@@ -1,4 +1,11 @@
 {
+  "_comment": [
+    "Template for public/config.json. The real file is populated by",
+    "scripts/deploy-all.sh after CDK produces the Cognito/CloudFront outputs.",
+    "For local development without a deployed Backend, copy the sibling",
+    "config.json.dev.example to config.json instead.",
+    "config.json is listed in .gitignore so it is never committed."
+  ],
   "cognito": {
     "user_pool_id": "<YOUR_USER_POOL_ID>",
     "client_id": "<YOUR_CLIENT_ID>",

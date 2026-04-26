@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Development-only config.json. Copy to `config.json` to start the Vite",
+    "dev server without a deployed Stratoclave Backend.",
+    "",
+    "For a real deployment, generate config.json from CDK outputs via",
+    "scripts/deploy-all.sh (which writes cognito/* values from the live",
+    "stacks). Do NOT commit a populated config.json."
+  ],
+  "cognito": {
+    "user_pool_id": "us-east-1_EXAMPLE",
+    "client_id": "example-client-id-1234567890",
+    "domain": "https://example.auth.us-east-1.amazoncognito.com",
+    "region": "us-east-1"
+  },
+  "api": {
+    "endpoint": "http://localhost:8000"
+  }
+}

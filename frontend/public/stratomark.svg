@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Stratoclave brand mark (favicon / static).
+  Strato (stratified rock) × Conclave (sealed assembly):
+  three stacked diamonds (ice / stone / bedrock) converging on a
+  breathing focal point, with a faint cardinal-red bleed in the
+  lower-right corner and four light rays meeting at the core.
+
+  This is a static rendering of <StratoMark /> from
+  frontend/src/components/brand/StratoMark.tsx. The animated variant
+  lives in the React component; keep this SVG in sync with the visual
+  language there if you redesign the mark.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Stratoclave">
+  <defs>
+    <linearGradient id="ice" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="hsl(200, 95%, 78%)" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="hsl(200, 85%, 55%)" stop-opacity="0.85"/>
+    </linearGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="hsl(210, 25%, 70%)" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="hsl(215, 20%, 45%)" stop-opacity="0.7"/>
+    </linearGradient>
+    <linearGradient id="bedrock" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="hsl(220, 15%, 40%)" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="hsl(220, 18%, 20%)" stop-opacity="0.9"/>
+    </linearGradient>
+    <radialGradient id="cardinal" cx="0.7" cy="0.7" r="0.5">
+      <stop offset="0%" stop-color="hsl(355, 70%, 50%)" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="hsl(355, 70%, 50%)" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ray" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="hsl(200, 95%, 88%)" stop-opacity="0"/>
+      <stop offset="50%" stop-color="hsl(200, 95%, 88%)" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="hsl(200, 95%, 88%)" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="core-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Cardinal-red bleed behind the mark -->
+  <rect x="0" y="0" width="120" height="120" fill="url(#cardinal)"/>
+
+  <!-- Bedrock (backmost diamond) -->
+  <polygon points="60,98 34,72 60,46 86,72"
+           fill="url(#bedrock)" stroke="hsl(220, 18%, 28%)" stroke-width="0.8"/>
+
+  <!-- Stone (middle diamond) -->
+  <polygon points="60,80 38,58 60,36 82,58"
+           fill="url(#stone)" stroke="hsl(215, 20%, 55%)" stroke-width="0.8" stroke-opacity="0.6"/>
+
+  <!-- Ice (front diamond) -->
+  <polygon points="60,62 44,46 60,30 76,46"
+           fill="url(#ice)" stroke="hsl(200, 95%, 85%)" stroke-width="0.6" stroke-opacity="0.5"/>
+
+  <!-- Four light rays converging on the core -->
+  <g stroke="url(#ray)" stroke-width="1" fill="none">
+    <line x1="60" y1="6"  x2="60" y2="22"/>
+    <line x1="60" y1="98" x2="60" y2="114"/>
+    <line x1="6"  y1="46" x2="22" y2="46"/>
+    <line x1="98" y1="46" x2="114" y2="46"/>
+  </g>
+
+  <!-- Focal point at the center of the ice diamond -->
+  <circle cx="60" cy="46" r="2.2" fill="hsl(200, 95%, 92%)" filter="url(#core-glow)"/>
+</svg>
