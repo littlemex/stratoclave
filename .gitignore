@@ -129,7 +129,7 @@ ms-playwright/
 # -----------------------------------------------------------------
 # docs/ contains project status, screenshots, and guides that may include
 # environment-specific values. Generated/maintained outside of git.
-docs/
+#docs/
 
 # -----------------------------------------------------------------
 # Frontend runtime config (generated at deploy time)
