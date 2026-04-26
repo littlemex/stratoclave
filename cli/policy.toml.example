@@ -1,0 +1,21 @@
+# Stratoclave Enterprise Policy Configuration
+#
+# This file is read at build time and embedded into the binary.
+# Copy this file to policy.toml and customize for your organization.
+
+[policy]
+organization_name = "YourOrganization"
+disable_debug = false
+allowed_env_vars = [
+]
+allowed_model_patterns = [
+]
+audit_endpoint = ""
+fixed_api_endpoint = ""
+fixed_default_model = ""
+
+[enterprise_policy]
+# Enable Bedrock mode for Claude Code (sets CLAUDE_CODE_USE_BEDROCK=1)
+use_bedrock = true
+# Enable experimental Agent Teams feature (sets CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
+experimental_agent_teams = true

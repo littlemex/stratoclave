@@ -1,0 +1,150 @@
+# Stratoclave repository .gitignore
+#
+# 方針:
+#   - 各言語の標準成果物 (target/, node_modules/, __pycache__/) は無条件で除外
+#   - 環境変数ファイル (.env 系) は常に除外し、.example のみ許可
+#   - ローカル CLI トークン / デプロイ時一時ファイル / finch shim も除外
+#   - docs/ は git 管理外 (環境固有情報を含むため)
+
+# -----------------------------------------------------------------
+# Environment / secrets
+# -----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# AWS / credential 系が紛れ込む可能性
+*.pem
+*.key
+credentials
+*.credentials
+
+# ローカル CLI トークン (通常は $HOME/.stratoclave/ に置くが、リポジトリ内に紛れた場合の保険)
+mvp_tokens.json
+tokens.json
+
+# -----------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Python virtualenv
+.venv/
+venv/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# -----------------------------------------------------------------
+# Node / Frontend / Playwright
+# -----------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Playwright
+playwright-report/
+playwright-report-*/
+test-results/
+test-results-*/
+
+# -----------------------------------------------------------------
+# Rust / Cargo
+# -----------------------------------------------------------------
+target/
+
+# -----------------------------------------------------------------
+# AWS CDK
+# -----------------------------------------------------------------
+cdk.out/
+cdk.out.*/
+.cdk.staging/
+outputs.json
+*.patch
+
+# -----------------------------------------------------------------
+# Container / Docker / Finch
+# -----------------------------------------------------------------
+.finch/
+# デプロイ中に生成される tar.gz
+*.tar.gz
+backend-source*.tar.gz
+frontend-source*.tar.gz
+stratoclave*.tar.gz
+
+# -----------------------------------------------------------------
+# IDE / editor
+# -----------------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# -----------------------------------------------------------------
+# OS
+# -----------------------------------------------------------------
+.DS_Store
+__MACOSX/
+Thumbs.db
+
+# -----------------------------------------------------------------
+# Database / caches
+# -----------------------------------------------------------------
+*.db
+*.sqlite3
+data/
+
+# -----------------------------------------------------------------
+# Project-specific / runtime artifacts
+# -----------------------------------------------------------------
+# ローカル一時ファイル
+/tmp-*
+*.bak
+*.tmp
+
+# CLI release ビルド成果物 (配布時は Release assets で配る、repo には含めない)
+cli/target/
+cli/stratoclave
+
+# Playwright browsers cache
+ms-playwright/
+
+# -----------------------------------------------------------------
+# Documentation (runtime-generated, not tracked)
+# -----------------------------------------------------------------
+# docs/ contains project status, screenshots, and guides that may include
+# environment-specific values. Generated/maintained outside of git.
+docs/
+
+# -----------------------------------------------------------------
+# Frontend runtime config (generated at deploy time)
+# -----------------------------------------------------------------
+frontend/public/config.json
+
+# -----------------------------------------------------------------
+# Claude Code / AI 運用ファイル
+# -----------------------------------------------------------------
+# 個人ごとの Claude Code 設定 (MCP、rules、session memory など) は OSS に含めない
+.claude/
+CLAUDE.md
+
+# -----------------------------------------------------------------
+# Pack / transfer scratch
+# -----------------------------------------------------------------
+# scripts/pack-to-s3.sh が作る作業ディレクトリ
+_pack/

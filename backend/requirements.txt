@@ -1,0 +1,28 @@
+# FastAPI
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+
+# AWS
+boto3==1.35.74
+
+# Phase 2 (v2.1): ACP 撤廃に伴い websockets / watchdog を削除 (2026-04-25).
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx==0.28.1
+
+# Utilities
+pydantic[email]==2.10.3
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Observability
+structlog==24.4.0
+python-json-logger==3.2.1
+
+# Authentication
+PyJWT[crypto]==2.10.1
+cryptography==44.0.0

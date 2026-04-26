@@ -1,0 +1,44 @@
+# Stratoclave CLI Configuration
+#
+# Copy this file to ~/.stratoclave/config.toml and customize.
+
+[auth]
+# Authentication method: "cognito" (default) | "saml2aws" | "aws_profile"
+# auth_method = "cognito"
+cognito_domain = "https://<YOUR_COGNITO_DOMAIN>.auth.us-east-1.amazoncognito.com"
+client_id = "<YOUR_CLIENT_ID>"
+
+[api]
+endpoint = "https://<YOUR_API_ENDPOINT>"
+
+[ui]
+# Admin UI URL (optional, auto-derived from API endpoint if not specified)
+# admin_url = "https://<YOUR_ADMIN_UI_URL>"
+
+[defaults]
+model = "anthropic.claude-sonnet-4-5-v2:0"
+
+[callback]
+port = 18080
+host = "127.0.0.1"
+
+[timeouts]
+# Total HTTP request timeout in seconds
+http_total = 10
+# Connection timeout in seconds
+connection = 5
+# SSE chunk read timeout in seconds
+sse_chunk = 20
+# Authentication callback timeout in seconds
+auth_callback = 300
+
+# [auth.saml2aws] section (optional, only when auth_method = "saml2aws")
+# Uncomment and configure when using saml2aws authentication
+# [auth.saml2aws]
+# profile = "default"
+# cognito_identity_pool_id = "us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# skip_prompt = true
+# # Optional: specify IdP account
+# # idp_account = "your-idp-account"
+# # Optional: specify IAM role ARN
+# # role_arn = "arn:aws:iam::123456789012:role/YourRole"

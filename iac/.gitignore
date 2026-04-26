@@ -1,0 +1,30 @@
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+.env.*.local
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+cdk.out.*/
+*.patch
+outputs.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

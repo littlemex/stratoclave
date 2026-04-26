@@ -1,0 +1,14 @@
+[policy]
+organization_name = "Default"
+disable_debug = false
+allowed_env_vars = [
+]
+allowed_model_patterns = [
+]
+audit_endpoint = ""
+fixed_api_endpoint = ""
+fixed_default_model = ""
+
+[enterprise_policy]
+use_bedrock = true
+experimental_agent_teams = true

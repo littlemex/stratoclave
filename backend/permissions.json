@@ -1,0 +1,40 @@
+{
+  "version": "2026-04-26.3",
+  "roles": {
+    "admin": {
+      "description": "全テナント・全ユーザー・SSO trusted accounts・全 API キーを管理する root 権限",
+      "permissions": [
+        "users:*",
+        "tenants:*",
+        "usage:*",
+        "permissions:*",
+        "accounts:*",
+        "apikeys:*",
+        "messages:send"
+      ]
+    },
+    "team_lead": {
+      "description": "自分が所有する Tenant のみを管理 + 自分の使用履歴 + 自分の API キー",
+      "permissions": [
+        "tenants:create",
+        "tenants:read-own",
+        "usage:read-own-tenant",
+        "usage:read-self",
+        "apikeys:read-self",
+        "apikeys:create-self",
+        "apikeys:revoke-self",
+        "messages:send"
+      ]
+    },
+    "user": {
+      "description": "Messages API 利用者 + 自分の API キー管理",
+      "permissions": [
+        "messages:send",
+        "usage:read-self",
+        "apikeys:read-self",
+        "apikeys:create-self",
+        "apikeys:revoke-self"
+      ]
+    }
+  }
+}

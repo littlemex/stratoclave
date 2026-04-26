@@ -1,0 +1,454 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Stratoclave デザインシステム (Phase F6)
+  ---------------------------------------------------------------
+  世界観: Strato (岩盤・成層) × Conclave (秘密集会)
+  - background: 深い石盤 (near-black slate with a touch of blue)
+  - foreground: 氷河の霧 (cool off-white)
+  - primary  : glacier blue (主要 CTA / リンク)
+  - accent   : cardinal red (強調・警告前段)
+  - destructive: 血赤 (削除のみ)
+  - border   : 石の削り面 (subtle, 3px radius 以下)
+  ---------------------------------------------------------------
+*/
+
+@layer base {
+  :root {
+    --background: 220 20% 8%;
+    --foreground: 210 20% 94%;
+
+    --card: 220 18% 11%;
+    --card-foreground: 210 20% 94%;
+    --popover: 220 22% 9%;
+    --popover-foreground: 210 20% 94%;
+
+    --primary: 200 85% 62%;
+    --primary-foreground: 220 40% 5%;
+
+    --secondary: 220 14% 18%;
+    --secondary-foreground: 210 20% 92%;
+
+    --muted: 220 14% 14%;
+    --muted-foreground: 215 14% 66%;
+
+    --accent: 355 60% 48%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 68% 52%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 220 12% 18%;
+    --input: 220 14% 14%;
+    --ring: 200 85% 58%;
+
+    --radius: 0.25rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+  html {
+    color-scheme: dark;
+    /* 背景に地層のような非常に微かなグラデーション: 石盤感 */
+    background:
+      radial-gradient(
+        ellipse 80% 60% at 50% -10%,
+        hsl(200 40% 14% / 0.55),
+        transparent 60%
+      ),
+      radial-gradient(
+        ellipse 90% 55% at 50% 110%,
+        hsl(220 20% 4% / 0.85),
+        transparent 65%
+      ),
+      hsl(var(--background));
+    background-attachment: fixed;
+  }
+  body {
+    @apply bg-transparent text-foreground font-sans antialiased;
+    min-height: 100vh;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Fraunces: 見出しの重心。h1 / h2 / h3 は optical sizing で磨く */
+  h1,
+  h2,
+  h3 {
+    @apply font-display tracking-tight;
+    font-optical-sizing: auto;
+    font-feature-settings: 'ss01', 'ss02';
+  }
+  /* h4 以下は sans で可読性優先 (設計書 §8.2) */
+  h4,
+  h5,
+  h6,
+  th {
+    @apply font-sans tracking-normal;
+  }
+
+  code,
+  pre {
+    @apply font-mono;
+  }
+
+  /* Focus ring: 白金のような細い光 */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  /* Selection: 薄氷 */
+  ::selection {
+    background: hsl(var(--primary) / 0.28);
+    color: hsl(var(--foreground));
+  }
+
+  /* Scrollbar (WebKit): 岩肌に薄くエッチング */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 2px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.4);
+  }
+}
+
+@layer components {
+  /*
+    Glass card: ログイン背景など重要な 1 箇所限定 (レビュー対応、テーブル/グリッドでは禁止)
+  */
+  .strato-glass {
+    background: linear-gradient(
+      180deg,
+      hsl(220 30% 14% / 0.72) 0%,
+      hsl(220 22% 10% / 0.92) 100%
+    );
+    backdrop-filter: blur(14px) saturate(1.1);
+    -webkit-backdrop-filter: blur(14px) saturate(1.1);
+    border: 1px solid hsl(220 15% 22%);
+    box-shadow:
+      0 1px 0 0 hsl(210 20% 94% / 0.04) inset,
+      0 30px 80px -20px hsl(220 60% 2% / 0.6);
+  }
+
+  /*
+    Layered hairline: 地層を示すセクション下線
+    ::before で微かな氷河光が周期的に左→右に横切る (post-login ambient)
+  */
+  .strato-hairline {
+    position: relative;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      hsl(var(--border)) 20%,
+      hsl(var(--border)) 80%,
+      transparent 100%
+    );
+    height: 1px;
+    overflow: hidden;
+  }
+  @keyframes strato-hairline-sweep {
+    0%   { transform: translateX(-40%); opacity: 0; }
+    12%  { opacity: 1; }
+    50%  { opacity: 1; }
+    100% { transform: translateX(160%); opacity: 0; }
+  }
+  .strato-hairline::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      hsl(200 90% 75% / 0.1) 30%,
+      hsl(200 95% 85% / 0.6) 50%,
+      hsl(200 90% 75% / 0.1) 70%,
+      transparent 100%
+    );
+    width: 30%;
+    animation: strato-hairline-sweep 9s ease-in-out infinite;
+  }
+  /* Footer (第 2 の hairline) は逆位相でスタート → 画面上下が交互に呼吸 */
+  .strato-hairline--reverse::before {
+    animation-delay: -4.5s;
+  }
+
+  /*
+    Stat emphasis: ダッシュボードのカウンタ見出しに使う金属光沢の 1 筋
+  */
+  .strato-stat {
+    background: linear-gradient(
+      180deg,
+      hsl(var(--foreground)) 0%,
+      hsl(var(--foreground) / 0.78) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /*
+    Brand mark animations — 呼吸する中心光点とタイトル shimmer
+  */
+  @keyframes strato-core-breathe {
+    0%, 100% { opacity: 0.55; transform: scale(1); }
+    50%      { opacity: 1;    transform: scale(1.35); }
+  }
+  @keyframes strato-halo-breathe {
+    0%, 100% { opacity: 0.75; transform: scale(1); }
+    50%      { opacity: 1;    transform: scale(1.06); }
+  }
+  @keyframes strato-ray-breathe {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 0.95; }
+  }
+
+  .strato-mark--animated .strato-core {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: strato-core-breathe 4.8s ease-in-out infinite;
+  }
+  .strato-mark--animated .strato-mark__halo {
+    animation: strato-halo-breathe 6.2s ease-in-out infinite;
+  }
+  .strato-mark--animated .strato-rays {
+    animation: strato-ray-breathe 7.4s ease-in-out infinite;
+  }
+
+  /*
+    Title shimmer — "Stratoclave" の文字に非常にゆっくり氷河光が横切る
+  */
+  @keyframes strato-title-shimmer {
+    0%   { background-position: -150% 0; }
+    100% { background-position: 250% 0; }
+  }
+  .strato-title-shimmer {
+    background-image:
+      linear-gradient(
+        90deg,
+        hsl(var(--foreground)) 0%,
+        hsl(var(--foreground)) 38%,
+        hsl(200 95% 92%) 50%,
+        hsl(var(--foreground)) 62%,
+        hsl(var(--foreground)) 100%
+      );
+    background-size: 250% 100%;
+    background-position: 0 0;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: strato-title-shimmer 11s linear infinite;
+  }
+
+  /*
+    Motion-reduce 対応: prefers-reduced-motion のユーザーにはアニメーション停止
+  */
+  @media (prefers-reduced-motion: reduce) {
+    .strato-mark--animated .strato-core,
+    .strato-mark--animated .strato-mark__halo,
+    .strato-mark--animated .strato-rays,
+    .strato-title-shimmer,
+    .strato-aurora,
+    .strato-card-spotlight {
+      animation: none !important;
+    }
+    .strato-title-shimmer {
+      background: none;
+      -webkit-background-clip: initial;
+      background-clip: initial;
+      color: hsl(var(--foreground));
+    }
+    .strato-cursor-halo {
+      display: none;
+    }
+  }
+
+  /*
+    Login 画面: カード表面を舐める光の反射 (mouse 位置依存)
+    --sx/--sy は 0..100 (%) で、login page の全画面内の mouse 位置を注入する
+  */
+  .strato-card-spotlight {
+    position: relative;
+  }
+  .strato-card-spotlight::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      380px circle at calc(var(--sx, 50) * 1%) calc(var(--sy, 50) * 1%),
+      hsl(200 95% 85% / 0.12),
+      transparent 55%
+    );
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 240ms ease;
+  }
+  .strato-login:hover .strato-card-spotlight::before {
+    opacity: 1;
+  }
+
+  /*
+    Cursor halo: マウス位置に追従する柔らかい光 (Login 画面限定)
+  */
+  .strato-cursor-halo {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 260px;
+    height: 260px;
+    pointer-events: none;
+    z-index: 0;
+    transform: translate3d(calc(var(--cx, 0px) - 130px), calc(var(--cy, 0px) - 130px), 0);
+    background: radial-gradient(
+      circle at center,
+      hsl(200 95% 70% / 0.12) 0%,
+      hsl(200 95% 70% / 0.05) 35%,
+      transparent 70%
+    );
+    opacity: 0;
+    transition: opacity 260ms ease;
+    mix-blend-mode: screen;
+  }
+  .strato-login:hover .strato-cursor-halo {
+    opacity: 1;
+  }
+
+  /*
+    Aurora threads: 画面幅いっぱいの極細光の糸 3 本、mouse Y で波打つ
+  */
+  @keyframes strato-aurora-pulse {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 0.75; }
+  }
+  .strato-aurora {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    pointer-events: none;
+    animation: strato-aurora-pulse 9s ease-in-out infinite;
+  }
+  .strato-aurora--a {
+    top: 30%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      hsl(200 90% 75% / 0.5) 20%,
+      hsl(200 95% 85% / 0.9) 50%,
+      hsl(200 90% 75% / 0.5) 80%,
+      transparent
+    );
+    transform:
+      translate3d(0, calc(var(--my, 0) * -12px), 0)
+      skewY(calc(var(--mx, 0) * 0.5deg));
+    transition: transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .strato-aurora--b {
+    top: 50%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      hsl(210 30% 80% / 0.25) 25%,
+      hsl(210 30% 85% / 0.5) 50%,
+      hsl(210 30% 80% / 0.25) 75%,
+      transparent
+    );
+    transform:
+      translate3d(0, calc(var(--my, 0) * 6px), 0)
+      skewY(calc(var(--mx, 0) * -0.35deg));
+    transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+    animation-delay: -3s;
+  }
+  .strato-aurora--c {
+    top: 72%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      hsl(355 60% 55% / 0.25) 25%,
+      hsl(355 70% 65% / 0.45) 50%,
+      hsl(355 60% 55% / 0.25) 75%,
+      transparent
+    );
+    transform:
+      translate3d(0, calc(var(--my, 0) * 14px), 0)
+      skewY(calc(var(--mx, 0) * 0.45deg));
+    transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+    animation-delay: -6s;
+  }
+
+  /*
+    Login card の 3D tilt (controlled via inline style on the element)
+    ここでは transition だけ定義、rotateX/Y はコンポーネント側から inline style で
+  */
+  .strato-card-tilt {
+    transform-style: preserve-3d;
+    transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+  }
+
+  /*
+    Tenant beacon: footer の tenant_id 横に置く小さな灯火 + 波紋
+    Conclave (閉ざされた集会の中央にある焦点) のメタファ
+  */
+  @keyframes strato-beacon-core {
+    0%, 100% { opacity: 0.55; transform: scale(1); }
+    50%      { opacity: 1;    transform: scale(1.15); }
+  }
+  @keyframes strato-beacon-ring {
+    0%   { transform: scale(0.4); opacity: 0.6; }
+    100% { transform: scale(2.4); opacity: 0; }
+  }
+
+  .strato-beacon {
+    position: relative;
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .strato-beacon__core {
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: hsl(200 95% 70%);
+    box-shadow: 0 0 8px hsl(200 95% 70% / 0.9);
+    animation: strato-beacon-core 3.2s ease-in-out infinite;
+  }
+  .strato-beacon__ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    border: 1px solid hsl(200 95% 70% / 0.55);
+    animation: strato-beacon-ring 3.2s ease-out infinite;
+  }
+  /* 2 本目の波紋は 1.6s 遅らせて連続的に見せる */
+  .strato-beacon__ring--delayed {
+    animation-delay: 1.6s;
+  }
+
+  /* Motion-reduce: beacon と hairline sweep も停止 */
+  @media (prefers-reduced-motion: reduce) {
+    .strato-hairline::before,
+    .strato-beacon__core,
+    .strato-beacon__ring {
+      animation: none !important;
+    }
+    .strato-hairline::before {
+      display: none;
+    }
+  }
+}

@@ -1,0 +1,49 @@
+[package]
+name = "stratoclave"
+version = "0.1.0"
+edition = "2021"
+description = "Stratoclave CLI - Cognito OIDC authentication client"
+
+[[bin]]
+name = "stratoclave"
+path = "src/main.rs"
+
+[dependencies]
+# AWS credentials parsing
+configparser = "3.1"
+# TOML parsing
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+dirs = "5"
+anyhow = "1"
+tiny_http = "0.12"
+url = "2"
+open = "5"
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+atty = "0.2"
+# Phase S: AWS SSO / STS 経由ログイン用
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-sts = "1"
+aws-sigv4 = "1"
+aws-credential-types = "1"
+aws-smithy-runtime-api = "1"
+http = "1"
+
+[dev-dependencies]
+# Phase 2 (v2.1): 旧 OIDC browser-flow 統合テスト (cli/tests/test_*.rs) を 2026-04-25 撤去。
+# wiremock / tempfile / assert_cmd / predicates は不要になったため削除済み。
+# Phase 3 で wiremock-rs ベースの新テストを追加する際に再導入する。
+tokio = { version = "1", features = ["full", "test-util"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"
