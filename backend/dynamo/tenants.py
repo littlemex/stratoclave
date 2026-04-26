@@ -213,3 +213,54 @@ class TenantsRepository:
                 ":now": _now_iso(),
             },
         )
+
+    # ------------------------------------------------------------------
+    # Seed (idempotent)
+    # ------------------------------------------------------------------
+    def seed_default(
+        self,
+        *,
+        tenant_id: str = "default-org",
+        name: str = "Default Organization",
+        default_credit: Optional[int] = None,
+        created_by: str = "system-seed",
+    ) -> dict[str, Any]:
+        """OSS zero-touch 起動用の default Tenant を idempotent put する.
+
+        冪等性: ConditionExpression='attribute_not_exists(tenant_id)' を付けるので
+        既に存在すれば書き込みは発生せず、touch もしない。
+
+        戻り値: {"tenant_id": str, "created": bool, "item": dict}
+          - created=True: 今回新規作成した
+          - created=False: 既に存在していた (no-op)
+        """
+        # 既存レコードがあれば (archived でも) touch せず返す
+        existing = self.get_including_archived(tenant_id)
+        if existing:
+            return {"tenant_id": tenant_id, "created": False, "item": existing}
+
+        now = _now_iso()
+        item: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "name": name,
+            # 初回 seed 時点では Admin 含めユーザーが存在しないため、
+            # ADMIN_OWNED sentinel を使う (上限チェック対象外、Admin 所有扱い)
+            "team_lead_user_id": ADMIN_OWNED,
+            "default_credit": Decimal(default_credit or _default_credit_fallback()),
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+            "created_by": created_by,
+        }
+        try:
+            self._table.put_item(
+                Item=item,
+                ConditionExpression="attribute_not_exists(tenant_id)",
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                # race 条件 (別プロセスが先に seed した): no-op
+                existing = self.get_including_archived(tenant_id) or item
+                return {"tenant_id": tenant_id, "created": False, "item": existing}
+            raise
+        return {"tenant_id": tenant_id, "created": True, "item": item}

@@ -46,6 +46,8 @@ from mvp.admin_sso_invites import router as mvp_admin_sso_invites_router
 # Phase C: 長期 API Key (cowork 等の gateway クライアント用)
 from mvp.me_api_keys import router as mvp_me_api_keys_router
 from mvp.admin_api_keys import router as mvp_admin_api_keys_router
+# CLI bootstrap (未認証: CloudFront URL から CLI 用設定を配布)
+from mvp.well_known import router as mvp_well_known_router
 
 
 logger = get_logger(__name__)
@@ -90,6 +92,21 @@ async def lifespan(app: FastAPI):
             "allow_admin_creation_enabled_in_production",
             event="allow_admin_creation_warning",
             environment=environment,
+        )
+
+    # OSS zero-touch seed: Permissions / Default Tenant を idempotent 投入.
+    # 失敗しても Backend は起動継続 (運用継続優先、seed_all 内で握り潰し).
+    try:
+        from bootstrap import seed_all
+        seed_all()
+    except Exception as exc:
+        # seed_all 自身は例外を外に漏らさない想定だが、import 時の ImportError
+        # などを拾うための最外 guard。ここに来た場合は設定ミスなので ERROR で記録.
+        logger.error(
+            "seed_bootstrap_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
         )
 
     yield
@@ -175,6 +192,8 @@ app.include_router(mvp_admin_sso_invites_router)         # /api/mvp/admin/sso-in
 # Phase C
 app.include_router(mvp_me_api_keys_router)               # /api/mvp/me/api-keys[*]
 app.include_router(mvp_admin_api_keys_router)            # /api/mvp/admin/api-keys[*] + /api/mvp/admin/users/{id}/api-keys
+# CLI bootstrap
+app.include_router(mvp_well_known_router)                # GET /.well-known/stratoclave-config
 
 # Frontend 旧実装との互換用: /api/users/me/credit を /api/mvp/me にエイリアス
 # (Frontend が /api/users/me/credit を叩いている)
