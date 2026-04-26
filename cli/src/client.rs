@@ -826,9 +826,12 @@ mod tests {
             redirect_host: "127.0.0.1".to_string(),
             redirect_uri: "http://127.0.0.1:18080/callback".to_string(),
             api_endpoint: "http://localhost:8000".to_string(),
+            admin_ui_url: None,
             default_model: None,
             config_dir: std::path::PathBuf::from("/tmp/test"),
             timeouts: crate::config::Timeouts::default(),
+            auth_method: crate::auth::AuthMethod::default(),
+            saml2aws: None,
         };
 
         let client = ApiClient::new(config, "test-token".to_string());
@@ -971,9 +974,12 @@ mod tests {
             redirect_host: "127.0.0.1".to_string(),
             redirect_uri: "http://127.0.0.1:18080/callback".to_string(),
             api_endpoint: "http://localhost:8000".to_string(),
+            admin_ui_url: None,
             default_model: None,
             config_dir: std::path::PathBuf::from("/tmp/test"),
             timeouts: crate::config::Timeouts::default(),
+            auth_method: crate::auth::AuthMethod::default(),
+            saml2aws: None,
         };
 
         let client = ApiClient::new(config, "test-token".to_string());

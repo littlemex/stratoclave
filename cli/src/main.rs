@@ -84,6 +84,19 @@ enum Commands {
         #[command(subcommand)]
         action: ApiKeyAction,
     },
+    /// Bootstrap CLI configuration from a Stratoclave deployment URL
+    Setup {
+        /// Stratoclave API endpoint (e.g. https://xxx.cloudfront.net)
+        api_endpoint: String,
+
+        /// Overwrite existing ~/.stratoclave/config.toml without prompting
+        #[arg(long, short = 'f')]
+        force: bool,
+
+        /// Print resulting config.toml to stdout without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -342,6 +355,11 @@ async fn main() -> ExitCode {
         Some(Commands::TeamLead { action }) => dispatch_team_lead(action).await,
         Some(Commands::Ui { action }) => dispatch_ui(&action).await,
         Some(Commands::ApiKey { action }) => dispatch_api_key(action).await,
+        Some(Commands::Setup {
+            api_endpoint,
+            force,
+            dry_run,
+        }) => wrap(commands::setup::run(api_endpoint, force, dry_run).await),
         None => {
             eprintln!("Usage: stratoclave <command> --help");
             ExitCode::from(1)
