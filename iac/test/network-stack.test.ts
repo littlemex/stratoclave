@@ -11,6 +11,7 @@ describe('NetworkStack', () => {
     app = new cdk.App();
     stack = new NetworkStack(app, 'TestNetworkStack', {
       env: { account: '123456789012', region: 'us-west-2' },
+      prefix: 'stratoclave',
     });
     template = Template.fromStack(stack);
   });

@@ -1,6 +1,20 @@
 #!/bin/bash
-# Cloud Build: backend コードを S3 にアップロードし、CodeBuild でビルド
+# ============================================================================
+# DEPRECATED
+# ----------------------------------------------------------------------------
+# This script builds the Backend container image inside a CodeBuild project
+# (StratoclaveCodeBuildStack), which is archived in the current IaC. Use
+# scripts/build-and-push.sh, which builds locally with finch/docker and
+# pushes to ECR directly. For CI pipelines, run `docker build` + `docker
+# push` from a GitHub Actions workflow instead.
+#
+# Running this script against the current codebase will fail at the
+# CloudFormation describe-stacks step.
+# ============================================================================
+# Cloud Build: upload backend source to S3 and trigger CodeBuild build.
 set -euo pipefail
+
+echo "[WARN] cloud-build.sh is deprecated. Use scripts/build-and-push.sh instead." >&2
 
 # 色付きログ
 RED='\033[0;31m'

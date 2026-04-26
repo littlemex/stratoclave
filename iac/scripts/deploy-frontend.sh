@@ -96,8 +96,18 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
-# --- CodeBuild Mode ---
+# --- CodeBuild Mode (deprecated) ---
 if [ "$USE_CODEBUILD" = true ]; then
+  log_error "The --codebuild mode is deprecated."
+  log_error "StratoclaveFrontendCodeBuildStack has been archived; this mode"
+  log_error "would trigger a CloudFormation stack that no longer exists."
+  log_error ""
+  log_error "Use the default local build mode (omit --codebuild). For CI"
+  log_error "pipelines, run 'npm run build' + 'aws s3 sync' from your own"
+  log_error "GitHub Actions workflow instead."
+  exit 2
+
+  # Unreachable legacy code kept for reference only.
   log_step "CodeBuild Mode: Packaging and triggering remote build"
 
   SOURCE_BUCKET=$(get_stack_output "StratoclaveFrontendCodeBuildStack" "FrontendSourceBucketName") || {

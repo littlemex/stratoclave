@@ -1,16 +1,28 @@
 #!/bin/bash
 
-# Configuration Validation Script (Triple-Check)
+# ============================================================================
+# DEPRECATED
+# ----------------------------------------------------------------------------
+# This script was designed for the pre-cross-stack-reference era, where the
+# CloudFront domain and Cognito domain prefix had to be grepped out of
+# iac/bin/iac.ts as string literals. The current IaC (iac/bin/iac.ts) passes
+# these values via cross-stack references (frontendStack.cfnDistribution.
+# attrDomainName → cognitoStack callback URLs), so there are no hard-coded
+# literals to validate.
+#
+# This script is retained only until we refactor it into a proper stack-
+# outputs diff tool. Running it against the current codebase will report
+# empty grep matches as errors.
+#
+# Do not rely on this script for new deployments. See deploy-all.sh instead.
+# ============================================================================
+#
+# Configuration Validation Script (Triple-Check) [LEGACY]
 #
 # Validates configuration consistency across three sources:
-#   1. iac/bin/iac.ts         -- hardcoded fallback values
+#   1. iac/bin/iac.ts         -- hardcoded fallback values (no longer present)
 #   2. outputs.json           -- last CDK deploy output (local artifact)
 #   3. CloudFormation Stacks  -- live AWS state
-#
-# Checks performed:
-#   - Cognito domain prefix: iac.ts vs outputs.json vs CloudFormation
-#   - CloudFront domain:     iac.ts vs outputs.json vs CloudFormation
-#   - User Pool ID:          outputs.json vs CloudFormation
 #
 # Usage:
 #   ./scripts/validate-config.sh            # Full validation (requires AWS credentials)
@@ -19,6 +31,8 @@
 # Exit codes:
 #   0 - All validations passed (warnings are OK)
 #   1 - Validation failed (errors found)
+
+echo "[WARN] validate-config.sh is deprecated. See the header for details." >&2
 
 set -e
 

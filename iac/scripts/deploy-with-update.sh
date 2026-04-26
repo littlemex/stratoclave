@@ -1,26 +1,26 @@
 #!/bin/bash
 
-# Two-Stage Deploy Script
+# ============================================================================
+# DEPRECATED — use scripts/deploy-all.sh instead
+# ----------------------------------------------------------------------------
+# Stages 3 and 4 of this script patch iac/bin/iac.ts with sed, which
+# assumes the CloudFront domain exists in iac.ts as a string literal.
+# The current iac/bin/iac.ts resolves the CloudFront domain via a
+# CDK cross-stack reference, so there is nothing to patch.
 #
-# Solves the CloudFront chicken-egg problem:
-#   - Cognito needs CloudFront domain for callback URLs
-#   - CloudFront domain is only known after FrontendStack deploys
-#   - On first deploy, iac.ts has a placeholder CloudFront domain
+# For first-time and update deployments use scripts/deploy-all.sh.
+# This script is retained only for backwards compatibility and will be
+# removed in a future release.
+# ============================================================================
 #
-# Stage 1: Deploy all stacks (Cognito gets placeholder callback URL)
-# Stage 2: Read actual CloudFront domain, update Cognito callback URLs
-# Stage 3: Update iac.ts and outputs.json with actual values
-# Stage 4: Re-validate configuration
+# Two-Stage Deploy Script [LEGACY]
 #
 # Usage:
-#   ./scripts/deploy-with-update.sh                    # Full deploy
-#   ./scripts/deploy-with-update.sh --stage2-only      # Only update Cognito URLs (post-deploy fix)
+#   ./scripts/deploy-with-update.sh                    # Full deploy (legacy path)
+#   ./scripts/deploy-with-update.sh --stage2-only      # Only update Cognito URLs
 #   ./scripts/deploy-with-update.sh --dry-run          # Show what would be done
-#
-# Prerequisites:
-#   - AWS CLI configured with appropriate credentials
-#   - CDK bootstrapped in target account/region
-#   - Node.js and npm installed
+
+echo "[WARN] deploy-with-update.sh is deprecated. Use scripts/deploy-all.sh." >&2
 
 set -e
 

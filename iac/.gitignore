@@ -14,6 +14,9 @@ node_modules
 .cdk.staging
 cdk.out
 cdk.out.*/
+# CDK context cache contains account-specific data (AZ lookups, AMI IDs).
+# It should be regenerated per-deployment; do not commit.
+cdk.context.json
 *.patch
 outputs.json
 

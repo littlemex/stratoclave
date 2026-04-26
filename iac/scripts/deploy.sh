@@ -34,11 +34,18 @@ Usage: $0 [OPTIONS]
 Options:
     --all           Deploy all stacks (default)
     --network       Deploy Network stack only
+    --dynamodb      Deploy DynamoDB stack only
     --ecr           Deploy ECR stack only
     --alb           Deploy ALB stack only
+    --frontend      Deploy Frontend stack only (also rebuilds Frontend assets)
+    --cognito       Deploy Cognito stack only
     --ecs           Deploy ECS stack only
-    --frontend      Deploy Frontend stack only
+    --config        Deploy BackendConfig (SSM Parameter Store) stack only
     --help          Show this help message
+
+Note:
+    For a full first-time deployment, prefer ./deploy-all.sh which also
+    handles Frontend build + S3 sync + CloudFront invalidation in one pass.
 
 Environment Variables:
     AWS_REGION      AWS region (default: us-east-1)
@@ -57,49 +64,23 @@ EOF
     exit 0
 }
 
-# デフォルト設定
+# Default: deploy everything
 DEPLOY_ALL=true
-DEPLOY_NETWORK=false
-DEPLOY_ECR=false
-DEPLOY_ALB=false
-DEPLOY_ECS=false
-DEPLOY_FRONTEND=false
+TARGETS=()
 
-# 引数解析
+# Argument parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --all)
-            DEPLOY_ALL=true
-            shift
-            ;;
-        --network)
-            DEPLOY_ALL=false
-            DEPLOY_NETWORK=true
-            shift
-            ;;
-        --ecr)
-            DEPLOY_ALL=false
-            DEPLOY_ECR=true
-            shift
-            ;;
-        --alb)
-            DEPLOY_ALL=false
-            DEPLOY_ALB=true
-            shift
-            ;;
-        --ecs)
-            DEPLOY_ALL=false
-            DEPLOY_ECS=true
-            shift
-            ;;
-        --frontend)
-            DEPLOY_ALL=false
-            DEPLOY_FRONTEND=true
-            shift
-            ;;
-        --help)
-            usage
-            ;;
+        --all)      DEPLOY_ALL=true; shift ;;
+        --network)  DEPLOY_ALL=false; TARGETS+=("network"); shift ;;
+        --dynamodb) DEPLOY_ALL=false; TARGETS+=("dynamodb"); shift ;;
+        --ecr)      DEPLOY_ALL=false; TARGETS+=("ecr"); shift ;;
+        --alb)      DEPLOY_ALL=false; TARGETS+=("alb"); shift ;;
+        --frontend) DEPLOY_ALL=false; TARGETS+=("frontend"); shift ;;
+        --cognito)  DEPLOY_ALL=false; TARGETS+=("cognito"); shift ;;
+        --ecs)      DEPLOY_ALL=false; TARGETS+=("ecs"); shift ;;
+        --config)   DEPLOY_ALL=false; TARGETS+=("config"); shift ;;
+        --help)     usage ;;
         *)
             log_error "Unknown option: $1"
             usage
@@ -134,92 +115,72 @@ if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region $AWS_RE
     npx cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/$AWS_REGION
 fi
 
-# デプロイ関数
-deploy_stack() {
-    local stack_name=$1
-    log_step "Deploying $stack_name..."
-    npx cdk deploy $stack_name --require-approval never
+# Map a short id to its CloudFormation stack name (matches iac/lib/_common.ts stackName()).
+PREFIX="${STRATOCLAVE_PREFIX:-stratoclave}"
+
+stack_name_for() {
+    local id=$1
+    echo "${PREFIX}-${id}"
 }
 
-# Frontendビルド関数
+deploy_stack() {
+    local id=$1
+    local stack_name
+    stack_name=$(stack_name_for "$id")
+    log_step "Deploying $stack_name..."
+    npx cdk deploy "$stack_name" --require-approval never
+}
+
 build_frontend() {
     log_step "Building Frontend..."
     cd ../frontend
-
     if [ ! -d "node_modules" ]; then
         log_info "Installing frontend dependencies..."
         npm install
     fi
-
     log_info "Building frontend assets..."
     npm run build
-
     if [ ! -d "dist" ]; then
         log_error "Frontend build failed: dist directory not found"
         exit 1
     fi
-
     cd ../iac
     log_info "Frontend build complete"
 }
 
-# デプロイ実行
+# Stack dependency order (see iac/bin/iac.ts):
+#   network → dynamodb → ecr → alb → frontend → cognito → ecs → config
 if [ "$DEPLOY_ALL" = true ]; then
     log_info "Deploying all stacks..."
-    deploy_stack StratoclaveNetworkStack
-    deploy_stack StratoclaveEcrStack
-    deploy_stack StratoclaveAlbStack
-    deploy_stack StratoclaveEcsStack
-
-    # Build frontend before deploying
+    npx cdk deploy --all --require-approval never
     build_frontend
-    deploy_stack StratoclaveFrontendStack
 else
-    if [ "$DEPLOY_NETWORK" = true ]; then
-        deploy_stack StratoclaveNetworkStack
-    fi
-    if [ "$DEPLOY_ECR" = true ]; then
-        deploy_stack StratoclaveEcrStack
-    fi
-    if [ "$DEPLOY_ALB" = true ]; then
-        deploy_stack StratoclaveAlbStack
-    fi
-    if [ "$DEPLOY_ECS" = true ]; then
-        deploy_stack StratoclaveEcsStack
-    fi
-    if [ "$DEPLOY_FRONTEND" = true ]; then
-        build_frontend
-        deploy_stack StratoclaveFrontendStack
-    fi
+    for target in "${TARGETS[@]}"; do
+        if [ "$target" = "frontend" ]; then
+            build_frontend
+        fi
+        deploy_stack "$target"
+    done
 fi
 
-log_info "Deployment complete!"
+log_info "Deployment complete"
 
-# スタック出力を表示
+# Print stack outputs
 log_step "Stack Outputs:"
-ALB_DNS=$(aws cloudformation describe-stacks --stack-name StratoclaveAlbStack --query 'Stacks[0].Outputs[?OutputKey=="AlbDnsName"].OutputValue' --output text 2>/dev/null || echo "N/A")
-FRONTEND_URL=$(aws cloudformation describe-stacks --stack-name StratoclaveFrontendStack --query 'Stacks[0].Outputs[?OutputKey=="FrontendUrl"].OutputValue' --output text 2>/dev/null || echo "N/A")
+ALB_DNS=$(aws cloudformation describe-stacks --stack-name "$(stack_name_for alb)" --query 'Stacks[0].Outputs[?OutputKey==`AlbDnsName`].OutputValue' --output text 2>/dev/null || echo "N/A")
+CLOUDFRONT_DOMAIN=$(aws cloudformation describe-stacks --stack-name "$(stack_name_for frontend)" --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDomainName`].OutputValue' --output text 2>/dev/null || echo "N/A")
 
 echo ""
-echo "  Backend URL:  http://${ALB_DNS}"
-echo "  Frontend URL: ${FRONTEND_URL}"
+echo "  Backend URL:   http://${ALB_DNS}"
+echo "  Frontend URL:  https://${CLOUDFRONT_DOMAIN}"
 echo ""
 
 log_info "Next steps:"
-echo "  1. Build and push Docker image:"
+echo "  1. Push the Backend container image:"
 echo "     ./scripts/build-and-push.sh"
-echo "  2. Update Cognito Callback URLs:"
-echo "     ./scripts/update-cognito-urls.sh"
+echo "  2. Create the first admin user (if this is the initial deploy):"
+echo "     ../scripts/bootstrap-admin.sh --email admin@example.com"
 echo "  3. Access the application:"
-echo "     ${FRONTEND_URL}"
-echo "  4. Wait 2-3 minutes for ECS tasks to start, then check:"
+echo "     https://${CLOUDFRONT_DOMAIN}"
+echo "  4. After ECS tasks start, health check:"
 echo "     http://${ALB_DNS}/health"
-
-# Auto-update Cognito URLs if frontend was deployed
-if [ "$DEPLOY_ALL" = true ] || [ "$DEPLOY_FRONTEND" = true ]; then
-    if [ -f "./scripts/update-cognito-urls.sh" ]; then
-        echo ""
-        log_info "Updating Cognito Callback URLs..."
-        ./scripts/update-cognito-urls.sh || log_warn "Failed to update Cognito URLs. Run manually: ./scripts/update-cognito-urls.sh"
-    fi
-fi

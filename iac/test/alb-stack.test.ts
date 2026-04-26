@@ -30,6 +30,7 @@ describe('AlbStack', () => {
 
     stack = new AlbStack(app, 'TestAlbStack', {
       env: { account: '123456789012', region: 'us-west-2' },
+      prefix: 'stratoclave',
       vpc,
       securityGroup,
       internal: false,

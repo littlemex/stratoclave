@@ -119,6 +119,20 @@ export class FrontendStack extends cdk.Stack {
             cachedMethods: ['GET', 'HEAD'],
             compress: true,
           },
+          {
+            // Serve well-known endpoints (e.g. /.well-known/stratoclave-config)
+            // directly from the Backend so CLI bootstrap clients can fetch
+            // them without authentication. Do NOT attach spaFallbackFn here.
+            pathPattern: '/.well-known/*',
+            targetOriginId: 'ALBOrigin',
+            viewerProtocolPolicy: 'redirect-to-https',
+            // Let the Backend control caching (it sets Cache-Control: public, max-age=300).
+            cachePolicyId: '4135ea2d-6df8-44a3-9df3-4b5a84be39ad', // CachingDisabled
+            originRequestPolicyId: 'b689b0a8-53d0-40ab-baf2-68738e2966ac', // AllViewerExceptHostHeader
+            allowedMethods: ['GET', 'HEAD', 'OPTIONS'],
+            cachedMethods: ['GET', 'HEAD'],
+            compress: true,
+          },
         ],
         // customErrorResponses は撤去 (Blocker B1)
       },

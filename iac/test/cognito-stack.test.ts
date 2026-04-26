@@ -11,6 +11,7 @@ describe('CognitoStack', () => {
     app = new cdk.App();
     stack = new CognitoStack(app, 'TestCognitoStack', {
       env: { account: '123456789012', region: 'us-east-1' },
+      prefix: 'stratoclave',
       domainPrefix: 'test-stratoclave',
     });
     template = Template.fromStack(stack);

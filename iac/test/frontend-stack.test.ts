@@ -12,6 +12,7 @@ describe('FrontendStack', () => {
 
     stack = new FrontendStack(app, 'TestFrontendStack', {
       env: { account: '123456789012', region: 'us-west-2' },
+      prefix: 'stratoclave',
       albDnsName: 'test-alb-123456789.us-west-2.elb.amazonaws.com',
     });
 
