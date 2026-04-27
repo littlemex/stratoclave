@@ -1,0 +1,82 @@
+name: test
+
+# Runs unit and integration tests for Backend (pytest), CLI (cargo test),
+# and Frontend (vitest) on every pull request and push to main.
+#
+# The initial scope mirrors PR #... coverage:
+#   - Backend: credit reservation atomicity, model allowlist,
+#     well-known discovery contract.
+#   - CLI:     config.toml schema (nested + flat) regression.
+#   - Frontend: RBAC helper unit tests mirroring permissions.json.
+#
+# Follow-up PRs will expand coverage into JWT/RBAC/API-key flows,
+# wiremock-based CLI contract tests, and MSW-backed UI tests per the
+# Team A/B design documents.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend / pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run pytest
+        run: pytest -q tests/
+
+  cli:
+    name: cli / cargo test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        run: |
+          rustup set profile minimal
+          rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: Run cargo test
+        run: cargo test --bin stratoclave -- --test-threads=1
+
+  frontend:
+    name: frontend / vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run vitest
+        run: npm test

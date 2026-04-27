@@ -121,3 +121,115 @@ fn load_from_config_toml() -> Option<TomlSnapshot> {
         default_model,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the PR #2 schema unification fix (P0-4).
+    //!
+    //! `stratoclave setup` writes a nested TOML table (`[api] endpoint = ...`),
+    //! while older tooling uses a flat `api_endpoint = ...`. Both shapes must
+    //! parse back into the same `TomlSnapshot`.
+    //!
+    //! The tests change $HOME to a tempdir so they never read the developer's
+    //! real `~/.stratoclave/config.toml`. They also run sequentially via a
+    //! mutex because Cargo parallelizes `#[test]` and these cases mutate
+    //! process-wide env.
+    use super::*;
+    use std::env;
+    use std::fs;
+    use std::sync::Mutex;
+
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        _tmp: tempfile::TempDir,
+        orig_home: Option<std::ffi::OsString>,
+        orig_endpoint: Option<std::ffi::OsString>,
+        orig_model: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.orig_home.take() {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+            match self.orig_endpoint.take() {
+                Some(v) => env::set_var("STRATOCLAVE_API_ENDPOINT", v),
+                None => env::remove_var("STRATOCLAVE_API_ENDPOINT"),
+            }
+            match self.orig_model.take() {
+                Some(v) => env::set_var("STRATOCLAVE_DEFAULT_MODEL", v),
+                None => env::remove_var("STRATOCLAVE_DEFAULT_MODEL"),
+            }
+        }
+    }
+
+    fn setup_home(toml: &str) -> (HomeGuard, std::sync::MutexGuard<'static, ()>) {
+        let guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::TempDir::new().expect("mktemp");
+        let dir = tmp.path().join(".stratoclave");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), toml).unwrap();
+
+        let home_guard = HomeGuard {
+            _tmp: tmp,
+            orig_home: env::var_os("HOME"),
+            orig_endpoint: env::var_os("STRATOCLAVE_API_ENDPOINT"),
+            orig_model: env::var_os("STRATOCLAVE_DEFAULT_MODEL"),
+        };
+        env::set_var("HOME", home_guard._tmp.path());
+        env::remove_var("STRATOCLAVE_API_ENDPOINT");
+        env::remove_var("STRATOCLAVE_DEFAULT_MODEL");
+        (home_guard, guard)
+    }
+
+    #[test]
+    fn load_accepts_nested_schema_from_stratoclave_setup() {
+        let toml = r#"
+[api]
+endpoint = "https://example.cloudfront.net"
+
+[defaults]
+model = "claude-opus-4-7"
+"#;
+        let (_h, _g) = setup_home(toml);
+        let cfg = MvpConfig::load().expect("nested schema should load");
+        assert_eq!(cfg.api_endpoint, "https://example.cloudfront.net");
+        assert_eq!(cfg.default_model, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn load_accepts_legacy_flat_schema() {
+        let toml = r#"
+api_endpoint = "https://legacy.cloudfront.net"
+default_model = "claude-sonnet-4-6"
+"#;
+        let (_h, _g) = setup_home(toml);
+        let cfg = MvpConfig::load().expect("flat schema should load");
+        assert_eq!(cfg.api_endpoint, "https://legacy.cloudfront.net");
+        assert_eq!(cfg.default_model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn load_prefers_env_var_over_config_file() {
+        let toml = r#"
+[api]
+endpoint = "https://file.cloudfront.net"
+"#;
+        let (_h, _g) = setup_home(toml);
+        env::set_var("STRATOCLAVE_API_ENDPOINT", "https://env.cloudfront.net");
+        let cfg = MvpConfig::load().expect("load with env override");
+        assert_eq!(cfg.api_endpoint, "https://env.cloudfront.net");
+    }
+
+    #[test]
+    fn load_errors_when_nothing_is_configured() {
+        let (_h, _g) = setup_home("");
+        let err = match MvpConfig::load() {
+            Ok(_) => panic!("expected error when endpoint is absent"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("API endpoint not configured"));
+    }
+}

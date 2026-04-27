@@ -40,6 +40,16 @@ IGNORE_PATHS=(
   ":(exclude)docs/diagrams/**/*.drawio"
   # This script itself carries example patterns as comments/tests.
   ":(exclude)scripts/check-no-hardcoded-secrets.sh"
+  # Test fixtures and inline mod tests routinely use shape-shaped fake
+  # identifiers (us-east-1_ABCDEFGHI, AKIAEXAMPLE...). Scanning them
+  # only produces noise; CI signal comes from production code files.
+  ":(exclude)backend/tests/**"
+  ":(exclude)cli/**/tests.rs"
+  ":(exclude)cli/tests/**"
+  ":(exclude)cli/src/**/*tests*"
+  ":(exclude)frontend/src/**/*.test.ts"
+  ":(exclude)frontend/src/**/*.test.tsx"
+  ":(exclude)iac/test/**"
 )
 
 # ----------------------------------------------------------------------
