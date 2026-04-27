@@ -1,19 +1,24 @@
+<!-- Last updated: 2026-04-27 -->
+<!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
+
 # Architecture
+
+> A Japanese translation is available at [ja/ARCHITECTURE.md](./ja/ARCHITECTURE.md).
 
 Stratoclave is a **thin proxy gateway in front of Amazon Bedrock** that adds
 multi-tenancy, role-based access control, credit quotas, and a unified login
-surface (Amazon Cognito *or* AWS SSO) without introducing any non-AWS
+surface (Amazon Cognito or AWS SSO) without introducing any non-AWS
 dependencies. The deployment runs entirely inside a single AWS account and
-region, and is deliberately composed of a very small number of moving parts so
-that an operator can understand the whole system from this document alone.
+region, and is deliberately composed of a small number of moving parts so that
+an operator can understand the whole system from this document alone.
 
 This document describes the components, the data model, the authentication
-and authorization flows, and the invariants that Stratoclave relies on. It is
-intended for operators deploying Stratoclave, contributors reading the code
-for the first time, and security reviewers. If you are looking for a
-step-by-step setup guide, see [GETTING_STARTED.md](GETTING_STARTED.md); for
-deployment and day-2 operations, see [ADMIN_GUIDE.md](ADMIN_GUIDE.md) and
-[DEPLOYMENT.md](DEPLOYMENT.md).
+and authorization flows, and the invariants Stratoclave relies on. It is
+intended for operators, contributors reading the code for the first time, and
+security reviewers. If you are looking for a step-by-step setup guide, see
+[GETTING_STARTED.md](GETTING_STARTED.md); for deployment and day-2 operations,
+see [DEPLOYMENT.md](DEPLOYMENT.md) and [ADMIN_GUIDE.md](ADMIN_GUIDE.md). The
+repository lives at [`https://github.com/littlemex/stratoclave`](https://github.com/littlemex/stratoclave).
 
 <!-- TODO(docs): Insert architecture diagram (hero image) here -->
 
@@ -612,11 +617,11 @@ Response shape (schema_version = `"1"`):
 ```json
 {
   "schema_version": "1",
-  "api_endpoint": "https://<cloudfront-domain>",
+  "api_endpoint": "https://d8b03j8erit4k.cloudfront.net",
   "cognito": {
     "user_pool_id": "us-east-1_XXXXXXXX",
     "client_id": "1abcd2efgh3ijkl4mnop5qrstu",
-    "domain": "https://<hosted-ui-subdomain>.auth.us-east-1.amazoncognito.com",
+    "domain": "https://stratoclave.auth.us-east-1.amazoncognito.com",
     "region": "us-east-1"
   },
   "cli": {
@@ -625,6 +630,10 @@ Response shape (schema_version = `"1"`):
   }
 }
 ```
+
+`api_endpoint` above is the sample deployment URL used throughout these docs;
+your actual value is whatever CloudFront URL `deploy-all.sh` prints at the end
+of a deploy.
 
 ### Why this is safe to publish unauthenticated
 
@@ -650,12 +659,13 @@ enforces this as a regression safety net.
 A fresh CLI install is configured by running:
 
 ```bash
-stratoclave setup https://<cloudfront-domain>
+stratoclave setup https://d8b03j8erit4k.cloudfront.net   # your deployment URL
 ```
 
 This fetches `GET /.well-known/stratoclave-config` and writes
 `~/.stratoclave/config.toml`. Subsequent commands read that file; no other
-out-of-band configuration is required.
+out-of-band configuration is required. See [CLI_GUIDE.md](CLI_GUIDE.md#setup)
+for the full command reference.
 
 ---
 
@@ -773,10 +783,10 @@ call on behalf of a caller. `backend/mvp/sso_sts.py` defends:
 - The request is made with a 10-second timeout.
 
 A future release will add an STS signature-nonce table (TTL 5 minutes) to
-close the replay window within the 5-minute skew; this is deliberately
-omitted for the alpha release because the replay attack requires
-simultaneous possession of the signed request and network access to the
-backend.
+close the replay window within the 5-minute skew. This is deliberately
+omitted for the current release because the attack requires simultaneous
+possession of the signed request **and** network access to the backend; see
+[Extension points](#extension-points).
 
 ### Secrets management
 
@@ -808,6 +818,33 @@ but not yet implemented.
   authorization (e.g. "allow up to $X per day"), integrate Amazon Verified
   Permissions at the `require_permission` boundary.
 
-Contributions are welcome — see
+Contributions are welcome; see
 [CONTRIBUTING.md](../CONTRIBUTING.md) for the process and
-[SECURITY.md](../SECURITY.md) for how to report vulnerabilities.
+[SECURITY.md](../SECURITY.md) for how to report vulnerabilities. The
+repository URL is
+[`https://github.com/littlemex/stratoclave`](https://github.com/littlemex/stratoclave).
+
+---
+
+## Known limitations
+
+The following are known, tracked gaps. Each is slated for a follow-up
+release; in the meantime, work around them as described.
+
+- **STS replay window.** Signed `GetCallerIdentity` requests are accepted
+  within a ±5 minute skew without a nonce table. See the
+  [Extension points](#extension-points) for the planned fix.
+- **`api-key revoke` requires the SHA-256 hash.** The CLI output of
+  `api-key list` currently shows the masked `key_id`
+  (`sk-stratoclave-XXXX...YYYY`) but not `key_hash`, so revoking from the CLI
+  requires the hash to come from the Admin UI or a direct HTTP call. See
+  [CLI_GUIDE.md -> Known limitations](CLI_GUIDE.md#known-limitations).
+- **`admin user create` does not return a temporary password by default.**
+  The response field is `null` unless `EXPOSE_TEMPORARY_PASSWORD=true` is set
+  on the backend. The recommended workflow is to issue the first-login
+  credential via `aws cognito-idp admin-set-user-password --no-permanent`.
+  See [ADMIN_GUIDE.md -> Provisioning a new user](ADMIN_GUIDE.md#provisioning-a-new-user).
+- **`admin trusted-accounts` has no CLI subcommand.** Administered via the
+  web UI or direct HTTP calls until the CLI catches up.
+- **Single region.** `us-east-1` only; see
+  [DEPLOYMENT.md -> Regional constraints](DEPLOYMENT.md#regional-constraints).
