@@ -1,0 +1,11 @@
+# rustfmt defaults with minor tweaks. Kept close to upstream defaults to
+# minimize diffs in existing code.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+# Uncomment below to rewrite imports / comments in a follow-up PR:
+# group_imports = "StdExternalCrate"
+# imports_granularity = "Crate"
+# wrap_comments = true
+# comment_width = 100
+# normalize_comments = true

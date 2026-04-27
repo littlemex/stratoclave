@@ -1,0 +1,98 @@
+name: Feature request
+description: Propose a new capability or improvement for Stratoclave.
+title: "[feature] <short summary>"
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. Stratoclave is alpha software, so
+        we lean toward small, composable changes. Before filing, please:
+
+        - Search [existing issues](https://github.com/littlemex/stratoclave/issues?q=is%3Aissue)
+          to avoid duplicates.
+        - Read [`CONTRIBUTING.md`](https://github.com/littlemex/stratoclave/blob/main/CONTRIBUTING.md)
+          — non-trivial features usually need a design discussion before a PR.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues and this proposal has not been filed.
+          required: true
+        - label: This is not a security vulnerability. (If it is, follow SECURITY.md instead.)
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target component
+      multiple: true
+      options:
+        - backend (FastAPI)
+        - frontend (React / Vite)
+        - cli (Rust)
+        - iac (CDK)
+        - scripts / bootstrap
+        - docs
+        - cross-cutting / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user-facing problem are you trying to solve, and for whom? Describe the pain before proposing a fix.
+      placeholder: |
+        As a team lead, I cannot currently ... which causes ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Your preferred approach. Sketch the API, UI, or infrastructure shape if you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other designs you weighed and why you discarded them. "None" is a valid answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: |
+        Observable conditions that would let us mark this shipped. Prefer a
+        short checklist over prose.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Does this introduce a breaking change?
+      options:
+        - "No"
+        - "Yes — API / schema / IaC construct"
+        - "Unsure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Links to prior art, mockups, related issues, or motivating use cases.

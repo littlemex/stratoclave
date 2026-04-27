@@ -39,7 +39,7 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.logging import get_logger
 from dynamo import UsageLogsRepository, UserTenantsRepository
@@ -93,10 +93,12 @@ class AnthropicMessage(BaseModel):
 class AnthropicMessagesRequest(BaseModel):
     model: str
     messages: list[AnthropicMessage]
-    max_tokens: int = 4096
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    top_k: Optional[int] = None
+    # max_tokens は Bedrock 側の現実的上限 (モデル毎に 4K〜32K)。
+    # 大きすぎる値を受けて `_estimate_reservation_tokens` が暴走するのを防ぐ。
+    max_tokens: int = Field(default=4096, ge=1, le=32768)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    top_k: Optional[int] = Field(default=None, ge=1, le=500)
     stop_sequences: Optional[list[str]] = None
     system: Optional[Any] = None  # str or list[dict]
     stream: bool = False
@@ -261,9 +263,17 @@ def messages(
     body: AnthropicMessagesRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
+    # model allowlist を先にチェック (credit 予約の前に 400 で弾く)
+    try:
+        model_id = resolve_bedrock_model(body.model)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"type": "invalid_model", "message": str(e)},
+        )
+
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit(user, reservation)
-    model_id = resolve_bedrock_model(body.model)
 
     if body.stream:
         return StreamingResponse(

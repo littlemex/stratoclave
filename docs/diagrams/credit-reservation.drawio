@@ -1,0 +1,149 @@
+<mxGraphModel dx="1480" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1480" pageHeight="900" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <mxCell id="title" value="Credit model — atomic reserve, then refund the diff"
+      style="text;html=1;align=center;fontSize=22;fontStyle=1;fontColor=#212121;"
+      vertex="1" parent="1">
+      <mxGeometry x="0" y="16" width="1480" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="subtitle" value="Pessimistic reservation on DynamoDB + post-call refund — no TOCTOU on N concurrent requests, yet UsageLogs records the real spend."
+      style="text;html=1;align=center;fontSize=12;fontStyle=2;fontColor=#555555;"
+      vertex="1" parent="1">
+      <mxGeometry x="0" y="48" width="1480" height="22" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="lane_client" value="Client (CLI / SDK / Cowork)"
+      style="rounded=1;fillColor=#FFF3E0;strokeColor=#E65100;strokeWidth=2;fontSize=13;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="90" width="260" height="620" as="geometry"/>
+    </mxCell>
+    <mxCell id="lane_backend" value="Backend — /v1/messages"
+      style="rounded=1;fillColor=#E3F2FD;strokeColor=#0D47A1;strokeWidth=2;fontSize=13;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="340" y="90" width="400" height="620" as="geometry"/>
+    </mxCell>
+    <mxCell id="lane_dynamo" value="DynamoDB — UserTenants / UsageLogs"
+      style="rounded=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;strokeWidth=2;fontSize=13;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="780" y="90" width="340" height="620" as="geometry"/>
+    </mxCell>
+    <mxCell id="lane_bedrock" value="Amazon Bedrock"
+      style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;fontSize=13;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="1160" y="90" width="280" height="620" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="c1" value="POST /v1/messages&#10;{ model, max_tokens, messages }"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#E65100;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="55" y="130" width="230" height="50" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e1" value="1) HTTPS + access_token / API key"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="290" y="155" as="sourcePoint"/>
+        <mxPoint x="350" y="155" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="b1" value="Authenticate, authorize,&#10;and estimate reservation amount:&#10;R ≈ max_tokens + input_estimate"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="355" y="130" width="370" height="60" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e2" value="2) UpdateItem  UserTenants[user,tenant]&#10;SET credit = credit - :R&#10;ConditionExpression: credit >= :R"
+      style="endArrow=classic;html=1;strokeColor=#6A1B9A;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="730" y="220" as="sourcePoint"/>
+        <mxPoint x="790" y="220" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="d1" value="Conditional UpdateItem&#10;✓ success → reservation committed&#10;✗ ConditionalCheckFailed → 402 Payment Required"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#6A1B9A;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="795" y="200" width="310" height="70" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e3" value="3) ok (or 402 → abort)"
+      style="endArrow=classic;html=1;strokeColor=#6A1B9A;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="790" y="290" as="sourcePoint"/>
+        <mxPoint x="730" y="290" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="b2" value="resolve_bedrock_model(model)&#10;→ us.anthropic.claude-...&#10;call Bedrock converse / converseStream&#10;with task-role IAM"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="355" y="310" width="370" height="70" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e4" value="4) invoke"
+      style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="730" y="345" as="sourcePoint"/>
+        <mxPoint x="1170" y="345" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="k1" value="Bedrock returns usage:&#10;• input_tokens&#10;• output_tokens&#10;• stopReason"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#2E7D32;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="1175" y="320" width="250" height="70" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e5" value="5) stream / response"
+      style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="1170" y="410" as="sourcePoint"/>
+        <mxPoint x="730" y="410" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="b3" value="Compute diff:&#10;actual = input_tokens + output_tokens&#10;delta  = R - actual  (can be negative if over-run)"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="355" y="430" width="370" height="60" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e6" value="6) UpdateItem SET credit = credit + :delta&#10;+ PutItem UsageLogs (1 record / call)"
+      style="endArrow=classic;html=1;strokeColor=#6A1B9A;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="730" y="520" as="sourcePoint"/>
+        <mxPoint x="790" y="520" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="d2" value="Refund (delta ≥ 0) — credit += delta&#10;OR reverse-clamp (delta &lt; 0)&#10;UsageLogs row with real spend + model + tokens + ms"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#6A1B9A;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="795" y="500" width="310" height="80" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e7" value="7) Stratoclave response&#10;(Anthropic-compatible body)"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="350" y="620" as="sourcePoint"/>
+        <mxPoint x="290" y="620" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="c2" value="Client receives the reply.&#10;UsageLogs are queryable from CLI / Web UI&#10;filtered per user / tenant / date."
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#E65100;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="55" y="600" width="230" height="70" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="takeaway" value="N concurrent requests that would exceed the quota cannot race: a conditional UpdateItem either commits or fails.  Under-spend is refunded; over-spend leaves credit negative and is visible to operators.  UsageLogs always reflect real Bedrock token counts."
+      style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;fontSize=13;fontStyle=1;fontColor=#1B5E20;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="730" width="1400" height="60" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>

@@ -1,0 +1,50 @@
+[project]
+name = "stratoclave-backend"
+version = "0.1.0"
+description = "Stratoclave Backend — Bedrock proxy gateway with tenant-level RBAC"
+requires-python = ">=3.11"
+
+[tool.ruff]
+# Applies to backend/ only (project root is `backend/`).
+line-length = 100
+target-version = "py311"
+src = ["."]
+
+# Lint scope — keep tests and bootstrap seed in scope.
+extend-exclude = [
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+]
+
+[tool.ruff.lint]
+# v0.1.0 initial scope: correctness-oriented rules only.
+# Style modernization (UP, SIM, RUF) is deferred to a follow-up PR so this
+# lint introduction produces zero diffs to existing code.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (undefined names, unused imports in __all__, etc.)
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "E402",   # module-level import not at top (sys.path manipulation in tests)
+    "E731",   # do not assign a lambda (intentional in some places)
+    "F401",   # unused imports in __init__.py handled by per-file-ignores
+    "W605",   # invalid escape sequence (regex patterns in comments)
+]
+# Follow-up PR will add: I (isort), B (bugbear), UP (pyupgrade),
+# SIM (simplify), C4 (comprehensions), PIE, RUF.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011", "SIM117"]   # tests may use assert False, nested with
+"**/__init__.py" = ["F401"]            # re-exports
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "dynamo", "mvp", "middleware", "bootstrap"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = false

@@ -1,0 +1,10 @@
+# Reproducible Rust toolchain for CLI.
+# Pin stable to avoid unexpected clippy/rustfmt rule changes between nightly/stable.
+[toolchain]
+# Use stable to satisfy transitive dependency MSRVs (aws-types >= 1.91,
+# icu_* >= 1.86, time >= 1.88). Edition 2024 is also required by clap_lex 1.1+.
+# Keep pinned to a specific stable version to avoid clippy rule drift across
+# CI and contributor workstations.
+channel = "1.92"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

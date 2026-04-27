@@ -94,15 +94,64 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
-    // Bedrock
+    // Bedrock: Anthropic (Claude) モデルのみ、かつ CRIS (Cross-Region Inference) の
+    // inference profile + その先の foundation-model 両方を allowlist 化.
+    // `Resource: *` だと RCE 時に Llama / Nova / Mistral 等も呼ばれコスト爆発するため
+    // Anthropic プレフィックスで厳格にスコープする.
+    //
+    // - foundation-model: アカウント境界を持たない Bedrock 側 owned なので `::`
+    // - inference-profile: 自アカウント内に作られる (us./apac./eu./global. prefix)
+    //
+    // us-east-1 以外の cross-region 経由で呼び出される場合も考慮し、us.*/apac.*/eu.*/global.* を含める。
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
+        sid: 'AllowAnthropicBedrockInvoke',
         effect: iam.Effect.ALLOW,
         actions: [
           'bedrock:InvokeModel',
           'bedrock:InvokeModelWithResponseStream',
           'bedrock:Converse',
           'bedrock:ConverseStream',
+        ],
+        resources: [
+          // foundation-model (region-less, account-less)
+          `arn:aws:bedrock:*::foundation-model/anthropic.*`,
+          // inference-profile in this account (us./apac./eu./global. prefix 全リージョン)
+          `arn:aws:bedrock:*:${account}:inference-profile/us.anthropic.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/apac.anthropic.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/eu.anthropic.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/global.anthropic.*`,
+        ],
+      })
+    );
+    // Bedrock read-only operations (モデル発見 / /v1/models).
+    // ListFoundationModels / ListInferenceProfiles は Resource 指定不可のため `*` のまま.
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowBedrockReadOnly',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:ListFoundationModels',
+          'bedrock:ListInferenceProfiles',
+          'bedrock:GetFoundationModel',
+          'bedrock:GetInferenceProfile',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    // ECS Exec (`enableExecuteCommand: true`) に必要な SSM messages 権限を明示付与.
+    // 本来は CDK が自動付与するが、CloudFormation の DefaultPolicy diff で現 live と
+    // 差が出るのを防ぐため明示宣言する.
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowEcsExecChannels',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ssmmessages:CreateControlChannel',
+          'ssmmessages:CreateDataChannel',
+          'ssmmessages:OpenControlChannel',
+          'ssmmessages:OpenDataChannel',
         ],
         resources: ['*'],
       })

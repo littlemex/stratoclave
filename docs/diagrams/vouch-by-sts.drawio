@@ -1,0 +1,147 @@
+<mxGraphModel dx="1480" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1480" pageHeight="900" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <mxCell id="title" value="Vouch by STS — passwordless login without holding any IdP secret"
+      style="text;html=1;align=center;fontSize=22;fontStyle=1;fontColor=#212121;"
+      vertex="1" parent="1">
+      <mxGeometry x="0" y="16" width="1480" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="subtitle" value="Same pattern as HashiCorp Vault&#39;s AWS auth (iam) method: the client signs GetCallerIdentity, the backend forwards the signed request to STS, and trusts only the STS reply."
+      style="text;html=1;align=center;fontSize=12;fontStyle=2;fontColor=#555555;"
+      vertex="1" parent="1">
+      <mxGeometry x="0" y="48" width="1480" height="22" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="lane_cli" value="CLI / Shell"
+      style="rounded=1;fillColor=#FFF3E0;strokeColor=#E65100;strokeWidth=2;fontSize=14;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="90" width="260" height="720" as="geometry"/>
+    </mxCell>
+    <mxCell id="lane_backend" value="Stratoclave Backend (ECS Fargate)"
+      style="rounded=1;fillColor=#E3F2FD;strokeColor=#0D47A1;strokeWidth=2;fontSize=14;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="340" y="90" width="340" height="720" as="geometry"/>
+    </mxCell>
+    <mxCell id="lane_sts" value="AWS STS (global)"
+      style="rounded=1;fillColor=#FFF8E1;strokeColor=#F9A825;strokeWidth=2;fontSize=14;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="720" y="90" width="240" height="720" as="geometry"/>
+    </mxCell>
+    <mxCell id="lane_dynamo" value="DynamoDB / Cognito"
+      style="rounded=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;strokeWidth=2;fontSize=14;fontStyle=1;align=center;verticalAlign=top;"
+      vertex="1" parent="1">
+      <mxGeometry x="1000" y="90" width="440" height="720" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s0_cli" value="aws sso login / saml2aws login / IAM user keys&#10;→ short-lived credentials in ~/.aws/credentials"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#E65100;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="55" y="130" width="230" height="50" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s1_cli" value="SigV4-sign&#10;POST GetCallerIdentity"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#E65100;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="55" y="210" width="230" height="44" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e1" value="1) POST /api/mvp/auth/sso-exchange&#10;{ signed_url, signed_headers, body }"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="290" y="232" as="sourcePoint"/>
+        <mxPoint x="350" y="232" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="s2_be" value="Validate request shape&#10;• Action=GetCallerIdentity only&#10;• method=POST&#10;• X-Amz-Date within ±5 min&#10;• URL allowlist: https://sts.*.amazonaws.com"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="355" y="210" width="310" height="90" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e2" value="2) Replay the signed request&#10;(backend does not mutate it)"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="670" y="320" as="sourcePoint"/>
+        <mxPoint x="730" y="320" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="s3_sts" value="STS verifies the signature,&#10;returns the canonical:&#10;&#10;• Arn&#10;• UserId&#10;• Account"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#F9A825;strokeWidth=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="735" y="300" width="210" height="100" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e3" value="3) Arn / UserId / Account"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="730" y="410" as="sourcePoint"/>
+        <mxPoint x="670" y="410" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="s4_be" value="Identity-type gates:&#10;• sso_user (AWSReservedSSO_*)&#10;• federated_role (assumed-role)&#10;• iam_user — default DENY&#10;• instance_profile — default DENY&#10;&#10;Trusted Accounts allowlist&#10;+ allowed_role_patterns (fnmatch)"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="355" y="420" width="310" height="130" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e4" value="4) read TrustedAccounts / SsoPreRegistrations&#10;resolve or provision user in Cognito"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="670" y="485" as="sourcePoint"/>
+        <mxPoint x="1010" y="485" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="s5_dynamo" value="DynamoDB&#10;• TrustedAccounts → is account allowed?&#10;• SsoPreRegistrations → invite → email + role&#10;• Users (source of truth for roles)"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#6A1B9A;strokeWidth=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="1015" y="440" width="410" height="90" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s6_cognito" value="Cognito User Pool&#10;• admin_create_user (if invite matches)&#10;• admin_set_user_password (24-char random)&#10;• admin_initiate_auth → access_token"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#6A1B9A;strokeWidth=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="1015" y="540" width="410" height="80" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e5" value="5) access_token + profile"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="1010" y="595" as="sourcePoint"/>
+        <mxPoint x="670" y="595" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="s7_be" value="Return to CLI:&#10;• access_token&#10;• user_id / tenant / roles"
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=10;"
+      vertex="1" parent="1">
+      <mxGeometry x="355" y="580" width="310" height="60" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e6" value="6) HTTPS response"
+      style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="350" y="610" as="sourcePoint"/>
+        <mxPoint x="290" y="610" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="s8_cli" value="~/.stratoclave/mvp_tokens.json (0600)&#10;All subsequent API calls use the access_token."
+      style="rounded=1;fillColor=#FFFFFF;strokeColor=#E65100;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="55" y="580" width="230" height="60" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="takeaway" value="Stratoclave never parses AWS credentials and never holds an IdP refresh token.  If the backend is fully compromised, an attacker cannot pivot to the customer&#39;s IAM Identity Center or SAML IdP: those refresh tokens simply aren&#39;t there."
+      style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;fontSize=13;fontStyle=1;fontColor=#1B5E20;align=center;verticalAlign=middle;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="720" width="1400" height="60" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>

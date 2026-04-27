@@ -1,0 +1,113 @@
+# Dependabot configuration for Stratoclave.
+#
+# Stratoclave is a polyglot repository (Python, TypeScript, Rust) with AWS CDK
+# infrastructure. Each ecosystem below is pinned to its manifest directory.
+# Schedules are staggered across the week so review load stays predictable.
+#
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # GitHub Actions workflow dependencies (action@version pins).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+
+  # Backend — FastAPI / boto3 / Pydantic etc.
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "backend"
+    commit-message:
+      prefix: "chore(backend)"
+      include: "scope"
+
+  # Frontend — Vite / React / shadcn.
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "chore(frontend)"
+      include: "scope"
+    groups:
+      # React and its immediate ecosystem tend to release together; batch
+      # them to avoid floods of individually-trivial PRs.
+      react:
+        patterns:
+          - "react"
+          - "react-*"
+          - "@types/react*"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+          - "tailwind-*"
+
+  # IaC — AWS CDK v2 (TypeScript).
+  - package-ecosystem: "npm"
+    directory: "/iac"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "iac"
+    commit-message:
+      prefix: "chore(iac)"
+      include: "scope"
+    groups:
+      aws-cdk:
+        patterns:
+          - "aws-cdk"
+          - "aws-cdk-lib"
+          - "@aws-cdk/*"
+          - "constructs"
+
+  # Root-level npm manifest (package-lock.json exists at the repo root).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "root"
+    commit-message:
+      prefix: "chore(root)"
+      include: "scope"
+
+  # CLI — Rust / Cargo.
+  - package-ecosystem: "cargo"
+    directory: "/cli"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "cli"
+    commit-message:
+      prefix: "chore(cli)"
+      include: "scope"

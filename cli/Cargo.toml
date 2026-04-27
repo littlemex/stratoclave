@@ -47,3 +47,19 @@ serde_json = "1"
 strip = true
 lto = true
 opt-level = "z"
+
+# Linter levels. v0.1.0 initial scope is minimal: only hard-safety rules.
+# Style / visibility modernization (unreachable_pub, pedantic, nursery) will
+# be enabled in a follow-up PR after the codebase is reviewed holistically.
+[lints.rust]
+# deny (not forbid) so that specific blocks can opt out with
+# `#[allow(unsafe_code)]` when calling small libc FFI for tty detection etc.
+unsafe_code = "deny"
+
+[lints.clippy]
+# Deny foot-guns:
+mem_forget = "deny"
+await_holding_lock = "deny"
+# Warn-only reminders:
+todo = "warn"
+dbg_macro = "warn"
