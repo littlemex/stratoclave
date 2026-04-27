@@ -23,10 +23,16 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run dev -- --port 3003 --strictPort',
-    port: PORT,
+    // --host ensures Vite binds to 127.0.0.1 (IPv4) so Playwright's
+    // navigation to `baseURL` resolves the same interface; without it
+    // Vite defaults to loopback only and the test runner can fail with
+    // ERR_CONNECTION_REFUSED when IPv6 is preferred.
+    command: 'npm run dev -- --host 127.0.0.1 --port 3003 --strictPort',
+    url: `http://127.0.0.1:${PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
   },
   projects: [
     {

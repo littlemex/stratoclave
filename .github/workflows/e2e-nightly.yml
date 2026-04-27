@@ -47,6 +47,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Seed runtime config.json for the dev server
+        # The Vite dev server fetches `/config.json` at bootstrap. The real
+        # file is generated from SSM in production deploys; for the smoke
+        # we use the committed dev example so the app can render the
+        # sign-in page without touching a real Cognito backend.
+        run: cp public/config.json.dev.example public/config.json
       - name: Install Playwright browsers (chromium only)
         run: npx playwright install --with-deps chromium
       - name: Run Playwright smoke
