@@ -27,7 +27,7 @@ Cowork is a headless, long-running client, so the one-hour lifetime of a Cognito
 
 Before you start, confirm the following:
 
-- A Stratoclave deployment is reachable over HTTPS at a CloudFront URL of the form `https://<subdomain>.cloudfront.net` (for example `https://d8b03j8erit4k.cloudfront.net`). If you do not have one yet, follow [DEPLOYMENT.md](DEPLOYMENT.md) first.
+- A Stratoclave deployment is reachable over HTTPS at a CloudFront URL of the form `https://<subdomain>.cloudfront.net` (for example `https://<your-deployment>.cloudfront.net`). If you do not have one yet, follow [DEPLOYMENT.md](DEPLOYMENT.md) first.
 - You can log in to the deployment either through the web UI or via the CLI (`stratoclave auth login` or `stratoclave auth sso`). Any role (`user`, `team_lead`, or `admin`) can issue its own API keys.
 - Claude Desktop is installed on your workstation. The Cowork gateway feature requires **Developer Mode** (see Step 2).
 - Your Stratoclave user holds the `messages:send` permission. All three default roles include it; if you are running a customised permissions table, confirm the value is present.
@@ -92,7 +92,7 @@ Use the CloudFront URL of your Stratoclave deployment and the plaintext API key 
 
 | Field                     | Value |
 | ------------------------- | ----- |
-| Gateway base URL          | `https://<your-deployment>.cloudfront.net` (for example `https://d8b03j8erit4k.cloudfront.net`) |
+| Gateway base URL          | `https://<your-deployment>.cloudfront.net` (for example `https://<your-deployment>.cloudfront.net`) |
 | Gateway auth scheme       | `Bearer` |
 | Gateway API key           | `sk-stratoclave-...` (the plaintext from Step 1) |
 | Gateway extra headers     | *(leave empty)* |

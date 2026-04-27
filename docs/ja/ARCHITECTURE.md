@@ -617,7 +617,7 @@ Cognito User Pool ID、App Client ID、Cognito ドメイン、いくつかの CL
 ```json
 {
   "schema_version": "1",
-  "api_endpoint": "https://d8b03j8erit4k.cloudfront.net",
+  "api_endpoint": "https://<your-deployment>.cloudfront.net",
   "cognito": {
     "user_pool_id": "us-east-1_XXXXXXXX",
     "client_id": "1abcd2efgh3ijkl4mnop5qrstu",
@@ -661,7 +661,7 @@ CloudFront URL である。
 新規 CLI インストールは次のコマンドで設定される。
 
 ```bash
-stratoclave setup https://d8b03j8erit4k.cloudfront.net   # your deployment URL
+stratoclave setup https://<your-deployment>.cloudfront.net   # your deployment URL
 ```
 
 これは `GET /.well-known/stratoclave-config` を取得し、

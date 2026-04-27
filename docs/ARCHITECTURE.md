@@ -617,7 +617,7 @@ Response shape (schema_version = `"1"`):
 ```json
 {
   "schema_version": "1",
-  "api_endpoint": "https://d8b03j8erit4k.cloudfront.net",
+  "api_endpoint": "https://<your-deployment>.cloudfront.net",
   "cognito": {
     "user_pool_id": "us-east-1_XXXXXXXX",
     "client_id": "1abcd2efgh3ijkl4mnop5qrstu",
@@ -659,7 +659,7 @@ enforces this as a regression safety net.
 A fresh CLI install is configured by running:
 
 ```bash
-stratoclave setup https://d8b03j8erit4k.cloudfront.net   # your deployment URL
+stratoclave setup https://<your-deployment>.cloudfront.net   # your deployment URL
 ```
 
 This fetches `GET /.well-known/stratoclave-config` and writes

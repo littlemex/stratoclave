@@ -114,7 +114,7 @@ When the script finishes it prints:
 
 ```
 [SUCCESS] Deployment completed
-  Frontend URL:  https://d8b03j8erit4k.cloudfront.net          # example: your deployment URL
+  Frontend URL:  https://<your-deployment>.cloudfront.net          # example: your deployment URL
   ALB endpoint:  http://stratoclave-alb-xxxxxxxx.us-east-1.elb.amazonaws.com
   User Pool ID:  us-east-1_EXAMPLE
 ```
@@ -171,7 +171,7 @@ Sample output:
 ```
 [INFO] Resolving deployment outputs in region us-east-1...
 [INFO] User Pool : us-east-1_EXAMPLE
-[INFO] API       : https://d8b03j8erit4k.cloudfront.net
+[INFO] API       : https://<your-deployment>.cloudfront.net
 [INFO] Email     : admin@example.com
 [STEP 1/3] Ensuring Cognito user exists
 [OK]   Created Cognito user.
@@ -184,7 +184,7 @@ Sample output:
 ============================================
   Email:     admin@example.com
   Password:  <generated-once, 20+ chars>
-  Login URL: https://d8b03j8erit4k.cloudfront.net
+  Login URL: https://<your-deployment>.cloudfront.net
 ```
 
 ### Locking down after bootstrap

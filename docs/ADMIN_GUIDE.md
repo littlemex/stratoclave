@@ -48,15 +48,15 @@ Stratoclave ships three roles, stored in the `stratoclave-users` DynamoDB table 
 
 Administrators log in through the web UI, the same as any other user. The bootstrap admin is created by [`scripts/bootstrap-admin.sh`](../scripts/bootstrap-admin.sh); see [DEPLOYMENT.md](DEPLOYMENT.md#post-deploy-first-admin) for how to create one.
 
-1. Open your deployment URL (for example `https://d8b03j8erit4k.cloudfront.net`) in the browser.
+1. Open your deployment URL (for example `https://<your-deployment>.cloudfront.net`) in the browser.
 2. Enter the admin email and the password printed by `bootstrap-admin.sh`.
 3. The header now shows the admin-only navigation items: **Users**, **Tenants**, **Trusted Accounts**, **Usage**.
 
 You can also drive every admin operation from the CLI once you have set `STRATOCLAVE_API_ENDPOINT`:
 
 ```bash
-export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"   # your deployment URL
-stratoclave setup https://d8b03j8erit4k.cloudfront.net
+export STRATOCLAVE_API_ENDPOINT="https://<your-deployment>.cloudfront.net"   # your deployment URL
+stratoclave setup https://<your-deployment>.cloudfront.net
 stratoclave auth login --email admin@example.com
 stratoclave admin user list
 ```
@@ -288,7 +288,7 @@ The backend exposes `POST /api/mvp/admin/users/{user_id}/api-keys` for proxy iss
 A dedicated CLI subcommand is not yet available; until then, call the HTTP API directly:
 
 ```bash
-curl -X POST "https://d8b03j8erit4k.cloudfront.net/api/mvp/admin/users/$USER_ID/api-keys" \
+curl -X POST "https://<your-deployment>.cloudfront.net/api/mvp/admin/users/$USER_ID/api-keys" \
   -H "Authorization: Bearer $(jq -r .access_token ~/.stratoclave/mvp_tokens.json)" \
   -H 'Content-Type: application/json' \
   -d '{"name": "pipeline-prod", "scopes": ["messages:send"], "expires_in_days": 90}'
@@ -351,8 +351,8 @@ Each user detail page in the web UI shows `credit_remaining`, `credit_used`, and
 Once you have deployed and bootstrapped an admin, share the deployment URL with your users:
 
 ```bash
-stratoclave setup https://d8b03j8erit4k.cloudfront.net    # your deployment URL
-export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"
+stratoclave setup https://<your-deployment>.cloudfront.net    # your deployment URL
+export STRATOCLAVE_API_ENDPOINT="https://<your-deployment>.cloudfront.net"
 stratoclave auth login --email user@example.com
 ```
 

@@ -27,7 +27,7 @@ If you are deploying Stratoclave into your own AWS account, start with [DEPLOYME
 
 - macOS, Linux, or WSL2.
 - Rust 1.75 or newer to build the CLI from source. Pre-built binaries are not yet published to the GitHub Releases page of [`littlemex/stratoclave`](https://github.com/littlemex/stratoclave); until then, `cargo build --release` is the supported path.
-- A Stratoclave deployment URL from your administrator, for example `https://d8b03j8erit4k.cloudfront.net` (this guide uses the URL as a concrete illustration; substitute your deployment URL).
+- A Stratoclave deployment URL from your administrator, for example `https://<your-deployment>.cloudfront.net` (this guide uses the URL as a concrete illustration; substitute your deployment URL).
 - One of the following sign-in paths:
   - An email address that an administrator has provisioned, together with a temporary password they have set via `aws cognito-idp admin-set-user-password`, **or**
   - An AWS profile with `aws sso login` already completed, for deployments that have your AWS account registered as a trusted identity source.
@@ -67,7 +67,7 @@ You should see a help listing with `auth`, `claude`, `usage`, `admin`, `team-lea
 Stratoclave ships a single-command bootstrap. Point `stratoclave setup` at the deployment URL your administrator shared:
 
 ```bash
-stratoclave setup https://d8b03j8erit4k.cloudfront.net   # your deployment URL
+stratoclave setup https://<your-deployment>.cloudfront.net   # your deployment URL
 ```
 
 The command:
@@ -80,10 +80,10 @@ The command:
 Expected output:
 
 ```
-[INFO] Fetching config from https://d8b03j8erit4k.cloudfront.net/.well-known/stratoclave-config ...
+[INFO] Fetching config from https://<your-deployment>.cloudfront.net/.well-known/stratoclave-config ...
 
 Saved to /home/you/.stratoclave/config.toml
-  api_endpoint      = https://d8b03j8erit4k.cloudfront.net
+  api_endpoint      = https://<your-deployment>.cloudfront.net
   cognito.domain    = https://stratoclave.auth.us-east-1.amazoncognito.com
   cognito.region    = us-east-1
   cli.default_model = us.anthropic.claude-opus-4-7
@@ -108,8 +108,8 @@ Useful flags:
 Several subcommands (`auth login`, `admin ...`, `team-lead ...`, `api-key ...`, `usage show`) read the API endpoint from the `STRATOCLAVE_API_ENDPOINT` environment variable rather than from the `[api]` section of `config.toml`. Until this is unified, **export `STRATOCLAVE_API_ENDPOINT` in your shell rc file** so every subcommand behaves consistently:
 
 ```bash
-export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"
-echo 'export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"' >> ~/.zshrc
+export STRATOCLAVE_API_ENDPOINT="https://<your-deployment>.cloudfront.net"
+echo 'export STRATOCLAVE_API_ENDPOINT="https://<your-deployment>.cloudfront.net"' >> ~/.zshrc
 ```
 
 See [CLI_GUIDE.md](CLI_GUIDE.md#configuration-file) for the full precedence rules.
