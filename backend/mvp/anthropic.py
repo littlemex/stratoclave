@@ -294,7 +294,14 @@ def messages(
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
-        raise HTTPException(status_code=502, detail=f"Bedrock error: {e}")
+        # Sanitize the upstream message before returning it: Bedrock errors
+        # can leak account IDs, inference-profile ARNs, and internal paths.
+        from core.error_handler import sanitize_exception_message
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bedrock error: {sanitize_exception_message(str(e))}",
+        )
     except Exception:
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
@@ -388,9 +395,17 @@ async def _stream_messages(
         try:
             resp = _bedrock_client().converse_stream(**kwargs)
         except ClientError as e:
+            from core.error_handler import sanitize_exception_message
+
             yield _sse_event(
                 "error",
-                {"type": "error", "error": {"type": "api_error", "message": str(e)}},
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": sanitize_exception_message(str(e)),
+                    },
+                },
             )
             # Bedrock 側は呼ばれていないため全額 refund
             tenants_repo.refund(
@@ -422,9 +437,17 @@ async def _stream_messages(
                     input_tokens = int(usage.get("inputTokens", input_tokens))
                     output_tokens = int(usage.get("outputTokens", output_tokens))
         except Exception as e:  # pragma: no cover
+            from core.error_handler import sanitize_exception_message
+
             yield _sse_event(
                 "error",
-                {"type": "error", "error": {"type": "api_error", "message": str(e)}},
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": sanitize_exception_message(str(e)),
+                    },
+                },
             )
             # 途中までトークンが確定している場合はその分だけ settle、残りは refund
             _settle_reservation_and_log(

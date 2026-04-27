@@ -28,6 +28,17 @@
 
 set -euo pipefail
 
+# P1-6: keep any temp files we create in a 0700 directory and wipe them on
+# exit regardless of success / failure. Previous versions wrote to a
+# fixed /tmp/bootstrap-admin-resp.json that another user on the host
+# could read.
+TMPDIR_P1_6="$(mktemp -d -t stratoclave-bootstrap.XXXXXX)"
+chmod 700 "$TMPDIR_P1_6"
+cleanup_tmpdir() {
+  rm -rf "$TMPDIR_P1_6"
+}
+trap cleanup_tmpdir EXIT INT TERM
+
 EMAIL=""
 PASSWORD=""
 DRY_RUN=false
@@ -163,8 +174,9 @@ if ! command -v curl >/dev/null; then
   exit 1
 fi
 
+RESP_FILE="$TMPDIR_P1_6/resp.json"
 set +e
-HTTP_STATUS=$(curl -sS -o /tmp/bootstrap-admin-resp.json -w '%{http_code}' \
+HTTP_STATUS=$(curl -sS -o "$RESP_FILE" -w '%{http_code}' \
   -X POST "$BOOTSTRAP_URL" \
   -H 'Content-Type: application/json' \
   -H 'X-Bootstrap: true' \
@@ -188,24 +200,44 @@ case "$HTTP_STATUS" in
     echo "[ERROR] Backend rejected the request ($HTTP_STATUS)." >&2
     echo "  The Backend must be deployed with ALLOW_ADMIN_CREATION=true for the" >&2
     echo "  initial bootstrap. After the first admin exists, set ALLOW_ADMIN_CREATION=false." >&2
-    cat /tmp/bootstrap-admin-resp.json >&2 || true
+    cat "$RESP_FILE" >&2 || true
     exit 1
     ;;
   *)
     echo "[ERROR] Unexpected Backend response: HTTP $HTTP_STATUS" >&2
-    cat /tmp/bootstrap-admin-resp.json >&2 || true
+    cat "$RESP_FILE" >&2 || true
     exit 1
     ;;
 esac
 
 # --- Summary ---
+# P1-6: By default print the password to stderr so it is not captured in
+# the typical "./bootstrap-admin.sh > log.txt" redirection, and offer an
+# alternative to write it (0600) to a file the operator chooses. Email
+# and URL stay on stdout because they are safe to capture.
 echo ""
 echo "============================================"
 echo " Bootstrap complete"
 echo "============================================"
 echo "  Email:      $EMAIL"
-echo "  Password:   $PASSWORD"
 echo "  Login URL:  $API_ENDPOINT"
+echo ""
+
+if [[ -n "${STRATOCLAVE_PASSWORD_FILE:-}" ]]; then
+  # Write password to the specified file with 0600 permissions.
+  umask 077
+  printf '%s\n' "$PASSWORD" > "$STRATOCLAVE_PASSWORD_FILE"
+  echo "  Password:   written to $STRATOCLAVE_PASSWORD_FILE (0600)"
+else
+  # Emit to stderr so `./bootstrap-admin.sh > log.txt` does not capture
+  # the password into a shared log file.
+  {
+    echo "  Password:   $PASSWORD"
+    echo "              (printed on stderr; capture with 2>> or set"
+    echo "               STRATOCLAVE_PASSWORD_FILE=<path> to write 0600)"
+  } >&2
+fi
+
 echo ""
 echo "Share the login URL with the administrator. Once they have logged in"
 echo "at least once, consider redeploying the Backend with:"

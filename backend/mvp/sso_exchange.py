@@ -326,7 +326,11 @@ def sso_exchange(body: SsoExchangeRequest) -> SsoExchangeResponse:
                 ),
             )
 
-    # 4. 毎回 random password 発行 → admin_initiate_auth → password 破棄
+    # 4. 毎回 random password 発行 → admin_initiate_auth → 即座に再上書きで invalidate
+    # (P1-4): admin_initiate_auth の完了直後に第 2 の乱数で再上書きすることで、
+    # ログ流出 / MITM 等で temp_pw が漏れたとしても Cognito 側では既に別値になっており、
+    # 盗まれた値は再利用不可能になる。再上書きが失敗しても auth は既に完了しているため
+    # フローを止めず、logger.warning で通知のみとする (監査対象)。
     temp_pw = _generate_temp_password()
     _cognito_set_permanent_password(pool_id, trusted.email, temp_pw)
     auth_result = _cognito_admin_password_auth(pool_id, client_id, trusted.email, temp_pw)
@@ -335,6 +339,21 @@ def sso_exchange(body: SsoExchangeRequest) -> SsoExchangeResponse:
 
     if not auth_result:
         raise HTTPException(status_code=502, detail="Cognito returned empty auth result")
+
+    # Belt-and-braces: overwrite the just-used password with a fresh random
+    # value so it cannot be replayed even if the previous value leaked.
+    # The user never sees either password — they always go through this flow.
+    try:
+        _cognito_set_permanent_password(
+            pool_id, trusted.email, _generate_temp_password()
+        )
+    except HTTPException as exc:
+        # A set-password failure here is non-fatal: the original auth
+        # already succeeded. Log loudly so operations can investigate.
+        _log.warning(
+            "sso_post_auth_password_rotate_failed",
+            extra={"email": trusted.email, "status": exc.status_code},
+        )
 
     users_repo.record_sso_login(
         user_id=sub,

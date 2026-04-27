@@ -195,18 +195,27 @@ def create_my_api_key(
     )
 
 
-@router.delete("/{key_hash}")
-def revoke_my_api_key(
-    key_hash: str,
+@router.delete("/by-key-id/{key_id:path}")
+def revoke_my_api_key_by_key_id(
+    key_id: str,
     user: AuthenticatedUser = Depends(require_permission("apikeys:revoke-self")),
 ) -> Response:
+    """Preferred revoke endpoint (P1-8).
+
+    Accepts the masked `key_id` (`sk-stratoclave-XXXX...YYYY`) shown in
+    `api-key list` instead of the SHA-256 hash. URL-path values end up in
+    ALB / CloudFront access logs, and the hash is also DynamoDB's primary
+    key — so leaking it via access logs is a long-lived enumeration
+    material. The masked id is safe to log and is the only value the UI /
+    CLI ever sees.
+    """
     repo = ApiKeysRepository()
-    item = repo.get_by_hash(key_hash)
-    if not item or str(item.get("user_id")) != user.user_id:
-        # 他人の key を revoke しようとした場合も 404 に統一 (enumeration 防御)
+    item = repo.find_by_user_and_key_id(user.user_id, key_id)
+    if not item:
+        # Unify with 404 for non-owners (enumeration defense).
         raise HTTPException(status_code=404, detail="api key not found")
 
-    # API Key 自身で自分を revoke することは許可 (self-destruct)
+    key_hash = str(item["key_hash"])
     try:
         repo.revoke(key_hash, actor_user_id=user.user_id)
     except ApiKeyNotFoundError:
@@ -216,8 +225,41 @@ def revoke_my_api_key(
         event="api_key_revoked",
         actor_id=user.user_id,
         actor_email=user.email,
-        target_id=item.get("key_id") or key_hash,
+        target_id=item.get("key_id") or "(unknown)",
         target_type="api_key",
         details={"owner_user_id": item.get("user_id")},
+    )
+    return Response(status_code=204)
+
+
+@router.delete("/{key_hash}", deprecated=True)
+def revoke_my_api_key_by_hash(
+    key_hash: str,
+    user: AuthenticatedUser = Depends(require_permission("apikeys:revoke-self")),
+) -> Response:
+    """Legacy revoke path kept for backward compatibility.
+
+    Deprecated (P1-8): prefer `DELETE /api/mvp/me/api-keys/by-key-id/{key_id}`.
+    Putting the SHA-256 hash in the URL leaves it in access logs. This
+    route will be removed once CLI and UI migrate to the `by-key-id`
+    endpoint.
+    """
+    repo = ApiKeysRepository()
+    item = repo.get_by_hash(key_hash)
+    if not item or str(item.get("user_id")) != user.user_id:
+        raise HTTPException(status_code=404, detail="api key not found")
+
+    try:
+        repo.revoke(key_hash, actor_user_id=user.user_id)
+    except ApiKeyNotFoundError:
+        raise HTTPException(status_code=404, detail="api key not found")
+
+    log_audit_event(
+        event="api_key_revoked",
+        actor_id=user.user_id,
+        actor_email=user.email,
+        target_id=item.get("key_id") or "(unknown)",
+        target_type="api_key",
+        details={"owner_user_id": item.get("user_id"), "via": "legacy-hash-path"},
     )
     return Response(status_code=204)

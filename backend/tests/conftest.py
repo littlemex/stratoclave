@@ -26,6 +26,12 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("AWS_REGION", "us-east-1")
 # Disable the lifespan seed so tests control state explicitly.
 os.environ.setdefault("STRATOCLAVE_DISABLE_SEED", "true")
+# Main.py treats env=production as strict (raises on missing required
+# Cognito vars at import time). Override to development here so tests
+# can import main without supplying a full prod env every time.
+os.environ.setdefault("ENVIRONMENT", "development")
+# Supply CORS_ORIGINS so _validate_cors_origins at import time passes.
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
 # Table name prefix must match what repository code reads from env.
 os.environ.setdefault("STRATOCLAVE_PREFIX", "stratoclave")
 
