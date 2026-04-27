@@ -3,18 +3,18 @@ name: test
 # Runs unit and integration tests for Backend (pytest), CLI (cargo test),
 # and Frontend (vitest) on every pull request and push to main.
 #
-# Coverage (as of tests/full-coverage):
-#   - Backend (65 tests + 1 xfail): credit reservation atomicity,
-#     model allowlist, well-known discovery contract, JWT verification,
-#     RBAC helpers, API key scope narrowing, tenant isolation, SSO gate,
-#     bootstrap seed.
-#   - CLI (42 tests): config.toml schema regression, mvp token
-#     persistence (0600 permissions), setup URL validation.
-#   - Frontend (23 tests): RBAC helpers, token storage, ProtectedRoute
-#     integration.
+# Coverage:
+#   - Backend (67 tests): credit reservation atomicity, model allowlist,
+#     well-known discovery contract, JWT verification, RBAC helpers,
+#     API key scope narrowing, tenant isolation, SSO gate, bootstrap
+#     seed (including the scan_admins reserved-keyword regression).
+#   - CLI (44 tests): config.toml schema regression, mvp token
+#     persistence (0600 permissions), setup URL validation, wiremock-
+#     driven `setup` integration against a stubbed backend.
+#   - Frontend (31 tests): RBAC helpers, token storage, ProtectedRoute
+#     integration, AuthContext bootstrap (3 paths), MeUsage rendering.
 #
-# Follow-up PRs add MSW-backed UI tests, wiremock-based CLI contract
-# tests, and Playwright E2E.
+# Playwright smoke runs separately in .github/workflows/e2e-nightly.yml.
 
 on:
   push:
@@ -63,8 +63,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
-      - name: Run cargo test
-        run: cargo test --bin stratoclave -- --test-threads=1
+      - name: Run cargo test (unit + integration)
+        run: cargo test -- --test-threads=1
 
   frontend:
     name: frontend / vitest

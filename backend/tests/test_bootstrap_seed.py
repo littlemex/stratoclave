@@ -86,35 +86,27 @@ def test_seed_default_tenant_is_idempotent(seed_env):
 def test_bootstrap_admin_noop_when_env_is_unset(seed_env, monkeypatch):
     monkeypatch.delenv("STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL", raising=False)
     from bootstrap.seed import seed_bootstrap_admin
+    from dynamo import UsersRepository
 
     result = seed_bootstrap_admin()
     assert result["skipped"] is True
-    # Deliberately do not call scan_admins() here — a known issue in the
-    # production code uses `roles` as a ProjectionExpression identifier,
-    # which is a DynamoDB reserved keyword. Captured by a separate xfail
-    # test so the reader sees the bug without blocking this suite.
+    assert UsersRepository().scan_admins() == []
 
 
-@pytest.mark.xfail(
-    reason=(
-        "UsersRepository.scan_admins() uses the DynamoDB reserved word 'roles' "
-        "as a raw ProjectionExpression, producing ValidationException. "
-        "Tracked separately; flipping this to an expected-pass will confirm the fix."
-    ),
-    strict=True,
-)
-def test_scan_admins_does_not_use_reserved_keyword(seed_env):
+def test_scan_admins_uses_reserved_keyword_alias(seed_env):
+    """Regression guard: `roles` is a DynamoDB reserved word and must be
+    referenced through an ExpressionAttributeNames alias, not raw.
+    """
     from dynamo import UsersRepository
 
-    # Just calling it must not raise ValidationException.
-    UsersRepository().scan_admins()
+    # The mere call must not raise ValidationException. On an empty table
+    # it returns [], which is fine.
+    assert UsersRepository().scan_admins() == []
 
 
-def test_bootstrap_admin_creates_cognito_user(seed_env, monkeypatch):
-    """When enabled, bootstrap must create the Cognito user and the
-    Users row. scan_admins() has a reserved-keyword bug (see xfail
-    above); we route around it with a stub so the rest of the seed
-    path is still exercised end-to-end.
+def test_bootstrap_admin_creates_cognito_and_users_row(seed_env, monkeypatch):
+    """When enabled, bootstrap must create both the Cognito user and
+    the DynamoDB Users row with the admin role.
     """
     monkeypatch.setenv("STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL", "first-admin@example.com")
     from bootstrap.seed import seed_bootstrap_admin, seed_default_tenant
@@ -122,12 +114,11 @@ def test_bootstrap_admin_creates_cognito_user(seed_env, monkeypatch):
 
     seed_default_tenant()
 
-    # Stub scan_admins to a clean empty list so the seed proceeds.
-    monkeypatch.setattr(UsersRepository, "scan_admins", lambda self, limit=10: [])
-
     result = seed_bootstrap_admin()
     assert result.get("created") is True
+    assert result["email"] == "first-admin@example.com"
 
+    # Cognito side.
     cognito = seed_env["cognito"]
     users = cognito.list_users(UserPoolId=seed_env["pool_id"])["Users"]
     emails = {
@@ -137,3 +128,20 @@ def test_bootstrap_admin_creates_cognito_user(seed_env, monkeypatch):
         if attr["Name"] == "email"
     }
     assert "first-admin@example.com" in emails
+
+    # DynamoDB Users side.
+    admins = UsersRepository().scan_admins()
+    assert any(a.get("email") == "first-admin@example.com" for a in admins)
+
+
+def test_bootstrap_admin_is_idempotent_when_admin_exists(seed_env, monkeypatch):
+    """A second invocation detects the existing admin and skips."""
+    monkeypatch.setenv("STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL", "first-admin@example.com")
+    from bootstrap.seed import seed_bootstrap_admin, seed_default_tenant
+
+    seed_default_tenant()
+    first = seed_bootstrap_admin()
+    assert first.get("created") is True
+
+    second = seed_bootstrap_admin()
+    assert second.get("skipped") is True

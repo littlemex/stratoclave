@@ -126,15 +126,17 @@ class UsersRepository:
 
         注意: DynamoDB scan は eventually consistent。lifespan 中に別プロセスが
         admin を追加していたらミスする可能性があるが、本用途では許容。
+
+        実装メモ: `roles` は DynamoDB の予約語なので ProjectionExpression で
+        直接名指しできない。ExpressionAttributeNames でエイリアス化する。
         """
-        # FilterExpression で roles に "admin" が含まれるものを絞る
         from boto3.dynamodb.conditions import Attr
 
         resp = self._table.scan(
             FilterExpression=Attr("sk").eq(self.SK_PROFILE)
             & Attr("roles").contains("admin"),
             Limit=max(limit, 1),
-            # ProjectionExpression で列を絞ってコスト削減
-            ProjectionExpression="user_id, email, roles",
+            ProjectionExpression="user_id, email, #r",
+            ExpressionAttributeNames={"#r": "roles"},
         )
         return resp.get("Items", [])
