@@ -1,0 +1,59 @@
+name: e2e-nightly
+
+# Playwright smoke that runs on a schedule and on manual dispatch.
+#
+# Kept separate from the normal `test` workflow because:
+#   - It needs Chromium downloads (~120MB) and can take minutes, which
+#     is too heavy for every PR.
+#   - It depends on stable UI text and screenshots that sometimes drift
+#     with design changes, so flake risk is higher.
+#
+# The initial version only runs the `smoke.spec.ts` baseline to confirm
+# that the Vite dev server boots and the login screen renders. Future
+# iterations will add admin flows, MSW-backed backend stubs, and visual
+# regression against docs/screenshots/images/.
+
+on:
+  schedule:
+    - cron: "23 17 * * *"  # 17:23 UTC nightly
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "frontend/e2e/**"
+      - ".github/workflows/e2e-nightly.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: playwright / smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Seed runtime config.json for the dev server
+        # The Vite dev server fetches `/config.json` at bootstrap. The real
+        # file is generated from SSM in production deploys; for the smoke
+        # we use the committed dev example so the app can render the
+        # sign-in page without touching a real Cognito backend.
+        run: cp public/config.json.dev.example public/config.json
+      - name: Install Playwright browsers (chromium only)
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright smoke
+        run: npx playwright test --project=chromium

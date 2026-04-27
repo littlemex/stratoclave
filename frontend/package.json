@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -51,6 +52,7 @@
     "vitest": "^1.6.0",
     "@testing-library/react": "^15.0.7",
     "@testing-library/jest-dom": "^6.4.8",
-    "jsdom": "^24.1.1"
+    "jsdom": "^24.1.1",
+    "@playwright/test": "^1.47.0"
   }
 }

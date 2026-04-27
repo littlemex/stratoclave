@@ -62,3 +62,90 @@ fn set_secure_permissions(path: &std::path::Path) -> Result<()> {
 fn set_secure_permissions(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the MVP token persistence layer. These mutate $HOME and
+    //! therefore run sequentially under a shared mutex.
+    use super::*;
+    use std::env;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        _tmp: tempfile::TempDir,
+        orig_home: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.orig_home.take() {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn with_temp_home() -> (HomeGuard, std::sync::MutexGuard<'static, ()>) {
+        let lock = HOME_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let guard = HomeGuard {
+            orig_home: env::var_os("HOME"),
+            _tmp: tmp,
+        };
+        env::set_var("HOME", guard._tmp.path());
+        (guard, lock)
+    }
+
+    fn sample() -> MvpTokens {
+        MvpTokens {
+            access_token: "eyJaccess".into(),
+            id_token: Some("eyJid".into()),
+            refresh_token: Some("eyJrefresh".into()),
+            expires_at: 1_700_000_000,
+            email: "u@example.com".into(),
+        }
+    }
+
+    #[test]
+    fn save_then_load_roundtrip() {
+        let (_h, _lock) = with_temp_home();
+        save(&sample()).unwrap();
+        let got = load().unwrap();
+        assert_eq!(got.access_token, "eyJaccess");
+        assert_eq!(got.email, "u@example.com");
+        assert_eq!(got.refresh_token.as_deref(), Some("eyJrefresh"));
+    }
+
+    #[test]
+    fn clear_removes_the_token_file() {
+        let (_h, _lock) = with_temp_home();
+        save(&sample()).unwrap();
+        clear().unwrap();
+        let err = match load() {
+            Ok(_) => panic!("expected load to fail after clear"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("Cannot read"));
+    }
+
+    #[test]
+    fn clear_when_absent_is_idempotent() {
+        let (_h, _lock) = with_temp_home();
+        // No prior save: clear should be a no-op.
+        clear().unwrap();
+        clear().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_applies_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_h, _lock) = with_temp_home();
+        save(&sample()).unwrap();
+        let path = token_path().unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file must be mode 0600");
+    }
+}
