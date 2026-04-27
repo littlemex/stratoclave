@@ -235,6 +235,38 @@ def test_scope_intersection_cannot_exceed_owner_roles(dynamodb_mock):
     assert user_has_permission(owner, "users:create") is False
 
 
+def test_find_by_user_and_key_id_returns_only_owner_rows(api_keys_table):
+    """P1-8 regression: the masked key_id resolver must only return rows
+    owned by the caller, so a leaked key_id from another user cannot be
+    used to revoke or otherwise touch that key.
+    """
+    repo = ApiKeysRepository()
+    item_alice, _ = repo.create(
+        user_id="alice",
+        name="alice-key",
+        scopes=["messages:send"],
+        expires_at=None,
+        created_by="alice",
+    )
+    item_bob, _ = repo.create(
+        user_id="bob",
+        name="bob-key",
+        scopes=["messages:send"],
+        expires_at=None,
+        created_by="bob",
+    )
+
+    # Alice's own lookup returns her row.
+    assert (
+        repo.find_by_user_and_key_id("alice", item_alice["key_id"])["name"]
+        == "alice-key"
+    )
+    # Alice cannot resolve Bob's key_id, even though the string is valid.
+    assert repo.find_by_user_and_key_id("alice", item_bob["key_id"]) is None
+    # Bogus key_id returns None.
+    assert repo.find_by_user_and_key_id("alice", "sk-stratoclave-FAKE") is None
+
+
 def test_scope_intersection_cannot_exceed_key_scopes(dynamodb_mock):
     """Even if the owner is admin, a narrow key must remain narrow."""
     _seed_permissions_table(dynamodb_mock)

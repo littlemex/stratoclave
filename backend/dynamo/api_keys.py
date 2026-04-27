@@ -114,6 +114,26 @@ class ApiKeysRepository:
             return items
         return [it for it in items if not it.get("revoked_at")]
 
+    def find_by_user_and_key_id(
+        self, user_id: str, key_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Resolve an owner's key by its masked `key_id` (the value shown
+        in `api-key list` output).
+
+        This indirection exists so that revoke endpoints do not need to
+        put the SHA-256 `key_hash` in the URL path — the hash is the
+        primary lookup key and putting it in ALB / CloudFront access
+        logs creates a long-lived enumeration material even after the
+        key is rotated.
+
+        Returns None if no key matches — callers must always check ownership
+        via this function before doing anything that reveals the row.
+        """
+        for item in self.list_by_user(user_id, include_revoked=True):
+            if str(item.get("key_id")) == key_id:
+                return item
+        return None
+
     def count_active(self, user_id: str) -> int:
         now = _now_iso()
         active = 0

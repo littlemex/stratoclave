@@ -155,10 +155,52 @@ app.add_middleware(CorrelationIDMiddleware)
 # CORS (Starlette は LIFO なので CORS を最後に add = 最初に実行)
 from core.constants import DEFAULT_CORS_ORIGINS
 
-cors_origins = os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+
+def _validate_cors_origins(raw: str) -> list[str]:
+    """Parse and validate CORS_ORIGINS at startup.
+
+    Rules (defense against config mistakes + P1-9):
+      - Must contain at least one origin.
+      - Wildcard `*` is forbidden: it is incompatible with
+        `allow_credentials=True` per Fetch spec, and a wildcard here
+        would let any site read authenticated responses.
+      - Each origin must start with `http://` or `https://` so it parses
+        as a real origin rather than a path.
+      - Production additionally rejects `http://` (plaintext) unless the
+        host is clearly local (localhost / 127.0.0.1), catching common
+        copy-paste mistakes from dev configs.
+    """
+    parts = [o.strip() for o in raw.split(",") if o.strip()]
+    if not parts:
+        raise EnvironmentError(
+            "CORS_ORIGINS must contain at least one origin. "
+            "Example: https://example.cloudfront.net"
+        )
+    for origin in parts:
+        if origin == "*":
+            raise EnvironmentError(
+                "CORS_ORIGINS must not contain the wildcard '*'. "
+                "Wildcards are incompatible with allow_credentials=True."
+            )
+        if not (origin.startswith("https://") or origin.startswith("http://")):
+            raise EnvironmentError(
+                f"CORS_ORIGINS entry must start with http:// or https://: {origin!r}"
+            )
+        if environment == "production" and origin.startswith("http://"):
+            host = origin.removeprefix("http://").split("/")[0].split(":")[0]
+            if host not in ("localhost", "127.0.0.1"):
+                raise EnvironmentError(
+                    f"CORS_ORIGINS in production must use https:// (got {origin!r})"
+                )
+    return parts
+
+
+cors_origins = _validate_cors_origins(
+    os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in cors_origins if o.strip()],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[
@@ -172,6 +214,9 @@ app.add_middleware(
         "x-api-key",
     ],
 )
+
+# Re-export for unit tests.
+__all__ = ["app", "_validate_cors_origins"]
 
 # ---------------------------------------------------------------------------
 # ルーター登録
