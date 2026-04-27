@@ -226,7 +226,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     void bootstrap()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /* ------------------------------------------------------------------ */

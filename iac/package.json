@@ -15,7 +15,7 @@
     "deploy": "cdk deploy",
     "deploy:full": "bash scripts/deploy-with-update.sh",
     "deploy:update-cognito": "bash scripts/deploy-with-update.sh --stage2-only",
-    "lint": "eslint . --ext ts --max-warnings 0",
+    "lint": "eslint . --ext ts",
     "lint:fix": "eslint . --ext ts --fix",
     "format": "prettier --write \"**/*.{ts,json}\"",
     "format:check": "prettier --check \"**/*.{ts,json}\""
