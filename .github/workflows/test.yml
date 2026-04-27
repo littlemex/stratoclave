@@ -3,15 +3,18 @@ name: test
 # Runs unit and integration tests for Backend (pytest), CLI (cargo test),
 # and Frontend (vitest) on every pull request and push to main.
 #
-# The initial scope mirrors PR #... coverage:
-#   - Backend: credit reservation atomicity, model allowlist,
-#     well-known discovery contract.
-#   - CLI:     config.toml schema (nested + flat) regression.
-#   - Frontend: RBAC helper unit tests mirroring permissions.json.
+# Coverage (as of tests/full-coverage):
+#   - Backend (65 tests + 1 xfail): credit reservation atomicity,
+#     model allowlist, well-known discovery contract, JWT verification,
+#     RBAC helpers, API key scope narrowing, tenant isolation, SSO gate,
+#     bootstrap seed.
+#   - CLI (42 tests): config.toml schema regression, mvp token
+#     persistence (0600 permissions), setup URL validation.
+#   - Frontend (23 tests): RBAC helpers, token storage, ProtectedRoute
+#     integration.
 #
-# Follow-up PRs will expand coverage into JWT/RBAC/API-key flows,
-# wiremock-based CLI contract tests, and MSW-backed UI tests per the
-# Team A/B design documents.
+# Follow-up PRs add MSW-backed UI tests, wiremock-based CLI contract
+# tests, and Playwright E2E.
 
 on:
   push:

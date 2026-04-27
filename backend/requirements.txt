@@ -19,6 +19,8 @@ httpx==0.28.1
 ruff==0.8.4
 # AWS SDK mock for tests (dev-only)
 moto[dynamodb,cognitoidp,sts]==5.1.12
+# Required by moto[cognitoidp] to sign its fake JWTs
+joserfc==1.0.1
 
 # Utilities
 pydantic[email]==2.10.3

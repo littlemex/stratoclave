@@ -37,6 +37,8 @@ _TABLE_ENVS = {
     "DYNAMODB_TENANTS_TABLE": "stratoclave-tenants",
     "DYNAMODB_PERMISSIONS_TABLE": "stratoclave-permissions",
     "DYNAMODB_API_KEYS_TABLE": "stratoclave-api-keys",
+    "DYNAMODB_TRUSTED_ACCOUNTS_TABLE": "stratoclave-trusted-accounts",
+    "DYNAMODB_SSO_PRE_REGISTRATIONS_TABLE": "stratoclave-sso-pre-registrations",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
