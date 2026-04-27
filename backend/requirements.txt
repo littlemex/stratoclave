@@ -17,6 +17,8 @@ httpx==0.28.1
 
 # Linting / formatting (dev-only)
 ruff==0.8.4
+# AWS SDK mock for tests (dev-only)
+moto[dynamodb,cognitoidp,sts]==5.1.12
 
 # Utilities
 pydantic[email]==2.10.3

@@ -95,3 +95,52 @@ If you are unsure whether a specific activity is in scope, contact us first.
 Once we begin receiving reports, we plan to maintain a public list of
 researchers who have helped us improve Stratoclave's security. Let us know
 if you'd like to be included.
+
+## Preventing accidental secret disclosure
+
+Contributors must avoid committing deployment-specific identifiers
+(CloudFront distribution IDs, Cognito User Pool IDs, ALB DNS names, AWS
+account IDs, live JWTs, access keys) to documentation, blog drafts, or
+source files.
+
+### Automated check
+
+A shape-based scan runs on every push and pull request via
+[`.github/workflows/secrets-scan.yml`](./.github/workflows/secrets-scan.yml).
+It invokes [`scripts/check-no-hardcoded-secrets.sh`](./scripts/check-no-hardcoded-secrets.sh),
+which greps for the following *patterns* (not fixed values) across tracked
+and untracked files:
+
+- CloudFront distribution: `[a-z0-9]{13,14}\.cloudfront\.net`
+- Cognito User Pool ID: `<region>_[A-Za-z0-9]{9}`
+- ALB DNS: `<name>-<9-10 digits>.<region>.elb.amazonaws.com`
+- ECR URI: `<12-digit account>.dkr.ecr.<region>.amazonaws.com`
+- AWS access key: `(AKIA|ASIA)[A-Z0-9]{16}`
+- JWT: three-segment base64url tokens (minimum length gated)
+- AWS secret access key in a key-like context
+
+Legitimate test fixtures and documentation placeholders are allowlisted
+(`<your-...>`, `example.com`, `test-alb-`, `d111111abcdef8`, etc.).
+
+### Running the scan locally
+
+```bash
+./scripts/check-no-hardcoded-secrets.sh
+```
+
+### Installing the pre-commit hook (recommended)
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+This installs `.git/hooks/pre-commit` that runs the scan before every
+commit. Bypass with `git commit --no-verify` only when necessary.
+
+### When a match is a false positive
+
+Extend `ALLOWLIST_REGEX` in
+[`scripts/check-no-hardcoded-secrets.sh`](./scripts/check-no-hardcoded-secrets.sh)
+rather than hard-coding the value. Prefer anchor strings like `test-`,
+`fake-`, `dummy-`, or angle-bracket placeholders that are obviously
+non-production.
