@@ -1,13 +1,18 @@
+<!-- Last updated: 2026-04-27 -->
+<!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
+
 # CLI Reference
 
-`stratoclave` is the single CLI for all user- and administrator-facing operations. This document is the authoritative reference for every subcommand, flag, and environment variable.
+> A Japanese translation is available at [ja/CLI_GUIDE.md](./ja/CLI_GUIDE.md).
 
-For task-oriented walkthroughs read [GETTING_STARTED.md](GETTING_STARTED.md) and [ADMIN_GUIDE.md](ADMIN_GUIDE.md) first.
+`stratoclave` is the single CLI for every user- and administrator-facing operation: signing in, issuing API keys, running Claude through the gateway, managing users and tenants, and inspecting usage. This document is the authoritative reference for every subcommand, flag, and environment variable.
+
+For task-oriented walkthroughs, read [GETTING_STARTED.md](GETTING_STARTED.md) and [ADMIN_GUIDE.md](ADMIN_GUIDE.md) first, then come back here when you need the precise shape of an option.
 
 ## Contents
 
 - [Installation](#installation)
-- [Global overview](#global-overview)
+- [Command tree](#command-tree)
 - [Configuration file](#configuration-file)
 - [Environment variables](#environment-variables)
 - [`setup`](#setup)
@@ -19,80 +24,92 @@ For task-oriented walkthroughs read [GETTING_STARTED.md](GETTING_STARTED.md) and
 - [`admin`](#admin)
 - [`team-lead`](#team-lead)
 - [Exit codes](#exit-codes)
+- [Known limitations](#known-limitations)
 - [Typical workflows](#typical-workflows)
 
 ---
 
 ## Installation
 
-Build from source:
+Stratoclave does not currently publish pre-built CLI binaries. Build from source:
 
 ```bash
-git clone https://github.com/<your-org>/stratoclave.git
+git clone https://github.com/littlemex/stratoclave.git
 cd stratoclave/cli
 cargo build --release
+```
 
-export STRATOCLAVE_BIN="$PWD/target/release/stratoclave"
-alias stratoclave="$STRATOCLAVE_BIN"
+The binary lands at `target/release/stratoclave`. Put it on your `PATH`:
+
+```bash
+# Option A: symlink into a directory already on PATH
+sudo ln -sf "$PWD/target/release/stratoclave" /usr/local/bin/stratoclave
+
+# Option B: shell alias
+echo "alias stratoclave='$PWD/target/release/stratoclave'" >> ~/.zshrc   # or ~/.bashrc
+source ~/.zshrc
 
 stratoclave --help
 ```
 
-Pre-built binaries are planned; check the project releases page.
+> **Roadmap.** A release pipeline that publishes signed binaries for macOS (arm64/x86_64) and Linux (x86_64) to the GitHub Releases page of `https://github.com/littlemex/stratoclave` is tracked for a future version. Until then, building from source is the supported path.
 
 ---
 
-## Global overview
+## Command tree
 
 ```
 stratoclave <command> [args...]
 
 Commands:
-  setup <api_endpoint>      Bootstrap ~/.stratoclave/config.toml from a deployment URL
-  auth                      Sign in, sign out, inspect the current session
-    login                   Cognito email + password (handles first-login challenge)
-    sso                     Sign in via AWS SSO / STS
-    whoami                  Show the current user and credit summary
-    logout                  Clear local tokens
-  claude [-- args...]       Launch claude (Claude Code) through the Stratoclave proxy
-  ui open|url               Open the web console in a browser (or print the URL)
-  usage show                Your own usage summary and recent history
-  api-key                   Long-lived API keys for scripts, daemons, cowork
-    create                  Issue a key (plaintext shown once)
-    list                    List your keys
-    revoke <key_hash>       Revoke one of your keys
-    admin-list              Admin only: list every key in the system
-    admin-revoke <hash>     Admin only: revoke any key
-  admin                     Admin-role operations (users, tenants, usage logs)
-    user create|list|show|delete|assign-tenant|set-credit
-    tenant create|list|show|delete|set-owner|members|usage
-    usage show
-  team-lead                 Team lead operations on tenants you own
-    tenant create|list|show|members|usage
+  setup <api_endpoint>        Bootstrap ~/.stratoclave/config.toml from a deployment URL.
+  auth
+    login                     Cognito email + password (handles first-login challenge).
+    sso                       Exchange an AWS SSO / STS session for a Stratoclave token.
+    whoami                    Show the current session and credit summary.
+    logout                    Clear local tokens.
+  claude [-- args...]         Launch claude (Claude Code) through the Stratoclave proxy.
+  ui open | url               Open the web console (or print the URL).
+  usage
+    show                      Your own usage summary and recent history.
+  api-key
+    create                    Issue a long-lived key (plaintext shown once).
+    list                      List your own keys.
+    revoke <key_hash>         Revoke one of your keys by SHA-256 hash.
+    admin-list                Admin only: list every key in the system.
+    admin-revoke <key_hash>   Admin only: revoke any key by SHA-256 hash.
+  admin
+    user     create | list | show | delete | assign-tenant | set-credit
+    tenant   create | list | show | delete | set-owner | members | usage
+    usage    show
+  team-lead
+    tenant   create | list | show | members | usage
 ```
 
 Run `stratoclave <command> --help` for flag-level help at any level.
 
-When the CLI is invoked with no arguments and stdin is piped in, it enters a non-interactive pipe mode intended for scripting. This mode is stable but undocumented here and should not be relied on for new integrations. Use the explicit subcommands above.
+When the CLI is invoked with no arguments and stdin is piped, it enters a non-interactive pipe mode used by legacy integrations. This mode is undocumented and should not be relied on for new work; use the explicit subcommands above.
+
+> **Important.** There are no plural forms of `admin user` or `admin tenant`. `stratoclave admin users list` and `stratoclave admin tenants list` do **not** exist. Always use the singular nouns (`admin user list`, `admin tenant list`).
 
 ---
 
 ## Configuration file
 
-The CLI reads configuration from, in order of priority:
+The CLI reads configuration from the following sources, in order of decreasing priority:
 
-1. Environment variables (always win, see the next section).
-2. `~/.stratoclave/config.toml` (the default location), or a path pointed to by `STRATOCLAVE_CONFIG_DIR`.
-3. Hard-coded defaults.
+1. Environment variables (see [Environment variables](#environment-variables)).
+2. `~/.stratoclave/config.toml` (or the path pointed to by `STRATOCLAVE_CONFIG_DIR`).
+3. Built-in defaults.
 
-The file is created automatically by `stratoclave setup <api_endpoint>`. The canonical shape is:
+`config.toml` is created by `stratoclave setup <api_endpoint>`. The canonical shape, matching the live schema:
 
 ```toml
 # Stratoclave CLI configuration
 # Generated by `stratoclave setup` on 2026-04-27T00:00:00Z
 
 [api]
-endpoint = "https://d111111abcdef8.cloudfront.net"
+endpoint = "https://d8b03j8erit4k.cloudfront.net"   # your deployment URL
 
 [auth]
 auth_method = "cognito"
@@ -115,27 +132,28 @@ sse_chunk = 20
 auth_callback = 300
 ```
 
-### Compatibility note: flat-key legacy format
+> **Note on `setup` output labels.** The summary printed by `stratoclave setup` renders the model as `cli.default_model` for historical reasons, while the file itself stores it under `[defaults] model`. The values are identical; only the display label differs.
 
-Several subcommands (`auth login`, `admin`, `team-lead`, `api-key`, `usage show`) currently read the API endpoint from a legacy flat-key layout or from the `STRATOCLAVE_API_ENDPOINT` environment variable, rather than from `[api] endpoint`. Until this is unified, the most reliable setup is to export `STRATOCLAVE_API_ENDPOINT` in your shell once:
+### `STRATOCLAVE_API_ENDPOINT` is effectively required
+
+Several subcommands (`auth login`, `admin ...`, `team-lead ...`, `api-key ...`, `usage show`) read the API endpoint from the `STRATOCLAVE_API_ENDPOINT` environment variable rather than from the `[api]` section of `config.toml`. Until this is unified, **export `STRATOCLAVE_API_ENDPOINT` in your shell rc file** so every subcommand behaves consistently:
 
 ```bash
-export STRATOCLAVE_API_ENDPOINT="https://d111111abcdef8.cloudfront.net"
+export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"   # your deployment URL
+echo 'export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"' >> ~/.zshrc
 ```
 
-You can alternatively add a top-level flat key in the same file:
+You may alternatively add a legacy flat-key block to the top of `config.toml`. Both forms coexist safely:
 
 ```toml
-# Legacy flat keys read by some subcommands (kept for compatibility).
-api_endpoint = "https://d111111abcdef8.cloudfront.net"
+# Flat keys read by the subcommands above. Kept for compatibility.
+api_endpoint = "https://d8b03j8erit4k.cloudfront.net"
 default_model = "us.anthropic.claude-opus-4-7"
 ```
 
-Both forms coexist safely. This shim will be removed once all subcommands migrate to the `[api]` section.
-
 ### Tokens
 
-Tokens issued by `auth login` or `auth sso` are stored at `~/.stratoclave/mvp_tokens.json` with file mode `0o600`. Deleting this file is equivalent to `stratoclave auth logout`.
+Tokens issued by `auth login` or `auth sso` are stored at `~/.stratoclave/mvp_tokens.json` with file mode `0600`. Deleting this file is equivalent to `stratoclave auth logout`.
 
 ---
 
@@ -143,24 +161,24 @@ Tokens issued by `auth login` or `auth sso` are stored at `~/.stratoclave/mvp_to
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `STRATOCLAVE_API_ENDPOINT` | Overrides the API endpoint for every subcommand. | From `config.toml` |
-| `STRATOCLAVE_DEFAULT_MODEL` | Overrides `defaults.model`. | `claude-opus-4-7` |
-| `STRATOCLAVE_CONFIG_DIR` | Alternative location for `config.toml` and `mvp_tokens.json`. | `$HOME/.stratoclave` |
-| `STRATOCLAVE_CLIENT_ID` | Override the Cognito App Client ID. | From `config.toml` |
-| `STRATOCLAVE_COGNITO_DOMAIN` | Override the Cognito hosted-UI domain. | From `config.toml` |
-| `STRATOCLAVE_ADMIN_UI_URL` | Override the URL used by `ui open`. | Falls back to `STRATOCLAVE_API_ENDPOINT` |
-| `STRATOCLAVE_CALLBACK_PORT` | Port used by the local OAuth callback server. | `18080` |
-| `STRATOCLAVE_REDIRECT_HOST` | Host used by the local OAuth callback server. | `127.0.0.1` |
-| `AWS_PROFILE` | Default profile for `auth sso` when `--profile` is omitted. | `default` |
-| `AWS_REGION` | Default STS region for `auth sso` when `--region` is omitted. | `us-east-1` |
-| `ANTHROPIC_BASE_URL` | Honoured by `stratoclave claude` via pass-through. | Stratoclave endpoint |
-| `ANTHROPIC_MODEL` | Honoured by `stratoclave claude`. | `STRATOCLAVE_DEFAULT_MODEL` |
+| `STRATOCLAVE_API_ENDPOINT` | Overrides the API endpoint. Required for most subcommands. | From `config.toml` (when present). |
+| `STRATOCLAVE_DEFAULT_MODEL` | Overrides `[defaults] model`. | `claude-opus-4-7`. |
+| `STRATOCLAVE_CONFIG_DIR` | Alternative location for `config.toml` and `mvp_tokens.json`. | `$HOME/.stratoclave`. |
+| `STRATOCLAVE_CLIENT_ID` | Overrides the Cognito App Client ID. | From `config.toml`. |
+| `STRATOCLAVE_COGNITO_DOMAIN` | Overrides the Cognito hosted-UI domain. | From `config.toml`. |
+| `STRATOCLAVE_ADMIN_UI_URL` | Overrides the URL used by `ui open`. | Falls back to `STRATOCLAVE_API_ENDPOINT`. |
+| `STRATOCLAVE_CALLBACK_PORT` | Port used by the local OAuth callback server. | `18080`. |
+| `STRATOCLAVE_REDIRECT_HOST` | Host used by the local OAuth callback server. | `127.0.0.1`. |
+| `AWS_PROFILE` | Default profile for `auth sso` when `--profile` is omitted. | `default`. |
+| `AWS_REGION` | Default STS region for `auth sso` when `--region` is omitted. | `us-east-1`. |
+| `ANTHROPIC_BASE_URL` | Propagated to `claude` by `stratoclave claude`. | Stratoclave endpoint. |
+| `ANTHROPIC_MODEL` | Propagated to `claude` by `stratoclave claude`. | `STRATOCLAVE_DEFAULT_MODEL`. |
 
 ---
 
 ## `setup`
 
-Bootstrap the CLI configuration from a deployment URL. This is the recommended first command after installing the binary.
+Bootstrap the CLI configuration from a deployment URL. Recommended as the first command after install.
 
 ```bash
 stratoclave setup <api_endpoint> [--dry-run] [--force]
@@ -168,32 +186,49 @@ stratoclave setup <api_endpoint> [--dry-run] [--force]
 
 ### Arguments
 
-| Arg | Description |
-|-----|-------------|
-| `<api_endpoint>` | The Stratoclave deployment root URL, e.g. `https://d111111abcdef8.cloudfront.net`. Must start with `http://` or `https://`. Do not include `/v1` at the end; the CLI will reject it. |
+| Argument | Description |
+|----------|-------------|
+| `<api_endpoint>` | Stratoclave deployment root URL, for example `https://d8b03j8erit4k.cloudfront.net`. Must start with `http://` or `https://`. Do not include `/v1`; the CLI will reject it. |
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--dry-run` | Print the rendered `config.toml` to stdout without writing it or touching the filesystem. |
+| `--dry-run` | Print the rendered `config.toml` to stdout without writing or touching the filesystem. |
 | `-f`, `--force` | Overwrite an existing `config.toml` without prompting. The previous file is preserved as `config.toml.bak.<epoch>`. |
 
 ### Behaviour
 
 1. Validates the URL (scheme, host, no `/v1` suffix).
-2. Fetches `<api_endpoint>/.well-known/stratoclave-config` (10-second timeout).
-3. Checks `schema_version == "1"`.
-4. If `~/.stratoclave/config.toml` exists, prompts for confirmation unless `--force`, backs up to `config.toml.bak.<epoch>`.
-5. Writes the new `config.toml` with `0o600`, creates `~/.stratoclave/` with `0o700` if missing.
-6. Prints a summary and suggested next steps.
+2. Fetches `<api_endpoint>/.well-known/stratoclave-config` with a 10 second timeout.
+3. Checks that `schema_version == "1"`.
+4. If `~/.stratoclave/config.toml` exists, prompts for confirmation unless `--force`, then backs up to `config.toml.bak.<epoch>`.
+5. Creates `~/.stratoclave/` with mode `0700` if missing, and writes `config.toml` with mode `0600`.
+6. Prints a summary plus suggested next steps.
 
 ### Example
 
 ```bash
-stratoclave setup https://d111111abcdef8.cloudfront.net --dry-run
+stratoclave setup https://d8b03j8erit4k.cloudfront.net --dry-run
 
-stratoclave setup https://d111111abcdef8.cloudfront.net
+stratoclave setup https://d8b03j8erit4k.cloudfront.net
+```
+
+Expected output (values depend on your deployment):
+
+```
+[INFO] Fetching config from https://d8b03j8erit4k.cloudfront.net/.well-known/stratoclave-config ...
+
+Saved to /home/you/.stratoclave/config.toml
+  api_endpoint      = https://d8b03j8erit4k.cloudfront.net
+  cognito.domain    = https://stratoclave.auth.us-east-1.amazoncognito.com
+  cognito.region    = us-east-1
+  cli.default_model = us.anthropic.claude-opus-4-7
+
+Next steps:
+  stratoclave auth login --email you@example.com
+  # or
+  stratoclave auth sso --profile your-sso-profile
 ```
 
 ### Common errors
@@ -201,8 +236,8 @@ stratoclave setup https://d111111abcdef8.cloudfront.net
 | Error | Meaning |
 |-------|---------|
 | `api_endpoint must start with http:// or https://` | The URL is missing a scheme. |
-| `The URL should be the base endpoint, not include /v1` | Strip the `/v1` suffix. The backend routes it automatically. |
-| `This Stratoclave deployment does not support /.well-known/stratoclave-config (HTTP 404)` | The backend is older than the setup command. Ask the admin to upgrade. |
+| `The URL should be the base endpoint, not include /v1` | Strip the `/v1` suffix; the backend routes it automatically. |
+| `This Stratoclave deployment does not support /.well-known/stratoclave-config (HTTP 404)` | The backend predates the discovery endpoint. Ask the operator to upgrade. |
 | `Could not reach <url>` | DNS, network, or VPN problem. Verify the URL with your administrator. |
 | `~/.stratoclave/config.toml already exists and stdin is not a TTY` | Re-run with `--force` when scripting. |
 
@@ -210,11 +245,11 @@ stratoclave setup https://d111111abcdef8.cloudfront.net
 
 ## `auth`
 
-Authentication subcommands. All of them write or consume `~/.stratoclave/mvp_tokens.json`.
+Authentication subcommands. All of them read from, or write to, `~/.stratoclave/mvp_tokens.json`.
 
 ### `auth login`
 
-Sign in with Cognito email and password. Handles the `NEW_PASSWORD_REQUIRED` challenge for first-time users.
+Sign in with a Cognito email and password. Handles the `NEW_PASSWORD_REQUIRED` challenge in the same session for first-time logins.
 
 ```bash
 stratoclave auth login [--email EMAIL] [--password PASSWORD] [--save-password]
@@ -223,14 +258,14 @@ stratoclave auth login [--email EMAIL] [--password PASSWORD] [--save-password]
 | Flag | Description |
 |------|-------------|
 | `--email` | Email address. Prompted interactively when omitted. |
-| `--password` | Password. Read from a silent prompt when omitted. |
-| `--save-password` | macOS only: store the password in the OS Keychain for future logins. Opt-in. |
+| `--password` | Password. Read from a silent prompt when omitted. The password is typed into the terminal; the browser is **not** opened. |
+| `--save-password` | macOS only. Store the password in the OS Keychain (service name `stratoclave`). Opt-in. |
 
-On first login you are prompted to pick a new password in the same session. Successful output ends with `[OK] Logged in as <email>`.
+Successful output ends with `[OK] Logged in as <email>. Token saved to ~/.stratoclave/mvp_tokens.json`.
 
 ### `auth sso`
 
-Exchange an AWS SSO / STS session for a Stratoclave token, no Cognito password required. The CLI signs a `sts:GetCallerIdentity` call and the backend validates the identity.
+Exchange an AWS SSO / STS session for a Stratoclave token. No Cognito password required. The CLI signs a `sts:GetCallerIdentity` request using the local AWS credentials chain, and the backend validates the identity.
 
 ```bash
 stratoclave auth sso [--profile PROFILE] [--region REGION]
@@ -241,31 +276,33 @@ stratoclave auth sso [--profile PROFILE] [--region REGION]
 | `--profile` | AWS profile name. Defaults to `AWS_PROFILE` or `default`. |
 | `--region` | STS region. Defaults to `AWS_REGION` or `us-east-1`. |
 
-Requirements on the backend side:
+Prerequisites on the backend side:
 
 - Your AWS account ID is registered as a trusted identity source.
-- Your IAM role ARN matches the deployment's allowed-role patterns.
+- Your IAM role ARN matches the deployment's allowed role patterns.
 - You are not signing from an EC2 instance profile (denied by default).
 
-Common errors are listed in [GETTING_STARTED.md section 3](GETTING_STARTED.md#option-b-aws-sso-passwordless).
+Common SSO rejections are listed in [GETTING_STARTED.md](GETTING_STARTED.md#sign-in).
 
 ### `auth whoami`
 
-Print the current session plus credit summary.
+Print the current session plus credit summary. The output is seven lines:
 
-```bash
-stratoclave auth whoami
-# email:   you@example.com
-# user_id: a4f824f8-b041-703d-3ec8-f15588b9c969
-# org_id:  default-org
-# roles:   ["user"]
+```
+email: you@example.com
+user_id: a4f824f8-b041-703d-3ec8-f15588b9c969
+org_id: default-org
+roles: user
+total_credit: 1000000
+credit_used: 42318
+remaining_credit: 957682
 ```
 
-Exits non-zero if you are not logged in.
+`roles` is rendered as a comma-separated list (no brackets), so a team lead who is also an admin appears as `roles: admin,team_lead`. Exits non-zero if you are not logged in or if the token has expired.
 
 ### `auth logout`
 
-Delete `~/.stratoclave/mvp_tokens.json`. The Cognito session is not revoked server-side. Ask an administrator to run `AdminUserGlobalSignOut` if you need forced invalidation.
+Delete `~/.stratoclave/mvp_tokens.json`. The Cognito session is not revoked server-side; ask an administrator to run `AdminUserGlobalSignOut` if you need forced invalidation.
 
 ```bash
 stratoclave auth logout
@@ -276,10 +313,10 @@ stratoclave auth logout
 
 ## `claude`
 
-Launch the `claude` binary as a subprocess with Stratoclave wiring pre-configured.
+Launch the `claude` binary (from [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)) as a subprocess, with Stratoclave wiring pre-configured.
 
 ```bash
-stratoclave claude [--model MODEL_ID] [-- claude-args...]
+stratoclave claude [--model MODEL_ID] -- [claude-args...]
 ```
 
 | Flag | Description |
@@ -291,11 +328,11 @@ The subprocess sees:
 
 | Environment variable | Value |
 |----------------------|-------|
-| `ANTHROPIC_BASE_URL` | The configured Stratoclave endpoint |
-| `ANTHROPIC_API_KEY` | The Cognito access token from `mvp_tokens.json` |
-| `ANTHROPIC_MODEL` | `--model` override, else `defaults.model`, else `claude-opus-4-7` |
+| `ANTHROPIC_BASE_URL` | The configured Stratoclave endpoint. |
+| `ANTHROPIC_API_KEY` | The Cognito access token from `mvp_tokens.json`. |
+| `ANTHROPIC_MODEL` | `--model` override, else `[defaults] model`, else `claude-opus-4-7`. |
 
-The CLI unsets `CLAUDE_CODE_USE_BEDROCK` and `AWS_REGION` so Claude Code cannot accidentally bypass the proxy.
+Stratoclave also unsets `CLAUDE_CODE_USE_BEDROCK` and `AWS_REGION` so Claude Code cannot accidentally bypass the proxy.
 
 ### Examples
 
@@ -326,13 +363,13 @@ The effective list depends on which Bedrock inference profiles the deployment ha
 
 ### `ui open`
 
-Open the Stratoclave web console in the default browser. The CLI appends `?token=<access_token>` so the console lands already authenticated.
+Open the Stratoclave web console in the default browser. The CLI appends `?token=<access_token>` to the URL so the console lands already authenticated.
 
 ```bash
 stratoclave ui open
 ```
 
-Fails with a clear message if you have not logged in or if your token is expired.
+Fails with a clear message if you have not logged in or if your token has expired.
 
 ### `ui url`
 
@@ -340,10 +377,10 @@ Print the URL (with token) to stdout. Useful over SSH or inside sandboxes where 
 
 ```bash
 stratoclave ui url
-# https://d111111abcdef8.cloudfront.net?token=eyJ...
+# https://d8b03j8erit4k.cloudfront.net?token=eyJ...
 ```
 
-Treat the output as a secret. Do not commit it to git or paste it in tickets.
+Treat the output as a secret. Do not commit it to git or paste it into tickets.
 
 ---
 
@@ -351,7 +388,7 @@ Treat the output as a secret. Do not commit it to git or paste it in tickets.
 
 ### `usage show`
 
-Show your own usage summary and recent request history.
+Show your own usage summary plus recent request history. Uses the `usage:read-self` permission, which every default role holds.
 
 ```bash
 stratoclave usage show [--since-days N] [--limit M]
@@ -384,11 +421,11 @@ recorded_at                  tenant_name                         model_id       
 
 ## `api-key`
 
-Long-lived API keys (`sk-stratoclave-...`) let you authenticate non-interactive clients such as Claude Desktop cowork, CI scripts, or custom SDK integrations. Each user may hold up to a deployment-defined maximum (default: 5 active keys).
+Long-lived API keys (`sk-stratoclave-...`) let you authenticate non-interactive clients such as Claude Desktop Cowork, CI scripts, or custom SDK integrations. Each user may hold up to a deployment-configured maximum (default: 5 active keys).
 
 ### `api-key create`
 
-Create a new key. The plaintext value is printed exactly once. Save it immediately.
+Create a new key. The plaintext value is printed exactly once.
 
 ```bash
 stratoclave api-key create [--name NAME] [--scope SCOPE]... [--expires-days DAYS]
@@ -396,9 +433,9 @@ stratoclave api-key create [--name NAME] [--scope SCOPE]... [--expires-days DAYS
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--name` | empty | Human-readable label, e.g. `"cowork on macbook"`. |
-| `--scope` | `messages:send`, `usage:read-self` | Permission to embed in the key. Repeatable. Must be a subset of your roles. |
-| `--expires-days` | `30` | Expiration in days. Pass `0` for no expiration (discouraged). |
+| `--name` | empty | Human-readable label, up to 64 characters, for example `"cowork on macbook"`. |
+| `--scope` | `messages:send`, `usage:read-self` | Permission to embed in the key. Repeatable. Must be a subset of your current roles. |
+| `--expires-days` | `30` | Expiration in days, from `1` to `3650`. Pass `0` for a non-expiring key (discouraged). |
 
 Sample output:
 
@@ -407,9 +444,9 @@ Sample output:
    API Key created (save this now - it won't be shown again)
   ==========================================================
 
-   sk-stratoclave-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   sk-stratoclave-4f8c9b2a1d7e6c0f3a5b8c9d2e1f4a7b
 
-   key_id     : key_0abc...
+   key_id     : sk-stratoclave-4f8c...4a7b
    scopes     : messages:send, usage:read-self
    expires_at : 2026-05-27T00:00:00Z
 
@@ -417,30 +454,54 @@ Sample output:
   or use it directly as `Authorization: Bearer <key>`.
 ```
 
+`key_id` is a display-only identifier of the form `sk-stratoclave-XXXX...YYYY` (first four and last four characters of the body, with the middle masked). It is safe to log. The plaintext is **not** safe to log.
+
 ### `api-key list`
 
-List your keys.
+List your own keys. The plaintext is never shown again.
 
 ```bash
 stratoclave api-key list [--include-revoked]
 ```
 
+Sample output:
+
+```
+active: 2 / 5
+  sk-stratoclave-4f8c...4a7b
+    name: cowork on macbook
+    scopes: messages:send,usage:read-self
+    expires_at: 2026-05-27T00:00:00Z
+    last_used_at: 2026-04-27T10:15:02Z
+  sk-stratoclave-1a2b...9c0d [REVOKED]
+    name: ci-pipeline
+    scopes: messages:send
+    expires_at: no-expiration
+    last_used_at: never
+```
+
+See [Known limitations](#known-limitations) for the caveat about revoking from this output.
+
 ### `api-key revoke`
 
-Revoke one of your keys by `key_hash` (copy it from `list`).
+Revoke one of your keys. Takes effect immediately; the next request using the key returns `401 Unauthorized`.
 
 ```bash
 stratoclave api-key revoke <key_hash>
 ```
 
-### `api-key admin-list` / `api-key admin-revoke` (admin only)
+The argument is the SHA-256 hex digest of the plaintext (the DynamoDB partition key), **not** the `key_id` shown by `api-key list`. See [Known limitations](#known-limitations) for the recommended workflow until this gap is closed.
 
-Inspect or revoke keys owned by any user.
+### `api-key admin-list` and `admin-revoke`
+
+Admin-only: inspect or revoke keys owned by any user.
 
 ```bash
 stratoclave api-key admin-list [--include-revoked]
 stratoclave api-key admin-revoke <key_hash>
 ```
+
+`admin-list` output additionally prints `owner=<user_id>` and the key's `name` on the same line.
 
 ---
 
@@ -450,7 +511,7 @@ Requires the `admin` role. All other roles receive HTTP 403.
 
 ### `admin user create`
 
-Issue a new user. A temporary password is printed; deliver it securely.
+Provision a new user. Default options create a `user`-role account in the `default-org` tenant with the tenant's `default_credit`.
 
 ```bash
 stratoclave admin user create --email user@example.com \
@@ -458,6 +519,25 @@ stratoclave admin user create --email user@example.com \
   [--tenant TENANT_ID] \
   [--total-credit N]
 ```
+
+> **Important.** By default, the response does **not** contain a `temporary_password` field; the value is `null`. This is a deliberate hardening step: administrators must issue the first-login credentials out of band. The recommended workflow is:
+>
+> ```bash
+> # 1. Create the user in Stratoclave.
+> stratoclave admin user create --email newuser@example.com --role user --tenant default-org
+>
+> # 2. Set a temporary password via Cognito and hand it to the user over a secure channel.
+> aws cognito-idp admin-set-user-password \
+>   --user-pool-id us-east-1_EXAMPLE \
+>   --username newuser@example.com \
+>   --password 'TempPassword!23' \
+>   --no-permanent \
+>   --region us-east-1
+> ```
+>
+> `--no-permanent` puts the user into the `FORCE_CHANGE_PASSWORD` state; their first `stratoclave auth login` will require them to pick a new password.
+>
+> If you need `temporary_password` echoed in the create response for legacy tooling, set the backend environment variable `EXPOSE_TEMPORARY_PASSWORD=true` on the ECS task definition before deploying. This is not recommended for production.
 
 ### `admin user list`
 
@@ -475,15 +555,17 @@ stratoclave admin user show <user_id>
 
 ### `admin user delete`
 
-Delete the user from Cognito and remove the primary `Users` row. Historical `UserTenants` entries are archived, not deleted, so usage logs remain attributable.
+Delete the user from Cognito and remove the primary `Users` row. Historical `UserTenants` entries are archived (not deleted) so usage logs remain attributable.
 
 ```bash
 stratoclave admin user delete <user_id>
 ```
 
+Guardrails: deleting yourself is rejected with HTTP `409`, and deleting the last remaining `admin` is rejected with HTTP `409`.
+
 ### `admin user assign-tenant`
 
-Move a user to a different tenant. Triggers re-login on the user's side because the role claims change.
+Move a user to a different tenant. Triggers a forced re-login on the user's side because the role claims change.
 
 ```bash
 stratoclave admin user assign-tenant <user_id> \
@@ -500,11 +582,11 @@ Overwrite a user's credit budget.
 stratoclave admin user set-credit <user_id> --total N [--reset-used]
 ```
 
-`--reset-used` zeroes `credit_used` so the user starts fresh.
+`--reset-used` zeroes `credit_used` so the user starts fresh, for example at the start of a new billing period.
 
 ### `admin tenant create`
 
-Create a tenant. Exactly one of `--team-lead` (Cognito sub) or `--team-lead-email` may be provided; if both are omitted, ownership defaults to `admin-owned`.
+Create a tenant. Provide at most one of `--team-lead` (a Cognito sub) or `--team-lead-email`; if both are omitted, ownership defaults to the sentinel string `admin-owned`.
 
 ```bash
 stratoclave admin tenant create --name "Team A" \
@@ -534,7 +616,7 @@ stratoclave admin tenant delete <tenant_id>
 
 ### `admin tenant set-owner`
 
-Reassign the team lead of a tenant. Critical operation; audit logs capture who performed it.
+Reassign the team lead of a tenant. Audit logs capture the actor.
 
 ```bash
 stratoclave admin tenant set-owner <tenant_id> \
@@ -543,7 +625,7 @@ stratoclave admin tenant set-owner <tenant_id> \
 
 ### `admin tenant members`
 
-List every member of the tenant including `user_id`. Admins see the raw identifiers for debugging.
+List every member of the tenant, including `user_id`. Admins see raw identifiers for debugging.
 
 ```bash
 stratoclave admin tenant members <tenant_id>
@@ -570,7 +652,7 @@ stratoclave admin usage show \
   [--limit N]
 ```
 
-The backend prefers `tenant_id > user_id > full scan` when picking an index. Always pass `--tenant` or `--user` when you can to avoid table scans.
+The backend selects an index in the order `tenant_id > user_id > full scan`. Always pass `--tenant` or `--user` when possible to avoid scans.
 
 ---
 
@@ -588,7 +670,7 @@ stratoclave team-lead tenant create --name "My Team" [--default-credit N]
 
 ### `team-lead tenant list`
 
-List only the tenants you own. Other tenants are invisible, not "permission denied".
+List only the tenants you own. Other tenants are invisible (they are not returned at all, as opposed to a `403 Forbidden` response).
 
 ```bash
 stratoclave team-lead tenant list
@@ -602,7 +684,7 @@ stratoclave team-lead tenant show <tenant_id>
 
 ### `team-lead tenant members`
 
-List members of a tenant you own. `user_id` is not returned at this role; only email and credit information.
+List members of a tenant you own. Unlike `admin tenant members`, `user_id` is not returned; only email and credit fields.
 
 ```bash
 stratoclave team-lead tenant members <tenant_id>
@@ -620,11 +702,38 @@ stratoclave team-lead tenant usage <tenant_id> [--since-days N]
 
 | Code | Meaning |
 |------|---------|
-| `0`  | Success. |
-| `1`  | Any CLI-reported error (network, validation, server error, permission denied, not found). The message on stderr explains which. |
-| `2`  | `clap` argument parse error. Printed as "error: ...". |
+| `0` | Success. |
+| `1` | Any CLI-reported error (network, validation, server error, permission denied, not found). The message on stderr explains which. |
+| `2` | `clap` argument parse error. Printed as `error: ...`. |
 
-For `stratoclave claude` the exit code reflects the underlying `claude` process, so it can be higher than 2.
+For `stratoclave claude` the exit code reflects the underlying `claude` subprocess, so it can be higher than 2.
+
+---
+
+## Known limitations
+
+The following are known, tracked gaps in the current CLI. Each will be closed in a follow-up release; in the meantime, use the documented workaround.
+
+### `api-key revoke` argument is the SHA-256 hash, not the `key_id`
+
+`api-key revoke` requires the `key_hash` (SHA-256 hex) of the plaintext, but `api-key list` does not currently include `key_hash` in its output. The masked `key_id` (`sk-stratoclave-XXXX...YYYY`) is displayed instead.
+
+Until the list output is enriched, revoke via one of the following:
+
+- **Web UI**: *Account -> API keys -> Revoke* for self, or *Admin -> API keys* for any user.
+- **HTTP API directly**: `DELETE /api/mvp/me/api-keys/{key_hash}` (the administrator can query `GET /api/mvp/admin/api-keys` to learn the hash).
+
+### `admin user create` does not return a temporary password by default
+
+See [`admin user create`](#admin-user-create). Provision the first-login password via `aws cognito-idp admin-set-user-password --no-permanent` after creating the user. The legacy behaviour can be re-enabled with `EXPOSE_TEMPORARY_PASSWORD=true` on the backend.
+
+### `admin trusted-accounts` has no CLI subcommand
+
+The trusted-account allowlist used by `auth sso` is administered through the Web UI or by calling the HTTP API at `POST /api/mvp/admin/trusted-accounts` directly. A `stratoclave admin trusted-account ...` family of subcommands is planned.
+
+### SSO nonce replay window
+
+The backend validates that the signed `GetCallerIdentity` request has an `X-Amz-Date` within five minutes of its wall clock, but does not yet record per-signature nonces. A future release will add an STS nonce table with a five-minute TTL so the replay window is eliminated.
 
 ---
 
@@ -633,13 +742,21 @@ For `stratoclave claude` the exit code reflects the underlying `claude` process,
 ### Onboarding a new user (email + password)
 
 ```bash
-# Admin
+# Administrator: create the Stratoclave record, then hand off a temporary
+# password via Cognito. See `admin user create` for why this is two steps.
 stratoclave admin user create --email alice@example.com --role user --tenant default-org
-# -> share the printed temporary_password with alice over a secure channel
+
+aws cognito-idp admin-set-user-password \
+  --user-pool-id us-east-1_EXAMPLE \
+  --username alice@example.com \
+  --password 'Temp!PickAStrongOne23' \
+  --no-permanent \
+  --region us-east-1
+# -> deliver the temporary password to Alice via a secure channel.
 
 # Alice
-stratoclave setup https://d111111abcdef8.cloudfront.net
-export STRATOCLAVE_API_ENDPOINT="https://d111111abcdef8.cloudfront.net"
+stratoclave setup https://d8b03j8erit4k.cloudfront.net
+export STRATOCLAVE_API_ENDPOINT="https://d8b03j8erit4k.cloudfront.net"
 stratoclave auth login --email alice@example.com
 stratoclave ui open
 ```
@@ -647,12 +764,12 @@ stratoclave ui open
 ### Onboarding a whole team via SSO
 
 ```bash
-# Admin (once): register the AWS account as a trusted identity source
-# from the Admin UI or `stratoclave admin ...` equivalents.
+# Administrator (once): register the AWS account as a trusted identity source
+# from the Admin UI or via POST /api/mvp/admin/trusted-accounts.
 
 # Each team member
 aws sso login --profile team
-stratoclave setup https://d111111abcdef8.cloudfront.net
+stratoclave setup https://d8b03j8erit4k.cloudfront.net
 stratoclave auth sso --profile team
 stratoclave ui open
 ```
@@ -662,11 +779,12 @@ stratoclave ui open
 ```bash
 stratoclave auth login --email you@example.com    # or `auth sso`
 stratoclave claude -- "Refactor this Python function"
-# Renew the session whenever you hit 401:
+
+# If you hit 401, renew the session:
 stratoclave auth login --email you@example.com
 ```
 
-### Issuing a gateway key for cowork
+### Issuing a gateway key for Cowork
 
 ```bash
 stratoclave api-key create \
@@ -674,7 +792,7 @@ stratoclave api-key create \
   --scope messages:send \
   --scope usage:read-self \
   --expires-days 90
-# Paste the printed sk-stratoclave-... into the cowork settings.
+# Paste the printed sk-stratoclave-... into Claude Desktop's Gateway API key field.
 ```
 
 See [COWORK_INTEGRATION.md](COWORK_INTEGRATION.md) for the full integration story.
