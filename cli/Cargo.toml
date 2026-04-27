@@ -26,7 +26,7 @@ tiny_http = "0.12"
 url = "2"
 open = "5"
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+rustyline = "18"
 atty = "0.2"
 # Phase S: AWS SSO / STS 経由ログイン用
 aws-config = { version = "1", features = ["behavior-version-latest"] }
