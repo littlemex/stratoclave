@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
-Cargo.lock
+# NOTE: Cargo.lock is committed (this is a bin crate / application).
+# See https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control
 
 # Environment files (use config.toml.example as template)
 config.toml

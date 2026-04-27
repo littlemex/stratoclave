@@ -14,12 +14,21 @@
     "predeploy": "npm run validate",
     "deploy": "cdk deploy",
     "deploy:full": "bash scripts/deploy-with-update.sh",
-    "deploy:update-cognito": "bash scripts/deploy-with-update.sh --stage2-only"
+    "deploy:update-cognito": "bash scripts/deploy-with-update.sh --stage2-only",
+    "lint": "eslint . --ext ts",
+    "lint:fix": "eslint . --ext ts --fix",
+    "format": "prettier --write \"**/*.{ts,json}\"",
+    "format:check": "prettier --check \"**/*.{ts,json}\""
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "22.7.9",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
     "jest": "^29.7.0",
+    "prettier": "^3.4.2",
     "ts-jest": "^29.2.5",
     "aws-cdk": "2.1000.3",
     "ts-node": "^10.9.2",

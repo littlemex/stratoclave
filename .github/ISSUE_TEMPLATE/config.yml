@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/littlemex/stratoclave/security/advisories/new
+    about: Report a suspected vulnerability privately via GitHub Security Advisories. Do not open a public issue.
+  - name: Security policy
+    url: https://github.com/littlemex/stratoclave/blob/main/SECURITY.md
+    about: Read the disclosure process, scope, and safe-harbor terms before filing a report.
+  - name: Contributing guide
+    url: https://github.com/littlemex/stratoclave/blob/main/CONTRIBUTING.md
+    about: Development setup, coding style, commit conventions, and pull-request workflow.
+  - name: Questions and discussion
+    url: https://github.com/littlemex/stratoclave/discussions
+    about: For usage questions, design discussions, and other open-ended topics. Enable Discussions in repo settings if this link 404s.

@@ -8,11 +8,15 @@ boto3==1.35.74
 
 # Phase 2 (v2.1): ACP 撤廃に伴い websockets / watchdog を削除 (2026-04-25).
 
-# Testing
+# Testing (dev-only; install via `pip install -r requirements.txt` for local dev.
+# Production Docker image should use a trimmed requirements-prod.txt in future.)
 pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-cov==6.0.0
 httpx==0.28.1
+
+# Linting / formatting (dev-only)
+ruff==0.8.4
 
 # Utilities
 pydantic[email]==2.10.3

@@ -1,0 +1,120 @@
+name: Bug report
+description: Report a defect in Stratoclave (backend, frontend, CLI, or IaC).
+title: "[bug] <short summary>"
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Before opening this
+        issue, please:
+
+        - Search [existing issues](https://github.com/littlemex/stratoclave/issues?q=is%3Aissue)
+          to avoid duplicates.
+        - Do **not** include secrets (access tokens, API keys, account IDs,
+          Cognito User Pool IDs, CloudFront distribution IDs, or full ARNs)
+          in logs or screenshots. Redact them with `<REDACTED>`.
+        - For suspected security vulnerabilities, stop here and follow the
+          [Security Policy](https://github.com/littlemex/stratoclave/blob/main/SECURITY.md)
+          instead. Do **not** file a public issue.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues and this bug has not been reported.
+          required: true
+        - label: I verified this is not a security vulnerability (if unsure, see SECURITY.md).
+          required: true
+        - label: I have removed secrets and account-identifying information from logs and screenshots.
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Which part of Stratoclave is affected? Pick the closest match.
+      multiple: true
+      options:
+        - backend (FastAPI)
+        - frontend (React / Vite)
+        - cli (Rust)
+        - iac (CDK)
+        - scripts / bootstrap
+        - docs
+        - other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit SHA
+      description: Output of `git rev-parse HEAD` at build time, or release tag. For the CLI, paste `stratoclave --version`.
+      placeholder: "e.g. 0a1b2c3 or v0.1.0-alpha.3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Relevant runtime details. Fill in only what applies.
+      value: |
+        - OS / arch:
+        - AWS region of the Stratoclave deployment:
+        - Browser (for frontend issues):
+        - Node.js version (for frontend / iac):
+        - Python version (for backend):
+        - Rust / cargo version (for CLI):
+        - Bedrock model(s) in use:
+        - Deployment topology: <!-- e.g. CDK default, customized, local dev -->
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include error messages verbatim.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, exact commands or clicks. A reproducer we can run ourselves dramatically speeds up triage.
+      placeholder: |
+        1. Deploy `main` with `npx cdk deploy --all`
+        2. Bootstrap admin via `./scripts/bootstrap-admin.sh --email admin@example.com`
+        3. Run `stratoclave claude -- "hi"`
+        4. Observe <error>
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Backend logs, CloudWatch excerpts, browser console output, or CLI
+        `RUST_LOG=debug` output. Truncate generously; paste only what points
+        at the failure. **Redact secrets.**
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, suspected root cause, related issues, workarounds you've tried.

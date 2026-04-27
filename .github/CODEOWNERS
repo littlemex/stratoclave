@@ -1,0 +1,25 @@
+# Stratoclave code owners
+#
+# GitHub uses the last matching pattern in this file to determine ownership,
+# so more specific rules should appear below the catch-all. Listed owners are
+# auto-requested for review on every pull request that touches a matched path.
+#
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repository.
+*                     @littlemex
+
+# Component-scoped owners (identical for now; split later as the team grows).
+/backend/             @littlemex
+/frontend/            @littlemex
+/cli/                 @littlemex
+/iac/                 @littlemex
+/scripts/             @littlemex
+/docs/                @littlemex
+
+# Governance and policy files.
+/.github/             @littlemex
+/LICENSE              @littlemex
+/SECURITY.md          @littlemex
+/CODE_OF_CONDUCT.md   @littlemex
+/CONTRIBUTING.md      @littlemex

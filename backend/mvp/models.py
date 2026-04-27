@@ -46,14 +46,40 @@ _MAPPING: dict[str, str] = {
 }
 
 
+# Bedrock 側モデル ID の allowlist (Claude ファミリのみ).
+# `_MAPPING` の value に加え、環境変数 `DEFAULT_BEDROCK_MODEL` の値と
+# 既知の inference profile 接頭辞を含む "anthropic" を必須とする。
+#
+# なお Bedrock には Llama / Nova / Mistral 等 Anthropic 以外のモデルも存在するが、
+# 本プロキシは Claude 系専用であり、それ以外を指定されてもコスト計算・credit 消費
+# ロジックが前提としていないため allowlist 外として 400 を返す。
+_ALLOWED_BEDROCK_MODELS: frozenset[str] = frozenset(
+    list(_MAPPING.values()) + [DEFAULT_MODEL]
+)
+
+
 def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
     """Anthropic 形式のモデル名を Bedrock inference profile ID に変換.
 
-    - 既に Bedrock 形式 (us.anthropic.* / global.anthropic.* 等) ならそのまま返す
-    - マッピングにないモデルは fallback として DEFAULT_MODEL を返す
+    - Anthropic 名 (`_MAPPING` の key) → 対応する Bedrock ID
+    - 既に Bedrock 形式の ID でも `_ALLOWED_BEDROCK_MODELS` に含まれるもののみ通す
+    - それ以外 (Llama / Nova / Mistral / 独自 region prefix) は ValueError で 400 を起こす
+
+    呼び出し側で ValueError を HTTPException(400) にマップすること。
     """
     if not anthropic_model:
         return DEFAULT_MODEL
-    if anthropic_model.startswith(("us.", "apac.", "eu.", "global.", "anthropic.")):
+
+    # Anthropic 形式 (alias) 経由
+    mapped = _MAPPING.get(anthropic_model)
+    if mapped is not None:
+        return mapped
+
+    # Bedrock ID 直指定は allowlist 限定
+    if anthropic_model in _ALLOWED_BEDROCK_MODELS:
         return anthropic_model
-    return _MAPPING.get(anthropic_model, DEFAULT_MODEL)
+
+    raise ValueError(
+        f"model '{anthropic_model}' is not allowed. "
+        f"Only Claude family models are supported by this proxy."
+    )

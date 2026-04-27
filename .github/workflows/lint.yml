@@ -1,0 +1,113 @@
+name: lint
+
+# Runs linters for Python (ruff), Rust (clippy + rustfmt), and TypeScript
+# (eslint + prettier) on all pushes to main and pull requests targeting main.
+#
+# Each job is independent and fails the overall workflow on lint errors so
+# that PRs are blocked if any surface regresses. Formatting is reported but
+# not enforced (v0.1.0 trade-off — existing codebase has a large pre-existing
+# format delta that will be fixed in a follow-up PR).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-python:
+    name: backend / ruff
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install ruff
+        run: pip install "ruff==0.8.4"
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format (check-only, non-blocking)
+        run: ruff format --check .
+        continue-on-error: true
+
+  cli-rust:
+    name: cli / clippy + rustfmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        # rust-toolchain.toml is respected automatically by rustup.
+        run: |
+          rustup set profile minimal
+          rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: cargo fmt (check-only, non-blocking)
+        run: cargo fmt --check
+        continue-on-error: true
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features
+
+  frontend-ts:
+    name: frontend / eslint + prettier
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: eslint
+        run: npm run lint
+      - name: prettier (check-only, non-blocking)
+        run: npm run format:check
+        continue-on-error: true
+
+  iac-ts:
+    name: iac / eslint + prettier
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: iac
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: iac/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: tsc (typecheck, non-blocking)
+        # A follow-up PR will remove archived stack test files that emit
+        # pre-existing type errors. Keep informational until then.
+        run: npx tsc --noEmit
+        continue-on-error: true
+      - name: eslint
+        run: npm run lint
+      - name: prettier (check-only, non-blocking)
+        run: npm run format:check
+        continue-on-error: true

@@ -117,3 +117,24 @@ class UsersRepository:
         )
         items = resp.get("Items", [])
         return items[0] if items else None
+
+    def scan_admins(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Users テーブルを scan して admin role を持つユーザを最大 limit 件返す.
+
+        bootstrap-admin の zero-state 判定用。scan はコストが高いが、
+        呼ばれるのは lifespan 時の 1 回だけ、かつ limit で早期打ち切りするため許容範囲.
+
+        注意: DynamoDB scan は eventually consistent。lifespan 中に別プロセスが
+        admin を追加していたらミスする可能性があるが、本用途では許容。
+        """
+        # FilterExpression で roles に "admin" が含まれるものを絞る
+        from boto3.dynamodb.conditions import Attr
+
+        resp = self._table.scan(
+            FilterExpression=Attr("sk").eq(self.SK_PROFILE)
+            & Attr("roles").contains("admin"),
+            Limit=max(limit, 1),
+            # ProjectionExpression で列を絞ってコスト削減
+            ProjectionExpression="user_id, email, roles",
+        )
+        return resp.get("Items", [])

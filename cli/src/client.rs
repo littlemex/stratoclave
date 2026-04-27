@@ -808,7 +808,12 @@ fn libc_isatty(fd: i32) -> bool {
     extern "C" {
         fn isatty(fd: i32) -> i32;
     }
-    unsafe { isatty(fd) != 0 }
+    // SAFETY: isatty(3) takes an int fd and returns int; no pointers involved.
+    // fd comes from STDOUT/STDIN_FILENO style constants upstream and is always valid.
+    #[allow(unsafe_code)]
+    unsafe {
+        isatty(fd) != 0
+    }
 }
 
 #[cfg(test)]

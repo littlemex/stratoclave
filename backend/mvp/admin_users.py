@@ -60,7 +60,11 @@ class CreateUserRequest(BaseModel):
 class CreateUserResponse(BaseModel):
     email: str
     user_id: str
-    temporary_password: str
+    # temporary_password はデフォルトでレスポンスから外す (P0-3).
+    # access log / HAR / browser devtools 経由の漏洩を防ぐため。
+    # 互換のために環境変数 EXPOSE_TEMPORARY_PASSWORD=true の時だけ含める。
+    # 推奨: ForcePasswordReset + SES メール配信 / one-time secret link への移行 (P1).
+    temporary_password: Optional[str] = None
     user_pool_id: str
     org_id: str
     role: Role
@@ -180,10 +184,17 @@ def create_user(
         details={"email": email, "role": body.role, "allow_admin_creation": admin_creation_allowed()},
     )
 
+    # temporary_password のレスポンス露出は環境変数 EXPOSE_TEMPORARY_PASSWORD=true の時のみ。
+    # デフォルトでは None にして、access log / HAR / browser devtools 経由の漏洩を防ぐ。
+    # この場合、Admin は Cognito コンソール経由でパスワードリセットメールを送るか、
+    # bootstrap-admin.sh の手動実行で取得する運用になる。
+    expose_temp_password = (
+        os.getenv("EXPOSE_TEMPORARY_PASSWORD", "false").lower() == "true"
+    )
     return CreateUserResponse(
         email=email,
         user_id=sub,
-        temporary_password=temp_password,
+        temporary_password=temp_password if expose_temp_password else None,
         user_pool_id=pool_id,
         org_id=tenant_id,
         role=body.role,
