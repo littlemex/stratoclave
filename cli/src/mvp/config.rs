@@ -87,8 +87,37 @@ fn load_from_config_toml() -> Option<TomlSnapshot> {
     }
     let text = std::fs::read_to_string(&path).ok()?;
     let parsed: toml::Value = toml::from_str(&text).ok()?;
+
+    // `stratoclave setup` が書き出すネストスキーマ ([api] endpoint / [defaults] model) を優先し、
+    // 旧フラットスキーマ (api_endpoint / default_model) も互換として受ける。
+    let api_endpoint = parsed
+        .get("api")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("endpoint"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            parsed
+                .get("api_endpoint")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+
+    let default_model = parsed
+        .get("defaults")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("model"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            parsed
+                .get("default_model")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+
     Some(TomlSnapshot {
-        api_endpoint: parsed.get("api_endpoint").and_then(|v| v.as_str().map(String::from)),
-        default_model: parsed.get("default_model").and_then(|v| v.as_str().map(String::from)),
+        api_endpoint,
+        default_model,
     })
 }

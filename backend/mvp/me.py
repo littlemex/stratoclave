@@ -127,8 +127,11 @@ def usage_summary(
 ) -> UsageSummaryResponse:
     """自分の使用量を model 別 / tenant 別に集計。
 
-    UsageLogs.user-id-index を使い「自分の全テナント横断」で集計し、
-    UserTenants (active) の credit 残高と合わせて返す。
+    スコープは「現在 active な tenant (user.org_id) のみ」。
+    過去に archived された tenant の消費は by_tenant に含めず、別エンドポイント
+    (/me/usage-history) で時系列として参照する。これは画面上の
+    「総消費」と「残クレジット」のスコープを揃えるため (クレジットは active tenant の
+    credit_used に紐づく)。
     """
     user_tenants_repo = UserTenantsRepository()
     active = user_tenants_repo.get(user.user_id, user.org_id) or {}
@@ -148,12 +151,17 @@ def usage_summary(
 
     by_model: dict[str, int] = {}
     by_tenant: dict[str, int] = {}
+    active_sample = 0
     for it in items:
-        tokens = int(it.get("total_tokens", 0))
-        model = str(it.get("model_id") or "unknown")
-        by_model[model] = by_model.get(model, 0) + tokens
         tid = str(it.get("tenant_id") or "unknown")
+        tokens = int(it.get("total_tokens", 0))
+        # by_tenant には全テナント分を載せる (UI 側で参照用に出すため)
         by_tenant[tid] = by_tenant.get(tid, 0) + tokens
+        # 「総消費」として集計する by_model は active tenant 分に限定する
+        if tid == user.org_id:
+            model = str(it.get("model_id") or "unknown")
+            by_model[model] = by_model.get(model, 0) + tokens
+            active_sample += 1
 
     return UsageSummaryResponse(
         tenant_id=user.org_id,
@@ -162,7 +170,7 @@ def usage_summary(
         remaining_credit=remaining,
         by_model=by_model,
         by_tenant=by_tenant,
-        sample_size=len(items),
+        sample_size=active_sample,
         since_days=since_days,
     )
 

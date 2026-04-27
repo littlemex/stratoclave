@@ -175,6 +175,11 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,
 
+    // 公開 API エンドポイント (CloudFront の HTTPS URL)
+    // /.well-known/stratoclave-config の api_endpoint として返す値。
+    // ALB 直 URL を返すと CLI が HTTP 経由で叩きに行くため、必ず CloudFront URL を返す。
+    STRATOCLAVE_API_ENDPOINT: `https://${frontendStack.cfnDistribution.attrDomainName}`,
+
     // Feature flags (MVP)
     VERIFIED_PERMISSIONS_ENABLED: 'false',
     TENANT_ISOLATION_ENABLED: 'false',

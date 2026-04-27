@@ -6,7 +6,18 @@ Phase 2 (v2.1) 変更:
 - `get()` は `status == "active"` のみ返す (archived は履歴として残す)
 - `ensure()` は archived レコードを active に昇格させる (A→B→A 再所属対応)
 - `switch_tenant()` で TransactWriteItems による原子的切替 (+ Cognito Saga は呼び出し側が担当)
-- `deduct()` は `status = "active"` ConditionExpression を追加し、切替中の旧 tenant 取り違えを防止
+
+Phase 3 変更 (credit reservation):
+- 旧 `deduct()` を廃止、代わりに `reserve()` / `refund()` の 2 つに分解
+- `reserve()`: Bedrock 呼び出し**前**に atomic に max_tokens 相当を確保
+    ConditionExpression は比較演算のみサポートのため、
+    `credit_used <= max_allowed_used` かつ `total_credit = expected_total` を
+    スナップショット整合でチェック。total_credit が admin overwrite で変動した
+    場合は ConditionCheckFailed → 再読込して retry (concurrent admin change 対応)。
+- `refund()`: 実消費が reservation より少ない分を戻す。
+    `credit_used >= tokens` で underflow ガード。
+- `_stream_messages` / non-stream 共に「事前 reserve → Bedrock → 実消費で差額 refund」
+  のパターン。silent pass は禁止。
 """
 from __future__ import annotations
 
@@ -143,43 +154,79 @@ class UserTenantsRepository:
         used = int(item.get("credit_used", 0))
         return max(total - used, 0)
 
-    def deduct(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
-        """クレジットを減算。残高不足 / 切替中は CreditExhaustedError.
+    _RESERVE_MAX_RETRIES = 5
 
-        v2.1 変更:
-          - ConditionExpression に `status = "active"` を追加
-          - 旧 tenant が archived になっている場合は即 CreditExhaustedError
+    def reserve(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
+        """原子的にクレジットを確保 (pessimistic reservation).
+
+        Bedrock 呼び出し**前**に呼び、max_tokens 相当を先取りする。
+        呼び出し完了後に refund() で差額を戻す。
+
+        アトミック性:
+          ConditionExpression は算術演算をサポートしないため、
+          `get → ConditionExpression (credit_used <= max_allowed_used AND
+          total_credit = expected_total) で update` のパターン。
+          並列リクエスト/admin overwrite で total_credit が変動した場合は
+          ConditionCheckFailed となり、再読込して retry する (最大 _RESERVE_MAX_RETRIES 回)。
+
+          - 同一 total_credit 下での並列 reserve: ConditionExpression により
+            合計 credit_used が total_credit を超えた瞬間から以降の reserve は失敗する。
+            超過は発生しない。
+          - admin の overwrite_credit と同時実行: reserve 側が CCF でリトライ、
+            overwrite が active なら update_item は成功。
+          - Tenant archived: (attribute_not_exists(#s) OR #s = :active) で排除。
+
+        Args:
+          tokens: 確保する token 数 (> 0)
+
+        Raises:
+          CreditExhaustedError: 残高不足、または concurrent update で retry 上限到達。
+            Tenant が存在しない / archived の場合も同じ例外。
+
+        Returns:
+          確保後の残高 (remaining = total_credit - credit_used)
         """
         if tokens <= 0:
             return self.remaining_credit(user_id, tenant_id)
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        last_total: Optional[int] = None
+        last_used: Optional[int] = None
+        for attempt in range(self._RESERVE_MAX_RETRIES):
             item = self.get(user_id, tenant_id)
             if not item:
                 raise CreditExhaustedError(
-                    f"Active UserTenant not found for user_id={user_id} tenant_id={tenant_id}"
+                    f"Active UserTenant not found for user_id={user_id} "
+                    f"tenant_id={tenant_id}"
                 )
             total = int(item.get("total_credit", 0))
             used = int(item.get("credit_used", 0))
-            new_used = used + tokens
-            if new_used > total:
+            last_total, last_used = total, used
+            max_allowed_used = total - tokens
+
+            if used > max_allowed_used:
+                # 事前チェックで既に超過 → 並列の他リクエストが埋めた場合でも
+                # ここで即座に残高不足を返す (retry しても意味がない)
                 raise CreditExhaustedError(
-                    f"Credit exhausted for user_id={user_id} tenant_id={tenant_id} "
+                    f"Insufficient credit for user_id={user_id} tenant_id={tenant_id} "
                     f"(total={total}, used={used}, requested={tokens})"
                 )
+
             try:
                 resp = self._table.update_item(
                     Key={"user_id": user_id, "tenant_id": tenant_id},
-                    UpdateExpression="SET credit_used = :new_used, updated_at = :now",
+                    UpdateExpression=(
+                        "ADD credit_used :tokens SET updated_at = :now"
+                    ),
                     ConditionExpression=(
-                        "credit_used = :old_used AND "
+                        "credit_used <= :max_allowed_used AND "
+                        "total_credit = :expected_total AND "
                         "(attribute_not_exists(#s) OR #s = :active)"
                     ),
                     ExpressionAttributeNames={"#s": "status"},
                     ExpressionAttributeValues={
-                        ":new_used": Decimal(new_used),
-                        ":old_used": Decimal(used),
+                        ":tokens": Decimal(tokens),
+                        ":max_allowed_used": Decimal(max_allowed_used),
+                        ":expected_total": Decimal(total),
                         ":active": "active",
                         ":now": _now_iso(),
                     },
@@ -187,19 +234,66 @@ class UserTenantsRepository:
                 )
             except ClientError as e:
                 if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                    if attempt < max_retries - 1:
-                        continue
-                    raise CreditExhaustedError(
-                        f"Concurrent credit update conflict (or tenant switched) "
-                        f"for user_id={user_id} tenant_id={tenant_id}"
-                    )
+                    # snapshot が古い (他の reserve / admin overwrite) → 再読込で retry
+                    continue
                 raise
+
             attrs = resp.get("Attributes", {})
             total_new = int(attrs.get("total_credit", 0))
             used_new = int(attrs.get("credit_used", 0))
             return max(total_new - used_new, 0)
 
-        raise CreditExhaustedError("Unexpected credit deduction failure")
+        raise CreditExhaustedError(
+            f"Credit reservation failed after {self._RESERVE_MAX_RETRIES} retries "
+            f"for user_id={user_id} tenant_id={tenant_id} "
+            f"(last_total={last_total}, last_used={last_used}, requested={tokens})"
+        )
+
+    def refund(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
+        """確保済みクレジットを戻す (reserve の逆操作).
+
+        reserve で確保した額のうち実消費を差し引いた余剰を atomic に戻す。
+        credit_used がアンダーフローしないよう ConditionExpression で守る。
+        Tenant が archived でも refund は許可する (over-charge を避けるため)。
+
+        Args:
+          tokens: 戻す token 数 (> 0)
+
+        Returns:
+          refund 後の残高
+        """
+        if tokens <= 0:
+            return self.remaining_credit(user_id, tenant_id)
+
+        try:
+            resp = self._table.update_item(
+                Key={"user_id": user_id, "tenant_id": tenant_id},
+                UpdateExpression="ADD credit_used :neg_tokens SET updated_at = :now",
+                ConditionExpression="credit_used >= :tokens",
+                ExpressionAttributeValues={
+                    ":neg_tokens": Decimal(-tokens),
+                    ":tokens": Decimal(tokens),
+                    ":now": _now_iso(),
+                },
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                # underflow ガード: credit_used < tokens → 0 にクランプ
+                item = self.get_including_archived(user_id, tenant_id)
+                if item:
+                    return max(
+                        int(item.get("total_credit", 0))
+                        - int(item.get("credit_used", 0)),
+                        0,
+                    )
+                return 0
+            raise
+
+        attrs = resp.get("Attributes", {})
+        total_new = int(attrs.get("total_credit", 0))
+        used_new = int(attrs.get("credit_used", 0))
+        return max(total_new - used_new, 0)
 
     def credit_summary(self, user_id: str, tenant_id: str) -> dict[str, int]:
         item = self.get(user_id, tenant_id)
