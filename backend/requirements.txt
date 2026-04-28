@@ -21,7 +21,7 @@ python-dotenv==1.0.1
 
 # Observability
 structlog==24.4.0
-python-json-logger==3.2.1
+python-json-logger==4.1.0
 
 # Authentication
 PyJWT[crypto]==2.10.1
