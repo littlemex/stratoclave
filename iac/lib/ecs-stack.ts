@@ -76,8 +76,32 @@ export class EcsStack extends cdk.Stack {
       ...props.dynamoDbTableArns,
       ...props.dynamoDbTableArns.map((arn) => `${arn}/index/*`),
     ];
+
+    // P0-10 (2026-04 security review): the blanket Statement below used
+    // to include `dynamodb:Scan` across every table. The review wanted
+    // Scan narrowed to the tables that legitimately need it; granting
+    // Scan on usage-logs / sso-nonces / messages / sse-tokens made a
+    // backend RCE into a one-shot bulk-exfil.
+    //
+    // We split the policy in two:
+    //
+    //   1. Everyday CRUD on every prefix-scoped table *without* Scan.
+    //   2. A second Statement granting Scan only on the tables whose
+    //      admin code paths actually need it today:
+    //        - users               (scan_admins + admin list paging)
+    //        - api-keys            (find_any_by_key_id for admin revoke)
+    //        - tenants             (admin tenant list)
+    //        - trusted-accounts    (SSO allowlist console)
+    //        - sso-pre-registrations (admin invite list)
+    //        - permissions         (RBAC seed / role dump)
+    //        - user-tenants        (tenants.py rollup of archived rows)
+    //
+    //      A Query / GSI migration that removes these scans is on the
+    //      P1 roadmap; the rest of the audit-critical tables (usage-logs,
+    //      sessions, messages, sse-tokens, sso-nonces) stay Scan-denied.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
+        sid: 'TableCrudWithoutScan',
         effect: iam.Effect.ALLOW,
         actions: [
           'dynamodb:GetItem',
@@ -85,12 +109,34 @@ export class EcsStack extends cdk.Stack {
           'dynamodb:UpdateItem',
           'dynamodb:DeleteItem',
           'dynamodb:Query',
-          'dynamodb:Scan',
           'dynamodb:BatchGetItem',
           'dynamodb:BatchWriteItem',
           'dynamodb:ConditionCheckItem',
         ],
         resources: dynamoResources,
+      })
+    );
+
+    const scanTableSuffixes = [
+      'users',
+      'api-keys',
+      'tenants',
+      'trusted-accounts',
+      'sso-pre-registrations',
+      'permissions',
+      'user-tenants',
+    ];
+    const scanResources: string[] = [];
+    for (const suffix of scanTableSuffixes) {
+      const arn = `arn:aws:dynamodb:${region}:${account}:table/${props.prefix}-${suffix}`;
+      scanResources.push(arn, `${arn}/index/*`);
+    }
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'ScanLimitedToAdminConsoleTables',
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Scan'],
+        resources: scanResources,
       })
     );
 
