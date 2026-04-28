@@ -220,7 +220,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch (err) {
           // Fall through to normal bootstrap on ticket failure; a
           // stale/expired ticket is a common UX case after a retry.
-          // eslint-disable-next-line no-console
           console.warn(
             'ui_ticket exchange failed, falling back to stored session',
             err,
