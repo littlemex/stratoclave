@@ -43,6 +43,8 @@ cd stratoclave/cli
 cargo build --release
 ```
 
+cold ビルドでは AWS SDK を中心に約 500 crate がコンパイルされ、Apple Silicon で **約 2 分** 程度かかる。Linux x86_64 も同程度。最後の 1 分ほど `reqwest` 系のリンク処理で進捗が止まったように見えるが、これはハングではなく正常な挙動である。
+
 バイナリは `target/release/stratoclave` に生成される。これを `PATH` に配置する。
 
 ```bash
@@ -205,12 +207,16 @@ stratoclave claude -- --print "List files"
 
 ### Anthropic SDK を直接使う
 
-`base_url` をデプロイメントに向け、API key に Stratoclave が発行したトークンまたは長寿命 API キーを渡せば、Anthropic 互換の SDK はそのまま動く。Python の例:
+`base_url` をデプロイメントに向け、API key に Stratoclave が発行したトークンまたは長寿命 API キーを渡せば、Anthropic 互換の SDK はそのまま動く。
+
+以下の例は `stratoclave auth login` / `stratoclave auth sso` が `~/.stratoclave/mvp_tokens.json` に書き込む短寿命アクセストークンを再利用している。このファイルは CLI で一度サインインした**後**にのみ存在する。無人スクリプトや長時間稼働するエージェント向けのクレデンシャルが必要なら、代わりに API キーを発行し ([`api-key create`](CLI_GUIDE.md#api-key) 参照)、`sk-stratoclave-…` 文字列を直接渡すこと。
 
 ```python
 import json, os, pathlib
 from anthropic import Anthropic
 
+# 事前に `stratoclave auth login` (または `auth sso`) が必要。
+# アクセストークンは 1 時間で失効する — デーモンには sk-stratoclave-* API キーを使う。
 tokens = json.loads(pathlib.Path("~/.stratoclave/mvp_tokens.json").expanduser().read_text())
 
 client = Anthropic(

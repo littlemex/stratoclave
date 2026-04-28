@@ -45,6 +45,8 @@ cd stratoclave/cli
 cargo build --release
 ```
 
+A cold build on Apple Silicon compiles roughly 500 crates (the AWS SDK pulls in most of them) and takes **about 2 minutes**; Linux x86_64 is similar. Expect the first build to look idle for the last minute while `reqwest` and friends link — that is normal, not a hang.
+
 The binary lands at `target/release/stratoclave`. Put it on your `PATH`:
 
 ```bash
@@ -207,12 +209,16 @@ stratoclave claude -- --print "List files"
 
 ### Using the Anthropic SDK directly
 
-Any Anthropic-compatible SDK works as long as you point `base_url` at your deployment and use a Stratoclave-issued token or long-lived API key as the API key. Example in Python:
+Any Anthropic-compatible SDK works as long as you point `base_url` at your deployment and use a Stratoclave-issued token or long-lived API key as the API key.
+
+The example below re-uses the short-lived access token that `stratoclave auth login` / `stratoclave auth sso` writes to `~/.stratoclave/mvp_tokens.json`. That file only exists **after** you have signed in with the CLI at least once; if you need a credential for unattended scripts or long-running agents, mint an API key instead (see [`api-key create`](CLI_GUIDE.md#api-key)) and assign the `sk-stratoclave-…` string directly.
 
 ```python
 import json, os, pathlib
 from anthropic import Anthropic
 
+# Requires a prior `stratoclave auth login` (or `auth sso`).
+# Access tokens expire hourly — for daemons use an sk-stratoclave-* API key.
 tokens = json.loads(pathlib.Path("~/.stratoclave/mvp_tokens.json").expanduser().read_text())
 
 client = Anthropic(

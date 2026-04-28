@@ -34,7 +34,7 @@ If you only want to use an existing Stratoclave deployment, you do not need this
 
 - An AWS account where you have permission to create VPCs, ECS services, IAM roles, Cognito User Pools, DynamoDB tables, S3 buckets, CloudFront distributions, and ALBs. `AdministratorAccess` is the simplest way to get through the first deploy; refine to a least-privilege role for subsequent updates if needed.
 - **Amazon Bedrock model access enabled in `us-east-1`** for every model you intend to serve (Claude Opus / Sonnet / Haiku inference profiles). Bedrock access is an account-level opt-in; see the Bedrock console -> **Model access**.
-- The AWS CDK v2 must be bootstrapped in the target account and region:
+- The AWS CDK v2 must be bootstrapped in the target account and region **before your first `cdk deploy`**. It is not required to run `cdk synth` for inspection:
 
   ```bash
   npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1
@@ -46,9 +46,9 @@ If you only want to use an existing Stratoclave deployment, you do not need this
 | ----------------- | --------------- | ----- |
 | AWS CLI           | v2.15+          | SSO or credentials configured for the target account. |
 | Node.js           | 20 LTS          | Runs CDK v2. |
-| Python            | 3.11+           | Only needed if you rebuild the backend image locally. |
-| Rust              | 1.75+           | Only needed to rebuild the `stratoclave` CLI. |
-| Container runtime | finch or Docker | finch is recommended on macOS; Docker Desktop works on any OS. |
+| Python            | 3.11+           | Needed to run the backend tests or rebuild the backend image locally. The system Python on recent macOS is 3.9; install a newer one with `brew install python@3.12` or via `pyenv install 3.11.9`. |
+| Rust              | 1.75+           | Only needed to rebuild the `stratoclave` CLI. A cold `cargo build --release` takes ~2 minutes on Apple Silicon and compiles ~500 crates — not a hang. |
+| Docker            | any recent      | The helper scripts shell out to `docker` by name to build the backend image. Docker Desktop works on macOS / Windows / Linux. |
 | jq                | any             | Used by several helper scripts. |
 
 Verify:
@@ -56,8 +56,8 @@ Verify:
 ```bash
 aws --version
 node --version
-python3 --version
-docker --version   # or: finch --version
+python3 --version   # must print 3.11 or newer
+docker --version
 ```
 
 ### Repository
@@ -71,20 +71,25 @@ cd stratoclave
 
 ## What gets deployed
 
-A successful `deploy-all.sh` run provisions **eight CloudFormation stacks** in dependency order. The stack name prefix is controlled by `STRATOCLAVE_PREFIX` (default: `stratoclave`). `<Prefix>` below is the PascalCase form.
+A successful `deploy-all.sh` run provisions **nine CloudFormation stacks** in dependency order. The stack name prefix is controlled by `STRATOCLAVE_PREFIX` (default: `stratoclave`). `<Prefix>` below is the PascalCase form.
 
 | # | Stack                 | Resources                                                             | Purpose |
 | - | --------------------- | --------------------------------------------------------------------- | ------- |
-| 1 | `<Prefix>NetworkStack`  | VPC, 2 public subnets, security groups                                | Public-subnet-only network (no NAT, minimal cost). |
-| 2 | `<Prefix>DynamodbStack` | 12 DynamoDB tables (`users`, `user-tenants`, `tenants`, `permissions`, `trusted-accounts`, ...) | All persistent state, `PAY_PER_REQUEST`. |
-| 3 | `<Prefix>EcrStack`      | Private ECR repository                                                | Holds the backend container image. |
-| 4 | `<Prefix>AlbStack`      | Internet-facing ALB, target group, HTTP listener on :80               | Public entry point for the backend. |
-| 5 | `<Prefix>FrontendStack` | S3 bucket, CloudFront distribution, SPA fallback function             | Static web UI hosting. |
-| 6 | `<Prefix>CognitoStack`  | User Pool, app client, hosted-UI domain                               | Authentication. Imports the CloudFront domain to wire up callback URLs. |
-| 7 | `<Prefix>EcsStack`      | ECS cluster, Fargate service (1 task), task role, task definition     | Backend runtime. All environment variables are injected here. |
-| 8 | `<Prefix>ConfigStack`   | SSM Parameter Store entries                                           | Static runtime values consumed by the backend and helper scripts. |
+| 1 | `<Prefix>NetworkStack`  | VPC, 2 public subnets, SGs, VPC Flow Logs (CloudWatch, 30 d)          | Public-subnet-only network (no NAT). ALB SG inbound is restricted to the AWS-managed **CloudFront origin-facing prefix list** — direct ALB DNS probes fail at L4. |
+| 2 | `<Prefix>DynamodbStack` | 13 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN), `api-keys` (RETAIN + PITR), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence) | All persistent state, `PAY_PER_REQUEST`. Audit-critical tables survive `cdk destroy`. |
+| 3 | `<Prefix>EcrStack`      | Private ECR repository (RETAIN)                                       | Holds the backend container image. Rollback surface of last resort. |
+| 4 | `<Prefix>AlbStack`      | Internet-facing ALB, target group, HTTP listener on :80, `deletionProtection=true` in production | Public entry point for the backend; listeners use `open:false` so no 0.0.0.0/0 ingress is punched on the ALB SG. |
+| 5 | `<Prefix>WafStack`      | **WAFv2 WebACL** (CLOUDFRONT scope, `us-east-1`): CommonRuleSet, KnownBadInputs, IpReputation, rate-based (5-minute window, per-IP), optional IPSet allowlist | Opt-out with `ENABLE_WAF=false`. ARN is cross-stack referenced by FrontendStack. |
+| 6 | `<Prefix>FrontendStack` | S3 bucket (private, SSL-enforced), CloudFront distribution (**OAC**, minTLS 1.2_2021, ResponseHeadersPolicy with HSTS 730 d + strict CSP + `frame-ancestors 'none'`), SPA fallback function | Static web UI hosting. Uses **Origin Access Control** (not legacy OAI) — S3 bucket policy is scoped by `aws:SourceArn`. |
+| 7 | `<Prefix>CognitoStack`  | User Pool, app client, hosted-UI domain                               | Authentication. Imports the CloudFront domain to wire up callback URLs. |
+| 8 | `<Prefix>EcsStack`      | ECS cluster, Fargate service (1 task), task role, task definition     | Backend runtime. All environment variables are injected here. |
+| 9 | `<Prefix>ConfigStack`   | SSM Parameter Store entries                                           | Static runtime values consumed by the backend and helper scripts. |
 
-Several archived stacks (RDS, Redis, WAF, CodeBuild, Verified Permissions) live under `iac/lib/_archived/` and are **not** deployed by default. They are kept for reference.
+Several archived stacks (RDS, Redis, CodeBuild, Verified Permissions) live under `iac/lib/_archived/` and are **not** deployed by default. They are kept for reference. The previous `WafStack` archive has been superseded by the live CLOUDFRONT-scope WAF described above.
+
+### Synth-time security checks (cdk-nag)
+
+Every `cdk synth` / `cdk deploy` runs the `AwsSolutionsChecks` Aspect from `cdk-nag`. Known, documented tradeoffs (default CloudFront cert, managed-prefix-list ingress, non-ENFORCED Cognito advanced security, etc.) are suppressed in `iac/bin/iac.ts` with rationale comments; any **new** `[Error at ...]` from cdk-nag will fail `cdk synth`. Set `CDK_NAG=off` only for the rare local debugging session.
 
 ---
 
@@ -125,22 +130,6 @@ When the script finishes it prints:
 | ---------------- | ------ |
 | `--dry-run`      | Print the stack order and exit without deploying. |
 | `--skip-build`   | Deploy CDK stacks only; do not rebuild or upload the frontend bundle. |
-
-### Using finch instead of Docker
-
-The helper scripts invoke `docker` by name. If you only have finch installed, add a shim to your `PATH`:
-
-```bash
-mkdir -p /tmp/docker-shim
-cat > /tmp/docker-shim/docker <<'EOF'
-#!/usr/bin/env bash
-exec finch "$@"
-EOF
-chmod +x /tmp/docker-shim/docker
-export PATH="/tmp/docker-shim:$PATH"
-```
-
-Then re-run `./iac/scripts/deploy-all.sh`.
 
 ---
 
@@ -263,9 +252,13 @@ Representative monthly spend for a low-traffic single-team deployment in `us-eas
 | ECS Fargate (0.25 vCPU / 0.5 GiB, 1 task)         | ~$12 |
 | Application Load Balancer                         | ~$17 |
 | CloudFront (~1 GiB egress, first 10 GB free)      | <$1 |
+| WAFv2 (5 rules + WebACL association)              | ~$10 to $12 (fixed) |
+| VPC Flow Logs → CloudWatch (30 d retention)       | ~$1 |
 | DynamoDB (PAY_PER_REQUEST, small write volume)    | ~$1 |
 | S3 + CloudWatch Logs + SSM Parameter Store        | ~$1 |
-| **Subtotal**                                      | **~$30 to $35** |
+| **Subtotal**                                      | **~$42 to $45** |
+
+Set `ENABLE_WAF=false` to drop the WAF line item (~$10) for throwaway / sandbox stacks.
 
 The per-request cost of Bedrock dominates in practice. Track it from the Admin Usage page in the web UI (tokens per model) and via AWS Cost Explorer's **Bedrock** service filter.
 
@@ -286,13 +279,12 @@ CDK stacks are designed to be re-applied freely. Typical update flows:
 
 ### Deprecated helper scripts
 
-The following scripts in `iac/scripts/` are leftovers from earlier iterations and are no longer part of the supported flow. They will be removed in a future release; do not add them to new documentation or runbooks:
+The following scripts in `iac/scripts/` are leftovers from earlier iterations and are no longer part of the default flow. They will be removed in a future release; do not add them to new documentation or runbooks:
 
 - `validate-config.sh`
 - `deploy-with-update.sh`
-- `cloud-build.sh`
 
-Use `iac/scripts/deploy-all.sh` (infrastructure + frontend) and `iac/scripts/build-and-push.sh` (backend image) exclusively.
+Use `iac/scripts/deploy-all.sh` (infrastructure + frontend) and `iac/scripts/build-and-push.sh` (backend image) for ordinary deployments. `iac/scripts/cloud-build.sh` is an optional remote build driver kept for environments where the local Docker socket is unavailable; it is safe to ignore unless you explicitly need it.
 
 ---
 
@@ -316,7 +308,10 @@ Vite's dev server proxies `/api/*` and `/v1/*` to the deployed ALB, so you do **
 ```bash
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# requirements-dev.txt also pulls in pytest, moto, joserfc, ruff so the same
+# venv can run the test suite. The production Docker image installs
+# requirements.txt only.
+pip install -r requirements-dev.txt
 
 ENVIRONMENT=development \
 AWS_REGION=us-east-1 \
@@ -375,7 +370,12 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `DYNAMODB_TRUSTED_ACCOUNTS_TABLE`        | yes                     | yes         | |
 | `DYNAMODB_SSO_PRE_REGISTRATIONS_TABLE`   | yes                     | yes         | |
 | `DYNAMODB_API_KEYS_TABLE`                | yes                     | yes         | |
-| `CORS_ORIGINS`                           | yes (no `localhost`)    | yes         | |
+| `CORS_ORIGINS`                           | yes (no `localhost`)    | yes         | Must match the CloudFront domain in production. Dev/local backends can set `http://localhost:3003`. |
+| `DYNAMODB_SSO_NONCES_TABLE`              | optional                | yes (default `stratoclave-sso-nonces`) | Vouch-by-STS replay defence (`backend/dynamo/sso_nonces.py`). If the table is missing, the backend logs a warning and falls back to the ±5 minute skew check only. |
+| `ENABLE_WAF`                             | IaC-only                | n/a         | CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. |
+| `WAF_RATE_LIMIT_PER_5MIN`                | IaC-only                | n/a         | Per-IP request cap in the rate-based rule. Default: `300`. |
+| `WAF_IP_ALLOWLIST_ENABLED`               | IaC-only                | n/a         | Enable SSM-parameter-backed IPSet allowlist. Default: `false`. |
+| `CDK_NAG`                                | IaC-only                | n/a         | Set to `off` to skip the cdk-nag synth-time aspect. Default: `on`. |
 | `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`      | optional                | no          | If set, the backend auto-provisions this email as admin on first startup when no admin exists. Idempotent. |
 | `ALLOW_ADMIN_CREATION`                   | bootstrap only          | yes (default `false`) | See [Locking down after bootstrap](#locking-down-after-bootstrap). |
 | `EXPOSE_TEMPORARY_PASSWORD`              | optional                | no          | If `true`, `admin user create` returns the one-time password in the response. Default `false` (response field is `null`). Not recommended for production. |

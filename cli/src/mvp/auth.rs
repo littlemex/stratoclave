@@ -68,6 +68,7 @@ pub async fn login(opts: LoginOptions) -> Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let resp: LoginResp = client
         .post(config.login_url())
@@ -149,6 +150,7 @@ pub async fn whoami() -> Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let resp = client
         .get(config.me_url())

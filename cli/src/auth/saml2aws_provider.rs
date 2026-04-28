@@ -188,11 +188,33 @@ async fn install_saml2aws() -> Result<()> {
         "linux" => {
             eprintln!("[INFO] Installing via curl...");
 
-            // Download and install using the official install script
+            // Download via the official release URL *and* verify the
+            // tarball against the checksum file the same release ships.
+            // Without the verification step, a MITM could swap in a
+            // hostile binary that we would install as root into
+            // ~/.local/bin. `sha256sum --ignore-missing --check` fails
+            // closed on mismatch.
             let install_cmd = r#"
-                CURRENT_VERSION=$(curl -Ls https://api.github.com/repos/Versent/saml2aws/releases/latest | grep 'tag_name' | cut -d'v' -f2 | cut -d'"' -f1)
-                wget -c https://github.com/Versent/saml2aws/releases/download/v${CURRENT_VERSION}/saml2aws_${CURRENT_VERSION}_linux_amd64.tar.gz -O - | tar -xzv -C ~/.local/bin
-                chmod u+x ~/.local/bin/saml2aws
+                set -euo pipefail
+                CURRENT_VERSION=$(curl -Ls https://api.github.com/repos/Versent/saml2aws/releases/latest \
+                    | grep '"tag_name"' | head -n1 | cut -d'v' -f2 | cut -d'"' -f1)
+                if [ -z "$CURRENT_VERSION" ]; then
+                    echo "[ERROR] Could not determine latest saml2aws version" >&2
+                    exit 1
+                fi
+                TMP="$(mktemp -d)"
+                trap 'rm -rf "$TMP"' EXIT INT TERM
+                TARBALL="saml2aws_${CURRENT_VERSION}_linux_amd64.tar.gz"
+                BASE="https://github.com/Versent/saml2aws/releases/download/v${CURRENT_VERSION}"
+                echo "[INFO] downloading $TARBALL"
+                curl -fsSL "$BASE/$TARBALL" -o "$TMP/$TARBALL"
+                echo "[INFO] downloading checksum file"
+                curl -fsSL "$BASE/saml2aws_${CURRENT_VERSION}_checksums.txt" \
+                    -o "$TMP/checksums.txt"
+                (cd "$TMP" && sha256sum --ignore-missing --check checksums.txt)
+                mkdir -p "$HOME/.local/bin"
+                tar -xzf "$TMP/$TARBALL" -C "$HOME/.local/bin"
+                chmod u+x "$HOME/.local/bin/saml2aws"
             "#;
 
             let status = Command::new("sh")
@@ -206,7 +228,10 @@ async fn install_saml2aws() -> Result<()> {
                 .context("Failed to install saml2aws")?;
 
             if !status.success() {
-                bail!("Installation failed. Please install manually.");
+                bail!(
+                    "Installation failed. sha256 verification may have rejected \
+                     the tarball. Please install manually."
+                );
             }
 
             eprintln!("[OK] saml2aws installed to ~/.local/bin/saml2aws");
@@ -344,7 +369,10 @@ async fn exchange_sts_for_jwt(
         region: "us-east-1".to_string(), // TODO: make configurable
     };
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let response = client
         .post(&url)
         .json(&request_body)

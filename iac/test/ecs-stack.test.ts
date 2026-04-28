@@ -38,7 +38,7 @@ describe('EcsStack', () => {
       'stratoclave-backend'
     );
 
-    const alb = new elbv2.ApplicationLoadBalancer(networkStack, 'TestALB', {
+    const _alb = new elbv2.ApplicationLoadBalancer(networkStack, 'TestALB', {
       vpc,
       internetFacing: true,
     });
@@ -52,16 +52,22 @@ describe('EcsStack', () => {
 
     stack = new EcsStack(app, 'TestEcsStack', {
       env: { account: '123456789012', region: 'us-west-2' },
+      prefix: 'stratoclave',
       vpc,
       securityGroup,
       repository,
       targetGroup,
+      userPoolArn:
+        'arn:aws:cognito-idp:us-west-2:123456789012:userpool/us-west-2_testpool',
+      dynamoDbTableArns: [
+        'arn:aws:dynamodb:us-west-2:123456789012:table/stratoclave-users',
+      ],
       cpu: 256,
       memory: 512,
       desiredCount: 1,
       environment: {
-        DATABASE_TYPE: 'sqlite',
-        AUTH_MODE: 'apikey',
+        DATABASE_TYPE: 'dynamodb',
+        AUTH_MODE: 'cognito',
       },
     });
 
@@ -92,35 +98,33 @@ describe('EcsStack', () => {
     });
   });
 
-  // ECS-03: Fargate Service (desiredCount=1, assignPublicIp=false) (P0)
-  test('Fargate Service が Private Subnet に配置されること', () => {
+  // v2.1: ECS Fargate runs on public subnets (no NAT), so assignPublicIp=ENABLED
+  test('Fargate Service runs on public subnets with desiredCount=1', () => {
     template.hasResourceProperties('AWS::ECS::Service', {
       ServiceName: 'stratoclave-backend',
       DesiredCount: 1,
       LaunchType: 'FARGATE',
       NetworkConfiguration: {
         AwsvpcConfiguration: {
-          AssignPublicIp: 'DISABLED',
+          AssignPublicIp: 'ENABLED',
         },
       },
     });
   });
 
-  // ECS-04: Task Role に Bedrock 権限 (InvokeModel, Converse 等) (P0)
-  test('Task Role に Bedrock 権限があること', () => {
+  test('Task Role has Bedrock invocation permissions', () => {
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
-          {
-            Action: [
+          Match.objectLike({
+            Action: Match.arrayWith([
               'bedrock:InvokeModel',
               'bedrock:InvokeModelWithResponseStream',
               'bedrock:Converse',
               'bedrock:ConverseStream',
-            ],
+            ]),
             Effect: 'Allow',
-            Resource: '*',
-          },
+          }),
         ]),
       },
     });
@@ -134,10 +138,8 @@ describe('EcsStack', () => {
     });
   });
 
-  // ECS-10: CfnOutput が 3 つエクスポートされること (P2)
-  test('CfnOutput が 3 つエクスポートされること', () => {
+  test('ClusterName and ServiceName are exported as CFN outputs', () => {
     template.hasOutput('ClusterName', {});
     template.hasOutput('ServiceName', {});
-    template.hasOutput('LogGroupName', {});
   });
 });

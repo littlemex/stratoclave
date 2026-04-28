@@ -687,6 +687,7 @@ access pattern (small, bursty) and removes the need to tune capacity.
 | `api-keys` | `key_hash` (SHA-256) | — | `user-id-index` | Long-lived API keys; plaintext never stored |
 | `trusted-accounts` | `account_id` | — | — | SSO allowlist + provisioning policy |
 | `sso-pre-registrations` | `email` | — | `iam-user-index` | Invitations for invite-only provisioning |
+| `sso-nonces` | `nonce` (SHA-256 of `Authorization + \x00 + X-Amz-Date`) | — | — | Vouch-by-STS replay defence. 10-minute TTL. Written with `attribute_not_exists(nonce)` before the STS round trip — a second submission of the same signed request returns 401. |
 
 ### Notable invariants
 
@@ -803,9 +804,6 @@ that one ARN.
 Stratoclave is intentionally under-featured; the items below are designed
 but not yet implemented.
 
-- **STS nonce table.** A DynamoDB table keyed by the `X-Amz-Signature`
-  value with a 5-minute TTL; `ConditionExpression = attribute_not_exists` on
-  insert fully eliminates the 5-minute replay window.
 - **Audit log table.** Promote `stratoclave.audit` events from CloudWatch to
   a dedicated DynamoDB table with a search UI so that compliance queries
   don't require CloudWatch Insights.

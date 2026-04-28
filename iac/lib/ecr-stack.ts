@@ -36,7 +36,10 @@ export class EcrStack extends cdk.Stack {
           rulePriority: 2,
         },
       ],
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // RETAIN: holding every released backend image is the rollback
+      // surface of last resort. A stray `cdk destroy` on dev must not
+      // take the tagged prod images with it.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     putStringParameter(this, 'EcrUriParam', {

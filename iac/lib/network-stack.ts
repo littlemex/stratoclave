@@ -1,5 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { applyCommonTags, paramPath, putStringParameter } from './_common';
 
@@ -51,21 +53,69 @@ export class NetworkStack extends cdk.Stack {
       enableDnsSupport: true,
     });
 
+    // VPC Flow Logs (P2): ALL traffic to CloudWatch, 30-day retention.
+    // Needed for forensics / DDoS investigation and to satisfy cdk-nag.
+    const flowLogsGroup = new logs.LogGroup(this, 'VpcFlowLogsGroup', {
+      logGroupName: `/aws/vpc/${props.prefix}-flow-logs`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    this.vpc.addFlowLog('VpcFlowLogs', {
+      destination: ec2.FlowLogDestination.toCloudWatchLogs(flowLogsGroup),
+      trafficType: ec2.FlowLogTrafficType.ALL,
+    });
+
     this.albSecurityGroup = new ec2.SecurityGroup(this, 'AlbSecurityGroup', {
       vpc: this.vpc,
       securityGroupName: `${props.prefix}-alb-sg`,
       description: `Security group for ${props.prefix} ALB`,
       allowAllOutbound: true,
     });
-    this.albSecurityGroup.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(80),
-      'Allow HTTP from anywhere'
+
+    // P1-2c: the ALB only serves CloudFront. Restrict inbound 80/443 to
+    // the AWS managed prefix list for CloudFront origin-facing IPs, so a
+    // direct ALB-DNS probe fails at the L4 boundary. CDK does not expose
+    // a first-class lookup for managed prefix lists, so we resolve the ID
+    // at deploy time with an AwsCustomResource (EC2 DescribeManagedPrefixLists).
+    const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
+      this,
+      'CloudFrontOriginFacingPrefixListLookup',
+      {
+        onUpdate: {
+          service: 'EC2',
+          action: 'describeManagedPrefixLists',
+          parameters: {
+            Filters: [
+              {
+                Name: 'prefix-list-name',
+                Values: ['com.amazonaws.global.cloudfront.origin-facing'],
+              },
+            ],
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            'cloudfront-origin-facing-prefix-list',
+          ),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+          resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+        }),
+      },
     );
+    const cloudFrontPrefixListId = cloudFrontPrefixListLookup.getResponseField(
+      'PrefixLists.0.PrefixListId',
+    );
+
+    // CloudFront origin-facing prefix list contains ~50+ IP ranges. Each
+    // prefix-list ingress expands into one rule per CIDR at enforcement
+    // time and counts against the "Inbound or outbound rules per security
+    // group" quota (default 60). We only need port 80: the FrontendStack
+    // distribution talks to the ALB origin with `originProtocolPolicy:
+    // 'http-only'`, so a :443 ingress would never be used. Keeping it
+    // would double the rule count and blow past the SG quota.
     this.albSecurityGroup.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      'Allow HTTPS from anywhere'
+      ec2.Peer.prefixList(cloudFrontPrefixListId),
+      ec2.Port.tcp(80),
+      'Allow HTTP from CloudFront edge locations only',
     );
 
     this.ecsSecurityGroup = new ec2.SecurityGroup(this, 'EcsSecurityGroup', {

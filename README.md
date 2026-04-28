@@ -56,12 +56,22 @@ Postgres, no Redis, no external control plane, and no SaaS dependency.
   list via `/v1/models` and streams through `/v1/messages`. A CloudFront
   Function guards against the `/v1/v1/...` double-prefix pitfall.
 - **CDK v2, one command.** A single `./scripts/deploy-all.sh` from
-  [`iac/`](./iac) provisions the VPC, DynamoDB tables, ECR repository, ALB,
-  CloudFront + S3 frontend, Cognito User Pool, and the Fargate service in a
-  single AWS region.
+  [`iac/`](./iac) provisions the VPC (with Flow Logs), DynamoDB tables, ECR
+  repository, ALB, **WAFv2 WebACL (CloudFront scope)**, CloudFront + S3
+  frontend, Cognito User Pool, and the Fargate service in a single AWS
+  region. `cdk-nag` runs at every synth so regressions in security posture
+  fail the build.
+- **Defense in depth at the edge.** CloudFront terminates TLS at 1.2_2021+
+  with HSTS 730 d + preload, a strict CSP (`frame-ancestors 'none'`), and
+  a managed WAF (CommonRuleSet + KnownBadInputs + IpReputation + per-IP
+  rate limit). The S3 origin uses **Origin Access Control** with a
+  `aws:SourceArn`-scoped bucket policy, and the ALB security group only
+  accepts the AWS-managed CloudFront origin-facing prefix list — direct
+  ALB DNS probes fail at L4.
 - **Auditable by construction.** Every privileged action is emitted as a
   structured JSON log to CloudWatch, keyed by the correlation ID the backend
-  injects on ingress.
+  injects on ingress. Emails are redacted into stable SHA-256 markers so
+  logs never leak PII.
 
 ## Architecture at a glance
 
@@ -84,21 +94,25 @@ For a detailed walkthrough of components, data model, and invariants, see
 
 ### Deploy to your AWS account
 
-Prerequisites: AWS CLI with an administrator profile, Node.js 18+, Docker or
-`finch`, and Bedrock model access enabled for the Claude family in your
-region.
+Prerequisites: AWS CLI with an administrator profile, Node.js 20 LTS, Docker,
+and Bedrock model access enabled for the Claude family in your region.
 
 ```bash
 # Clone
 git clone https://github.com/littlemex/stratoclave.git
 cd stratoclave
 
-# Set your profile / region / deployment prefix
+# Set your profile / region / deployment prefix. us-east-1 is enforced today
+# (see "Regional constraints" in docs/DEPLOYMENT.md).
 export AWS_PROFILE=your-admin-profile
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-east-1
 export CDK_DEFAULT_REGION=us-east-1
+export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 export STRATOCLAVE_PREFIX=stratoclave
 
-# One-shot deploy: network, DynamoDB, ECR, ALB, CloudFront, Cognito, Fargate
+# One-shot deploy: network (+ Flow Logs), DynamoDB, ECR, ALB, WAF,
+# CloudFront (OAC), Cognito, Fargate. cdk-nag runs during synth.
 cd iac
 npm install
 ./scripts/deploy-all.sh
@@ -265,11 +279,23 @@ In short: Stratoclave's backend task role holds no `iam:*`, no
 deployment artifacts. It does not store IdP refresh tokens. A full backend
 compromise is bounded to this deployment — Bedrock overspend, DynamoDB
 tampering, impersonation within this User Pool — and does not reach the
-customer's identity source or other AWS services. See the *Security
-considerations* section of [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
-for the detailed attack model and the residual risks that are explicitly
-called out (5-minute replay window, invite-only provisioning, DoS of the SSO
-exchange endpoint).
+customer's identity source or other AWS services.
+
+Infrastructure-level hardening is enforced at synth time by `cdk-nag`
+(CommonSolutionsChecks) and, at runtime, by:
+
+- WAFv2 managed rules + per-IP rate limit on the CloudFront distribution,
+- CloudFront OAC with a `aws:SourceArn`-scoped S3 bucket policy,
+- ALB SG inbound restricted to the CloudFront origin-facing prefix list,
+- DynamoDB `RETAIN` + PITR on audit-critical tables (`usage-logs`, `api-keys`),
+- Vouch-by-STS replay defence via the `sso-nonces` TTL table,
+- VPC Flow Logs (CloudWatch, 30 d),
+- structured-log PII redaction (emails → SHA-256 markers).
+
+See the *Security considerations* section of
+[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the detailed attack
+model and the residual risks that are explicitly called out (5-minute
+replay window, invite-only provisioning, DoS of the SSO exchange endpoint).
 
 ## Project status
 

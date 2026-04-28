@@ -690,6 +690,7 @@ stratoclave setup https://<your-deployment>.cloudfront.net   # your deployment U
 | `api-keys` | `key_hash` (SHA-256) | — | `user-id-index` | 長寿命 API キー; プレーンテキストは保存されない |
 | `trusted-accounts` | `account_id` | — | — | SSO 許可リスト + プロビジョニングポリシー |
 | `sso-pre-registrations` | `email` | — | `iam-user-index` | invite-only プロビジョニング用招待 |
+| `sso-nonces` | `nonce` (`Authorization + \x00 + X-Amz-Date` の SHA-256) | — | — | Vouch-by-STS のリプレイ防御。TTL は 10 分。STS ラウンドトリップの前に `attribute_not_exists(nonce)` で書き込まれる — 同じ署名付きリクエストを 2 度目に提出すると 401 が返る。 |
 
 ### 注目すべき不変条件
 
@@ -808,10 +809,6 @@ ARN にスコープされている。
 Stratoclave は意図的に機能を絞っている。以下は設計済みだがまだ実装されて
 いない項目である。
 
-- **STS nonce テーブル**。`X-Amz-Signature` 値をキーとし TTL 5 分の
-  DynamoDB テーブル。挿入時の
-  `ConditionExpression = attribute_not_exists` で 5 分のリプレイウィンドウ
-  を完全に除去できる。
 - **監査ログテーブル**。`stratoclave.audit` イベントを CloudWatch から
   検索 UI 付きの専用 DynamoDB テーブルに昇格させ、コンプライアンスクエリ
   に CloudWatch Insights を要求しないようにする。

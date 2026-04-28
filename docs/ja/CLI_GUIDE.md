@@ -86,7 +86,7 @@ Commands:
 
 各階層でフラグレベルのヘルプが必要なときは `stratoclave <command> --help` を実行する。
 
-引数なしで CLI を起動し標準入力がパイプされている場合、CLI はレガシー統合で使われる非対話パイプモードに入る。このモードは未ドキュメントで、新規の用途では依存すべきではない。上記の明示的なサブコマンドを使うこと。
+引数なしで CLI を起動**かつ**標準入力が TTY ではなくパイプになっている場合、CLI は古いシェルラッパー向けのレガシー非対話パイプモードに入る。このモードは標準入力から単一のプロンプトを受け取り、標準出力に単一のアシスタント応答を出力する。後方互換のためだけに残されており、新規の用途では明示的なサブコマンド (`stratoclave claude`, `stratoclave mcp`, または Anthropic SDK の直接呼び出し) を使うべきである。誤ってこのモードに入るのを避けるには、常に明示的なサブコマンドを渡すか、`/dev/null` から標準入力をリダイレクトすること (`stratoclave --help </dev/null`)。
 
 > **重要**: `admin user` や `admin tenant` の複数形は存在しない。`stratoclave admin users list` や `stratoclave admin tenants list` は**存在しない**。常に単数形の名詞 (`admin user list`, `admin tenant list`) を使うこと。
 

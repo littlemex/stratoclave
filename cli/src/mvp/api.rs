@@ -25,8 +25,12 @@ impl ApiClient {
                 "Not logged in: {e}. Run `stratoclave auth login` first."
             )
         })?;
+        // WAF (AWSManagedRulesCommonRuleSet) blocks requests with an empty
+        // User-Agent. reqwest does not auto-populate one, so every CLI
+        // subcommand must pass an explicit identifier.
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
             config,

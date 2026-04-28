@@ -177,6 +177,7 @@ fn validate_url(raw: &str) -> Result<String> {
 async fn fetch_config(url: &str) -> Result<StratoclaveConfig> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("Failed to build HTTP client")?;
 

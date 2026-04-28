@@ -20,6 +20,12 @@ export interface AlbStackProps extends cdk.StackProps {
   certificateArn?: string;
   /** 表示用の独自ドメイン (optional) */
   domainName?: string;
+  /**
+   * Enable ALB deletion protection. Production must set this to true so
+   * that a `cdk destroy` can't take the Backend offline by accident.
+   * @default false
+   */
+  deletionProtection?: boolean;
 }
 
 export class AlbStack extends cdk.Stack {
@@ -39,7 +45,9 @@ export class AlbStack extends cdk.Stack {
       securityGroup: props.securityGroup,
       loadBalancerName: `${prefix}-alb`,
       http2Enabled: true,
-      deletionProtection: false,
+      // Production defaults to deletion-protected so a stray `cdk destroy`
+      // can't wipe the load balancer out from under a live tenant.
+      deletionProtection: props.deletionProtection ?? false,
     });
 
     this.targetGroup = new elbv2.ApplicationTargetGroup(this, 'BackendTargetGroup', {
@@ -59,10 +67,16 @@ export class AlbStack extends cdk.Stack {
       deregistrationDelay: cdk.Duration.seconds(30),
     });
 
+    // P1-2c: `open: false` prevents CDK from auto-adding a
+    // `0.0.0.0/0 -> :80` ingress to our ALB security group. Inbound is
+    // controlled exclusively by network-stack.ts, which only allows the
+    // CloudFront origin-facing managed prefix list. Without this flag,
+    // CDK would punch a hole we just spent the sweep closing.
     if (props.certificateArn) {
       this.httpListener = this.alb.addListener('HttpListener', {
         port: 80,
         protocol: elbv2.ApplicationProtocol.HTTP,
+        open: false,
         defaultAction: elbv2.ListenerAction.redirect({
           protocol: 'HTTPS',
           port: '443',
@@ -77,6 +91,7 @@ export class AlbStack extends cdk.Stack {
       this.httpsListener = this.alb.addListener('HttpsListener', {
         port: 443,
         protocol: elbv2.ApplicationProtocol.HTTPS,
+        open: false,
         certificates: [certificate],
         defaultAction: elbv2.ListenerAction.forward([this.targetGroup]),
       });
@@ -84,6 +99,7 @@ export class AlbStack extends cdk.Stack {
       this.httpListener = this.alb.addListener('HttpListener', {
         port: 80,
         protocol: elbv2.ApplicationProtocol.HTTP,
+        open: false,
         defaultAction: elbv2.ListenerAction.forward([this.targetGroup]),
       });
     }

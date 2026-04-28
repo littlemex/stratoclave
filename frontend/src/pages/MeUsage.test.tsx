@@ -28,7 +28,7 @@ const mockUsageHistory = vi.fn<[unknown], Promise<UsageHistoryResponse>>()
 ;(globalThis as any).__usageSummary = (...a: unknown[]) =>
   mockUsageSummary(...(a as []))
 ;(globalThis as any).__usageHistory = (...a: unknown[]) =>
-  mockUsageHistory(...(a as []))
+  mockUsageHistory(a[0])
 
 // Imported after the mocks so React sees stubbed modules.
 import MeUsage from './MeUsage'

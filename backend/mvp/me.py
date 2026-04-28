@@ -149,19 +149,26 @@ def usage_summary(
     )
     items = resp.get("Items", [])
 
+    # P2-1a: `by_tenant` previously leaked archived tenant ids the caller
+    # no longer belongs to (and their names, via /me/usage-history).
+    # Restrict all aggregations to the active tenant so the response mirrors
+    # what `credit_used` actually represents.
     by_model: dict[str, int] = {}
     by_tenant: dict[str, int] = {}
     active_sample = 0
     for it in items:
         tid = str(it.get("tenant_id") or "unknown")
+        if tid != user.org_id:
+            # Skip consumption recorded against a tenant the caller has
+            # since been archived out of. Still counted in the global
+            # Admin usage view (`/admin/usage/show`), just hidden from
+            # the user's own summary.
+            continue
         tokens = int(it.get("total_tokens", 0))
-        # by_tenant には全テナント分を載せる (UI 側で参照用に出すため)
         by_tenant[tid] = by_tenant.get(tid, 0) + tokens
-        # 「総消費」として集計する by_model は active tenant 分に限定する
-        if tid == user.org_id:
-            model = str(it.get("model_id") or "unknown")
-            by_model[model] = by_model.get(model, 0) + tokens
-            active_sample += 1
+        model = str(it.get("model_id") or "unknown")
+        by_model[model] = by_model.get(model, 0) + tokens
+        active_sample += 1
 
     return UsageSummaryResponse(
         tenant_id=user.org_id,
