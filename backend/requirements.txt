@@ -12,7 +12,7 @@ python-multipart==0.0.12
 httpx==0.28.1
 
 # AWS
-boto3==1.35.74
+boto3==1.42.97
 
 # Utilities
 pydantic[email]==2.10.3
