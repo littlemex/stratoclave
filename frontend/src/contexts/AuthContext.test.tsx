@@ -30,14 +30,14 @@ vi.mock('@/lib/cognito', () => ({
   refreshTokens: (...args: unknown[]) => (globalThis as any).__mockRefresh(...args),
   logoutRedirect: vi.fn(),
   saveTokens: (t: StoredTokens) =>
-    window.localStorage.setItem('stratoclave_tokens', JSON.stringify(t)),
+    window.sessionStorage.setItem('stratoclave_tokens', JSON.stringify(t)),
   getStoredTokens: () => {
-    const raw = window.localStorage.getItem('stratoclave_tokens')
+    const raw = window.sessionStorage.getItem('stratoclave_tokens')
     return raw ? (JSON.parse(raw) as StoredTokens) : null
   },
-  clearTokens: () => window.localStorage.removeItem('stratoclave_tokens'),
+  clearTokens: () => window.sessionStorage.removeItem('stratoclave_tokens'),
   getAccessToken: () => {
-    const raw = window.localStorage.getItem('stratoclave_tokens')
+    const raw = window.sessionStorage.getItem('stratoclave_tokens')
     return raw ? (JSON.parse(raw) as StoredTokens).access_token : null
   },
 }))
@@ -79,19 +79,22 @@ function setUrl(href: string) {
 }
 
 beforeEach(() => {
-  window.localStorage.clear()
+  window.sessionStorage.clear()
   mockMe.mockReset()
   mockRefresh.mockReset()
   setUrl('/')
 })
 
 afterEach(() => {
-  window.localStorage.clear()
+  window.sessionStorage.clear()
 })
 
 describe('AuthContext bootstrap', () => {
-  it('accepts a CLI-injected ?token= and resolves to authenticated', async () => {
-    mockMe.mockResolvedValueOnce(MOCK_ME)
+  it('strips ?token= without authenticating (P0-8)', async () => {
+    // P0-8 (2026-04 security review): `?token=` is no longer accepted
+    // as an authentication channel — it was a session-fixation vector.
+    // The bootstrap should silently strip the parameter from the URL
+    // and fall through to normal unauthenticated handling.
     setUrl('/?token=eyJcli-token')
 
     render(
@@ -101,14 +104,13 @@ describe('AuthContext bootstrap', () => {
     )
 
     await waitFor(() =>
-      expect(screen.getByTestId('status').textContent).toBe('authenticated'),
+      expect(screen.getByTestId('status').textContent).toBe('unauthenticated'),
     )
-    expect(screen.getByTestId('email').textContent).toBe('alice@example.com')
-    // `?token=` must be stripped from the URL so a refresh does not reuse it.
+    // ?token= must have been scrubbed from the URL on the way in.
     expect(window.location.search).toBe('')
-    // Tokens were persisted.
-    const stored = window.localStorage.getItem('stratoclave_tokens')
-    expect(stored).toContain('eyJcli-token')
+    // No tokens saved — the fixation payload must not persist.
+    expect(window.sessionStorage.getItem('stratoclave_tokens')).toBeNull()
+    expect(mockMe).not.toHaveBeenCalled()
   })
 
   it('falls back to localStorage when no URL token is present', async () => {
@@ -119,7 +121,7 @@ describe('AuthContext bootstrap', () => {
       // 30 min in the future — not near expiry.
       expires_at: Date.now() + 30 * 60 * 1000,
     }
-    window.localStorage.setItem('stratoclave_tokens', JSON.stringify(tokens))
+    window.sessionStorage.setItem('stratoclave_tokens', JSON.stringify(tokens))
     mockMe.mockResolvedValueOnce(MOCK_ME)
 
     render(
@@ -154,7 +156,7 @@ describe('AuthContext bootstrap', () => {
       // Treat as expired (past) so the refresh branch runs.
       expires_at: Date.now() - 10_000,
     }
-    window.localStorage.setItem('stratoclave_tokens', JSON.stringify(expired))
+    window.sessionStorage.setItem('stratoclave_tokens', JSON.stringify(expired))
 
     const fresh: StoredTokens = {
       access_token: 'new',
@@ -177,8 +179,17 @@ describe('AuthContext bootstrap', () => {
     expect(mockRefresh).toHaveBeenCalledWith('eyJrefresh')
   })
 
-  it('clears tokens and reports the failure when /me returns 401 after a CLI token', async () => {
-    setUrl('/?token=eyJcli-token')
+  it('clears tokens when /me returns 401 on bootstrap', async () => {
+    // No more `?token=` injection, so the 401 path now exercises the
+    // existing sessionStorage tokens being invalid (Cognito session
+    // revoked, key rotated, tenant archived, etc.).
+    const tokens: StoredTokens = {
+      access_token: 'eyJstale',
+      id_token: null,
+      refresh_token: null,
+      expires_at: Date.now() + 30 * 60 * 1000,
+    }
+    window.sessionStorage.setItem('stratoclave_tokens', JSON.stringify(tokens))
     const err = Object.assign(new Error('unauthorized'), { status: 401 })
     mockMe.mockRejectedValueOnce(err)
 
@@ -191,6 +202,6 @@ describe('AuthContext bootstrap', () => {
     await waitFor(() =>
       expect(screen.getByTestId('status').textContent).toBe('unauthenticated'),
     )
-    expect(window.localStorage.getItem('stratoclave_tokens')).toBeNull()
+    expect(window.sessionStorage.getItem('stratoclave_tokens')).toBeNull()
   })
 })

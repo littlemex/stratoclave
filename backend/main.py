@@ -122,6 +122,21 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
+# Rate limiting on authentication endpoints (P0-3).
+#
+# Decorators live inside each router (cognito_auth, sso_exchange, ...).
+# Wiring them here makes the `Limiter` instance available on `app.state`
+# so slowapi's middleware-less per-route decorator can pick it up, and
+# installs the 429 exception handler.
+# ---------------------------------------------------------------------------
+from core.rate_limit import RateLimitExceeded, limiter
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402 — positional import after app
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# ---------------------------------------------------------------------------
 # セキュリティヘッダー
 # ---------------------------------------------------------------------------
 

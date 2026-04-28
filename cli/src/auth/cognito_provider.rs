@@ -131,6 +131,21 @@ fn generate_pkce_pair() -> PkcePair {
     }
 }
 
+/// CSPRNG-generated OAuth `state` parameter (RFC 6749 §10.12).
+///
+/// P0-4 (2026-04 security review): the previous implementation only
+/// sent PKCE. PKCE on its own defeats *authorization code
+/// interception* but NOT *login CSRF* — an attacker could direct a
+/// victim browser to `http://127.0.0.1:18080/callback?code=<attacker>`
+/// and the CLI would happily exchange the attacker's code for tokens,
+/// associating the victim's CLI with the attacker's identity. A fresh,
+/// single-use, high-entropy `state` echoed through the authorization
+/// request and verified on the callback closes that gap.
+fn generate_state() -> String {
+    let random_bytes: [u8; 32] = rand::random();
+    URL_SAFE_NO_PAD.encode(random_bytes)
+}
+
 /// Cognito token response
 #[derive(Debug, serde::Deserialize)]
 struct TokenResponse {
@@ -153,11 +168,18 @@ fn resolve_id_token(id_token: Option<String>, access_token: String) -> String {
     }
 }
 
-/// Wait for callback on local HTTP server
+/// Wait for callback on local HTTP server.
+///
+/// P0-4: require that the returned `state` matches the one we embedded
+/// in the authorization request. Without this check an attacker who
+/// merely tricks a victim browser into hitting the local callback
+/// (e.g. via a phishing link) can pin the victim's CLI session to the
+/// attacker's Cognito identity.
 fn wait_for_callback(
     server: &tiny_http::Server,
     redirect_host: &str,
     timeout_secs: u64,
+    expected_state: &str,
 ) -> Result<String> {
     let request = server
         .recv_timeout(std::time::Duration::from_secs(timeout_secs))
@@ -168,6 +190,26 @@ fn wait_for_callback(
             let url_str = format!("http://{}{}", redirect_host, req.url());
             let parsed = url::Url::parse(&url_str).context("Failed to parse callback URL")?;
             let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+
+            let returned_state = params.get("state").map(String::as_str).unwrap_or("");
+            // Use constant-time comparison on equal-length strings: we
+            // generate `expected_state` ourselves (CSPRNG 32B URL-safe
+            // base64) so unequal lengths are themselves a protocol
+            // failure and a fast reject is fine.
+            let state_matches = returned_state.len() == expected_state.len()
+                && returned_state
+                    .bytes()
+                    .zip(expected_state.bytes())
+                    .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                    == 0;
+            if !state_matches {
+                let response = tiny_http::Response::from_string(
+                    "OAuth `state` mismatch; likely CSRF or a replayed link.",
+                )
+                .with_status_code(400);
+                let _ = req.respond(response);
+                bail!("OAuth state mismatch — aborting to prevent login CSRF (P0-4)");
+            }
 
             if let Some(code) = params.get("code") {
                 let response = tiny_http::Response::from_string(
@@ -193,8 +235,14 @@ fn wait_for_callback(
 
 /// Run browser-based authentication flow (internal implementation)
 async fn browser_auth_flow_internal(app_config: &AppConfig) -> Result<TokenResponse> {
-    // 1. Generate PKCE pair
+    // 1. Generate PKCE pair + OAuth `state` (P0-4).
+    //
+    // PKCE alone protects against authorization-code interception on
+    // the redirect leg but does NOT protect against login CSRF —
+    // anyone who can induce the victim browser to visit our local
+    // callback with an attacker-supplied `code` wins without `state`.
     let pkce = generate_pkce_pair();
+    let state = generate_state();
 
     // 2. Start local callback server (try multiple ports if needed)
     let mut port = app_config.redirect_port;
@@ -220,7 +268,10 @@ async fn browser_auth_flow_internal(app_config: &AppConfig) -> Result<TokenRespo
     // Update redirect_uri with actual port
     let actual_redirect_uri = format!("http://{}:{}/callback", app_config.redirect_host, port);
 
-    // Build authorization URL with actual port
+    // Build authorization URL with actual port.
+    //
+    // `state` (P0-4) round-trips through the IdP and is verified on the
+    // callback. Cognito does not return `state` unless we send it.
     let params = [
         ("client_id", app_config.client_id.as_str()),
         ("response_type", "code"),
@@ -228,6 +279,7 @@ async fn browser_auth_flow_internal(app_config: &AppConfig) -> Result<TokenRespo
         ("redirect_uri", actual_redirect_uri.as_str()),
         ("code_challenge", pkce.code_challenge.as_str()),
         ("code_challenge_method", "S256"),
+        ("state", state.as_str()),
     ];
     let query = params
         .iter()
@@ -256,7 +308,7 @@ async fn browser_auth_flow_internal(app_config: &AppConfig) -> Result<TokenRespo
         "Waiting for authentication callback on port {} (timeout: {}s)...",
         port, auth_timeout
     );
-    let code = wait_for_callback(&server, &app_config.redirect_host, auth_timeout)?;
+    let code = wait_for_callback(&server, &app_config.redirect_host, auth_timeout, &state)?;
 
     // 5. Exchange code for tokens
     let token_url = format!("{}/oauth2/token", app_config.cognito_domain);

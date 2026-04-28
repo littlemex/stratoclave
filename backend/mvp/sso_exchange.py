@@ -30,8 +30,10 @@ from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+
+from core.rate_limit import SSO_EXCHANGE_RATE_LIMIT, limiter
 
 from dynamo import (
     SsoPreRegistrationsRepository,
@@ -208,7 +210,13 @@ def _cognito_admin_password_auth(
 # Endpoint
 # ------------------------------------------------------------------
 @router.post("/sso-exchange", response_model=SsoExchangeResponse)
-def sso_exchange(body: SsoExchangeRequest) -> SsoExchangeResponse:
+@limiter.limit(SSO_EXCHANGE_RATE_LIMIT)
+def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeResponse:
+    """P0-3: per-IP rate limit (default 20/minute). The STS presigned
+    verification itself is cheap but we forward it to the AWS STS API,
+    so an unbounded rate would let an attacker waste our rate budget
+    and run identity-enumeration against the allowlisted accounts."""
+    _ = request
     # 1. STS 検証 + 身元抽出
     sts_identity = verify_and_call_sts(
         method=body.method,
@@ -286,12 +294,16 @@ def sso_exchange(body: SsoExchangeRequest) -> SsoExchangeResponse:
             sso_account_id=sts_identity.account_id,
             sso_principal_arn=sts_identity.arn,
         )
-        # UserTenants 初期化
+        # UserTenants bootstrap. SSO provisioning is an explicit sign-up
+        # flow, so archived rows are allowed to be revived here — unlike
+        # the passive `/api/mvp/me` path, where resurrection would be a
+        # silent way to bypass tenant archive (P0-1).
         UserTenantsRepository().ensure(
             user_id=sub,
             tenant_id=tenant_id,
             role=trusted.target_role,
             total_credit=trusted.target_credit,
+            allow_resurrection=True,
         )
         log_audit_event(
             event="sso_user_provisioned",

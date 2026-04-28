@@ -26,14 +26,12 @@ import {
   getStoredTokens,
   logoutRedirect,
   refreshTokens as refreshTokensFromCognito,
-  saveTokens,
   startLogin,
 } from '@/lib/cognito'
 import type {
   AuthAction,
   AuthState,
   AuthUser,
-  StoredTokens,
   UserRole,
 } from '@/types/auth'
 
@@ -147,37 +145,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   /* ------------------------------------------------------------------ */
   useEffect(() => {
     const url = new URL(window.location.href)
-    const urlToken = url.searchParams.get('token')
+
+    // P0-8 (2026-04 security review): accepting `?token=<access_token>`
+    // straight off the URL let anyone who could lure a victim to
+    // `https://app.example/?token=<attacker>` pin the victim's SPA to
+    // an attacker-controlled Cognito identity (session fixation). We
+    // now strip any such parameter from the URL and ignore it.
+    // Legitimate CLI handoff goes through Cognito Hosted UI + PKCE.
+    const strippedToken = url.searchParams.get('token')
+    if (strippedToken !== null) {
+      url.searchParams.delete('token')
+      window.history.replaceState({}, document.title, url.pathname + url.search)
+      // Do NOT dispatch AUTH_SUCCESS with the stripped token. Fall
+      // through to the normal bootstrap below so the user either
+      // picks up an existing session or is pushed to Hosted UI.
+    }
 
     const bootstrap = async () => {
-      // 1. CLI (?token=<access_token>) からの来訪
-      if (urlToken) {
-        const tokens: StoredTokens = {
-          access_token: urlToken,
-          id_token: null,
-          refresh_token: null,
-          expires_at: Date.now() + 60 * 60 * 1000, // CLI 発行 token は短命、Backend 検証に任せる
-        }
-        saveTokens(tokens)
-        url.searchParams.delete('token')
-        window.history.replaceState({}, document.title, url.pathname + url.search)
-        try {
-          const user = await fetchMe()
-          dispatch({ type: 'AUTH_SUCCESS', user, tokens })
-        } catch (err) {
-          clearTokens()
-          dispatch({
-            type: 'AUTH_FAILURE',
-            error:
-              err instanceof Error
-                ? `CLI token を受け取りましたが認証に失敗しました: ${err.message}`
-                : 'CLI token 検証に失敗しました',
-          })
-        }
-        return
-      }
-
-      // 2. 既存 localStorage のトークン
+      // 1. 既存 sessionStorage のトークン (P0-7)
       const stored = getStoredTokens()
       if (!stored) {
         dispatch({ type: 'AUTH_FAILURE', error: 'No tokens' })

@@ -165,12 +165,16 @@ def create_user(
         roles=[body.role],
     )
 
-    # DynamoDB: UserTenants (total_credit 指定がなければ None のまま → ensure() が Tenant lookup)
+    # DynamoDB: UserTenants (if total_credit is None, ensure() falls back to
+    # the tenant default). Explicit admin re-add is the one path that is
+    # allowed to resurrect an archived membership — `/api/mvp/me` must not
+    # (P0-1, see dynamo/user_tenants.py).
     user_tenants_repo.ensure(
         user_id=sub,
         tenant_id=tenant_id,
         role=body.role,
         total_credit=body.total_credit,
+        allow_resurrection=True,
     )
 
     # Audit log: admin 作成は常に、その他 role も記録

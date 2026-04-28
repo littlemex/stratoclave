@@ -94,7 +94,15 @@ pub async fn user_create(
         body["total_credit"] = Value::Number(credit.into());
     }
     let res: Value = client.post_json("/api/mvp/admin/users", &body).await?;
-    print_kv(&res, &["email", "user_id", "role", "org_id", "temporary_password", "user_pool_id"]);
+    // P0-6: print every field except `temporary_password` via the
+    // generic helper; the password goes through the TTY-guarded
+    // reveal path so it does not land in shell history / CI logs.
+    print_kv(&res, &["email", "user_id", "role", "org_id", "user_pool_id"]);
+    if let Some(pw) = res.get("temporary_password").and_then(|v| v.as_str()) {
+        if !pw.is_empty() {
+            crate::mvp::admin_cmd::reveal_secret_via_tty("temporary_password", pw)?;
+        }
+    }
     Ok(())
 }
 

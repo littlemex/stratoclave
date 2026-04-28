@@ -1,13 +1,14 @@
-"""Admin による API Keys の代理管理 (Phase C).
+"""Admin-scope API key management (Phase C).
 
-GET    /api/mvp/admin/api-keys                      全 API Keys 一覧 (cursor paging)
-GET    /api/mvp/admin/users/{user_id}/api-keys      特定ユーザーの key 一覧
-POST   /api/mvp/admin/users/{user_id}/api-keys      特定ユーザーに代理発行 (plaintext を返す)
-DELETE /api/mvp/admin/api-keys/{key_hash}           任意 key を revoke
+GET    /api/mvp/admin/api-keys                      list every key (cursor paging)
+GET    /api/mvp/admin/users/{user_id}/api-keys      list one user's keys
+POST   /api/mvp/admin/users/{user_id}/api-keys      issue a key on behalf of a user
+DELETE /api/mvp/admin/api-keys/by-key-id/{key_id}   revoke any key (by masked id)
+DELETE /api/mvp/admin/api-keys/{key_hash}           REMOVED — returns 410 Gone (P0-2')
 
-権限:
-  - 一覧・発行・revoke とも `apikeys:*` が必要 (admin のみ)
-  - Admin 代理発行時、scopes は **対象ユーザーの roles の subset** である必要がある
+Authorization:
+  - list / issue / revoke all require `apikeys:*` (admin-only).
+  - On behalf of a user, `scopes` must be a subset of the target user's role grants.
 """
 from __future__ import annotations
 
@@ -214,14 +215,27 @@ def create_api_key_on_behalf(
     )
 
 
-@router.delete("/api-keys/{key_hash}")
-def revoke_any_api_key(
-    key_hash: str,
+@router.delete("/api-keys/by-key-id/{key_id:path}")
+def revoke_any_api_key_by_key_id(
+    key_id: str,
     actor: AuthenticatedUser = Depends(require_permission("apikeys:revoke")),
 ) -> Response:
+    """Admin revoke-any-key using the masked `key_id`.
+
+    P0-2' (2026-04 security review): the old path accepted the full
+    SHA-256 `key_hash` in the URL, which persisted it in CloudFront /
+    ALB access logs and made the endpoint itself a revoke oracle for
+    anyone with log-read access. The short `sk-stratoclave-xxxx...yyyy`
+    `key_id` is already shown in every admin listing, so using it as
+    the identifier here does not trade away anything new while removing
+    a long-lived enumeration surface.
+    """
     repo = ApiKeysRepository()
-    item = repo.get_by_hash(key_hash)
-    if not item:
+    item = repo.find_any_by_key_id(key_id)
+    if not item or item.get("revoked_at"):
+        raise HTTPException(status_code=404, detail="api key not found")
+    key_hash = str(item.get("key_hash") or "")
+    if not key_hash:
         raise HTTPException(status_code=404, detail="api key not found")
     try:
         repo.revoke(key_hash, actor_user_id=actor.user_id)
@@ -231,8 +245,36 @@ def revoke_any_api_key(
         event="api_key_revoked",
         actor_id=actor.user_id,
         actor_email=actor.email,
-        target_id=item.get("key_id") or key_hash,
+        target_id=item.get("key_id") or "(unknown)",
         target_type="api_key",
         details={"owner_user_id": item.get("user_id"), "by_admin": True},
     )
     return Response(status_code=204)
+
+
+@router.delete(
+    "/api-keys/{key_hash}",
+    deprecated=True,
+    include_in_schema=False,
+)
+def revoke_any_api_key_legacy(
+    key_hash: str,  # noqa: ARG001
+    _actor: AuthenticatedUser = Depends(require_permission("apikeys:revoke")),
+) -> Response:
+    """REMOVED. Use `DELETE /api/mvp/admin/api-keys/by-key-id/{key_id}`.
+
+    P0-2' (2026-04 security review): this path exposed the SHA-256
+    `key_hash` in the URL, which (a) left it in every CloudFront / ALB
+    access log and (b) turned the endpoint into a revoke oracle for any
+    principal with log-read access. Rather than patch it, we return
+    410 Gone for every caller and keep the handler only to avoid a
+    silent 405 for stale scripts. Clients already migrated to the
+    `by-key-id` path above.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "This endpoint has been removed. Use "
+            "`DELETE /api/mvp/admin/api-keys/by-key-id/{key_id}` instead."
+        ),
+    )

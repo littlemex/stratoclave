@@ -19,8 +19,10 @@ from typing import Any, Optional
 
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from core.rate_limit import LOGIN_RATE_LIMIT, RESPOND_RATE_LIMIT, limiter
 
 
 router = APIRouter(prefix="/api/mvp/auth", tags=["mvp-auth"])
@@ -61,7 +63,11 @@ class RespondRequest(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(body: LoginRequest) -> LoginResponse:
+@limiter.limit(LOGIN_RATE_LIMIT)
+def login(request: Request, body: LoginRequest) -> LoginResponse:
+    """P0-3: limited to `AUTH_LOGIN_RATE_LIMIT` per source IP (default
+    10/minute). Credential stuffing + user enumeration mitigation."""
+    _ = request  # slowapi requires it to be in the signature
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()
@@ -94,7 +100,11 @@ def login(body: LoginRequest) -> LoginResponse:
 
 
 @router.post("/respond", response_model=LoginResponse)
-def respond_challenge(body: RespondRequest) -> LoginResponse:
+@limiter.limit(RESPOND_RATE_LIMIT)
+def respond_challenge(request: Request, body: RespondRequest) -> LoginResponse:
+    """P0-3: same per-IP rate limit as /login. Prevents brute force of
+    the one-time `temporary_password` emitted by admin user creation."""
+    _ = request
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()

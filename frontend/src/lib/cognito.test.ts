@@ -1,9 +1,10 @@
-// LocalStorage helpers in cognito.ts.
-// The network-touching functions (startLogin, handleCallback, refreshTokens,
-// logoutRedirect) are not exercised here; they are better covered by the
-// AuthContext integration suite with MSW (follow-up PR). This file locks
-// in the save/get/clear contract used by every CLI-injected and
-// browser-stored session.
+// sessionStorage helpers in cognito.ts (P0-7: moved off localStorage).
+//
+// The network-touching functions (startLogin, handleCallback,
+// refreshTokens, logoutRedirect) are not exercised here; they are
+// better covered by the AuthContext integration suite with MSW (follow-
+// up PR). This file locks in the save/get/clear contract used by every
+// CLI-injected and browser-stored session.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -17,12 +18,12 @@ const FIXTURE: StoredTokens = {
   expires_at: Date.now() + 60 * 60 * 1000,
 }
 
-describe('cognito local-storage helpers', () => {
+describe('cognito session-storage helpers', () => {
   beforeEach(() => {
-    window.localStorage.clear()
+    window.sessionStorage.clear()
   })
   afterEach(() => {
-    window.localStorage.clear()
+    window.sessionStorage.clear()
   })
 
   it('round-trips a StoredTokens shape', () => {
@@ -37,7 +38,7 @@ describe('cognito local-storage helpers', () => {
   })
 
   it('returns null on malformed JSON', () => {
-    window.localStorage.setItem('stratoclave_tokens', 'not-json')
+    window.sessionStorage.setItem('stratoclave_tokens', 'not-json')
     expect(getStoredTokens()).toBeNull()
   })
 
@@ -45,7 +46,7 @@ describe('cognito local-storage helpers', () => {
     saveTokens(FIXTURE)
     clearTokens()
     expect(getStoredTokens()).toBeNull()
-    expect(window.localStorage.getItem('stratoclave_tokens')).toBeNull()
+    expect(window.sessionStorage.getItem('stratoclave_tokens')).toBeNull()
   })
 
   it('getAccessToken returns only the access_token field', () => {

@@ -134,6 +134,32 @@ class ApiKeysRepository:
                 return item
         return None
 
+    def find_any_by_key_id(self, key_id: str) -> Optional[dict[str, Any]]:
+        """Admin-scope lookup by masked `key_id` across every user.
+
+        P0-2' (2026-04 security review): the admin revoke path used to
+        accept the SHA-256 `key_hash` in the URL. That leaves the hash
+        in CloudFront / ALB access logs indefinitely, which is both
+        long-lived enumeration material and a direct revoke oracle for
+        anyone with log read access. Admins already see the masked
+        `key_id` (`sk-stratoclave-xxxx...yyyy`) in the listing UI, so
+        this function lets the new admin revoke endpoint accept that
+        safer identifier instead.
+
+        Walks the whole table; tenants with many thousands of keys may
+        want to add a `key-id-index` GSI in future.
+        """
+        scan_kwargs: dict[str, Any] = {}
+        while True:
+            resp = self._table.scan(**scan_kwargs)
+            for item in resp.get("Items", []):
+                if str(item.get("key_id")) == key_id:
+                    return item
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                return None
+            scan_kwargs["ExclusiveStartKey"] = last
+
     def count_active(self, user_id: str) -> int:
         now = _now_iso()
         active = 0
