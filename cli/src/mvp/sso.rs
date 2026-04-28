@@ -143,6 +143,7 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
     eprintln!("[INFO] Presenting identity to Stratoclave backend...");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let endpoint = format!("{}/api/mvp/auth/sso-exchange", config.api_endpoint);
     let resp = client

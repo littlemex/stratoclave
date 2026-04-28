@@ -203,14 +203,74 @@ class TenantsRepository:
         return resp.get("Attributes", {})
 
     def archive(self, tenant_id: str) -> None:
-        """論理削除 (status=archived)."""
+        """Archive a tenant (status=archived) and all its UserTenants rows.
+
+        P2-2 regression: archiving a Tenant used to leave UserTenants
+        rows with ``status=active``, which meant ``reserve()`` and
+        ``refund()`` against the archived tenant would still succeed and
+        rack up Bedrock usage on a tenant that was "deleted". The
+        user-facing `/v1/messages` call would happily drain the old
+        budget until an admin noticed.
+
+        Archival is now a two-phase operation:
+          1. Scan the user_tenants table for rows targeting this tenant
+             and flip each active one to status=archived.
+          2. Flip the tenants row itself to status=archived.
+
+        We intentionally do steps 1 → 2 (and not the other way around)
+        so that if the scan fails we leave the tenant in a re-runnable
+        state. The reverse order would leave the tenant dead but its
+        members writable.
+        """
+        from boto3.dynamodb.conditions import Attr
+
+        from .client import user_tenants_table_name, get_dynamodb_resource
+
+        ut_table = get_dynamodb_resource().Table(user_tenants_table_name())
+        now = _now_iso()
+
+        # Scan is acceptable here — archival is a rare, admin-initiated
+        # operation. For a high-tenant-count deployment this can be
+        # upgraded to a GSI query later.
+        last_evaluated: Optional[dict[str, Any]] = None
+        while True:
+            scan_kwargs: dict[str, Any] = {
+                "FilterExpression": Attr("tenant_id").eq(tenant_id)
+                & (Attr("status").eq("active") | Attr("status").not_exists()),
+                "ProjectionExpression": "user_id, tenant_id",
+            }
+            if last_evaluated:
+                scan_kwargs["ExclusiveStartKey"] = last_evaluated
+            resp = ut_table.scan(**scan_kwargs)
+            for row in resp.get("Items", []):
+                ut_table.update_item(
+                    Key={
+                        "user_id": row["user_id"],
+                        "tenant_id": row["tenant_id"],
+                    },
+                    UpdateExpression="SET #s = :archived, updated_at = :now",
+                    ConditionExpression=(
+                        "attribute_not_exists(#s) OR #s = :active"
+                    ),
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={
+                        ":archived": "archived",
+                        ":active": "active",
+                        ":now": now,
+                    },
+                )
+            last_evaluated = resp.get("LastEvaluatedKey")
+            if not last_evaluated:
+                break
+
+        # Finally flip the tenant itself.
         self._table.update_item(
             Key={"tenant_id": tenant_id},
             UpdateExpression="SET #s = :archived, updated_at = :now",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":archived": "archived",
-                ":now": _now_iso(),
+                ":now": now,
             },
         )
 

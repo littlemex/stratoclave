@@ -46,6 +46,12 @@ export class DynamoDBStack extends cdk.Stack {
       env === 'production' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
     const isProd = env === 'production';
 
+    // Audit-critical tables: always RETAIN, even in development, because
+    // these carry cross-tenant billing / API-key provenance that a dev
+    // rebuild must not erase. If you really need to wipe them, delete by
+    // hand with `aws dynamodb delete-table`.
+    const auditRemovalPolicy = cdk.RemovalPolicy.RETAIN;
+
     const baseTableProps = {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
@@ -108,9 +114,11 @@ export class DynamoDBStack extends cdk.Stack {
       sortKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
     });
 
-    // 5. UsageLogs (TTL 付き)
+    // 5. UsageLogs (TTL 付き) — RETAIN: tenant billing history, must survive
+    // dev stack rebuilds / accidental teardowns.
     this.usageLogsTable = new dynamodb.Table(this, 'UsageLogsTable', {
       ...baseTableProps,
+      removalPolicy: auditRemovalPolicy,
       tableName: `${prefix}-usage-logs`,
       partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'timestamp_log_id', type: dynamodb.AttributeType.STRING },
@@ -235,9 +243,13 @@ export class DynamoDBStack extends cdk.Stack {
     //       scopes: List<String>      付与された permission 文字列
     //       created_at / expires_at / revoked_at / last_used_at: String ISO 8601
     //       created_by: String        Admin 代理発行時は actor の user_id
+    // RETAIN: long-lived API key hashes are the only link between a key
+    // string in the wild and the user it was issued to. Losing this table
+    // silently turns valid keys into 401s *and* erases the audit trail.
     this.apiKeysTable = new dynamodb.Table(this, 'ApiKeysTable', {
       ...baseTableProps,
-      pointInTimeRecovery: false,
+      removalPolicy: auditRemovalPolicy,
+      pointInTimeRecovery: true,
       tableName: `${prefix}-api-keys`,
       partitionKey: { name: 'key_hash', type: dynamodb.AttributeType.STRING },
     });

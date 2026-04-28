@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import { WafStack } from '../lib/waf-stack';
 
-describe('WafStack', () => {
+describe('WafStack (P1-2, CloudFront scope)', () => {
   let app: cdk.App;
   let stack: WafStack;
   let template: Template;
@@ -11,28 +11,26 @@ describe('WafStack', () => {
     app = new cdk.App();
 
     stack = new WafStack(app, 'TestWafStack', {
-      env: { account: '123456789012', region: 'us-west-2' },
-      albArn: 'arn:aws:elasticloadbalancing:us-west-2:123456789012:loadbalancer/app/test-alb/1234567890abcdef',
+      env: { account: '123456789012', region: 'us-east-1' },
+      prefix: 'stratoclave-test',
     });
 
     template = Template.fromStack(stack);
   });
 
-  // WAF-01: Web ACL が REGIONAL スコープで作成されること (P0)
-  test('Web ACL が REGIONAL スコープで作成されること', () => {
+  test('Web ACL is CLOUDFRONT-scoped', () => {
     template.hasResourceProperties('AWS::WAFv2::WebACL', {
-      Scope: 'REGIONAL',
-      DefaultAction: Match.anyValue(),
+      Scope: 'CLOUDFRONT',
+      DefaultAction: { Allow: {} },
       Rules: Match.anyValue(),
     });
   });
 
-  // WAF-02: AWSManagedRulesCommonRuleSet が含まれること (P0)
-  test('AWSManagedRulesCommonRuleSet が含まれること', () => {
+  test('AWSManagedRulesCommonRuleSet is present', () => {
     template.hasResourceProperties('AWS::WAFv2::WebACL', {
       Rules: Match.arrayWith([
         Match.objectLike({
-          Name: Match.stringLikeRegexp('[Cc]ommon'),
+          Name: 'AWSManagedRulesCommonRuleSet',
           Statement: {
             ManagedRuleGroupStatement: {
               VendorName: 'AWS',
@@ -41,6 +39,53 @@ describe('WafStack', () => {
           },
         }),
       ]),
+    });
+  });
+
+  test('KnownBadInputs + IpReputation managed rules are present', () => {
+    template.hasResourceProperties('AWS::WAFv2::WebACL', {
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Statement: {
+            ManagedRuleGroupStatement: {
+              VendorName: 'AWS',
+              Name: 'AWSManagedRulesKnownBadInputsRuleSet',
+            },
+          },
+        }),
+        Match.objectLike({
+          Statement: {
+            ManagedRuleGroupStatement: {
+              VendorName: 'AWS',
+              Name: 'AWSManagedRulesAmazonIpReputationList',
+            },
+          },
+        }),
+      ]),
+    });
+  });
+
+  test('Rate-based rule uses per-IP aggregation with the configured limit', () => {
+    template.hasResourceProperties('AWS::WAFv2::WebACL', {
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Name: 'RateLimitPerIp',
+          Action: { Block: {} },
+          Statement: {
+            RateBasedStatement: {
+              AggregateKeyType: 'IP',
+              Limit: 300,
+            },
+          },
+        }),
+      ]),
+    });
+  });
+
+  test('WebACL ARN is exported to SSM for cross-stack wiring', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/stratoclave-test/waf/cloudfront-acl-arn',
+      Type: 'String',
     });
   });
 });

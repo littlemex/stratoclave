@@ -8,7 +8,9 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install dependencies first so layer caching helps iterative builds.
+# Install runtime dependencies only (requirements-dev.txt stays off the
+# image to keep pytest/moto/ruff out of the container). Layer ordering
+# preserves pip cache for iterative builds.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

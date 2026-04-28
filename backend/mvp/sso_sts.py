@@ -66,8 +66,43 @@ def verify_and_call_sts(
     headers: dict[str, str],
     body: str = "",
 ) -> StsIdentity:
-    """CLI から受け取った presigned リクエストを検証し、STS を直接呼んで身元確認する."""
+    """CLI から受け取った presigned リクエストを検証し、STS を直接呼んで身元確認する.
+
+    Replay protection (P3-1): before transporting the signed request to
+    STS, record its fingerprint in the nonces table with a short TTL.
+    A second submission of the same signature — even inside the ±5
+    minute skew window — is rejected with 401. The table is optional:
+    environments that have not yet provisioned it fall back to the
+    legacy skew-only check (logged once as a warning).
+
+    DNS rebinding / poisoning: httpx's default transport verifies TLS
+    certificates end-to-end, so an attacker hijacking DNS cannot present
+    a valid AWS-signed certificate for the allowlisted host. The vouch
+    pattern therefore stays safe without migrating to the boto3 STS
+    client (which would force us to re-sign and lose the pass-through).
+    """
     _validate_inputs(method, url, headers)
+
+    # Replay guard (P3-1) — must happen before the STS round trip.
+    from dynamo.sso_nonces import NonceReplayError, SsoNoncesRepository
+
+    lowered = {k.lower(): v for k, v in headers.items()}
+    auth_header = lowered.get("authorization", "")
+    x_amz_date = lowered.get("x-amz-date", "")
+    try:
+        SsoNoncesRepository().consume(
+            authorization=auth_header, x_amz_date=x_amz_date
+        )
+    except NonceReplayError:
+        raise HTTPException(
+            status_code=401,
+            detail="Replay detected: this signed request has already been used.",
+        )
+    except Exception as e:  # pragma: no cover — configuration fallback
+        _log.warning(
+            "sso_nonce_store_unavailable",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
 
     # 署名済みのまま STS に転送 (body は sigv4 署名に含まれるため改変不可)
     try:

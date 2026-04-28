@@ -22,6 +22,7 @@ pub async fn create_user(email: &str, total_credit: Option<u64>) -> Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let resp = client

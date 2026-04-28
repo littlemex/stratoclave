@@ -47,6 +47,7 @@ impl ApiClient {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeouts.http_total_secs()))
             .connect_timeout(std::time::Duration::from_secs(config.timeouts.connection_secs()))
+            .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -65,6 +66,7 @@ impl ApiClient {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(self.config.timeouts.connection_secs()))
             // No overall timeout - streaming responses need to run indefinitely
+            .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     }

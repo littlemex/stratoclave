@@ -31,3 +31,12 @@ def usage_logs_table_name() -> str:
 
 def sse_tokens_table_name() -> str:
     return table_name("DYNAMODB_SSE_TOKENS_TABLE", "stratoclave-sse-tokens")
+
+
+def sso_nonces_table_name() -> str:
+    """Replay-protection nonces for the Vouch-by-STS flow.
+    Stores the hash of each successfully verified signed GetCallerIdentity
+    request with a short TTL, so an attacker that captures the signed
+    payload cannot replay it inside the ±5-minute skew window.
+    """
+    return table_name("DYNAMODB_SSO_NONCES_TABLE", "stratoclave-sso-nonces")

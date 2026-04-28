@@ -19,15 +19,48 @@ def add_app_context(logger: Any, method_name: str, event_dict: EventDict) -> Eve
 
 
 def mask_sensitive_data(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
-    """Mask sensitive data in log entries"""
-    sensitive_keys = {"auth_token", "token", "password", "secret", "api_key"}
+    """Mask sensitive data in log entries.
+
+    Two levels of masking:
+      - ``REDACT_KEYS`` — always replaced with ``***REDACTED***`` regardless
+        of value length (tokens, passwords, secrets, API keys).
+      - ``PII_KEYS`` — hashed to an 8-char marker (``pii:abcd1234``) so log
+        correlation across entries for the same user is still possible
+        without storing the original value. `email` is the canonical PII
+        field; extend this set when new user-level identifiers are added.
+    """
+    import hashlib
+
+    REDACT_KEYS = {
+        "auth_token",
+        "token",
+        "access_token",
+        "id_token",
+        "refresh_token",
+        "password",
+        "secret",
+        "api_key",
+        "plaintext_key",
+    }
+    PII_KEYS = {"email", "user_email", "actor_email"}
+
+    def _pii_marker(value: str) -> str:
+        digest = hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:8]
+        return f"pii:{digest}"
 
     for key in list(event_dict.keys()):
-        if key.lower() in sensitive_keys:
+        lowered = key.lower()
+        if lowered in REDACT_KEYS:
             event_dict[key] = "***REDACTED***"
-        elif isinstance(event_dict[key], str) and len(event_dict[key]) > 100:
-            # Mask long strings that might contain tokens
-            if any(s in key.lower() for s in ["token", "key", "auth"]):
+            continue
+        if lowered in PII_KEYS:
+            value = event_dict[key]
+            if isinstance(value, str) and value:
+                event_dict[key] = _pii_marker(value)
+            continue
+        if isinstance(event_dict[key], str) and len(event_dict[key]) > 100:
+            # Mask long strings that might carry an embedded token.
+            if any(s in lowered for s in ["token", "key", "auth"]):
                 event_dict[key] = f"{event_dict[key][:10]}...***REDACTED***"
 
     return event_dict

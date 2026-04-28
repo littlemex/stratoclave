@@ -72,10 +72,15 @@ describe('AlbStack', () => {
     });
   });
 
-  // ALB-06: CfnOutput が 3 つエクスポートされること (P2)
-  test('CfnOutput が 3 つエクスポートされること', () => {
+  test('ALB DNS name and ARN are exported as CFN outputs', () => {
     template.hasOutput('AlbDnsName', {});
     template.hasOutput('AlbArn', {});
-    template.hasOutput('TargetGroupArn', {});
+  });
+
+  test('Target group ARN is published to SSM parameter store (replaces old CfnOutput)', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/stratoclave/alb/target-group-arn',
+      Type: 'String',
+    });
   });
 });

@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import { NetworkStack } from '../lib/network-stack';
 
-describe('NetworkStack', () => {
+describe('NetworkStack (v2.1 MVP: Public Subnet 直置き、NAT なし、WAF+CloudFront 前提)', () => {
   let app: cdk.App;
   let stack: NetworkStack;
   let template: Template;
@@ -10,14 +10,13 @@ describe('NetworkStack', () => {
   beforeAll(() => {
     app = new cdk.App();
     stack = new NetworkStack(app, 'TestNetworkStack', {
-      env: { account: '123456789012', region: 'us-west-2' },
+      env: { account: '123456789012', region: 'us-east-1' },
       prefix: 'stratoclave',
     });
     template = Template.fromStack(stack);
   });
 
-  // NET-01: VPC が作成されること (CIDR: 10.0.0.0/16) (P0)
-  test('VPC が作成され、正しい CIDR が設定されていること', () => {
+  test('VPC is created with /16 CIDR and DNS enabled', () => {
     template.hasResourceProperties('AWS::EC2::VPC', {
       CidrBlock: '10.0.0.0/16',
       EnableDnsHostnames: true,
@@ -25,55 +24,78 @@ describe('NetworkStack', () => {
     });
   });
 
-  // NET-04: NAT Gateway が 1 つだけ作成されること (P1)
-  test('NAT Gateway が 1 つだけ作成されること', () => {
-    template.resourceCountIs('AWS::EC2::NatGateway', 1);
+  test('No NAT gateways (MVP runs ECS on public subnet)', () => {
+    template.resourceCountIs('AWS::EC2::NatGateway', 0);
   });
 
-  // NET-05: ALB SG: HTTP(80) + HTTPS(443) from 0.0.0.0/0 (P0)
-  test('ALB Security Group が HTTP と HTTPS を許可すること', () => {
-    template.hasResourceProperties('AWS::EC2::SecurityGroup', {
-      GroupDescription: 'Security group for Stratoclave ALB',
-      SecurityGroupIngress: Match.arrayWith([
-        Match.objectLike({
-          CidrIp: '0.0.0.0/0',
-          FromPort: 443,
-          IpProtocol: 'tcp',
-          ToPort: 443,
-        }),
-        Match.objectLike({
-          CidrIp: '0.0.0.0/0',
-          FromPort: 80,
-          IpProtocol: 'tcp',
-          ToPort: 80,
-        }),
-      ]),
+  test('VPC Flow Logs are enabled (CloudWatch, 30-day retention)', () => {
+    template.resourceCountIs('AWS::EC2::FlowLog', 1);
+    template.hasResourceProperties('AWS::EC2::FlowLog', {
+      TrafficType: 'ALL',
+      ResourceType: 'VPC',
+    });
+    template.hasResourceProperties('AWS::Logs::LogGroup', {
+      LogGroupName: '/aws/vpc/stratoclave-flow-logs',
+      RetentionInDays: 30,
     });
   });
 
-  // NET-06: ECS SG: TCP(8000) from ALB SG のみ (P0)
-  test('ECS Security Group が ALB SG からのみポート 8000 を許可すること', () => {
-    // Verify ECS Security Group exists
-    template.hasResourceProperties('AWS::EC2::SecurityGroup', {
-      GroupDescription: 'Security group for Stratoclave ECS Tasks',
-    });
-
-    // Verify ingress rule (may be inline or separate resource)
-    // Check if there's a separate SecurityGroupIngress resource
+  test('ALB SG ingress is restricted to the CloudFront origin-facing prefix list (HTTP only, not 0.0.0.0/0)', () => {
     const resources = template.toJSON().Resources;
-    const ingressRules = Object.values(resources).filter(
-      (r: any) => r.Type === 'AWS::EC2::SecurityGroupIngress'
+    const albSg: any = Object.values(resources).find(
+      (r: any) =>
+        r.Type === 'AWS::EC2::SecurityGroup' &&
+        r.Properties.GroupName === 'stratoclave-alb-sg',
     );
+    expect(albSg).toBeDefined();
 
-    // There should be at least one ingress rule for port 8000
-    const ecsIngressRule = ingressRules.find((r: any) => r.Properties.FromPort === 8000);
-    expect(ecsIngressRule).toBeDefined();
+    // No inline world-open ingress rules must survive on the ALB SG.
+    const inline = albSg.Properties.SecurityGroupIngress || [];
+    for (const rule of inline) {
+      expect(rule.CidrIp).not.toBe('0.0.0.0/0');
+      expect(rule.CidrIpv6).not.toBe('::/0');
+    }
+
+    // Only port 80 is needed — CloudFront connects to the ALB origin with
+    // originProtocolPolicy=http-only, so a :443 ingress would be unused and
+    // double the SG rule count (each prefix-list ingress expands into N
+    // rules, one per CIDR in the managed list).
+    const ingressRules = Object.values(resources).filter(
+      (r: any) => r.Type === 'AWS::EC2::SecurityGroupIngress',
+    );
+    const httpRule: any = ingressRules.find((r: any) => r.Properties.FromPort === 80);
+    const tlsRule = ingressRules.find((r: any) => r.Properties.FromPort === 443);
+    expect(httpRule).toBeDefined();
+    expect(tlsRule).toBeUndefined();
+    expect(httpRule.Properties.SourcePrefixListId).toBeDefined();
+    expect(httpRule.Properties.CidrIp).toBeUndefined();
   });
 
-  // NET-08: CfnOutput が 3 つエクスポートされること (P2)
-  test('CfnOutput が 3 つエクスポートされること', () => {
+  test('ECS SG only accepts port 8000 from the ALB SG', () => {
+    template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
+      FromPort: 8000,
+      ToPort: 8000,
+      IpProtocol: 'tcp',
+      SourceSecurityGroupId: Match.anyValue(),
+    });
+  });
+
+  test('VPC ID is published as a CFN output', () => {
     template.hasOutput('VpcId', {});
-    template.hasOutput('AlbSecurityGroupId', {});
-    template.hasOutput('EcsSecurityGroupId', {});
+  });
+
+  test('Network parameters are written to SSM Parameter Store', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/stratoclave/network/alb-sg-id',
+      Type: 'String',
+    });
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/stratoclave/network/ecs-sg-id',
+      Type: 'String',
+    });
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/stratoclave/network/vpc-id',
+      Type: 'String',
+    });
   });
 });

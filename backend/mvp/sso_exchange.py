@@ -325,6 +325,28 @@ def sso_exchange(body: SsoExchangeRequest) -> SsoExchangeResponse:
                     "SSO login is not permitted for this user."
                 ),
             )
+        # P2: refuse to continue if the incoming STS principal does not
+        # match the one that was bound when the user was provisioned.
+        # Prevents a second STS principal from hijacking an existing SSO
+        # user by supplying the same email in a trusted account.
+        bound_arn = str(existing.get("sso_principal_arn") or "")
+        if bound_arn and bound_arn != sts_identity.arn:
+            _log.warning(
+                "sso_principal_arn_mismatch",
+                extra={
+                    "email": trusted.email,
+                    "bound_arn_tail": bound_arn[-30:],
+                    "incoming_arn_tail": sts_identity.arn[-30:],
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Identity is not authorized for this account "
+                    "(principal mismatch). Contact an administrator to "
+                    "rebind the SSO principal."
+                ),
+            )
 
     # 4. 毎回 random password 発行 → admin_initiate_auth → 即座に再上書きで invalidate
     # (P1-4): admin_initiate_auth の完了直後に第 2 の乱数で再上書きすることで、

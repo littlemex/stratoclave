@@ -268,7 +268,10 @@ async fn browser_auth_flow_internal(app_config: &AppConfig) -> Result<TokenRespo
         ("code_verifier", pkce.code_verifier.as_str()),
     ];
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let response = client
         .post(&token_url)
         .form(&params)
@@ -303,7 +306,10 @@ async fn refresh_access_token_internal(
         ("refresh_token", refresh_token),
     ];
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let response = client
         .post(&token_url)
         .form(&params)
@@ -341,7 +347,10 @@ pub struct DeviceAuthorizationResponse {
 pub async fn device_auth_flow(app_config: &AppConfig) -> Result<AuthToken> {
     let device_auth_url = format!("{}/oauth2/deviceAuthorization", app_config.cognito_domain);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // 1. Request device authorization
     let params = [("client_id", app_config.client_id.as_str())];

@@ -1,5 +1,7 @@
 *.js
 !jest.config.js
+# CloudFront Functions are shipped as raw .js inside lib/, not tsc output.
+!lib/cloudfront-functions/*.js
 *.d.ts
 node_modules
 

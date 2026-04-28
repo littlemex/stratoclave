@@ -88,7 +88,7 @@ Commands:
 
 Run `stratoclave <command> --help` for flag-level help at any level.
 
-When the CLI is invoked with no arguments and stdin is piped, it enters a non-interactive pipe mode used by legacy integrations. This mode is undocumented and should not be relied on for new work; use the explicit subcommands above.
+When the CLI is invoked with no arguments **and** stdin is a pipe (not a TTY), it enters a legacy non-interactive pipe mode used by older shell wrappers. This mode accepts a single prompt on stdin and emits a single assistant reply on stdout. It is kept only for backward compatibility; new work should use explicit subcommands (`stratoclave claude`, `stratoclave mcp`, or direct Anthropic SDK calls). To avoid accidentally invoking it, always pass an explicit subcommand, or redirect stdin from `/dev/null` (`stratoclave --help </dev/null`).
 
 > **Important.** There are no plural forms of `admin user` or `admin tenant`. `stratoclave admin users list` and `stratoclave admin tenants list` do **not** exist. Always use the singular nouns (`admin user list`, `admin tenant list`).
 

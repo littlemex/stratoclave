@@ -132,23 +132,17 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
         )
 
     if policy == "invite_only":
-        session = (sts.session_name or "").strip()
-        if "@" in session:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"{session.lower()} is not pre-registered. "
-                    "Ask an administrator to invite. (provisioning_policy=invite_only)"
-                ),
-            )
-        # session_name が email でない場合のヒント
+        # P2: do not echo the attacker-supplied session_name back in the
+        # error body — that effectively tells an attacker which email
+        # addresses exist in the trusted account (user enumeration).
+        # Surface a uniform 403 and instruct callers to consult logs /
+        # the admin console for the real reason.
         raise HTTPException(
             status_code=403,
             detail=(
-                f"AWS session '{session or '(empty)'}' (role={sts.role_name}) is not pre-registered. "
-                f"Configure IdP to use email as session_name, "
-                f"or add an invite with iam_user_name='{session}' to map this session to an email. "
-                "(provisioning_policy=invite_only)"
+                "Identity is not authorized for this account "
+                "(provisioning_policy=invite_only). "
+                "An administrator can grant access by creating an invite."
             ),
         )
 

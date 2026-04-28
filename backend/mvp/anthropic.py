@@ -93,9 +93,11 @@ class AnthropicMessage(BaseModel):
 class AnthropicMessagesRequest(BaseModel):
     model: str
     messages: list[AnthropicMessage]
-    # max_tokens は Bedrock 側の現実的上限 (モデル毎に 4K〜32K)。
-    # 大きすぎる値を受けて `_estimate_reservation_tokens` が暴走するのを防ぐ。
-    max_tokens: int = Field(default=4096, ge=1, le=32768)
+    # Claude Opus/Sonnet 4.x accept up to 64K output tokens on Bedrock.
+    # Claude Desktop Cowork defaults to `max_tokens=64000`, so anything
+    # below that rejects legitimate clients at the proxy layer. The cap
+    # still guards `_estimate_reservation_tokens` against unbounded input.
+    max_tokens: int = Field(default=4096, ge=1, le=65536)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     top_k: Optional[int] = Field(default=None, ge=1, le=500)
