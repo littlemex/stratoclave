@@ -25,7 +25,7 @@ python-json-logger==3.2.1
 
 # Authentication
 PyJWT[crypto]==2.10.1
-cryptography==44.0.0
+cryptography==47.0.0
 
 # Rate limiting (in-process token bucket shared across routes).
 slowapi==0.1.9
