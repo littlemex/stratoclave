@@ -390,6 +390,11 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
         'Cognito AdvancedSecurityMode is deferred alongside MFA (HANDOVER_SECURITY_HARDENING.md). Non-essentials get punted until after the comprehensive audit lands.',
     },
     {
+      id: 'AwsSolutions-COG8',
+      reason:
+        'Cognito User Pool tier upgrade (Essentials -> Plus) is deferred alongside MFA and AdvancedSecurityMode. The Plus tier unlocks advanced security features that we have already chosen to defer in COG2 / COG3.',
+    },
+    {
       id: 'AwsSolutions-ECS2',
       reason:
         'The ECS task environment variables injected here are all non-secret: table names, region, prefix, feature flags. Secrets (Cognito user pool id is public; there are no long-lived keys) do not pass through env at all.',
