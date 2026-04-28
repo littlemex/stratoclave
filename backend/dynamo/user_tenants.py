@@ -72,12 +72,20 @@ class UserTenantsRepository:
         tenant_id: str,
         role: str = "user",
         total_credit: Optional[int] = None,
+        allow_resurrection: bool = False,
     ) -> dict[str, Any]:
-        """存在しなければ作成、archived なら active に昇格、active ならそのまま返す。
+        """Create if missing, return as-is if already active.
 
-        total_credit の優先順位 (§5.1):
-          1. user_total_credit 指定あり → user_override
-          2. Tenants.default_credit → tenant_default
+        Archived rows are only flipped back to `active` when the caller
+        opts in with `allow_resurrection=True`. Plain identity probes
+        such as `/api/mvp/me` leave archived rows archived; only
+        deliberate provisioning (admin re-add, SSO re-registration)
+        should revive a membership. See P0-1 in SECURITY_REVIEW_2026-04
+        for the incident that motivated this gate.
+
+        total_credit precedence (§5.1):
+          1. explicit `total_credit` argument  → user_override
+          2. Tenants.default_credit            → tenant_default
           3. UserTenantsRepository.DEFAULT_CREDIT → global_default
         """
         existing = self.get_including_archived(user_id, tenant_id)
@@ -109,7 +117,29 @@ class UserTenantsRepository:
             return item
 
         if existing.get("status") == "archived":
-            # archived を active に昇格、Credit をリセット
+            # P0-1 (2026-04 security review): silently flipping an
+            # archived UserTenants row back to `active` meant that a
+            # user whose tenant an admin had just archived could resume
+            # full credit simply by calling `/api/mvp/me` once. The row
+            # would be revived with `credit_used=0`, and the next
+            # `/v1/messages` would happily spend against it.
+            #
+            # Resurrection is now gated behind an explicit opt-in used
+            # only by intentional provisioning paths (admin re-adding a
+            # member, SSO re-registration). Implicit identity probes
+            # must not have this side effect.
+            #
+            # Belt-and-braces: even with `allow_resurrection=True`, if
+            # the parent `Tenants` record is archived, refuse. Admins
+            # archive a tenant deliberately; reviving membership into
+            # an archived tenant is almost certainly a mistake.
+            if not allow_resurrection:
+                return existing
+            from .tenants import TenantsRepository
+
+            tenant_rec = TenantsRepository().get(tenant_id)
+            if tenant_rec and tenant_rec.get("status") == "archived":
+                return existing
             resp = self._table.update_item(
                 Key={"user_id": user_id, "tenant_id": tenant_id},
                 UpdateExpression=(

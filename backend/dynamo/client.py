@@ -40,3 +40,15 @@ def sso_nonces_table_name() -> str:
     payload cannot replay it inside the ±5-minute skew window.
     """
     return table_name("DYNAMODB_SSO_NONCES_TABLE", "stratoclave-sso-nonces")
+
+
+def ui_tickets_table_name() -> str:
+    """Short-lived, single-use tickets that hand a CLI session off to
+    the web UI without ever placing the access token in a URL.
+
+    The CLI mints a ticket via POST /api/mvp/auth/ui-ticket, the
+    browser consumes it via POST /api/mvp/auth/ui-ticket/consume, and
+    the record is deleted on first consume. DynamoDB TTL reaps
+    unconsumed tickets after ~30 s.
+    """
+    return table_name("DYNAMODB_UI_TICKETS_TABLE", "stratoclave-ui-tickets")

@@ -136,24 +136,107 @@ fn validate_url(raw: &str) -> Result<String> {
         bail!("api_endpoint must not be empty");
     }
 
-    // scheme check
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+    // P0-5 (2026-04 security review): `stratoclave setup <url>` is the
+    // single bootstrap channel — whatever URL is accepted here ends up
+    // in `~/.stratoclave/config.toml` and drives every subsequent
+    // `auth login` / `/v1/messages` / `setup` refresh. The old
+    // validator tolerated `http://` and every host string the caller
+    // wanted, which let an attacker:
+    //
+    //   * downgrade the connection to plain HTTP and sniff Cognito
+    //     passwords / access tokens, or
+    //   * hand a URL like `http://attacker.example/` that the bootstrap
+    //     fetch followed through a `302 -> http://169.254.169.254/...`
+    //     to read the EC2 IMDS and harvest role credentials, or
+    //   * point the bootstrap at `http://localhost:8080/` and trick the
+    //     CLI into talking to any local listener.
+    //
+    // We now enforce (a) HTTPS only, except for explicit `localhost` /
+    // `127.0.0.1` for local development, (b) an SSRF denylist covering
+    // IMDS, link-local, private ranges, and AWS-internal TLDs, and
+    // (c) no `user:password@` userinfo component.
+    //
+    // Redirect following is disabled separately at the reqwest Client
+    // layer so a permitted host cannot bounce the bootstrap into the
+    // denylist post-hoc.
+    let parsed = url::Url::parse(trimmed).map_err(|e| {
+        anyhow!("api_endpoint is not a valid URL: {}", e)
+    })?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
         bail!(
             "api_endpoint must start with http:// or https:// (got {:?})",
             trimmed
         );
     }
+    if parsed.username() != "" || parsed.password().is_some() {
+        bail!("api_endpoint must not contain userinfo (user:password@host)");
+    }
 
-    // URL parse check
-    let parsed = url::Url::parse(trimmed).map_err(|e| {
-        anyhow!("api_endpoint is not a valid URL: {}", e)
-    })?;
+    let host = parsed
+        .host_str()
+        .map(|h| h.to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| anyhow!("api_endpoint must include a host"))?;
 
-    // host check
-    match parsed.host_str() {
-        None => bail!("api_endpoint must include a host"),
-        Some(h) if h.is_empty() => bail!("api_endpoint must include a host"),
-        _ => {}
+    let loopback_host = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    if scheme == "http" && !loopback_host {
+        bail!(
+            "api_endpoint must use https:// for non-loopback hosts (got {:?}). \
+             The bootstrap config is written to disk and reused for every \
+             subsequent auth call, so plaintext HTTP would leak every token.",
+            trimmed
+        );
+    }
+
+    // SSRF denylist. We block the AWS IMDS endpoint, link-local, the
+    // cloud metadata hostnames used by other providers (defence in
+    // depth — we only deploy on AWS today), and typical *.internal /
+    // *.local zones so a rogue DNS record cannot bootstrap a CLI into
+    // an internal-only service.
+    const DENY_HOSTS: &[&str] = &[
+        "169.254.169.254",       // EC2 / EKS IMDS
+        "metadata.google.internal", // GCP metadata
+        "metadata.azure.com",    // Azure IMDS (new)
+        "169.254.170.2",         // ECS task metadata
+    ];
+    if DENY_HOSTS.iter().any(|deny| host == *deny) {
+        bail!(
+            "api_endpoint host {:?} is blocked (metadata / SSRF surface).",
+            host
+        );
+    }
+
+    // Block any RFC 1918 / link-local literal IP except the explicit
+    // loopback addresses above. This catches `http://10.0.0.1/` style
+    // attempts that would otherwise sneak through the `http -> localhost`
+    // carve-out because they have a literal IP host.
+    if host.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            let is_loopback = ip.is_loopback();
+            if !is_loopback
+                && (ip.is_private()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_broadcast()
+                    || ip.is_documentation())
+            {
+                bail!(
+                    "api_endpoint must not point at a private/link-local IP ({})",
+                    ip
+                );
+            }
+        }
+    }
+
+    // Explicit host suffix denylist for AWS-internal / intranet TLDs.
+    const DENY_SUFFIXES: &[&str] = &[".internal", ".local", ".localdomain"];
+    if DENY_SUFFIXES.iter().any(|suf| host.ends_with(suf)) && !loopback_host {
+        bail!(
+            "api_endpoint host {:?} uses a reserved internal suffix.",
+            host
+        );
     }
 
     // よくある typo: /v1 付き
@@ -175,9 +258,23 @@ fn validate_url(raw: &str) -> Result<String> {
 // ------------------------------------------------------------------
 
 async fn fetch_config(url: &str) -> Result<StratoclaveConfig> {
+    // P0-5 (2026-04 security review): refuse to follow redirects during
+    // bootstrap. `validate_url` already ensured the initial host is
+    // safe, but `reqwest`'s default is to chase up to 10 redirects —
+    // which defeats the validation if the server responds
+    // `302 -> http://169.254.169.254/...`. `redirect(Policy::none())`
+    // treats any 3xx as a hard error, forcing the attacker to own a
+    // permitted host directly.
+    //
+    // We intentionally do NOT set `https_only(true)` here because the
+    // caller is already vetted by `validate_url`, which carves out
+    // `http://localhost` for local backends. Enforcing `https_only` on
+    // the Client would break local development while `validate_url`
+    // has already proven the scheme/host combination is safe.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(concat!("stratoclave-cli/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("Failed to build HTTP client")?;
 
@@ -446,9 +543,13 @@ mod tests {
 
     #[test]
     fn test_validate_url_rejects_missing_scheme() {
+        // P0-5: the tightened validator now rejects at url::Url::parse
+        // level (no scheme => RelativeUrlWithoutBase). We only assert
+        // that *some* error is returned for the bare hostname input;
+        // the exact wording is the underlying parse error.
         let err = validate_url("example.cloudfront.net").unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("http://") && msg.contains("https://"));
+        assert!(!msg.is_empty(), "error message must not be empty");
     }
 
     #[test]

@@ -43,6 +43,8 @@ from mvp.cognito_auth import router as mvp_cognito_auth_router
 from mvp.sso_exchange import router as mvp_sso_exchange_router
 from mvp.admin_trusted_accounts import router as mvp_admin_trusted_accounts_router
 from mvp.admin_sso_invites import router as mvp_admin_sso_invites_router
+# P0-8 follow-up: CLI → SPA handoff via single-use tickets
+from mvp.ui_ticket import router as mvp_ui_ticket_router
 # Phase C: 長期 API Key (cowork 等の gateway クライアント用)
 from mvp.me_api_keys import router as mvp_me_api_keys_router
 from mvp.admin_api_keys import router as mvp_admin_api_keys_router
@@ -119,6 +121,21 @@ app = FastAPI(
     version="2.1.0",
     lifespan=lifespan,
 )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting on authentication endpoints (P0-3).
+#
+# Decorators live inside each router (cognito_auth, sso_exchange, ...).
+# Wiring them here makes the `Limiter` instance available on `app.state`
+# so slowapi's middleware-less per-route decorator can pick it up, and
+# installs the 429 exception handler.
+# ---------------------------------------------------------------------------
+from core.rate_limit import RateLimitExceeded, limiter
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402 — positional import after app
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +251,8 @@ app.include_router(mvp_cognito_auth_router)      # /api/mvp/auth/login, /respond
 app.include_router(mvp_sso_exchange_router)              # POST /api/mvp/auth/sso-exchange
 app.include_router(mvp_admin_trusted_accounts_router)    # /api/mvp/admin/trusted-accounts[*]
 app.include_router(mvp_admin_sso_invites_router)         # /api/mvp/admin/sso-invites[*]
+# P0-8 follow-up: single-use CLI → SPA handoff tickets (replaces ?token=)
+app.include_router(mvp_ui_ticket_router)                 # POST /api/mvp/auth/ui-ticket[/consume]
 # Phase C
 app.include_router(mvp_me_api_keys_router)               # /api/mvp/me/api-keys[*]
 app.include_router(mvp_admin_api_keys_router)            # /api/mvp/admin/api-keys[*] + /api/mvp/admin/users/{id}/api-keys

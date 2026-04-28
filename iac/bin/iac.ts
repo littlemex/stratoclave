@@ -206,6 +206,12 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
       dynamoDBStack.ssoPreRegistrationsTable.tableName,
     // Phase C: 長期 API Key (cowork 等の gateway クライアント用)
     DYNAMODB_API_KEYS_TABLE: dynamoDBStack.apiKeysTable.tableName,
+    // Phase S: SSO replay-defence nonces (sso_sts.py falls back safely
+    // if the table is unreachable, but set it so the fast path is used).
+    DYNAMODB_SSO_NONCES_TABLE: dynamoDBStack.ssoNoncesTable.tableName,
+    // P0-8 follow-up: single-use CLI → SPA handoff tickets. Required
+    // for `stratoclave ui open` since ?token= handoff was retired.
+    DYNAMODB_UI_TICKETS_TABLE: dynamoDBStack.uiTicketsTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,

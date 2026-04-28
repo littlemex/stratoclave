@@ -43,6 +43,10 @@ from .api_keys import (
     hash_key as hash_api_key,
     to_public_dict as api_key_to_public_dict,
 )
+from .ui_tickets import (
+    UiTicketsRepository,
+    TicketNotFoundError,
+)
 
 __all__ = [
     "get_dynamodb_resource",
@@ -68,4 +72,6 @@ __all__ = [
     "is_api_key",
     "hash_api_key",
     "api_key_to_public_dict",
+    "UiTicketsRepository",
+    "TicketNotFoundError",
 ]

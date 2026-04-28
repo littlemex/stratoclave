@@ -232,34 +232,33 @@ def revoke_my_api_key_by_key_id(
     return Response(status_code=204)
 
 
-@router.delete("/{key_hash}", deprecated=True)
+@router.delete("/{key_hash}", deprecated=True, include_in_schema=False)
 def revoke_my_api_key_by_hash(
-    key_hash: str,
-    user: AuthenticatedUser = Depends(require_permission("apikeys:revoke-self")),
+    key_hash: str,  # noqa: ARG001 — accepted for compatibility, never used
+    user: AuthenticatedUser = Depends(require_permission("apikeys:revoke-self")),  # noqa: ARG001
 ) -> Response:
-    """Legacy revoke path kept for backward compatibility.
+    """REMOVED. Use `DELETE /api/mvp/me/api-keys/by-key-id/{key_id}` instead.
 
-    Deprecated (P1-8): prefer `DELETE /api/mvp/me/api-keys/by-key-id/{key_id}`.
-    Putting the SHA-256 hash in the URL leaves it in access logs. This
-    route will be removed once CLI and UI migrate to the `by-key-id`
-    endpoint.
+    Security review (2026-04) flagged two issues with this legacy path:
+
+      1. Putting the SHA-256 hash of an active API key in the URL leaves
+         it in CloudFront / ALB access logs indefinitely. Anyone with
+         log read access could harvest hashes and (a) correlate them
+         with the ApiKeys table for enumeration, or (b) feed them back
+         to this endpoint to revoke arbitrary keys.
+      2. The ownership check was a simple Python `!=` comparison rather
+         than a conditional DynamoDB write. Racing the compare-and-write
+         window was theoretically exploitable.
+
+    Rather than patch it, the route now returns 410 Gone for every
+    caller. Clients on the `by-key-id` migration path (CLI + web
+    console) already moved over; anything still hitting this URL is a
+    stale script that should be updated.
     """
-    repo = ApiKeysRepository()
-    item = repo.get_by_hash(key_hash)
-    if not item or str(item.get("user_id")) != user.user_id:
-        raise HTTPException(status_code=404, detail="api key not found")
-
-    try:
-        repo.revoke(key_hash, actor_user_id=user.user_id)
-    except ApiKeyNotFoundError:
-        raise HTTPException(status_code=404, detail="api key not found")
-
-    log_audit_event(
-        event="api_key_revoked",
-        actor_id=user.user_id,
-        actor_email=user.email,
-        target_id=item.get("key_id") or "(unknown)",
-        target_type="api_key",
-        details={"owner_user_id": item.get("user_id"), "via": "legacy-hash-path"},
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "This endpoint has been removed. Use "
+            "`DELETE /api/mvp/me/api-keys/by-key-id/{key_id}` instead."
+        ),
     )
-    return Response(status_code=204)

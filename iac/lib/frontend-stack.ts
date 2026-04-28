@@ -72,12 +72,17 @@ export class FrontendStack extends cdk.Stack {
               // Vite injects style/script as first-party; allow data: for
               // the occasional tiny inline asset. No eval().
               "script-src 'self'",
-              "style-src 'self' 'unsafe-inline'",
+              // Google Fonts stylesheet (fonts.googleapis.com) + font
+              // file delivery (fonts.gstatic.com) are referenced from
+              // index.html. style-src-elem falls back to style-src when
+              // unset, which is why the loose stylesheet reference
+              // above was blocked before this entry existed.
+              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
               // Cognito Hosted UI and the Stratoclave backend are the
               // only documented networked targets from the SPA.
               "connect-src 'self' https: wss:",
               "img-src 'self' data: https:",
-              "font-src 'self' data:",
+              "font-src 'self' data: https://fonts.gstatic.com",
               "frame-ancestors 'none'",
               "base-uri 'self'",
               "form-action 'self' https://*.auth.us-east-1.amazoncognito.com https://*.auth.us-west-2.amazoncognito.com",
@@ -254,6 +259,12 @@ export class FrontendStack extends cdk.Stack {
     // Silence the unused-var lint while keeping the arn helper above
     // available for future per-stack NagSuppressions.
     void distributionArnPlaceholder;
+    // P0-11 (2026-04 security review): belt-and-braces on the OAC bucket
+    // policy. `aws:SourceArn` alone assumes CloudFront distribution IDs
+    // are globally unique (they are), but AWS's documented OAC pattern
+    // always pairs it with `aws:SourceAccount` as a defence against any
+    // future confused-deputy class of bug. Matching the AWS reference
+    // template makes third-party security audits trivial.
     this.bucket.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'AllowCloudFrontServicePrincipalReadOnly',
@@ -264,6 +275,7 @@ export class FrontendStack extends cdk.Stack {
         conditions: {
           StringEquals: {
             'AWS:SourceArn': distributionArn,
+            'AWS:SourceAccount': this.account,
           },
         },
       })

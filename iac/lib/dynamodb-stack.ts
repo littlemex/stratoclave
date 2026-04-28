@@ -34,6 +34,10 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly ssoPreRegistrationsTable: dynamodb.Table;
   /** Phase C: Long-lived API keys (sk-stratoclave-*) for gateway clients like cowork */
   public readonly apiKeysTable: dynamodb.Table;
+  /** Phase S: Replay defence nonces for the Vouch-by-STS signed-request flow */
+  public readonly ssoNoncesTable: dynamodb.Table;
+  /** P0-8 follow-up: single-use CLI → SPA handoff tickets */
+  public readonly uiTicketsTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -260,6 +264,36 @@ export class DynamoDBStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // 14. SsoNonces (Phase S replay defence).
+    //     Backend writes a SHA-256 fingerprint of each accepted
+    //     `sts:GetCallerIdentity` signed request with
+    //     `attribute_not_exists(nonce)`, so the same signature cannot
+    //     be replayed within the ±5-minute skew window. DynamoDB TTL
+    //     (`expires_at`) reaps entries ~10 minutes after acceptance.
+    //     Retaining PITR is not useful here — the rows are ephemeral.
+    this.ssoNoncesTable = new dynamodb.Table(this, 'SsoNoncesTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-sso-nonces`,
+      partitionKey: { name: 'nonce', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
+    // 15. UiTickets (P0-8 follow-up, replaces `?token=` handoff).
+    //     CLI mints an opaque 256-bit nonce (SHA-256 hash is the PK)
+    //     bound to the authenticated session's tokens; the browser
+    //     swaps that nonce back for the tokens via
+    //     /api/mvp/auth/ui-ticket/consume. Single-use (delete-on-read)
+    //     plus a 30 s TTL via `expires_at` bound the exposure window
+    //     even if a DynamoDB row is read by a compromised ECS task.
+    this.uiTicketsTable = new dynamodb.Table(this, 'UiTicketsTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-ui-tickets`,
+      partitionKey: { name: 'ticket_hash', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -274,6 +308,8 @@ export class DynamoDBStack extends cdk.Stack {
       this.trustedAccountsTable.tableArn,
       this.ssoPreRegistrationsTable.tableArn,
       this.apiKeysTable.tableArn,
+      this.ssoNoncesTable.tableArn,
+      this.uiTicketsTable.tableArn,
     ];
 
     // Parameter Store エクスポート
@@ -291,6 +327,8 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableTrustedAccountsParam', 'dynamodb/table-trusted-accounts', this.trustedAccountsTable],
       ['TableSsoPreRegistrationsParam', 'dynamodb/table-sso-pre-registrations', this.ssoPreRegistrationsTable],
       ['TableApiKeysParam', 'dynamodb/table-api-keys', this.apiKeysTable],
+      ['TableSsoNoncesParam', 'dynamodb/table-sso-nonces', this.ssoNoncesTable],
+      ['TableUiTicketsParam', 'dynamodb/table-ui-tickets', this.uiTicketsTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

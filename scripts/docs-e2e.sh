@@ -190,6 +190,46 @@ ok   "stratoclave usage show"
 "$STRATOCLAVE_CLI" api-key list >/dev/null  || fail "stratoclave api-key list failed"
 ok   "stratoclave api-key list"
 
+# P0-8 regression guard: `stratoclave ui open / url` must not embed the
+# access token in the URL. The sanctioned handoff channel is
+# `?ui_ticket=<single-use-nonce>` minted by the backend. If this ever
+# prints `?token=<jwt>` again the session-fixation primitive is back.
+ui_url=$("$STRATOCLAVE_CLI" ui url 2>&1 | tail -n1)
+if echo "$ui_url" | grep -qE 'token=eyJ|token=[A-Za-z0-9._\-]{40,}'; then
+  fail "stratoclave ui url leaked an access_token in the URL (P0-8 regression): $ui_url"
+fi
+if ! echo "$ui_url" | grep -qE 'ui_ticket=stt_[A-Za-z0-9_\-]+'; then
+  fail "stratoclave ui url did not embed a ui_ticket= handoff nonce: $ui_url"
+fi
+ok "stratoclave ui url uses ?ui_ticket= (no access_token in URL)"
+
+# P0-8 consume round trip: freshly minted ticket should be redeemable
+# exactly once and return a payload whose access_token round-trips
+# through /v1/messages. Extracts the nonce from the URL, POSTs it to
+# /ui-ticket/consume, then uses the returned access_token.
+ticket=$(echo "$ui_url" | sed -E 's#.*ui_ticket=([^&]+).*#\1#')
+consume=$(curl -sS -w '\n%{http_code}' \
+  -X POST "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/auth/ui-ticket/consume" \
+  -H 'Content-Type: application/json' \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  -d "{\"ticket\":\"$ticket\"}")
+consume_status=$(printf '%s' "$consume" | tail -n1)
+if [ "$consume_status" != "200" ]; then
+  fail "ui-ticket consume returned HTTP $consume_status"
+fi
+ok "ui-ticket consume returned 200"
+
+# Replay MUST fail (single-use).
+replay_status=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -X POST "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/auth/ui-ticket/consume" \
+  -H 'Content-Type: application/json' \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  -d "{\"ticket\":\"$ticket\"}")
+if [ "$replay_status" != "404" ]; then
+  fail "ui-ticket replay returned HTTP $replay_status (expected 404)"
+fi
+ok "ui-ticket replay rejected (404)"
+
 access=$(jq -r '.access_token' "$HOME/.stratoclave/mvp_tokens.json")
 resp=$(curl -sS -w '\n%{http_code}' \
   -X POST "${STRATOCLAVE_API_ENDPOINT%/}/v1/messages" \

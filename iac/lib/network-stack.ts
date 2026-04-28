@@ -118,12 +118,36 @@ export class NetworkStack extends cdk.Stack {
       'Allow HTTP from CloudFront edge locations only',
     );
 
+    // P0-9 (2026-04 security review): the ECS task SG used to allow all
+    // outbound traffic. Combined with `assignPublicIp: ENABLED` that
+    // meant a backend RCE could establish arbitrary egress connections
+    // — C2, data exfil, crypto-mining, or pivot into other tenants'
+    // services on the public internet. We narrow outbound to only the
+    // traffic the runtime actually needs:
+    //
+    //   * TCP/443  — every AWS SDK call (Bedrock / STS / Cognito /
+    //                DynamoDB / ECR / CloudWatch Logs / SSM) is HTTPS.
+    //   * UDP/53   — Route 53 Resolver for AWS endpoint DNS.
+    //
+    // A VPC-endpoint + private-subnet migration is the right long-term
+    // answer (tracked as P1); this change is the defence that can ship
+    // atomically with no data-plane rearrangement.
     this.ecsSecurityGroup = new ec2.SecurityGroup(this, 'EcsSecurityGroup', {
       vpc: this.vpc,
       securityGroupName: `${props.prefix}-ecs-sg`,
       description: `Security group for ${props.prefix} ECS Fargate tasks`,
-      allowAllOutbound: true,
+      allowAllOutbound: false,
     });
+    this.ecsSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS to AWS service endpoints (Bedrock, STS, Cognito, DynamoDB, ECR, CloudWatch)'
+    );
+    this.ecsSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.udp(53),
+      'DNS resolution (Route 53 Resolver for AWS endpoint hostnames)'
+    );
     this.ecsSecurityGroup.addIngressRule(
       this.albSecurityGroup,
       ec2.Port.tcp(8000),
