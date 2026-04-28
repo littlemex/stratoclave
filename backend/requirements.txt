@@ -5,7 +5,7 @@
 # FastAPI
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
-python-multipart==0.0.12
+python-multipart==0.0.27
 
 # httpx is used at runtime by the backend to forward signed STS requests
 # and by tests; keep it in the runtime set.
