@@ -12,21 +12,21 @@ path = "src/main.rs"
 # AWS credentials parsing
 configparser = "3.1"
 # TOML parsing
-toml = "0.8"
+toml = "1.1"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "form"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
-rand = "0.8"
-dirs = "5"
+rand = "0.10"
+dirs = "6"
 anyhow = "1"
 tiny_http = "0.12"
 url = "2"
 open = "5"
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+rustyline = "18"
 atty = "0.2"
 # Phase S: AWS SSO / STS 経由ログイン用
 aws-config = { version = "1", features = ["behavior-version-latest"] }

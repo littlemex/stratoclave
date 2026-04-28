@@ -161,10 +161,11 @@ export class WafStack extends cdk.Stack {
       },
     });
 
-    // 5. Rate-based rule (5-minute window, per IP).
+    // 5. Rate-based rule (5-minute window, per IP). Last rule in the
+    // chain — no further `priority++` is needed after this one.
     rules.push({
       name: 'RateLimitPerIp',
-      priority: priority++,
+      priority: priority,
       action: { block: {} },
       statement: {
         rateBasedStatement: {

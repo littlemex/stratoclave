@@ -17,6 +17,6 @@
   "devDependencies": {
     "@playwright/test": "^1.42.0",
     "amazon-cognito-identity-js": "^6.3.16",
-    "typescript": "^5.3.3"
+    "typescript": "^6.0.3"
   }
 }

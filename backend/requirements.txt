@@ -3,29 +3,29 @@
 # package listed here ends up in the shipped container.
 
 # FastAPI
-fastapi==0.115.0
+fastapi==0.136.1
 uvicorn[standard]==0.32.0
-python-multipart==0.0.12
+python-multipart==0.0.27
 
 # httpx is used at runtime by the backend to forward signed STS requests
 # and by tests; keep it in the runtime set.
 httpx==0.28.1
 
 # AWS
-boto3==1.35.74
+boto3==1.42.97
 
 # Utilities
-pydantic[email]==2.10.3
-pydantic-settings==2.7.0
-python-dotenv==1.0.1
+pydantic[email]==2.13.3
+pydantic-settings==2.14.0
+python-dotenv==1.2.2
 
 # Observability
-structlog==24.4.0
-python-json-logger==3.2.1
+structlog==25.5.0
+python-json-logger==4.1.0
 
 # Authentication
 PyJWT[crypto]==2.10.1
-cryptography==44.0.0
+cryptography==47.0.0
 
 # Rate limiting (in-process token bucket shared across routes).
 slowapi==0.1.9

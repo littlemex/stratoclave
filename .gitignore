@@ -34,6 +34,7 @@ __pycache__/
 
 # Python virtualenv
 .venv/
+.venv-*/
 venv/
 
 # pytest / coverage
