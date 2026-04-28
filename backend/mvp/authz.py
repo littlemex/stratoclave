@@ -159,21 +159,99 @@ def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., Au
 
 
 # -----------------------------------------------------------------
-# Admin 作成ゲート (Critical C-D)
+# Admin creation gate (Critical C-D) — P1-A hardening (2026-04 review)
 # -----------------------------------------------------------------
+#
+# The first-admin bootstrap path opens `POST /api/mvp/admin/users` to
+# anyone who can reach the backend, because the very first user has to
+# be created before anyone can authenticate. The old flag
+# `ALLOW_ADMIN_CREATION=true` was global and sticky: if an operator
+# forgot to unset it after bootstrap, any unauthenticated caller could
+# mint themselves an admin. That is the single biggest operational
+# footgun in the current threat model.
+#
+# P1-A keeps the env var for dev ergonomics, but in `ENVIRONMENT=production`
+# the flag alone is insufficient — the operator must also set
+# `ALLOW_ADMIN_CREATION_UNTIL=<epoch seconds>` to a future instant. The
+# gate auto-closes when `now > epoch`, so even "oops I shipped with the
+# flag on" stops being a permanent exposure.
+#
+# Dev / staging keep the old sticky-flag behaviour so `stratoclave
+# auth login` smoke tests don't grow a new ceremony. The warn log on
+# every request (plus the startup warn) makes the state impossible to
+# miss in CloudWatch.
+def _is_production() -> bool:
+    # Default to production when unset. `main.py` already fails closed
+    # if ENVIRONMENT is missing in prod-critical env validation, but
+    # centralising the default here means any helper that reads
+    # ENVIRONMENT agrees with the rest of the backend.
+    return os.getenv("ENVIRONMENT", "production").lower() == "production"
+
+
+def _admin_creation_until_epoch() -> int:
+    """Return the expiry epoch (seconds) for the admin bootstrap window,
+    or 0 if unset / malformed. Callers interpret 0 as "no time-bound
+    window configured" and combine it with the sticky boolean flag.
+    """
+    raw = os.getenv("ALLOW_ADMIN_CREATION_UNTIL", "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        # A malformed value fails closed in production: the sticky
+        # boolean is not enough on its own there, and a bad number
+        # here cannot satisfy the `now <= epoch` check.
+        return 0
+
+
 def admin_creation_allowed() -> bool:
-    """ALLOW_ADMIN_CREATION=true かつ production では warning を audit に記録."""
-    allowed = os.getenv("ALLOW_ADMIN_CREATION", "false").lower() == "true"
-    return allowed
+    """Return True when `POST /api/mvp/admin/users` may create an admin.
+
+    * Development / staging: the classic sticky `ALLOW_ADMIN_CREATION=true`
+      still works, to keep local smoke tests ergonomic.
+    * Production: the boolean is NOT enough. The operator must ALSO set
+      `ALLOW_ADMIN_CREATION_UNTIL=<future-epoch>`; the gate auto-closes
+      at that instant. A missing or past epoch means admin creation is
+      denied even if the boolean is on.
+    """
+    flag = os.getenv("ALLOW_ADMIN_CREATION", "false").lower() == "true"
+    if not flag:
+        return False
+    if not _is_production():
+        return True
+    until = _admin_creation_until_epoch()
+    if until <= 0:
+        return False
+    import time
+
+    return int(time.time()) <= until
 
 
 def warn_if_admin_creation_enabled_in_production(logger: logging.Logger) -> None:
-    env = os.getenv("ENVIRONMENT", "development")
-    if env == "production" and admin_creation_allowed():
-        logger.warning(
-            "allow_admin_creation_enabled_in_production",
-            extra={"event": "allow_admin_creation_warning", "environment": env},
-        )
+    """Emit an audit-level warning if the bootstrap gate is open.
+
+    Called from `main.py` on startup and (if present) from the
+    `create_user` handler on every admin-role request, so the presence
+    of an open gate is loud enough to catch in CloudWatch filters.
+    """
+    if not _is_production():
+        return
+    if not admin_creation_allowed():
+        return
+    import time
+
+    until = _admin_creation_until_epoch()
+    remaining = max(0, until - int(time.time())) if until else 0
+    logger.warning(
+        "allow_admin_creation_enabled_in_production",
+        extra={
+            "event": "allow_admin_creation_warning",
+            "environment": "production",
+            "expires_at": until,
+            "seconds_remaining": remaining,
+        },
+    )
 
 
 # -----------------------------------------------------------------

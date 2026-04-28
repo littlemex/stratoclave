@@ -24,6 +24,7 @@ dirs = "6"
 anyhow = "1"
 tiny_http = "0.12"
 url = "2"
+urlencoding = "2"
 open = "5"
 clap = { version = "4", features = ["derive"] }
 rustyline = "18"

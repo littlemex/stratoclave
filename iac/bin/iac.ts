@@ -66,11 +66,25 @@ const defaultBedrockModel =
 
 // Admin 作成ゲート (Critical C-D): production では bootstrap 後に unset する運用
 const allowAdminCreation = process.env.ALLOW_ADMIN_CREATION || 'false';
+// P1-A: production では `ALLOW_ADMIN_CREATION_UNTIL=<epoch>` も必要。
+// ここで値を受け取って ECS env に流すことで、operator が SSM を直接
+// 触ることなく CDK deploy 経路で制御できる。
+const allowAdminCreationUntil = process.env.ALLOW_ADMIN_CREATION_UNTIL || '';
 
 // Environment flag drives production-only knobs (deletion protection,
 // retain-on-delete tables, stricter cdk-nag rules).
 const envName = process.env.ENVIRONMENT || 'development';
 const isProd = envName === 'production';
+
+// P1-C (2026-04 review): `enableExecuteCommand` defaults OFF in
+// production so a compromised AWS credential cannot simply
+// `aws ecs execute-command` into a live backend task. Non-production
+// keeps it on for developer convenience. `ENABLE_ECS_EXEC=true`
+// explicitly re-opens shell access for an operator-run deploy cycle.
+const ecsExecExplicit = process.env.ENABLE_ECS_EXEC;
+const enableEcsExec = ecsExecExplicit !== undefined
+  ? ecsExecExplicit.toLowerCase() === 'true'
+  : !isProd;
 
 // P1-2 WAF: set ENABLE_WAF=false only for throwaway stacks. Default is on —
 // without WAF, /api/* is exposed with no rate limit or managed-rule coverage.
@@ -230,7 +244,10 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     USAGE_API_RATE_LIMIT: '10/minute',
 
     // Phase 2 (v2.1): Admin 作成ゲート (Critical C-D)
+    // P1-A: production では ALLOW_ADMIN_CREATION_UNTIL=<epoch> が
+    // 追加で必要。空文字列なら未設定扱いで backend が拒否する。
     ALLOW_ADMIN_CREATION: allowAdminCreation,
+    ALLOW_ADMIN_CREATION_UNTIL: allowAdminCreationUntil,
 
     // Tenant
     DEFAULT_ORG_ID: 'default-org',
@@ -241,6 +258,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DEFAULT_BEDROCK_MODEL: defaultBedrockModel,
   },
   secrets: {},
+  // P1-C: shell-into-task is opt-in (false in production by default).
+  enableExecuteCommand: enableEcsExec,
   description: `[${prefix}] ECS Fargate (Public Subnet, desiredCount=1)`,
 });
 ecsStack.addDependency(networkStack);
