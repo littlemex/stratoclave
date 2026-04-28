@@ -63,7 +63,15 @@ SSO_EXCHANGE_RATE_LIMIT = os.getenv("SSO_EXCHANGE_RATE_LIMIT", "20/minute")
 limiter = Limiter(
     key_func=_client_key,
     default_limits=[],  # opt-in per route
-    headers_enabled=True,
+    # `headers_enabled=True` makes slowapi's sync decorator try to mutate
+    # the handler's return value into a `starlette.responses.Response`
+    # and inject `X-RateLimit-*` headers. Our auth handlers return
+    # pydantic models via `response_model=...`, so the injector blows up
+    # with `parameter response must be an instance of starlette.responses.Response`
+    # and turns every authenticated request into a 500. Disable the
+    # header injection; the 429 emission on cap breach is independent of
+    # headers_enabled and still fires through the exception handler.
+    headers_enabled=False,
     swallow_errors=False,
 )
 
