@@ -26,12 +26,14 @@ import {
   getStoredTokens,
   logoutRedirect,
   refreshTokens as refreshTokensFromCognito,
+  saveTokens,
   startLogin,
 } from '@/lib/cognito'
 import type {
   AuthAction,
   AuthState,
   AuthUser,
+  StoredTokens,
   UserRole,
 } from '@/types/auth'
 
@@ -151,18 +153,82 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // `https://app.example/?token=<attacker>` pin the victim's SPA to
     // an attacker-controlled Cognito identity (session fixation). We
     // now strip any such parameter from the URL and ignore it.
-    // Legitimate CLI handoff goes through Cognito Hosted UI + PKCE.
     const strippedToken = url.searchParams.get('token')
     if (strippedToken !== null) {
       url.searchParams.delete('token')
       window.history.replaceState({}, document.title, url.pathname + url.search)
-      // Do NOT dispatch AUTH_SUCCESS with the stripped token. Fall
-      // through to the normal bootstrap below so the user either
-      // picks up an existing session or is pushed to Hosted UI.
+    }
+
+    // P0-8 follow-up: the sanctioned CLI → SPA handoff channel. The
+    // CLI mints a single-use, 30 s-TTL nonce on the backend and opens
+    // the SPA with `?ui_ticket=<nonce>`. We (a) strip the query
+    // parameter before any third-party script has a chance to see it,
+    // (b) POST the nonce to `/api/mvp/auth/ui-ticket/consume` which
+    // atomically deletes the backend record and hands back the real
+    // tokens, and (c) drop the tokens into sessionStorage via the
+    // normal `saveTokens` path. The nonce alone carries no API
+    // authority, so leaking it in the URL bar during that brief
+    // window is acceptable.
+    const uiTicket = url.searchParams.get('ui_ticket')
+    if (uiTicket !== null) {
+      url.searchParams.delete('ui_ticket')
+      window.history.replaceState({}, document.title, url.pathname + url.search)
     }
 
     const bootstrap = async () => {
-      // 1. 既存 sessionStorage のトークン (P0-7)
+      // 1. CLI → SPA handoff via single-use ticket (P0-8 follow-up).
+      if (uiTicket) {
+        try {
+          const resp = await fetch('/api/mvp/auth/ui-ticket/consume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket: uiTicket }),
+          })
+          if (!resp.ok) {
+            throw new Error(
+              `ui-ticket consume failed: HTTP ${resp.status}`,
+            )
+          }
+          const data = (await resp.json()) as {
+            access_token: string
+            id_token: string | null
+            refresh_token: string | null
+            expires_in: number | null
+          }
+          const tokens: StoredTokens = {
+            access_token: data.access_token,
+            id_token: data.id_token ?? null,
+            refresh_token: data.refresh_token ?? null,
+            expires_at:
+              Date.now() + ((data.expires_in ?? 3600) * 1000),
+          }
+          saveTokens(tokens)
+          try {
+            const user = await fetchMe()
+            dispatch({ type: 'AUTH_SUCCESS', user, tokens })
+          } catch (err) {
+            clearTokens()
+            dispatch({
+              type: 'AUTH_FAILURE',
+              error:
+                err instanceof Error
+                  ? `CLI handoff 済だが /me 呼び出しに失敗: ${err.message}`
+                  : 'CLI handoff 済だが /me 呼び出しに失敗',
+            })
+          }
+          return
+        } catch (err) {
+          // Fall through to normal bootstrap on ticket failure; a
+          // stale/expired ticket is a common UX case after a retry.
+          // eslint-disable-next-line no-console
+          console.warn(
+            'ui_ticket exchange failed, falling back to stored session',
+            err,
+          )
+        }
+      }
+
+      // 2. 既存 sessionStorage のトークン (P0-7)
       const stored = getStoredTokens()
       if (!stored) {
         dispatch({ type: 'AUTH_FAILURE', error: 'No tokens' })
