@@ -87,11 +87,22 @@ if environment == "production":
 async def lifespan(app: FastAPI):
     logger.info("application_starting", environment=environment)
 
-    # Phase 2 (v2.1) 運用ガード: production で ALLOW_ADMIN_CREATION=true は警告
-    allow_admin_creation = os.getenv("ALLOW_ADMIN_CREATION", "false").lower() == "true"
-    if environment == "production" and allow_admin_creation:
+    # P1-A (2026-04 review): admin bootstrap gate now expires.
+    # `ALLOW_ADMIN_CREATION=true` on its own is no longer sufficient in
+    # production — `ALLOW_ADMIN_CREATION_UNTIL=<epoch>` must also be
+    # in the future. authz.admin_creation_allowed() is the single
+    # source of truth; we just log loudly here on startup so an
+    # accidentally-open gate is visible in CloudWatch from boot.
+    from mvp.authz import (
+        admin_creation_allowed,
+        warn_if_admin_creation_enabled_in_production,
+    )
+    import logging as _std_logging
+    _compat_logger = _std_logging.getLogger("stratoclave.startup")
+    if admin_creation_allowed():
+        warn_if_admin_creation_enabled_in_production(_compat_logger)
         logger.warning(
-            "allow_admin_creation_enabled_in_production",
+            "admin_creation_gate_open_at_startup",
             event="allow_admin_creation_warning",
             environment=environment,
         )

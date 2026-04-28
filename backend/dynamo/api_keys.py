@@ -161,11 +161,21 @@ class ApiKeysRepository:
             scan_kwargs["ExclusiveStartKey"] = last
 
     def count_active(self, user_id: str) -> int:
+        """Count the user's *persistent* active keys.
+
+        P1-B: ephemeral wrapper keys (minted by `stratoclave claude`)
+        are excluded from this count. They self-revoke on child exit
+        and carry a short TTL, so counting them against the cap would
+        lock humans out of minting their own keys whenever a claude
+        session was alive.
+        """
         now = _now_iso()
         active = 0
         for it in self.list_by_user(user_id, include_revoked=False):
             expires_at = it.get("expires_at")
             if expires_at and expires_at <= now:
+                continue
+            if it.get("ephemeral"):
                 continue
             active += 1
         return active
@@ -188,15 +198,28 @@ class ApiKeysRepository:
         scopes: list[str],
         expires_at: Optional[str],
         created_by: str,
+        ephemeral: bool = False,
     ) -> tuple[dict[str, Any], str]:
         """新規キーを作成. 返り値は (DB item, plaintext) の tuple.
 
         plaintext は一度しか返せないため、API レスポンスで即ユーザに表示した後に
         破棄すること. DB には key_hash のみ保存.
+
+        ``ephemeral=True`` (P1-B): caller is the CLI `claude` wrapper
+        minting a throwaway key for a single child-process lifetime.
+        Ephemeral keys:
+            * do NOT count against the per-user ``MAX_ACTIVE_KEYS_PER_USER``
+              cap (so running ``stratoclave claude`` repeatedly never
+              locks out a human's ability to mint their own keys);
+            * are marked ``ephemeral: true`` in DynamoDB so audit
+              tooling can distinguish them from human-held keys;
+            * should always carry a short ``expires_at`` (minutes-level)
+              so even a missed revoke on abnormal exit decays quickly.
         """
         if not scopes:
             raise ValueError("scopes must not be empty")
-        if self.count_active(user_id) >= MAX_ACTIVE_KEYS_PER_USER:
+        # Only non-ephemeral keys count against the per-user cap.
+        if not ephemeral and self.count_active(user_id) >= MAX_ACTIVE_KEYS_PER_USER:
             raise ApiKeyLimitExceededError(
                 f"user {user_id} already has {MAX_ACTIVE_KEYS_PER_USER} active api keys"
             )
@@ -214,6 +237,7 @@ class ApiKeysRepository:
             "revoked_at": None,
             "last_used_at": None,
             "created_by": created_by,
+            "ephemeral": ephemeral,
         }
         # DynamoDB は None を書けないので、expires_at / revoked_at / last_used_at は None のときキーを落とす
         db_item = {k: v for k, v in item.items() if v is not None}

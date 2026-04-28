@@ -73,6 +73,16 @@ class CreateApiKeyRequest(BaseModel):
     scopes: Optional[list[str]] = Field(default=None, max_length=32)
     # None または 0 = 無期限、それ以外は日数指定 (1..3650)
     expires_in_days: Optional[int] = Field(default=DEFAULT_EXPIRES_DAYS, ge=0, le=3650)
+    # P1-B: ephemeral wrapper keys minted by `stratoclave claude`. These
+    # keys bypass the per-user active-key cap (so launching claude
+    # never locks humans out of minting their own keys), and should
+    # always be accompanied by a short expiry (minutes-level) plus an
+    # explicit revoke on child-process exit. The wrapper sends both.
+    ephemeral: bool = Field(default=False)
+    # Short-lived minute-grained expiry for ephemeral keys. When set,
+    # `expires_in_days` is ignored. Max 60 minutes so a missed revoke
+    # cannot become a long-lived leak.
+    expires_in_minutes: Optional[int] = Field(default=None, ge=1, le=60)
 
 
 class CreateApiKeyResponse(BaseModel):
@@ -123,6 +133,20 @@ def _resolve_expires_at(expires_in_days: Optional[int]) -> Optional[str]:
     return (datetime.now(timezone.utc) + timedelta(days=expires_in_days)).isoformat()
 
 
+def _resolve_ephemeral_expires_at(expires_in_minutes: Optional[int]) -> str:
+    """Minute-grained expiry for ephemeral wrapper keys (P1-B).
+
+    Defaults to 5 minutes if the caller supplies no explicit value.
+    The key is refreshed on every `stratoclave claude` invocation, so a
+    short window is enough for the child process lifetime while keeping
+    the blast radius of a missed revoke tiny.
+    """
+    minutes = expires_in_minutes if expires_in_minutes and expires_in_minutes > 0 else 5
+    return (
+        datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    ).isoformat()
+
+
 # ---------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------
@@ -154,7 +178,19 @@ def create_my_api_key(
         )
 
     scopes = _resolve_scopes(user, body.scopes)
-    expires_at = _resolve_expires_at(body.expires_in_days)
+    if body.ephemeral:
+        # P1-B: ephemeral wrapper key minted by `stratoclave claude`.
+        # Always on a minute-level TTL, always cap-exempt. Scopes are
+        # still validated against the caller's roles so a wrapper
+        # cannot grant itself more than the user already has.
+        expires_at = _resolve_ephemeral_expires_at(body.expires_in_minutes)
+    else:
+        if body.expires_in_minutes is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="expires_in_minutes is only valid with ephemeral=true",
+            )
+        expires_at = _resolve_expires_at(body.expires_in_days)
     repo = ApiKeysRepository()
     try:
         item, plaintext = repo.create(
@@ -163,6 +199,7 @@ def create_my_api_key(
             scopes=scopes,
             expires_at=expires_at,
             created_by=user.user_id,
+            ephemeral=body.ephemeral,
         )
     except ApiKeyLimitExceededError as e:
         raise HTTPException(

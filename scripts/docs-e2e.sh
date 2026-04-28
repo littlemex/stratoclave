@@ -244,4 +244,83 @@ if [ "$status" != "200" ]; then
 fi
 ok "/v1/messages returned 200"
 
+# P1-B regression guard: the claude-wrapper API-key mint path must
+# accept `ephemeral=true` + `expires_in_minutes=30`, bypass the active-
+# key cap, and return a revokable key_id. We do the mint and revoke
+# here directly so a future CLI rewrite that silently drops the
+# wrapper-key mechanism trips this check.
+mint_body='{"name":"stratoclave-claude-wrapper","scopes":["messages:send"],"ephemeral":true,"expires_in_minutes":5}'
+mint=$(curl -sS -w '\n%{http_code}' \
+  -X POST "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me/api-keys" \
+  -H "Authorization: Bearer $access" \
+  -H 'Content-Type: application/json' \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  -d "$mint_body")
+mint_status=$(printf '%s' "$mint" | tail -n1)
+mint_body_json=$(printf '%s' "$mint" | sed '$d')
+if [ "$mint_status" != "201" ]; then
+  fail "ephemeral wrapper-key mint returned HTTP $mint_status: $mint_body_json"
+fi
+wrapper_key_id=$(printf '%s' "$mint_body_json" | jq -r '.key_id')
+if [ -z "$wrapper_key_id" ] || [ "$wrapper_key_id" = "null" ]; then
+  fail "ephemeral wrapper-key response missing key_id"
+fi
+ok "ephemeral wrapper-key mint returned 201 (key_id=$wrapper_key_id)"
+
+# P1-B regression guard: the revoke path must succeed and remove the
+# key from the active listing.
+revoke_status=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -X DELETE "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me/api-keys/by-key-id/${wrapper_key_id}" \
+  -H "Authorization: Bearer $access" \
+  -A "stratoclave-docs-e2e/$(date +%s)")
+if [ "$revoke_status" != "204" ]; then
+  fail "ephemeral wrapper-key revoke returned HTTP $revoke_status"
+fi
+ok "ephemeral wrapper-key revoked (204)"
+
+# P1-C regression guard: enableExecuteCommand must be OFF in production.
+# We ask ECS describe-services directly (requires the caller's AWS
+# credentials — this check is skipped when AWS_PROFILE is not set).
+if [ -n "${AWS_PROFILE:-}" ]; then
+  enable_exec=$(aws ecs describe-services \
+    --cluster stratoclave-cluster \
+    --services stratoclave-backend \
+    --query 'services[0].enableExecuteCommand' \
+    --output text 2>/dev/null || echo UNKNOWN)
+  if [ "$enable_exec" = "False" ] || [ "$enable_exec" = "false" ]; then
+    ok "ECS enableExecuteCommand=false on the backend service (P1-C)"
+  elif [ "$enable_exec" = "UNKNOWN" ]; then
+    log "  skipping ECS describe (no AWS access)"
+  else
+    fail "ECS backend service has enableExecuteCommand=$enable_exec — P1-C regression in production"
+  fi
+fi
+
+# P1-A regression guard: an accidentally-open admin-bootstrap gate in
+# production is one of the highest-impact foot-guns in the threat
+# model. We probe it through the SSM parameter path the backend
+# reads; the check is skipped when AWS access is not configured.
+if [ -n "${AWS_PROFILE:-}" ]; then
+  gate_env=$(aws ecs describe-task-definition \
+    --task-definition stratoclave-backend \
+    --query 'taskDefinition.containerDefinitions[0].environment' \
+    --output json 2>/dev/null || echo '[]')
+  allow_flag=$(printf '%s' "$gate_env" | jq -r '.[] | select(.name=="ALLOW_ADMIN_CREATION") | .value' | head -n1)
+  allow_until=$(printf '%s' "$gate_env" | jq -r '.[] | select(.name=="ALLOW_ADMIN_CREATION_UNTIL") | .value' | head -n1)
+  now_epoch=$(date -u +%s)
+  if [ "$allow_flag" = "true" ]; then
+    if [ -z "$allow_until" ] || [ "$allow_until" = "null" ] || [ "$allow_until" = "0" ]; then
+      fail "ALLOW_ADMIN_CREATION=true without ALLOW_ADMIN_CREATION_UNTIL in production (P1-A regression)"
+    fi
+    if [ "$allow_until" -le "$now_epoch" ] 2>/dev/null; then
+      ok "ALLOW_ADMIN_CREATION_UNTIL has already passed (gate auto-closed)"
+    else
+      log "  WARN: ALLOW_ADMIN_CREATION is open (until epoch=$allow_until, $((allow_until - now_epoch))s remaining)"
+      ok "admin-bootstrap gate open but time-bounded (P1-A)"
+    fi
+  else
+    ok "ALLOW_ADMIN_CREATION is false on the live task definition (P1-A)"
+  fi
+fi
+
 ok "docs-e2e complete (full path)"

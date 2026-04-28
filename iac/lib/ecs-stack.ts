@@ -32,6 +32,24 @@ export interface EcsStackProps extends cdk.StackProps {
 
   environment?: { [key: string]: string };
   secrets?: { [key: string]: ecs.Secret };
+
+  /**
+   * P1-C (2026-04 security review).
+   *
+   * `enableExecuteCommand: true` means any principal with
+   * `ecs:ExecuteCommand` on this service gets a shell inside the
+   * live backend container. That is useful for incident debugging
+   * but hugely expensive if the AWS credentials that carry that
+   * permission are ever compromised — the attacker walks straight
+   * into a process that holds every backend env var and DynamoDB
+   * grant.
+   *
+   * Default off in production. Operators that genuinely need shell
+   * access can set `ENABLE_ECS_EXEC=true` for a time-boxed window,
+   * redeploy, and then unset it. Non-production environments leave
+   * it on so dev smoke tests keep working.
+   */
+  enableExecuteCommand?: boolean;
 }
 
 /**
@@ -186,22 +204,27 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
-    // ECS Exec (`enableExecuteCommand: true`) に必要な SSM messages 権限を明示付与.
-    // 本来は CDK が自動付与するが、CloudFormation の DefaultPolicy diff で現 live と
-    // 差が出るのを防ぐため明示宣言する.
-    this.taskDefinition.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        sid: 'AllowEcsExecChannels',
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'ssmmessages:CreateControlChannel',
-          'ssmmessages:CreateDataChannel',
-          'ssmmessages:OpenControlChannel',
-          'ssmmessages:OpenDataChannel',
-        ],
-        resources: ['*'],
-      })
-    );
+    // ECS Exec (`enableExecuteCommand: true`) に必要な SSM messages 権限.
+    // P1-C (2026-04 review): `enableExecuteCommand` が false のときは
+    // この権限自体を task role から削ぎ落とす。ssmmessages:* は shell
+    // チャネル開通専用で他用途はないため、enable フラグに追従させる
+    // のが最小権限として正しい。再オープンは `ENABLE_ECS_EXEC=true`
+    // を渡して cdk deploy で元に戻す。
+    if (props.enableExecuteCommand) {
+      this.taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'AllowEcsExecChannels',
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'ssmmessages:CreateControlChannel',
+            'ssmmessages:CreateDataChannel',
+            'ssmmessages:OpenControlChannel',
+            'ssmmessages:OpenDataChannel',
+          ],
+          resources: ['*'],
+        })
+      );
+    }
 
     // Cognito (指定された User Pool のみ)
     // Phase 2 (v2.1): Cognito Groups を使わない方針のため、
@@ -277,7 +300,8 @@ export class EcsStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       securityGroups: [props.securityGroup],
       serviceName: `${prefix}-backend`,
-      enableExecuteCommand: true,
+      // P1-C: default off. Callers must opt in explicitly.
+      enableExecuteCommand: props.enableExecuteCommand ?? false,
       healthCheckGracePeriod: cdk.Duration.seconds(60),
     });
 

@@ -289,3 +289,97 @@ def test_scope_intersection_cannot_exceed_key_scopes(dynamodb_mock):
     # Even though admin role includes users:* wildcard, the key's narrow scope
     # blocks this — the intersection floor is the key's declared scopes.
     assert user_has_permission(admin_but_narrow, "users:create") is False
+
+
+# -------------------------------------------------------------------
+# P1-B: ephemeral wrapper keys (claude_cmd handoff).
+# -------------------------------------------------------------------
+def test_ephemeral_key_is_flagged_and_excluded_from_cap(api_keys_table):
+    """Ephemeral keys bypass the per-user active-key cap.
+
+    Rationale (P1-B): `stratoclave claude` mints a throwaway key on
+    every invocation. Counting those against the 5-key cap would lock
+    human operators out of minting their own keys during an active
+    claude session. They carry an `ephemeral: true` flag plus a short
+    TTL so auditability stays intact.
+    """
+    from dynamo.api_keys import MAX_ACTIVE_KEYS_PER_USER, ApiKeysRepository
+
+    repo = ApiKeysRepository()
+    # Fill the cap with persistent keys.
+    for i in range(MAX_ACTIVE_KEYS_PER_USER):
+        repo.create(
+            user_id="user-1",
+            name=f"persistent-{i}",
+            scopes=["messages:send"],
+            expires_at=None,
+            created_by="user-1",
+        )
+    assert repo.count_active("user-1") == MAX_ACTIVE_KEYS_PER_USER
+
+    # The next persistent mint must fail.
+    from dynamo.api_keys import ApiKeyLimitExceededError
+
+    with pytest.raises(ApiKeyLimitExceededError):
+        repo.create(
+            user_id="user-1",
+            name="one-too-many",
+            scopes=["messages:send"],
+            expires_at=None,
+            created_by="user-1",
+        )
+
+    # But an ephemeral mint is still allowed — and does not move the
+    # count.
+    short_ttl = (
+        datetime.now(timezone.utc) + timedelta(minutes=5)
+    ).isoformat()
+    eph_item, _ = repo.create(
+        user_id="user-1",
+        name="claude-wrapper-123",
+        scopes=["messages:send"],
+        expires_at=short_ttl,
+        created_by="user-1",
+        ephemeral=True,
+    )
+    assert eph_item["ephemeral"] is True
+    assert repo.count_active("user-1") == MAX_ACTIVE_KEYS_PER_USER
+
+    # Listing surfaces the ephemeral flag so audit tooling can see it.
+    rows = list(repo.list_by_user("user-1", include_revoked=False))
+    eph_rows = [r for r in rows if r.get("ephemeral")]
+    assert len(eph_rows) == 1
+
+
+def test_ephemeral_key_revocation_round_trip(api_keys_table):
+    """An ephemeral key revokes cleanly via the normal revoke path —
+    the wrapper's 'on child exit, DELETE by key_hash' flow must work."""
+    from dynamo.api_keys import ApiKeysRepository
+
+    repo = ApiKeysRepository()
+    short_ttl = (
+        datetime.now(timezone.utc) + timedelta(minutes=5)
+    ).isoformat()
+    item, _ = repo.create(
+        user_id="user-1",
+        name="claude-wrapper",
+        scopes=["messages:send"],
+        expires_at=short_ttl,
+        created_by="user-1",
+        ephemeral=True,
+    )
+    # Before revoke: present and active-count unchanged (ephemeral
+    # excluded from the cap).
+    hit = repo.get_by_hash(item["key_hash"])
+    assert hit is not None
+    assert hit["ephemeral"] is True
+    assert repo.count_active("user-1") == 0
+
+    repo.revoke(item["key_hash"], actor_user_id="user-1")
+    revoked = repo.get_by_hash(item["key_hash"])
+    assert revoked is not None
+    assert revoked.get("revoked_at")
+    # Still zero because ephemeral was never counted in the first
+    # place — but also a sanity check that revoke doesn't blow up on
+    # ephemeral rows.
+    assert repo.count_active("user-1") == 0

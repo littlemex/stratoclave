@@ -19,6 +19,7 @@ POST /api/mvp/admin/users
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Literal, Optional
 
@@ -35,12 +36,18 @@ from dynamo import (
 )
 from dynamo.client import get_dynamodb_resource
 
-from .authz import admin_creation_allowed, log_audit_event, require_permission
+from .authz import (
+    admin_creation_allowed,
+    log_audit_event,
+    require_permission,
+    warn_if_admin_creation_enabled_in_production,
+)
 from .cognito_admin import delete_user as cognito_delete_user, global_sign_out, update_org_id
 from .deps import DEFAULT_ORG_ID, AuthenticatedUser
 
 
 router = APIRouter(prefix="/api/mvp/admin", tags=["mvp-admin"])
+_log = logging.getLogger(__name__)
 
 
 Role = Literal["admin", "team_lead", "user"]
@@ -90,12 +97,23 @@ def create_user(
     body: CreateUserRequest,
     actor: AuthenticatedUser = Depends(require_permission("users:create")),
 ) -> CreateUserResponse:
-    # Admin 作成ゲート (Critical C-D)
-    if body.role == "admin" and not admin_creation_allowed():
-        raise HTTPException(
-            status_code=403,
-            detail="admin role creation is disabled (set ALLOW_ADMIN_CREATION=true to enable)",
-        )
+    # Admin creation gate (Critical C-D, P1-A time-bounded in production).
+    if body.role == "admin":
+        if not admin_creation_allowed():
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "admin role creation is disabled. In development set "
+                    "ALLOW_ADMIN_CREATION=true. In production set "
+                    "ALLOW_ADMIN_CREATION=true AND "
+                    "ALLOW_ADMIN_CREATION_UNTIL=<future-epoch-seconds>; "
+                    "the gate auto-closes once the epoch passes."
+                ),
+            )
+        # Emit a per-request audit warning whenever the gate is
+        # actively open in production so forgetting to close it is
+        # impossible to miss in CloudWatch alerts.
+        warn_if_admin_creation_enabled_in_production(_log)
 
     pool_id = _require_user_pool_id()
     email = body.email.lower().strip()
