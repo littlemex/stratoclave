@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { Layers } from 'lucide-react'
 
 import {
@@ -20,12 +21,6 @@ import {
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-const RANGES: Array<{ label: string; days: number }> = [
-  { label: '7 日', days: 7 },
-  { label: '30 日', days: 30 },
-  { label: '90 日', days: 90 },
-]
-
 function fmt(n: number): string {
   return n.toLocaleString()
 }
@@ -39,7 +34,14 @@ function formatDate(iso: string): string {
 }
 
 export default function MeUsage() {
+  const { t } = useTranslation()
   const [days, setDays] = useState(30)
+
+  const ranges: Array<{ labelKey: string; days: number }> = [
+    { labelKey: 'me_usage.range_7d', days: 7 },
+    { labelKey: 'me_usage.range_30d', days: 30 },
+    { labelKey: 'me_usage.range_90d', days: 90 },
+  ]
 
   const summary = useQuery({
     queryKey: ['me', 'usage-summary', days],
@@ -65,21 +67,21 @@ export default function MeUsage() {
       <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
           <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-            使用履歴
+            {t('me_usage.label')}
           </p>
           <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
-            自分の使用履歴
+            {t('me_usage.title')}
           </h1>
           <p className="mt-2 max-w-xl text-sm text-muted-foreground">
-            モデル別の集計と、直近のリクエストを新しい順に表示します。
+            {t('me_usage.intro')}
           </p>
         </div>
         <div
           className="flex gap-1 border border-border bg-card p-0.5"
           role="radiogroup"
-          aria-label="期間選択"
+          aria-label={t('me_usage.range_aria')}
         >
-          {RANGES.map((r) => (
+          {ranges.map((r) => (
             <button
               key={r.days}
               role="radio"
@@ -92,33 +94,36 @@ export default function MeUsage() {
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              {r.label}
+              {t(r.labelKey)}
             </button>
           ))}
         </div>
       </header>
 
       <section className="grid gap-4 md:grid-cols-3">
-        <StatBlock label="期間の総消費">
+        <StatBlock label={t('me_usage.stat_total')}>
           <div className="flex items-baseline gap-2">
             <span className="strato-stat font-display text-3xl font-semibold tracking-tight">
               {summary.data ? fmt(totalUsedInRange) : '—'}
             </span>
-            <span className="text-xs text-muted-foreground">tokens</span>
+            <span className="text-xs text-muted-foreground">{t('common.tokens')}</span>
           </div>
           {summary.data ? (
             <p className="mt-2 font-mono text-[11px] text-muted-foreground">
-              サンプル {fmt(summary.data.sample_size)} 件 / {summary.data.since_days} 日
+              {t('me_usage.stat_total_footer', {
+                samples: fmt(summary.data.sample_size),
+                days: summary.data.since_days,
+              })}
             </p>
           ) : null}
         </StatBlock>
 
-        <StatBlock label="残クレジット">
+        <StatBlock label={t('me_usage.stat_remaining')}>
           <div className="flex items-baseline gap-2">
             <span className="strato-stat font-display text-3xl font-semibold tracking-tight">
               {summary.data ? fmt(summary.data.remaining_credit) : '—'}
             </span>
-            <span className="text-xs text-muted-foreground">tokens</span>
+            <span className="text-xs text-muted-foreground">{t('common.tokens')}</span>
           </div>
           {summary.data ? (
             <p className="mt-2 font-mono text-[11px] text-muted-foreground">
@@ -127,15 +132,17 @@ export default function MeUsage() {
           ) : null}
         </StatBlock>
 
-        <StatBlock label="記録済みテナント">
+        <StatBlock label={t('me_usage.stat_tenants')}>
           <div className="flex items-baseline gap-2">
             <span className="strato-stat font-display text-3xl font-semibold tracking-tight">
               {summary.data ? Object.keys(summary.data.by_tenant).length : '—'}
             </span>
-            <span className="text-xs text-muted-foreground">tenants</span>
+            <span className="text-xs text-muted-foreground">
+              {t('me_usage.stat_tenants_unit')}
+            </span>
           </div>
           <p className="mt-2 text-[11px] text-muted-foreground">
-            過去のテナント切替を含む記録済みテナント数。
+            {t('me_usage.stat_tenants_footer')}
           </p>
         </StatBlock>
       </section>
@@ -143,17 +150,17 @@ export default function MeUsage() {
       <Card>
         <CardHeader>
           <CardTitle className="font-sans text-base font-semibold">
-            モデル別 トークン消費
+            {t('me_usage.by_model_title')}
           </CardTitle>
           <CardDescription>
-            Bedrock モデルごとに、この期間内の消費 token を集計します。
+            {t('me_usage.by_model_desc')}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {summary.isLoading ? (
-            <p className="text-sm text-muted-foreground">読み込み中…</p>
+            <p className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</p>
           ) : byModel.length === 0 ? (
-            <EmptyState message="この期間に Messages 利用履歴がありません。" />
+            <EmptyState message={t('me_usage.empty_models')} />
           ) : (
             <ul className="space-y-3">
               {byModel.map(([model, tokens]) => {
@@ -169,7 +176,7 @@ export default function MeUsage() {
                       <span className="text-sm font-medium">
                         {fmt(tokens)}{' '}
                         <span className="text-xs text-muted-foreground">
-                          tokens ({pct}%)
+                          {t('common.tokens')} ({pct}%)
                         </span>
                       </span>
                     </div>
@@ -190,27 +197,27 @@ export default function MeUsage() {
       <Card>
         <CardHeader>
           <CardTitle className="font-sans text-base font-semibold">
-            直近のリクエスト
+            {t('me_usage.recent_title')}
           </CardTitle>
           <CardDescription>
-            新しい順に最大 50 件を表示します。
+            {t('me_usage.recent_desc')}
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           {history.isLoading ? (
-            <p className="p-6 text-sm text-muted-foreground">読み込み中…</p>
+            <p className="p-6 text-sm text-muted-foreground">{t('common.loading_ellipsis')}</p>
           ) : (history.data?.history.length ?? 0) === 0 ? (
-            <EmptyState message="この期間のリクエスト履歴はありません。" />
+            <EmptyState message={t('me_usage.empty_history')} />
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>日時</TableHead>
-                  <TableHead>モデル</TableHead>
-                  <TableHead>テナント</TableHead>
-                  <TableHead className="text-right">Input</TableHead>
-                  <TableHead className="text-right">Output</TableHead>
-                  <TableHead className="text-right">Total</TableHead>
+                  <TableHead>{t('me_usage.col_when')}</TableHead>
+                  <TableHead>{t('me_usage.col_model')}</TableHead>
+                  <TableHead>{t('me_usage.col_tenant')}</TableHead>
+                  <TableHead className="text-right">{t('me_usage.col_input')}</TableHead>
+                  <TableHead className="text-right">{t('me_usage.col_output')}</TableHead>
+                  <TableHead className="text-right">{t('me_usage.col_total')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

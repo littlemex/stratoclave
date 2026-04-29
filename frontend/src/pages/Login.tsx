@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Loader2, Terminal } from 'lucide-react'
+import { Trans, useTranslation } from 'react-i18next'
 
 import { StratoMark } from '@/components/brand/StratoMark'
+import { LanguageSwitcher } from '@/components/common/LanguageSwitcher'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -35,6 +37,7 @@ function isBenignAuthState(message: string | null | undefined): boolean {
 }
 export default function Login() {
   const { login, state } = useAuth()
+  const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -167,19 +170,22 @@ export default function Login() {
         <div className="mb-10 flex flex-col items-center text-center">
           <StratoMark size={84} animated parallax={parallax} className="mb-5" />
           <h1 className="strato-title-shimmer font-display text-[44px] font-semibold leading-none tracking-tight">
-            Stratoclave
+            {t('login.title')}
           </h1>
           <p className="mt-3 max-w-xs text-sm text-muted-foreground">
-            Amazon Bedrock を一元管理するプロキシゲートウェイ。
+            {t('app.tagline')}
           </p>
+          <div className="mt-4">
+            <LanguageSwitcher />
+          </div>
         </div>
 
         <div ref={cardRef} className="strato-card-tilt">
           <Card variant="soft" className="strato-glass strato-card-spotlight">
             <CardHeader>
-              <CardTitle className="text-2xl">サインイン</CardTitle>
+              <CardTitle className="text-2xl">{t('login.card_title')}</CardTitle>
               <CardDescription>
-                管理者から発行されたメールアドレスとパスワードでサインインしてください。
+                {t('login.card_description')}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -192,7 +198,7 @@ export default function Login() {
                 {loading ? (
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                 ) : null}
-                Cognito でサインイン
+                {t('login.cta')}
               </Button>
 
               {state.error && !isBenignAuthState(state.error) ? (
@@ -207,14 +213,20 @@ export default function Login() {
               <div className="space-y-3 border-t border-border/60 pt-5">
                 <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                   <Terminal className="h-3.5 w-3.5" aria-hidden />
-                  CLI からサインインする場合
+                  {t('login.cli_title')}
                 </div>
                 <pre className="overflow-x-auto border border-border/60 bg-muted/60 px-3 py-2 font-mono text-xs leading-relaxed text-muted-foreground">
 {`stratoclave auth login
 stratoclave ui open`}
                 </pre>
                 <p className="text-xs text-muted-foreground">
-                  CLI でログイン後、<code className="font-mono text-foreground/80">stratoclave ui open</code> を実行すると認証済みタブがこの画面に戻ります。
+                  <Trans
+                    i18nKey="login.cli_footer"
+                    values={{ cmd: 'stratoclave ui open' }}
+                    components={{
+                      1: <code className="font-mono text-foreground/80" />,
+                    }}
+                  />
                 </p>
               </div>
             </CardContent>
@@ -223,12 +235,10 @@ stratoclave ui open`}
 
         <div className="mt-10 space-y-1.5 text-center">
           <p className="font-mono text-[11px] tracking-[0.16em] text-muted-foreground/80">
-            <span className="text-foreground/70">STRATO</span>{' '}
-            · Bedrock の上に重なる管理の地層
+            {t('login.tagline_strato')}
           </p>
           <p className="font-mono text-[11px] tracking-[0.16em] text-muted-foreground/80">
-            <span className="text-foreground/70">CONCLAVE</span>{' '}
-            · テナントに閉ざされた秘密空間でクレジットを統べる
+            {t('login.tagline_conclave')}
           </p>
         </div>
       </div>

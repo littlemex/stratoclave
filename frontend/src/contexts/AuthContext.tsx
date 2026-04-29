@@ -22,6 +22,11 @@ import {
 
 import { api } from '@/lib/api'
 import {
+  DEFAULT_LOCALE,
+  isSupportedLocale,
+  setLocaleLocal,
+} from '@/lib/i18n'
+import {
   clearTokens,
   getStoredTokens,
   logoutRedirect,
@@ -34,6 +39,7 @@ import type {
   AuthState,
   AuthUser,
   StoredTokens,
+  UserLocale,
   UserRole,
 } from '@/types/auth'
 
@@ -48,6 +54,7 @@ interface AuthContextValue {
   logout: () => void
   softLogout: () => void
   reloadUser: () => Promise<void>
+  setLocale: (locale: UserLocale) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -81,6 +88,9 @@ function reducer(state: AuthState, action: AuthAction): AuthState {
       return { status: 'unauthenticated', user: null, tokens: null, error: null }
     case 'TOKENS_UPDATED':
       return { ...state, tokens: action.tokens }
+    case 'LOCALE_UPDATED':
+      if (!state.user) return state
+      return { ...state, user: { ...state.user, locale: action.locale } }
     default:
       return state
   }
@@ -93,13 +103,23 @@ function sanitizeRoles(raw: unknown): UserRole[] {
   )
 }
 
+function sanitizeLocale(raw: unknown): UserLocale {
+  return isSupportedLocale(raw) ? raw : DEFAULT_LOCALE
+}
+
 async function fetchMe(): Promise<AuthUser> {
   const me = await api.me()
+  const locale = sanitizeLocale(me.locale)
+  // Drive react-i18next off the server-authoritative locale on every /me
+  // fetch. Storing it also refreshes the sessionStorage cache used by
+  // the language detector on the next cold start.
+  setLocaleLocal(locale)
   return {
     user_id: me.user_id,
     email: me.email ?? '',
     org_id: me.org_id ?? 'default-org',
     roles: sanitizeRoles(me.roles),
+    locale,
   }
 }
 
@@ -118,6 +138,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const softLogout = useCallback(() => {
     clearTokens()
     dispatch({ type: 'AUTH_LOGOUT' })
+  }, [])
+
+  const setLocale = useCallback(async (locale: UserLocale) => {
+    // Optimistic: update local state + i18next immediately so the UI
+    // switches without a round-trip, then PATCH /me to persist. If the
+    // PATCH fails (network blip, 401 racing a logout) we keep the
+    // local change — the next `/me` bootstrap reconciles us back to
+    // the server-side truth.
+    setLocaleLocal(locale)
+    dispatch({ type: 'LOCALE_UPDATED', locale })
+    try {
+      await api.updateMe({ locale })
+    } catch (err) {
+      console.warn('[AuthContext] locale persist failed, keeping local', err)
+    }
   }, [])
 
   const reloadUser = useCallback(async () => {
@@ -212,8 +247,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               type: 'AUTH_FAILURE',
               error:
                 err instanceof Error
-                  ? `CLI handoff 済だが /me 呼び出しに失敗: ${err.message}`
-                  : 'CLI handoff 済だが /me 呼び出しに失敗',
+                  ? `/me fetch after CLI handoff failed: ${err.message}`
+                  : '/me fetch after CLI handoff failed',
             })
           }
           return
@@ -312,7 +347,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ state, dispatch, login, logout, softLogout, reloadUser }}
+      value={{ state, dispatch, login, logout, softLogout, reloadUser, setLocale }}
     >
       {children}
     </AuthContext.Provider>

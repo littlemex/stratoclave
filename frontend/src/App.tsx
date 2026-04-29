@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 
 import { ErrorToast } from '@/components/ErrorToast'
 import { LoadingScreen } from '@/components/common/LoadingScreen'
@@ -35,6 +36,7 @@ export default function App() {
   const { state } = useAuth()
   const softLogout = useSoftLogout()
   const { showError } = useError()
+  const { t } = useTranslation()
 
   useEffect(() => {
     registerErrorHandler(showError)
@@ -47,7 +49,7 @@ export default function App() {
 
   // Bootstrapping the AuthContext (network I/O + token check)
   if (state.status === 'loading') {
-    return <LoadingScreen message="認証情報を確認しています" />
+    return <LoadingScreen message={t('callback.processing')} />
   }
 
   return (

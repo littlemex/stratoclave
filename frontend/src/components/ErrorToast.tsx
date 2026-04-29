@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Clock, Network, ShieldX, X } from 'lucide-react'
 
 import { useError, type ErrorType } from '@/contexts/ErrorContext'
@@ -35,23 +36,26 @@ function iconFor(type: ErrorType) {
   }
 }
 
-function labelFor(type: ErrorType): string {
-  switch (type) {
-    case 'server': return 'サーバーエラー'
-    case 'rate_limit': return 'レート制限'
-    case 'unauthorized': return '認証切れ'
-    case 'forbidden': return '権限なし'
-    case 'timeout': return 'タイムアウト'
-    case 'network': return 'ネットワーク'
-    case 'parse': return '解析エラー'
-    default: return 'エラー'
-  }
-}
-
 export function ErrorToast() {
+  const { t } = useTranslation()
   const { errors, dismissError } = useError()
 
   if (errors.length === 0) return null
+
+  const labelFor = (type: ErrorType): string => {
+    switch (type) {
+      case 'server':
+      case 'rate_limit':
+      case 'unauthorized':
+      case 'forbidden':
+      case 'timeout':
+      case 'network':
+      case 'parse':
+        return t(`error_toast.${type}`)
+      default:
+        return t('error_toast.default')
+    }
+  }
 
   return (
     <div
@@ -80,7 +84,7 @@ export function ErrorToast() {
             <button
               className="shrink-0 rounded-sm p-0.5 text-foreground/70 transition-colors hover:text-foreground"
               onClick={() => dismissError(error.id)}
-              aria-label="通知を閉じる"
+              aria-label={t('error_toast.dismiss')}
             >
               <X className="h-4 w-4" />
             </button>

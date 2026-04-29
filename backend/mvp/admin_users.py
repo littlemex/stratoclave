@@ -44,6 +44,7 @@ from .authz import (
 )
 from .cognito_admin import delete_user as cognito_delete_user, global_sign_out, update_org_id
 from .deps import DEFAULT_ORG_ID, AuthenticatedUser
+from .me import SUPPORTED_LOCALES, Locale
 
 
 router = APIRouter(prefix="/api/mvp/admin", tags=["mvp-admin"])
@@ -62,6 +63,9 @@ class CreateUserRequest(BaseModel):
     role: Role = "user"
     tenant_id: Optional[str] = Field(default=None, max_length=64)
     total_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    # i18n: admin can pre-set the new user's UI locale. Omit = server
+    # default ("ja"). The new user can change it later via PATCH /me.
+    locale: Optional[Locale] = None
 
 
 class CreateUserResponse(BaseModel):
@@ -181,6 +185,7 @@ def create_user(
         auth_provider_user_id=sub,
         org_id=tenant_id,
         roles=[body.role],
+        locale=body.locale,
     )
 
     # DynamoDB: UserTenants (if total_credit is None, ensure() falls back to
@@ -263,6 +268,8 @@ class UserSummary(BaseModel):
     sso_account_id: Optional[str] = None
     sso_principal_arn: Optional[str] = None
     last_sso_login_at: Optional[str] = None
+    # i18n: current UI locale for this user (server-clamped to supported set).
+    locale: Optional[Locale] = None
 
 
 class UsersListResponse(BaseModel):
@@ -298,6 +305,8 @@ def _enrich_user_with_credit(user_item: dict, repo: UserTenantsRepository) -> Us
         roles = [roles_raw]
     else:
         roles = [str(r) for r in roles_raw]
+    raw_locale = user_item.get("locale")
+    locale: Optional[Locale] = raw_locale if raw_locale in SUPPORTED_LOCALES else None  # type: ignore[assignment]
     return UserSummary(
         user_id=str(user_item["user_id"]),
         email=str(user_item.get("email") or ""),
@@ -311,6 +320,7 @@ def _enrich_user_with_credit(user_item: dict, repo: UserTenantsRepository) -> Us
         sso_account_id=user_item.get("sso_account_id"),
         sso_principal_arn=user_item.get("sso_principal_arn"),
         last_sso_login_at=user_item.get("last_sso_login_at"),
+        locale=locale,
     )
 
 
@@ -441,6 +451,61 @@ def delete_user_endpoint(
         details={"email": email, "roles": roles_list},
     )
     return Response(status_code=204)
+
+
+# -----------------------------------------------------------------------
+# Admin profile patch (scope-limited)
+# -----------------------------------------------------------------------
+class AdminUpdateUserRequest(BaseModel):
+    """Admin-side scoped update of a target user's mutable profile fields.
+
+    **Scope is deliberately limited to** ``locale`` in this PR. We did not
+    widen to ``role`` or ``email`` here because admin-level role changes
+    are a privilege-escalation surface and need their own audit +
+    transactional handling (Cognito group sync, last-admin protection,
+    CloudWatch alerting). A future change can add a sibling endpoint
+    such as ``PATCH /users/{user_id}/role`` if that ever lands.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    locale: Locale = Field(..., description="UI locale to set for the target user")
+
+
+@router.patch("/users/{user_id}", response_model=UserSummary)
+def admin_update_user(
+    user_id: str,
+    body: AdminUpdateUserRequest,
+    actor: AuthenticatedUser = Depends(require_permission("users:update")),
+) -> UserSummary:
+    """Admin sets a target user's UI locale.
+
+    - `users:update` permission required (same as credit overwrite).
+    - Returns `UserSummary` with the refreshed `locale` so the UI can
+      redraw the row without a second round-trip.
+    - Audit-logged (`event=user_locale_updated_by_admin`) with target
+      and new locale.
+    """
+    users_repo = UsersRepository()
+    existing = users_repo.get_by_user_id(user_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    attrs = users_repo.update_locale(user_id, body.locale)
+    if attrs is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    log_audit_event(
+        event="user_locale_updated_by_admin",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=user_id,
+        target_type="user",
+        before={"locale": existing.get("locale")},
+        after={"locale": body.locale},
+    )
+
+    refreshed = users_repo.get_by_user_id(user_id) or existing
+    return _enrich_user_with_credit(refreshed, UserTenantsRepository())
 
 
 # -----------------------------------------------------------------------

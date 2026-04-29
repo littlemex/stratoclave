@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 
 import { LoadingScreen } from '@/components/common/LoadingScreen'
 import { Button } from '@/components/ui/button'
@@ -9,6 +10,7 @@ import { handleCallback } from '@/lib/cognito'
 export default function Callback() {
   const navigate = useNavigate()
   const { reloadUser } = useAuth()
+  const { t } = useTranslation()
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -36,19 +38,19 @@ export default function Callback() {
       <div className="flex min-h-screen items-center justify-center px-6">
         <div className="w-full max-w-md border border-destructive/40 bg-card p-8 shadow-sm">
           <h1 className="font-display text-2xl tracking-tight text-destructive">
-            サインインに失敗しました
+            {t('callback.failed_title')}
           </h1>
           <p className="mt-3 text-sm text-muted-foreground">{error}</p>
           <Button
             className="mt-6"
             onClick={() => navigate('/', { replace: true })}
           >
-            ホームに戻る
+            {t('callback.back_home')}
           </Button>
         </div>
       </div>
     )
   }
 
-  return <LoadingScreen message="サインイン処理中" />
+  return <LoadingScreen message={t('callback.processing')} />
 }

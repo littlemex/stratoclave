@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { Plus, Search } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -16,16 +17,11 @@ import {
 } from '@/components/ui/table'
 import { api, type Role, type UserSummary } from '@/lib/api'
 
-const ROLE_LABEL: Record<Role, string> = {
-  admin: 'Admin',
-  team_lead: 'Team Lead',
-  user: 'User',
-}
-
 function RoleBadge({ role }: { role: Role }) {
+  const { t } = useTranslation()
   const variant =
     role === 'admin' ? 'accent' : role === 'team_lead' ? 'default' : 'secondary'
-  return <Badge variant={variant}>{ROLE_LABEL[role]}</Badge>
+  return <Badge variant={variant}>{t(`role.${role}`)}</Badge>
 }
 
 function fmt(n: number): string {
@@ -33,6 +29,7 @@ function fmt(n: number): string {
 }
 
 export default function AdminUsers() {
+  const { t } = useTranslation()
   const [cursor, setCursor] = useState<string | undefined>(undefined)
   const [cursorStack, setCursorStack] = useState<Array<string | undefined>>([])
   const [roleFilter, setRoleFilter] = useState<Role | ''>('')
@@ -53,7 +50,11 @@ export default function AdminUsers() {
     const users = usersQuery.data?.users ?? []
     const q = search.trim().toLowerCase()
     if (!q) return users
-    return users.filter((u) => u.email.toLowerCase().includes(q) || u.user_id.toLowerCase().includes(q))
+    return users.filter(
+      (u) =>
+        u.email.toLowerCase().includes(q) ||
+        u.user_id.toLowerCase().includes(q),
+    )
   }, [usersQuery.data, search])
 
   const nextCursor = usersQuery.data?.next_cursor ?? null
@@ -76,15 +77,17 @@ export default function AdminUsers() {
     <div className="space-y-6">
       <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="font-display text-3xl tracking-tight">ユーザー管理</h1>
+          <h1 className="font-display text-3xl tracking-tight">
+            {t('admin_users.title')}
+          </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Cognito User Pool + DynamoDB の Users テーブルを横断的に管理します。
+            {t('admin_users.intro')}
           </p>
         </div>
         <Button asChild>
           <Link to="/admin/users/new">
             <Plus className="h-4 w-4" />
-            新規ユーザー
+            {t('admin_users.new')}
           </Link>
         </Button>
       </header>
@@ -93,12 +96,16 @@ export default function AdminUsers() {
         <div className="flex items-center gap-2 md:w-64">
           <Search className="h-4 w-4 text-muted-foreground" aria-hidden />
           <Input
-            placeholder="email または user_id で絞り込み"
+            placeholder={t('admin_users.search_placeholder')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <div className="flex gap-2" role="radiogroup" aria-label="ロール絞り込み">
+        <div
+          className="flex gap-2"
+          role="radiogroup"
+          aria-label={t('admin_users.role_filter_aria')}
+        >
           <Button
             role="radio"
             aria-checked={roleFilter === ''}
@@ -110,7 +117,7 @@ export default function AdminUsers() {
               setCursorStack([])
             }}
           >
-            All
+            {t('common.all')}
           </Button>
           {(['admin', 'team_lead', 'user'] as Role[]).map((r) => (
             <Button
@@ -125,7 +132,7 @@ export default function AdminUsers() {
                 setCursorStack([])
               }}
             >
-              {ROLE_LABEL[r]}
+              {t(`role.${r}`)}
             </Button>
           ))}
         </div>
@@ -135,32 +142,40 @@ export default function AdminUsers() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Email</TableHead>
-              <TableHead>ロール</TableHead>
-              <TableHead>所属テナント</TableHead>
-              <TableHead className="text-right">残クレジット</TableHead>
-              <TableHead className="text-right">使用</TableHead>
+              <TableHead>{t('admin_users.col_email')}</TableHead>
+              <TableHead>{t('admin_users.col_role')}</TableHead>
+              <TableHead>{t('admin_users.col_tenant')}</TableHead>
+              <TableHead className="text-right">{t('admin_users.col_remaining')}</TableHead>
+              <TableHead className="text-right">{t('admin_users.col_usage')}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
             {usersQuery.isLoading ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
-                  読み込み中…
+                <TableCell
+                  colSpan={6}
+                  className="text-center text-muted-foreground"
+                >
+                  {t('common.loading_ellipsis')}
                 </TableCell>
               </TableRow>
             ) : filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
-                  該当するユーザーがいません。
+                <TableCell
+                  colSpan={6}
+                  className="text-center text-muted-foreground"
+                >
+                  {t('admin_users.row_empty')}
                 </TableCell>
               </TableRow>
             ) : (
               filtered.map((u) => (
                 <TableRow key={u.user_id}>
                   <TableCell>
-                    <div className="font-medium">{u.email || '(email 未設定)'}</div>
+                    <div className="font-medium">
+                      {u.email || t('common.email_unset')}
+                    </div>
                     <code className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
                       {u.user_id}
                     </code>
@@ -172,7 +187,9 @@ export default function AdminUsers() {
                       ))}
                     </div>
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{u.org_id}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {u.org_id}
+                  </TableCell>
                   <TableCell className="text-right font-mono text-sm">
                     {fmt(u.remaining_credit)}
                   </TableCell>
@@ -181,7 +198,11 @@ export default function AdminUsers() {
                   </TableCell>
                   <TableCell className="text-right">
                     <Button asChild variant="ghost" size="sm">
-                      <Link to={`/admin/users/${encodeURIComponent(u.user_id)}`}>詳細</Link>
+                      <Link
+                        to={`/admin/users/${encodeURIComponent(u.user_id)}`}
+                      >
+                        {t('common.details')}
+                      </Link>
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -193,8 +214,10 @@ export default function AdminUsers() {
 
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
-          {(usersQuery.data?.users.length ?? 0)} 件表示
-          {nextCursor ? ' / 次ページあり' : ''}
+          {t('admin_users.count_showing', {
+            shown: usersQuery.data?.users.length ?? 0,
+          })}
+          {nextCursor ? t('admin_users.count_more') : ''}
         </span>
         <div className="flex gap-2">
           <Button
@@ -203,7 +226,7 @@ export default function AdminUsers() {
             onClick={goPrev}
             disabled={cursorStack.length === 0}
           >
-            前へ
+            {t('common.prev')}
           </Button>
           <Button
             variant="outline"
@@ -211,7 +234,7 @@ export default function AdminUsers() {
             onClick={goNext}
             disabled={!nextCursor}
           >
-            次へ
+            {t('common.next')}
           </Button>
         </div>
       </div>

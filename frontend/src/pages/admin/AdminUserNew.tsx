@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { ArrowLeft, Info, Lock } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -14,42 +15,50 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { TempPasswordDialog } from '@/components/admin/TempPasswordDialog'
-import { api, type CreateUserResponse, type Role } from '@/lib/api'
+import { api, type CreateUserResponse, type Locale, type Role } from '@/lib/api'
+import { SUPPORTED_LOCALES } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 
-const ROLE_OPTIONS: Array<{
+interface RoleOption {
   value: Role
-  label: string
-  description: string
-  lockedReason?: string
-}> = [
+  labelKey: string
+  descKey: string
+  lockedReasonKey?: string
+}
+
+const ROLE_OPTIONS: RoleOption[] = [
   {
     value: 'user',
-    label: 'User',
-    description: 'Messages API と自分のクレジットのみ閲覧可能',
+    labelKey: 'role.user',
+    descKey: 'admin_user_new.role_user_desc',
   },
   {
     value: 'team_lead',
-    label: 'Team Lead',
-    description: '自分が所有する Tenant の管理 + メンバーの使用量閲覧',
+    labelKey: 'role.team_lead',
+    descKey: 'admin_user_new.role_team_lead_desc',
   },
   {
     value: 'admin',
-    label: 'Administrator',
-    description: '全 Tenant・全ユーザー・全 Usage にアクセス可能',
-    lockedReason:
-      'ALLOW_ADMIN_CREATION=true 環境変数が設定されている場合のみ作成可能 (セキュリティ運用)',
+    labelKey: 'role.admin',
+    descKey: 'admin_user_new.role_admin_desc',
+    lockedReasonKey: 'admin_user_new.role_admin_locked',
   },
 ]
 
 export default function AdminUserNew() {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { t } = useTranslation()
 
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<Role>('user')
   const [tenantId, setTenantId] = useState('')
   const [totalCredit, setTotalCredit] = useState('')
+  // i18n: empty string = "let server pick default". We do not pre-fill
+  // with "ja" because "ja" is the server default already; keeping the
+  // field unset preserves existing behavior when this form is submitted
+  // unchanged.
+  const [locale, setLocale] = useState<'' | Locale>('')
   const [formError, setFormError] = useState<string | null>(null)
   const [success, setSuccess] = useState<CreateUserResponse | null>(null)
 
@@ -65,6 +74,7 @@ export default function AdminUserNew() {
         role,
         tenant_id: tenantId || undefined,
         total_credit: totalCredit ? Number(totalCredit) : undefined,
+        locale: locale || undefined,
       }
       return api.admin.createUser(body)
     },
@@ -74,7 +84,7 @@ export default function AdminUserNew() {
     },
     onError: (err: unknown) => {
       const e = err as { status?: number; detail?: string; message?: string } | null
-      setFormError(e?.detail ?? e?.message ?? '作成に失敗しました')
+      setFormError(e?.detail ?? e?.message ?? t('admin_user_new.error_fallback'))
     },
   })
 
@@ -89,7 +99,7 @@ export default function AdminUserNew() {
     e.preventDefault()
     setFormError(null)
     if (!isValid) {
-      setFormError('email が空、または @ を含んでいません。')
+      setFormError(t('admin_user_new.error_email'))
       return
     }
     createMutation.mutate()
@@ -100,28 +110,28 @@ export default function AdminUserNew() {
       <Button asChild variant="ghost" size="sm" className="px-0">
         <Link to="/admin/users">
           <ArrowLeft className="h-4 w-4" />
-          ユーザー一覧に戻る
+          {t('admin_user_new.back_to_list')}
         </Link>
       </Button>
 
       <div>
-        <h1 className="font-display text-3xl tracking-tight">新規ユーザー作成</h1>
+        <h1 className="font-display text-3xl tracking-tight">{t('admin_user_new.title')}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Cognito AdminCreateUser で一時パスワードを発行します。初回ログイン時に本人がパスワードを更新します。
+          {t('admin_user_new.intro')}
         </p>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5">
         <Card>
           <CardHeader>
-            <CardTitle className="font-sans text-base font-semibold">基本情報</CardTitle>
-            <CardDescription>
-              email は Cognito Username として扱われるため、重複チェックがあります。
-            </CardDescription>
+            <CardTitle className="font-sans text-base font-semibold">
+              {t('admin_user_new.basic')}
+            </CardTitle>
+            <CardDescription>{t('admin_user_new.basic_desc')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email">{t('admin_user_new.email_label')}</Label>
               <Input
                 id="email"
                 type="email"
@@ -134,10 +144,10 @@ export default function AdminUserNew() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>ロール</Label>
+              <Label>{t('admin_user_new.role_label')}</Label>
               <div className="grid gap-2">
                 {ROLE_OPTIONS.map((opt) => {
-                  const disabled = Boolean(opt.lockedReason)
+                  const disabled = Boolean(opt.lockedReasonKey)
                   const selected = role === opt.value
                   return (
                     <button
@@ -164,19 +174,21 @@ export default function AdminUserNew() {
                       />
                       <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex items-center gap-2 text-sm font-medium">
-                          {opt.label}
+                          {t(opt.labelKey)}
                           {disabled ? (
                             <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
                               <Lock className="h-3 w-3" aria-hidden />
-                              作成不可
+                              {t('admin_user_new.role_locked_badge')}
                             </span>
                           ) : null}
                         </div>
-                        <p className="text-xs text-muted-foreground">{opt.description}</p>
-                        {disabled && opt.lockedReason ? (
+                        <p className="text-xs text-muted-foreground">
+                          {t(opt.descKey)}
+                        </p>
+                        {disabled && opt.lockedReasonKey ? (
                           <p className="flex items-start gap-1 text-[11px] text-muted-foreground">
                             <Info className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
-                            {opt.lockedReason}
+                            {t(opt.lockedReasonKey)}
                           </p>
                         ) : null}
                       </div>
@@ -191,22 +203,22 @@ export default function AdminUserNew() {
         <Card>
           <CardHeader>
             <CardTitle className="font-sans text-base font-semibold">
-              テナントとクレジット
+              {t('admin_user_new.tenant_card')}
             </CardTitle>
             <CardDescription>
-              省略時は default-org、Tenant の default_credit が初期値として適用されます。
+              {t('admin_user_new.tenant_card_desc')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="tenant">所属テナント</Label>
+              <Label htmlFor="tenant">{t('admin_user_new.tenant_label')}</Label>
               <select
                 id="tenant"
                 value={tenantId}
                 onChange={(e) => setTenantId(e.target.value)}
                 className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               >
-                <option value="">default-org (省略時)</option>
+                <option value="">{t('admin_user_new.tenant_default_option')}</option>
                 {tenantOptions.map((t) => (
                   <option key={t.tenant_id} value={t.tenant_id}>
                     {t.name} ({t.tenant_id})
@@ -214,12 +226,12 @@ export default function AdminUserNew() {
                 ))}
               </select>
               <p className="text-xs text-muted-foreground">
-                tenant_id を選択しない場合、default-org に所属しグローバル 100,000 tokens がクレジットとして付与されます。
+                {t('admin_user_new.tenant_help')}
               </p>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="total-credit">クレジット上書き (任意)</Label>
+              <Label htmlFor="total-credit">{t('admin_user_new.credit_label')}</Label>
               <Input
                 id="total-credit"
                 type="number"
@@ -228,8 +240,28 @@ export default function AdminUserNew() {
                 min={0}
                 max={10_000_000}
                 onChange={(e) => setTotalCredit(e.target.value)}
-                placeholder="未入力なら Tenant の default_credit を使用"
+                placeholder={t('admin_user_new.credit_placeholder')}
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="locale">{t('admin_user_new.locale_label')}</Label>
+              <select
+                id="locale"
+                value={locale}
+                onChange={(e) => setLocale(e.target.value as '' | Locale)}
+                className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                <option value="">—</option>
+                {SUPPORTED_LOCALES.map((loc) => (
+                  <option key={loc} value={loc}>
+                    {t(`locale.${loc}`)}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                {t('admin_user_new.locale_help')}
+              </p>
             </div>
           </CardContent>
         </Card>
@@ -245,10 +277,12 @@ export default function AdminUserNew() {
             onClick={() => navigate('/admin/users')}
             disabled={createMutation.isPending}
           >
-            キャンセル
+            {t('admin_user_new.cancel')}
           </Button>
           <Button type="submit" disabled={createMutation.isPending || !isValid}>
-            {createMutation.isPending ? '作成中…' : 'ユーザーを作成'}
+            {createMutation.isPending
+              ? t('admin_user_new.submit_pending')
+              : t('admin_user_new.submit')}
           </Button>
         </div>
       </form>

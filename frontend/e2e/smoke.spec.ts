@@ -1,9 +1,10 @@
-// Minimum-viable smoke test: the unauthenticated landing page renders
-// and shows the Cognito sign-in entry point.
+// Minimum-viable smoke: the unauthenticated landing page renders and
+// shows the Cognito sign-in affordance.
 //
-// This suite deliberately does not talk to a real backend. A later
-// iteration will stub /api/mvp/* via MSW or a dev proxy and exercise
-// admin / user flows end-to-end.
+// We match the sign-in CTA by locale-agnostic regex so this test is
+// stable whether the browser's `navigator.language` detector falls on
+// en or ja (Playwright defaults to en-US on macOS runners, en-US on
+// CI). Dedicated locale-specific assertions live in `i18n.spec.ts`.
 
 import { expect, test } from '@playwright/test'
 
@@ -14,9 +15,13 @@ test.describe('unauthenticated landing', () => {
     await page.goto('/')
     // The app must render without throwing runtime errors.
     await expect(page).toHaveTitle(/Stratoclave/i)
-    // The primary call-to-action is the Cognito sign-in button.
+    // The primary CTA button, in whichever language i18next resolved:
+    //   en: "Sign in with Cognito"
+    //   ja: "Cognito でサインイン"
+    // Both strings contain the literal token "Cognito", so a single
+    // case-insensitive regex covers both locales.
     await expect(
-      page.getByRole('button', { name: /cognito でサインイン/i }),
+      page.getByRole('button', { name: /cognito/i }),
     ).toBeVisible()
   })
 

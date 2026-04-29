@@ -4,19 +4,29 @@ from __future__ import annotations
 import base64
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from boto3.dynamodb.conditions import Key as boto3_key
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo import TenantsRepository, UsageLogsRepository, UsersRepository, UserTenantsRepository
 
-from .authz import require_permission
+from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser, get_current_user
 
 
 router = APIRouter(prefix="/api/mvp", tags=["mvp-me"])
+
+
+# i18n: supported UI locales. Kept small and explicit — a wildcard
+# would let clients set arbitrary attacker-controlled strings in their
+# DynamoDB row, which then flows back into /me and the SPA ships it
+# into every DOM translator lookup. String whitelist here + Literal on
+# the Pydantic layer is defence in depth.
+SUPPORTED_LOCALES: tuple[str, ...] = ("en", "ja")
+DEFAULT_LOCALE = "ja"
+Locale = Literal["en", "ja"]
 
 
 class TenantSummary(BaseModel):
@@ -34,14 +44,45 @@ class MeResponse(BaseModel):
     remaining_credit: int
     currency: str = "tokens"
     tenant: Optional[TenantSummary] = None
+    # i18n: SPA uses this as the authoritative source on bootstrap,
+    # overriding any cached value in sessionStorage / navigator.language.
+    locale: Locale = DEFAULT_LOCALE
+
+
+class UpdateMeRequest(BaseModel):
+    """Self-service update of mutable profile fields. Today the only
+    mutable field is `locale`; more can be added later without
+    breaking the API contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    locale: Locale = Field(..., description="UI locale")
+
+
+class UpdateMeResponse(BaseModel):
+    locale: Locale
+
+
+def _resolve_locale(raw: Optional[str]) -> Locale:
+    """Clamp a stored locale to the supported set, defaulting to JA.
+
+    Legacy rows (pre-i18n) won't have a `locale` field at all; new rows
+    always land with a default. Any value we cannot understand (wrong
+    case, stray "fr", operator typo) falls back to the default so the
+    SPA never receives an unsupported code.
+    """
+    if isinstance(raw, str) and raw in SUPPORTED_LOCALES:
+        return raw  # type: ignore[return-value]
+    return DEFAULT_LOCALE
 
 
 @router.get("/me", response_model=MeResponse)
 def me(user: AuthenticatedUser = Depends(get_current_user)) -> MeResponse:
     users_repo = UsersRepository()
     # deps.py で backfill 済みだが念のため
-    if users_repo.get_by_user_id(user.user_id) is None:
-        users_repo.put_user(
+    row = users_repo.get_by_user_id(user.user_id)
+    if row is None:
+        row = users_repo.put_user(
             user_id=user.user_id,
             email=user.email,
             auth_provider="cognito",
@@ -73,7 +114,44 @@ def me(user: AuthenticatedUser = Depends(get_current_user)) -> MeResponse:
         credit_used=summary["credit_used"],
         remaining_credit=summary["remaining_credit"],
         tenant=tenant,
+        locale=_resolve_locale(row.get("locale") if row else None),
     )
+
+
+@router.patch("/me", response_model=UpdateMeResponse)
+def update_me(
+    body: UpdateMeRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> UpdateMeResponse:
+    """Self-service profile update. Currently scope-limited to
+    changing the UI locale. The target user is implicit — there is no
+    path parameter — so this endpoint cannot be turned into a BOLA
+    primitive by rewriting a URL.
+    """
+    repo = UsersRepository()
+    attrs = repo.update_locale(user.user_id, body.locale)
+    if attrs is None:
+        # User row vanished between auth and PATCH. Recreate (rare;
+        # e.g. admin deleted the user in parallel).
+        repo.put_user(
+            user_id=user.user_id,
+            email=user.email,
+            auth_provider="cognito",
+            auth_provider_user_id=user.user_id,
+            org_id=user.org_id,
+            roles=user.roles,
+            locale=body.locale,
+        )
+
+    log_audit_event(
+        event="user_locale_updated",
+        actor_id=user.user_id,
+        actor_email=user.email,
+        target_id=user.user_id,
+        target_type="user",
+        details={"locale": body.locale},
+    )
+    return UpdateMeResponse(locale=body.locale)
 
 
 # ------------------------------------------------------------------

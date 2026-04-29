@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { Trans, useTranslation } from 'react-i18next'
 import {
   ArrowRight,
   Building2,
@@ -25,17 +26,12 @@ import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types/auth'
 
-const ROLE_LABEL: Record<UserRole, string> = {
-  admin: 'Administrator',
-  team_lead: 'Team Lead',
-  user: 'User',
-}
-
 function formatNumber(n: number): string {
   return n.toLocaleString()
 }
 
 export default function Dashboard() {
+  const { t } = useTranslation()
   const { isAdmin, isTeamLead } = usePermissions()
   const meQuery = useQuery({
     queryKey: ['me'],
@@ -55,33 +51,36 @@ export default function Dashboard() {
     <div className="space-y-12">
       <section className="space-y-3">
         <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-          ダッシュボード
+          {t('dashboard.label')}
         </p>
         <h1 className="font-display text-4xl font-semibold tracking-tight">
           {me?.email ? (
-            <>
-              ようこそ、
-              <span className="text-primary">{me.email}</span>
-            </>
+            <Trans
+              i18nKey="dashboard.welcome_with_email"
+              values={{ email: me.email }}
+              components={{ 1: <span className="text-primary" /> }}
+            />
           ) : (
-            'ようこそ'
+            t('dashboard.welcome')
           )}
         </h1>
         <p className="max-w-2xl text-sm text-muted-foreground">
-          クレジット残高・所属テナント・ロールを俯瞰します。詳細は上部ナビゲーションから各セクションへ進んでください。
+          {t('dashboard.intro')}
         </p>
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
         <StatCard
-          label="クレジット残量"
+          label={t('dashboard.stat_credit')}
           icon={<Coins className="h-3.5 w-3.5" aria-hidden />}
         >
           <div className="flex items-baseline gap-2">
             <span className="strato-stat font-display text-4xl font-semibold tracking-tight">
               {me ? formatNumber(me.remaining_credit) : '—'}
             </span>
-            <span className="text-xs text-muted-foreground">tokens</span>
+            <span className="text-xs text-muted-foreground">
+              {t('dashboard.stat_credit_unit')}
+            </span>
           </div>
           {me ? (
             <div className="mt-4 space-y-2">
@@ -95,47 +94,49 @@ export default function Dashboard() {
                 />
               </div>
               <p className="font-mono text-[11px] tracking-wide text-muted-foreground">
-                {formatNumber(me.credit_used)} / {formatNumber(me.total_credit)} ·{' '}
-                {remainingPct}% 残
+                {t('dashboard.stat_credit_remaining', {
+                  used: formatNumber(me.credit_used),
+                  total: formatNumber(me.total_credit),
+                  pct: remainingPct,
+                })}
               </p>
             </div>
           ) : null}
         </StatCard>
 
         <StatCard
-          label="所属テナント"
+          label={t('dashboard.stat_tenant')}
           icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
         >
           <div className="font-display text-2xl font-semibold tracking-tight">
             {me?.tenant?.name ?? me?.tenant?.tenant_id ?? '—'}
           </div>
           <p className="mt-3 font-mono text-[11px] text-muted-foreground">
-            tenant_id ·{' '}
-            <span className="text-foreground/70">
-              {me?.tenant?.tenant_id ?? '—'}
-            </span>
+            {t('dashboard.stat_tenant_id', {
+              id: me?.tenant?.tenant_id ?? '—',
+            })}
           </p>
         </StatCard>
 
         <StatCard
-          label="ロール"
+          label={t('dashboard.stat_role')}
           icon={<ShieldCheck className="h-3.5 w-3.5" aria-hidden />}
         >
           <div className="flex flex-wrap gap-1.5">
-            {(me?.roles ?? []).map((r) => (
+            {(me?.roles ?? []).map((r: UserRole) => (
               <Badge
                 key={r}
                 variant={r === 'admin' ? 'accent' : 'secondary'}
               >
-                {ROLE_LABEL[r] ?? r}
+                {t(`role.${r}`)}
               </Badge>
             ))}
             {!me || me.roles.length === 0 ? (
-              <Badge variant="muted">未設定</Badge>
+              <Badge variant="muted">{t('dashboard.stat_role_none')}</Badge>
             ) : null}
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
-            権限は DynamoDB Users テーブルを真実源に決定されます。
+            {t('dashboard.stat_role_footer')}
           </p>
         </StatCard>
       </section>
@@ -143,55 +144,61 @@ export default function Dashboard() {
       <section className="space-y-4">
         <div className="flex items-baseline justify-between">
           <h2 className="font-display text-xl font-semibold tracking-tight">
-            ショートカット
+            {t('dashboard.shortcuts')}
           </h2>
           <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-            quick actions
+            {t('dashboard.shortcuts_sub')}
           </span>
         </div>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           <ShortcutCard
             to="/me/usage"
             icon={<Fingerprint className="h-4 w-4" aria-hidden />}
-            title="自分の使用履歴"
-            description="モデル別・日別のトークン消費を確認します。"
+            title={t('dashboard.shortcut_my_usage_title')}
+            description={t('dashboard.shortcut_my_usage_desc')}
+            openLabel={t('dashboard.open')}
           />
           <ShortcutCard
             to="/me/api-keys"
             icon={<Key className="h-4 w-4" aria-hidden />}
-            title="API キー"
-            description="cowork など外部ゲートウェイクライアント用の長期 API キーを発行・管理します。"
+            title={t('dashboard.shortcut_api_keys_title')}
+            description={t('dashboard.shortcut_api_keys_desc')}
+            openLabel={t('dashboard.open')}
           />
           {isAdmin ? (
             <ShortcutCard
               to="/admin/users"
               icon={<Users className="h-4 w-4" aria-hidden />}
-              title="ユーザー管理"
-              description="新規ユーザー発行・テナント紐付け・クレジット調整を行います。"
+              title={t('dashboard.shortcut_admin_users_title')}
+              description={t('dashboard.shortcut_admin_users_desc')}
+              openLabel={t('dashboard.open')}
             />
           ) : null}
           {isAdmin ? (
             <ShortcutCard
               to="/admin/tenants"
               icon={<Building2 className="h-4 w-4" aria-hidden />}
-              title="テナント管理"
-              description="全テナントの一覧・オーナー再割当・使用量を確認します。"
+              title={t('dashboard.shortcut_admin_tenants_title')}
+              description={t('dashboard.shortcut_admin_tenants_desc')}
+              openLabel={t('dashboard.open')}
             />
           ) : null}
           {isAdmin ? (
             <ShortcutCard
               to="/admin/trusted-accounts"
               icon={<KeyRound className="h-4 w-4" aria-hidden />}
-              title="SSO 信頼アカウント"
-              description="AWS Account 単位の SSO 受入ポリシーと事前招待を管理します。"
+              title={t('dashboard.shortcut_trusted_accounts_title')}
+              description={t('dashboard.shortcut_trusted_accounts_desc')}
+              openLabel={t('dashboard.open')}
             />
           ) : null}
           {isTeamLead ? (
             <ShortcutCard
               to="/team-lead/tenants"
               icon={<Building2 className="h-4 w-4" aria-hidden />}
-              title="所有テナント"
-              description="自分が所有するテナントの作成・メンバー確認・使用量閲覧を行います。"
+              title={t('dashboard.shortcut_team_lead_title')}
+              description={t('dashboard.shortcut_team_lead_desc')}
+              openLabel={t('dashboard.open')}
             />
           ) : null}
         </div>
@@ -199,7 +206,7 @@ export default function Dashboard() {
 
       {meQuery.isError ? (
         <p className="border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive-foreground">
-          ユーザー情報の取得に失敗しました。しばらく待ってから再読み込みしてください。
+          {t('dashboard.me_error')}
         </p>
       ) : null}
     </div>
@@ -233,11 +240,13 @@ function ShortcutCard({
   icon,
   title,
   description,
+  openLabel,
 }: {
   to: string
   icon: React.ReactNode
   title: string
   description: string
+  openLabel: string
 }) {
   return (
     <Card className="group transition-[border-color,background-color] hover:border-primary/40">
@@ -260,7 +269,7 @@ function ShortcutCard({
           className="px-0 text-primary"
         >
           <Link to={to}>
-            開く <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+            {openLabel} <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
           </Link>
         </Button>
       </CardContent>

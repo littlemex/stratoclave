@@ -72,6 +72,7 @@ const MOCK_ME: MeResponse = {
   remaining_credit: 8766,
   currency: 'tokens',
   tenant: { tenant_id: 'default-org', name: 'Default Org' },
+  locale: 'ja',
 }
 
 function setUrl(href: string) {

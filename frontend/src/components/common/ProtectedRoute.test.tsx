@@ -62,6 +62,7 @@ const AUTH_ADMIN: AuthState = {
     email: 'admin@example.com',
     org_id: 'default-org',
     roles: ['admin', 'user'],
+    locale: 'ja',
   },
   tokens: {
     access_token: 'x',
@@ -93,7 +94,13 @@ describe('ProtectedRoute', () => {
         />
       </Routes>,
     )
-    expect(screen.getByText(/認証情報を確認しています/)).toBeInTheDocument()
+    // The loading screen label is i18n-driven; match either the en or
+    // ja translation of `callback.processing` so this test is not
+    // brittle to whichever locale leaks in from an earlier test that
+    // flipped i18next globally.
+    expect(
+      screen.getByText(/(サインイン処理中|Completing sign-in)/),
+    ).toBeInTheDocument()
   })
 
   it('redirects unauthenticated users back to /', () => {

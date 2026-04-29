@@ -2,7 +2,36 @@
 name = "stratoclave-backend"
 version = "0.1.0"
 description = "Stratoclave Backend — Bedrock proxy gateway with tenant-level RBAC"
+readme = { file = "../README.md", content-type = "text/markdown" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
+keywords = [
+    "aws",
+    "bedrock",
+    "proxy",
+    "gateway",
+    "anthropic",
+    "cognito",
+    "fastapi",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/littlemex/stratoclave"
+Repository = "https://github.com/littlemex/stratoclave"
+Issues = "https://github.com/littlemex/stratoclave/issues"
 
 [tool.ruff]
 # Applies to backend/ only (project root is `backend/`).
