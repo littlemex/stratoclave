@@ -9,6 +9,10 @@
 
 export type UserRole = 'admin' | 'team_lead' | 'user'
 
+// i18n: supported UI locales, server-clamped. Keep in sync with
+// backend/mvp/me.py::SUPPORTED_LOCALES.
+export type UserLocale = 'en' | 'ja'
+
 export interface StoredTokens {
   access_token: string
   id_token: string | null
@@ -21,6 +25,7 @@ export interface AuthUser {
   email: string
   org_id: string
   roles: UserRole[]
+  locale: UserLocale
 }
 
 export interface AuthState {
@@ -36,3 +41,4 @@ export type AuthAction =
   | { type: 'AUTH_FAILURE'; error: string }
   | { type: 'AUTH_LOGOUT' }
   | { type: 'TOKENS_UPDATED'; tokens: StoredTokens }
+  | { type: 'LOCALE_UPDATED'; locale: UserLocale }

@@ -1,84 +1,90 @@
-# Stratoclave Infrastructure as Code (CDK)
+# Stratoclave Infrastructure (AWS CDK v2)
 
-Lambda Function URL から ALB + ECS Fargate への移行を実現する CDK プロジェクトです。
+This directory contains the AWS CDK v2 application that provisions the
+entire Stratoclave deployment — VPC, DynamoDB tables, ECR, ALB, WAFv2,
+CloudFront + S3 frontend, Cognito User Pool, and the Fargate service —
+into a single AWS region in your own account.
 
-## アーキテクチャ
+> The Japanese translation of this document lives at
+> [`../docs/ja/IAC.md`](../docs/ja/IAC.md).
+
+## Architecture
 
 ```
-Client → ALB (Internet-facing) → ECS Fargate (Private Subnet) → Bedrock
-         ↓
-      Target Group
-         ↓
-    ECS Service (Auto Scaling)
+Client → CloudFront (TLS, WAFv2) → ALB (internal) → ECS Fargate → Bedrock
+                                     │
+                                     ▼
+                              Target Group (HTTP /health)
+                                     │
+                                     ▼
+                             ECS Service (Fargate, Auto Scaling)
 ```
 
-## スタック構成
+## Stacks
 
-| スタック | 説明 | リソース |
-|---------|------|---------|
-| **CognitoStack** | 認証基盤 | Cognito User Pool、Client、Domain |
-| **NetworkStack** | ネットワークインフラ | VPC、サブネット、セキュリティグループ |
-| **EcrStack** | コンテナレジストリ | ECR リポジトリ |
-| **AlbStack** | ロードバランサー | ALB、ターゲットグループ、リスナー |
-| **RdsStack** | データベース | RDS PostgreSQL、Secrets Manager |
-| **RedisStack** | キャッシュ | ElastiCache Redis |
-| **VerifiedPermissionsStack** | 認可基盤 | AVP Policy Store（Cedar） |
-| **EcsStack** | コンテナオーケストレーション | ECS クラスタ、Fargate タスク定義、サービス |
-| **CodeBuildStack** | バックエンドビルド | S3、CodeBuild、IAM ロール |
-| **FrontendStack** | フロントエンド配信 | S3、CloudFront、OAI |
-| **FrontendCodeBuildStack** | フロントエンドビルド | S3、CodeBuild、IAM ロール |
-| **WafStack** | WAF v2 | WebACL、ALB 関連付け |
+| Stack | Purpose | Key resources |
+|-------|---------|---------------|
+| **CognitoStack** | Authentication | Cognito User Pool, app client, hosted-UI domain |
+| **NetworkStack** | Networking | VPC (with Flow Logs), subnets, security groups |
+| **EcrStack** | Container registry | ECR repository with lifecycle policy |
+| **AlbStack** | Load balancer | Internal ALB, target group, listener |
+| **VerifiedPermissionsStack** | Authorization | AVP policy store (Cedar) |
+| **EcsStack** | Container orchestration | ECS cluster, Fargate task definition, service |
+| **CodeBuildStack** | Backend build | S3 source bucket, CodeBuild project, IAM role |
+| **FrontendStack** | Frontend delivery | S3 + CloudFront (OAC) |
+| **FrontendCodeBuildStack** | Frontend build | S3 source bucket, CodeBuild project, IAM role |
+| **WafStack** | Edge protection | WAFv2 WebACL (CloudFront scope) |
 
-## 前提条件
+## Prerequisites
 
-- Node.js 20.x 以上
-- AWS CLI 設定済み（`aws configure` 実行済み）
-- CDK CLI インストール済み（`npm install -g aws-cdk`）
-- **Docker は不要**: CodeBuild でクラウドビルドを実行
+- Node.js 20 LTS or later
+- AWS CLI configured (`aws configure`)
+- CDK CLI (`npm install -g aws-cdk`)
+- **Docker is not required** — container images are built in the cloud
+  via AWS CodeBuild
 
-## デプロイ手順
+## Deployment
 
-### 1. 環境変数の設定
+### 1. Configure environment
 
 ```bash
-export AWS_REGION=us-west-2  # お好みのリージョン
-export AWS_PROFILE=default   # 使用する AWS プロファイル
+export AWS_REGION=us-east-1        # us-east-1 is the currently supported region
+export AWS_PROFILE=your-profile    # the AWS CLI profile to deploy from
 ```
 
-### 2. CDK のブートストラップ（初回のみ）
+### 2. Bootstrap CDK (once per account/region)
 
 ```bash
 cd iac
-npx cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/$AWS_REGION
+npx cdk bootstrap \
+  aws://$(aws sts get-caller-identity --query Account --output text)/$AWS_REGION
 ```
 
-### 3. すべてのスタックをデプロイ
+### 3. Deploy every stack
 
 ```bash
 ./scripts/deploy.sh --all
 ```
 
-デプロイには約 5-10 分かかります。
+A clean deploy takes roughly 5–10 minutes.
 
-### 4. Docker イメージのビルドと ECR プッシュ（クラウドビルド）
+### 4. Build and push the backend container image (cloud build)
 
-**推奨**: ローカルに Docker がない場合、CodeBuild でクラウドビルドを実行：
+If Docker is not available locally, use CodeBuild:
 
 ```bash
 cd iac
-npx cdk deploy StratoclaveCodeBuildStack  # 初回のみ
+npx cdk deploy StratoclaveCodeBuildStack   # first-time only
 ./scripts/cloud-build.sh
 ```
 
-**または**: ローカルに Docker がある場合、従来の方法も使用可能：
+Alternatively, when Docker is available locally:
 
 ```bash
 ./scripts/build-and-push.sh
 ```
 
-### 6. デプロイの確認
-
-ALB のエンドポイントを取得：
+### 5. Verify the deployment
 
 ```bash
 ALB_DNS=$(aws cloudformation describe-stacks \
@@ -87,37 +93,22 @@ ALB_DNS=$(aws cloudformation describe-stacks \
   --output text \
   --region $AWS_REGION)
 
-echo "ALB Endpoint: http://$ALB_DNS"
-```
-
-Health check：
-
-```bash
 curl http://$ALB_DNS/health
-# 期待される出力: {"status":"healthy"}
+# expected output: {"status":"healthy"}
 ```
 
-## スタック個別デプロイ
-
-特定のスタックのみをデプロイする場合：
+## Targeted stack deploys
 
 ```bash
-# Network スタックのみ
 ./scripts/deploy.sh --network
-
-# ECR スタックのみ
 ./scripts/deploy.sh --ecr
-
-# ALB スタックのみ
 ./scripts/deploy.sh --alb
-
-# ECS スタックのみ
 ./scripts/deploy.sh --ecs
 ```
 
-## スタック削除
+## Tearing the deployment down
 
-**注意**: 削除は逆順で行う必要があります。
+Destroy in reverse dependency order:
 
 ```bash
 npx cdk destroy StratoclaveEcsStack
@@ -126,38 +117,38 @@ npx cdk destroy StratoclaveEcrStack
 npx cdk destroy StratoclaveNetworkStack
 ```
 
-## トラブルシューティング
+## Troubleshooting
 
-### ECS タスクが起動しない
+### ECS tasks refuse to start
 
-**原因**: Docker イメージが ECR にプッシュされていない
+Most commonly: the backend image is missing from ECR.
 
-**解決策**:
 ```bash
 ./scripts/build-and-push.sh
-aws ecs update-service --cluster stratoclave-cluster --service stratoclave-backend --force-new-deployment --region $AWS_REGION
+aws ecs update-service \
+  --cluster stratoclave-cluster \
+  --service stratoclave-backend \
+  --force-new-deployment \
+  --region $AWS_REGION
 ```
 
-### ALB のヘルスチェックが失敗する
+### ALB health checks fail
 
-**原因**: ECS タスクの `/health` エンドポイントが応答していない
+The `/health` endpoint on the ECS task is not responding. Inspect the
+task logs and the security-group configuration:
 
-**確認方法**:
 ```bash
-# ECS タスクのログを確認
 aws logs tail /ecs/stratoclave-backend --follow --region $AWS_REGION
 
-# セキュリティグループを確認
 aws ec2 describe-security-groups \
   --filters "Name=tag:Stack,Values=Network" \
   --region $AWS_REGION
 ```
 
-### Docker イメージのビルドが失敗する
+### Docker image build fails
 
-**原因**: backend/requirements.txt の依存関係エラー
+Usually a dependency mismatch in `backend/requirements.txt`:
 
-**解決策**:
 ```bash
 cd ../backend
 python3 -m venv venv
@@ -165,100 +156,80 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## コスト試算
+## Cost estimate
 
-| リソース | 月額コスト（概算） |
-|---------|-----------------|
-| ALB | $16-22 |
-| ECS Fargate (0.25 vCPU, 0.5 GB) | $9-15 |
+| Resource | Monthly cost (approx.) |
+|----------|-----------------------|
+| ALB | $16–22 |
+| ECS Fargate (0.25 vCPU, 0.5 GiB) | $9–15 |
 | NAT Gateway | $32 |
 | CloudWatch Logs | $5 |
-| **合計** | **$62-74/月** |
+| **Total** | **$62–74 / month** |
 
-最小構成（1 タスク）での概算です。トラフィック増加時は Auto Scaling により追加コストが発生します。
+Estimate is for a minimal single-task deployment. Auto Scaling will
+increase this under load.
 
-## Lambda Function URL からの移行
+## Cloud Build (AWS CodeBuild)
 
-### 移行手順
+Stratoclave ships with a CodeBuild pipeline so that deployments work
+without a local Docker toolchain.
 
-1. **新しい ALB + ECS 環境をデプロイ**（このドキュメントの手順に従う）
-2. **並行稼働期間**:
-   - 既存の Lambda Function URL はそのまま稼働
-   - 新しい ALB エンドポイントで動作確認
-3. **段階的切り替え**:
-   - DNS または API Gateway で加重ルーティング
-   - トラフィックを 10% → 50% → 100% と段階移行
-4. **旧 Lambda 環境の削除**:
-   - 1 週間程度様子を見てから Lambda を削除
-
-### 認証の移行
-
-Lambda Function URL の認証 `none` 制約は、ALB + ECS では以下で回避できます：
-
-- **セキュリティグループ**: 特定 IP/CIDR からのみアクセス許可
-- **ALB 認証**: Cognito または OIDC 認証を ALB レベルで追加
-- **API Key 認証**: FastAPI ミドルウェア（既存）がそのまま動作
-
-## Cloud Build（AWS CodeBuild）
-
-ローカルに Docker がない環境でも、AWS CodeBuild でクラウド側でビルドできます。
-
-### アーキテクチャ
+### Flow
 
 ```
-ローカル → S3 (暗号化) → CodeBuild → ECR → ECS Fargate
+local → S3 (encrypted) → CodeBuild → ECR → ECS Fargate
 ```
 
-### 初回セットアップ
+### One-time setup
 
 ```bash
 cd iac
 npx cdk deploy StratoclaveCodeBuildStack
 ```
 
-### ビルドとデプロイ（ワンコマンド）
+### Build and deploy (single command)
 
 ```bash
 cd iac
 ./scripts/cloud-build.sh
 ```
 
-このスクリプトは以下を自動実行します：
+The script:
 
-1. `backend/` ディレクトリを tar.gz に圧縮
-2. S3 にアップロード（SSE-S3 暗号化）
-3. CodeBuild でビルド開始
-4. Docker イメージを ECR にプッシュ
-5. ECS Service を自動更新
+1. Packages `backend/` into a `tar.gz`.
+2. Uploads it to S3 (SSE-S3).
+3. Starts a CodeBuild job that builds and pushes the image to ECR.
+4. Triggers a rolling ECS deployment.
 
-### セキュリティ
+### Security
 
-- **IAM 最小権限**: CodeBuild は ECR プッシュと ECS 更新のみ許可
-- **S3 暗号化**: SSE-S3 + HTTPS 強制
-- **ライフサイクル**: ソースアーカイブは 7 日で自動削除
-- **ログ**: CloudWatch Logs で 14 日間保持
+- **Least-privilege IAM**: CodeBuild is limited to ECR push and ECS
+  update.
+- **S3 encryption**: SSE-S3 with HTTPS enforcement.
+- **Lifecycle**: source archives are deleted after 7 days.
+- **Logging**: CloudWatch Logs, retained for 14 days.
 
-### コスト
+### Cost
 
-- CodeBuild: 約 $0.80/月（30 ビルド想定）
-- S3: $0.01 以下/月
-- 合計: 約 $0.80/月（既存インフラの 1%）
+- CodeBuild: ~$0.80 / month (~30 builds)
+- S3: < $0.01 / month
 
-## Frontend Build and Deploy（CodeBuild + S3 + CloudFront）
+## Frontend build and deploy (CodeBuild + S3 + CloudFront)
 
-フロントエンドは CodeBuild で自動ビルドされ、環境変数が CDK Outputs から注入されます。
+The frontend is built by CodeBuild; environment variables are pulled
+from CDK outputs so no manual `.env.production` file is needed.
 
-### アーキテクチャ
+### Flow
 
 ```
-フロントエンドソース → S3 (Source Bucket) → CodeBuild
-  ↓
-  npm ci && npm run build (env vars from CDK)
-  ↓
-S3 (Frontend Bucket) → CloudFront → ユーザー
+frontend source → S3 (source bucket) → CodeBuild
+      ↓
+  npm ci && npm run build   (env vars injected from CDK outputs)
+      ↓
+S3 (frontend bucket) → CloudFront → users
 ```
 
-### 初回セットアップ
+### One-time setup
 
 ```bash
 cd iac
@@ -266,36 +237,35 @@ npx cdk deploy StratoclaveFrontendStack
 npx cdk deploy StratoclaveFrontendCodeBuildStack
 ```
 
-### フロントエンドのデプロイ（ワンコマンド）
+### Build and deploy (single command)
 
 ```bash
 cd iac
 ./scripts/deploy-frontend.sh
 ```
 
-このスクリプトは以下を自動実行します：
+The script:
 
-1. `frontend/` ディレクトリを tar.gz に圧縮（node_modules と dist は除外）
-2. S3 Source Bucket にアップロード
-3. CodeBuild でビルド開始：
-   - `.env.production` を CDK Outputs から生成
-   - `npm ci && npm run build`
-   - `dist/` を S3 Frontend Bucket に同期
-   - CloudFront キャッシュを無効化
+1. Packages `frontend/` (excluding `node_modules` and `dist`) into a
+   `tar.gz`.
+2. Uploads it to the source S3 bucket.
+3. Kicks off CodeBuild:
+   - Generates `.env.production` from CDK outputs.
+   - Runs `npm ci && npm run build`.
+   - Syncs `dist/` to the frontend S3 bucket.
+   - Invalidates the CloudFront distribution.
 
-### 環境変数の自動注入
+### Injected environment variables
 
-CodeBuild は以下の環境変数を CDK Outputs から自動注入します：
+CodeBuild injects the following variables from CDK outputs:
 
-- `VITE_COGNITO_CLIENT_ID`: Cognito クライアント ID
-- `VITE_COGNITO_USER_POOL_ID`: Cognito ユーザープール ID
-- `VITE_COGNITO_DOMAIN`: Cognito ホストド UI ドメイン
-- `VITE_API_ENDPOINT`: ALB エンドポイント
-- `VITE_CLOUDFRONT_URL`: CloudFront ディストリビューション URL
+- `VITE_COGNITO_CLIENT_ID`
+- `VITE_COGNITO_USER_POOL_ID`
+- `VITE_COGNITO_DOMAIN`
+- `VITE_API_ENDPOINT`
+- `VITE_CLOUDFRONT_URL`
 
-**重要**: 手動で `.env.production` を作成する必要はありません。すべて IaC で管理されます。
-
-### フロントエンドへのアクセス
+### Access the frontend
 
 ```bash
 CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
@@ -307,38 +277,30 @@ CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
 echo "Frontend URL: $CLOUDFRONT_URL"
 ```
 
-### ビルドログの確認
+### Build logs
 
 ```bash
 aws logs tail /codebuild/stratoclave-frontend --follow
 ```
 
-### セキュリティ
+### Cost
 
-- **S3 暗号化**: SSE-S3 + HTTPS 強制
-- **ライフサイクル**: ソースアーカイブは 7 日で自動削除
-- **ログ**: CloudWatch Logs で 14 日間保持
-- **S3 パブリックアクセス**: BLOCK_ALL（CloudFront OAI 経由のみ）
+- CodeBuild: ~$0.50 / month (~20 builds)
+- S3: < $0.01 / month
+- CloudFront: $1–5 / month depending on traffic
 
-### コスト
+## Next steps
 
-- CodeBuild: 約 $0.50/月（20 ビルド想定）
-- S3: $0.01 以下/月
-- CloudFront: $1-5/月（トラフィック依存）
-- 合計: 約 $1.50-5.50/月
+- ACM certificate + HTTPS on a custom domain
+- Route 53 DNS for the custom domain
+- WAF rule tuning beyond the managed rule groups
+- CloudWatch alarms on ECS service / ALB / Cognito
+- Auto Scaling policy tuning
+- Secrets Manager-backed rotation of API keys
 
-## 次のステップ
+## References
 
-- ACM 証明書の作成と HTTPS 対応
-- Route 53 での独自ドメイン設定
-- WAF の追加（DDoS 対策）
-- CloudWatch Alarms の設定
-- Auto Scaling ポリシーの調整
-- Secrets Manager での API Key 管理
-
-## 参考リンク
-
-- [AWS CDK ドキュメント](https://docs.aws.amazon.com/cdk/latest/guide/home.html)
-- [ECS Fargate ドキュメント](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html)
-- [ALB ドキュメント](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)
-- [CodeBuild ドキュメント](https://docs.aws.amazon.com/codebuild/latest/userguide/welcome.html)
+- [AWS CDK documentation](https://docs.aws.amazon.com/cdk/latest/guide/home.html)
+- [ECS Fargate documentation](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html)
+- [Application Load Balancer documentation](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)
+- [AWS CodeBuild documentation](https://docs.aws.amazon.com/codebuild/latest/userguide/welcome.html)

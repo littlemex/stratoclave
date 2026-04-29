@@ -1,13 +1,14 @@
 /**
  * Temp password dialog
  *
- * ユーザー作成成功時に一時パスワードを 1 回だけ表示する。
- * - コピー必須: コピーボタンを押すまで「閉じる」ボタンは無効化
- * - 「閉じたら二度と表示されません」を強調
- * - Esc / overlay click での閉じる操作を `onOpenChange` で制御 (強制コピー)
+ * Shows the Cognito temporary password exactly once after a successful
+ * user creation. The UI forces the operator to copy the value before the
+ * dialog can be dismissed — overlay click and Escape are intercepted to
+ * prevent accidental loss of the credential.
  */
 
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Check, Copy, ShieldAlert } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -35,6 +36,7 @@ export function TempPasswordDialog({
   temporaryPassword,
   onAcknowledge,
 }: Props) {
+  const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -45,7 +47,7 @@ export function TempPasswordDialog({
     try {
       await navigator.clipboard.writeText(temporaryPassword)
     } catch {
-      // clipboard 非対応: 最低限コピーしたことを手動で要求
+      // Clipboard API unavailable: fall back to execCommand('copy').
       const ta = document.createElement('textarea')
       ta.value = temporaryPassword
       document.body.appendChild(ta)
@@ -64,7 +66,6 @@ export function TempPasswordDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        // コピー済みでなければ閉じさせない
         if (!next && !copied) return
         if (!next) onAcknowledge()
       }}
@@ -82,23 +83,20 @@ export function TempPasswordDialog({
           <div className="mb-1 flex items-center gap-2 text-accent">
             <ShieldAlert className="h-4 w-4" aria-hidden />
             <span className="text-xs font-semibold uppercase tracking-wide">
-              一度だけ表示されます
+              {t('temp_password.banner')}
             </span>
           </div>
-          <DialogTitle>一時パスワードを本人に安全に渡してください</DialogTitle>
-          <DialogDescription>
-            このダイアログを閉じると再表示できません。本人に手渡したあと、必ず
-            新パスワードの設定を促してください。
-          </DialogDescription>
+          <DialogTitle>{t('temp_password.title')}</DialogTitle>
+          <DialogDescription>{t('temp_password.desc')}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3">
           <div>
-            <Label>Email</Label>
+            <Label>{t('temp_password.email_label')}</Label>
             <div className="mt-1 font-mono text-sm">{email}</div>
           </div>
           <div>
-            <Label htmlFor="temp-password">一時パスワード</Label>
+            <Label htmlFor="temp-password">{t('temp_password.password_label')}</Label>
             <div className="mt-1 flex gap-2">
               <Input
                 id="temp-password"
@@ -111,25 +109,25 @@ export function TempPasswordDialog({
                 {copied ? (
                   <>
                     <Check className="h-4 w-4" aria-hidden />
-                    コピー済み
+                    {t('temp_password.copied')}
                   </>
                 ) : (
                   <>
                     <Copy className="h-4 w-4" aria-hidden />
-                    コピー
+                    {t('temp_password.copy')}
                   </>
                 )}
               </Button>
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            初回ログイン時に新パスワードの設定が必要です (Cognito NEW_PASSWORD_REQUIRED challenge)。
+            {t('temp_password.policy_note')}
           </p>
         </div>
 
         <DialogFooter>
           <Button disabled={!copied} onClick={onAcknowledge}>
-            コピーを確認して閉じる
+            {t('temp_password.acknowledge')}
           </Button>
         </DialogFooter>
       </DialogContent>

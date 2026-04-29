@@ -2,6 +2,27 @@
   "name": "stratoclave-frontend",
   "private": true,
   "version": "0.1.0",
+  "description": "Stratoclave web console — tenant, user, credit and API key management for the Stratoclave Bedrock proxy gateway.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/littlemex/stratoclave",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/littlemex/stratoclave.git",
+    "directory": "frontend"
+  },
+  "bugs": {
+    "url": "https://github.com/littlemex/stratoclave/issues"
+  },
+  "keywords": [
+    "aws",
+    "bedrock",
+    "proxy",
+    "gateway",
+    "anthropic",
+    "cognito",
+    "react",
+    "vite"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,15 +44,22 @@
     "@tanstack/react-query": "^5.100.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "i18next": "^23.16.8",
+    "i18next-browser-languagedetector": "^8.2.1",
     "jwt-decode": "^4.0.0",
     "lucide-react": "^1.11.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-i18next": "^14.1.3",
     "react-router-dom": "^6.21.0",
     "tailwind-merge": "^2.6.1"
   },
   "devDependencies": {
     "@axe-core/react": "^4.11.2",
+    "@playwright/test": "^1.47.0",
+    "@testing-library/jest-dom": "^6.4.8",
+    "@testing-library/react": "^15.0.7",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^25.6.0",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",
@@ -40,19 +68,16 @@
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.5.0",
     "eslint": "^8.56.0",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-react-refresh": "^0.4.5",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.2.1",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.5",
+    "jsdom": "^24.1.1",
     "postcss": "^8.5.12",
     "prettier": "^3.4.2",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.3.3",
     "vite": "^5.0.8",
-    "vitest": "^1.6.0",
-    "@testing-library/react": "^15.0.7",
-    "@testing-library/jest-dom": "^6.4.8",
-    "jsdom": "^24.1.1",
-    "@playwright/test": "^1.47.0"
+    "vitest": "^1.6.0"
   }
 }

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { ArrowLeft, Edit3 } from 'lucide-react'
 
 import { AccessDenied } from '@/components/common/AccessDenied'
@@ -38,16 +39,17 @@ function fmt(n: number): string {
   return n.toLocaleString()
 }
 
-const RANGES: Array<{ label: string; days: number }> = [
-  { label: '7 日', days: 7 },
-  { label: '30 日', days: 30 },
-  { label: '90 日', days: 90 },
-]
-
 export default function TeamLeadTenantDetail() {
+  const { t } = useTranslation()
   const { tenantId = '' } = useParams<{ tenantId: string }>()
   const qc = useQueryClient()
   const [days, setDays] = useState(30)
+
+  const ranges: Array<{ labelKey: string; days: number }> = [
+    { labelKey: 'team_lead_tenant_detail.range_7d', days: 7 },
+    { labelKey: 'team_lead_tenant_detail.range_30d', days: 30 },
+    { labelKey: 'team_lead_tenant_detail.range_90d', days: 90 },
+  ]
 
   const tenantQuery = useQuery({
     queryKey: ['team-lead', 'tenants', 'detail', tenantId],
@@ -74,17 +76,17 @@ export default function TeamLeadTenantDetail() {
   }
 
   if (tenantQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">読み込み中…</p>
+    return <p className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</p>
   }
 
-  // Backend が 404 を返すケース:
-  // 1. 非所有者が他人のテナントを叩いた場合 (enumeration 防御)
-  // 2. 存在しない tenant_id
+  // Backend returns 404 for:
+  //   1. a non-owner hitting somebody else's tenant (enumeration guard)
+  //   2. a tenant_id that does not exist
   if (tenantQuery.isError || !tenantQuery.data) {
     return (
       <AccessDenied
-        title="このテナントは表示できません"
-        description="あなたが所有していないか、存在しない tenant_id です。所有するテナントは「所有テナント」一覧から選択してください。"
+        title={t('team_lead_tenant_detail.access_denied_title')}
+        description={t('team_lead_tenant_detail.access_denied_desc')}
         homeHref="/team-lead/tenants"
       />
     )
@@ -104,7 +106,7 @@ export default function TeamLeadTenantDetail() {
       <Button asChild variant="ghost" size="sm" className="px-0">
         <Link to="/team-lead/tenants">
           <ArrowLeft className="h-4 w-4" />
-          所有テナントに戻る
+          {t('team_lead_tenant_detail.back_to_list')}
         </Link>
       </Button>
 
@@ -124,14 +126,14 @@ export default function TeamLeadTenantDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="font-sans text-sm font-medium text-muted-foreground">
-              default_credit
+              {t('tenant.default_credit')}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="font-display text-2xl tracking-tight">
               {fmt(tenant.default_credit)}
               <span className="ml-1 text-xs font-sans font-normal text-muted-foreground">
-                tokens
+                {t('common.tokens')}
               </span>
             </div>
           </CardContent>
@@ -139,14 +141,14 @@ export default function TeamLeadTenantDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="font-sans text-sm font-medium text-muted-foreground">
-              所属メンバー
+              {t('tenant.members')}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="font-display text-2xl tracking-tight">
               {members.length}
               <span className="ml-1 text-xs font-sans font-normal text-muted-foreground">
-                名
+                {t('team_lead_tenant_detail.stat_members_unit')}
               </span>
             </div>
           </CardContent>
@@ -154,18 +156,22 @@ export default function TeamLeadTenantDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="font-sans text-sm font-medium text-muted-foreground">
-              この期間の消費
+              {t('team_lead_tenant_detail.stat_usage_title')}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="font-display text-2xl tracking-tight">
               {fmt(totalTokens)}
               <span className="ml-1 text-xs font-sans font-normal text-muted-foreground">
-                tokens
+                {t('common.tokens')}
               </span>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              {usage ? `${fmt(usage.sample_size)} 件のログから集計` : ' '}
+              {usage
+                ? t('team_lead_tenant_detail.stat_usage_footer', {
+                    samples: fmt(usage.sample_size),
+                  })
+                : ' '}
             </p>
           </CardContent>
         </Card>
@@ -177,10 +183,10 @@ export default function TeamLeadTenantDetail() {
         <CardHeader className="flex flex-row items-start justify-between space-y-0">
           <div>
             <CardTitle className="font-sans text-base font-semibold">
-              所属メンバー
+              {t('team_lead_tenant_detail.members_card_title')}
             </CardTitle>
             <CardDescription>
-              あなたの閲覧権限では email とクレジット情報のみが表示されます。
+              {t('team_lead_tenant_detail.members_card_desc')}
             </CardDescription>
           </div>
         </CardHeader>
@@ -188,24 +194,24 @@ export default function TeamLeadTenantDetail() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Email</TableHead>
-                <TableHead>ロール</TableHead>
-                <TableHead className="text-right">残クレジット</TableHead>
-                <TableHead className="text-right">使用</TableHead>
+                <TableHead>{t('common.email')}</TableHead>
+                <TableHead>{t('dashboard.stat_role')}</TableHead>
+                <TableHead className="text-right">{t('tenant.remaining_credit')}</TableHead>
+                <TableHead className="text-right">{t('tenant.usage')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {members.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} className="py-6 text-center text-muted-foreground">
-                    このテナントに紐づく active メンバーはいません。Administrator にユーザーの紐付けを依頼してください。
+                    {t('team_lead_tenant_detail.members_empty')}
                   </TableCell>
                 </TableRow>
               ) : (
                 members.map((m) => (
                   <TableRow key={m.email}>
                     <TableCell className="font-medium">
-                      {m.email || '(email 未設定)'}
+                      {m.email || t('common.email_unset')}
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -237,13 +243,19 @@ export default function TeamLeadTenantDetail() {
       <Card>
         <CardHeader className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
-            <CardTitle className="font-sans text-base font-semibold">使用量</CardTitle>
+            <CardTitle className="font-sans text-base font-semibold">
+              {t('team_lead_tenant_detail.usage_card_title')}
+            </CardTitle>
             <CardDescription>
-              モデル別・メンバー別 (email) の集計です。Team Lead の視点では user_id は非公開。
+              {t('team_lead_tenant_detail.usage_card_desc')}
             </CardDescription>
           </div>
-          <div className="flex gap-2" role="radiogroup" aria-label="期間選択">
-            {RANGES.map((r) => (
+          <div
+            className="flex gap-2"
+            role="radiogroup"
+            aria-label={t('team_lead_tenant_detail.range_aria')}
+          >
+            {ranges.map((r) => (
               <Button
                 key={r.days}
                 role="radio"
@@ -252,7 +264,7 @@ export default function TeamLeadTenantDetail() {
                 size="sm"
                 onClick={() => setDays(r.days)}
               >
-                {r.label}
+                {t(r.labelKey)}
               </Button>
             ))}
           </div>
@@ -260,11 +272,11 @@ export default function TeamLeadTenantDetail() {
         <CardContent className="space-y-6">
           <section>
             <h3 className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">
-              モデル別
+              {t('team_lead_tenant_detail.by_model')}
             </h3>
             {byModel.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                この期間の使用履歴はまだありません。
+                {t('team_lead_tenant_detail.by_model_empty')}
               </p>
             ) : (
               <ul className="space-y-2">
@@ -278,7 +290,9 @@ export default function TeamLeadTenantDetail() {
                         </code>
                         <span className="text-sm font-medium">
                           {fmt(tokens)}{' '}
-                          <span className="text-xs text-muted-foreground">tokens ({pct}%)</span>
+                          <span className="text-xs text-muted-foreground">
+                            {t('common.tokens')} ({pct}%)
+                          </span>
                         </span>
                       </div>
                       <div className="h-1 w-full overflow-hidden rounded-sm bg-muted">
@@ -296,11 +310,11 @@ export default function TeamLeadTenantDetail() {
 
           <section>
             <h3 className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">
-              メンバー別 (email)
+              {t('team_lead_tenant_detail.by_member')}
             </h3>
             {byUserEmail.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                メンバー別のデータはまだありません。
+                {t('team_lead_tenant_detail.by_member_empty')}
               </p>
             ) : (
               <ul className="space-y-2">
@@ -312,7 +326,9 @@ export default function TeamLeadTenantDetail() {
                         <span className="truncate text-sm">{email}</span>
                         <span className="text-sm font-medium">
                           {fmt(tokens)}{' '}
-                          <span className="text-xs text-muted-foreground">tokens ({pct}%)</span>
+                          <span className="text-xs text-muted-foreground">
+                            {t('common.tokens')} ({pct}%)
+                          </span>
                         </span>
                       </div>
                       <div className="h-1 w-full overflow-hidden rounded-sm bg-muted">
@@ -340,6 +356,7 @@ function EditButton({
   tenant: TenantItem
   onDone: () => void
 }) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [name, setName] = useState(tenant.name)
   const [defaultCredit, setDefaultCredit] = useState(String(tenant.default_credit))
@@ -358,7 +375,7 @@ function EditButton({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '更新に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('team_lead_tenant_detail.edit_error_fallback'))
     },
   })
 
@@ -367,7 +384,7 @@ function EditButton({
       <div>
         <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
           <Edit3 className="h-4 w-4" />
-          編集
+          {t('team_lead_tenant_detail.edit_button')}
         </Button>
       </div>
       <Dialog
@@ -383,16 +400,18 @@ function EditButton({
       >
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>テナント編集</DialogTitle>
-            <DialogDescription>名前と default_credit を変更できます。</DialogDescription>
+            <DialogTitle>{t('team_lead_tenant_detail.edit_title')}</DialogTitle>
+            <DialogDescription>
+              {t('team_lead_tenant_detail.edit_desc')}
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="tl-edit-name">名前</Label>
+              <Label htmlFor="tl-edit-name">{t('tenant.name')}</Label>
               <Input id="tl-edit-name" value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="tl-edit-default">default_credit</Label>
+              <Label htmlFor="tl-edit-default">{t('tenant.default_credit')}</Label>
               <Input
                 id="tl-edit-default"
                 type="number"
@@ -406,10 +425,10 @@ function EditButton({
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setOpen(false)}>
-              キャンセル
+              {t('common.cancel')}
             </Button>
             <Button disabled={mutation.isPending} onClick={() => mutation.mutate()}>
-              {mutation.isPending ? '更新中…' : '更新'}
+              {mutation.isPending ? t('common.updating') : t('common.update')}
             </Button>
           </DialogFooter>
         </DialogContent>

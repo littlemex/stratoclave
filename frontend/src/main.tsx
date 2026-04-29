@@ -8,6 +8,11 @@ import { ErrorProvider } from '@/contexts/ErrorContext'
 import { loadRuntimeConfig } from '@/lib/runtimeConfig'
 import { queryClient } from '@/lib/api'
 import App from '@/App'
+// i18n side-effect: sets up `i18n.t` / `useTranslation()` before any
+// component renders. Do NOT move this below component imports — React
+// components that call `useTranslation()` during module init would
+// otherwise run against an uninitialised instance.
+import '@/lib/i18n'
 import '@/index.css'
 
 // 開発モードでのみ axe-core を起動。
@@ -43,10 +48,13 @@ loadRuntimeConfig()
   .catch((error) => {
     const container = document.getElementById('root')
     if (container) {
+      // Runtime config failure happens before i18n can be trusted
+      // (we might not even have translations loaded yet), so render a
+      // minimal bilingual splash that stays readable in either locale.
       container.innerHTML = `
         <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0b0d12;color:#e7ecf3;font-family:Inter,system-ui,sans-serif;">
           <div style="max-width:420px;padding:2rem;border:1px solid #3f2b2b;background:#1a1216;">
-            <h1 style="margin:0 0 12px 0;font-family:Fraunces,serif;">設定の読み込みに失敗しました</h1>
+            <h1 style="margin:0 0 12px 0;font-family:Fraunces,serif;">Configuration load failed / 設定の読み込みに失敗しました</h1>
             <p style="margin:0;color:#b0a8a0;font-size:14px;">${error instanceof Error ? error.message : String(error)}</p>
           </div>
         </div>

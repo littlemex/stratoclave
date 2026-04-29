@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Trans, useTranslation } from 'react-i18next'
 import { ArrowLeft, MailPlus, Trash2 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -49,6 +50,7 @@ function formatDate(iso: string): string {
 }
 
 export default function AdminTrustedAccountDetail() {
+  const { t } = useTranslation()
   const { accountId = '' } = useParams<{ accountId: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -66,12 +68,16 @@ export default function AdminTrustedAccountDetail() {
   })
 
   if (accountQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">読み込み中…</p>
+    return (
+      <p className="text-sm text-muted-foreground">
+        {t('admin_trusted_account_detail.loading')}
+      </p>
+    )
   }
   if (accountQuery.isError || !accountQuery.data) {
     return (
       <p className="text-sm text-destructive">
-        このアカウントは登録されていません。
+        {t('admin_trusted_account_detail.not_found')}
       </p>
     )
   }
@@ -79,22 +85,28 @@ export default function AdminTrustedAccountDetail() {
   const account = accountQuery.data
   const invites = invitesQuery.data?.invites ?? []
 
+  const invitesDesc =
+    t('admin_trusted_account_detail.invites_desc_base') +
+    (account.provisioning_policy === 'invite_only'
+      ? t('admin_trusted_account_detail.invites_current_invite_only')
+      : t('admin_trusted_account_detail.invites_current_auto_provision'))
+
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <Button asChild variant="ghost" size="sm" className="px-0">
         <Link to="/admin/trusted-accounts">
           <ArrowLeft className="h-4 w-4" />
-          信頼アカウント一覧に戻る
+          {t('admin_trusted_account_detail.back_to_list')}
         </Link>
       </Button>
 
       <div>
         <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-          AWS Account
+          {t('admin_trusted_account_detail.eyebrow')}
         </p>
         <div className="flex items-center gap-2">
           <h1 className="font-display text-3xl font-semibold tracking-tight">
-            {account.description || 'No description'}
+            {account.description || t('admin_trusted_account_detail.no_description')}
           </h1>
           <Badge variant="secondary">{account.provisioning_policy}</Badge>
         </div>
@@ -107,14 +119,14 @@ export default function AdminTrustedAccountDetail() {
         <Card>
           <CardHeader className="pb-2">
             <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-              Default Credit
+              {t('admin_trusted_account_detail.stat_default_credit')}
             </p>
           </CardHeader>
           <CardContent>
             <div className="font-display text-2xl font-semibold tracking-tight">
               {fmt(account.default_credit)}
               <span className="ml-1 text-xs font-sans font-normal text-muted-foreground">
-                tokens
+                {t('common.tokens')}
               </span>
             </div>
           </CardContent>
@@ -122,24 +134,28 @@ export default function AdminTrustedAccountDetail() {
         <Card>
           <CardHeader className="pb-2">
             <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-              IAM User Login
+              {t('admin_trusted_account_detail.stat_iam_user')}
             </p>
           </CardHeader>
           <CardContent>
             <Badge variant={account.allow_iam_user ? 'destructive' : 'muted'}>
-              {account.allow_iam_user ? 'ALLOWED' : 'DENIED'}
+              {account.allow_iam_user
+                ? t('admin_trusted_account_detail.badge_allowed')
+                : t('admin_trusted_account_detail.badge_denied')}
             </Badge>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
             <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-              Instance Profile
+              {t('admin_trusted_account_detail.stat_instance_profile')}
             </p>
           </CardHeader>
           <CardContent>
             <Badge variant={account.allow_instance_profile ? 'destructive' : 'muted'}>
-              {account.allow_instance_profile ? 'ALLOWED' : 'DENIED'}
+              {account.allow_instance_profile
+                ? t('admin_trusted_account_detail.badge_allowed')
+                : t('admin_trusted_account_detail.badge_denied')}
             </Badge>
           </CardContent>
         </Card>
@@ -159,15 +175,17 @@ export default function AdminTrustedAccountDetail() {
       <Card>
         <CardHeader>
           <CardTitle className="font-sans text-base font-semibold">
-            Allowed Role Patterns
+            {t('admin_trusted_account_detail.role_patterns_title')}
           </CardTitle>
           <CardDescription>
-            空の場合は全 role を許可します。
+            {t('admin_trusted_account_detail.role_patterns_desc')}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {account.allowed_role_patterns.length === 0 ? (
-            <p className="text-sm text-muted-foreground">（制限なし）</p>
+            <p className="text-sm text-muted-foreground">
+              {t('admin_trusted_account_detail.role_patterns_empty')}
+            </p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {account.allowed_role_patterns.map((p) => (
@@ -187,35 +205,34 @@ export default function AdminTrustedAccountDetail() {
         <CardHeader className="flex flex-row items-start justify-between space-y-0">
           <div>
             <CardTitle className="font-sans text-base font-semibold">
-              SSO 事前招待 (Pre-registrations)
+              {t('admin_trusted_account_detail.invites_title')}
             </CardTitle>
-            <CardDescription>
-              招待は常に最優先で適用されます。auto_provision の既定動作に加えて、
-              session_name が email でない Isengard / IAM user / 個別ロール昇格 を
-              email にマップするために併用できます。
-              {account.provisioning_policy === 'invite_only'
-                ? ' (現在: invite_only なので、招待が無いユーザーは拒否されます)'
-                : ' (現在: auto_provision なので、招待がないユーザーは session_name から email を自動抽出します)'}
-            </CardDescription>
+            <CardDescription>{invitesDesc}</CardDescription>
           </div>
           <InviteButton accountId={account.account_id} />
         </CardHeader>
         <CardContent className="p-0">
           {invitesQuery.isLoading ? (
-            <p className="p-6 text-sm text-muted-foreground">読み込み中…</p>
+            <p className="p-6 text-sm text-muted-foreground">
+              {t('common.loading_ellipsis')}
+            </p>
           ) : invites.length === 0 ? (
             <p className="px-6 py-10 text-center text-sm text-muted-foreground">
-              このアカウントの招待はまだありません。
+              {t('admin_trusted_account_detail.invites_empty')}
             </p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Role</TableHead>
-                  <TableHead>IAM User</TableHead>
-                  <TableHead>招待日</TableHead>
-                  <TableHead>利用</TableHead>
+                  <TableHead>{t('admin_trusted_account_detail.col_email')}</TableHead>
+                  <TableHead>{t('admin_trusted_account_detail.col_role')}</TableHead>
+                  <TableHead>
+                    {t('admin_trusted_account_detail.col_iam_user')}
+                  </TableHead>
+                  <TableHead>
+                    {t('admin_trusted_account_detail.col_invited_at')}
+                  </TableHead>
+                  <TableHead>{t('admin_trusted_account_detail.col_used')}</TableHead>
                   <TableHead />
                 </TableRow>
               </TableHeader>
@@ -245,9 +262,13 @@ export default function AdminTrustedAccountDetail() {
                     </TableCell>
                     <TableCell>
                       {inv.consumed_at ? (
-                        <Badge variant="muted">used</Badge>
+                        <Badge variant="muted">
+                          {t('admin_trusted_account_detail.badge_used')}
+                        </Badge>
                       ) : (
-                        <Badge variant="secondary">pending</Badge>
+                        <Badge variant="secondary">
+                          {t('admin_trusted_account_detail.badge_pending')}
+                        </Badge>
                       )}
                     </TableCell>
                     <TableCell className="text-right">
@@ -274,16 +295,17 @@ function ActionBar({
   onChanged: () => void
   onDeleted: () => void
 }) {
+  const { t } = useTranslation()
   const [editOpen, setEditOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   return (
     <section className="flex flex-wrap gap-2">
       <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
-        編集
+        {t('admin_trusted_account_detail.edit')}
       </Button>
       <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)}>
         <Trash2 className="h-4 w-4" />
-        削除
+        {t('admin_trusted_account_detail.delete')}
       </Button>
       <EditDialog
         account={account}
@@ -312,6 +334,7 @@ function EditDialog({
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
+  const { t } = useTranslation()
   const [description, setDescription] = useState(account.description)
   const [policy, setPolicy] = useState<ProvisioningPolicy>(account.provisioning_policy)
   const [rolePatterns, setRolePatterns] = useState(
@@ -345,7 +368,7 @@ function EditDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '更新に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_trusted_account_detail.edit_error_fallback'))
     },
   })
 
@@ -359,18 +382,18 @@ function EditDialog({
     >
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>信頼アカウントの編集</DialogTitle>
+          <DialogTitle>{t('admin_trusted_account_detail.edit_title')}</DialogTitle>
           <DialogDescription>
-            account_id は変更できません。その他のパラメータを調整します。
+            {t('admin_trusted_account_detail.edit_desc')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label>Description</Label>
+            <Label>{t('admin_trusted_account_detail.edit_desc_label')}</Label>
             <Input value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
           <div className="space-y-1.5">
-            <Label>Provisioning Policy</Label>
+            <Label>{t('admin_trusted_account_detail.edit_policy_label')}</Label>
             <select
               value={policy}
               onChange={(e) => setPolicy(e.target.value as ProvisioningPolicy)}
@@ -381,7 +404,7 @@ function EditDialog({
             </select>
           </div>
           <div className="space-y-1.5">
-            <Label>Allowed Role Patterns</Label>
+            <Label>{t('admin_trusted_account_detail.edit_roles_label')}</Label>
             <textarea
               value={rolePatterns}
               onChange={(e) => setRolePatterns(e.target.value)}
@@ -396,7 +419,7 @@ function EditDialog({
               onChange={(e) => setAllowIamUser(e.target.checked)}
               className="h-4 w-4 rounded-sm"
             />
-            IAM user を許可
+            {t('admin_trusted_account_detail.edit_allow_iam_user')}
           </label>
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -405,10 +428,12 @@ function EditDialog({
               onChange={(e) => setAllowInstanceProfile(e.target.checked)}
               className="h-4 w-4 rounded-sm"
             />
-            <span className="text-destructive">Instance Profile を許可 (非推奨)</span>
+            <span className="text-destructive">
+              {t('admin_trusted_account_detail.edit_allow_ip')}
+            </span>
           </label>
           <div className="space-y-1.5">
-            <Label>Default Credit</Label>
+            <Label>{t('admin_trusted_account_detail.edit_default_credit')}</Label>
             <Input
               type="number"
               value={defaultCredit}
@@ -421,10 +446,10 @@ function EditDialog({
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button disabled={mutation.isPending} onClick={() => mutation.mutate()}>
-            {mutation.isPending ? '更新中…' : '更新'}
+            {mutation.isPending ? t('common.updating') : t('common.update')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -443,6 +468,7 @@ function DeleteDialog({
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
+  const { t } = useTranslation()
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -454,7 +480,7 @@ function DeleteDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '削除に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_trusted_account_detail.delete_error_fallback'))
     },
   })
 
@@ -471,29 +497,36 @@ function DeleteDialog({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-destructive">アカウントを削除</DialogTitle>
+          <DialogTitle className="text-destructive">
+            {t('admin_trusted_account_detail.delete_title')}
+          </DialogTitle>
           <DialogDescription>
-            このアカウント経由で作成されたユーザーの Cognito エントリは残ります。
-            今後このアカウントからの SSO ログインは拒否されます。
+            {t('admin_trusted_account_detail.delete_desc')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1.5">
           <Label>
-            確認のために <code className="font-mono">{account.account_id}</code> を入力
+            <Trans
+              i18nKey="admin_trusted_account_detail.delete_confirm_label"
+              values={{ id: account.account_id }}
+              components={{ 1: <code className="font-mono" /> }}
+            />
           </Label>
           <Input value={confirm} onChange={(e) => setConfirm(e.target.value)} />
         </div>
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button
             variant="destructive"
             disabled={confirm !== account.account_id || mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? '削除中…' : '削除を実行'}
+            {mutation.isPending
+              ? t('admin_trusted_account_detail.delete_submitting')
+              : t('admin_trusted_account_detail.delete_submit')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -503,12 +536,13 @@ function DeleteDialog({
 
 // ------------------------------------------------------------------
 function InviteButton({ accountId }: { accountId: string }) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   return (
     <>
       <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
         <MailPlus className="h-4 w-4" />
-        招待を追加
+        {t('admin_trusted_account_detail.invite_add')}
       </Button>
       <InviteDialog accountId={accountId} open={open} onOpenChange={setOpen} />
     </>
@@ -524,6 +558,7 @@ function InviteDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
 }) {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'user' | 'team_lead'>('user')
@@ -560,7 +595,7 @@ function InviteDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '招待の作成に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_trusted_account_detail.invite_error_fallback'))
     },
   })
 
@@ -570,15 +605,18 @@ function InviteDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>SSO 招待を追加</DialogTitle>
+          <DialogTitle>{t('admin_trusted_account_detail.invite_dialog_title')}</DialogTitle>
           <DialogDescription>
-            account <code className="font-mono">{accountId}</code> 経由で初回ログインした
-            際にこの email が自動で Stratoclave user として作成されます。
+            <Trans
+              i18nKey="admin_trusted_account_detail.invite_dialog_desc"
+              values={{ id: accountId }}
+              components={{ 1: <code className="font-mono" /> }}
+            />
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label>Email</Label>
+            <Label>{t('admin_trusted_account_detail.invite_email_label')}</Label>
             <Input
               type="email"
               value={email}
@@ -587,7 +625,7 @@ function InviteDialog({
             />
           </div>
           <div className="space-y-1.5">
-            <Label>Role</Label>
+            <Label>{t('admin_trusted_account_detail.invite_role_label')}</Label>
             <select
               value={role}
               onChange={(e) => setRole(e.target.value as 'user' | 'team_lead')}
@@ -598,34 +636,36 @@ function InviteDialog({
             </select>
           </div>
           <div className="space-y-1.5">
-            <Label>IAM User Name (任意、IAM user 招待のみ)</Label>
+            <Label>{t('admin_trusted_account_detail.invite_iam_user_label')}</Label>
             <Input
               value={iamUserName}
               onChange={(e) => setIamUserName(e.target.value)}
               placeholder="alice"
             />
             <p className="text-[11px] text-muted-foreground">
-              IAM user は Arn から email を導出できないため、この name でマップします。
+              {t('admin_trusted_account_detail.invite_iam_user_help')}
             </p>
           </div>
           <div className="grid gap-2 md:grid-cols-2">
             <div className="space-y-1.5">
-              <Label>Tenant (任意)</Label>
+              <Label>{t('admin_trusted_account_detail.invite_tenant_label')}</Label>
               <select
                 value={tenantId}
                 onChange={(e) => setTenantId(e.target.value)}
                 className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground"
               >
-                <option value="">default</option>
-                {(tenantsQuery.data?.tenants ?? []).map((t) => (
-                  <option key={t.tenant_id} value={t.tenant_id}>
-                    {t.name}
+                <option value="">
+                  {t('admin_trusted_account_detail.invite_tenant_default')}
+                </option>
+                {(tenantsQuery.data?.tenants ?? []).map((tenant) => (
+                  <option key={tenant.tenant_id} value={tenant.tenant_id}>
+                    {tenant.name}
                   </option>
                 ))}
               </select>
             </div>
             <div className="space-y-1.5">
-              <Label>Total Credit (任意)</Label>
+              <Label>{t('admin_trusted_account_detail.invite_total_credit_label')}</Label>
               <Input
                 type="number"
                 value={totalCredit}
@@ -639,10 +679,12 @@ function InviteDialog({
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button disabled={!isValid || mutation.isPending} onClick={() => mutation.mutate()}>
-            {mutation.isPending ? '作成中…' : '招待を作成'}
+            {mutation.isPending
+              ? t('admin_trusted_account_detail.invite_submitting')
+              : t('admin_trusted_account_detail.invite_submit')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -651,6 +693,7 @@ function InviteDialog({
 }
 
 function DeleteInviteButton({ email }: { email: string }) {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const mutation = useMutation({
     mutationFn: () => api.admin.deleteSsoInvite(email),
@@ -663,7 +706,10 @@ function DeleteInviteButton({ email }: { email: string }) {
       variant="ghost"
       size="sm"
       onClick={() => {
-        if (confirm(`Delete invite for ${email}?`)) mutation.mutate()
+        if (
+          confirm(t('admin_trusted_account_detail.delete_invite_prompt', { email }))
+        )
+          mutation.mutate()
       }}
       disabled={mutation.isPending}
     >

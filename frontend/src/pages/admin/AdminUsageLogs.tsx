@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Trans, useTranslation } from 'react-i18next'
 import { Filter } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -35,6 +36,7 @@ function formatDate(iso: string): string {
 }
 
 export default function AdminUsageLogs() {
+  const { t } = useTranslation()
   const [tenantId, setTenantId] = useState('')
   const [userId, setUserId] = useState('')
   const [since, setSince] = useState('')
@@ -75,17 +77,24 @@ export default function AdminUsageLogs() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="font-display text-3xl tracking-tight">全体使用量</h1>
+        <h1 className="font-display text-3xl tracking-tight">
+          {t('admin_usage_logs.title')}
+        </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          UsageLogs テーブルの全件をフィルタ付きで確認します。tenant_id 指定時は PK Query、user_id 指定時は GSI Query、いずれも無ければ Scan です (100 件で truncate)。
+          {t('admin_usage_logs.intro')}
         </p>
       </header>
 
       <Card>
         <CardHeader>
-          <CardTitle className="font-sans text-base font-semibold">絞り込み</CardTitle>
+          <CardTitle className="font-sans text-base font-semibold">
+            {t('admin_usage_logs.filter_title')}
+          </CardTitle>
           <CardDescription>
-            ISO 8601 (<code className="font-mono text-xs">2026-04-01T00:00:00Z</code> 形式) を since / until に入力できます。
+            <Trans
+              i18nKey="admin_usage_logs.filter_desc"
+              components={{ 1: <code className="font-mono text-xs" /> }}
+            />
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -130,7 +139,7 @@ export default function AdminUsageLogs() {
           <div className="mt-4 flex gap-2">
             <Button size="sm" onClick={apply}>
               <Filter className="h-4 w-4" />
-              絞り込み適用
+              {t('admin_usage_logs.apply')}
             </Button>
             <Button
               size="sm"
@@ -145,7 +154,7 @@ export default function AdminUsageLogs() {
                 setCursorStack([])
               }}
             >
-              クリア
+              {t('admin_usage_logs.clear')}
             </Button>
           </div>
         </CardContent>
@@ -155,26 +164,26 @@ export default function AdminUsageLogs() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>日時</TableHead>
-              <TableHead>User</TableHead>
-              <TableHead>Tenant</TableHead>
-              <TableHead>Model</TableHead>
-              <TableHead className="text-right">Input</TableHead>
-              <TableHead className="text-right">Output</TableHead>
-              <TableHead className="text-right">Total</TableHead>
+              <TableHead>{t('admin_usage_logs.col_when')}</TableHead>
+              <TableHead>{t('admin_usage_logs.col_user')}</TableHead>
+              <TableHead>{t('admin_usage_logs.col_tenant')}</TableHead>
+              <TableHead>{t('admin_usage_logs.col_model')}</TableHead>
+              <TableHead className="text-right">{t('admin_usage_logs.col_input')}</TableHead>
+              <TableHead className="text-right">{t('admin_usage_logs.col_output')}</TableHead>
+              <TableHead className="text-right">{t('admin_usage_logs.col_total')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {logsQuery.isLoading ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground">
-                  読み込み中…
+                  {t('common.loading_ellipsis')}
                 </TableCell>
               </TableRow>
             ) : (logsQuery.data?.logs.length ?? 0) === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground">
-                  該当するログがありません。
+                  {t('admin_usage_logs.row_empty')}
                 </TableCell>
               </TableRow>
             ) : (
@@ -184,7 +193,9 @@ export default function AdminUsageLogs() {
                     {formatDate(log.recorded_at)}
                   </TableCell>
                   <TableCell>
-                    <div className="text-xs">{log.user_email ?? '(email 無)'}</div>
+                    <div className="text-xs">
+                      {log.user_email ?? t('admin_usage_logs.col_user_email_none')}
+                    </div>
                     <code className="font-mono text-[10px] text-muted-foreground">
                       {log.user_id}
                     </code>
@@ -211,7 +222,10 @@ export default function AdminUsageLogs() {
 
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
-          {logsQuery.data?.logs.length ?? 0} 件表示{nextCursor ? ' / 次ページあり' : ''}
+          {t('admin_usage_logs.count_showing', {
+            shown: logsQuery.data?.logs.length ?? 0,
+          })}
+          {nextCursor ? t('admin_usage_logs.count_more') : ''}
         </span>
         <div className="flex gap-2">
           <Button
@@ -227,7 +241,7 @@ export default function AdminUsageLogs() {
               })
             }
           >
-            前へ
+            {t('common.prev')}
           </Button>
           <Button
             variant="outline"
@@ -238,7 +252,7 @@ export default function AdminUsageLogs() {
               setCursor(nextCursor ?? undefined)
             }}
           >
-            次へ
+            {t('common.next')}
           </Button>
         </div>
       </div>

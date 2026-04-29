@@ -55,6 +55,11 @@ const jsonHeaders = { 'Content-Type': 'application/json' }
 // --- Domain types (minimal subset the UI uses) ---
 export type Role = 'admin' | 'team_lead' | 'user'
 
+// i18n: UI locale. Backend clamps to this set server-side; unknown
+// values fall back to "ja". Keep this literal in sync with
+// backend/mvp/me.py :: SUPPORTED_LOCALES.
+export type Locale = 'en' | 'ja'
+
 export interface MeResponse {
   user_id: string
   email: string
@@ -65,6 +70,11 @@ export interface MeResponse {
   remaining_credit: number
   currency: string
   tenant: { tenant_id: string; name?: string | null } | null
+  locale: Locale
+}
+
+export interface UpdateMeResponse {
+  locale: Locale
 }
 
 export interface UsageSummary {
@@ -107,6 +117,8 @@ export interface UserSummary {
   sso_account_id?: string | null
   sso_principal_arn?: string | null
   last_sso_login_at?: string | null
+  // i18n: current UI locale (may be null for legacy rows).
+  locale?: Locale | null
 }
 
 export interface UsersListResponse {
@@ -119,6 +131,8 @@ export interface CreateUserRequest {
   role?: Role
   tenant_id?: string
   total_credit?: number
+  // i18n: admin can pre-set the new user's UI locale.
+  locale?: Locale
 }
 
 export interface CreateUserResponse {
@@ -279,6 +293,13 @@ export interface TeamLeadMembersResponse {
 export const api = {
   me: () => jsonRequest<MeResponse>('/api/mvp/me'),
 
+  updateMe: (body: { locale: Locale }) =>
+    jsonRequest<UpdateMeResponse>('/api/mvp/me', {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify(body),
+    }),
+
   usageSummary: (sinceDays?: number) => {
     const q = sinceDays ? `?since_days=${sinceDays}` : ''
     return jsonRequest<UsageSummary>(`/api/mvp/me/usage-summary${q}`)
@@ -317,6 +338,15 @@ export const api = {
       jsonRequest<void>(`/api/mvp/admin/users/${encodeURIComponent(user_id)}`, {
         method: 'DELETE',
       }),
+    updateUser: (user_id: string, body: { locale: Locale }) =>
+      jsonRequest<UserSummary>(
+        `/api/mvp/admin/users/${encodeURIComponent(user_id)}`,
+        {
+          method: 'PATCH',
+          headers: jsonHeaders,
+          body: JSON.stringify(body),
+        },
+      ),
     assignTenant: (
       user_id: string,
       body: { tenant_id: string; total_credit?: number; new_role?: Role },

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Trans, useTranslation } from 'react-i18next'
 import { ArrowLeft, Archive, Edit3, UserCog } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -38,6 +39,7 @@ function fmt(n: number): string {
 }
 
 export default function AdminTenantDetail() {
+  const { t } = useTranslation()
   const { tenantId = '' } = useParams<{ tenantId: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -63,10 +65,10 @@ export default function AdminTenantDetail() {
   }
 
   if (tenantQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">読み込み中…</p>
+    return <p className="text-sm text-muted-foreground">{t('admin_tenant_detail.loading')}</p>
   }
   if (tenantQuery.isError || !tenantQuery.data) {
-    return <p className="text-sm text-destructive">テナントが見つかりませんでした。</p>
+    return <p className="text-sm text-destructive">{t('admin_tenant_detail.not_found')}</p>
   }
 
   const tenant = tenantQuery.data
@@ -82,7 +84,7 @@ export default function AdminTenantDetail() {
       <Button asChild variant="ghost" size="sm" className="px-0">
         <Link to="/admin/tenants">
           <ArrowLeft className="h-4 w-4" />
-          テナント一覧に戻る
+          {t('admin_tenant_detail.back_to_list')}
         </Link>
       </Button>
 
@@ -100,14 +102,14 @@ export default function AdminTenantDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="font-sans text-sm font-medium text-muted-foreground">
-              default_credit
+              {t('tenant.default_credit')}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="font-display text-2xl tracking-tight">
               {fmt(tenant.default_credit)}
               <span className="ml-1 text-xs font-sans font-normal text-muted-foreground">
-                tokens
+                {t('common.tokens')}
               </span>
             </div>
           </CardContent>
@@ -115,7 +117,7 @@ export default function AdminTenantDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="font-sans text-sm font-medium text-muted-foreground">
-              オーナー
+              {t('admin_tenant_detail.card_owner_title')}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-1">
@@ -131,55 +133,72 @@ export default function AdminTenantDetail() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="font-sans text-sm font-medium text-muted-foreground">
-              この期間の消費 (30日)
+              {t('admin_tenant_detail.card_usage_title')}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="font-display text-2xl tracking-tight">
               {fmt(totalTokens)}
               <span className="ml-1 text-xs font-sans font-normal text-muted-foreground">
-                tokens
+                {t('common.tokens')}
               </span>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              {usage ? `${fmt(usage.sample_size)} 件のログから集計` : ' '}
+              {usage
+                ? t('admin_tenant_detail.card_usage_footer', {
+                    samples: fmt(usage.sample_size),
+                  })
+                : ' '}
             </p>
           </CardContent>
         </Card>
       </section>
 
-      <ActionBar tenant={tenant} onChanged={invalidate} onDeleted={() => navigate('/admin/tenants')} />
+      <ActionBar
+        tenant={tenant}
+        onChanged={invalidate}
+        onDeleted={() => navigate('/admin/tenants')}
+      />
 
       <Card>
         <CardHeader>
-          <CardTitle className="font-sans text-base font-semibold">所属メンバー</CardTitle>
+          <CardTitle className="font-sans text-base font-semibold">
+            {t('admin_tenant_detail.members_title')}
+          </CardTitle>
           <CardDescription>
-            active な UserTenants レコードのみを表示します。archived の履歴は UsageLogs に残ります。
+            {t('admin_tenant_detail.members_desc')}
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Email</TableHead>
-                <TableHead>ロール</TableHead>
-                <TableHead className="text-right">残クレジット</TableHead>
-                <TableHead className="text-right">使用</TableHead>
+                <TableHead>{t('common.email')}</TableHead>
+                <TableHead>{t('dashboard.stat_role')}</TableHead>
+                <TableHead className="text-right">
+                  {t('tenant.remaining_credit')}
+                </TableHead>
+                <TableHead className="text-right">{t('tenant.usage')}</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
             <TableBody>
               {members.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
-                    このテナントに紐づく active メンバーはいません。
+                  <TableCell
+                    colSpan={5}
+                    className="py-6 text-center text-muted-foreground"
+                  >
+                    {t('admin_tenant_detail.members_empty')}
                   </TableCell>
                 </TableRow>
               ) : (
                 members.map((m) => (
                   <TableRow key={m.user_id}>
                     <TableCell>
-                      <div className="font-medium">{m.email || '(email 未設定)'}</div>
+                      <div className="font-medium">
+                        {m.email || t('common.email_unset')}
+                      </div>
                       <code className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
                         {m.user_id}
                       </code>
@@ -205,7 +224,9 @@ export default function AdminTenantDetail() {
                     </TableCell>
                     <TableCell className="text-right">
                       <Button asChild variant="ghost" size="sm">
-                        <Link to={`/admin/users/${encodeURIComponent(m.user_id)}`}>詳細</Link>
+                        <Link to={`/admin/users/${encodeURIComponent(m.user_id)}`}>
+                          {t('common.details')}
+                        </Link>
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -218,13 +239,17 @@ export default function AdminTenantDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="font-sans text-base font-semibold">モデル別 消費</CardTitle>
-          <CardDescription>直近 30 日 / 最大 1,000 サンプル</CardDescription>
+          <CardTitle className="font-sans text-base font-semibold">
+            {t('admin_tenant_detail.usage_by_model_title')}
+          </CardTitle>
+          <CardDescription>
+            {t('admin_tenant_detail.usage_by_model_desc')}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {usageByModel.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              このテナントでの使用履歴はまだありません。
+              {t('admin_tenant_detail.usage_by_model_empty')}
             </p>
           ) : (
             <ul className="space-y-2">
@@ -235,7 +260,10 @@ export default function AdminTenantDetail() {
                     <div className="flex items-baseline justify-between gap-3">
                       <code className="truncate font-mono text-xs text-muted-foreground">{model}</code>
                       <span className="text-sm font-medium">
-                        {fmt(tokens)} <span className="text-xs text-muted-foreground">tokens ({pct}%)</span>
+                        {fmt(tokens)}{' '}
+                        <span className="text-xs text-muted-foreground">
+                          {t('common.tokens')} ({pct}%)
+                        </span>
                       </span>
                     </div>
                     <div className="h-1 w-full overflow-hidden rounded-sm bg-muted">
@@ -251,8 +279,12 @@ export default function AdminTenantDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="font-sans text-base font-semibold">ユーザー別 消費</CardTitle>
-          <CardDescription>Admin 向けビューなので user_email を表示します。</CardDescription>
+          <CardTitle className="font-sans text-base font-semibold">
+            {t('admin_tenant_detail.usage_by_user_title')}
+          </CardTitle>
+          <CardDescription>
+            {t('admin_tenant_detail.usage_by_user_desc')}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {usage && Object.keys(usage.by_user ?? {}).length > 0 ? (
@@ -267,7 +299,9 @@ export default function AdminTenantDetail() {
                         <span className="truncate text-sm">{user}</span>
                         <span className="text-sm font-medium">
                           {fmt(tokens)}{' '}
-                          <span className="text-xs text-muted-foreground">tokens ({pct}%)</span>
+                          <span className="text-xs text-muted-foreground">
+                            {t('common.tokens')} ({pct}%)
+                          </span>
                         </span>
                       </div>
                       <div className="h-1 w-full overflow-hidden rounded-sm bg-muted">
@@ -278,7 +312,9 @@ export default function AdminTenantDetail() {
                 })}
             </ul>
           ) : (
-            <p className="text-sm text-muted-foreground">ユーザー別のデータはありません。</p>
+            <p className="text-sm text-muted-foreground">
+              {t('admin_tenant_detail.usage_by_user_empty')}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -298,6 +334,7 @@ function ActionBar({
   onChanged: () => void
   onDeleted: () => void
 }) {
+  const { t } = useTranslation()
   const [editOpen, setEditOpen] = useState(false)
   const [ownerOpen, setOwnerOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
@@ -308,21 +345,23 @@ function ActionBar({
     <section className="flex flex-wrap gap-2">
       <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
         <Edit3 className="h-4 w-4" />
-        編集
+        {t('admin_tenant_detail.edit')}
       </Button>
       <Button variant="outline" size="sm" onClick={() => setOwnerOpen(true)}>
         <UserCog className="h-4 w-4" />
-        オーナー再割当
+        {t('admin_tenant_detail.reassign_owner')}
       </Button>
       <Button
         variant="destructive"
         size="sm"
         disabled={isDefaultOrg || tenant.status === 'archived'}
         onClick={() => setArchiveOpen(true)}
-        title={isDefaultOrg ? 'default-org は削除できません' : undefined}
+        title={
+          isDefaultOrg ? t('admin_tenant_detail.archive_default_org_hint') : undefined
+        }
       >
         <Archive className="h-4 w-4" />
-        アーカイブ
+        {t('admin_tenant_detail.archive')}
       </Button>
 
       <EditDialog
@@ -358,6 +397,7 @@ function EditDialog({
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
+  const { t } = useTranslation()
   const [name, setName] = useState(tenant.name)
   const [defaultCredit, setDefaultCredit] = useState(String(tenant.default_credit))
   const [error, setError] = useState<string | null>(null)
@@ -375,7 +415,7 @@ function EditDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '更新に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_tenant_detail.edit_error_fallback'))
     },
   })
 
@@ -389,16 +429,16 @@ function EditDialog({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>テナント編集</DialogTitle>
-          <DialogDescription>名前と default_credit を変更できます。</DialogDescription>
+          <DialogTitle>{t('admin_tenant_detail.edit_title')}</DialogTitle>
+          <DialogDescription>{t('admin_tenant_detail.edit_desc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="edit-name">名前</Label>
+            <Label htmlFor="edit-name">{t('tenant.name')}</Label>
             <Input id="edit-name" value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="edit-default">default_credit</Label>
+            <Label htmlFor="edit-default">{t('tenant.default_credit')}</Label>
             <Input
               id="edit-default"
               type="number"
@@ -412,10 +452,10 @@ function EditDialog({
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button disabled={mutation.isPending} onClick={() => mutation.mutate()}>
-            {mutation.isPending ? '更新中…' : '更新'}
+            {mutation.isPending ? t('common.updating') : t('common.update')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -434,6 +474,7 @@ function OwnerDialog({
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
+  const { t } = useTranslation()
   const [owner, setOwner] = useState(tenant.team_lead_user_id ?? 'admin-owned')
   const [error, setError] = useState<string | null>(null)
 
@@ -451,7 +492,7 @@ function OwnerDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '更新に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_tenant_detail.owner_error_fallback'))
     },
   })
 
@@ -465,20 +506,24 @@ function OwnerDialog({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>オーナーの再割当</DialogTitle>
+          <DialogTitle>{t('admin_tenant_detail.owner_title')}</DialogTitle>
           <DialogDescription>
-            team_lead ロールを持つユーザーを選択するか、admin-owned (共有) に設定します。
+            {t('admin_tenant_detail.owner_desc')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1.5">
-          <Label htmlFor="owner-select">新しい所有者</Label>
+          <Label htmlFor="owner-select">
+            {t('admin_tenant_detail.owner_new_label')}
+          </Label>
           <select
             id="owner-select"
             value={owner}
             onChange={(e) => setOwner(e.target.value)}
             className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground"
           >
-            <option value="admin-owned">admin-owned (共有)</option>
+            <option value="admin-owned">
+              {t('admin_tenants.create_owner_admin_owned')}
+            </option>
             {(teamLeadUsersQuery.data?.users ?? []).map((u) => (
               <option key={u.user_id} value={u.user_id}>
                 {u.email || u.user_id}
@@ -489,13 +534,15 @@ function OwnerDialog({
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button
             disabled={owner === tenant.team_lead_user_id || mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? '更新中…' : '適用'}
+            {mutation.isPending
+              ? t('admin_tenant_detail.owner_applying')
+              : t('admin_tenant_detail.owner_apply')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -514,6 +561,7 @@ function ArchiveDialog({
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
+  const { t } = useTranslation()
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -525,7 +573,7 @@ function ArchiveDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? 'アーカイブに失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_tenant_detail.archive_error_fallback'))
     },
   })
 
@@ -543,15 +591,21 @@ function ArchiveDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="text-destructive">
-            テナントをアーカイブします
+            {t('admin_tenant_detail.archive_title')}
           </DialogTitle>
           <DialogDescription>
-            status=archived にしますが、レコード・使用履歴は残ります。同名のテナントをすぐに新規作成しても衝突しません。
+            {t('admin_tenant_detail.archive_desc')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1.5">
           <Label htmlFor="archive-confirm">
-            確認のために <code className="font-mono text-foreground">{tenant.tenant_id}</code> を入力してください
+            <Trans
+              i18nKey="admin_tenant_detail.archive_confirm_label"
+              values={{ id: tenant.tenant_id }}
+              components={{
+                1: <code className="font-mono text-foreground" />,
+              }}
+            />
           </Label>
           <Input
             id="archive-confirm"
@@ -564,14 +618,16 @@ function ArchiveDialog({
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button
             variant="destructive"
             disabled={confirm !== tenant.tenant_id || mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? '実行中…' : 'アーカイブ'}
+            {mutation.isPending
+              ? t('admin_tenant_detail.archive_submitting')
+              : t('admin_tenant_detail.archive_submit')}
           </Button>
         </DialogFooter>
       </DialogContent>

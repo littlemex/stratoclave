@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource, users_table_name
 
@@ -44,10 +45,15 @@ class UsersRepository:
         auth_method: Optional[str] = None,
         sso_account_id: Optional[str] = None,
         sso_principal_arn: Optional[str] = None,
+        locale: Optional[str] = None,
     ) -> dict[str, Any]:
         """新規ユーザー作成 or 既存更新.
 
         created_at は既存 item があれば保持、無ければ今時刻. Phase S 追加属性も扱う.
+
+        ``locale`` (i18n): UI 表示言語. 明示指定があれば上書き、無ければ既存値
+        を保持、既存も無ければ default の ``"ja"`` を設定。backend 側では
+        許容値を ``{"en", "ja"}`` に制限する (validation は呼び出し側)。
         """
         now = _now_iso()
         existing = self.get_by_user_id(user_id)
@@ -64,6 +70,13 @@ class UsersRepository:
             "created_at": created_at,
             "updated_at": now,
         }
+        # i18n: explicit > existing > default ("ja").
+        if locale is not None:
+            item["locale"] = locale
+        elif existing and existing.get("locale"):
+            item["locale"] = existing["locale"]
+        else:
+            item["locale"] = "ja"
         # Phase S: SSO 系属性 (明示指定時のみ上書き)
         if auth_method is not None:
             item["auth_method"] = auth_method
@@ -104,6 +117,30 @@ class UsersRepository:
                 ":arn": sso_principal_arn,
             },
         )
+
+    def update_locale(self, user_id: str, locale: str) -> Optional[dict[str, Any]]:
+        """Update the user's UI locale. Returns the new item attributes
+        (``ReturnValues=ALL_NEW``) or ``None`` when the user does not
+        exist.
+
+        The caller is responsible for whitelisting ``locale`` against
+        the supported set before invoking this. We keep the repository
+        layer storage-agnostic and only enforce structural invariants.
+        """
+        try:
+            resp = self._table.update_item(
+                Key={"user_id": user_id, "sk": self.SK_PROFILE},
+                UpdateExpression="SET #loc = :l, updated_at = :now",
+                ConditionExpression="attribute_exists(user_id)",
+                ExpressionAttributeNames={"#loc": "locale"},
+                ExpressionAttributeValues={":l": locale, ":now": _now_iso()},
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return None
+            raise
+        return resp.get("Attributes")
 
     def get_by_user_id(self, user_id: str) -> Optional[dict[str, Any]]:
         resp = self._table.get_item(Key={"user_id": user_id, "sk": self.SK_PROFILE})

@@ -1,5 +1,6 @@
 import { type ReactNode } from 'react'
 import { Navigate, Outlet } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 
 import { useAuth } from '@/contexts/AuthContext'
 import { usePermissions } from '@/hooks/usePermissions'
@@ -20,11 +21,12 @@ export default function ProtectedRoute({
   requireAll = false,
   fallback,
 }: ProtectedRouteProps) {
+  const { t } = useTranslation()
   const { state } = useAuth()
   const { roles } = usePermissions()
 
   if (state.status === 'loading') {
-    return <LoadingScreen message="認証情報を確認しています" />
+    return <LoadingScreen message={t('callback.processing')} />
   }
 
   if (state.status === 'unauthenticated') {

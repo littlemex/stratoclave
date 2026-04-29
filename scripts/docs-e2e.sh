@@ -244,6 +244,64 @@ if [ "$status" != "200" ]; then
 fi
 ok "/v1/messages returned 200"
 
+# i18n regression guard: `/me` must always return a supported locale
+# ("en" or "ja"). `PATCH /me` must accept a valid locale and round-trip
+# it. Unsupported values must be rejected with 422 (Pydantic Literal +
+# extra=forbid). If this probe ever returns anything else the SPA will
+# start receiving locales it cannot translate.
+me_resp=$(curl -sS \
+  -H "Authorization: Bearer $access" \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me")
+me_locale=$(printf '%s' "$me_resp" | jq -r '.locale // empty')
+if [ "$me_locale" != "en" ] && [ "$me_locale" != "ja" ]; then
+  fail "/api/mvp/me returned unexpected locale '$me_locale': $me_resp"
+fi
+ok "/api/mvp/me returned supported locale ($me_locale)"
+
+# Flip to the *other* locale, confirm it sticks in /me, flip back to
+# the original so the probe is idempotent when rerun.
+orig_locale="$me_locale"
+flip_target="en"
+if [ "$orig_locale" = "en" ]; then flip_target="ja"; fi
+patch_status=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -X PATCH "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me" \
+  -H "Authorization: Bearer $access" \
+  -H 'Content-Type: application/json' \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  -d "{\"locale\":\"$flip_target\"}")
+if [ "$patch_status" != "200" ]; then
+  fail "PATCH /api/mvp/me locale flip returned HTTP $patch_status"
+fi
+me_after=$(curl -sS \
+  -H "Authorization: Bearer $access" \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me" | jq -r '.locale // empty')
+if [ "$me_after" != "$flip_target" ]; then
+  fail "PATCH /api/mvp/me locale did not persist: expected=$flip_target got=$me_after"
+fi
+curl -sS -o /dev/null \
+  -X PATCH "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me" \
+  -H "Authorization: Bearer $access" \
+  -H 'Content-Type: application/json' \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  -d "{\"locale\":\"$orig_locale\"}"
+ok "PATCH /api/mvp/me round-trips locale (flipped to $flip_target and back)"
+
+# Unsupported locale must be rejected. Pydantic's Literal + extra=forbid
+# produces 422 here; accepting anything else would mean an attacker
+# could shape the i18next key set by smuggling "<script>" etc.
+bad_status=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -X PATCH "${STRATOCLAVE_API_ENDPOINT%/}/api/mvp/me" \
+  -H "Authorization: Bearer $access" \
+  -H 'Content-Type: application/json' \
+  -A "stratoclave-docs-e2e/$(date +%s)" \
+  -d '{"locale":"fr"}')
+if [ "$bad_status" != "422" ]; then
+  fail "PATCH /api/mvp/me accepted unsupported locale (HTTP $bad_status, expected 422)"
+fi
+ok "PATCH /api/mvp/me rejects unsupported locale (422)"
+
 # P1-B regression guard: the claude-wrapper API-key mint path must
 # accept `ephemeral=true` + `expires_in_minutes=30`, bypass the active-
 # key cap, and return a revokable key_id. We do the mint and revoke

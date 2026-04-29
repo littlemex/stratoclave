@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { Plus } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -37,6 +38,7 @@ function fmt(n: number): string {
 }
 
 export default function AdminTenants() {
+  const { t } = useTranslation()
   const [cursor, setCursor] = useState<string | undefined>()
   const [cursorStack, setCursorStack] = useState<Array<string | undefined>>([])
   const [createOpen, setCreateOpen] = useState(false)
@@ -53,14 +55,16 @@ export default function AdminTenants() {
     <div className="space-y-6">
       <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="font-display text-3xl tracking-tight">テナント管理</h1>
+          <h1 className="font-display text-3xl tracking-tight">
+            {t('admin_tenants.title')}
+          </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            全テナントを一覧します。Team Lead が所有するテナントもここから確認・編集できます。
+            {t('admin_tenants.intro')}
           </p>
         </div>
         <Button onClick={() => setCreateOpen(true)}>
           <Plus className="h-4 w-4" />
-          新規テナント
+          {t('admin_tenants.new_button')}
         </Button>
       </header>
 
@@ -68,11 +72,13 @@ export default function AdminTenants() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>名前</TableHead>
-              <TableHead>tenant_id</TableHead>
-              <TableHead>オーナー</TableHead>
-              <TableHead className="text-right">default_credit</TableHead>
-              <TableHead>状態</TableHead>
+              <TableHead>{t('admin_tenants.col_name')}</TableHead>
+              <TableHead>{t('admin_tenants.col_tenant_id')}</TableHead>
+              <TableHead>{t('admin_tenants.col_owner')}</TableHead>
+              <TableHead className="text-right">
+                {t('admin_tenants.col_default_credit')}
+              </TableHead>
+              <TableHead>{t('admin_tenants.col_status')}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -80,43 +86,43 @@ export default function AdminTenants() {
             {tenantsQuery.isLoading ? (
               <TableRow>
                 <TableCell colSpan={6} className="text-center text-muted-foreground">
-                  読み込み中…
+                  {t('common.loading_ellipsis')}
                 </TableCell>
               </TableRow>
             ) : (tenantsQuery.data?.tenants.length ?? 0) === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="text-center text-muted-foreground">
-                  テナントがありません。
+                  {t('admin_tenants.row_empty')}
                 </TableCell>
               </TableRow>
             ) : (
-              tenantsQuery.data!.tenants.map((t) => (
-                <TableRow key={t.tenant_id}>
-                  <TableCell className="font-medium">{t.name}</TableCell>
+              tenantsQuery.data!.tenants.map((tenant) => (
+                <TableRow key={tenant.tenant_id}>
+                  <TableCell className="font-medium">{tenant.name}</TableCell>
                   <TableCell>
                     <code className="font-mono text-xs text-muted-foreground">
-                      {t.tenant_id}
+                      {tenant.tenant_id}
                     </code>
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {t.team_lead_user_id === 'admin-owned' ? (
+                    {tenant.team_lead_user_id === 'admin-owned' ? (
                       <Badge variant="muted">admin-owned</Badge>
                     ) : (
-                      <code className="font-mono">{t.team_lead_user_id}</code>
+                      <code className="font-mono">{tenant.team_lead_user_id}</code>
                     )}
                   </TableCell>
                   <TableCell className="text-right font-mono text-sm">
-                    {fmt(t.default_credit)}
+                    {fmt(tenant.default_credit)}
                   </TableCell>
                   <TableCell>
-                    <Badge variant={t.status === 'archived' ? 'muted' : 'secondary'}>
-                      {t.status}
+                    <Badge variant={tenant.status === 'archived' ? 'muted' : 'secondary'}>
+                      {tenant.status}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right">
                     <Button asChild variant="ghost" size="sm">
-                      <Link to={`/admin/tenants/${encodeURIComponent(t.tenant_id)}`}>
-                        詳細
+                      <Link to={`/admin/tenants/${encodeURIComponent(tenant.tenant_id)}`}>
+                        {t('common.details')}
                       </Link>
                     </Button>
                   </TableCell>
@@ -129,8 +135,10 @@ export default function AdminTenants() {
 
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
-          {tenantsQuery.data?.tenants.length ?? 0} 件表示
-          {nextCursor ? ' / 次ページあり' : ''}
+          {t('admin_tenants.count_showing', {
+            shown: tenantsQuery.data?.tenants.length ?? 0,
+          })}
+          {nextCursor ? t('admin_tenants.count_more') : ''}
         </span>
         <div className="flex gap-2">
           <Button
@@ -146,7 +154,7 @@ export default function AdminTenants() {
               })
             }
           >
-            前へ
+            {t('common.prev')}
           </Button>
           <Button
             variant="outline"
@@ -157,7 +165,7 @@ export default function AdminTenants() {
               setCursor(nextCursor ?? undefined)
             }}
           >
-            次へ
+            {t('common.next')}
           </Button>
         </div>
       </div>
@@ -165,21 +173,18 @@ export default function AdminTenants() {
       <Card className="border-primary/30 bg-primary/5">
         <CardHeader>
           <CardTitle className="font-sans text-base font-semibold">
-            Tenant の所有者について
+            {t('admin_tenants.hint_title')}
           </CardTitle>
           <CardDescription>
-            `admin-owned` は組織全体で共有するテナントを意味します。Team Lead が所有するテナントは、その Team Lead 本人の user_id が表示されます。
+            {t('admin_tenants.hint_desc')}
           </CardDescription>
         </CardHeader>
         <CardContent className="text-xs text-muted-foreground">
-          所有者を変更するにはテナント詳細画面の「オーナー再割当」を使用します (Cognito ユーザーが削除されて孤児化したテナントの救済用)。
+          {t('admin_tenants.hint_detail')}
         </CardContent>
       </Card>
 
-      <CreateTenantDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-      />
+      <CreateTenantDialog open={createOpen} onOpenChange={setCreateOpen} />
     </div>
   )
 }
@@ -191,13 +196,13 @@ function CreateTenantDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
 }) {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const [name, setName] = useState('')
   const [teamLeadUserId, setTeamLeadUserId] = useState('admin-owned')
   const [defaultCredit, setDefaultCredit] = useState('')
   const [error, setError] = useState<string | null>(null)
 
-  // team_lead ロールのユーザーを提案
   const teamLeadUsersQuery = useQuery({
     queryKey: ['admin', 'users', 'team_lead'],
     queryFn: () => api.admin.listUsers({ role: 'team_lead', limit: 100 }),
@@ -221,7 +226,7 @@ function CreateTenantDialog({
     },
     onError: (err: unknown) => {
       const e = err as { detail?: string; message?: string } | null
-      setError(e?.detail ?? e?.message ?? '作成に失敗しました')
+      setError(e?.detail ?? e?.message ?? t('admin_tenants.create_error_fallback'))
     },
   })
 
@@ -235,30 +240,30 @@ function CreateTenantDialog({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>新規テナント</DialogTitle>
-          <DialogDescription>
-            所有者を `admin-owned` にすると組織全体で共有するテナントになります。
-          </DialogDescription>
+          <DialogTitle>{t('admin_tenants.create_title')}</DialogTitle>
+          <DialogDescription>{t('admin_tenants.create_desc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="tenant-name">名前</Label>
+            <Label htmlFor="tenant-name">{t('admin_tenants.create_name_label')}</Label>
             <Input
               id="tenant-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Acme Engineering"
+              placeholder={t('admin_tenants.create_name_placeholder')}
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="tenant-owner">オーナー (team_lead)</Label>
+            <Label htmlFor="tenant-owner">{t('admin_tenants.create_owner_label')}</Label>
             <select
               id="tenant-owner"
               value={teamLeadUserId}
               onChange={(e) => setTeamLeadUserId(e.target.value)}
               className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground"
             >
-              <option value="admin-owned">admin-owned (共有)</option>
+              <option value="admin-owned">
+                {t('admin_tenants.create_owner_admin_owned')}
+              </option>
               {(teamLeadUsersQuery.data?.users ?? []).map((u) => (
                 <option key={u.user_id} value={u.user_id}>
                   {u.email || u.user_id}
@@ -267,7 +272,9 @@ function CreateTenantDialog({
             </select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="tenant-default-credit">default_credit (任意)</Label>
+            <Label htmlFor="tenant-default-credit">
+              {t('admin_tenants.create_default_label')}
+            </Label>
             <Input
               id="tenant-default-credit"
               type="number"
@@ -275,20 +282,22 @@ function CreateTenantDialog({
               max={10_000_000}
               value={defaultCredit}
               onChange={(e) => setDefaultCredit(e.target.value)}
-              placeholder="未指定なら 100,000 tokens"
+              placeholder={t('admin_tenants.create_default_placeholder')}
             />
           </div>
         </div>
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button
             disabled={!name.trim() || mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? '作成中…' : '作成'}
+            {mutation.isPending
+              ? t('admin_tenants.create_submitting')
+              : t('admin_tenants.create_submit')}
           </Button>
         </DialogFooter>
       </DialogContent>

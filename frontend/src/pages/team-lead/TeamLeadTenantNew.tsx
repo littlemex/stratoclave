@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { ArrowLeft } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -16,6 +17,7 @@ import { Label } from '@/components/ui/label'
 import { api } from '@/lib/api'
 
 export default function TeamLeadTenantNew() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const qc = useQueryClient()
 
@@ -36,11 +38,9 @@ export default function TeamLeadTenantNew() {
     onError: (err: unknown) => {
       const e = err as { status?: number; detail?: string; message?: string } | null
       if (e?.status === 403 && e.detail?.includes('tenant_limit_exceeded')) {
-        setError(
-          'Team Lead が所有できるテナント数の上限に達しました (50 件)。不要なテナントをアーカイブするか Administrator に相談してください。',
-        )
+        setError(t('team_lead_tenant_new.error_limit'))
       } else {
-        setError(e?.detail ?? e?.message ?? '作成に失敗しました')
+        setError(e?.detail ?? e?.message ?? t('team_lead_tenant_new.error_fallback'))
       }
     },
   })
@@ -52,14 +52,16 @@ export default function TeamLeadTenantNew() {
       <Button asChild variant="ghost" size="sm" className="px-0">
         <Link to="/team-lead/tenants">
           <ArrowLeft className="h-4 w-4" />
-          所有テナントに戻る
+          {t('team_lead_tenant_new.back_to_list')}
         </Link>
       </Button>
 
       <div>
-        <h1 className="font-display text-3xl tracking-tight">新規テナント</h1>
+        <h1 className="font-display text-3xl tracking-tight">
+          {t('team_lead_tenant_new.title')}
+        </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          あなたが所有者として作成されます。ユーザーの所属紐付けは Administrator に依頼してください。
+          {t('team_lead_tenant_new.intro')}
         </p>
       </div>
 
@@ -68,7 +70,7 @@ export default function TeamLeadTenantNew() {
           e.preventDefault()
           setError(null)
           if (!isValid) {
-            setError('名前が空です。')
+            setError(t('team_lead_tenant_new.error_name_empty'))
             return
           }
           mutation.mutate()
@@ -77,25 +79,29 @@ export default function TeamLeadTenantNew() {
       >
         <Card>
           <CardHeader>
-            <CardTitle className="font-sans text-base font-semibold">基本情報</CardTitle>
+            <CardTitle className="font-sans text-base font-semibold">
+              {t('team_lead_tenant_new.basic')}
+            </CardTitle>
             <CardDescription>
-              default_credit はこのテナントに紐づく新規ユーザーの初期クレジットとして適用されます。
+              {t('team_lead_tenant_new.basic_desc')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="tl-name">名前</Label>
+              <Label htmlFor="tl-name">{t('team_lead_tenant_new.name_label')}</Label>
               <Input
                 id="tl-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Platform Team"
+                placeholder={t('team_lead_tenant_new.name_placeholder')}
                 required
                 autoComplete="off"
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="tl-default-credit">default_credit (任意)</Label>
+              <Label htmlFor="tl-default-credit">
+                {t('team_lead_tenant_new.default_credit_label')}
+              </Label>
               <Input
                 id="tl-default-credit"
                 type="number"
@@ -103,7 +109,7 @@ export default function TeamLeadTenantNew() {
                 max={10_000_000}
                 value={defaultCredit}
                 onChange={(e) => setDefaultCredit(e.target.value)}
-                placeholder="未入力なら 100,000 tokens"
+                placeholder={t('team_lead_tenant_new.default_credit_placeholder')}
               />
             </div>
           </CardContent>
@@ -118,10 +124,10 @@ export default function TeamLeadTenantNew() {
             onClick={() => navigate('/team-lead/tenants')}
             disabled={mutation.isPending}
           >
-            キャンセル
+            {t('common.cancel')}
           </Button>
           <Button type="submit" disabled={!isValid || mutation.isPending}>
-            {mutation.isPending ? '作成中…' : 'テナントを作成'}
+            {mutation.isPending ? t('common.creating') : t('team_lead_tenant_new.submit')}
           </Button>
         </div>
       </form>
