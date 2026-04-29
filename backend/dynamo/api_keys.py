@@ -184,6 +184,53 @@ class ApiKeysRepository:
         resp = self._table.scan(**kwargs)
         return resp.get("Items", []), resp.get("LastEvaluatedKey")
 
+    def find_any_by_key_id(self, key_id: str) -> Optional[dict[str, Any]]:
+        """Admin-scope lookup by masked `key_id` across every user.
+
+        Sweep-4 C-Latent-1 (2026-04-30 round-5 review): this method used
+        to exist pre-sweep-3 but was lost during a server-side squash,
+        leaving ``admin_api_keys.revoke_any_api_key_by_key_id`` calling
+        a NameError at runtime. Admins therefore could not revoke a
+        compromised key via the supported ``DELETE /api/mvp/admin/
+        api-keys/by-key-id/{key_id}`` path.
+
+        Implementation notes:
+          * Uses a full-table Scan with FilterExpression on ``key_id``.
+            The ``api-keys`` table is in the backend task role's Scan
+            allowlist (see ``iac/lib/ecs-stack.ts`` sweep-4 C-D comment)
+            so this is authorised.
+          * Scan is paginated (via ``ExclusiveStartKey``) to guarantee
+            correctness if the table grows past 1 MB. In practice a
+            Stratoclave deployment holds O(100) active keys, so the
+            common case is a single page.
+          * Auditors (us) chose Scan + Filter over a dedicated
+            ``key-id-index`` GSI because the key-id is only ~16 chars
+            of masked prefix / suffix and the administrative revoke
+            path is rare enough that the Scan cost is acceptable. A
+            future optimisation could add a GSI; we pin the Scan
+            behaviour via a regression test in
+            ``tests/test_api_keys.py``.
+          * Returns None if no key matches.
+        """
+        from boto3.dynamodb.conditions import Attr
+
+        kwargs: dict[str, Any] = {
+            "FilterExpression": Attr("key_id").eq(key_id),
+            "Limit": 200,
+        }
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                # Filter is server-side; but defensively re-check here
+                # to avoid an empty-string collision on an unindexed
+                # item shape.
+                if str(item.get("key_id") or "") == key_id:
+                    return item
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                return None
+            kwargs["ExclusiveStartKey"] = last
+
     # ----- write -----
     def create(
         self,

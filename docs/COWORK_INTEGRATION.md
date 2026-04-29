@@ -53,7 +53,7 @@ stratoclave api-key create \
 The last line of the output is the plaintext key, prefixed with `sk-stratoclave-`:
 
 ```text
-sk-stratoclave-4f8c9b2a1d7e6c0f3a5b8c9d2e1f4a7b
+sk-stratoclave-EXAMPLE0000000000000000000000000000
 ```
 
 Store this plaintext in your password manager immediately; the server keeps only the SHA-256 hash and cannot show the plaintext again.

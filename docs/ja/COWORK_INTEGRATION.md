@@ -51,7 +51,7 @@ stratoclave api-key create \
 出力の最終行が、`sk-stratoclave-` で始まるプレーンテキストのキーである。
 
 ```text
-sk-stratoclave-4f8c9b2a1d7e6c0f3a5b8c9d2e1f4a7b
+sk-stratoclave-EXAMPLE0000000000000000000000000000
 ```
 
 このプレーンテキストは即座にパスワードマネージャに保存すること。サーバーは SHA-256 ハッシュだけを保持し、プレーンテキストを再表示することはできない。
