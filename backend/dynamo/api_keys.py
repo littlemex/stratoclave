@@ -134,31 +134,26 @@ class ApiKeysRepository:
                 return item
         return None
 
-    def find_any_by_key_id(self, key_id: str) -> Optional[dict[str, Any]]:
-        """Admin-scope lookup by masked `key_id` across every user.
+    def find_by_key_id_under_user(
+        self, *, user_id: str, key_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Scoped lookup by masked `key_id` within a single owner.
 
-        P0-2' (2026-04 security review): the admin revoke path used to
-        accept the SHA-256 `key_hash` in the URL. That leaves the hash
-        in CloudFront / ALB access logs indefinitely, which is both
-        long-lived enumeration material and a direct revoke oracle for
-        anyone with log read access. Admins already see the masked
-        `key_id` (`sk-stratoclave-xxxx...yyyy`) in the listing UI, so
-        this function lets the new admin revoke endpoint accept that
-        safer identifier instead.
+        C-D (2026-04 critical sweep): the pre-C-D implementation did a
+        full `Scan` of the api-keys table to let an admin revoke by
+        `key_id` alone. That left the entire credential ledger (every
+        SHA-256 key hash + owner + scopes) reachable from any backend
+        RCE. The new admin flow requires the owning `user_id` in the
+        URL — it is already shown in the admin UI next to every key —
+        and we Query the existing `user-id-index` GSI instead.
 
-        Walks the whole table; tenants with many thousands of keys may
-        want to add a `key-id-index` GSI in future.
+        Linear over the user's own keys (≤ 5 active + a few revoked)
+        so the cost is bounded.
         """
-        scan_kwargs: dict[str, Any] = {}
-        while True:
-            resp = self._table.scan(**scan_kwargs)
-            for item in resp.get("Items", []):
-                if str(item.get("key_id")) == key_id:
-                    return item
-            last = resp.get("LastEvaluatedKey")
-            if not last:
-                return None
-            scan_kwargs["ExclusiveStartKey"] = last
+        for item in self.list_by_user(user_id, include_revoked=True):
+            if str(item.get("key_id")) == key_id:
+                return item
+        return None
 
     def count_active(self, user_id: str) -> int:
         """Count the user's *persistent* active keys.
@@ -269,6 +264,36 @@ class ApiKeysRepository:
                 raise ApiKeyNotFoundError(key_hash)
             raise
         return resp.get("Attributes", {})
+
+    def revoke_all_for_user(self, user_id: str, *, actor_user_id: str) -> int:
+        """Revoke every non-revoked API key owned by ``user_id``.
+
+        Z-1 (2026-04 third blind review): when an admin deletes /
+        reassigns a user, their access_token is invalidated via the
+        ``token_revoked_after`` watermark plus Cognito
+        ``global_sign_out``. The user's ``sk-stratoclave-*`` API keys,
+        however, live in a separate table keyed on ``key_hash`` and
+        are not addressed by either mechanism. Explicitly sweeping
+        them here closes the gap: the watermark check in deps.py
+        already stops pre-watermark keys at auth time (defence in
+        depth), but revoking the row makes the state observable in
+        admin listings and immediately idempotent on restore.
+
+        Returns the count of rows transitioned from active to
+        revoked (rows that were already revoked are left alone).
+        """
+        revoked = 0
+        for item in self.list_by_user(user_id, include_revoked=False):
+            key_hash = str(item.get("key_hash") or "")
+            if not key_hash or item.get("revoked_at"):
+                continue
+            try:
+                self.revoke(key_hash, actor_user_id=actor_user_id)
+                revoked += 1
+            except ApiKeyNotFoundError:
+                # Row vanished between scan and revoke — skip quietly.
+                continue
+        return revoked
 
     def touch_last_used(self, key_hash: str) -> None:
         """認証成功時に last_used_at を更新. 失敗は黙殺 (高頻度のため)."""

@@ -423,9 +423,49 @@ def delete_user_endpoint(
     # Cognito 側削除 (先に実行。失敗したら中断)
     if email:
         cognito_delete_user(email)
+    # X-1 (2026-04 critical-sweep follow-up): Cognito's admin_delete_user
+    # does NOT invalidate already-issued access_tokens. We previously
+    # tried to delete the Users row outright, but that deleted the
+    # `token_revoked_after` watermark alongside it, so a backfill on
+    # the next request would happily rebuild the row as a fresh `user`
+    # and resurrect the victim for up to an hour. Call global_sign_out
+    # so Cognito kills the refresh token AND replace the Users row
+    # with a soft-delete tombstone that `deps.is_user_deleted` blocks
+    # before any backfill can run.
+    try:
+        global_sign_out(user_id)
+    except Exception as e:  # pragma: no cover — Cognito hiccup
+        _log.warning("global_sign_out_failed_on_delete", extra={"user_id": user_id, "error": str(e)})
 
-    # DynamoDB Users を削除
-    users_repo._table.delete_item(Key={"user_id": user_id, "sk": users_repo.SK_PROFILE})
+    # DynamoDB Users は物理削除ではなく soft-delete (X-1)。
+    users_repo.mark_deleted(user_id)
+
+    # Z-1 (2026-04 third blind review): sk-stratoclave-* API keys live
+    # in a separate table and survive mark_deleted + global_sign_out.
+    # The deps.py watermark check catches them at auth time (defence
+    # in depth) but we also sweep the rows here so admin listings
+    # reflect the cut-off immediately and restore operations do not
+    # silently re-enable them.
+    try:
+        from dynamo import ApiKeysRepository as _ApiKeysRepository
+
+        revoked_count = _ApiKeysRepository().revoke_all_for_user(
+            user_id, actor_user_id=actor.user_id
+        )
+        if revoked_count:
+            log_audit_event(
+                event="api_keys_revoked_on_user_delete",
+                actor_id=actor.user_id,
+                actor_email=actor.email,
+                target_id=user_id,
+                target_type="user",
+                details={"count": revoked_count},
+            )
+    except Exception as e:  # pragma: no cover — repo-level boto error
+        _log.warning(
+            "api_keys_revoke_failed_on_delete",
+            extra={"user_id": user_id, "error": str(e)},
+        )
 
     # UserTenants を archived にする (履歴は残す)
     from datetime import datetime, timezone
@@ -558,6 +598,28 @@ def assign_tenant(
     # (2) Cognito Saga: attribute 更新 → global sign out
     update_org_id(user_id, new_tenant_id)
     global_sign_out(user_id)
+    # C-C (2026-04 critical sweep): stamp a server-side session
+    # revocation watermark. Cognito's global_sign_out kills refresh
+    # tokens but leaves the access_token live until its 1 h exp; a
+    # stale tab would otherwise keep acting with the NEW org_id until
+    # then. The watermark fails those stale JWTs at deps.py.
+    users_repo.revoke_all_sessions(user_id)
+    # Z-1 (2026-04 third blind review): sweep sk-stratoclave-* API
+    # keys belonging to this user too. The watermark check in
+    # deps.py refuses them at auth time anyway, but an explicit
+    # revoke makes the admin list reflect reality right after the
+    # switch and avoids "zombie rows" for compliance reviews.
+    try:
+        from dynamo import ApiKeysRepository as _ApiKeysRepository
+
+        _ApiKeysRepository().revoke_all_for_user(
+            user_id, actor_user_id=actor.user_id
+        )
+    except Exception as e:  # pragma: no cover
+        _log.warning(
+            "api_keys_revoke_failed_on_switch",
+            extra={"user_id": user_id, "error": str(e)},
+        )
 
     log_audit_event(
         event="user_tenant_switched",

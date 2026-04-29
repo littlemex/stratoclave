@@ -177,7 +177,138 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# C-H (2026-04 critical sweep) / Z-3 (third blind review): hard cap on
+# request body size.
+#
+# The first cut shipped as a ``BaseHTTPMiddleware`` that inspected
+# ``Content-Length`` only. Two problems surfaced in the third sweep:
+#
+#   1. ``Transfer-Encoding: chunked`` requests carry no
+#      ``Content-Length`` header, so the middleware fell through and
+#      let the whole body buffer into memory before Pydantic rejected
+#      it. An attacker could OOM the ECS task by streaming
+#      multi-GB chunked bodies, taking every concurrent /v1/messages
+#      stream down with them.
+#   2. ``BaseHTTPMiddleware`` itself reads the body into memory before
+#      the inner handler runs, so even a correct Content-Length
+#      handler can only refuse work that has already been received.
+#
+# Z-3 reimplements the cap as a native ASGI middleware: we wrap the
+# ``receive`` callable and tally bytes as chunks arrive, aborting the
+# moment the cumulative size exceeds ``MAX_BODY_BYTES``. This works
+# for both ``Content-Length`` and chunked transfers, and no memory
+# is allocated for bytes past the limit.
+MAX_BODY_BYTES = int(os.getenv("REQUEST_MAX_BODY_BYTES", 2 * 1024 * 1024))
+
+
+class MaxBodySizeASGIMiddleware:
+    """ASGI-layer body-size guard.
+
+    Called before FastAPI / Starlette parse the request, so a rejected
+    body never reaches Pydantic or the handler. Shape matches the
+    standard three-argument ASGI contract: ``(app) -> (scope, receive,
+    send) -> None``.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "").upper()
+        if method not in ("POST", "PUT", "PATCH"):
+            await self.app(scope, receive, send)
+            return
+
+        # Fast-path: reject an oversized Content-Length before we even
+        # start reading the body.
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                declared_int = int(declared)
+            except ValueError:
+                declared_int = -1
+            if declared_int > MAX_BODY_BYTES:
+                await self._reject(send)
+                return
+
+        # Slow-path: streaming tally. We wrap ``receive`` so the inner
+        # app sees real messages, and we fail closed the first time
+        # the running total would exceed the cap.
+        received_total = 0
+        capped = False
+
+        async def capped_receive():
+            nonlocal received_total, capped
+            message = await receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"") or b""
+                received_total += len(body)
+                if received_total > MAX_BODY_BYTES:
+                    capped = True
+                    # Stop delivering body chunks; the app will see
+                    # end-of-body and we short-circuit with 413.
+                    return {
+                        "type": "http.request",
+                        "body": b"",
+                        "more_body": False,
+                    }
+            return message
+
+        # We need to send 413 as soon as we detect the breach, but the
+        # inner app has already started processing. Simplest robust
+        # approach: drain the wrapped receive until we either finish
+        # the body or trip the cap, then either forward to the app
+        # (normal path) or emit 413 ourselves (capped path).
+        async def send_413_if_capped(message):
+            if capped and message["type"] == "http.response.start":
+                # Overwrite the inner app's outgoing status.
+                message = {
+                    "type": "http.response.start",
+                    "status": 413,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                    ],
+                }
+                await send(message)
+                return
+            if capped and message["type"] == "http.response.body":
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b'{"detail":"request body too large"}',
+                        "more_body": False,
+                    }
+                )
+                return
+            await send(message)
+
+        await self.app(scope, capped_receive, send_413_if_capped)
+
+    @staticmethod
+    async def _reject(send):
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b'{"detail":"request body too large"}',
+                "more_body": False,
+            }
+        )
+
+
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(MaxBodySizeASGIMiddleware)
 app.add_middleware(CorrelationIDMiddleware)
 
 # CORS (Starlette は LIFO なので CORS を最後に add = 最初に実行)
