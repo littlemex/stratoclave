@@ -85,3 +85,41 @@ jobs:
         run: npm ci
       - name: Run vitest
         run: npm test
+
+  iac:
+    # Sweep-4 (2026-04-30): IaC regressions on the ECS task role Scan
+    # allowlist (and other CDK-level security controls) used to be
+    # invisible to PR CI because `iac/` had no test job here. A server-
+    # squash therefore could quietly re-introduce `api-keys` or
+    # `permissions` into the dynamodb:Scan statement with zero CI
+    # signal — exactly what happened between sweep-1 and sweep-3.
+    # This job wires the jest suite under iac/test/ into PR-level
+    # CI so any future regression fails the merge.
+    name: iac / jest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: iac
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: iac/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run jest (CDK assertions)
+        run: npm test
+
+  secrets-patterns:
+    # Sweep-4: guarantees the `scripts/check-no-hardcoded-secrets.sh`
+    # pattern registry retains every required label. Complements the
+    # `secrets-scan` workflow which runs the scanner itself — here we
+    # lock that the scanner's rules haven't been silently weakened.
+    name: scripts / secrets-patterns registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Assert required pattern labels are present
+        run: bash scripts/test-secrets-patterns.sh

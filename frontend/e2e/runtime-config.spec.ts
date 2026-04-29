@@ -65,4 +65,51 @@ test.describe('runtime config failure', () => {
       page.getByRole('button', { name: /cognito/i }),
     ).toHaveCount(0)
   })
+
+  // Sweep-4 C-Critical (C-I regression): simulate an error-surface
+  // attacker whose message carries an <img onerror=...> payload, and
+  // assert the splash renders text-only — no <img> attached, no
+  // window-side-effect fired. This proves the createElement /
+  // textContent rewrite actually works at runtime, not just in unit
+  // tests that source-scan main.tsx.
+  test('does not execute script when error.message contains HTML', async ({
+    page,
+  }) => {
+    // We cannot easily force `error.message` to carry arbitrary bytes
+    // through fetch(). Instead we inject a deterministic failure by
+    // replacing loadRuntimeConfig with a rejected promise whose Error
+    // carries an <img onerror> payload *before* main.tsx runs. This
+    // exercises the exact `catch((error) => …)` branch the sweep-4
+    // fix lives in.
+    const payload = '<img src=x onerror="window.__XSS_PWN__=true">'
+    await page.addInitScript((pl) => {
+      // Define a module-level override BEFORE React bootstrap. When
+      // main.tsx imports loadRuntimeConfig() it will receive our
+      // override via a monkey-patched fetch that throws the crafted
+      // Error on /config.json.
+      const origFetch = window.fetch.bind(window)
+      // @ts-expect-error test-only override
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : (input as URL).toString()
+        if (url.endsWith('/config.json')) {
+          throw new Error(pl)
+        }
+        return origFetch(input, init)
+      }
+    }, payload)
+
+    await page.goto('/')
+    await expect(
+      page.getByRole('heading', { name: /Configuration load failed/i }),
+    ).toBeVisible()
+
+    // (a) the side-effect window flag is not set
+    const pwned = await page.evaluate(
+      () => (window as unknown as { __XSS_PWN__?: boolean }).__XSS_PWN__ === true,
+    )
+    expect(pwned).toBe(false)
+    // (b) no <img> element was attached at all
+    const imgCount = await page.locator('img').count()
+    expect(imgCount).toBe(0)
+  })
 })

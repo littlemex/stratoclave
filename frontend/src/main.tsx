@@ -47,17 +47,35 @@ loadRuntimeConfig()
   })
   .catch((error) => {
     const container = document.getElementById('root')
-    if (container) {
-      // Runtime config failure happens before i18n can be trusted
-      // (we might not even have translations loaded yet), so render a
-      // minimal bilingual splash that stays readable in either locale.
-      container.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0b0d12;color:#e7ecf3;font-family:Inter,system-ui,sans-serif;">
-          <div style="max-width:420px;padding:2rem;border:1px solid #3f2b2b;background:#1a1216;">
-            <h1 style="margin:0 0 12px 0;font-family:Fraunces,serif;">Configuration load failed / 設定の読み込みに失敗しました</h1>
-            <p style="margin:0;color:#b0a8a0;font-size:14px;">${error instanceof Error ? error.message : String(error)}</p>
-          </div>
-        </div>
-      `
-    }
+    if (!container) return
+    // P0-11 (sweep-4): the error message comes from a fetch surface we
+    // do not fully control (proxies, DNS errors, custom /config.json).
+    // We must treat it as untrusted text and render it through
+    // `textContent`, never `innerHTML` / template-literal interpolation.
+    // Runtime config failure happens before i18n can be trusted so we
+    // keep the splash bilingual via static strings.
+    while (container.firstChild) container.removeChild(container.firstChild)
+
+    const outer = document.createElement('div')
+    outer.setAttribute(
+      'style',
+      'display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0b0d12;color:#e7ecf3;font-family:Inter,system-ui,sans-serif;',
+    )
+    const card = document.createElement('div')
+    card.setAttribute(
+      'style',
+      'max-width:420px;padding:2rem;border:1px solid #3f2b2b;background:#1a1216;',
+    )
+    const heading = document.createElement('h1')
+    heading.setAttribute('style', 'margin:0 0 12px 0;font-family:Fraunces,serif;')
+    heading.textContent =
+      'Configuration load failed / 設定の読み込みに失敗しました'
+    const body = document.createElement('p')
+    body.setAttribute('style', 'margin:0;color:#b0a8a0;font-size:14px;')
+    body.textContent = error instanceof Error ? error.message : String(error)
+
+    card.appendChild(heading)
+    card.appendChild(body)
+    outer.appendChild(card)
+    container.appendChild(outer)
   })

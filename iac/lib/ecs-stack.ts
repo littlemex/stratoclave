@@ -135,13 +135,26 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
+    // Sweep-4 (2026-04-30) tightens sweep-1 C-D by dropping the
+    // `permissions` table from the Scan allowlist. `permissions` is
+    // only accessed via `PermissionsRepository.get(role)` (deterministic
+    // key lookup) in production code — `list_all()` exists as a helper
+    // but is unreferenced — so granting Scan on it is pure attack
+    // surface. We deliberately KEEP `api-keys` here for now: the admin
+    // console's `/api/mvp/admin/api-keys` listing page still uses
+    // `ApiKeysRepository.list_all()` which is implemented as a Scan.
+    // A follow-up PR will migrate that page to a user-keyed GSI view
+    // and then this allowlist can drop to five. Until then, removing
+    // `api-keys` from here breaks the admin UI with a 403 at runtime.
+    //
+    // DO NOT add `permissions` back here — the invariant is pinned by
+    // iac/test/ecs-stack-scan-allowlist.test.ts.
     const scanTableSuffixes = [
       'users',
       'api-keys',
       'tenants',
       'trusted-accounts',
       'sso-pre-registrations',
-      'permissions',
       'user-tenants',
     ];
     const scanResources: string[] = [];

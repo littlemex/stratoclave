@@ -140,6 +140,46 @@ export async function handleCallback(): Promise<StoredTokens> {
   const data = await res.json()
   sessionStorage.removeItem(PKCE_KEY)
 
+  // P0-4 sweep-4 (C-J regression, fail-closed hardened after blind
+  // review round 4): verify the id_token's `nonce` claim matches what
+  // startLogin() stashed. PKCE + state defeat login CSRF; nonce
+  // specifically binds the ID token to THIS authorization request so
+  // a previously-captured id_token cannot be replayed into a new
+  // browser session.
+  //
+  // Fail-closed posture:
+  //   * startLogin() requests `scope: 'openid email profile'`, so the
+  //     token response MUST contain `id_token`. If it doesn't, that is
+  //     either a MITM stripping the field or a Cognito App Client
+  //     misconfiguration — we refuse either way.
+  //   * We consume the expectedNonce from sessionStorage FIRST (nonce
+  //     semantics: one-shot) so no error path can leak a reusable
+  //     nonce back into sessionStorage for a later replay.
+  //   * We decode the JWT payload without signature verification — the
+  //     token came from the token endpoint over TLS and the backend
+  //     is the authoritative access_token verifier for every API
+  //     call. `_decodeJwtPayload` returning null (malformed token)
+  //     also fails closed.
+  const expectedNonce = sessionStorage.getItem(NONCE_KEY)
+  sessionStorage.removeItem(NONCE_KEY)
+  if (!expectedNonce) {
+    throw new Error(
+      'OIDC nonce missing from session storage — aborting (P0-4 fail-closed)',
+    )
+  }
+  if (!data.id_token || typeof data.id_token !== 'string') {
+    throw new Error(
+      'OIDC id_token missing from token response — aborting (P0-4 fail-closed)',
+    )
+  }
+  const payload = _decodeJwtPayload(data.id_token)
+  const idNonce = typeof payload?.nonce === 'string' ? payload.nonce : null
+  if (!idNonce || idNonce !== expectedNonce) {
+    throw new Error(
+      'OIDC nonce mismatch — aborting to prevent ID-token replay (P0-4)',
+    )
+  }
+
   const tokens: StoredTokens = {
     access_token: data.access_token,
     id_token: data.id_token ?? null,
@@ -148,6 +188,25 @@ export async function handleCallback(): Promise<StoredTokens> {
   }
   saveTokens(tokens)
   return tokens
+}
+
+function _decodeJwtPayload(token: string): Record<string, unknown> | null {
+  // JWT payload is base64url-encoded JSON between the two dots.
+  // We deliberately do not verify the signature here: the token came
+  // from Cognito's `/oauth2/token` endpoint over TLS using a
+  // client-bound PKCE exchange, so structural decoding is sufficient
+  // to read back the `nonce` claim for comparison. The backend is the
+  // authoritative verifier for access tokens on every API call.
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const pad = '='.repeat((4 - (parts[1].length % 4)) % 4)
+    const b64 = (parts[1] + pad).replace(/-/g, '+').replace(/_/g, '/')
+    const json = atob(b64)
+    return JSON.parse(json) as Record<string, unknown>
+  } catch {
+    return null
+  }
 }
 
 // ---------- Refresh ----------

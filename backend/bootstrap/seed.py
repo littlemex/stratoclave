@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from core.logging import get_logger
 from dynamo import (
@@ -108,6 +108,46 @@ def seed_default_tenant() -> dict[str, Any]:
         created=result["created"],
     )
     return result
+
+
+def _stash_bootstrap_password(*, prefix: str, password: str, email: str) -> str:
+    """Stash the bootstrap admin temp password in AWS Secrets Manager.
+
+    Lands at ``<prefix>/bootstrap-admin-temp-password``. Existing value
+    is overwritten (idempotent re-boot behaviour). Returns the ARN of
+    the secret so the structured log can reference it without exposing
+    the plaintext.
+
+    We intentionally write only to Secrets Manager, NOT to stderr or
+    stdout: the ECS awslogs driver forwards both streams to CloudWatch
+    Logs, so stderr would still leak the plaintext through the log
+    retention surface. The task role already has
+    ``secretsmanager:PutSecretValue`` on ``<prefix>/*`` (see
+    ``iac/lib/ecs-stack.ts``).
+    """
+    import json
+
+    import boto3
+
+    client = boto3.client(
+        "secretsmanager",
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+    )
+    secret_name = f"{prefix}/bootstrap-admin-temp-password"
+    payload = json.dumps({"email": email, "password": password})
+    try:
+        resp = client.put_secret_value(SecretId=secret_name, SecretString=payload)
+        return str(resp.get("ARN", secret_name))
+    except client.exceptions.ResourceNotFoundException:
+        resp = client.create_secret(
+            Name=secret_name,
+            Description=(
+                "Stratoclave bootstrap admin temporary password. Delete after "
+                "the operator has rotated it via Cognito."
+            ),
+            SecretString=payload,
+        )
+        return str(resp.get("ARN", secret_name))
 
 
 def _generate_temp_password(length: int = 20) -> str:
@@ -262,20 +302,66 @@ def seed_bootstrap_admin() -> dict[str, Any]:
         role="admin",
     )
 
-    # CloudWatch Logs に一時パスワードを 1 回だけ INFO 出力.
-    # ここは平文だが Backend 内部ログに閉じており、HTTP response に出ないため P0-3 違反ではない。
-    # Admin は初回 login 後に自分でパスワードを変更する前提。
+    # Sweep-4 C-Critical (C-F regression, tightened after round-4 blind
+    # review). History:
+    #
+    #   * pre-sweep-1: `logger.info(..., temporary_password=pw)` shipped
+    #     the plaintext into structured logs, which on Fargate with the
+    #     awslogs driver lands in CloudWatch Logs permanently — every
+    #     principal with `logs:FilterLogEvents` on /ecs/...-backend
+    #     could escalate to admin retroactively.
+    #   * first sweep-4 revision: moved the plaintext to `sys.stderr`.
+    #     That was INSUFFICIENT: the awslogs ECS driver captures stdout
+    #     AND stderr from the container process, so the secret still
+    #     landed in CloudWatch — only stripped of its structured
+    #     `temporary_password` field name.
+    #
+    # Correct solution (this revision): write the plaintext to AWS
+    # Secrets Manager at `${prefix}/bootstrap-admin-temp-password`
+    # with a short 7-day recovery window. The backend task role
+    # already has `secretsmanager:PutSecretValue` on `${prefix}/*`
+    # (see iac/lib/ecs-stack.ts). Operators retrieve it once via
+    #   aws secretsmanager get-secret-value --secret-id <prefix>/bootstrap-admin-temp-password
+    # and then delete it — or simply rotate the password via Cognito
+    # and let the secret expire. Plaintext never touches stdout/stderr
+    # / CloudWatch Logs / SIEM pipelines.
+    #
+    # Structured logs still record the FACT of the bootstrap (email,
+    # sub, tenant, created_new) so the operation is auditable. Only
+    # the credential itself is moved off-log.
     if temp_password:
+        secret_arn: Optional[str] = None
+        try:
+            secret_arn = _stash_bootstrap_password(
+                prefix=os.getenv("STRATOCLAVE_PREFIX", "stratoclave"),
+                password=temp_password,
+                email=email_env,
+            )
+        except Exception as e:
+            logger.error(
+                "bootstrap_admin_secret_stash_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                email=email_env,
+            )
+
         logger.info(
             "bootstrap_admin_created",
             email=email_env,
             user_id=sub,
             tenant_id=tenant_id,
             created_new=created_new,
-            temporary_password=temp_password,
+            # NB: `temporary_password` is intentionally NOT included in
+            # this structured record. Do not re-add it — the regression
+            # guard test_bootstrap_admin_password_not_logged.py will
+            # fail CI if it shows up here.
+            secret_arn=secret_arn,
             instruction=(
-                "This password is logged once. Login once and change it via Cognito. "
-                "Rotate by: aws cognito-idp admin-set-user-password --user-pool-id "
+                "Temporary password stashed in AWS Secrets Manager. Retrieve once via: "
+                "aws secretsmanager get-secret-value --secret-id "
+                f"{os.getenv('STRATOCLAVE_PREFIX', 'stratoclave')}/bootstrap-admin-temp-password "
+                "--query SecretString --output text. Then rotate via: "
+                "aws cognito-idp admin-set-user-password --user-pool-id "
                 f"{pool_id} --username {email_env} --password <NEW> --permanent"
             ),
         )

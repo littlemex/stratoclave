@@ -83,7 +83,22 @@ def verify_and_call_sts(
     """
     _validate_inputs(method, url, headers)
 
-    # Replay guard (P3-1) — must happen before the STS round trip.
+    # Replay guard (P3-1, sweep-4 C-Critical-B2 fail-closed restored).
+    #
+    # Historical context: earlier sweeps wrapped the nonces-table
+    # consume() in `except Exception: log.warning`. That is fail-OPEN:
+    # if DynamoDB throttles, the IAM policy drifts, or the table is
+    # un-provisioned on a forked deployment, the entire vouch flow
+    # silently regresses to "skew-only" replay protection, which any
+    # attacker who captured a single sigv4 request can beat for the
+    # next ±5 minutes. A fail-OPEN control is worse than no control
+    # because it hides the failure from operators.
+    #
+    # Sweep-4 behaviour:
+    #   NonceReplayError                -> 401 "replay"
+    #   any OTHER exception             -> 401 "dependency unavailable"
+    # Operators still see the error in logs, but the request is
+    # refused rather than silently degraded.
     from dynamo.sso_nonces import NonceReplayError, SsoNoncesRepository
 
     lowered = {k.lower(): v for k, v in headers.items()}
@@ -98,10 +113,23 @@ def verify_and_call_sts(
             status_code=401,
             detail="Replay detected: this signed request has already been used.",
         )
-    except Exception as e:  # pragma: no cover — configuration fallback
-        _log.warning(
-            "sso_nonce_store_unavailable",
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Fail-closed on ANY other error. We expose a generic 401 to
+        # the caller (no leaking of backend topology) and log the
+        # actual cause at ERROR level so oncall can fix the underlying
+        # table / IAM / throttling problem.
+        _log.error(
+            "sso_nonce_store_unavailable_fail_closed",
             extra={"error": str(e), "error_type": type(e).__name__},
+        )
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "SSO replay protection temporarily unavailable — request refused. "
+                "Retry later; if the problem persists contact the service operator."
+            ),
         )
 
     # 署名済みのまま STS に転送 (body は sigv4 署名に含まれるため改変不可)

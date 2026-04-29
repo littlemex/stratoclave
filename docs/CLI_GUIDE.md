@@ -444,7 +444,7 @@ Sample output:
    API Key created (save this now - it won't be shown again)
   ==========================================================
 
-   sk-stratoclave-4f8c9b2a1d7e6c0f3a5b8c9d2e1f4a7b
+   sk-stratoclave-EXAMPLE0000000000000000000000000000
 
    key_id     : sk-stratoclave-4f8c...4a7b
    scopes     : messages:send, usage:read-self

@@ -351,6 +351,50 @@ def test_ephemeral_key_is_flagged_and_excluded_from_cap(api_keys_table):
     assert len(eph_rows) == 1
 
 
+def test_find_any_by_key_id_locates_key_across_users(api_keys_table):
+    """Sweep-4 C-Latent-1 regression guard: admin_api_keys.py calls
+    ``repo.find_any_by_key_id(key_id)`` when revoking a compromised
+    key without knowing the owner. The method historically went
+    missing across squash cycles, resulting in a runtime
+    ``AttributeError`` on every admin revoke. This pins its
+    presence + contract: returns the exact matching row regardless
+    of which user minted the key.
+    """
+    from dynamo.api_keys import ApiKeysRepository
+
+    repo = ApiKeysRepository()
+    item_a, _ = repo.create(
+        user_id="user-aaaa",
+        name="alice-laptop",
+        scopes=["messages:send"],
+        expires_at=None,
+        created_by="user-aaaa",
+    )
+    item_b, _ = repo.create(
+        user_id="user-bbbb",
+        name="bob-ci",
+        scopes=["messages:send"],
+        expires_at=None,
+        created_by="user-bbbb",
+    )
+
+    # Cross-user lookup: admin revoking Bob's key while authenticated
+    # as themselves must be able to resolve it by key_id alone.
+    found = repo.find_any_by_key_id(item_b["key_id"])
+    assert found is not None
+    assert found["user_id"] == "user-bbbb"
+    assert found["key_hash"] == item_b["key_hash"]
+
+    # Sanity: the other user's row also resolves.
+    found_a = repo.find_any_by_key_id(item_a["key_id"])
+    assert found_a is not None
+    assert found_a["user_id"] == "user-aaaa"
+
+    # Missing key returns None, not an exception — the admin revoke
+    # endpoint relies on this for its 404 branch.
+    assert repo.find_any_by_key_id("sk-stratoclave-not-a-real-key") is None
+
+
 def test_ephemeral_key_revocation_round_trip(api_keys_table):
     """An ephemeral key revokes cleanly via the normal revoke path —
     the wrapper's 'on child exit, DELETE by key_hash' flow must work."""

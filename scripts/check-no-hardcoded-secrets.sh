@@ -86,6 +86,27 @@ PATTERNS=(
   # Raw AWS secret access key (40 char base64) — high false-positive risk;
   # require surrounding key-like context (aws_secret, SecretAccessKey).
   "aws-secret-context|(aws_secret_access_key|SecretAccessKey|AWS_SECRET)[ '\"=:]+[A-Za-z0-9/+=]{40}"
+
+  # Sweep-2 X-4 additions (sweep-4 re-restored after squash drops).
+  # ------------------------------------------------------------------
+  # Stratoclave API key plaintext. Format is `sk-stratoclave-<32-64 hex>`.
+  # A plaintext ever committed is a one-shot bearer into every backend
+  # endpoint the key's owner could reach, so we block it on every
+  # pre-commit / push regardless of context.
+  "stratoclave-plaintext-apikey|sk-stratoclave-[0-9a-f]{32,64}"
+
+  # Bare 12-digit AWS account id with explicit labelling context
+  # ("account", "AWS_ACCOUNT_ID", "aws:ACCOUNT:"). Pure 12-digit ids
+  # have huge false-positive rates (timestamps, phone numbers, etc.)
+  # so we require a key-like anchor.
+  "bare-aws-account-id|(aws_account_id|AWS_ACCOUNT_ID|aws:account:|account_id[[:space:]]*[:=])[ '\"=:]+[0-9]{12}"
+
+  # Cognito refresh_token heuristic — 300+ char base64ish payload with
+  # a leading dot separator, typical of `eyJ…` refresh responses. We
+  # intentionally require the `refresh_token` key nearby to cut
+  # false-positives against generic JWTs already covered by
+  # `jwt-token` above.
+  "cognito-refresh-token|refresh_token[[:space:]]*[:=][[:space:]]*['\"]?[A-Za-z0-9._\\-]{200,}"
 )
 
 fail=0

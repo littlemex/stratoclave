@@ -41,7 +41,7 @@ from core.rate_limit import SSO_EXCHANGE_RATE_LIMIT, limiter
 from dynamo import TicketNotFoundError, UiTicketsRepository
 
 from .authz import log_audit_event
-from .deps import AuthenticatedUser, get_current_user
+from .deps import AuthenticatedUser, _decode_cognito_access_token, get_current_user
 
 
 router = APIRouter(prefix="/api/mvp/auth", tags=["mvp-ui-ticket"])
@@ -84,7 +84,61 @@ def mint_ui_ticket(
     The caller must present a valid bearer via the normal
     `get_current_user` dependency. We then bind the supplied token
     bundle to a fresh nonce and hand the nonce back.
+
+    P0-8 / sweep-4 C-Critical-B1: the body's access_token is a
+    full-authority credential that the SPA will sessionStorage-adopt
+    on consume. Trusting the caller to put THEIR OWN token here is
+    not enough — a malicious CLI could mint a ticket carrying Bob's
+    access_token while authenticated as Alice, giving Alice a
+    session-fixation primitive for Bob's account. We therefore
+    JWKS-verify the body.access_token and require sub(body) ==
+    caller.user_id before binding it to the nonce.
     """
+    # Re-verify body.access_token against Cognito JWKS and bind it to
+    # the caller. `_decode_cognito_access_token` raises HTTPException
+    # 401 on any verification failure (signature, issuer, audience,
+    # expiry, or non-access token_use), so we inherit the full set of
+    # JWT-level defences already exercised by test_jwt_verify.py.
+    #
+    # Sweep-4 round-5 hardening: the JWKS fetch layer can raise non-
+    # PyJWTError exceptions (URLError / JSONDecodeError / SSL cert
+    # errors) on transient infrastructure failures. We must NOT echo
+    # those exception strings back to the caller — they leak internal
+    # OIDC issuer URLs, proxy error hints, and DNS topology.
+    # Instead we log the detail server-side and return a generic 401.
+    try:
+        body_claims = _decode_cognito_access_token(body.access_token)
+    except HTTPException:
+        raise
+    except Exception as e:  # pragma: no cover — defensive
+        _log.error(
+            "ui_ticket_body_verify_unexpected_error",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="UI ticket body access_token could not be verified.",
+        )
+    body_sub = str(body_claims.get("sub") or "")
+    if not body_sub or body_sub != user.user_id:
+        # Do not leak either sub back to the caller. Audit log below is
+        # intentionally terse.
+        log_audit_event(
+            event="ui_ticket_mint_subject_mismatch",
+            actor_id=user.user_id,
+            actor_email=user.email,
+            target_id="(ui-handoff)",
+            target_type="ui_ticket",
+            details={"reason": "body_sub_does_not_match_caller"},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "UI ticket body subject mismatch: "
+                "the access_token must belong to the authenticated caller."
+            ),
+        )
+
     repo = UiTicketsRepository()
     plaintext, expires_at = repo.mint(
         user_id=user.user_id,
