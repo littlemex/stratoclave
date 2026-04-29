@@ -72,6 +72,56 @@ class AuthenticatedUser:
         return "team_lead" in self.roles
 
 
+def is_user_deleted(user_record: Optional[dict[str, Any]]) -> bool:
+    """Predicate for X-1: has this user been soft-deleted?
+
+    Returning ``True`` means the auth layer must reject any token
+    for this user with 401 *and must not* attempt to backfill a row
+    — otherwise the physically-gone user is resurrected as a
+    fresh ``user`` under ``default-org``. Biased towards "not
+    deleted" on any unexpected shape so a corrupt row cannot lock
+    out every user.
+    """
+    if user_record is None:
+        return False
+    status = user_record.get("status")
+    return isinstance(status, str) and status == "deleted"
+
+
+def is_token_revoked(
+    *,
+    user_record: Optional[dict[str, Any]],
+    token_iat: Optional[int],
+) -> bool:
+    """Predicate for C-C: is this access_token older than the last
+    forced-logout watermark written by
+    :py:meth:`UsersRepository.revoke_all_sessions`?
+
+    The function is intentionally simple and biases towards "not
+    revoked" on any unexpected shape (missing record, missing / malformed
+    watermark, missing iat). The strict path lives in the route layer
+    via ``get_current_user``: we want auth to keep working for users
+    with no Users row yet (backfill flow), and a corrupt watermark
+    must not turn every request into a 401.
+    """
+    if user_record is None:
+        return False
+    raw = user_record.get("token_revoked_after")
+    if raw is None:
+        return False
+    try:
+        watermark = int(raw)
+    except (TypeError, ValueError):
+        # Structural inconsistency: log and fall open.
+        _log.warning("token_revoked_after_malformed", extra={"value": repr(raw)})
+        return False
+    if token_iat is None:
+        # Defensive: Cognito always sets iat, but we do not want to
+        # invent 0 and wipe every session on a spec change.
+        return False
+    return int(token_iat) < watermark
+
+
 @lru_cache(maxsize=1)
 def _jwks_client() -> PyJWKClient:
     issuer = os.getenv("OIDC_ISSUER_URL")
@@ -199,6 +249,47 @@ def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
     if not user_rec:
         raise HTTPException(status_code=401, detail="API key owner no longer exists")
 
+    # Z-1 (2026-04 third blind review): the tombstone + watermark
+    # checks used to live only on the Cognito JWT path, so a
+    # long-lived sk-stratoclave-* key outlived a ``mark_deleted`` on
+    # its owner. A deleted admin's API key kept calling /v1/messages
+    # for up to the key's own expires_at (often no expiry at all).
+    # We now apply the same two checks here before trusting the key:
+    #
+    #   (a) is_user_deleted     → owner has a tombstone row → 401
+    #   (b) key created before   → owner was force-signed-out after
+    #       token_revoked_after    the key was minted → 401. This
+    #                              catches tenant switch / demote
+    #                              resets that should have invalidated
+    #                              all credentials belonging to the
+    #                              user, not just Cognito bearers.
+    if is_user_deleted(user_rec):
+        raise HTTPException(
+            status_code=401, detail="API key owner has been deleted"
+        )
+    wm_raw = user_rec.get("token_revoked_after")
+    created_raw = item.get("created_at")
+    if wm_raw is not None and created_raw:
+        try:
+            watermark = int(wm_raw)
+        except (TypeError, ValueError):
+            watermark = None
+        if watermark is not None:
+            try:
+                created_epoch = int(
+                    datetime.fromisoformat(str(created_raw).replace("Z", "+00:00")).timestamp()
+                )
+            except (TypeError, ValueError):
+                created_epoch = None
+            if created_epoch is not None and created_epoch < watermark:
+                raise HTTPException(
+                    status_code=401,
+                    detail=(
+                        "API key predates a forced session revocation on its"
+                        " owner — mint a new key after re-authenticating."
+                    ),
+                )
+
     email = str(user_rec.get("email") or "")
     org_id = str(user_rec.get("org_id") or DEFAULT_ORG_ID)
     roles_raw = user_rec.get("roles") or []
@@ -264,6 +355,18 @@ def get_current_user(
     org_id: str = DEFAULT_ORG_ID
     needs_backfill = False
 
+    # X-1 (2026-04 critical-sweep follow-up): soft-delete tombstone.
+    # If the row is marked deleted we refuse the token immediately.
+    # Doing this BEFORE the backfill path is essential — otherwise
+    # deps.py would happily rebuild the row as a fresh ``user`` and
+    # resurrect the victim for up to one access_token lifetime.
+    if is_user_deleted(user_record):
+        raise HTTPException(
+            status_code=401,
+            detail="User has been deleted — authentication refused",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     if user_record:
         email = str(user_record.get("email") or "")
         roles_raw = user_record.get("roles") or []
@@ -274,6 +377,25 @@ def get_current_user(
         org_id = str(user_record.get("org_id") or DEFAULT_ORG_ID)
     else:
         needs_backfill = True
+
+    # C-C (2026-04 critical sweep): DB-owned session revocation.
+    # Cognito's AdminUserGlobalSignOut only kills refresh tokens; the
+    # already-issued access_token is live until exp. Whenever an admin
+    # reassigns tenants / demotes / deletes a user, we stamp
+    # ``token_revoked_after = now()`` on the Users row. Here we refuse
+    # any JWT whose ``iat`` is earlier than that watermark so the
+    # stale tab cannot keep acting with the new org_id / roles.
+    try:
+        token_iat_claim = claims.get("iat")
+        token_iat = int(token_iat_claim) if token_iat_claim is not None else None
+    except (TypeError, ValueError):
+        token_iat = None
+    if is_token_revoked(user_record=user_record, token_iat=token_iat):
+        raise HTTPException(
+            status_code=401,
+            detail="Session has been revoked — please sign in again",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     # email 空 (access_token に email claim が無いケースの #1 fix):
     # 1. Users テーブルにあれば使う (上で済み)

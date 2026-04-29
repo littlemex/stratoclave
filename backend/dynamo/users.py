@@ -1,4 +1,5 @@
 """Users テーブルのリポジトリ."""
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -10,6 +11,10 @@ from .client import get_dynamodb_resource, users_table_name
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _now_epoch() -> int:
+    return int(time.time())
 
 
 class UsersRepository:
@@ -117,6 +122,84 @@ class UsersRepository:
                 ":arn": sso_principal_arn,
             },
         )
+
+    def mark_deleted(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Soft-delete flow (X-1, 2026-04 critical-sweep follow-up).
+
+        Physical deletion of the Users row used to play badly with
+        Cognito's "access_token outlives the user" guarantee:
+
+          1. Admin calls DELETE /api/mvp/admin/users/{victim}.
+          2. Cognito user is deleted; Users row is deleted; UserTenants
+             rows are archived.
+          3. The victim still holds a JWT that is structurally valid
+             (signed by Cognito pre-deletion, within `exp`).
+          4. The deps.py backfill path reads `user_record = None` and
+             happily re-creates the row as a fresh `user` under
+             `default-org`.
+          5. The victim is effectively resurrected for up to one hour.
+
+        This method writes a *tombstone* row instead:
+
+          * ``status="deleted"`` so the auth layer (`is_user_deleted`)
+            can refuse any token that lands on it,
+          * ``deleted_at``: ISO8601 audit timestamp,
+          * ``token_revoked_after``: current epoch seconds so the
+            existing iat-based check also fails any older JWT.
+
+        Idempotent; callable on an already-deleted row, strictly
+        advancing the watermark. Returns ``None`` when no row exists.
+        """
+        try:
+            resp = self._table.update_item(
+                Key={"user_id": user_id, "sk": self.SK_PROFILE},
+                UpdateExpression=(
+                    "SET #s = :deleted, deleted_at = :now_iso, "
+                    "token_revoked_after = :tra, updated_at = :now_iso"
+                ),
+                ConditionExpression="attribute_exists(user_id)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":deleted": "deleted",
+                    ":now_iso": _now_iso(),
+                    ":tra": _now_epoch(),
+                },
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return None
+            raise
+        return resp.get("Attributes")
+
+    def revoke_all_sessions(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Set ``token_revoked_after`` to the current epoch second so
+        every JWT issued earlier is rejected by the auth path (C-C).
+
+        Used by tenant reassignment, role demotion, user deletion,
+        and any future "force logout" operation. Returns the new
+        attributes (``ReturnValues=ALL_NEW``) or ``None`` when the
+        user does not exist. Cognito's own ``AdminUserGlobalSignOut``
+        only kills refresh tokens, so without this watermark a stale
+        access_token stays live for up to 1 h with the new org_id /
+        roles shown by the Users row.
+        """
+        try:
+            resp = self._table.update_item(
+                Key={"user_id": user_id, "sk": self.SK_PROFILE},
+                UpdateExpression="SET token_revoked_after = :tra, updated_at = :now",
+                ConditionExpression="attribute_exists(user_id)",
+                ExpressionAttributeValues={
+                    ":tra": _now_epoch(),
+                    ":now": _now_iso(),
+                },
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return None
+            raise
+        return resp.get("Attributes")
 
     def update_locale(self, user_id: str, locale: str) -> Optional[dict[str, Any]]:
         """Update the user's UI locale. Returns the new item attributes

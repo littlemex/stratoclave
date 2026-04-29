@@ -39,12 +39,13 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.logging import get_logger
 from dynamo import UsageLogsRepository, UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
+from .authz import require_permission
 from .deps import AuthenticatedUser, get_current_user
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 
@@ -63,7 +64,18 @@ router = APIRouter(tags=["mvp-anthropic"])
 # Claude Desktop cowork は Gateway auth scheme=Bearer で probe してくるため、
 # 認証必須 (他ユーザーが Model list を覗ける問題を防ぐ).
 @router.get("/v1/models")
-def list_models(_user: AuthenticatedUser = Depends(get_current_user)) -> dict:
+def list_models(
+    # X-2 (2026-04 critical-sweep follow-up): `/v1/messages` and
+    # `/v1/models` previously only called `get_current_user`, which
+    # resolves the AuthenticatedUser but does not check scopes. An
+    # API key minted with `scopes=["usage:read-self"]` could therefore
+    # enumerate models and drive Bedrock invocations, completely
+    # bypassing the advertised scope-based blast-radius guarantee.
+    # Gating on `require_permission("messages:send")` routes both JWTs
+    # and API keys through `user_has_permission`, which AND-checks
+    # against `user.roles` AND `user.key_scopes` for API-key auth.
+    _user: AuthenticatedUser = Depends(require_permission("messages:send")),
+) -> dict:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     data = [
         {
@@ -85,14 +97,81 @@ def list_models(_user: AuthenticatedUser = Depends(get_current_user)) -> dict:
 # ===== Anthropic 互換 API のリクエスト/レスポンス =====
 
 
+# C-H (2026-04 critical sweep): Pydantic hard caps. The body-size
+# middleware (``main.MaxBodySizeMiddleware``) rejects 2 MiB+ requests
+# outright; the caps below add a second layer that refuses malformed
+# inputs that fit within the byte budget but still stress the
+# credit-reservation math or copy-on-parse memory usage.
+_MAX_CONTENT_CHARS = 200_000          # Claude 200K context (≈ chars)
+_MAX_MESSAGES = 500                   # absurd-upper-bound guard
+_MAX_STOP_SEQUENCES = 4               # Bedrock Converse limit
+_MAX_STOP_SEQUENCE_CHARS = 64
+
+
+def _enforce_content_size(value: Any) -> Any:
+    """Validator: cap the serialized size of an Anthropic content block.
+
+    ``content`` and ``system`` accept either a plain string or an
+    Anthropic content-block list, so the simplest universal guard is
+    to JSON-serialize the value and limit the resulting length. That
+    also prevents an attacker from burying 500 MB of text inside a
+    single deeply-nested content block.
+    """
+    if value is None:
+        return value
+    import json as _json
+
+    try:
+        serialized = _json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("content is not JSON-serializable") from exc
+    if len(serialized) > _MAX_CONTENT_CHARS:
+        raise ValueError(
+            f"content exceeds {_MAX_CONTENT_CHARS} char cap "
+            f"(got {len(serialized)} chars)"
+        )
+    return value
+
+
 class AnthropicMessage(BaseModel):
-    role: str
-    content: Any  # str or list[dict]
+    # Anthropic's Messages API is forward-evolving (tool_use /
+    # tool_result / image blocks / cache_control etc.). Rejecting
+    # unknown keys here would break every SDK upgrade, so we allow
+    # passthrough and rely on the size validator + Bedrock's own
+    # schema for structural enforcement.
+    model_config = ConfigDict(extra="allow")
+
+    role: str = Field(min_length=1, max_length=16)
+    # content may be a plain string or an Anthropic content-block list.
+    # The length cap below catches the trivial DoS vector of attaching
+    # a single-message body stuffed with hundreds of MB of text that
+    # passes the outer middleware because it was chunked.
+    content: Any
+
+    @field_validator("content")
+    @classmethod
+    def _content_size(cls, v: Any) -> Any:
+        return _enforce_content_size(v)
 
 
 class AnthropicMessagesRequest(BaseModel):
-    model: str
-    messages: list[AnthropicMessage]
+    # Anthropic's Messages API is not frozen: Claude Code / Claude
+    # Desktop / the Anthropic SDKs routinely ship new top-level
+    # fields (``tools``, ``tool_choice``, ``metadata``, ``service_tier``,
+    # ``anthropic_beta``, ``thinking``, ``cache_control``, ...) that
+    # we forward to Bedrock without needing to understand.
+    # Z-hotfix (2026-04): the original sweep-1 C-H locked this model
+    # with ``extra="forbid"``, which meant every `stratoclave claude`
+    # invocation 422'd the moment the CLI sent `tools`. The body
+    # middleware (``MaxBodySizeASGIMiddleware``) still caps the raw
+    # byte size and the field-level caps below still guard the
+    # values we *do* read (messages / stop_sequences / system /
+    # max_tokens / model). Forward-compat drift is the whole point
+    # of a proxy gateway.
+    model_config = ConfigDict(extra="allow")
+
+    model: str = Field(min_length=1, max_length=256)
+    messages: list[AnthropicMessage] = Field(max_length=_MAX_MESSAGES)
     # Claude Opus/Sonnet 4.x accept up to 64K output tokens on Bedrock.
     # Claude Desktop Cowork defaults to `max_tokens=64000`, so anything
     # below that rejects legitimate clients at the proxy layer. The cap
@@ -101,9 +180,30 @@ class AnthropicMessagesRequest(BaseModel):
     temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     top_k: Optional[int] = Field(default=None, ge=1, le=500)
-    stop_sequences: Optional[list[str]] = None
-    system: Optional[Any] = None  # str or list[dict]
+    stop_sequences: Optional[list[str]] = Field(
+        default=None, max_length=_MAX_STOP_SEQUENCES
+    )
+    system: Optional[Any] = None
     stream: bool = False
+
+    @field_validator("stop_sequences")
+    @classmethod
+    def _stop_sequence_lengths(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return v
+        for item in v:
+            if not isinstance(item, str):
+                raise ValueError("stop_sequences must be a list of strings")
+            if len(item) > _MAX_STOP_SEQUENCE_CHARS:
+                raise ValueError(
+                    f"stop_sequences entry exceeds {_MAX_STOP_SEQUENCE_CHARS} chars"
+                )
+        return v
+
+    @field_validator("system")
+    @classmethod
+    def _system_size(cls, v: Any) -> Any:
+        return _enforce_content_size(v)
 
 
 def _bedrock_client():
@@ -263,7 +363,10 @@ def _reserve_credit(
 @router.post("/v1/messages")
 def messages(
     body: AnthropicMessagesRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
+    # X-2 (2026-04 critical-sweep follow-up): enforce the scope layer
+    # on the Bedrock invocation path. See list_models() for the full
+    # rationale.
+    user: AuthenticatedUser = Depends(require_permission("messages:send")),
 ):
     # model allowlist を先にチェック (credit 予約の前に 400 で弾く)
     try:
