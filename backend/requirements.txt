@@ -24,7 +24,7 @@ structlog==25.5.0
 python-json-logger==4.1.0
 
 # Authentication
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.12.1
 cryptography==47.0.0
 
 # Rate limiting (in-process token bucket shared across routes).
