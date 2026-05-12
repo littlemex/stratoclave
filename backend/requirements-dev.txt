@@ -13,7 +13,7 @@ pytest-asyncio==0.24.0
 pytest-cov==7.1.0
 
 # AWS SDK mock for backend tests
-moto[dynamodb,cognitoidp,sts]==5.1.12
+moto[dynamodb,cognitoidp,sts]==5.2.1
 # moto[cognitoidp] uses joserfc to sign its fake JWTs
 joserfc==1.0.1
 
