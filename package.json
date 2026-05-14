@@ -15,7 +15,7 @@
     "test:integration:auth-credit:headed": "playwright test e2e/integration/auth-to-credit-flow.spec.ts --config=playwright.config.integration.ts --headed"
   },
   "devDependencies": {
-    "@playwright/test": "^1.42.0",
+    "@playwright/test": "^1.60.0",
     "amazon-cognito-identity-js": "^6.3.16",
     "typescript": "^6.0.3"
   }
