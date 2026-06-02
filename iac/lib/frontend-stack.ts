@@ -218,6 +218,19 @@ export class FrontendStack extends cdk.Stack {
             compress: true,
           },
           {
+            // OpenAI Responses API (/openai/v1/responses + /openai/v1/models).
+            // Same pass-through posture as /v1/*. Without this behavior the
+            // SPA fallback returns index.html for /openai/v1/* requests.
+            pathPattern: '/openai/*',
+            targetOriginId: 'ALBOrigin',
+            viewerProtocolPolicy: 'redirect-to-https',
+            cachePolicyId: '4135ea2d-6df8-44a3-9df3-4b5a84be39ad', // CachingDisabled
+            originRequestPolicyId: 'b689b0a8-53d0-40ab-baf2-68738e2966ac', // AllViewerExceptHostHeader
+            allowedMethods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'POST', 'PATCH', 'DELETE'],
+            cachedMethods: ['GET', 'HEAD'],
+            compress: true,
+          },
+          {
             // Serve well-known endpoints (e.g. /.well-known/stratoclave-config)
             // directly from the Backend so CLI bootstrap clients can fetch
             // them without authentication. Do NOT attach spaFallbackFn here.
