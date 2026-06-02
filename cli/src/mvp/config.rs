@@ -1,29 +1,40 @@
-//! MVP 用の最小設定ロード.
+//! MVP configuration loader for the CLI.
 //!
-//! messages_url / admin_users_url は旧実装 (`mvp/admin_cmd.rs`) で使われていたが、
-//! Phase 2 の新実装は `api()` ヘルパ経由で /api/mvp/* 全エンドポイントをカバーする。
-//! 後方互換のため残存 (`#[allow(dead_code)]`)。
+//! `messages_url` / `admin_users_url` predate the Phase 2 unified
+//! `api()` helper; they remain here for backward compatibility with
+//! older callers (gated by `#[allow(dead_code)]`).
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
 use std::env;
 
-/// MVP で必要な設定値.
+/// Configuration values consumed by the CLI's MVP commands.
 pub struct MvpConfig {
-    /// API エンドポイント (例: https://d123.cloudfront.net または http://alb-xxx)
+    /// Public API endpoint, e.g. `https://d123.cloudfront.net` or `http://alb-xxx`.
     pub api_endpoint: String,
-    /// デフォルトモデル (Claude Code 起動時の ANTHROPIC_MODEL)
+    /// Default Anthropic model surfaced to `claude` (`ANTHROPIC_MODEL`).
     pub default_model: String,
+    /// Default OpenAI model surfaced to `codex`. Defaults to `openai.gpt-5.4`.
+    pub default_codex_model: String,
+    /// Sub-path under `api_endpoint` that exposes the OpenAI Responses API
+    /// (e.g. `/openai/v1`). When unset, defaults to `/openai/v1`.
+    pub codex_openai_base_path: Option<String>,
 }
 
 impl MvpConfig {
-    /// 環境変数 + 既存 config.toml から値を組み立てる.
+    /// Build an `MvpConfig` from env vars first, then `~/.stratoclave/config.toml`.
     pub fn load() -> Result<Self> {
-        // 1. 環境変数優先
+        let toml_snapshot = load_from_config_toml();
+
+        // 1. Public API endpoint (required).
         let api_endpoint = env::var("STRATOCLAVE_API_ENDPOINT")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| load_from_config_toml().map(|c| c.api_endpoint).flatten())
+            .or_else(|| {
+                toml_snapshot
+                    .as_ref()
+                    .and_then(|c| c.api_endpoint.clone())
+            })
             .ok_or_else(|| {
                 anyhow!(
                     "API endpoint not configured. Set STRATOCLAVE_API_ENDPOINT env var \
@@ -31,15 +42,43 @@ impl MvpConfig {
                 )
             })?;
 
+        // 2. Default Anthropic model (Claude).
         let default_model = env::var("STRATOCLAVE_DEFAULT_MODEL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| load_from_config_toml().map(|c| c.default_model).flatten())
+            .or_else(|| {
+                toml_snapshot
+                    .as_ref()
+                    .and_then(|c| c.default_model.clone())
+            })
             .unwrap_or_else(|| "claude-opus-4-7".to_string());
+
+        // 3. Default codex / OpenAI model.
+        let default_codex_model = env::var("STRATOCLAVE_DEFAULT_CODEX_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                toml_snapshot
+                    .as_ref()
+                    .and_then(|c| c.default_codex_model.clone())
+            })
+            .unwrap_or_else(|| "openai.gpt-5.4".to_string());
+
+        // 4. OpenAI base path under the api_endpoint.
+        let codex_openai_base_path = env::var("STRATOCLAVE_CODEX_OPENAI_BASE_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                toml_snapshot
+                    .as_ref()
+                    .and_then(|c| c.codex_openai_base_path.clone())
+            });
 
         Ok(Self {
             api_endpoint: api_endpoint.trim_end_matches('/').to_string(),
             default_model,
+            default_codex_model,
+            codex_openai_base_path,
         })
     }
 
@@ -63,8 +102,8 @@ impl MvpConfig {
         format!("{}/api/mvp/admin/users", self.api_endpoint)
     }
 
-    /// Generic URL builder for /api/mvp/* paths.
-    /// `path` は "/" から始まる絶対パス。
+    /// Generic URL builder for `/api/mvp/*` paths.
+    /// `path` should start with `/`.
     pub fn api(&self, path: &str) -> String {
         if path.starts_with('/') {
             format!("{}{}", self.api_endpoint, path)
@@ -77,6 +116,8 @@ impl MvpConfig {
 struct TomlSnapshot {
     api_endpoint: Option<String>,
     default_model: Option<String>,
+    default_codex_model: Option<String>,
+    codex_openai_base_path: Option<String>,
 }
 
 fn load_from_config_toml() -> Option<TomlSnapshot> {
@@ -88,8 +129,9 @@ fn load_from_config_toml() -> Option<TomlSnapshot> {
     let text = std::fs::read_to_string(&path).ok()?;
     let parsed: toml::Value = toml::from_str(&text).ok()?;
 
-    // `stratoclave setup` が書き出すネストスキーマ ([api] endpoint / [defaults] model) を優先し、
-    // 旧フラットスキーマ (api_endpoint / default_model) も互換として受ける。
+    // `stratoclave setup` writes a nested schema (`[api] endpoint = ...`,
+    // `[defaults] model = ...`). We also accept the older flat schema
+    // (`api_endpoint` / `default_model`) for backward compatibility.
     let api_endpoint = parsed
         .get("api")
         .and_then(|v| v.as_table())
@@ -116,9 +158,25 @@ fn load_from_config_toml() -> Option<TomlSnapshot> {
                 .map(String::from)
         });
 
+    let default_codex_model = parsed
+        .get("defaults")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("codex_model"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let codex_openai_base_path = parsed
+        .get("codex")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("openai_base_path"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Some(TomlSnapshot {
         api_endpoint,
         default_model,
+        default_codex_model,
+        codex_openai_base_path,
     })
 }
 
@@ -146,6 +204,8 @@ mod tests {
         orig_home: Option<std::ffi::OsString>,
         orig_endpoint: Option<std::ffi::OsString>,
         orig_model: Option<std::ffi::OsString>,
+        orig_codex_model: Option<std::ffi::OsString>,
+        orig_codex_path: Option<std::ffi::OsString>,
     }
 
     impl Drop for HomeGuard {
@@ -162,6 +222,14 @@ mod tests {
                 Some(v) => env::set_var("STRATOCLAVE_DEFAULT_MODEL", v),
                 None => env::remove_var("STRATOCLAVE_DEFAULT_MODEL"),
             }
+            match self.orig_codex_model.take() {
+                Some(v) => env::set_var("STRATOCLAVE_DEFAULT_CODEX_MODEL", v),
+                None => env::remove_var("STRATOCLAVE_DEFAULT_CODEX_MODEL"),
+            }
+            match self.orig_codex_path.take() {
+                Some(v) => env::set_var("STRATOCLAVE_CODEX_OPENAI_BASE_PATH", v),
+                None => env::remove_var("STRATOCLAVE_CODEX_OPENAI_BASE_PATH"),
+            }
         }
     }
 
@@ -177,10 +245,14 @@ mod tests {
             orig_home: env::var_os("HOME"),
             orig_endpoint: env::var_os("STRATOCLAVE_API_ENDPOINT"),
             orig_model: env::var_os("STRATOCLAVE_DEFAULT_MODEL"),
+            orig_codex_model: env::var_os("STRATOCLAVE_DEFAULT_CODEX_MODEL"),
+            orig_codex_path: env::var_os("STRATOCLAVE_CODEX_OPENAI_BASE_PATH"),
         };
         env::set_var("HOME", home_guard._tmp.path());
         env::remove_var("STRATOCLAVE_API_ENDPOINT");
         env::remove_var("STRATOCLAVE_DEFAULT_MODEL");
+        env::remove_var("STRATOCLAVE_DEFAULT_CODEX_MODEL");
+        env::remove_var("STRATOCLAVE_CODEX_OPENAI_BASE_PATH");
         (home_guard, guard)
     }
 
@@ -197,6 +269,8 @@ model = "claude-opus-4-7"
         let cfg = MvpConfig::load().expect("nested schema should load");
         assert_eq!(cfg.api_endpoint, "https://example.cloudfront.net");
         assert_eq!(cfg.default_model, "claude-opus-4-7");
+        assert_eq!(cfg.default_codex_model, "openai.gpt-5.4");
+        assert!(cfg.codex_openai_base_path.is_none());
     }
 
     #[test]
@@ -209,6 +283,7 @@ default_model = "claude-sonnet-4-6"
         let cfg = MvpConfig::load().expect("flat schema should load");
         assert_eq!(cfg.api_endpoint, "https://legacy.cloudfront.net");
         assert_eq!(cfg.default_model, "claude-sonnet-4-6");
+        assert_eq!(cfg.default_codex_model, "openai.gpt-5.4");
     }
 
     #[test]
@@ -231,5 +306,26 @@ endpoint = "https://file.cloudfront.net"
             Err(e) => e,
         };
         assert!(err.to_string().contains("API endpoint not configured"));
+    }
+
+    #[test]
+    fn load_codex_overrides_from_toml_and_env() {
+        let toml = r#"
+[api]
+endpoint = "https://example.cloudfront.net"
+
+[defaults]
+codex_model = "openai.gpt-5.5"
+
+[codex]
+openai_base_path = "/custom/openai/v1"
+"#;
+        let (_h, _g) = setup_home(toml);
+        let cfg = MvpConfig::load().expect("codex schema should load");
+        assert_eq!(cfg.default_codex_model, "openai.gpt-5.5");
+        assert_eq!(
+            cfg.codex_openai_base_path.as_deref(),
+            Some("/custom/openai/v1")
+        );
     }
 }

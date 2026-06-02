@@ -13,6 +13,10 @@ path = "src/main.rs"
 configparser = "3.1"
 # TOML parsing
 toml = "1.1"
+# Runtime: codex_cmd writes a temp config.toml so it never mutates
+# the user's ~/.codex/config.toml. Persistent enough that the spawned
+# child can read it during its lifetime.
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "form"] }
 serde = { version = "1", features = ["derive"] }

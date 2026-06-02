@@ -13,6 +13,10 @@ httpx==0.28.1
 
 # AWS
 boto3==1.42.97
+# Mints short-lived bearer tokens for bedrock-mantle (OpenAI Responses API).
+# `expiry=timedelta(seconds=900)` is set in mvp/openai_responses.py so the
+# token TTL stays at 15 min instead of the library default of 1 h.
+aws-bedrock-token-generator==1.1.0
 
 # Utilities
 pydantic[email]==2.13.3

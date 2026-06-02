@@ -171,15 +171,18 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
-    // Bedrock: Anthropic (Claude) モデルのみ、かつ CRIS (Cross-Region Inference) の
-    // inference profile + その先の foundation-model 両方を allowlist 化.
-    // `Resource: *` だと RCE 時に Llama / Nova / Mistral 等も呼ばれコスト爆発するため
-    // Anthropic プレフィックスで厳格にスコープする.
+    // Bedrock: Anthropic (Claude) only — both the cross-region
+    // inference profile (CRIS) and the underlying foundation-model are
+    // allowlisted. `Resource: *` would let an RCE invoke Llama / Nova /
+    // Mistral and blow up cost, so we scope strictly to the Anthropic
+    // prefix.
     //
-    // - foundation-model: アカウント境界を持たない Bedrock 側 owned なので `::`
-    // - inference-profile: 自アカウント内に作られる (us./apac./eu./global. prefix)
+    //  - foundation-model: Bedrock-owned, no account boundary → `::`.
+    //  - inference-profile: created in this account, prefixed by
+    //    `us./apac./eu./global.` per region.
     //
-    // us-east-1 以外の cross-region 経由で呼び出される場合も考慮し、us.*/apac.*/eu.*/global.* を含める。
+    // The wildcard region in each ARN covers cross-region inference
+    // routes that originate outside us-east-1.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowAnthropicBedrockInvoke',
@@ -193,7 +196,7 @@ export class EcsStack extends cdk.Stack {
         resources: [
           // foundation-model (region-less, account-less)
           `arn:aws:bedrock:*::foundation-model/anthropic.*`,
-          // inference-profile in this account (us./apac./eu./global. prefix 全リージョン)
+          // inference-profile in this account (us./apac./eu./global. prefix, all regions)
           `arn:aws:bedrock:*:${account}:inference-profile/us.anthropic.*`,
           `arn:aws:bedrock:*:${account}:inference-profile/apac.anthropic.*`,
           `arn:aws:bedrock:*:${account}:inference-profile/eu.anthropic.*`,
@@ -201,8 +204,9 @@ export class EcsStack extends cdk.Stack {
         ],
       })
     );
-    // Bedrock read-only operations (モデル発見 / /v1/models).
-    // ListFoundationModels / ListInferenceProfiles は Resource 指定不可のため `*` のまま.
+    // Bedrock read-only operations (model discovery / /v1/models).
+    // ListFoundationModels / ListInferenceProfiles do not support
+    // resource-level scoping, so the resource list stays at `*`.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowBedrockReadOnly',
@@ -217,12 +221,64 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
-    // ECS Exec (`enableExecuteCommand: true`) に必要な SSM messages 権限.
-    // P1-C (2026-04 review): `enableExecuteCommand` が false のときは
-    // この権限自体を task role から削ぎ落とす。ssmmessages:* は shell
-    // チャネル開通専用で他用途はないため、enable フラグに追従させる
-    // のが最小権限として正しい。再オープンは `ENABLE_ECS_EXEC=true`
-    // を渡して cdk deploy で元に戻す。
+    // OpenAI (codex / GPT-5.x) on Amazon Bedrock — separate IAM namespace.
+    //
+    // Bedrock's OpenAI-compatible endpoint lives at
+    // `bedrock-mantle.{region}.api.aws/openai/v1/...` with its own
+    // `bedrock-mantle:*` action set. GPT-5.4 / GPT-5.5 are GA only in
+    // us-east-2 and us-west-2 today, so we scope by region. Unlike the
+    // Anthropic statement above this one is intentionally separate so
+    // that future provider expansion (Llama / Nova / Mistral) can each
+    // ship their own statement without widening Anthropic or OpenAI.
+    //
+    // We list only the project-scoped resource ARNs we expect AWS to
+    // accept; the inference action set covers `CreateInference`,
+    // discovery (`Get*` / `List*`). If AWS later accepts wildcards on
+    // the bedrock-mantle namespace at the resource level (similar to
+    // `bedrock:*`-style ARNs), we should tighten further.
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowOpenAIBedrockMantleInvoke',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-mantle:CreateInference',
+          'bedrock-mantle:Get*',
+          'bedrock-mantle:List*',
+        ],
+        resources: [
+          `arn:aws:bedrock-mantle:us-east-2:${account}:project/*`,
+          `arn:aws:bedrock-mantle:us-west-2:${account}:project/*`,
+        ],
+      })
+    );
+
+    // The bearer-token mint action that `aws-bedrock-token-generator`
+    // performs in `mvp/openai_responses.py`. Same regional scope as
+    // CreateInference. If AWS rejects resource-level scoping on this
+    // action (similar to `bedrock:ListFoundationModels`), fall back to
+    // `resources: ['*']` and add an inline comment confirming the AWS
+    // constraint — never silently widen without that note.
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowBedrockMantleBearerTokenMint',
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock-mantle:CallWithBearerToken'],
+        resources: [
+          `arn:aws:bedrock-mantle:us-east-2:${account}:project/*`,
+          `arn:aws:bedrock-mantle:us-west-2:${account}:project/*`,
+        ],
+      })
+    );
+
+    // SSM messages permissions required by ECS Exec
+    // (`enableExecuteCommand: true`).
+    //
+    // P1-C (2026-04 review): when `enableExecuteCommand` is false, the
+    // statement is dropped from the task role entirely. ssmmessages:*
+    // exists solely to open shell channels — there is no other use —
+    // so tying the permission to the feature flag is the correct
+    // least-privilege posture. To re-open, pass
+    // `ENABLE_ECS_EXEC=true` and re-run `cdk deploy`.
     if (props.enableExecuteCommand) {
       this.taskDefinition.taskRole.addToPrincipalPolicy(
         new iam.PolicyStatement({

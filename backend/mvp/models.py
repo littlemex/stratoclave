@@ -1,85 +1,238 @@
-"""Anthropic → Bedrock モデル ID マッピング (MVP はハードコード).
+"""Model registry for the Bedrock proxy.
 
-Claude Code が送ってくる Anthropic 形式の model id を
-Bedrock の inference profile ID に変換する.
+Maps client-facing model identifiers to Bedrock model IDs and metadata
+required to route a request: which provider (anthropic / openai), which
+Bedrock region, and which wire protocol the route handler should speak.
 
-このマッピングは 2026-04-25 時点で `aws bedrock list-inference-profiles` で
-実在を確認済み. 将来的には Parameter Store から取得して外部化予定.
+The legacy `_MAPPING` dict and `resolve_bedrock_model()` shim are preserved
+for backward compatibility with `mvp.anthropic` and any external imports
+during the migration window. New code should call `resolve_model()` and
+read `ModelEntry` fields directly.
+
+The set of allowed models is enumerated explicitly: any client-supplied
+model ID outside this list is rejected with HTTP 400 by the route layer
+before credit reservation. Unsupported models would otherwise reach
+Bedrock with no token-accounting policy attached.
 """
+from __future__ import annotations
+
 import os
-from typing import Optional
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 
-# MVP default: Opus 4.7 (必須要件)
+# MVP default for the Anthropic Messages route. OpenAI route uses its own
+# default sourced from `DEFAULT_CODEX_MODEL` env, resolved at the CLI/CDK layer.
 DEFAULT_MODEL = os.getenv(
     "DEFAULT_BEDROCK_MODEL",
     "us.anthropic.claude-opus-4-7",
 )
 
 
-# 左: Claude Code / Anthropic SDK が送ってくるモデル名 (Anthropic 命名規則)
-# 右: Bedrock inference profile ID (us-east-1、2026-04-25 実在確認済み)
-_MAPPING: dict[str, str] = {
-    # Claude 4 系 (MVP で必須: Opus 4.6, 4.7)
-    "claude-opus-4-7": "us.anthropic.claude-opus-4-7",
-    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
-    "claude-opus-4-5": "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "claude-opus-4-1": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "claude-opus-4": "us.anthropic.claude-opus-4-20250514-v1:0",
-    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
-    "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    # Claude 3.x 系 (互換性のため)
-    "claude-3-7-sonnet": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "claude-3-5-haiku": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
-    "claude-3-haiku": "us.anthropic.claude-3-haiku-20240307-v1:0",
-    "claude-3-opus": "us.anthropic.claude-3-opus-20240229-v1:0",
-    "claude-3-sonnet": "us.anthropic.claude-3-sonnet-20240229-v1:0",
-    # 日付サフィックス付きのエイリアス (Anthropic SDK が送ってくる形式)
-    "claude-opus-4-5-20251101": "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "claude-opus-4-1-20250805": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "claude-opus-4-20250514": "us.anthropic.claude-opus-4-20250514-v1:0",
-    "claude-sonnet-4-5-20250929": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "claude-3-7-sonnet-20250219": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "claude-3-5-haiku-20241022": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+@dataclass(frozen=True)
+class ModelEntry:
+    """A single allowed model entry.
+
+    `aliases` is the set of client-facing identifiers (Anthropic SDK names,
+    short codex-style names, raw Bedrock IDs) that map to this entry.
+    `bedrock_region` is the per-model AWS region — Claude family is in
+    us-east-1; OpenAI family lives in bedrock-mantle in us-east-2/us-west-2.
+    `wire_protocol` selects the route handler: `messages` → `mvp.anthropic`,
+    `responses` → `mvp.openai_responses`.
+    """
+
+    provider: Literal["anthropic", "openai"]
+    bedrock_model_id: str
+    bedrock_region: str
+    aliases: tuple[str, ...]
+    wire_protocol: Literal["messages", "responses"]
+
+
+# Source of truth. To add a model: append an entry, redeploy. There is no
+# runtime override; the registry is intentionally code-resident so reviewers
+# can audit every reachable model in the diff.
+_REGISTRY: tuple[ModelEntry, ...] = (
+    # ---- Anthropic / Claude family (us-east-1) ----
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-opus-4-7",
+        bedrock_region="us-east-1",
+        aliases=("claude-opus-4-7",),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-opus-4-6-v1",
+        bedrock_region="us-east-1",
+        aliases=("claude-opus-4-6",),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-opus-4-5-20251101-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-opus-4-5", "claude-opus-4-5-20251101"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-opus-4-1-20250805-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-opus-4-1", "claude-opus-4-1-20250805"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-opus-4-20250514-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-opus-4", "claude-opus-4-20250514"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-sonnet-4-6",
+        bedrock_region="us-east-1",
+        aliases=("claude-sonnet-4-6",),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-3-7-sonnet", "claude-3-7-sonnet-20250219"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-3-5-haiku", "claude-3-5-haiku-20241022"),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-3-haiku-20240307-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-3-haiku",),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-3-opus-20240229-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-3-opus",),
+        wire_protocol="messages",
+    ),
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-3-sonnet-20240229-v1:0",
+        bedrock_region="us-east-1",
+        aliases=("claude-3-sonnet",),
+        wire_protocol="messages",
+    ),
+    # ---- OpenAI family on Bedrock (bedrock-mantle, us-east-2 / us-west-2) ----
+    # GPT-5.4 is GA in us-east-2 and us-west-2. We default to us-east-2 because
+    # GPT-5.5 is currently us-east-2 only; keeping both in the same region
+    # simplifies cross-region failover stories.
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.4",
+        bedrock_region="us-east-2",
+        aliases=("gpt-5.4", "openai.gpt-5.4"),
+        wire_protocol="responses",
+    ),
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.5",
+        bedrock_region="us-east-2",
+        aliases=("gpt-5.5", "openai.gpt-5.5"),
+        wire_protocol="responses",
+    ),
+)
+
+
+_ALIAS_MAP: dict[str, ModelEntry] = {
+    alias: entry for entry in _REGISTRY for alias in entry.aliases
+}
+# Bedrock IDs are themselves valid client-facing identifiers (clients that
+# already speak Bedrock-native names). Allow them to round-trip through
+# resolve_model() but only for entries that exist in the registry.
+_BEDROCK_ID_MAP: dict[str, ModelEntry] = {
+    entry.bedrock_model_id: entry for entry in _REGISTRY
 }
 
 
-# Bedrock 側モデル ID の allowlist (Claude ファミリのみ).
-# `_MAPPING` の value に加え、環境変数 `DEFAULT_BEDROCK_MODEL` の値と
-# 既知の inference profile 接頭辞を含む "anthropic" を必須とする。
-#
-# なお Bedrock には Llama / Nova / Mistral 等 Anthropic 以外のモデルも存在するが、
-# 本プロキシは Claude 系専用であり、それ以外を指定されてもコスト計算・credit 消費
-# ロジックが前提としていないため allowlist 外として 400 を返す。
+def resolve_model(name: Optional[str]) -> ModelEntry:
+    """Resolve a client-facing model name to a `ModelEntry`.
+
+    Falls back to `DEFAULT_MODEL` when `name` is empty/None. Raises
+    `ValueError` for any name not in the allowlist; the route layer maps
+    that to HTTP 400.
+    """
+    if not name:
+        name = DEFAULT_MODEL
+    entry = _ALIAS_MAP.get(name) or _BEDROCK_ID_MAP.get(name)
+    if entry is None:
+        raise ValueError(
+            f"model '{name}' is not in the allowlist. "
+            "Supported models are listed in backend/mvp/models.py:_REGISTRY."
+        )
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility shims
+# ---------------------------------------------------------------------------
+# `mvp.anthropic` (line 50) imports `_MAPPING` and `resolve_bedrock_model`
+# at module top-level. Keep both working unchanged so that the model-registry
+# refactor lands as a pure additive change. New code should not import
+# `_MAPPING`; use `_REGISTRY` filtered by `provider == "anthropic"` instead.
+
+_MAPPING: dict[str, str] = {
+    alias: entry.bedrock_model_id
+    for entry in _REGISTRY
+    if entry.provider == "anthropic"
+    for alias in entry.aliases
+}
+
 _ALLOWED_BEDROCK_MODELS: frozenset[str] = frozenset(
     list(_MAPPING.values()) + [DEFAULT_MODEL]
 )
 
 
 def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
-    """Anthropic 形式のモデル名を Bedrock inference profile ID に変換.
+    """Legacy resolver: returns the Bedrock model ID for an Anthropic name.
 
-    - Anthropic 名 (`_MAPPING` の key) → 対応する Bedrock ID
-    - 既に Bedrock 形式の ID でも `_ALLOWED_BEDROCK_MODELS` に含まれるもののみ通す
-    - それ以外 (Llama / Nova / Mistral / 独自 region prefix) は ValueError で 400 を起こす
-
-    呼び出し側で ValueError を HTTPException(400) にマップすること。
+    Restricted to the Anthropic subset of the registry to preserve the
+    previous "Claude-only" guarantee for callers (e.g. `mvp.anthropic`).
+    OpenAI models route through `mvp.openai_responses` and resolve through
+    `resolve_model()` directly.
     """
     if not anthropic_model:
         return DEFAULT_MODEL
 
-    # Anthropic 形式 (alias) 経由
     mapped = _MAPPING.get(anthropic_model)
     if mapped is not None:
         return mapped
 
-    # Bedrock ID 直指定は allowlist 限定
     if anthropic_model in _ALLOWED_BEDROCK_MODELS:
         return anthropic_model
 
     raise ValueError(
         f"model '{anthropic_model}' is not allowed. "
-        f"Only Claude family models are supported by this proxy."
+        f"Only Claude family models are supported by the Anthropic Messages route."
     )

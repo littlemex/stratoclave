@@ -16,23 +16,24 @@ import { Construct } from 'constructs';
 /**
  * Stratoclave IaC entrypoint (Phase 2 v2.1)
  *
- * 構成:
- *   - Network (Public Subnet 2 AZ、NAT なし)
- *   - DynamoDB (10 テーブル、Tenants/Permissions を Phase 2 で追加)
+ * Topology:
+ *   - Network (Public Subnet, 2 AZ, no NAT)
+ *   - DynamoDB (10 tables; Tenants / Permissions added in Phase 2)
  *   - ECR
  *   - ALB (internet-facing, HTTP only)
  *   - Frontend (S3 + CloudFront + CloudFront Function SPA fallback)
- *   - Cognito User Pool (Frontend の CloudFront ドメインを cross-stack 参照)
- *   - ECS Fargate (Public Subnet 直置き)
- *   - BackendConfig (Parameter Store 固定値)
+ *   - Cognito User Pool (cross-stack references the Frontend domain)
+ *   - ECS Fargate (placed directly in the public subnet)
+ *   - BackendConfig (static Parameter Store values)
  *
- * 依存順序 (v2.1): network → dynamodb → ecr → alb → frontend → cognito → ecs → config
- *   Cognito の Callback URL に CloudFront ドメインを cross-stack で渡すため Frontend に依存。
- *   全スタックが同 us-east-1 のため crossRegionReferences は不要。
+ * Dependency order (v2.1): network → dynamodb → ecr → alb → frontend
+ *   → cognito → ecs → config. Cognito reads the CloudFront domain via
+ *   a cross-stack reference, hence the Frontend dependency. All stacks
+ *   live in us-east-1, so crossRegionReferences is not needed.
  *
- * 撤去したもの: RdsStack, RedisStack, WafStack, CodeBuildStack,
- *               FrontendCodeBuildStack, VerifiedPermissionsStack
- *               (iac/lib/_archived/ に退避保管)
+ * Retired stacks (kept under iac/lib/_archived/): RdsStack, RedisStack,
+ *   WafStack (now re-introduced under a different layout), CodeBuildStack,
+ *   FrontendCodeBuildStack, VerifiedPermissionsStack.
  */
 
 const app = new cdk.App();
@@ -40,13 +41,14 @@ const prefix = getPrefix();
 
 const DEFAULT_REGION = 'us-east-1';
 
-// Blocker B2 (v2.1): CDK_DEFAULT_REGION=us-east-1 を強制
-// 全スタックを同一リージョンに揃え、crossRegionReferences を不要にする
+// Blocker B2 (v2.1): CDK_DEFAULT_REGION must be us-east-1.
+// All stacks live in one region so crossRegionReferences is not needed
+// for the Cognito Hosted UI ↔ Frontend cross-stack reference.
 const cdkRegion = process.env.CDK_DEFAULT_REGION || DEFAULT_REGION;
 if (cdkRegion !== DEFAULT_REGION) {
   throw new Error(
     `CDK_DEFAULT_REGION must be "${DEFAULT_REGION}" for Stratoclave (got "${cdkRegion}"). ` +
-      `Cognito Hosted UI と他スタック間の cross-stack 参照を成立させるため同一リージョン必須。`
+      `Cognito Hosted UI / cross-stack references require all stacks to live in one region.`
   );
 }
 
@@ -253,9 +255,20 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DEFAULT_ORG_ID: 'default-org',
     DEFAULT_TENANT_CREDIT: '100000',
 
-    // Bedrock
+    // Bedrock (Anthropic / Claude)
     BEDROCK_REGION: env.region,
     DEFAULT_BEDROCK_MODEL: defaultBedrockModel,
+
+    // OpenAI (codex / GPT-5.x) on Amazon Bedrock — bedrock-mantle endpoint.
+    // GPT-5.4 / GPT-5.5 are GA only in us-east-2 and us-west-2 today; the
+    // route handler in mvp/openai_responses.py picks the per-model region
+    // out of the model registry, so this list is purely a hint surfaced
+    // to the CLI through /.well-known/stratoclave-config.
+    CODEX_ENABLED: process.env.CODEX_ENABLED || 'true',
+    DEFAULT_CODEX_MODEL: process.env.DEFAULT_CODEX_MODEL || 'openai.gpt-5.4',
+    OPENAI_BEDROCK_REGIONS:
+      process.env.OPENAI_BEDROCK_REGIONS || 'us-east-2,us-west-2',
+    OPENAI_BASE_PATH: process.env.OPENAI_BASE_PATH || '/openai/v1',
   },
   secrets: {},
   // P1-C: shell-into-task is opt-in (false in production by default).

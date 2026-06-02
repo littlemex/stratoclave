@@ -1,18 +1,24 @@
-//! `stratoclave setup <api_endpoint>` サブコマンド.
+//! `stratoclave setup <api_endpoint>` subcommand.
 //!
-//! OSS 版の CLI 利用者が初回 bootstrap する唯一の経路。
-//! 指定された API エンドポイント (Admin から共有された CloudFront URL) に対して
-//! `GET /.well-known/stratoclave-config` を叩き、レスポンス JSON を
-//! `~/.stratoclave/config.toml` として書き出す。
+//! Single bootstrap entry point for the OSS CLI. Hits the
+//! `GET /.well-known/stratoclave-config` of the supplied URL (the
+//! CloudFront origin shared by an admin) and writes the response into
+//! `~/.stratoclave/config.toml`.
 //!
-//! フロー:
-//!   1. URL を validate (http/https scheme、URL parse 可能)
-//!   2. `{api_endpoint}/.well-known/stratoclave-config` を取得 (timeout 10s)
-//!   3. schema_version == "1" を検証
-//!   4. 既存 config.toml の存在確認 → --force または対話確認
-//!   5. --dry-run なら stdout に出力して終了
-//!   6. 既存 config.toml を config.toml.bak.<timestamp> にバックアップ
-//!   7. 新しい config.toml を書き込み、サマリを表示
+//! Flow:
+//!   1. validate the URL (http/https only, no userinfo, SSRF denylist)
+//!   2. fetch `{api_endpoint}/.well-known/stratoclave-config` (10 s timeout)
+//!   3. enforce `schema_version == "1"`
+//!   4. detect an existing `config.toml` → require `--force` or prompt
+//!   5. on `--dry-run`, print the rendered TOML and exit
+//!   6. back up the prior file as `config.toml.bak.<unix-ts>`
+//!   7. write the new file (mode 0o600) and print a summary
+//!
+//! With `--codex`, additionally backs up `~/.codex/config.toml` and
+//! appends a `[model_providers.stratoclave]` block so the system-wide
+//! `codex` binary can talk to this deployment without going through
+//! `stratoclave codex`. Top-level `model_provider` is only changed
+//! after an interactive prompt.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -21,7 +27,11 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// `.well-known/stratoclave-config` のレスポンススキーマ.
+/// Response schema for `GET /.well-known/stratoclave-config`.
+///
+/// `cli.codex` is `Option<CodexHints>` so old CLI binaries that hit a
+/// new backend (or new CLI binaries that hit an old backend without
+/// `CODEX_ENABLED`) deserialize cleanly.
 #[derive(Debug, Deserialize)]
 struct StratoclaveConfig {
     schema_version: String,
@@ -39,17 +49,32 @@ struct CognitoInfo {
 }
 
 #[derive(Debug, Deserialize)]
+struct CodexHints {
+    default_model: String,
+    openai_base_path: String,
+    #[allow(dead_code)]
+    supported_regions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CliHints {
     default_model: String,
     callback_port: u16,
+    #[serde(default)]
+    codex: Option<CodexHints>,
 }
 
-/// `stratoclave setup <api_endpoint>` エントリーポイント.
-pub async fn run(api_endpoint: String, force: bool, dry_run: bool) -> Result<()> {
-    // 1. URL を validate
+/// `stratoclave setup <api_endpoint>` entry point.
+pub async fn run(
+    api_endpoint: String,
+    force: bool,
+    dry_run: bool,
+    codex: bool,
+) -> Result<()> {
+    // 1. Validate the URL.
     let api_endpoint = validate_url(&api_endpoint)?;
 
-    // 2. {api_endpoint}/.well-known/stratoclave-config を取得
+    // 2. Fetch the discovery document.
     let discovery_url = format!(
         "{}/.well-known/stratoclave-config",
         api_endpoint.trim_end_matches('/')
@@ -58,7 +83,7 @@ pub async fn run(api_endpoint: String, force: bool, dry_run: bool) -> Result<()>
 
     let config = fetch_config(&discovery_url).await?;
 
-    // 3. schema_version 検証
+    // 3. Lock to schema_version "1".
     if config.schema_version != "1" {
         bail!(
             "This CLI expects schema_version=1 but received {:?}. \
@@ -67,14 +92,14 @@ pub async fn run(api_endpoint: String, force: bool, dry_run: bool) -> Result<()>
         );
     }
 
-    // 4. 書き込み先パスを決定
+    // 4. Resolve the destination path.
     let config_dir = resolve_config_dir()?;
     let config_path = config_dir.join("config.toml");
 
-    // 5. TOML 文字列を生成
+    // 5. Render the new TOML.
     let toml_content = render_toml(&config);
 
-    // 6. --dry-run なら stdout に出力して終了
+    // 6. --dry-run prints the rendered TOML and exits.
     if dry_run {
         println!("[INFO] --dry-run: not writing to {}", config_path.display());
         println!("---");
@@ -83,10 +108,23 @@ pub async fn run(api_endpoint: String, force: bool, dry_run: bool) -> Result<()>
             println!();
         }
         println!("---");
+        if codex {
+            if let Some(codex_hints) = &config.cli.codex {
+                println!("[INFO] --dry-run: would also patch ~/.codex/config.toml");
+                println!("---");
+                print!("{}", render_codex_toml_block(&api_endpoint, codex_hints));
+                println!("---");
+            } else {
+                println!(
+                    "[WARN] --codex requested but the deployment does not advertise \
+                     codex support; ~/.codex/config.toml would be left unchanged."
+                );
+            }
+        }
         return Ok(());
     }
 
-    // 7. 既存 config.toml の確認
+    // 7. Existing config.toml — confirm before clobbering.
     if config_path.exists() {
         if !force {
             if !is_stdin_tty() {
@@ -100,19 +138,19 @@ pub async fn run(api_endpoint: String, force: bool, dry_run: bool) -> Result<()>
                 return Ok(());
             }
         }
-        // 既存ファイルをバックアップ
+        // Move the prior file aside before writing the new one.
         let backup = backup_existing(&config_path)?;
         println!("[INFO] Backed up existing config to {}", backup.display());
     }
 
-    // 8. ディレクトリを準備 (mode 0o700)
+    // 8. Prepare the config directory (mode 0o700 on Unix).
     ensure_config_dir(&config_dir)?;
 
-    // 9. config.toml を書き込み
+    // 9. Write the new config.toml.
     fs::write(&config_path, &toml_content)
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
 
-    // 10. パーミッションを 0o600 に設定 (Unix のみ)
+    // 10. Set 0o600 on Unix.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -120,8 +158,24 @@ pub async fn run(api_endpoint: String, force: bool, dry_run: bool) -> Result<()>
         let _ = fs::set_permissions(&config_path, perms);
     }
 
-    // 11. サマリを表示
+    // 11. Print a summary.
     print_summary(&config_path, &config);
+
+    // 12. Optional: patch ~/.codex/config.toml.
+    if codex {
+        match &config.cli.codex {
+            Some(codex_hints) => {
+                patch_codex_config(&api_endpoint, codex_hints, force)?;
+            }
+            None => {
+                println!(
+                    "[WARN] --codex requested but the deployment does not advertise \
+                     codex support (well-known did not include cli.codex). \
+                     Leaving ~/.codex/config.toml unchanged."
+                );
+            }
+        }
+    }
 
     Ok(())
 }
@@ -239,7 +293,7 @@ fn validate_url(raw: &str) -> Result<String> {
         );
     }
 
-    // よくある typo: /v1 付き
+    // Common typo: trailing /v1.
     let path = parsed.path().trim_end_matches('/');
     if path.ends_with("/v1") {
         bail!(
@@ -249,7 +303,7 @@ fn validate_url(raw: &str) -> Result<String> {
         );
     }
 
-    // 末尾の / は除去して返す
+    // Strip trailing slash before returning.
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
@@ -331,7 +385,7 @@ async fn fetch_config(url: &str) -> Result<StratoclaveConfig> {
 
 fn render_toml(cfg: &StratoclaveConfig) -> String {
     let timestamp = now_iso8601();
-    format!(
+    let mut out = format!(
         "# Stratoclave CLI configuration\n\
          # Generated by `stratoclave setup` on {timestamp}\n\
          # Do not commit this file to version control.\n\
@@ -348,17 +402,7 @@ fn render_toml(cfg: &StratoclaveConfig) -> String {
          user_pool_id = \"{user_pool_id}\"\n\
          \n\
          [defaults]\n\
-         model = \"{default_model}\"\n\
-         \n\
-         [callback]\n\
-         host = \"127.0.0.1\"\n\
-         port = {callback_port}\n\
-         \n\
-         [timeouts]\n\
-         http_total = 10\n\
-         connection = 5\n\
-         sse_chunk = 20\n\
-         auth_callback = 300\n",
+         model = \"{default_model}\"\n",
         timestamp = timestamp,
         api_endpoint = cfg.api_endpoint,
         client_id = cfg.cognito.client_id,
@@ -366,24 +410,42 @@ fn render_toml(cfg: &StratoclaveConfig) -> String {
         region = cfg.cognito.region,
         user_pool_id = cfg.cognito.user_pool_id,
         default_model = cfg.cli.default_model,
+    );
+
+    // Include codex defaults when the deployment advertises them, so a
+    // freshly-bootstrapped CLI can run `stratoclave codex` without any
+    // additional configuration.
+    if let Some(codex) = &cfg.cli.codex {
+        out.push_str(&format!(
+            "codex_model = \"{}\"\n\n[codex]\nopenai_base_path = \"{}\"\n",
+            codex.default_model, codex.openai_base_path,
+        ));
+    } else {
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "[callback]\nhost = \"127.0.0.1\"\nport = {callback_port}\n\n\
+         [timeouts]\nhttp_total = 10\nconnection = 5\nsse_chunk = 20\nauth_callback = 300\n",
         callback_port = cfg.cli.callback_port,
-    )
+    ));
+
+    out
 }
 
 fn now_iso8601() -> String {
-    // chrono を入れたくないので簡易 ISO 8601 (UTC) を手組み
+    // Hand-rolled ISO 8601 (UTC) to avoid pulling in chrono.
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     let secs = dur.as_secs() as i64;
-    // 簡易 datetime: 単に epoch 秒を出す代わりに、date -u っぽく。
-    // コード内で外部コマンドは使えないので epoch 秒をフォールバックとして出す。
-    // より良い表現のために以下の小さな変換を実装する。
     format_epoch_utc(secs)
 }
 
-/// epoch 秒を "YYYY-MM-DDTHH:MM:SSZ" (UTC) に変換する簡易実装.
-/// chrono を追加しないために手書きしている。1970 年 1 月 1 日 UTC を基準とする。
+/// Format a Unix epoch in seconds as "YYYY-MM-DDTHH:MM:SSZ" (UTC).
+/// Hand-implemented so we don't need to add chrono just for the
+/// generated-on header in the bootstrap config. Anchored at
+/// 1970-01-01T00:00:00Z.
 fn format_epoch_utc(secs: i64) -> String {
     if secs < 0 {
         return "1970-01-01T00:00:00Z".to_string();
@@ -396,7 +458,7 @@ fn format_epoch_utc(secs: i64) -> String {
     let min = (sec_of_day % 3600) / 60;
     let sec = sec_of_day % 60;
 
-    // 1970-01-01 からの日数を Y-M-D に変換
+    // Convert "days since 1970-01-01" into Y-M-D.
     let mut year: i64 = 1970;
     loop {
         let year_days = if is_leap(year) { 366 } else { 365 };
@@ -516,6 +578,259 @@ fn print_summary(path: &PathBuf, cfg: &StratoclaveConfig) {
 }
 
 // ------------------------------------------------------------------
+// ~/.codex/config.toml patcher (--codex)
+// ------------------------------------------------------------------
+
+const CODEX_BLOCK_HEADER: &str = "[model_providers.stratoclave]";
+const CODEX_PROVIDER_NAME: &str = "stratoclave";
+
+fn render_codex_toml_block(api_endpoint: &str, codex: &CodexHints) -> String {
+    let base_url = format!(
+        "{}{}",
+        api_endpoint.trim_end_matches('/'),
+        codex.openai_base_path,
+    );
+    format!(
+        "# Added by `stratoclave setup --codex`\n\
+         {header}\n\
+         name                   = \"Stratoclave (OpenAI via Bedrock)\"\n\
+         base_url               = \"{base_url}\"\n\
+         wire_api               = \"responses\"\n\
+         env_key                = \"STRATOCLAVE_OPENAI_KEY\"\n\
+         request_max_retries    = 3\n\
+         stream_max_retries     = 5\n\
+         stream_idle_timeout_ms = 600000\n\
+         supports_websockets    = false\n",
+        header = CODEX_BLOCK_HEADER,
+        base_url = base_url,
+    )
+}
+
+fn resolve_codex_config_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("CODEX_HOME") {
+        return Ok(PathBuf::from(dir));
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".codex"))
+        .ok_or_else(|| anyhow!("Could not resolve home directory for ~/.codex"))
+}
+
+/// Append the `[model_providers.stratoclave]` block to `~/.codex/config.toml`.
+///
+/// - If the file does not exist, write it with just the block.
+/// - If the block already exists (string match on the header), no-op
+///   (operator can hand-edit; we never silently rewrite their settings).
+/// - If `model_provider` is set to something other than "stratoclave",
+///   prompt the user before changing it (or skip when not a TTY).
+fn patch_codex_config(
+    api_endpoint: &str,
+    codex: &CodexHints,
+    force: bool,
+) -> Result<()> {
+    let codex_dir = resolve_codex_config_dir()?;
+    let codex_path = codex_dir.join("config.toml");
+
+    if !codex_dir.exists() {
+        fs::create_dir_all(&codex_dir).with_context(|| {
+            format!("Failed to create codex config dir {}", codex_dir.display())
+        })?;
+    }
+
+    let block = render_codex_toml_block(api_endpoint, codex);
+
+    if !codex_path.exists() {
+        fs::write(&codex_path, &block).with_context(|| {
+            format!("Failed to write {}", codex_path.display())
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o600);
+            let _ = fs::set_permissions(&codex_path, perms);
+        }
+        println!(
+            "[INFO] Wrote {} with stratoclave provider block.",
+            codex_path.display()
+        );
+        return Ok(());
+    }
+
+    let original = fs::read_to_string(&codex_path)
+        .with_context(|| format!("Failed to read {}", codex_path.display()))?;
+
+    // Always back up before any modification (force or not).
+    let backup = backup_existing_codex(&codex_path)?;
+    println!(
+        "[INFO] Backed up existing codex config to {}",
+        backup.display()
+    );
+
+    let mut updated = original.clone();
+    if updated.contains(CODEX_BLOCK_HEADER) {
+        println!(
+            "[INFO] {} already has a [model_providers.stratoclave] block; \
+             leaving it as-is.",
+            codex_path.display()
+        );
+    } else {
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push('\n');
+        updated.push_str(&block);
+        println!(
+            "[INFO] Appended [model_providers.stratoclave] block to {}.",
+            codex_path.display()
+        );
+    }
+
+    let current_provider = read_top_level_string(&updated, "model_provider");
+    let want_change = match current_provider.as_deref() {
+        Some(CODEX_PROVIDER_NAME) => false,
+        _ => true,
+    };
+    if want_change {
+        let proceed = if force {
+            true
+        } else if !is_stdin_tty() {
+            // Non-interactive without --force: leave the existing
+            // top-level provider alone. The new block is still appended
+            // so users can opt in by editing model_provider themselves.
+            println!(
+                "[INFO] Existing top-level `model_provider` is {:?}; \
+                 leaving unchanged (re-run with --force or interactively to switch).",
+                current_provider.as_deref().unwrap_or("(unset)")
+            );
+            false
+        } else {
+            prompt_codex_provider_switch(current_provider.as_deref())?
+        };
+        if proceed {
+            updated = upsert_top_level_string(&updated, "model_provider", CODEX_PROVIDER_NAME);
+            println!(
+                "[INFO] Set top-level model_provider = \"{}\".",
+                CODEX_PROVIDER_NAME
+            );
+        }
+    }
+
+    if updated != original {
+        fs::write(&codex_path, &updated).with_context(|| {
+            format!("Failed to write {}", codex_path.display())
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o600);
+            let _ = fs::set_permissions(&codex_path, perms);
+        }
+    }
+
+    Ok(())
+}
+
+fn backup_existing_codex(path: &PathBuf) -> Result<PathBuf> {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let parent = path.parent().ok_or_else(|| anyhow!("no parent dir"))?;
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config.toml");
+    let backup = parent.join(format!("{}.bak.{}", filename, ts));
+    fs::copy(path, &backup).with_context(|| {
+        format!("Failed to copy existing codex config to {}", backup.display())
+    })?;
+    Ok(backup)
+}
+
+fn prompt_codex_provider_switch(current: Option<&str>) -> Result<bool> {
+    eprint!(
+        "Set top-level `model_provider = \"stratoclave\"` in ~/.codex/config.toml? \
+         Current value: {} [y/N] ",
+        current.unwrap_or("(unset)")
+    );
+    io::stderr().flush().ok();
+    let mut buf = String::new();
+    io::stdin()
+        .read_line(&mut buf)
+        .context("Failed to read confirmation from stdin")?;
+    let answer = buf.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// Read the value of a top-level string assignment such as
+/// `model_provider = "openai"`. Only inspects lines outside any `[table]`
+/// section, so an inner `model_provider` under a sub-table is ignored.
+fn read_top_level_string(text: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            continue;
+        }
+        if let Some((lhs, rhs)) = line.split_once('=') {
+            if lhs.trim() == key {
+                let v = rhs.trim();
+                let v = v.trim_matches('"');
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Insert or replace a top-level string assignment. Adds the line at
+/// the very top of the file if missing.
+fn upsert_top_level_string(text: &str, key: &str, value: &str) -> String {
+    let replacement = format!("{} = \"{}\"", key, value);
+    let mut in_section = false;
+    let mut wrote = false;
+    let mut out = String::with_capacity(text.len() + replacement.len() + 1);
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with('[') && trimmed.contains(']') {
+            in_section = true;
+            out.push_str(raw);
+            out.push('\n');
+            continue;
+        }
+        let mut wrote_here = false;
+        if !in_section && !wrote {
+            if let Some((lhs, _)) = trimmed.split_once('=') {
+                if lhs.trim() == key {
+                    out.push_str(&replacement);
+                    out.push('\n');
+                    wrote = true;
+                    wrote_here = true;
+                }
+            }
+        }
+        if !wrote_here {
+            out.push_str(raw);
+            out.push('\n');
+        }
+    }
+    if !wrote {
+        let mut prefixed = String::with_capacity(out.len() + replacement.len() + 1);
+        prefixed.push_str(&replacement);
+        prefixed.push('\n');
+        prefixed.push_str(&out);
+        return prefixed;
+    }
+    out
+}
+
+// ------------------------------------------------------------------
 // Tests
 // ------------------------------------------------------------------
 
@@ -586,6 +901,7 @@ mod tests {
             cli: CliHints {
                 default_model: "us.anthropic.claude-opus-4-7".into(),
                 callback_port: 18080,
+                codex: None,
             },
         };
         let out = render_toml(&cfg);
@@ -618,6 +934,7 @@ mod tests {
             cli: CliHints {
                 default_model: "us.anthropic.claude-opus-4-7".into(),
                 callback_port: 18080,
+                codex: None,
             },
         };
         let out = render_toml(&cfg);
@@ -628,6 +945,97 @@ mod tests {
         );
         assert_eq!(parsed["auth"]["client_id"].as_str(), Some("clientid"));
         assert_eq!(parsed["callback"]["port"].as_integer(), Some(18080));
+    }
+
+    #[test]
+    fn test_render_toml_includes_codex_section_when_present() {
+        let cfg = StratoclaveConfig {
+            schema_version: "1".into(),
+            api_endpoint: "https://example.com".into(),
+            cognito: CognitoInfo {
+                user_pool_id: "us-east-1_ABC".into(),
+                client_id: "clientid".into(),
+                domain: "https://d.auth.us-east-1.amazoncognito.com".into(),
+                region: "us-east-1".into(),
+            },
+            cli: CliHints {
+                default_model: "us.anthropic.claude-opus-4-7".into(),
+                callback_port: 18080,
+                codex: Some(CodexHints {
+                    default_model: "openai.gpt-5.4".into(),
+                    openai_base_path: "/openai/v1".into(),
+                    supported_regions: vec!["us-east-2".into(), "us-west-2".into()],
+                }),
+            },
+        };
+        let out = render_toml(&cfg);
+        let parsed: toml::Value =
+            toml::from_str(&out).expect("rendered TOML with codex should parse");
+        assert_eq!(
+            parsed["defaults"]["codex_model"].as_str(),
+            Some("openai.gpt-5.4")
+        );
+        assert_eq!(
+            parsed["codex"]["openai_base_path"].as_str(),
+            Some("/openai/v1")
+        );
+    }
+
+    #[test]
+    fn test_render_codex_block_uses_base_url() {
+        let codex = CodexHints {
+            default_model: "openai.gpt-5.4".into(),
+            openai_base_path: "/openai/v1".into(),
+            supported_regions: vec!["us-east-2".into()],
+        };
+        let block = render_codex_toml_block("https://example.cloudfront.net", &codex);
+        assert!(block.contains("[model_providers.stratoclave]"));
+        assert!(block.contains("base_url               = \"https://example.cloudfront.net/openai/v1\""));
+        assert!(block.contains("wire_api               = \"responses\""));
+        assert!(block.contains("env_key                = \"STRATOCLAVE_OPENAI_KEY\""));
+    }
+
+    #[test]
+    fn test_upsert_top_level_string_inserts_when_missing() {
+        let original = "[foo]\nx = 1\n";
+        let out = upsert_top_level_string(original, "model_provider", "stratoclave");
+        // Inserted at the top so the key is outside any section.
+        assert!(out.starts_with("model_provider = \"stratoclave\"\n"));
+        assert!(out.contains("[foo]\nx = 1\n"));
+    }
+
+    #[test]
+    fn test_upsert_top_level_string_replaces_existing() {
+        let original = "model_provider = \"openai\"\n[foo]\nx = 1\n";
+        let out = upsert_top_level_string(original, "model_provider", "stratoclave");
+        assert!(out.contains("model_provider = \"stratoclave\""));
+        assert!(!out.contains("model_provider = \"openai\""));
+    }
+
+    #[test]
+    fn test_upsert_does_not_replace_keys_inside_sections() {
+        // `model_provider` here lives inside [foo]; the helper must not
+        // touch it (only top-level keys are upserted).
+        let original = "[foo]\nmodel_provider = \"openai\"\n";
+        let out = upsert_top_level_string(original, "model_provider", "stratoclave");
+        // A new top-level line is prepended; the inner one stays.
+        assert!(out.starts_with("model_provider = \"stratoclave\"\n"));
+        assert!(out.contains("[foo]\nmodel_provider = \"openai\"\n"));
+    }
+
+    #[test]
+    fn test_read_top_level_string_skips_section_keys() {
+        let toml = "[foo]\nmodel_provider = \"openai\"\n";
+        assert_eq!(read_top_level_string(toml, "model_provider"), None);
+    }
+
+    #[test]
+    fn test_read_top_level_string_finds_top_level_key() {
+        let toml = "model_provider = \"openai\"\n[foo]\nbar = 1\n";
+        assert_eq!(
+            read_top_level_string(toml, "model_provider"),
+            Some("openai".to_string())
+        );
     }
 
     #[test]
