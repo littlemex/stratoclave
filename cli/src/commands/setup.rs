@@ -592,6 +592,11 @@ fn render_codex_toml_block(api_endpoint: &str, codex: &CodexHints) -> String {
     );
     format!(
         "# Added by `stratoclave setup --codex`\n\
+         # Bedrock's OpenAI Responses endpoint does not implement the\n\
+         # `web_search` tool today; codex must not send it as a tool\n\
+         # type or every request returns a 400 validation_error.\n\
+         web_search = \"disabled\"\n\
+         \n\
          {header}\n\
          name                   = \"Stratoclave (OpenAI via Bedrock)\"\n\
          base_url               = \"{base_url}\"\n\
@@ -599,8 +604,7 @@ fn render_codex_toml_block(api_endpoint: &str, codex: &CodexHints) -> String {
          env_key                = \"STRATOCLAVE_OPENAI_KEY\"\n\
          request_max_retries    = 3\n\
          stream_max_retries     = 5\n\
-         stream_idle_timeout_ms = 600000\n\
-         supports_websockets    = false\n",
+         stream_idle_timeout_ms = 600000\n",
         header = CODEX_BLOCK_HEADER,
         base_url = base_url,
     )
@@ -993,6 +997,10 @@ mod tests {
         assert!(block.contains("base_url               = \"https://example.cloudfront.net/openai/v1\""));
         assert!(block.contains("wire_api               = \"responses\""));
         assert!(block.contains("env_key                = \"STRATOCLAVE_OPENAI_KEY\""));
+        // web_search must be disabled — Bedrock OpenAI Responses does
+        // not implement that tool type and a default-on web_search
+        // turns every request into a 400.
+        assert!(block.contains("web_search = \"disabled\""));
     }
 
     #[test]

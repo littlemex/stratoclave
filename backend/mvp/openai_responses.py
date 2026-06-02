@@ -502,6 +502,18 @@ async def _stream_response(
                         # Read the body so the sanitizer has something to chew on.
                         body_text = (await resp.aread()).decode("utf-8", "replace")
                         sanitized = sanitize_exception_message(body_text[:500])
+                        # Server-side audit: also log the upstream status +
+                        # sanitized message so we can diagnose stream
+                        # failures from the backend logs (the SSE error
+                        # event reaches the client but their TUI usually
+                        # only surfaces "stream disconnected").
+                        logger.warning(
+                            "bedrock_mantle_stream_4xx_5xx",
+                            status_code=resp.status_code,
+                            region=entry.bedrock_region,
+                            model_id=entry.bedrock_model_id,
+                            message=sanitized,
+                        )
                         yield _sse_event(
                             "error",
                             {

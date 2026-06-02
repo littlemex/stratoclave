@@ -253,20 +253,23 @@ export class EcsStack extends cdk.Stack {
     );
 
     // The bearer-token mint action that `aws-bedrock-token-generator`
-    // performs in `mvp/openai_responses.py`. Same regional scope as
-    // CreateInference. If AWS rejects resource-level scoping on this
-    // action (similar to `bedrock:ListFoundationModels`), fall back to
-    // `resources: ['*']` and add an inline comment confirming the AWS
-    // constraint — never silently widen without that note.
+    // performs in `mvp/openai_responses.py`.
+    //
+    // Verified at deploy time (2026-06-02): bedrock-mantle does NOT
+    // accept resource-level conditions on `CallWithBearerToken`. A
+    // region-scoped ARN yields:
+    //   "User: ... is not authorized to perform: bedrock-mantle:CallWithBearerToken
+    //    on resource: * because no identity-based policy allows ..."
+    // `resources: ['*']` is therefore the documented AWS constraint,
+    // not a posture choice. If AWS later supports resource-level scoping
+    // (parity with bedrock:InvokeModel), tighten back to the project
+    // ARN list used by AllowOpenAIBedrockMantleInvoke above.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowBedrockMantleBearerTokenMint',
         effect: iam.Effect.ALLOW,
         actions: ['bedrock-mantle:CallWithBearerToken'],
-        resources: [
-          `arn:aws:bedrock-mantle:us-east-2:${account}:project/*`,
-          `arn:aws:bedrock-mantle:us-west-2:${account}:project/*`,
-        ],
+        resources: ['*'],
       })
     );
 

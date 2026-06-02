@@ -145,13 +145,13 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         wire_protocol="messages",
     ),
     # ---- OpenAI family on Bedrock (bedrock-mantle, us-east-2 / us-west-2) ----
-    # GPT-5.4 is GA in us-east-2 and us-west-2. We default to us-east-2 because
-    # GPT-5.5 is currently us-east-2 only; keeping both in the same region
-    # simplifies cross-region failover stories.
+    # GPT-5.4 is GA in us-east-2 and us-west-2; verified working in us-west-2
+    # against the existing operator's codex config. GPT-5.5 is currently
+    # us-east-2 only.
     ModelEntry(
         provider="openai",
         bedrock_model_id="openai.gpt-5.4",
-        bedrock_region="us-east-2",
+        bedrock_region="us-west-2",
         aliases=("gpt-5.4", "openai.gpt-5.4"),
         wire_protocol="responses",
     ),
