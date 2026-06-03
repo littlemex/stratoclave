@@ -32,6 +32,7 @@ If you are deploying Stratoclave into your own AWS account, start with [DEPLOYME
   - An email address that an administrator has provisioned, together with a temporary password they have set via `aws cognito-idp admin-set-user-password`, **or**
   - An AWS profile with `aws sso login` already completed, for deployments that have your AWS account registered as a trusted identity source.
 - Optional: the `claude` binary (from [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)) on your `PATH` if you want to run `stratoclave claude`.
+- Optional: the `codex` binary (from [OpenAI Codex CLI](https://developers.openai.com/codex/)) on your `PATH` if you want to run `stratoclave codex`.
 
 ---
 
@@ -187,13 +188,18 @@ With a valid session in place, ask Claude anything:
 stratoclave claude -- "Hello, who are you?"
 ```
 
-Behind the scenes the CLI spawns `claude` as a subprocess and injects:
+Behind the scenes the CLI mints a 30-minute ephemeral
+`sk-stratoclave-*` key (scoped to `messages:send` only), spawns `claude`
+as a subprocess, and injects:
 
 | Environment variable | Value |
 |----------------------|-------|
 | `ANTHROPIC_BASE_URL` | Your Stratoclave endpoint. |
-| `ANTHROPIC_API_KEY` | The Cognito access token currently in `~/.stratoclave/mvp_tokens.json`. |
+| `ANTHROPIC_API_KEY` | The ephemeral `sk-stratoclave-*` key. The Cognito access token is **not** exported. |
 | `ANTHROPIC_MODEL` | `us.anthropic.claude-opus-4-7` by default, or whatever `--model` specifies. |
+
+The ephemeral key is revoked when the wrapper exits (the 30-min TTL is a
+safety net if revoke fails).
 
 Override the model per call:
 
@@ -206,6 +212,26 @@ Forward flags to `claude` after the `--` separator:
 ```bash
 stratoclave claude -- --print "List files"
 ```
+
+### Or, if you use OpenAI codex
+
+```bash
+stratoclave codex -- "Hello, who are you?"
+stratoclave codex --model openai.gpt-5.5 -- exec --skip-git-repo-check "Reply: PONG"
+```
+
+Same lifecycle as `claude` (ephemeral 30-min key, scrubbed env, auto
+revoke on exit), but with the `responses:send` scope and a temp
+`CODEX_HOME` whose `config.toml` targets `<endpoint>/openai/v1`. The
+user's persistent `~/.codex/config.toml` is not loaded.
+
+If you want the system-wide `codex` binary to route through Stratoclave
+without the wrapper (useful for editor integrations or persistent codex
+sessions), run `stratoclave setup <api_endpoint> --codex` once. That
+patches `~/.codex/config.toml` with a `[model_providers.stratoclave]`
+block and prompts before changing the top-level `model_provider`. Path B
+in [`CODEX_GUIDE.md`](./CODEX_GUIDE.md) covers the full flow including
+the long-lived key option for CI / remote agents.
 
 ### Using the Anthropic SDK directly
 

@@ -1,31 +1,38 @@
-"""Anthropic Messages API 互換エンドポイント.
+"""Anthropic Messages API compatibility endpoint.
 
 POST /v1/messages
-    Anthropic 形式のリクエストを受け取り、Bedrock Converse / ConverseStream を呼んで
-    Anthropic 形式のレスポンスを返す.
+    Accepts an Anthropic-shaped request, calls Bedrock
+    `converse` / `converse_stream`, and returns an Anthropic-shaped
+    response.
 
-ストリーミング (`stream: true`) の場合は Anthropic 形式の SSE を emit する:
-  event: message_start
-  data: {"type":"message_start", ...}
+When `stream: true`, emits Anthropic-style SSE events:
 
-  event: content_block_start
-  ...
+    event: message_start
+    data: {"type":"message_start", ...}
 
-  event: content_block_delta
-  data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"..."}}
+    event: content_block_start
+    ...
 
-  ...
+    event: content_block_delta
+    data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"..."}}
 
-  event: content_block_stop
-  event: message_delta
-  event: message_stop
+    ...
 
-Credit (pessimistic reservation):
-  - リクエスト受付時に max_tokens (+ 想定 input) を atomic に先取り (reserve)
-    → 残高不足なら即 402。並列 N 本でも TOCTOU なしで確実にブロック。
-  - Bedrock 呼び出し完了後、実消費 (input+output) との差額を refund で戻す。
-  - エラー時も finally で全額 refund (課金が発生していないため)。
-  - UsageLog は実消費が確定した時に 1 回だけ記録する。
+    event: content_block_stop
+    event: message_delta
+    event: message_stop
+
+Credit handling (pessimistic reservation):
+
+  - On request entry, atomically reserve `max_tokens + estimated_input`.
+    Insufficient balance returns 402 immediately; the conditional write
+    keeps N concurrent requests from racing past the budget.
+  - After Bedrock returns, refund the difference between reservation
+    and actual usage.
+  - On any error path, the `finally` clause refunds the full
+    reservation (Bedrock did not bill us).
+  - UsageLogs receives exactly one row per request, with the actual
+    usage (never the reservation).
 """
 from __future__ import annotations
 
@@ -35,19 +42,26 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.logging import get_logger
-from dynamo import UsageLogsRepository, UserTenantsRepository
+from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
+from ._bedrock_clients import bedrock_runtime_client
+from ._pipeline import reserve_credit, settle_reservation_and_log
 from .authz import require_permission
 from .deps import AuthenticatedUser, get_current_user
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
+
+# Backward-compatible aliases for tests that import the underscore-prefixed
+# functions from this module. New code should import directly from
+# `mvp._pipeline`.
+_reserve_credit = reserve_credit
+_settle_reservation_and_log = settle_reservation_and_log
 
 
 logger = get_logger(__name__)
@@ -55,14 +69,15 @@ router = APIRouter(tags=["mvp-anthropic"])
 
 
 # ---------------------------------------------------------------------------
-# /v1/models — Claude Desktop (cowork) / Claude Code の provider discovery 用
+# /v1/models — provider discovery for Claude Desktop (cowork) / Claude Code.
 # ---------------------------------------------------------------------------
-# Anthropic の /v1/models は以下の shape を返す:
+# Anthropic's `/v1/models` returns the shape:
 #   {"data": [{"id":"claude-opus-4-7","display_name":"Claude Opus 4.7","type":"model",
 #              "created_at":"2026-..."}], "has_more": false, "first_id":..., "last_id":...}
-# 本実装は MVP として minimum viable shape (id と type のみ) を返す.
-# Claude Desktop cowork は Gateway auth scheme=Bearer で probe してくるため、
-# 認証必須 (他ユーザーが Model list を覗ける問題を防ぐ).
+# The MVP returns the minimum viable shape (id + type only).
+# Claude Desktop cowork probes with `Authorization: Bearer ...`, so the
+# endpoint requires auth — otherwise unauthenticated callers could
+# enumerate the deployment's model list.
 @router.get("/v1/models")
 def list_models(
     # X-2 (2026-04 critical-sweep follow-up): `/v1/messages` and
@@ -94,7 +109,7 @@ def list_models(
     }
 
 
-# ===== Anthropic 互換 API のリクエスト/レスポンス =====
+# ===== Anthropic-compatible request / response models =====
 
 
 # C-H (2026-04 critical sweep): Pydantic hard caps. The body-size
@@ -207,12 +222,20 @@ class AnthropicMessagesRequest(BaseModel):
 
 
 def _bedrock_client():
+    """Resolve the Bedrock client for the Anthropic Messages route.
+
+    Claude family lives in `BEDROCK_REGION` (defaults to `us-east-1` per
+    `iac/bin/iac.ts`). Per-model regions are encoded in the model registry
+    but the Anthropic route here is single-region by design — the OpenAI
+    Responses route consults `client_for_model(entry)` directly when it
+    needs the bedrock-mantle endpoint in us-east-2/us-west-2.
+    """
     region = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION", "us-east-1")
-    return boto3.client("bedrock-runtime", region_name=region)
+    return bedrock_runtime_client(region)
 
 
 def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
-    """Anthropic 形式の content (str or list[dict]) を Bedrock Converse の content に変換."""
+    """Convert Anthropic-shaped content (str or list[dict]) into Bedrock Converse content."""
     if isinstance(content, str):
         return [{"text": content}]
     if isinstance(content, list):
@@ -224,10 +247,10 @@ def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
             if btype == "text":
                 out.append({"text": block.get("text", "")})
             elif btype == "image":
-                # MVP は画像非対応 (Claude Code は主にテキスト)。スキップする
+                # MVP does not support image input (Claude Code is text-mostly); skip.
                 continue
             else:
-                # その他の未知ブロックはテキスト化してスキップしない
+                # Unknown block types are text-stringified rather than skipped.
                 out.append({"text": json.dumps(block)})
         return out or [{"text": ""}]
     # fallback
@@ -284,20 +307,22 @@ def _build_bedrock_kwargs(
     return kwargs
 
 
-# ===== クレジット予約 =====
+# ===== Credit reservation =====
 
 
-# Reservation の最小値。1 リクエストあたり少なくともこの額を先取りする。
-# max_tokens だけだと output 側しかカバーできないため、input 分の余裕も含める。
+# Minimum reservation per request. We always pre-debit at least this much.
+# max_tokens alone only covers the output side, so we also reserve a
+# margin for input tokens.
 _MIN_RESERVATION_TOKENS = 1024
 
 
 def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
-    """Bedrock 呼び出し前に先取りする token 数を見積もる.
+    """Estimate how many tokens to pre-reserve before calling Bedrock.
 
-    Anthropic の max_tokens は output の上限だが、input_tokens も含めて課金される。
-    input の厳密な tokenization は行わず、シンプルに文字数ベースで粗見積もり
-    (BPE ではないため概算; refund で差額は戻るので過大見積もりでも問題ない)。
+    Anthropic's `max_tokens` caps output, but input tokens are billed
+    too. We do not tokenize precisely (no BPE) — a simple char-count
+    heuristic is enough because the refund step reconciles any over- or
+    under-estimate against the actual Bedrock-reported usage.
     """
     char_count = 0
     for msg in body.messages:
@@ -319,45 +344,19 @@ def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
                 if isinstance(text, str):
                     char_count += len(text)
 
-    # ざっくり 3 文字 = 1 token (日英混在の保守見積もり)。
+    # Rough heuristic: 3 chars per token (conservative for mixed JP/EN text).
     input_estimate = max(char_count // 3, 0)
     reservation = body.max_tokens + input_estimate
     return max(reservation, _MIN_RESERVATION_TOKENS)
 
 
-def _reserve_credit(
-    user: AuthenticatedUser, reservation_tokens: int
-) -> UserTenantsRepository:
-    """リクエスト処理の入口で reservation_tokens 分を atomic に確保.
-
-    残高不足なら 402 Payment Required を返す (Anthropic API の credit_exhausted 相当)。
-    """
-    repo = UserTenantsRepository()
-    repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
-    try:
-        repo.reserve(
-            user_id=user.user_id,
-            tenant_id=user.org_id,
-            tokens=reservation_tokens,
-        )
-    except CreditExhaustedError:
-        remaining = repo.remaining_credit(user.user_id, user.org_id)
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "type": "credit_exhausted",
-                "message": (
-                    "Insufficient credit balance for this request. "
-                    "Contact your admin."
-                ),
-                "remaining_credit": remaining,
-                "reservation_required": reservation_tokens,
-            },
-        )
-    return repo
+# Credit reservation and settlement live in `mvp._pipeline` and are
+# imported above as `reserve_credit` / `settle_reservation_and_log`.
+# The underscore-prefixed aliases at the top of this module preserve
+# backward compatibility for tests that import the private names.
 
 
-# ===== 非ストリーミング =====
+# ===== Non-streaming path =====
 
 
 @router.post("/v1/messages")
@@ -368,7 +367,7 @@ def messages(
     # rationale.
     user: AuthenticatedUser = Depends(require_permission("messages:send")),
 ):
-    # model allowlist を先にチェック (credit 予約の前に 400 で弾く)
+    # Allowlist check first; reject with 400 before reserving credit.
     try:
         model_id = resolve_bedrock_model(body.model)
     except ValueError as e:
@@ -395,7 +394,7 @@ def messages(
     try:
         resp = _bedrock_client().converse(**kwargs)
     except ClientError as e:
-        # Bedrock エラー時は課金が発生していないため全額 refund
+        # On a Bedrock error nothing was billed; refund the full reservation.
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
@@ -448,7 +447,7 @@ def messages(
     }
 
 
-# ===== ストリーミング =====
+# ===== Streaming =====
 
 
 async def _stream_messages(
@@ -458,10 +457,11 @@ async def _stream_messages(
     tenants_repo: UserTenantsRepository,
     reservation: int,
 ) -> AsyncGenerator[bytes, None]:
-    """ストリーミング経路.
+    """Streaming path.
 
-    入口で reservation 済みのため途中の credit 枯渇チェックは不要。
-    完了時 (正常 / 異常どちらも) に実消費で reservation を settle する。
+    Credit is reserved at entry, so no mid-stream balance check is
+    required. On completion (success or failure) we settle the
+    reservation against the actual usage.
     """
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
     input_tokens = 0
@@ -512,7 +512,7 @@ async def _stream_messages(
                     },
                 },
             )
-            # Bedrock 側は呼ばれていないため全額 refund
+            # Bedrock was never invoked; refund the full reservation.
             tenants_repo.refund(
                 user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
             )
@@ -554,7 +554,7 @@ async def _stream_messages(
                     },
                 },
             )
-            # 途中までトークンが確定している場合はその分だけ settle、残りは refund
+            # Partial usage has already been observed; settle that and refund the rest.
             _settle_reservation_and_log(
                 user=user,
                 tenants_repo=tenants_repo,
@@ -574,7 +574,7 @@ async def _stream_messages(
 
         stop_reason = _map_stop_reason(stop_reason_bedrock or "end_turn")
 
-        # 4. message_delta (usage と stop_reason を含める)
+        # 4. message_delta (carries usage and stop_reason)
         yield _sse_event(
             "message_delta",
             {
@@ -590,7 +590,7 @@ async def _stream_messages(
         # 5. message_stop
         yield _sse_event("message_stop", {"type": "message_stop"})
 
-        # 6. 実消費で reservation を settle
+        # 6. Settle the reservation against actual usage.
         _settle_reservation_and_log(
             user=user,
             tenants_repo=tenants_repo,
@@ -601,8 +601,8 @@ async def _stream_messages(
         )
         settled = True
     finally:
-        # クライアント切断等で途中で generator が閉じられた場合の保険。
-        # 未 settle のままだと reservation がリークするので、実消費 (0 でも可) で必ず決算する。
+        # Defensive: if the client disconnected mid-stream, settle now
+        # so the reservation does not leak. Settling with zero is fine.
         if not settled:
             _settle_reservation_and_log(
                 user=user,
@@ -620,7 +620,7 @@ def _sse_event(event: str, data: dict[str, Any]) -> bytes:
 
 
 def _map_stop_reason(bedrock_reason: str) -> str:
-    """Bedrock → Anthropic の stop_reason マッピング."""
+    """Map Bedrock stop reasons to Anthropic ones."""
     mapping = {
         "end_turn": "end_turn",
         "max_tokens": "max_tokens",
@@ -631,80 +631,6 @@ def _map_stop_reason(bedrock_reason: str) -> str:
     return mapping.get(bedrock_reason, "end_turn")
 
 
-def _settle_reservation_and_log(
-    *,
-    user: AuthenticatedUser,
-    tenants_repo: UserTenantsRepository,
-    reservation: int,
-    actual_input_tokens: int,
-    actual_output_tokens: int,
-    model_id: str,
-) -> None:
-    """Reservation と実消費の差額を決算し、UsageLog を記録する.
-
-    - actual <= reservation なら diff 分を refund。
-    - actual > reservation なら reservation 超過分を追加で reserve する
-      (通常は max_tokens + input 見積もりで余裕を持たせているため起きにくい)。
-    - UsageLog は 1 リクエストあたり必ず 1 件記録する (append-only 監査証跡)。
-
-    ここに silent pass は置かない。例外は呼び出し側に伝播させる。
-    """
-    actual = max(actual_input_tokens + actual_output_tokens, 0)
-    diff = reservation - actual
-    if diff > 0:
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=diff
-        )
-    elif diff < 0:
-        # 超過分をベストエフォートで追加確保。残高不足でも既に Bedrock 呼び出しは完了しており
-        # UsageLog は記録する必要があるため、ここでは HTTPException にせず監査ログに残す。
-        # (確保失敗は次回リクエストで 402 になる。監査は UsageLogs + credit_overrun event。)
-        overrun = -diff
-        try:
-            tenants_repo.reserve(
-                user_id=user.user_id,
-                tenant_id=user.org_id,
-                tokens=overrun,
-            )
-        except CreditExhaustedError:
-            # 残高不足で追加確保できなかった場合は credit_used をクランプで total まで埋める。
-            # これで UsageLogs 合計と credit_used の乖離を最小化する。
-            item = tenants_repo.get(user.user_id, user.org_id)
-            clamped_gap = 0
-            uncovered = overrun
-            if item is not None:
-                total_credit = int(item.get("total_credit", 0))
-                used = int(item.get("credit_used", 0))
-                clamped_gap = max(total_credit - used, 0)
-                if clamped_gap > 0:
-                    try:
-                        tenants_repo.reserve(
-                            user_id=user.user_id,
-                            tenant_id=user.org_id,
-                            tokens=clamped_gap,
-                        )
-                        uncovered = overrun - clamped_gap
-                    except CreditExhaustedError:
-                        # 他の並列リクエストが同時に埋めて再度失敗、clamp 額はそのまま uncovered 扱い
-                        clamped_gap = 0
-            # 乖離監査イベント。reconciliation ジョブ / alert 対象。
-            logger.warning(
-                "credit_overrun",
-                user_id=user.user_id,
-                tenant_id=user.org_id,
-                model_id=model_id,
-                reservation=reservation,
-                actual=actual,
-                overrun=overrun,
-                clamped=clamped_gap,
-                uncovered=uncovered,
-            )
-
-    UsageLogsRepository().record(
-        tenant_id=user.org_id,
-        user_id=user.user_id,
-        user_email=user.email,
-        model_id=model_id,
-        input_tokens=actual_input_tokens,
-        output_tokens=actual_output_tokens,
-    )
+# `_settle_reservation_and_log` is the alias for `mvp._pipeline.settle_reservation_and_log`
+# declared near the top of this module. The implementation moved to
+# `mvp/_pipeline.py` so the OpenAI Responses route shares it byte-for-byte.

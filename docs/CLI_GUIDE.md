@@ -69,6 +69,7 @@ Commands:
     whoami                    Show the current session and credit summary.
     logout                    Clear local tokens.
   claude [-- args...]         Launch claude (Claude Code) through the Stratoclave proxy.
+  codex  [-- args...]         Launch codex (OpenAI codex CLI) through the Stratoclave proxy.
   ui open | url               Open the web console (or print the URL).
   usage
     show                      Your own usage summary and recent history.
@@ -324,15 +325,23 @@ stratoclave claude [--model MODEL_ID] -- [claude-args...]
 | `--model` | Override `ANTHROPIC_MODEL` for this invocation. |
 | `-- <args>` | Everything after `--` is passed to the `claude` binary verbatim. |
 
-The subprocess sees:
+Before spawning, the wrapper mints an ephemeral `sk-stratoclave-*` key
+limited to the `messages:send` scope (TTL 30 min, marked `ephemeral=true`
+so it does not count against the 5-active-key cap), and revokes it on
+exit. The subprocess sees:
 
 | Environment variable | Value |
 |----------------------|-------|
 | `ANTHROPIC_BASE_URL` | The configured Stratoclave endpoint. |
-| `ANTHROPIC_API_KEY` | The Cognito access token from `mvp_tokens.json`. |
+| `ANTHROPIC_API_KEY` | An ephemeral `sk-stratoclave-*` key with `messages:send` only. |
 | `ANTHROPIC_MODEL` | `--model` override, else `[defaults] model`, else `claude-opus-4-7`. |
 
-Stratoclave also unsets `CLAUDE_CODE_USE_BEDROCK` and `AWS_REGION` so Claude Code cannot accidentally bypass the proxy.
+The Cognito access token from `mvp_tokens.json` is **not** exported into
+the child. Stratoclave also unsets `CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION`,
+`AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_SESSION_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`, and
+`STRATOCLAVE_{ACCESS,ID,REFRESH}_TOKEN` so Claude Code cannot bypass the
+proxy or pivot back into the user's AWS / Cognito session.
 
 ### Examples
 
@@ -356,6 +365,68 @@ stratoclave claude -- --print "List files"
 | `claude-haiku-4-5` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 
 The effective list depends on which Bedrock inference profiles the deployment has permitted. Ask your administrator if a model you expect is missing.
+
+---
+
+## `codex`
+
+Launch the `codex` binary (from [OpenAI Codex CLI](https://developers.openai.com/codex/)) as a subprocess, with Stratoclave wiring pre-configured. This is the OpenAI counterpart of `stratoclave claude`.
+
+```bash
+stratoclave codex [--model MODEL_ID] -- [codex-args...]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--model` | Override the codex `model` for this invocation (e.g. `openai.gpt-5.5`). |
+| `-- <args>` | Everything after `--` is passed to the `codex` binary verbatim (e.g. `exec --skip-git-repo-check "..."`). |
+
+Before spawning, the wrapper mints an ephemeral `sk-stratoclave-*` key
+limited to the `responses:send` scope (TTL 30 min, marked `ephemeral=true`),
+creates a temporary directory, and writes a `config.toml` describing a
+`stratoclave` model provider that targets `<endpoint>/openai/v1`. The
+subprocess sees:
+
+| Environment variable | Value |
+|----------------------|-------|
+| `CODEX_HOME` | A temp dir whose `config.toml` points codex at Stratoclave. |
+| `STRATOCLAVE_OPENAI_KEY` | The ephemeral `sk-stratoclave-*` key (`responses:send` only). |
+
+The user's persistent `~/.codex/config.toml` is **not loaded** during this
+invocation; only the temp config is used. The Cognito access token, AWS
+profile / region / credentials, and `AWS_BEARER_TOKEN_BEDROCK` are
+explicitly scrubbed from the child environment so the codex agent — and
+anything it execs (MCP servers, tool subprocesses) — cannot pivot back
+into the user's AWS or Cognito session. On exit (success, failure, or
+Ctrl-C), the wrapper revokes the ephemeral key.
+
+### Examples
+
+```bash
+# Interactive TUI through Stratoclave
+stratoclave codex
+
+# One-shot prompt
+stratoclave codex -- exec --skip-git-repo-check "Reply: PONG"
+
+# Use GPT-5.5 instead of the default
+stratoclave codex --model openai.gpt-5.5 -- "Plan a refactor"
+```
+
+### Supported model IDs
+
+| CLI value         | Bedrock model     | Region    |
+|-------------------|-------------------|-----------|
+| `openai.gpt-5.4`  | `openai.gpt-5.4`  | us-west-2 |
+| `openai.gpt-5.5`  | `openai.gpt-5.5`  | us-east-2 |
+
+Aliases without the `openai.` prefix (`gpt-5.4`, `gpt-5.5`) are also
+accepted. The deployment's ECS task makes the cross-region HTTPS call to
+`bedrock-mantle.{region}.api.aws/openai/v1/responses`. To add a new model,
+append a `ModelEntry` to `backend/mvp/models.py` and redeploy.
+
+For the full setup walk-through (including the Path B long-lived key flow
+for CI / remote agents), see [`CODEX_GUIDE.md`](./CODEX_GUIDE.md).
 
 ---
 

@@ -19,7 +19,7 @@
       vertex="1" parent="1">
       <mxGeometry x="40" y="90" width="260" height="620" as="geometry"/>
     </mxCell>
-    <mxCell id="lane_backend" value="Backend — /v1/messages"
+    <mxCell id="lane_backend" value="Backend — /v1/messages or /openai/v1/responses (shared mvp/_pipeline.py)"
       style="rounded=1;fillColor=#E3F2FD;strokeColor=#0D47A1;strokeWidth=2;fontSize=13;fontStyle=1;align=center;verticalAlign=top;"
       vertex="1" parent="1">
       <mxGeometry x="340" y="90" width="400" height="620" as="geometry"/>
@@ -29,16 +29,16 @@
       vertex="1" parent="1">
       <mxGeometry x="780" y="90" width="340" height="620" as="geometry"/>
     </mxCell>
-    <mxCell id="lane_bedrock" value="Amazon Bedrock"
+    <mxCell id="lane_bedrock" value="Amazon Bedrock&#10;(converse) or bedrock-mantle&#10;(OpenAI Responses)"
       style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;fontSize=13;fontStyle=1;align=center;verticalAlign=top;"
       vertex="1" parent="1">
       <mxGeometry x="1160" y="90" width="280" height="620" as="geometry"/>
     </mxCell>
 
-    <mxCell id="c1" value="POST /v1/messages&#10;{ model, max_tokens, messages }"
+    <mxCell id="c1" value="POST /v1/messages&#10;or /openai/v1/responses&#10;{ model, max_tokens / max_output_tokens, ... }"
       style="rounded=1;fillColor=#FFFFFF;strokeColor=#E65100;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
       vertex="1" parent="1">
-      <mxGeometry x="55" y="130" width="230" height="50" as="geometry"/>
+      <mxGeometry x="55" y="125" width="230" height="60" as="geometry"/>
     </mxCell>
 
     <mxCell id="e1" value="1) HTTPS + access_token / API key"
@@ -49,10 +49,10 @@
       </mxGeometry>
     </mxCell>
 
-    <mxCell id="b1" value="Authenticate, authorize,&#10;and estimate reservation amount:&#10;R ≈ max_tokens + input_estimate"
+    <mxCell id="b1" value="Authenticate, authorize (messages:send / responses:send),&#10;and estimate reservation amount:&#10;Anthropic: R ≈ max_tokens + input_estimate&#10;OpenAI: R ≈ max_output_tokens × effort_multiplier (1× / 2× / 4× / 8×) + input_estimate; floor 8 192"
       style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
       vertex="1" parent="1">
-      <mxGeometry x="355" y="130" width="370" height="60" as="geometry"/>
+      <mxGeometry x="355" y="120" width="370" height="80" as="geometry"/>
     </mxCell>
 
     <mxCell id="e2" value="2) UpdateItem  UserTenants[user,tenant]&#10;SET credit = credit - :R&#10;ConditionExpression: credit >= :R"
@@ -77,10 +77,10 @@
       </mxGeometry>
     </mxCell>
 
-    <mxCell id="b2" value="resolve_bedrock_model(model)&#10;→ us.anthropic.claude-...&#10;call Bedrock converse / converseStream&#10;with task-role IAM"
+    <mxCell id="b2" value="resolve_model(name) → ModelEntry&#10;Anthropic: Bedrock converse / converseStream (us-east-1, IAM)&#10;OpenAI: httpx → bedrock-mantle.{region}.api.aws/openai/v1/responses&#10;(15-min bearer from aws-bedrock-token-generator, IAM-task-role)"
       style="rounded=1;fillColor=#FFFFFF;strokeColor=#0D47A1;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
       vertex="1" parent="1">
-      <mxGeometry x="355" y="310" width="370" height="70" as="geometry"/>
+      <mxGeometry x="355" y="305" width="370" height="80" as="geometry"/>
     </mxCell>
 
     <mxCell id="e4" value="4) invoke"
@@ -91,10 +91,10 @@
       </mxGeometry>
     </mxCell>
 
-    <mxCell id="k1" value="Bedrock returns usage:&#10;• input_tokens&#10;• output_tokens&#10;• stopReason"
+    <mxCell id="k1" value="Upstream returns usage:&#10;• input_tokens (or prompt_tokens)&#10;• output_tokens (incl. reasoning_tokens)&#10;• stop / completion signal"
       style="rounded=1;fillColor=#FFFFFF;strokeColor=#2E7D32;strokeWidth=1;fontSize=11;align=center;verticalAlign=middle;"
       vertex="1" parent="1">
-      <mxGeometry x="1175" y="320" width="250" height="70" as="geometry"/>
+      <mxGeometry x="1175" y="320" width="250" height="80" as="geometry"/>
     </mxCell>
 
     <mxCell id="e5" value="5) stream / response"
@@ -125,7 +125,7 @@
       <mxGeometry x="795" y="500" width="310" height="80" as="geometry"/>
     </mxCell>
 
-    <mxCell id="e7" value="7) Stratoclave response&#10;(Anthropic-compatible body)"
+    <mxCell id="e7" value="7) Stratoclave response&#10;(Anthropic-compatible or OpenAI-Responses-compatible body)"
       style="endArrow=classic;html=1;strokeColor=#212121;strokeWidth=2;fontSize=11;fontStyle=1;" edge="1" parent="1">
       <mxGeometry relative="1" as="geometry">
         <mxPoint x="350" y="620" as="sourcePoint"/>
@@ -139,7 +139,7 @@
       <mxGeometry x="55" y="600" width="230" height="70" as="geometry"/>
     </mxCell>
 
-    <mxCell id="takeaway" value="N concurrent requests that would exceed the quota cannot race: a conditional UpdateItem either commits or fails.  Under-spend is refunded; over-spend leaves credit negative and is visible to operators.  UsageLogs always reflect real Bedrock token counts."
+    <mxCell id="takeaway" value="One pipeline (mvp/_pipeline.py) covers both inference routes.  N concurrent requests that would exceed the quota cannot race: the conditional UpdateItem either commits or fails.  Under-spend is refunded; over-spend is best-effort re-reserved and surfaced as a credit_overrun audit event.  UsageLogs always reflect real upstream token counts (Bedrock or bedrock-mantle), never the reservation."
       style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;fontSize=13;fontStyle=1;fontColor=#1B5E20;align=center;verticalAlign=middle;"
       vertex="1" parent="1">
       <mxGeometry x="40" y="730" width="1400" height="60" as="geometry"/>

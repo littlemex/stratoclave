@@ -1,20 +1,22 @@
-//! Stratoclave CLI (Phase 2, clap derive 一本化).
+//! Stratoclave CLI (Phase 2, clap derive only).
 //!
-//! コマンドツリー:
+//! Command tree:
 //!   stratoclave
-//!   ├── auth { login | logout | whoami }
-//!   ├── claude [--model X] -- [claude-args]
-//!   ├── usage show [--since-days N] [--limit M]
+//!   ├── auth      { login | logout | whoami }
+//!   ├── claude    [--model X] -- [claude-args]
+//!   ├── codex     [--model X] -- [codex-args]
+//!   ├── usage     show [--since-days N] [--limit M]
 //!   ├── admin
-//!   │   ├── user { create | list | show | delete | assign-tenant | set-credit }
+//!   │   ├── user   { create | list | show | delete | assign-tenant | set-credit }
 //!   │   ├── tenant { create | list | show | delete | set-owner | members | usage }
-//!   │   └── usage show [--tenant T] [--user U] [--since X] [--until Y] [--limit N]
+//!   │   └── usage  show [--tenant T] [--user U] [--since X] [--until Y] [--limit N]
 //!   ├── team-lead
 //!   │   └── tenant { create | list | show | members | usage }
-//!   └── ui { open | url }
+//!   └── ui        { open | url }
 //!
-//! TTY でない stdin があり、かつ引数が無い場合はパイプモード (既存 commands::pipe)。
-//! 既存の手パース実装 (login-mvp など) は撤廃。
+//! Invoked with no arguments and a non-TTY stdin, the binary falls back
+//! to pipe mode (`commands::pipe`). The legacy hand-rolled subcommand
+//! parsers (`login-mvp` etc.) have been removed.
 
 mod auth;
 mod client;
@@ -57,6 +59,15 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Launch OpenAI codex via Stratoclave proxy
+    Codex {
+        /// Override model ID (e.g. openai.gpt-5.4)
+        #[arg(long)]
+        model: Option<String>,
+        /// Extra args passed to codex
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Self usage summary + recent history
     Usage {
         #[command(subcommand)]
@@ -96,6 +107,13 @@ enum Commands {
         /// Print resulting config.toml to stdout without writing
         #[arg(long)]
         dry_run: bool,
+
+        /// Also patch ~/.codex/config.toml with the [model_providers.stratoclave]
+        /// block so the system-wide `codex` binary points at this deployment.
+        /// Without this flag codex configuration is left untouched; the
+        /// `stratoclave codex` subcommand uses its own ephemeral config.
+        #[arg(long)]
+        codex: bool,
     },
 }
 
@@ -247,7 +265,7 @@ enum AdminTenantAction {
         /// team_lead user_id (Cognito sub) or "admin-owned"
         #[arg(long, conflicts_with = "team_lead_email")]
         team_lead: Option<String>,
-        /// email (CLI が admin/users list で sub に解決)
+        /// email (the CLI resolves it to a Cognito sub via `admin user list`)
         #[arg(long, conflicts_with = "team_lead")]
         team_lead_email: Option<String>,
         #[arg(long)]
@@ -332,7 +350,7 @@ enum TeamLeadTenantAction {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // 非 TTY stdin & 引数なし → pipe モード (既存挙動維持)
+    // Non-TTY stdin and no args → fall back to pipe mode (legacy behaviour).
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 && !client::is_stdin_tty() {
         return run_pipe().await;
@@ -341,7 +359,7 @@ async fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
-            // clap の自動 help / version / error をそのまま出力
+            // Pass clap's automatic help / version / error output through.
             e.print().ok();
             return ExitCode::from(e.exit_code() as u8);
         }
@@ -350,6 +368,7 @@ async fn main() -> ExitCode {
     match cli.command {
         Some(Commands::Auth { action }) => dispatch_auth(action).await,
         Some(Commands::Claude { model, args }) => dispatch_claude(model, args).await,
+        Some(Commands::Codex { model, args }) => dispatch_codex(model, args).await,
         Some(Commands::Usage { action }) => dispatch_usage(action).await,
         Some(Commands::Admin { action }) => dispatch_admin(action).await,
         Some(Commands::TeamLead { action }) => dispatch_team_lead(action).await,
@@ -359,7 +378,8 @@ async fn main() -> ExitCode {
             api_endpoint,
             force,
             dry_run,
-        }) => wrap(commands::setup::run(api_endpoint, force, dry_run).await),
+            codex,
+        }) => wrap(commands::setup::run(api_endpoint, force, dry_run, codex).await),
         None => {
             eprintln!("Usage: stratoclave <command> --help");
             ExitCode::from(1)
@@ -394,6 +414,16 @@ async fn dispatch_auth(action: AuthAction) -> ExitCode {
 
 async fn dispatch_claude(model: Option<String>, args: Vec<String>) -> ExitCode {
     match mvp::claude_cmd::run(&args, model.as_deref()).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn dispatch_codex(model: Option<String>, args: Vec<String>) -> ExitCode {
+    match mvp::codex_cmd::run(&args, model.as_deref()).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[ERROR] {e}");

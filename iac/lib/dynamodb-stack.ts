@@ -1,6 +1,10 @@
 import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as cr from 'aws-cdk-lib/custom-resources';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import * as fs from 'fs';
+import * as path from 'path';
 import { applyCommonTags, putStringParameter } from './_common';
 
 export interface DynamoDBStackProps extends cdk.StackProps {
@@ -12,8 +16,8 @@ export interface DynamoDBStackProps extends cdk.StackProps {
 /**
  * MVP DynamoDB Stack
  *
- * 全テーブル: PAY_PER_REQUEST, AWS_MANAGED 暗号化, prefix 命名
- * - SseTokens テーブルは Redis 撤去に伴い新設（TTL 付き）
+ * Every table: PAY_PER_REQUEST, AWS_MANAGED encryption, prefix-named.
+ * - SseTokens was added to replace the retired Redis dependency (TTL-bearing).
  */
 export class DynamoDBStack extends cdk.Stack {
   public readonly sessionsTable: dynamodb.Table;
@@ -181,10 +185,10 @@ export class DynamoDBStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // 10. Permissions (Phase 2 新設、RBAC 真実源)
+    // 10. Permissions (added in Phase 2; the RBAC source of truth)
     //     Item schema:
-    //       role: String (PK)   e.g. "admin", "team_lead", "user"
-    //       permissions: List<String>  e.g. ["users:*", "messages:send"]
+    //       role: String (PK)              e.g. "admin", "team_lead", "user"
+    //       permissions: List<String>      e.g. ["users:*", "messages:send"]
     //       description: String
     //       updated_at: String (ISO 8601)
     //       version: String
@@ -356,6 +360,112 @@ export class DynamoDBStack extends cdk.Stack {
       value: this.permissionsTable.tableName,
     });
 
+    // ----------------------------------------------------------------
+    // Permissions reseed (deploy-time custom resource).
+    //
+    // The ECS task's lifespan also calls `bootstrap.seed.seed_all()`
+    // when it starts, but on a deploy that adds a new permission scope
+    // (e.g. `responses:send`) there is a window during the rolling
+    // restart where the *new* code is live but the DynamoDB row still
+    // shows the *old* permission set. During that window, every
+    // `mint_ephemeral_key_scoped("responses:send")` from a `user`
+    // role returns 403.
+    //
+    // To close that window, every deploy issues an `UpdateItem` per
+    // role here, taking the source of truth from
+    // `backend/permissions.json` at synth time. The update is idempotent
+    // — same JSON → same write → no churn — and runs before the ECS
+    // service swaps to the new task definition (DynamoDB stack is
+    // upstream of the ECS stack in iac.ts).
+    seedPermissionsAtDeploy(this, prefix, this.permissionsTable);
+
     applyCommonTags(this, prefix, 'DynamoDB');
+  }
+}
+
+/**
+ * On every deploy, write each role's permission set from
+ * `backend/permissions.json` into the Permissions table.
+ *
+ * Implemented as one `AwsCustomResource` per role so an `UpdateItem`
+ * failure in one role surfaces in CloudFormation events without
+ * blocking the others. The ListPermissions / Roles set is read at synth
+ * time (Node.js `fs`) so the JSON is baked into the synthesized
+ * template — runtime drift is captured by the next `cdk deploy`.
+ */
+function seedPermissionsAtDeploy(
+  scope: Construct,
+  prefix: string,
+  permissionsTable: dynamodb.Table,
+): void {
+  const permsJsonPath = path.join(
+    __dirname,
+    '..',
+    '..',
+    'backend',
+    'permissions.json',
+  );
+  if (!fs.existsSync(permsJsonPath)) {
+    // Synth fails loudly; we never silently skip the reseed because
+    // that is the behaviour we are trying to prevent.
+    throw new Error(
+      `permissions.json not found at ${permsJsonPath}; ` +
+        'the Permissions reseed custom resource cannot be configured. ' +
+        'Ensure the iac stack is synthed from a tree containing backend/.',
+    );
+  }
+  const raw = fs.readFileSync(permsJsonPath, 'utf-8');
+  const parsed = JSON.parse(raw) as {
+    version: string;
+    roles: Record<
+      string,
+      { description: string; permissions: string[] }
+    >;
+  };
+
+  for (const [role, body] of Object.entries(parsed.roles)) {
+    // The same DynamoDB UpdateItem call is wired to both `onCreate` and
+    // `onUpdate` so greenfield deploys seed the row immediately. With
+    // only `onUpdate`, a brand-new stack would create the table empty
+    // and rely on the ECS task's in-process `seed_all()` — which is
+    // a fallback we want, not the primary mechanism.
+    const updateItem = {
+      service: 'DynamoDB',
+      action: 'updateItem',
+      parameters: {
+        TableName: permissionsTable.tableName,
+        Key: { role: { S: role } },
+        UpdateExpression: 'SET #p = :p, #d = :d, #v = :v, #u = :u',
+        ExpressionAttributeNames: {
+          '#p': 'permissions',
+          '#d': 'description',
+          '#v': 'version',
+          '#u': 'updated_at',
+        },
+        ExpressionAttributeValues: {
+          ':p': { L: body.permissions.map((s) => ({ S: s })) },
+          ':d': { S: body.description },
+          ':v': { S: parsed.version },
+          // The custom resource invocation timestamp is generated by
+          // CloudFormation; we record the source version here.
+          ':u': { S: parsed.version },
+        },
+      },
+      physicalResourceId: cr.PhysicalResourceId.of(
+        `${prefix}-permissions-${role}-${parsed.version}`,
+      ),
+    } as const;
+
+    new cr.AwsCustomResource(scope, `SeedPermissions-${role}`, {
+      onCreate: updateItem,
+      onUpdate: updateItem,
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['dynamodb:UpdateItem'],
+          resources: [permissionsTable.tableArn],
+        }),
+      ]),
+      installLatestAwsSdk: false,
+    });
   }
 }

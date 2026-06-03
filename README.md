@@ -9,7 +9,8 @@
 [![Backend: Python 3.11](https://img.shields.io/badge/backend-Python_3.11-3776AB.svg)](./backend)
 [![CLI: Rust](https://img.shields.io/badge/cli-Rust-dea584.svg)](./cli)
 [![Infra: AWS CDK v2](https://img.shields.io/badge/infra-AWS_CDK_v2-FF9900.svg)](./iac)
-[![API: Anthropic-compatible](https://img.shields.io/badge/API-Anthropic_Messages-C1572F.svg)](#api-compatibility)
+[![API: Anthropic Messages](https://img.shields.io/badge/API-Anthropic_Messages-C1572F.svg)](#api-compatibility)
+[![API: OpenAI Responses](https://img.shields.io/badge/API-OpenAI_Responses-412991.svg)](#api-compatibility)
 
 </div>
 
@@ -21,13 +22,15 @@ Stratoclave is a self-hosted gateway that sits in front of Amazon Bedrock and
 adds the three things raw Bedrock does not give you on its own: **who called
 which model, under whose budget, and through which identity**.
 
-It exposes an Anthropic `Messages API`-compatible endpoint, so any client that
-speaks `ANTHROPIC_BASE_URL` — the Anthropic SDKs, Claude Code, Claude Desktop
-Cowork, custom agents — works unchanged. Behind that endpoint it enforces
-per-tenant and per-user credit quotas with atomic DynamoDB reservations,
-records every call in an audit log, and accepts three orthogonal identity
-paths (Amazon Cognito password, AWS SSO via a Vault-style STS vouch, and
-long-lived `sk-stratoclave-*` keys).
+It exposes two independent inference routes: an Anthropic `Messages API`-
+compatible endpoint at `/v1/messages` (for the Anthropic SDKs, Claude Code,
+and Claude Desktop Cowork) and an OpenAI Responses API-compatible endpoint
+at `/openai/v1/responses` (for the OpenAI SDK and the `codex` CLI, backed by
+GPT-5.x on Amazon Bedrock via the bedrock-mantle service). Both routes
+enforce per-tenant and per-user credit quotas with atomic DynamoDB
+reservations, record every call in an audit log, and accept three orthogonal
+identity paths (Amazon Cognito password, AWS SSO via a Vault-style STS vouch,
+and long-lived `sk-stratoclave-*` keys).
 
 Stratoclave is deliberately AWS-native and small: a single region in your own
 account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito
@@ -40,8 +43,16 @@ Postgres, no Redis, no external control plane, and no SaaS dependency.
   accept the same payloads as `api.anthropic.com`. Point `ANTHROPIC_BASE_URL`
   at your deployment and the Anthropic SDKs, Claude Code, and Claude Desktop
   Cowork work unchanged.
+- **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
+  `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
+  them to GPT-5.x models on Amazon Bedrock via the bedrock-mantle service
+  (us-east-2 / us-west-2). The `stratoclave codex` CLI subcommand wraps the
+  `codex` binary against this endpoint with an ephemeral key; the `--codex`
+  flag on `stratoclave setup` patches `~/.codex/config.toml` for direct use.
+  Gated by the `CODEX_ENABLED` ECS env flag.
 - **Two-level credit governance.** Every tenant has a default credit, every
-  user can carry a per-user override, and every `/v1/messages` call reserves
+  user can carry a per-user override, and every inference call — to
+  `/v1/messages` (Anthropic) or `/openai/v1/responses` (OpenAI) — reserves
   tokens atomically with a conditional DynamoDB write before Bedrock is
   invoked. Unused credit is refunded from the real token counts on return.
 - **Three role RBAC, tenant-scoped.** `admin`, `team_lead`, and `user` roles
@@ -79,13 +90,21 @@ Postgres, no Redis, no external control plane, and no SaaS dependency.
   <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to ECS Fargate, with DynamoDB, Cognito, Bedrock, STS, and CloudWatch Logs." width="100%">
 </p>
 
-The entire deployment lives inside a single AWS region in your own account.
-Clients reach CloudFront for TLS termination; static paths hit S3, API paths
-hit an internal ALB fronting a single-task Fargate service. The backend is
-stateless — all mutable state lives in DynamoDB, authenticated by either a
-Cognito `access_token` or a `sk-stratoclave-*` API key, and every `/v1/*`
-call is translated into a Bedrock `converse` / `converseStream` invocation
-against an inference-profile allowlist.
+The Stratoclave control plane lives inside a single AWS region (us-east-1)
+in your own account. Clients reach CloudFront for TLS termination; static
+paths hit S3, API paths hit an internal ALB fronting a single-task Fargate
+service. The backend is stateless — all mutable state lives in DynamoDB,
+authenticated by either a Cognito `access_token` or a `sk-stratoclave-*` API
+key.
+
+Inference fans out to two Bedrock surfaces. Anthropic Messages calls
+(`/v1/messages`) invoke Bedrock `converse` / `converseStream` in us-east-1
+against an inference-profile allowlist. OpenAI Responses calls
+(`/openai/v1/responses`) are forwarded by httpx to the bedrock-mantle service
+at `bedrock-mantle.{region}.api.aws/openai/v1`, where the region is per-model
+(GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). The cross-region bedrock-mantle
+calls originate from the single Fargate task in us-east-1; no second
+control-plane region is deployed.
 
 For a detailed walkthrough of components, data model, and invariants, see
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
@@ -134,12 +153,19 @@ export PATH="$PWD/target/release:$PATH"
 # Bootstrap config from /.well-known/stratoclave-config
 stratoclave setup https://d111111abcdef8.cloudfront.net
 
+# (Optional) Also patch ~/.codex/config.toml for direct codex use
+stratoclave setup https://d111111abcdef8.cloudfront.net --codex
+
 # Sign in (pick one path)
 stratoclave auth login --email you@example.com               # Cognito password
 stratoclave auth sso   --profile your-aws-sso-profile        # AWS SSO / saml2aws
 
 # Run Claude Code through Stratoclave (claude-code must be installed separately)
 stratoclave claude -- "Summarize this repository in one sentence"
+
+# Run OpenAI codex through Stratoclave (codex must be installed separately).
+# Mints a short-lived responses:send-only key; ~/.codex/config.toml is untouched.
+stratoclave codex -- "Summarize this repository in one sentence"
 
 # Open the web console in a pre-authenticated tab
 stratoclave ui open
@@ -162,8 +188,30 @@ resp = client.messages.create(
 print(resp.content[0].text)
 ```
 
+### Use it from the OpenAI SDK / codex
+
+```python
+import openai
+
+client = openai.OpenAI(
+    base_url="https://d111111abcdef8.cloudfront.net/openai/v1",
+    api_key="sk-stratoclave-xxxxxxxx...",  # issue via CLI or web console
+)
+resp = client.responses.create(
+    model="openai.gpt-5.4",
+    input="Hello",
+)
+print(resp.output_text)
+```
+
+The `responses:send` scope is required; all three roles (`admin`, `team_lead`,
+`user`) carry it by default. GPT-5.4 is served from us-west-2 and GPT-5.5
+from us-east-2 via the bedrock-mantle service; both are gated by the
+`CODEX_ENABLED` feature flag on the ECS task. See
+[`docs/CODEX_GUIDE.md`](./docs/CODEX_GUIDE.md) for the full codex setup.
+
 For a complete walkthrough including the web console, administrative
-workflows, and Cowork configuration, see
+workflows, Cowork configuration, and codex setup, see
 [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md).
 
 ## How it works
@@ -198,11 +246,19 @@ model.
 
 ### Credit reservation
 
-Concurrent requests that would overshoot a quota cannot race. Every
-`/v1/messages` call reserves `max_tokens + input_estimate` with a conditional
-`UpdateItem` on `UserTenants`, then invokes Bedrock, then refunds the
-difference from the real token counts. `UsageLogs` always records the actual
-spend, not the reservation.
+Concurrent requests that would overshoot a quota cannot race. Both
+inference routes share the same reservation pipeline (`backend/mvp/_pipeline.py`):
+the request reserves `max_tokens + input_estimate` with a conditional
+`UpdateItem` on `UserTenants`, invokes the upstream service (Bedrock
+`converse` for `/v1/messages`, bedrock-mantle Responses for
+`/openai/v1/responses`), then refunds the difference from the real token
+counts. `UsageLogs` always records the actual spend, not the reservation.
+
+The OpenAI Responses route applies a reasoning-effort multiplier to the
+upfront reservation (1× / 2× / 4× / 8× for `low` / `medium` / `high` /
+`xhigh`) because reasoning traces can emit far more output tokens than
+`max_output_tokens` alone implies. The minimum reservation is 8 192 tokens
+per request regardless of multiplier.
 
 <p align="center">
   <img src="./docs/diagrams/credit-reservation.png" alt="Credit reservation flow: authenticate, conditional UpdateItem to reserve tokens, invoke Bedrock, refund the diff, write a UsageLogs row." width="100%">
@@ -214,18 +270,21 @@ documented in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) and
 
 ## API compatibility
 
-| Endpoint                         | Behavior                                                            |
-|----------------------------------|---------------------------------------------------------------------|
-| `POST /v1/messages`              | Anthropic `Messages API` payload; translated to Bedrock `converse` / `converseStream`. |
-| `GET  /v1/models`                | Returns the Claude-family inference profiles mapped by the backend. |
-| `GET  /.well-known/stratoclave-config` | Unauthenticated discovery document; drives `stratoclave setup`. |
-| `POST /api/mvp/auth/sso-exchange`| Vouch-by-STS entry point for CLI SSO login.                         |
-| `/api/mvp/admin/*`               | Admin and team-lead operations (user, tenant, credit, usage, trusted accounts, invites). |
+| Endpoint                               | Behavior                                                            |
+|----------------------------------------|---------------------------------------------------------------------|
+| `POST /v1/messages`                    | Anthropic `Messages API` payload; translated to Bedrock `converse` / `converseStream`. Requires the `messages:send` scope. |
+| `GET  /v1/models`                      | Returns the Claude-family inference profiles mapped by the backend. |
+| `POST /openai/v1/responses`            | OpenAI Responses API payload; forwarded to `bedrock-mantle.{region}.api.aws/openai/v1`. Requires the `responses:send` scope. Gated by the `CODEX_ENABLED` ECS env flag. |
+| `GET  /openai/v1/models`               | Returns OpenAI-family entries from the model registry, in the OpenAI `/v1/models` shape. Requires the `responses:send` scope. |
+| `GET  /.well-known/stratoclave-config` | Unauthenticated discovery document; drives `stratoclave setup`.    |
+| `POST /api/mvp/auth/sso-exchange`      | Vouch-by-STS entry point for CLI SSO login.                         |
+| `/api/mvp/admin/*`                     | Admin and team-lead operations (user, tenant, credit, usage, trusted accounts, invites). |
 
-The Claude family is the only supported provider. Requests for non-Claude
-Bedrock models (Nova, Llama, Mistral, ...) are rejected with HTTP 400 because
-the token-accounting and credit-reservation logic is Claude-specific. The
-exact mapping lives in [`backend/mvp/models.py`](./backend/mvp/models.py).
+The Claude family (via Bedrock `converse`) and the OpenAI family (via the
+bedrock-mantle Responses API, currently `gpt-5.4` and `gpt-5.5`) are the
+supported providers. Any model outside the explicit allowlist is rejected
+with HTTP 400. The full registry lives in
+[`backend/mvp/models.py`](./backend/mvp/models.py).
 
 ## Stratoclave vs. LiteLLM Proxy
 
@@ -237,7 +296,7 @@ providers with a richer budgeting feature set in its commercial tier.
 
 | Dimension                 | Stratoclave                                                           | LiteLLM Proxy                                                                   |
 |---------------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------------------|
-| Providers                 | Amazon Bedrock (Claude family)                                        | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, Ollama, ...)           |
+| Providers                 | Amazon Bedrock (Claude family via `converse`; OpenAI GPT-5.x via bedrock-mantle Responses) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, Ollama, ...)           |
 | State                     | DynamoDB only (serverless)                                            | Postgres required, Redis recommended                                            |
 | RBAC                      | admin / team_lead / user, tenant-scoped                               | Proxy / Internal User / Team, global / team / user / key / model budgets        |
 | API keys                  | `sk-stratoclave-*`, scope narrowing, cap of 5 active, immediate revoke| Virtual keys with `expires / max_budget / rpm_limit / tpm_limit / models`       |
@@ -245,7 +304,7 @@ providers with a richer budgeting feature set in its commercial tier.
 | Deploy                    | AWS CDK v2, Fargate from 256 CPU / 512 MiB                            | Docker / Helm / ECS / EKS / Cloud Run; ~4 CPU / 8 GB recommended                |
 | License                   | Apache 2.0 (all features OSS)                                         | Dual license (MIT + Commercial); SSO and audit features are commercial          |
 | Audit / observability     | `UsageLogs` in DynamoDB + CloudWatch structured JSON                  | Langfuse / Datadog / OpenTelemetry / S3 / GCS / SQS / DynamoDB                  |
-| Claude Code integration   | `stratoclave claude -- "..."` wrapper                                 | `ANTHROPIC_BASE_URL` override                                                   |
+| Claude Code integration   | `stratoclave claude -- "..."` wrapper; `stratoclave codex -- "..."` for OpenAI codex CLI | `ANTHROPIC_BASE_URL` override                                                   |
 | Claude Desktop Cowork     | Tested; `/v1/v1` guard in CloudFront Function                         | Possible in principle; not formally documented                                  |
 
 **Pick Stratoclave** when your organization is AWS-native, Bedrock-only,
@@ -263,6 +322,7 @@ budgeting, or need deep integration with third-party observability stacks.
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)                    | CDK stacks, environment variables, day-2 operations.         |
 | [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md)                  | Tenant / user / credit / trusted-account management.         |
 | [`docs/CLI_GUIDE.md`](./docs/CLI_GUIDE.md)                      | `stratoclave` subcommand reference.                          |
+| [`docs/CODEX_GUIDE.md`](./docs/CODEX_GUIDE.md)                  | OpenAI codex CLI setup via `stratoclave codex` and Path B (long-lived key). |
 | [`docs/COWORK_INTEGRATION.md`](./docs/COWORK_INTEGRATION.md)    | Claude Desktop Cowork (Gateway mode) setup.                  |
 
 Diagram sources are in [`docs/diagrams/`](./docs/diagrams) as both
@@ -290,7 +350,13 @@ Infrastructure-level hardening is enforced at synth time by `cdk-nag`
 - DynamoDB `RETAIN` + PITR on audit-critical tables (`usage-logs`, `api-keys`),
 - Vouch-by-STS replay defence via the `sso-nonces` TTL table,
 - VPC Flow Logs (CloudWatch, 30 d),
-- structured-log PII redaction (emails → SHA-256 markers).
+- structured-log PII redaction (emails → SHA-256 markers),
+- bedrock-mantle bearer tokens minted with a 15-minute TTL (capped in
+  `openai_responses.py`); the token lives only in the ECS task heap for
+  the duration of one request and is never persisted to DynamoDB or logs,
+- a dedicated `responses:send` scope on `POST /openai/v1/responses` and
+  `GET /openai/v1/models`; all three identity paths (Cognito, STS vouch,
+  `sk-stratoclave-*`) must carry this scope to reach the OpenAI routes.
 
 See the *Security considerations* section of
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the detailed attack

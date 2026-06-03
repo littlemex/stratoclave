@@ -268,14 +268,14 @@ function KeyRow({
 
   const revokeMutation = useMutation({
     mutationFn: async () => {
-      // The list API exposes key_id only, not key_hash. Revocation
-      // currently requires the hash, so UI-initiated revokes are not
-      // wired up yet and we surface a CLI hint instead.
-      throw new Error(t('me_api_keys.revoke_unsupported_error'))
+      // Revoke by user-facing key_id (e.g. "sk-stratoclave-AbCd...XYz9").
+      // The list API exposes key_id but not key_hash, so the by-key-id
+      // backend route is what the UI uses.
+      await api.apiKeys.revokeByKeyId(item.key_id)
     },
     onError: (err: unknown) => {
-      const e = err as { message?: string } | null
-      setError(e?.message ?? t('me_api_keys.revoke_error_fallback'))
+      const e = err as { detail?: string; message?: string } | null
+      setError(e?.detail ?? e?.message ?? t('me_api_keys.revoke_error_fallback'))
     },
     onSuccess: () => {
       setConfirmOpen(false)
@@ -354,20 +354,21 @@ function KeyRow({
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-            {t('me_api_keys.revoke_ui_unsupported')}
-            <pre className="mt-2 overflow-x-auto rounded-sm bg-background/60 p-2 font-mono text-[11px]">
-{`stratoclave api-key revoke <key_hash>`}
-            </pre>
+            <p>{t('me_api_keys.revoke_warning')}</p>
             <p className="mt-2">
               <Trans
-                i18nKey="me_api_keys.revoke_hash_hint"
+                i18nKey="me_api_keys.revoke_cli_hint"
                 components={{ 1: <code className="font-mono" /> }}
               />
             </p>
           </div>
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
+            <Button
+              variant="ghost"
+              disabled={revokeMutation.isPending}
+              onClick={() => setConfirmOpen(false)}
+            >
               {t('me_api_keys.revoke_close')}
             </Button>
             <Button
@@ -375,7 +376,9 @@ function KeyRow({
               disabled={revokeMutation.isPending}
               onClick={() => revokeMutation.mutate()}
             >
-              {t('me_api_keys.revoke_ui_button')}
+              {revokeMutation.isPending
+                ? t('me_api_keys.revoke_submitting')
+                : t('me_api_keys.revoke_confirm')}
             </Button>
           </DialogFooter>
         </DialogContent>
