@@ -32,13 +32,17 @@ def bedrock_runtime_client(region: str):
     return boto3.client("bedrock-runtime", region_name=region)
 
 
-def client_for_model(entry) -> "boto3 client":  # noqa: F821 — boto3 has no public type
+def client_for_model(entry):
     """Return a `bedrock-runtime` client for the region bound to `entry`.
 
     `entry.bedrock_region` is authoritative. The fallback chain
     (`BEDROCK_REGION` env → `us-east-1`) only fires when an entry is
     missing the field, which the registry today never does — kept as a
     safety net for future entries.
+
+    The return type is intentionally unannotated: boto3 does not export a
+    public type for its client factories, and threading `Any` here adds
+    noise without buying anything `bedrock_runtime_client` does not.
     """
     region: Optional[str] = entry.bedrock_region
     if not region:
