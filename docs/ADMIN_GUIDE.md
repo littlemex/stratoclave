@@ -264,8 +264,13 @@ Stratoclave issues long-lived API keys of the form `sk-stratoclave-...` for mach
 
 Scopes carried by a key:
 
-- `messages:send` -- call `POST /v1/messages`.
+- `messages:send` -- call `POST /v1/messages` (Anthropic Messages API).
+- `responses:send` -- call `POST /openai/v1/responses` (OpenAI Responses API on bedrock-mantle).
 - `usage:read-self` -- read the owner's own usage.
+
+Keys for codex users typically need `responses:send` only; keys for
+Claude Code or Cowork need `messages:send` only. The two scopes are
+independent — a key with one cannot reach the route gated by the other.
 
 ### Issuing a key for yourself
 

@@ -1,16 +1,19 @@
-<!-- Last updated: 2026-04-27 -->
-<!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
+<!-- Last updated: 2026-06-03 -->
+<!-- Applies to: Stratoclave main with `feature/openai-responses-proxy` (or later) -->
 
 # Architecture
 
 > A Japanese translation is available at [ja/ARCHITECTURE.md](./ja/ARCHITECTURE.md).
 
-Stratoclave is a **thin proxy gateway in front of Amazon Bedrock** that adds
-multi-tenancy, role-based access control, credit quotas, and a unified login
-surface (Amazon Cognito or AWS SSO) without introducing any non-AWS
-dependencies. The deployment runs entirely inside a single AWS account and
-region, and is deliberately composed of a small number of moving parts so that
-an operator can understand the whole system from this document alone.
+Stratoclave is a **thin proxy gateway in front of Amazon Bedrock and the
+OpenAI Responses API on Bedrock** that adds multi-tenancy, role-based access
+control, credit quotas, and a unified login surface (Amazon Cognito or AWS
+SSO). The control plane runs entirely inside a single AWS account and
+region (us-east-1) without introducing non-AWS control-plane dependencies;
+the optional OpenAI Responses path makes cross-region HTTPS calls to the
+Bedrock-hosted bedrock-mantle endpoint (us-east-2 / us-west-2). The system
+is deliberately composed of a small number of moving parts so that an
+operator can understand the whole stack from this document alone.
 
 This document describes the components, the data model, the authentication
 and authorization flows, and the invariants Stratoclave relies on. It is
@@ -43,7 +46,9 @@ repository lives at [`https://github.com/littlemex/stratoclave`](https://github.
 
 1. **One region, one account, no SaaS.** Stratoclave deploys to a single AWS
    region inside your own account. There is no external control plane, no
-   hosted metadata service, and no third-party dependency that could become
+   hosted metadata service, and no third-party control-plane dependency
+   beyond the optional cross-region call to bedrock-mantle. Nothing third-party
+   could become
    a single point of failure or data leak.
 2. **Stateless backend.** The FastAPI container holds no per-user state
    beyond short-lived in-memory caches. Every piece of mutable state lives
@@ -96,6 +101,8 @@ repository lives at [`https://github.com/littlemex/stratoclave`](https://github.
                                                          │   /api/mvp/*   RBAC      │
                                                          │   /v1/messages Bedrock   │
                                                          │   /v1/models             │
+                                                         │   /openai/v1/responses   │
+                                                         │   /openai/v1/models      │
                                                          │   /.well-known/...       │
                                                          │  Audit logger (JSON)     │
                                                          └─────┬───────────┬────────┘
@@ -186,6 +193,10 @@ backend/
     ├── deps.py                # JWT verification + API key path
     ├── authz.py               # has_permission, require_permission, audit log
     ├── anthropic.py           # POST /v1/messages, GET /v1/models
+    ├── openai_responses.py    # POST /openai/v1/responses, GET /openai/v1/models
+    ├── _pipeline.py           # Shared credit reservation + UsageLogs settle
+    ├── _bedrock_clients.py    # Per-region boto3 / httpx Bedrock clients
+    ├── models.py              # ModelEntry registry (Anthropic + OpenAI)
     ├── me.py                  # /api/mvp/me + usage summaries
     ├── admin_users.py
     ├── admin_tenants.py
@@ -273,19 +284,26 @@ cli/src/
 ├── mvp/
 │   ├── auth.rs                # Cognito password login + NEW_PASSWORD_REQUIRED
 │   ├── sso.rs                 # aws-sdk-sts presign → backend
+│   ├── child_launcher.rs      # Shared spawner (env scrub + revoke lifecycle)
+│   ├── ephemeral_key.rs       # Mint/revoke responses:send / messages:send keys
 │   ├── claude_cmd.rs          # Wraps `claude` with ANTHROPIC_BASE_URL injected
+│   ├── codex_cmd.rs           # Wraps `codex` with CODEX_HOME tempdir + STRATOCLAVE_OPENAI_KEY
 │   ├── api.rs                 # reqwest client, error rendering
 │   ├── tokens.rs              # ~/.stratoclave/mvp_tokens.json (0600)
 │   ├── config.rs              # STRATOCLAVE_* env + config.toml
 │   ├── admin.rs / team_lead.rs / usage.rs
 │   └── ...
-└── commands/ui.rs             # stratoclave ui open (opens browser)
+└── commands/
+    ├── ui.rs                  # stratoclave ui open (opens browser)
+    └── setup.rs               # stratoclave setup [--codex] (writes config.toml)
 ```
 
-The CLI exists to absorb the two jobs that a browser cannot comfortably do:
-calling AWS SDK APIs (`sts:GetCallerIdentity`) and launching Claude SDK
-tools with `ANTHROPIC_BASE_URL` set. Everything else — RBAC, Bedrock proxy,
-credit accounting — is performed server-side.
+The CLI exists to absorb the three jobs that a browser cannot comfortably do:
+calling AWS SDK APIs (`sts:GetCallerIdentity` for SSO Vouch), launching
+Claude tools with `ANTHROPIC_BASE_URL` set, and launching OpenAI codex with
+`CODEX_HOME` pointed at an ephemeral config and `STRATOCLAVE_OPENAI_KEY`
+holding a short-lived `responses:send` key. Everything else — RBAC, Bedrock
+proxy, credit accounting — is performed server-side.
 
 **Bootstrap.** On a new machine, the CLI is configured with a single
 command: `stratoclave setup <server-url>`. That command calls
@@ -321,8 +339,9 @@ the ordinary CloudFormation `Fn::ImportValue` mechanism — no
 
 **SPA fallback** is implemented by a CloudFront Function (viewer-request)
 attached only to the S3 origin's default behavior. API paths
-(`/api/*`, `/v1/*`, `/.well-known/*`) pass through untouched, so legitimate
-`403` / `404` responses from the backend are never rewritten to `index.html`.
+(`/api/*`, `/v1/*`, `/openai/*`, `/.well-known/*`) pass through untouched,
+so legitimate `403` / `404` responses from the backend are never rewritten
+to `index.html`.
 
 **ECS task role** is scoped to:
 - `bedrock:InvokeModel` / `InvokeModelWithResponseStream` (us-east-1 inference profiles).
@@ -472,9 +491,14 @@ The shipped permissions table:
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | `users:*`, `tenants:*`, `usage:*`, `permissions:*`, `accounts:*`, `apikeys:*`, `messages:send` |
-| `team_lead` | `tenants:create`, `tenants:read-own`, `usage:read-own-tenant`, `usage:read-self`, `apikeys:read-self`, `apikeys:create-self`, `apikeys:revoke-self`, `messages:send` |
-| `user` | `messages:send`, `usage:read-self`, `apikeys:read-self`, `apikeys:create-self`, `apikeys:revoke-self` |
+| `admin` | `users:*`, `tenants:*`, `usage:*`, `permissions:*`, `accounts:*`, `apikeys:*`, `messages:send`, `responses:send` |
+| `team_lead` | `tenants:create`, `tenants:read-own`, `usage:read-own-tenant`, `usage:read-self`, `apikeys:read-self`, `apikeys:create-self`, `apikeys:revoke-self`, `messages:send`, `responses:send` |
+| `user` | `messages:send`, `responses:send`, `usage:read-self`, `apikeys:read-self`, `apikeys:create-self`, `apikeys:revoke-self` |
+
+The `messages:send` scope gates `POST /v1/messages` (Anthropic Messages
+API). `responses:send` gates `POST /openai/v1/responses` (OpenAI Responses
+API on bedrock-mantle). The two are independent: a key issued with only
+`messages:send` cannot reach the OpenAI route, and vice versa.
 
 ### How permissions are seeded
 
@@ -573,6 +597,46 @@ Refills are performed by an administrator via
 `PATCH /api/mvp/admin/users/{user_id}/credit`, which overwrites
 `total_credit` and optionally resets `credit_used`. Refill operations are
 audited (`event=credit_overwritten`).
+
+---
+
+## OpenAI Responses API (bedrock-mantle path)
+
+`POST /openai/v1/responses` is the OpenAI counterpart of `/v1/messages`.
+It accepts an OpenAI Responses API payload, runs the same credit pipeline
+as the Anthropic route (`backend/mvp/_pipeline.py`), and forwards the body
+to `bedrock-mantle.{region}.api.aws/openai/v1/responses` via `httpx`. The
+target region is per-model (`ModelEntry.bedrock_region`), so the call from
+the us-east-1 ECS task is cross-region (us-west-2 for `gpt-5.4`,
+us-east-2 for `gpt-5.5`).
+
+The bedrock-mantle endpoint authenticates with a bearer token that
+Stratoclave mints on demand from `aws-bedrock-token-generator.provide_token(
+region=…, expiry=timedelta(seconds=900))`. The token TTL is capped at 15
+minutes; the token is held only on the request stack and is never
+persisted to DynamoDB or logs.
+
+**Differences from the Anthropic path:**
+
+- Reservation accounts for reasoning effort. `_estimate_reservation_tokens`
+  multiplies `max_output_tokens` by 1× / 2× / 4× / 8× for `low` / `medium`
+  / `high` / `xhigh` reasoning effort, then floors the total at 8 192
+  tokens. Reasoning tokens count toward `output_tokens` in `usage`.
+- Streaming relays SSE events byte-for-byte after sanitizing
+  `event: error` lines through `core.error_handler.sanitize_exception_message`
+  to scrub ARNs and account IDs.
+- The route is gated by the `CODEX_ENABLED` ECS env flag; when off, both
+  `POST /openai/v1/responses` and `GET /openai/v1/models` return HTTP 503.
+- Image / file inputs are rejected at the Pydantic layer (HTTP 422); the
+  proxy does not yet model image-token cost.
+
+The `bedrock-mantle:CallWithBearerToken` IAM action does not currently
+support resource-level conditions (verified at deploy time, 2026-06), so
+the task role's policy uses `Resource: '*'` for that action only.
+`bedrock-mantle:CreateInference` and friends are scoped to
+`arn:aws:bedrock-mantle:{us-east-2,us-west-2}:<account>:project/*`.
+
+For the user-facing setup, see [`CODEX_GUIDE.md`](./CODEX_GUIDE.md).
 
 ---
 
@@ -844,5 +908,9 @@ release; in the meantime, work around them as described.
   See [ADMIN_GUIDE.md -> Provisioning a new user](ADMIN_GUIDE.md#provisioning-a-new-user).
 - **`admin trusted-accounts` has no CLI subcommand.** Administered via the
   web UI or direct HTTP calls until the CLI catches up.
-- **Single region.** `us-east-1` only; see
+- **Single control-plane region.** All Stratoclave infrastructure runs in
+  `us-east-1`; see
   [DEPLOYMENT.md -> Regional constraints](DEPLOYMENT.md#regional-constraints).
+  Bedrock for the Claude path is also us-east-1; the OpenAI Responses path
+  makes cross-region HTTPS calls to bedrock-mantle (us-east-2 / us-west-2),
+  but no second control-plane region is deployed.
