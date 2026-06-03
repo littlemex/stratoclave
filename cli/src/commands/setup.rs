@@ -590,12 +590,26 @@ fn render_codex_toml_block(api_endpoint: &str, codex: &CodexHints) -> String {
         api_endpoint.trim_end_matches('/'),
         codex.openai_base_path,
     );
+    let context_window =
+        crate::mvp::codex_cmd::codex_context_window_for(&codex.default_model);
     format!(
         "# Added by `stratoclave setup --codex`\n\
          # Bedrock's OpenAI Responses endpoint does not implement the\n\
          # `web_search` tool today; codex must not send it as a tool\n\
          # type or every request returns a 400 validation_error.\n\
          web_search = \"disabled\"\n\
+         # codex 0.136 walks up from `cwd` looking for a project-local\n\
+         # `.codex/config.toml`. When the user is anywhere under $HOME\n\
+         # the search reaches `~/.codex/config.toml` itself and emits\n\
+         # \"Ignored unsupported project-local config keys\" for any\n\
+         # `model_provider` / `model_providers` entries. Disabling the\n\
+         # marker list short-circuits the walk so only this file loads.\n\
+         project_root_markers = []\n\
+         # codex's built-in model catalog does not list the OpenAI\n\
+         # GPT-5 family; without an explicit context window codex\n\
+         # warns \"Model metadata for ... not found. Defaulting to\n\
+         # fallback metadata\" on every startup.\n\
+         model_context_window = {context_window}\n\
          \n\
          {header}\n\
          name                   = \"Stratoclave (OpenAI via Bedrock)\"\n\
@@ -607,6 +621,7 @@ fn render_codex_toml_block(api_endpoint: &str, codex: &CodexHints) -> String {
          stream_idle_timeout_ms = 600000\n",
         header = CODEX_BLOCK_HEADER,
         base_url = base_url,
+        context_window = context_window,
     )
 }
 

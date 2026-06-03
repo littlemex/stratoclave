@@ -478,16 +478,43 @@ async def _stream_response(
 ) -> AsyncGenerator[bytes, None]:
     """Stream the Responses-API SSE feed back to the caller.
 
-    The Bedrock SSE bytes are forwarded byte-for-byte with one exception:
-    `event: error` payloads are intercepted and re-emitted with the
-    `error.message` field passed through the sanitizer. Final usage is
-    extracted from the `response.completed` event payload's
-    `response.usage` block.
+    Implementation note — why bytes, not lines
+    -----------------------------------------
+    The previous version of this generator iterated the upstream stream
+    via ``resp.aiter_lines()`` and re-emitted each line with a single
+    ``"\\n"`` appended. That was fragile in two ways the codex CLI hit
+    in the wild ("stream closed before response.completed"):
+
+      1. ``aiter_lines`` discards the original line terminator (``\\n``,
+         ``\\r\\n``, or ``\\r``) and there is no guarantee that the
+         upstream's blank-line event boundaries survive a re-emit that
+         always adds exactly one ``\\n`` per line. Clients expect a
+         literal blank line (``\\n\\n``) between events; if even one
+         boundary collapses, the SSE parser stalls until the connection
+         drops, surfacing as the "stream closed" error.
+      2. The Responses API splits long JSON payloads onto multiple
+         ``data:`` lines per the SSE spec — the parser is supposed to
+         join them with ``\\n`` and then JSON-decode the whole thing.
+         The line-by-line parse used here for usage extraction missed
+         every multi-line ``response.completed`` event, which silently
+         settled with usage=(0, 0).
+
+    The fix is to switch to byte-level pass-through with an
+    event-boundary buffer:
+
+      - chunks are appended to a buffer and the buffer is scanned for
+        ``\\n\\n`` / ``\\r\\n\\r\\n`` event terminators;
+      - each completed event is emitted *as the bytes the upstream
+        sent* (preserving terminator, line endings, and any comment
+        lines), with the only exception being ``event: error`` events
+        which are still rebuilt through the sanitizer;
+      - the same completed event is parsed in-memory to recover the
+        ``response.completed`` usage block (concatenating multi-line
+        data per the SSE spec).
     """
     input_tokens = 0
     output_tokens = 0
     settled = False
-    last_event_was_error = False
 
     payload = body.model_dump(exclude_none=True)
     payload["stream"] = True
@@ -532,45 +559,70 @@ async def _stream_response(
                         settled = True
                         return
 
-                    async for raw_line in resp.aiter_lines():
-                        # httpx strips the trailing newline; we add it back
-                        # because SSE clients depend on the empty-line
-                        # boundary between events.
-                        line = raw_line
-
-                        if line.startswith("event:"):
-                            last_event_was_error = (
-                                line[len("event:") :].strip() == "error"
-                            )
-                            yield (line + "\n").encode("utf-8")
+                    buffer = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        if not chunk:
                             continue
+                        buffer.extend(chunk)
+                        for raw_event in _drain_events(buffer):
+                            out_bytes, usage = _handle_sse_event(raw_event)
+                            yield out_bytes
+                            if usage is not None:
+                                input_tokens, output_tokens = usage
 
-                        if last_event_was_error and line.startswith("data:"):
-                            sanitized_line = _sanitize_sse_error_line(line)
-                            yield (sanitized_line + "\n").encode("utf-8")
-                            last_event_was_error = False
-                            continue
-
-                        # Empty line terminates the event; reset the flag.
-                        if line == "":
-                            last_event_was_error = False
-
-                        yield (line + "\n").encode("utf-8")
-
-                        if line.startswith("data:"):
-                            try:
-                                payload_obj = json.loads(line[5:].lstrip())
-                            except (json.JSONDecodeError, TypeError):
-                                continue
-                            if (
-                                isinstance(payload_obj, dict)
-                                and payload_obj.get("type") == "response.completed"
+                    # Flush any trailing bytes that were not terminated
+                    # by a blank line. bedrock-mantle (or any hop in
+                    # between) sometimes closes the chunked-transfer
+                    # body before the final `\\n\\n` is flushed —
+                    # that's the exact symptom of the codex
+                    # "stream closed before response.completed" report.
+                    # If the buffer still contains an SSE-shaped event
+                    # (an `event:` and/or `data:` line), append a
+                    # blank-line terminator so the client's SSE parser
+                    # actually fires the terminal event before tearing
+                    # down the connection. We only synthesize the
+                    # terminator when one is missing — well-formed
+                    # streams flow through unchanged.
+                    if buffer:
+                        trailing = bytes(buffer)
+                        out_bytes, usage = _handle_sse_event(trailing)
+                        if out_bytes:
+                            if not (
+                                out_bytes.endswith(b"\n\n")
+                                or out_bytes.endswith(b"\r\n\r\n")
+                            ) and (
+                                b"event:" in out_bytes or b"data:" in out_bytes
                             ):
-                                resp_obj = payload_obj.get("response")
-                                if isinstance(resp_obj, dict):
-                                    input_tokens, output_tokens = _extract_usage(
-                                        resp_obj.get("usage", {})
-                                    )
+                                # Choose the line ending the upstream
+                                # already used; default to `\n` if we
+                                # cannot tell. This keeps the byte
+                                # mix consistent with what the client
+                                # has been parsing all along.
+                                if b"\r\n" in out_bytes:
+                                    if out_bytes.endswith(b"\r\n"):
+                                        out_bytes = out_bytes + b"\r\n"
+                                    else:
+                                        out_bytes = out_bytes + b"\r\n\r\n"
+                                else:
+                                    if out_bytes.endswith(b"\n"):
+                                        out_bytes = out_bytes + b"\n"
+                                    else:
+                                        out_bytes = out_bytes + b"\n\n"
+                                logger.warning(
+                                    "bedrock_mantle_stream_unterminated_final_event",
+                                    region=entry.bedrock_region,
+                                    model_id=entry.bedrock_model_id,
+                                    note=(
+                                        "upstream closed before final "
+                                        "blank-line terminator; "
+                                        "synthesizing one to unblock "
+                                        "the SSE client"
+                                    ),
+                                )
+                            yield out_bytes
+                        if usage is not None:
+                            input_tokens, output_tokens = usage
+                        buffer.clear()
             except httpx.HTTPError as e:
                 yield _sse_event(
                     "error",
@@ -614,6 +666,145 @@ async def _stream_response(
                 actual_output_tokens=output_tokens,
                 model_id=entry.bedrock_model_id,
             )
+
+
+# ---------------------------------------------------------------------------
+# SSE event-buffer helpers
+# ---------------------------------------------------------------------------
+# These exist so the proxy can preserve the upstream's exact SSE framing
+# while still inspecting the (possibly multi-line) `data:` payload of
+# selected events. They are intentionally lenient: any bytes that fail to
+# decode as UTF-8 still flow back to the client unchanged — the parse path
+# only triggers a rewrite for `event: error` events whose `data:` is valid
+# JSON, and only triggers a usage read for `response.completed` events.
+
+
+def _drain_events(buffer: bytearray) -> list[bytes]:
+    """Pop every fully-terminated SSE event from `buffer` (in place).
+
+    SSE event boundaries are blank lines: either `\\n\\n` or
+    `\\r\\n\\r\\n` per the spec. We search for whichever appears first
+    and slice up to and including it. Bytes that do not yet contain a
+    terminator stay in the buffer for the next chunk.
+    """
+    events: list[bytes] = []
+    while True:
+        # Find the earliest event terminator. `find` returns -1 if absent.
+        crlf = buffer.find(b"\r\n\r\n")
+        lf = buffer.find(b"\n\n")
+        if crlf == -1 and lf == -1:
+            break
+        if crlf == -1:
+            cut = lf + 2
+        elif lf == -1:
+            cut = crlf + 4
+        else:
+            # Take the boundary that ends earliest in the buffer.
+            cut = min(lf + 2, crlf + 4)
+        events.append(bytes(buffer[:cut]))
+        del buffer[:cut]
+    return events
+
+
+def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]]]:
+    """Process one fully-buffered SSE event.
+
+    Returns the bytes to forward to the client (usually `raw` itself —
+    we are byte-transparent by default) plus an optional `(input_tokens,
+    output_tokens)` extracted from `response.completed`.
+
+    The only event whose bytes we rewrite is `event: error`: its
+    `data:` payload is JSON-decoded, `error.message` is sanitized, and
+    the rebuilt frame replaces the original. This preserves the
+    sanitizer guarantee for ARNs / account IDs in upstream errors
+    (see test_openai_responses_credit.py::test_sse_error_event_sanitized_before_yield).
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # Bedrock-mantle's stream is documented as UTF-8; if a chunk
+        # somehow violated that we still want to forward it verbatim
+        # rather than drop the frame. The codex parser will handle the
+        # decode error itself.
+        return raw, None
+
+    event_name, data_payload = _parse_sse_frame(text)
+
+    usage: Optional[tuple[int, int]] = None
+    if event_name == "response.completed" and data_payload is not None:
+        try:
+            obj = json.loads(data_payload)
+        except (json.JSONDecodeError, TypeError):
+            obj = None
+        if isinstance(obj, dict):
+            response_block = obj.get("response")
+            if isinstance(response_block, dict):
+                usage = _extract_usage(response_block.get("usage", {}))
+
+    if event_name == "error" and data_payload is not None:
+        sanitized = _sanitize_error_payload(data_payload)
+        if sanitized is not None:
+            return f"event: error\ndata: {sanitized}\n\n".encode("utf-8"), usage
+
+    return raw, usage
+
+
+def _parse_sse_frame(text: str) -> tuple[Optional[str], Optional[str]]:
+    """Return `(event_name, joined_data)` from an SSE event text.
+
+    Per the SSE spec, multiple `data:` lines in the same event are
+    joined with `"\\n"` before delivery to the client's parser. We
+    follow that rule so a multi-line `response.completed` payload still
+    JSON-decodes correctly. Lines starting with `:` are SSE comments
+    and are ignored.
+    """
+    event_name: Optional[str] = None
+    data_lines: list[str] = []
+    # SSE accepts \n, \r\n, and \r as line endings. splitlines handles all.
+    for raw_line in text.splitlines():
+        if not raw_line or raw_line.startswith(":"):
+            continue
+        if raw_line.startswith("event:"):
+            event_name = raw_line[len("event:") :].strip()
+            continue
+        if raw_line.startswith("data:"):
+            # Strip exactly one leading space if present (per SSE spec
+            # "field: value" — value is the bytes after the optional
+            # single space).
+            v = raw_line[len("data:") :]
+            if v.startswith(" "):
+                v = v[1:]
+            data_lines.append(v)
+    if not data_lines:
+        return event_name, None
+    return event_name, "\n".join(data_lines)
+
+
+def _sanitize_error_payload(data_payload: str) -> Optional[str]:
+    """Sanitize `error.message` inside an SSE error data payload.
+
+    Returns the rebuilt JSON string on success, or `None` if there was
+    nothing to sanitize and the caller should pass the original bytes
+    through unchanged. A parse failure also returns `None` — the raw
+    event is then forwarded verbatim and the regex sweep that
+    `core.error_handler.sanitize_exception_message` performs at log
+    time still applies on the server side.
+    """
+    try:
+        obj = json.loads(data_payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    err = obj.get("error")
+    if not isinstance(err, dict):
+        return None
+    msg = err.get("message")
+    if not isinstance(msg, str):
+        return None
+    err["message"] = sanitize_exception_message(msg)
+    obj["error"] = err
+    return json.dumps(obj, ensure_ascii=False)
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> bytes:

@@ -35,6 +35,10 @@ pub struct ChildLauncher {
     /// Additional `KEY=VALUE` pairs added to the child env.
     env_overrides: Vec<(String, OsString)>,
     scrub: ScrubFlags,
+    /// Optional working directory for the child process. When set, the
+    /// child is spawned with `Command::current_dir(...)` instead of
+    /// inheriting the parent's `cwd`.
+    cwd: Option<PathBuf>,
 }
 
 impl ChildLauncher {
@@ -43,12 +47,19 @@ impl ChildLauncher {
             binary: binary.to_string(),
             env_overrides: Vec::new(),
             scrub: ScrubFlags::default(),
+            cwd: None,
         }
     }
 
     pub fn env(mut self, key: &str, value: impl AsRef<OsStr>) -> Self {
         self.env_overrides
             .push((key.to_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Override the working directory the child is spawned in.
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
         self
     }
 
@@ -88,6 +99,10 @@ impl ChildLauncher {
 
         let mut cmd = Command::new(&path);
         cmd.args(args);
+
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
+        }
 
         for (k, v) in &self.env_overrides {
             cmd.env(k, v);
