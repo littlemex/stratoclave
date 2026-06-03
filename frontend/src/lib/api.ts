@@ -541,9 +541,12 @@ export const api = {
         headers: jsonHeaders,
         body: JSON.stringify(body),
       }),
-    revoke: (key_hash: string) =>
+    // Revoke by the user-facing key_id (e.g. "sk-stratoclave-AbCd...XYz9").
+    // The list API returns key_id but not key_hash, so this is the path the
+    // UI uses. The legacy /api/mvp/me/api-keys/{key_hash} route returns 410.
+    revokeByKeyId: (key_id: string) =>
       jsonRequest<void>(
-        `/api/mvp/me/api-keys/${encodeURIComponent(key_hash)}`,
+        `/api/mvp/me/api-keys/by-key-id/${encodeURIComponent(key_id)}`,
         { method: 'DELETE' },
       ),
   },
