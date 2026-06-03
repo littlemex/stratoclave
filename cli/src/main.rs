@@ -65,7 +65,7 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
         /// Extra args passed to codex
-        #[arg(trailing_var_arg = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Self usage summary + recent history
