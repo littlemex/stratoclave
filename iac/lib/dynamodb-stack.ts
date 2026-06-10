@@ -60,11 +60,17 @@ export class DynamoDBStack extends cdk.Stack {
     // hand with `aws dynamodb delete-table`.
     const auditRemovalPolicy = cdk.RemovalPolicy.RETAIN;
 
+    // A-07-dynamo: prod tables MUST opt into DynamoDB delete-protection
+    // so that a stray `cdk destroy`, mis-targeted CloudFormation rollback,
+    // or compromised CI session cannot silently drop billing / audit
+    // tables. Dev environments leave it off so disposable stacks are
+    // still tear-down-friendly.
     const baseTableProps = {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
       pointInTimeRecovery: isProd,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      deletionProtection: isProd,
     };
 
     // 1. Sessions
