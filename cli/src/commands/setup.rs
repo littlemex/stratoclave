@@ -588,7 +588,8 @@ fn backup_existing(path: &PathBuf) -> Result<PathBuf> {
 // ------------------------------------------------------------------
 
 fn is_stdin_tty() -> bool {
-    atty::is(atty::Stream::Stdin)
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 fn prompt_overwrite(path: &PathBuf) -> Result<bool> {

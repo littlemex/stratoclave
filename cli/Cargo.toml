@@ -32,7 +32,9 @@ urlencoding = "2"
 open = "5"
 clap = { version = "4", features = ["derive"] }
 rustyline = "18"
-atty = "0.2"
+# `atty` was removed (RUSTSEC-2024-0375 unmaintained, RUSTSEC-2021-0145
+# unsound). Stdin TTY detection now uses std::io::IsTerminal, stable
+# since Rust 1.70.
 # Phase S: AWS SSO / STS 経由ログイン用
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sts = "1"

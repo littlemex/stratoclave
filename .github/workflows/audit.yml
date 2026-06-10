@@ -74,7 +74,16 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
-        run: cargo audit --deny warnings
+        # See cli/audit.toml for the inline justification of each
+        # --ignore. Re-evaluate at every aws-sdk / aws-smithy bump;
+        # the goal is to delete these flags entirely once the
+        # AWS SDK chain drops the legacy-rustls path that pulls
+        # rustls 0.21 / rustls-webpki 0.101.
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104
 
   npm-audit-iac:
     name: iac / npm audit

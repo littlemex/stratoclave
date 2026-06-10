@@ -1,0 +1,23 @@
+# cargo-audit configuration for the Stratoclave CLI.
+#
+# `ignore` entries are deferrals, not approvals — every entry must
+# carry an inline justification and a tracking note. Re-evaluate at
+# every aws-sdk / aws-smithy bump.
+
+[advisories]
+ignore = [
+    # rustls-webpki 0.101.7 is pulled in only via the *legacy* TLS
+    # path of `aws-smithy-http-client` (legacy-rustls-ring →
+    # rustls 0.21 → rustls-webpki 0.101). The modern path
+    # (rustls-aws-lc → rustls 0.23 → rustls-webpki 0.103.13) is
+    # already wired up in parallel and is what the runtime client
+    # actually uses for outbound HTTPS, so the panic / name-
+    # constraint advisories are unreachable from our own code paths.
+    #
+    # The legacy path will be removed once the AWS SDK chain drops
+    # `hyper-014` / `legacy-rustls-ring` from its default features.
+    # Tracking: follow-up PR after the 2026-06 hardening sweep.
+    "RUSTSEC-2026-0098",  # rustls-webpki name-constraint URI bypass
+    "RUSTSEC-2026-0099",  # rustls-webpki wildcard-name constraint bypass
+    "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic
+]
