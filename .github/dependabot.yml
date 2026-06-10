@@ -9,6 +9,13 @@
 version: 2
 updates:
   # GitHub Actions workflow dependencies (action@version pins).
+  #
+  # A-05-actions follow-up: floating major tags (`@v6`) accept any push
+  # the upstream maintainer makes to that tag. For supply-chain hygiene
+  # the workflows under .github/workflows/ should migrate to SHA pins
+  # (`actions/checkout@<sha> # v6.x.y`); Dependabot below is configured
+  # to keep those SHAs current. Tracked as a follow-up to the
+  # 2026-06 hardening sweep.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
