@@ -13,6 +13,14 @@ Per-region selection is driven by `ModelEntry.bedrock_region` from the
 model registry. The legacy `BEDROCK_REGION` env var is preserved as a
 fallback for the Anthropic route only — OpenAI models ship with explicit
 regions in their registry entry and never read this env.
+
+Timeouts are explicit. botocore's defaults are 60 s (connect) and no
+read timeout, which is wrong for our blast radius: a hung Bedrock TCP
+session in `converse_stream` can pin a worker thread for an unbounded
+duration. We pin both via `Config(connect_timeout=10, read_timeout=120)`;
+streaming work continues to flow during the read window because the SDK
+emits events as bytes arrive — `read_timeout` only fires when the upstream
+goes silent for >120 s.
 """
 from __future__ import annotations
 
@@ -20,16 +28,39 @@ import os
 from typing import Optional
 
 import boto3
+from botocore.config import Config
 
 
-def bedrock_runtime_client(region: str):
+# Defaults tuned for Bedrock invocations:
+#   - connect_timeout: 10 s is generous for AWS-internal TLS handshake.
+#   - read_timeout: 120 s caps the longest plausible "silent" stretch
+#     between Bedrock SSE chunks. A model that genuinely needs >120 s of
+#     thinking before its first token is misconfigured for our path.
+#   - retries.mode "standard" keeps boto3 quiet retries off for streaming
+#     responses (retrying mid-stream silently double-bills).
+_DEFAULT_BOTO_CONFIG = Config(
+    connect_timeout=10,
+    read_timeout=120,
+    retries={"max_attempts": 2, "mode": "standard"},
+)
+
+
+def bedrock_runtime_client(region: str, *, config: Optional[Config] = None):
     """Return a fresh boto3 `bedrock-runtime` client bound to `region`.
 
     Not memoized: see module docstring for the IMDS-rotation rationale.
     Construction overhead is dominated by HTTPS connection setup on the
     first call; subsequent calls reuse the underlying urllib3 pool.
+
+    `config` defaults to `_DEFAULT_BOTO_CONFIG` so `connect_timeout` and
+    `read_timeout` are always set. Tests that need to override (e.g.
+    inject a mock with no timeout) can pass an explicit Config.
     """
-    return boto3.client("bedrock-runtime", region_name=region)
+    return boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+        config=config or _DEFAULT_BOTO_CONFIG,
+    )
 
 
 def client_for_model(entry):

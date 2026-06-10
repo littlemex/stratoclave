@@ -36,11 +36,12 @@ Credit handling (pessimistic reservation):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
 import uuid
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Iterator, Optional
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException
@@ -498,7 +499,13 @@ async def _stream_messages(
 
         kwargs = _build_bedrock_kwargs(body, model_id)
         try:
-            resp = _bedrock_client().converse_stream(**kwargs)
+            # boto3's `converse_stream` is synchronous. Calling it directly
+            # from this async generator pins the uvicorn event loop for the
+            # entire Bedrock TCP handshake; multi-tenant traffic to other
+            # endpoints (incl. /healthz) blocks until it returns. Offload
+            # to the default thread executor so the loop stays responsive.
+            client = _bedrock_client()
+            resp = await asyncio.to_thread(client.converse_stream, **kwargs)
         except ClientError as e:
             from core.error_handler import sanitize_exception_message
 
@@ -522,7 +529,11 @@ async def _stream_messages(
         stop_reason_bedrock: Optional[str] = None
 
         try:
-            for event in resp.get("stream", []):
+            # The Bedrock event stream is a sync iterator backed by a
+            # blocking socket read. Wrap it in `_aiter_blocking_stream`
+            # so each `next(...)` runs in a worker thread and the event
+            # loop is free to service other requests in between events.
+            async for event in _aiter_blocking_stream(resp.get("stream", [])):
                 if "contentBlockDelta" in event:
                     delta_obj = event["contentBlockDelta"].get("delta", {})
                     text = delta_obj.get("text", "")
@@ -612,6 +623,37 @@ async def _stream_messages(
                 actual_output_tokens=output_tokens,
                 model_id=model_id,
             )
+
+
+async def _aiter_blocking_stream(
+    stream: Iterator[dict[str, Any]],
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Wrap a blocking iterator (boto3 EventStream) for use under asyncio.
+
+    Each `next(it)` is dispatched to the default thread executor, so the
+    uvicorn event loop is free to service other coroutines while the
+    underlying socket waits for the next Bedrock SSE chunk. The function
+    yields one event per loop iteration; when the upstream iterator
+    raises `StopIteration` (i.e. Bedrock closed the stream cleanly) we
+    return normally.
+    """
+    sentinel = object()
+    it = iter(stream)
+
+    def _next_or_sentinel() -> Any:
+        # `StopIteration` cannot cross thread boundaries cleanly; convert
+        # to a sentinel so the caller terminates without re-raising
+        # `RuntimeError: generator raised StopIteration`.
+        try:
+            return next(it)
+        except StopIteration:
+            return sentinel
+
+    while True:
+        item = await asyncio.to_thread(_next_or_sentinel)
+        if item is sentinel:
+            return
+        yield item
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> bytes:
