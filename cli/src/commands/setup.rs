@@ -284,6 +284,49 @@ fn validate_url(raw: &str) -> Result<String> {
         }
     }
 
+    // A-04-ssrf: cover IPv6 too. URLs can encode v6 hosts as
+    // `http://[::1]/` (loopback), `http://[fe80::1]/` (link-local),
+    // `http://[fc00::1]/` (ULA), or `http://[::ffff:10.0.0.1]/`
+    // (IPv4-mapped — semantically still RFC 1918). Without this guard
+    // an attacker could bypass the IPv4 SSRF check by handing the CLI
+    // an IPv6 literal that resolves to AWS IMDS via a v6 alias.
+    let v6_candidate: String = if host.starts_with('[') && host.ends_with(']') {
+        host[1..host.len() - 1].to_string()
+    } else {
+        host.to_string()
+    };
+    if let Ok(ip) = v6_candidate.parse::<std::net::Ipv6Addr>() {
+        let is_loopback: bool = ip.is_loopback();
+        if !is_loopback {
+            // Stable Rust does not yet expose `is_unique_local`,
+            // `is_unicast_link_local`, etc. on Ipv6Addr. Detect the
+            // ranges by hand.
+            let segs: [u16; 8] = ip.segments();
+            let is_unspecified: bool = ip.is_unspecified();
+            let is_link_local: bool = (segs[0] & 0xffc0) == 0xfe80; // fe80::/10
+            let is_unique_local: bool = (segs[0] & 0xfe00) == 0xfc00; // fc00::/7
+            let is_documentation: bool =
+                segs[0] == 0x2001 && segs[1] == 0xdb8; // 2001:db8::/32
+            let v4_mapped: Option<std::net::Ipv4Addr> = ip.to_ipv4_mapped();
+            let v4_mapped_private: bool = v4_mapped
+                .map(|v4: std::net::Ipv4Addr| {
+                    v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+                })
+                .unwrap_or(false);
+            if is_unspecified
+                || is_link_local
+                || is_unique_local
+                || is_documentation
+                || v4_mapped_private
+            {
+                bail!(
+                    "api_endpoint must not point at a private/link-local IPv6 address ({})",
+                    ip
+                );
+            }
+        }
+    }
+
     // Explicit host suffix denylist for AWS-internal / intranet TLDs.
     const DENY_SUFFIXES: &[&str] = &[".internal", ".local", ".localdomain"];
     if DENY_SUFFIXES.iter().any(|suf| host.ends_with(suf)) && !loopback_host {
@@ -904,6 +947,51 @@ mod tests {
         let err = validate_url("https://example.cloudfront.net/v1/").unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("/v1"));
+    }
+
+    // A-04-ssrf: IPv6 SSRF guards.
+    #[test]
+    fn test_validate_url_rejects_ipv6_link_local() {
+        let err = validate_url("https://[fe80::1]/").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.to_lowercase().contains("ipv6") || msg.contains("link-local"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_rejects_ipv6_unique_local() {
+        let err = validate_url("https://[fc00::1]/").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.to_lowercase().contains("ipv6") || msg.contains("private"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_rejects_ipv4_mapped_in_ipv6() {
+        // [::ffff:10.0.0.1] resolves to RFC 1918 10.0.0.1 — semantically
+        // a private IPv4 address and a classic SSRF bypass technique.
+        let err = validate_url("https://[::ffff:10.0.0.1]/").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.to_lowercase().contains("ipv6")
+                || msg.contains("private")
+                || msg.contains("link-local"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_allows_ipv6_loopback() {
+        // ::1 is loopback and must remain reachable for local dev. The
+        // outer http→https requirement carves out the literal `localhost`
+        // host name only, so we use https:// here to confirm the IPv6
+        // loopback address is *not* blocked by the new SSRF guard.
+        let out = validate_url("https://[::1]/").unwrap();
+        assert!(out.contains("::1"));
     }
 
     #[test]

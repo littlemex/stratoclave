@@ -57,13 +57,27 @@ pub async fn login(opts: LoginOptions) -> Result<()> {
         None => prompt("Email: ")?,
     };
 
-    // password (Keychain から or プロンプト)
-    let password = match opts.password {
-        Some(p) => p,
-        None => keychain_load(&email).ok().flatten().map_or_else(
+    // password resolution order:
+    //   1. STRATOCLAVE_PASSWORD env var (preferred for scripts so
+    //      the value never appears in /proc/<pid>/cmdline)
+    //   2. --password flag (DEPRECATED, A-01-cli — emits a warning to
+    //      stderr that operators should be reading)
+    //   3. OS keychain (Keyring), if previously saved
+    //   4. interactive prompt with TTY echo off
+    let password = if let Ok(env_pw) = std::env::var("STRATOCLAVE_PASSWORD") {
+        env_pw
+    } else if let Some(p) = opts.password {
+        eprintln!(
+            "[WARN] --password is deprecated and exposes the password on the \
+             process list. Use STRATOCLAVE_PASSWORD or the interactive prompt \
+             instead. See `stratoclave auth login --help`."
+        );
+        p
+    } else {
+        keychain_load(&email).ok().flatten().map_or_else(
             || prompt_password("Password: "),
             Ok,
-        )?,
+        )?
     };
 
     let client = reqwest::Client::builder()

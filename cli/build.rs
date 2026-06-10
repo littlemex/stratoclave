@@ -107,6 +107,14 @@ fn generate_policy_code(toml_content: &str) -> String {
         }
     }
 
+    // A-02-buildrs: every value that originates from policy.toml flows
+    // into a `format!` call below that emits Rust source code. A
+    // policy.toml that contained an unescaped `"` (or `\`) used to
+    // break out of the string literal and inject arbitrary code into
+    // the generated `policy.rs`, giving a malicious commit to
+    // `policy.toml` build-time RCE on every developer that ran
+    // `cargo build`. `escape_for_rust_str_lit` re-quotes the value
+    // so it can never close the literal early.
     let env_vars_code = if allowed_env_vars.is_empty() {
         "&[]".to_string()
     } else {
@@ -114,7 +122,7 @@ fn generate_policy_code(toml_content: &str) -> String {
             "&[{}]",
             allowed_env_vars
                 .iter()
-                .map(|s| format!("\"{}\"", s))
+                .map(|s| format!("\"{}\"", escape_for_rust_str_lit(s)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -127,7 +135,7 @@ fn generate_policy_code(toml_content: &str) -> String {
             "&[{}]",
             allowed_model_patterns
                 .iter()
-                .map(|s| format!("\"{}\"", s))
+                .map(|s| format!("\"{}\"", escape_for_rust_str_lit(s)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -136,20 +144,28 @@ fn generate_policy_code(toml_content: &str) -> String {
     let audit_code = if audit_endpoint.is_empty() {
         "None".to_string()
     } else {
-        format!("Some(\"{}\")", audit_endpoint)
+        format!("Some(\"{}\")", escape_for_rust_str_lit(&audit_endpoint))
     };
 
     let api_endpoint_code = if fixed_api_endpoint.is_empty() {
         "None".to_string()
     } else {
-        format!("Some(\"{}\")", fixed_api_endpoint)
+        format!(
+            "Some(\"{}\")",
+            escape_for_rust_str_lit(&fixed_api_endpoint)
+        )
     };
 
     let default_model_code = if fixed_default_model.is_empty() {
         "None".to_string()
     } else {
-        format!("Some(\"{}\")", fixed_default_model)
+        format!(
+            "Some(\"{}\")",
+            escape_for_rust_str_lit(&fixed_default_model)
+        )
     };
+
+    let org_name_escaped = escape_for_rust_str_lit(&org_name);
 
     format!(
         r##"
@@ -201,7 +217,7 @@ impl EnterprisePolicy {{
     }}
 }}
 "##,
-        org_name,
+        org_name_escaped,
         disable_debug,
         env_vars_code,
         model_patterns_code,
@@ -211,6 +227,29 @@ impl EnterprisePolicy {{
         use_bedrock,
         experimental_agent_teams
     )
+}
+
+/// Escape a TOML-derived value so it can be safely embedded inside a
+/// double-quoted Rust string literal in the generated `policy.rs`.
+/// Without this, a value containing `"` or `\` would close the
+/// literal early and let the rest be interpreted as Rust source —
+/// effectively giving any committer to `policy.toml` build-time RCE
+/// on every developer machine that runs `cargo build`.
+fn escape_for_rust_str_lit(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn generate_default_policy_code() -> String {

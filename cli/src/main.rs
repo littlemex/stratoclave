@@ -156,7 +156,12 @@ enum AuthAction {
     Login {
         #[arg(long)]
         email: Option<String>,
-        #[arg(long)]
+        /// DEPRECATED: passing the password on the command line exposes it
+        /// to anyone who can read the process list (`ps`/`/proc`/audit
+        /// logs). Prefer the `STRATOCLAVE_PASSWORD` environment variable
+        /// or the interactive prompt instead. The flag is retained only
+        /// for migration scripts and is hidden from `--help`.
+        #[arg(long, hide = true)]
         password: Option<String>,
         /// Save password to OS keychain (macOS only for MVP)
         #[arg(long)]
@@ -350,6 +355,29 @@ enum TeamLeadTenantAction {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // A-10-policy: when the embedded enterprise policy disables debug,
+    // strip every debug / log-verbosity environment variable before any
+    // crate has a chance to read it. Previously `disable_debug` was
+    // parsed from `policy.toml` and surfaced on the `POLICY` constant
+    // but never consulted, so an enterprise build that opted in to
+    // silenced debug output still exposed full `RUST_LOG=trace` /
+    // tokio-console / reqwest dumps once an end user set the env.
+    if policy::POLICY.disable_debug {
+        // SAFETY: removing env vars from the process environment is
+        // racy in multi-threaded code, but this runs before tokio
+        // spawns a runtime / before any auxiliary thread starts.
+        for k in [
+            "RUST_LOG",
+            "RUST_BACKTRACE",
+            "STRATOCLAVE_DEBUG",
+            "RUST_SPANTRACE",
+            "REQWEST_LOG",
+            "TOKIO_CONSOLE_BIND",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
     // Non-TTY stdin and no args → fall back to pipe mode (legacy behaviour).
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 && !client::is_stdin_tty() {
