@@ -51,6 +51,19 @@ export interface EcsStackProps extends cdk.StackProps {
    * it on so dev smoke tests keep working.
    */
   enableExecuteCommand?: boolean;
+
+  /**
+   * ECR image tag the task definition resolves at deploy time.
+   *
+   * Defaults to `latest` for backwards compatibility, but the ECR
+   * repository was switched to ``IMMUTABLE`` (A-01-ecr) so production
+   * deployments MUST pass an immutable, content-addressed tag here
+   * (e.g. ``sec-2026-06-11`` or a 12-char SHA prefix). The bin
+   * entrypoint reads ``IMAGE_TAG`` from the deployer's environment so
+   * CI / `cdk deploy` invocations can switch tags without editing
+   * the stack.
+   */
+  imageTag?: string;
 }
 
 /**
@@ -406,7 +419,10 @@ export class EcsStack extends cdk.Stack {
     );
 
     const container = this.taskDefinition.addContainer('BackendContainer', {
-      image: ecs.ContainerImage.fromEcrRepository(props.repository, 'latest'),
+      image: ecs.ContainerImage.fromEcrRepository(
+        props.repository,
+        props.imageTag || 'latest',
+      ),
       logging: ecs.LogDriver.awsLogs({ logGroup, streamPrefix: 'backend' }),
       environment: props.environment || {},
       secrets: props.secrets || {},

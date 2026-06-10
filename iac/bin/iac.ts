@@ -192,6 +192,10 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   memory: 512,
   desiredCount: 1, // in-memory state 前提、単一タスク運用
   containerPort: 8000,
+  // A-01-ecr follow-through: with the repo IMMUTABLE, every deploy
+  // must point at a content-addressed tag. Operators export
+  // IMAGE_TAG=<sha-or-release-tag> alongside the deploy command.
+  imageTag: process.env.IMAGE_TAG || 'latest',
   environment: {
     ENVIRONMENT: envName,
     STRATOCLAVE_PREFIX: prefix,
