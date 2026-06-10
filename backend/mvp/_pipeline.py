@@ -55,7 +55,19 @@ def reserve_credit(
             tokens=reservation_tokens,
         )
     except CreditExhaustedError:
+        # A-08-credit: do not leak the precise remaining balance or the
+        # exact reservation requirement to unauthenticated/abusing
+        # callers — those numbers let an attacker probe budgets and
+        # plan exhaustion attacks. Surface only the type + a generic
+        # message; the exhaustion is recorded server-side for ops.
         remaining = repo.remaining_credit(user.user_id, user.org_id)
+        logger.info(
+            "credit_exhausted_402",
+            user_id=user.user_id,
+            tenant_id=user.org_id,
+            remaining_credit=remaining,
+            reservation_required=reservation_tokens,
+        )
         raise HTTPException(
             status_code=402,
             detail={
@@ -64,8 +76,6 @@ def reserve_credit(
                     "Insufficient credit balance for this request. "
                     "Contact your admin."
                 ),
-                "remaining_credit": remaining,
-                "reservation_required": reservation_tokens,
             },
         )
     return repo

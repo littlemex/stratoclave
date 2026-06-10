@@ -228,26 +228,35 @@ def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
     repo = ApiKeysRepository()
     key_hash = hash_api_key(plain_key)
     item = repo.get_by_hash(key_hash)
+
+    # A-04-authn: every API-key 401 path MUST surface the same opaque
+    # message to the caller so an attacker cannot enumerate which
+    # `sk-stratoclave-*` prefixes are unknown vs. revoked vs. expired.
+    # The structured server-side log keeps the precise reason for ops.
+    def _reject(reason: str) -> "HTTPException":
+        _log.info("api_key_rejected", extra={"reason": reason})
+        return HTTPException(status_code=401, detail="Invalid API key")
+
     if not item:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        raise _reject("not_found")
     if item.get("revoked_at"):
-        raise HTTPException(status_code=401, detail="API key has been revoked")
+        raise _reject("revoked")
     expires_at = item.get("expires_at")
     if expires_at:
         now_iso = datetime.now(timezone.utc).isoformat()
         if expires_at <= now_iso:
-            raise HTTPException(status_code=401, detail="API key has expired")
+            raise _reject("expired")
 
     owner_id = str(item.get("user_id") or "")
     scopes_raw = item.get("scopes") or []
     scopes = [str(s) for s in scopes_raw] if isinstance(scopes_raw, list) else []
     if not owner_id:
-        raise HTTPException(status_code=401, detail="API key missing owner")
+        raise _reject("missing_owner")
 
     users_repo = UsersRepository()
     user_rec = users_repo.get_by_user_id(owner_id)
     if not user_rec:
-        raise HTTPException(status_code=401, detail="API key owner no longer exists")
+        raise _reject("owner_missing")
 
     # Z-1 (2026-04 third blind review): the tombstone + watermark
     # checks used to live only on the Cognito JWT path, so a
@@ -264,9 +273,7 @@ def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
     #                              all credentials belonging to the
     #                              user, not just Cognito bearers.
     if is_user_deleted(user_rec):
-        raise HTTPException(
-            status_code=401, detail="API key owner has been deleted"
-        )
+        raise _reject("owner_tombstone")
     wm_raw = user_rec.get("token_revoked_after")
     created_raw = item.get("created_at")
     if wm_raw is not None and created_raw:
@@ -282,13 +289,7 @@ def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
             except (TypeError, ValueError):
                 created_epoch = None
             if created_epoch is not None and created_epoch < watermark:
-                raise HTTPException(
-                    status_code=401,
-                    detail=(
-                        "API key predates a forced session revocation on its"
-                        " owner — mint a new key after re-authenticating."
-                    ),
-                )
+                raise _reject("predates_revocation_watermark")
 
     email = str(user_rec.get("email") or "")
     org_id = str(user_rec.get("org_id") or DEFAULT_ORG_ID)

@@ -381,12 +381,20 @@ def get_user(
 # Delete (with last-admin protection)
 # -----------------------------------------------------------------------
 def _count_active_admins() -> int:
-    """DynamoDB Users から `roles` に admin を含む active user 数を数える."""
+    """DynamoDB Users から `roles` に admin を含む *active* user 数を数える.
+
+    A-03-admin: ``mark_deleted`` で生成されたソフト削除トンbストーン (status=
+    "deleted") は active 扱いしない。さもないと最後の admin を削除した直後に
+    まだ tombstone が残っているため delete API が無条件で許可されてしまい、
+    その後 active admin がゼロになる。
+    """
     repo = UsersRepository()
     resp = repo._table.scan()
     count = 0
     for item in resp.get("Items", []):
         if item.get("sk") != repo.SK_PROFILE:
+            continue
+        if item.get("status") == "deleted":
             continue
         roles = item.get("roles") or []
         if "admin" in roles:

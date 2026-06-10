@@ -319,6 +319,13 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
             },
         )
         # 招待 consume
+        # A-10-invite: prior to this fix the consume step swallowed any
+        # exception (DynamoDB throttling, race with another consumer,
+        # etc.). The login flow then proceeded — but the invite was
+        # still marked unconsumed, so the same invite could be replayed
+        # to provision additional principals. We fail closed instead:
+        # if we cannot prove the invite was consumed, abort the login
+        # before issuing Cognito credentials.
         invites_repo = SsoPreRegistrationsRepository()
         try:
             invite = invites_repo.get(trusted.email)
@@ -326,6 +333,13 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
                 invites_repo.mark_consumed(trusted.email)
         except Exception as e:
             _log.warning("sso_invite_consume_failed: %s", e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not finalise the SSO invitation; please retry. "
+                    "If the problem persists contact your administrator."
+                ),
+            )
     else:
         sub = str(existing["user_id"])
         existing_method = str(existing.get("auth_method") or "cognito")

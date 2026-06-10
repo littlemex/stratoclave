@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Any, Optional
 from uuid import uuid4
 
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource
@@ -85,10 +85,26 @@ class TenantsRepository:
         return [item for item in resp.get("Items", []) if item.get("status") != "archived"]
 
     def count_by_owner(self, owner_user_id: str) -> int:
+        """Count *active* tenants owned by `owner_user_id`.
+
+        A-04-tenant: archived tenants must NOT count toward the team-lead
+        cap. Otherwise a team lead who archives a tenant cannot create a
+        new one even though their visible footprint is below the limit,
+        and the cap silently inflates over time as archives accumulate.
+
+        Implementation note: DynamoDB COUNT-only queries cannot apply
+        FilterExpression server-side without scanning attributes, so we
+        fetch the items via the same projection the cap path needs and
+        count active ones in Python. The team-lead-index entries per
+        owner are bounded (the cap itself is the bound), so this stays
+        O(limit) RCU.
+        """
         resp = self._table.query(
             IndexName="team-lead-index",
             KeyConditionExpression=Key("team_lead_user_id").eq(owner_user_id),
-            Select="COUNT",
+            FilterExpression=Attr("status").ne("archived"),
+            ProjectionExpression="tenant_id, #s",
+            ExpressionAttributeNames={"#s": "status"},
         )
         return int(resp.get("Count", 0))
 

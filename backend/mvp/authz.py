@@ -228,12 +228,17 @@ def admin_creation_allowed() -> bool:
     return int(time.time()) <= until
 
 
+_LAST_ADMIN_GATE_WARN_AT: float = 0.0
+_ADMIN_GATE_WARN_INTERVAL_SECONDS: int = 300
+
+
 def warn_if_admin_creation_enabled_in_production(logger: logging.Logger) -> None:
     """Emit an audit-level warning if the bootstrap gate is open.
 
     Called from `main.py` on startup and (if present) from the
-    `create_user` handler on every admin-role request, so the presence
-    of an open gate is loud enough to catch in CloudWatch filters.
+    `create_user` handler. To avoid flooding CloudWatch with the same
+    epoch on every request (A-11-log), the warning is rate-limited to
+    once per ``_ADMIN_GATE_WARN_INTERVAL_SECONDS`` per process.
     """
     if not _is_production():
         return
@@ -241,8 +246,14 @@ def warn_if_admin_creation_enabled_in_production(logger: logging.Logger) -> None
         return
     import time
 
+    global _LAST_ADMIN_GATE_WARN_AT
+    now = time.time()
+    if now - _LAST_ADMIN_GATE_WARN_AT < _ADMIN_GATE_WARN_INTERVAL_SECONDS:
+        return
+    _LAST_ADMIN_GATE_WARN_AT = now
+
     until = _admin_creation_until_epoch()
-    remaining = max(0, until - int(time.time())) if until else 0
+    remaining = max(0, until - int(now)) if until else 0
     logger.warning(
         "allow_admin_creation_enabled_in_production",
         extra={

@@ -741,10 +741,26 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]]]:
             if isinstance(response_block, dict):
                 usage = _extract_usage(response_block.get("usage", {}))
 
-    if event_name == "error" and data_payload is not None:
-        sanitized = _sanitize_error_payload(data_payload)
+    if event_name == "error":
+        # A-03-sse: when the upstream error payload does not match the
+        # expected JSON shape (`{"error": {"message": "..."}}`) the
+        # sanitizer returns None, and previously we forwarded the raw
+        # bytes as-is — defeating the redaction guarantee for ARNs /
+        # account IDs. Fall back to a regex sweep over the entire data
+        # payload (or the raw frame, if data was missing) so callers
+        # never see an unsanitized error event.
+        sanitized = (
+            _sanitize_error_payload(data_payload)
+            if data_payload is not None
+            else None
+        )
         if sanitized is not None:
             return f"event: error\ndata: {sanitized}\n\n".encode("utf-8"), usage
+        fallback = data_payload if data_payload is not None else text
+        scrubbed = sanitize_exception_message(fallback)
+        return (
+            f"event: error\ndata: {json.dumps({'error': {'message': scrubbed}}, ensure_ascii=False)}\n\n"
+        ).encode("utf-8"), usage
 
     return raw, usage
 

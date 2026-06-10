@@ -345,9 +345,15 @@ def seed_bootstrap_admin() -> dict[str, Any]:
                 email=email_env,
             )
 
+        # A-12-log: do NOT log the admin email or Cognito Pool ID in
+        # plaintext on every bootstrap, even at info level — once
+        # CloudWatch ingests them they are searchable forever and any
+        # one-account contributor can read them. Surface the Secrets
+        # Manager ARN (already a tagged AWS resource) and a generic
+        # rotation hint instead; the operator who runs the rotation
+        # already knows which Pool ID to target from the deploy output.
         logger.info(
             "bootstrap_admin_created",
-            email=email_env,
             user_id=sub,
             tenant_id=tenant_id,
             created_new=created_new,
@@ -357,18 +363,14 @@ def seed_bootstrap_admin() -> dict[str, Any]:
             # fail CI if it shows up here.
             secret_arn=secret_arn,
             instruction=(
-                "Temporary password stashed in AWS Secrets Manager. Retrieve once via: "
-                "aws secretsmanager get-secret-value --secret-id "
-                f"{os.getenv('STRATOCLAVE_PREFIX', 'stratoclave')}/bootstrap-admin-temp-password "
-                "--query SecretString --output text. Then rotate via: "
-                "aws cognito-idp admin-set-user-password --user-pool-id "
-                f"{pool_id} --username {email_env} --password <NEW> --permanent"
+                "Temporary password stashed in Secrets Manager (see secret_arn). "
+                "Retrieve once and immediately rotate via "
+                "`aws cognito-idp admin-set-user-password`."
             ),
         )
     else:
         logger.warning(
             "bootstrap_admin_created_without_password",
-            email=email_env,
             user_id=sub,
             tenant_id=tenant_id,
             instruction="Set password via aws cognito-idp admin-set-user-password",
