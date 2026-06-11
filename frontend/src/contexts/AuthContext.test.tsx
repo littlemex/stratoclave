@@ -43,9 +43,11 @@ vi.mock('@/lib/cognito', () => ({
 }))
 
 // Typed handles to the stubs installed on globalThis above.
-const mockMe = vi.fn<[], Promise<MeResponse>>()
+// vitest >=3 collapsed the legacy `vi.fn<TArgs, TReturn>()` form into
+// a single function-type generic.
+const mockMe = vi.fn<() => Promise<MeResponse>>()
 const mockRefresh = vi.fn()
-;(globalThis as any).__mockMe = (...a: unknown[]) => mockMe(...(a as []))
+;(globalThis as any).__mockMe = (..._a: unknown[]) => mockMe()
 ;(globalThis as any).__mockRefresh = (...a: unknown[]) => mockRefresh(...(a as []))
 
 // Must be imported AFTER vi.mock so React sees the mocked modules.

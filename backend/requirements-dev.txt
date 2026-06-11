@@ -8,14 +8,19 @@
 -r requirements.txt
 
 # Testing
-pytest==8.3.4
-pytest-asyncio==0.24.0
+# pytest 9.0.3 fixes CVE-2025-71176 (path traversal in tmp_path).
+# pytest-asyncio 1.4.0 is the first release whose dist-deps allow
+# pytest 9 (the 0.24.x line caps at pytest<9).
+pytest==9.0.3
+pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 
 # AWS SDK mock for backend tests
 moto[dynamodb,cognitoidp,sts]==5.1.12
-# moto[cognitoidp] uses joserfc to sign its fake JWTs
-joserfc==1.0.1
+# moto[cognitoidp] uses joserfc to sign its fake JWTs.
+# joserfc 1.6.3 fixes CVE-2026-27932 (CPU exhaustion via unbounded
+# PBES2 p2c parameter).
+joserfc==1.6.3
 
 # Linting / formatting
 ruff==0.8.4

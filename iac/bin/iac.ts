@@ -165,6 +165,12 @@ if (wafStack) {
 const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
   env: cognitoEnv,
   prefix,
+  // A-09-cognito / A-20-cognito: cap refresh-token TTL at 7 days and
+  // RETAIN the User Pool on stack delete when this is the production
+  // environment. Without `environment` the stack falls back to the
+  // legacy 30-day refresh + DESTROY behaviour, which is appropriate
+  // for disposable dev stacks only.
+  environment: envName,
   domainPrefix: cognitoDomainPrefix,
   cloudFrontDomainName: frontendStack.cfnDistribution.attrDomainName,
   description: `[${prefix}] Cognito User Pool (Hosted UI, User/Pass auth for CLI)`,
@@ -186,6 +192,10 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   memory: 512,
   desiredCount: 1, // in-memory state 前提、単一タスク運用
   containerPort: 8000,
+  // A-01-ecr follow-through: with the repo IMMUTABLE, every deploy
+  // must point at a content-addressed tag. Operators export
+  // IMAGE_TAG=<sha-or-release-tag> alongside the deploy command.
+  imageTag: process.env.IMAGE_TAG || 'latest',
   environment: {
     ENVIRONMENT: envName,
     STRATOCLAVE_PREFIX: prefix,
@@ -436,6 +446,11 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
       id: 'AwsSolutions-ECS2',
       reason:
         'The ECS task environment variables injected here are all non-secret: table names, region, prefix, feature flags. Secrets (Cognito user pool id is public; there are no long-lived keys) do not pass through env at all.',
+    },
+    {
+      id: 'AwsSolutions-SMG4',
+      reason:
+        'BootstrapAdminTempPasswordSecret is single-use: the operator reads it exactly once and rotates the admin password through Cognito (`admin-set-user-password`) immediately. Secrets Manager rotation does not apply to a placeholder that is overwritten by the seed code on first boot, and there is no managed service that knows how to rotate a temporary Cognito password on our behalf.',
     },
   ];
   NagSuppressions.addStackSuppressions(networkStack, appLevelSuppressions);

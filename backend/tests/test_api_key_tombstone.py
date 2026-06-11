@@ -103,7 +103,10 @@ class TestAuthenticateApiKeyRejectsDeletedOwner:
         with pytest.raises(HTTPException) as exc:
             _authenticate_api_key(plain)
         assert exc.value.status_code == 401
-        assert "deleted" in str(exc.value.detail).lower()
+        # A-04-authn: every API-key 401 surfaces the same opaque
+        # message; the precise reason ("owner_tombstone") is captured
+        # only in the structured server log to defeat enumeration.
+        assert str(exc.value.detail) == "Invalid API key"
 
     def test_active_owner_passes(self, api_keys_repo, users_repo):
         from mvp.deps import _authenticate_api_key
@@ -127,7 +130,9 @@ class TestAuthenticateApiKeyRejectsPreWatermark:
         with pytest.raises(HTTPException) as exc:
             _authenticate_api_key(plain)
         assert exc.value.status_code == 401
-        assert "predates" in str(exc.value.detail).lower()
+        # A-04-authn: collapsed to the same opaque message; the
+        # structured server log records "predates_revocation_watermark".
+        assert str(exc.value.detail) == "Invalid API key"
 
     def test_key_created_after_watermark_still_works(self, api_keys_repo, users_repo):
         from mvp.deps import _authenticate_api_key

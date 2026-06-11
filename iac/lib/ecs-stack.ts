@@ -5,6 +5,7 @@ import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 import { applyCommonTags, putStringParameter } from './_common';
 
@@ -50,6 +51,19 @@ export interface EcsStackProps extends cdk.StackProps {
    * it on so dev smoke tests keep working.
    */
   enableExecuteCommand?: boolean;
+
+  /**
+   * ECR image tag the task definition resolves at deploy time.
+   *
+   * Defaults to `latest` for backwards compatibility, but the ECR
+   * repository was switched to ``IMMUTABLE`` (A-01-ecr) so production
+   * deployments MUST pass an immutable, content-addressed tag here
+   * (e.g. ``sec-2026-06-11`` or a 12-char SHA prefix). The bin
+   * entrypoint reads ``IMAGE_TAG`` from the deployer's environment so
+   * CI / `cdk deploy` invocations can switch tags without editing
+   * the stack.
+   */
+  imageTag?: string;
 }
 
 /**
@@ -77,10 +91,47 @@ export class EcsStack extends cdk.Stack {
       containerInsights: true,
     });
 
+    // A-06-iam: pre-create the bootstrap-admin secret with an empty
+    // placeholder so the ECS task role only ever needs `PutSecretValue`
+    // (not `CreateSecret`). The seed code on first boot overwrites the
+    // placeholder with the freshly generated temp password.
+    const bootstrapAdminSecret = new secretsmanager.Secret(
+      this,
+      'BootstrapAdminTempPasswordSecret',
+      {
+        secretName: `${prefix}/bootstrap-admin-temp-password`,
+        description:
+          'Stratoclave bootstrap admin temporary password (rewritten by seed.py at first boot).',
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        generateSecretString: {
+          // The placeholder MUST be valid JSON so seed.py's
+          // `put_secret_value` write replaces it cleanly. The real
+          // {email,password} payload is filled in at lifespan time.
+          secretStringTemplate: JSON.stringify({ placeholder: true }),
+          generateStringKey: 'token',
+          excludePunctuation: true,
+          passwordLength: 32,
+        },
+      },
+    );
+    // cdk-nag SMG4 (rotation): bootstrap secret is single-use — the
+    // operator reads it once, then rotates the admin password through
+    // Cognito directly. Secrets Manager rotation does not apply to
+    // a placeholder that is overwritten by the seed code on first boot.
+    // Suppressed via the bin/iac.ts stack-level suppression list.
+    void bootstrapAdminSecret;
+
+    // A-08-log: 7-day retention used to be the default. That is below
+    // the typical SOC2 / ISO27001 90-day audit window, and below the
+    // window during which most upstream auth incidents are detected.
+    // Default to 90 days; container logs are cheap relative to the
+    // forensic value of the extra runway.
     const logGroup = new logs.LogGroup(this, 'BackendLogGroup', {
       logGroupName: `/ecs/${prefix}-backend`,
-      retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      // RETAIN in any environment — log groups carry incident
+      // forensics that survive a stack rebuild.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'BackendTaskDefinition', {
@@ -320,18 +371,38 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
-    // Secrets Manager (${prefix}/* 配下のみ)
+    // Secrets Manager — split into two least-privilege statements
+    // (A-06-iam):
+    //
+    //   1. Read-only `GetSecretValue` for everything under `${prefix}/*`.
+    //      Container code reads provider tokens, JWT signing keys etc.
+    //   2. `PutSecretValue` ONLY against the bootstrap-admin secret,
+    //      which the lifespan seed must rewrite when a fresh password
+    //      is generated. `CreateSecret` / `UpdateSecret` are not
+    //      granted at all — the secret is pre-provisioned by CDK and
+    //      `seed.py` was already idempotent on update; the previous
+    //      blanket `${prefix}/*` write policy let any RCE inside the
+    //      container forge secrets that the rotation script later
+    //      consumed.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          'secretsmanager:GetSecretValue',
-          'secretsmanager:CreateSecret',
-          'secretsmanager:UpdateSecret',
-          'secretsmanager:PutSecretValue',
-        ],
+        actions: ['secretsmanager:GetSecretValue'],
         resources: [
           `arn:aws:secretsmanager:${region}:${account}:secret:${prefix}/*`,
+        ],
+      })
+    );
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:PutSecretValue'],
+        resources: [
+          // Wildcard suffix (`*`) is required because Secrets Manager
+          // appends a 6-char random suffix to the ARN at create time;
+          // pinpointing the exact suffix would force CloudFormation to
+          // re-deploy the policy after every secret rotation.
+          `arn:aws:secretsmanager:${region}:${account}:secret:${prefix}/bootstrap-admin-temp-password-*`,
         ],
       })
     );
@@ -348,7 +419,10 @@ export class EcsStack extends cdk.Stack {
     );
 
     const container = this.taskDefinition.addContainer('BackendContainer', {
-      image: ecs.ContainerImage.fromEcrRepository(props.repository, 'latest'),
+      image: ecs.ContainerImage.fromEcrRepository(
+        props.repository,
+        props.imageTag || 'latest',
+      ),
       logging: ecs.LogDriver.awsLogs({ logGroup, streamPrefix: 'backend' }),
       environment: props.environment || {},
       secrets: props.secrets || {},

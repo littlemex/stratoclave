@@ -36,12 +36,12 @@ describe('CognitoStack', () => {
     });
   });
 
-  // COG-03: パスワードポリシー (minLength=8, 全文字種必須) (P1)
+  // COG-03: password policy (minLength=12 since 2026-06 hardening, full charset required) (P1)
   test('パスワードポリシーが正しく設定されていること', () => {
     template.hasResourceProperties('AWS::Cognito::UserPool', {
       Policies: {
         PasswordPolicy: {
-          MinimumLength: 8,
+          MinimumLength: 12,
           RequireLowercase: true,
           RequireUppercase: true,
           RequireNumbers: true,

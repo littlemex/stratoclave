@@ -126,19 +126,36 @@ async function fetchMe(): Promise<AuthUser> {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState)
 
+  // A-07-logout: BroadcastChannel-based cross-tab notifications.
+  // Lazily constructed; nullable in environments that lack the API
+  // (older Safari, jsdom test runs).
+  const broadcast = useCallback((type: 'login' | 'logout') => {
+    if (typeof BroadcastChannel === 'undefined') return
+    try {
+      const ch = new BroadcastChannel('stratoclave_auth')
+      ch.postMessage({ type })
+      ch.close()
+    } catch {
+      // Best-effort; cross-tab sync is a UX nicety, not a security boundary.
+    }
+  }, [])
+
   const login = useCallback(async () => {
     await startLogin()
-  }, [])
+    broadcast('login')
+  }, [broadcast])
 
   const logout = useCallback(() => {
     dispatch({ type: 'AUTH_LOGOUT' })
+    broadcast('logout')
     logoutRedirect()
-  }, [])
+  }, [broadcast])
 
   const softLogout = useCallback(() => {
     clearTokens()
     dispatch({ type: 'AUTH_LOGOUT' })
-  }, [])
+    broadcast('logout')
+  }, [broadcast])
 
   const setLocale = useCallback(async (locale: UserLocale) => {
     // Optimistic: update local state + i18next immediately so the UI
@@ -330,19 +347,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   /* ------------------------------------------------------------------ */
-  /* Cross-tab sync                                                     */
+  /* Cross-tab sync (A-07-logout)                                       */
+  /*                                                                    */
+  /* `StorageEvent` is dispatched only when *another* tab writes to     */
+  /* localStorage / sessionStorage on the same origin — and even then   */
+  /* sessionStorage is per-tab, so a logout in tab A is invisible to    */
+  /* tab B's storage listener. Switch to `BroadcastChannel`, which is   */
+  /* the standards-blessed cross-tab event bus and works correctly      */
+  /* under the sessionStorage token model that P0-7 introduced.         */
   /* ------------------------------------------------------------------ */
   useEffect(() => {
-    const handler = (e: StorageEvent) => {
-      if (e.key !== 'stratoclave_tokens') return
-      if (!e.newValue) {
+    if (typeof BroadcastChannel === 'undefined') return
+    const channel = new BroadcastChannel('stratoclave_auth')
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'logout') {
         dispatch({ type: 'AUTH_LOGOUT' })
-      } else {
+      } else if (e.data?.type === 'login') {
         void reloadUser()
       }
     }
-    window.addEventListener('storage', handler)
-    return () => window.removeEventListener('storage', handler)
+    channel.addEventListener('message', handler)
+    return () => {
+      channel.removeEventListener('message', handler)
+      channel.close()
+    }
   }, [reloadUser])
 
   return (

@@ -23,10 +23,12 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
-const mockUsageSummary = vi.fn<[number?], Promise<UsageSummary>>()
-const mockUsageHistory = vi.fn<[unknown], Promise<UsageHistoryResponse>>()
+// vitest >=3 collapsed the legacy `vi.fn<TArgs, TReturn>()` form into
+// a single function-type generic.
+const mockUsageSummary = vi.fn<(sinceDays?: number) => Promise<UsageSummary>>()
+const mockUsageHistory = vi.fn<(opts: unknown) => Promise<UsageHistoryResponse>>()
 ;(globalThis as any).__usageSummary = (...a: unknown[]) =>
-  mockUsageSummary(...(a as []))
+  mockUsageSummary(a[0] as number | undefined)
 ;(globalThis as any).__usageHistory = (...a: unknown[]) =>
   mockUsageHistory(a[0])
 

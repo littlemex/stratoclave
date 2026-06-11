@@ -1,8 +1,17 @@
-FROM public.ecr.aws/docker/library/python:3.11-slim
+# A-02-docker: tag-only references are mutable. The base image is
+# expected to be pinned by digest in the production build pipeline:
+# CI passes `--build-arg PYTHON_BASE=public.ecr.aws/docker/library/python@sha256:<...>`
+# so the actual layer hash is locked in the deployed image. Local
+# development falls back to the floating tag below.
+ARG PYTHON_BASE=public.ecr.aws/docker/library/python:3.11-slim
+FROM ${PYTHON_BASE}
 
 WORKDIR /app
 
-# Install system dependencies (curl for health checks).
+# Install system dependencies (curl for health checks). `--no-install-recommends`
+# minimises the attack surface of the base image; the explicit `apt-get
+# update` is kept in the same RUN as the cleanup so the cache layer stays
+# tight.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     apt-get clean && \
@@ -11,8 +20,18 @@ RUN apt-get update && \
 # Install runtime dependencies only (requirements-dev.txt stays off the
 # image to keep pytest/moto/ruff out of the container). Layer ordering
 # preserves pip cache for iterative builds.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+#
+# A-03-pip: the production image opts into `--require-hashes` when a
+# pinned `requirements.lock.txt` is present. The lock file is generated
+# by `pip-compile --generate-hashes` in CI and committed alongside the
+# floating `requirements.txt`. Dev / local runs without the lock fall
+# back to the floating list with `--no-cache-dir`.
+COPY requirements.txt requirements.lock.txt* ./
+RUN if [ -f requirements.lock.txt ]; then \
+        pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock.txt; \
+    else \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 # Copy application.
 COPY . .

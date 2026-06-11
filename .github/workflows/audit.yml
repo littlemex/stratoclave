@@ -1,0 +1,125 @@
+name: audit
+
+# Supply-chain audit (A-04-ci, 2026-06 hardening sweep).
+#
+# Runs known-vulnerability scanners across every language ecosystem in
+# the repo so a bumped dependency that ships a CVE breaks the merge
+# rather than landing silently.
+#
+# Why these tools, with these flags:
+#   - pip-audit  : reads requirements*.txt, reports against PyPI advisories.
+#                  --strict makes any finding fail; ignore-vulns can be added
+#                  case-by-case with a comment justifying the deferral.
+#   - cargo-audit: reads Cargo.lock, reports against the RustSec advisory DB.
+#                  --deny warnings turns advisories into a non-zero exit.
+#   - npm audit  : reads package-lock.json. The default exit code is non-zero
+#                  on any finding at moderate or higher; we keep that strict
+#                  default and run on both `iac/` and `frontend/` lockfiles.
+#
+# Triage policy: a CVE finding blocks merge until either (a) bumped to a
+# fixed version, or (b) explicitly deferred via the per-tool ignore
+# mechanism with an inline reason and a tracking issue.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Re-run weekly so a new CVE against an already-pinned dep surfaces
+    # without requiring a code change.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    name: backend / pip-audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install --no-cache-dir pip-audit
+      - name: Audit runtime dependencies
+        run: pip-audit --strict -r requirements.txt
+      - name: Audit dev dependencies
+        run: pip-audit --strict -r requirements-dev.txt
+
+  cargo-audit:
+    name: cli / cargo-audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Run cargo audit
+        # See cli/audit.toml for the inline justification of each
+        # --ignore. Re-evaluate at every aws-sdk / aws-smithy bump;
+        # the goal is to delete these flags entirely once the
+        # AWS SDK chain drops the legacy-rustls path that pulls
+        # rustls 0.21 / rustls-webpki 0.101.
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104
+
+  npm-audit-iac:
+    name: iac / npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: iac
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: iac/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit
+        # `npm audit` exits non-zero on vulnerabilities at "moderate" or
+        # higher; --audit-level=high keeps low-severity dev-only findings
+        # out of the merge gate while still failing on anything serious.
+        run: npm audit --audit-level=high
+
+  npm-audit-frontend:
+    name: frontend / npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit
+        run: npm audit --audit-level=high

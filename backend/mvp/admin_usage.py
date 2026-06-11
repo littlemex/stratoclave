@@ -33,7 +33,10 @@ router = APIRouter(prefix="/api/mvp/admin", tags=["mvp-admin-usage"])
 class UsageLogEntry(BaseModel):
     tenant_id: str
     user_id: str
-    user_email: Optional[str] = None
+    # A-19-pii: surface the prefixed hash, not the plaintext email.
+    # Operators correlate via user_id; UI lookups resolve display names
+    # against the Users table on demand.
+    user_email_hash: Optional[str] = None
     model_id: str
     input_tokens: int
     output_tokens: int
@@ -63,10 +66,19 @@ def _decode_cursor(cursor: Optional[str]) -> Optional[dict]:
 
 
 def _to_entry(item: dict[str, Any]) -> UsageLogEntry:
+    # Backwards-compat read path: legacy rows still carry ``user_email``
+    # in plaintext. Surface only the hash to the API. If the row pre-
+    # dates A-19-pii, hash the legacy field at read time so the API
+    # contract is stable from day one.
+    legacy_email = item.get("user_email")
+    email_hash = item.get("user_email_hash")
+    if email_hash is None and legacy_email:
+        from dynamo.usage_logs import hash_user_email
+        email_hash = hash_user_email(str(legacy_email))
     return UsageLogEntry(
         tenant_id=str(item.get("tenant_id") or ""),
         user_id=str(item.get("user_id") or ""),
-        user_email=item.get("user_email"),
+        user_email_hash=email_hash,
         model_id=str(item.get("model_id") or ""),
         input_tokens=int(item.get("input_tokens", 0)),
         output_tokens=int(item.get("output_tokens", 0)),

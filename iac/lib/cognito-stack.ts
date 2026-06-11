@@ -14,6 +14,16 @@ export interface CognitoStackProps extends cdk.StackProps {
   cloudFrontDomainName?: string;
   additionalCallbackUrls?: string[];
   additionalLogoutUrls?: string[];
+  /**
+   * Environment name (development, staging, production).
+   *
+   * Drives the User Pool removal policy (A-20-cognito) and the refresh-
+   * token TTL (A-09-cognito). When omitted, defaults to `development`
+   * so a fresh stack stays disposable. Production deployments MUST
+   * pass `production` so the pool retains on stack delete and refresh
+   * tokens cap at 7 days.
+   */
+  environment?: string;
 }
 
 /**
@@ -39,6 +49,8 @@ export class CognitoStack extends cdk.Stack {
     super(scope, id, props);
 
     const { prefix } = props;
+    const env = props.environment || 'development';
+    const isProd = env === 'production';
     this.domainPrefix = props.domainPrefix || `${prefix}-auth-${cdk.Aws.ACCOUNT_ID}`;
 
     this.userPool = new cognito.UserPool(this, 'UserPool', {
@@ -57,7 +69,7 @@ export class CognitoStack extends cdk.Stack {
         }),
       },
       passwordPolicy: {
-        minLength: 8,
+        minLength: 12,
         requireLowercase: true,
         requireUppercase: true,
         requireDigits: true,
@@ -65,7 +77,11 @@ export class CognitoStack extends cdk.Stack {
         tempPasswordValidity: cdk.Duration.days(7),
       },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // A-20-cognito: production must RETAIN the User Pool on stack
+      // delete; losing it orphans every issued credential and forces a
+      // full re-onboarding. Dev still uses DESTROY so disposable
+      // stacks tear down cleanly.
+      removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
     this.userPoolDomain = this.userPool.addDomain('Domain', {
@@ -117,7 +133,11 @@ export class CognitoStack extends cdk.Stack {
       ],
       accessTokenValidity: cdk.Duration.hours(1),
       idTokenValidity: cdk.Duration.hours(1),
-      refreshTokenValidity: cdk.Duration.days(30),
+      // A-09-cognito: cap refresh-token TTL at 7 days in production so
+      // a stolen refresh token is invalidated within a week even if
+      // the global sign-out path fails. Dev keeps the legacy 30-day
+      // window for ergonomic development workflows.
+      refreshTokenValidity: isProd ? cdk.Duration.days(7) : cdk.Duration.days(30),
       preventUserExistenceErrors: true,
     });
 

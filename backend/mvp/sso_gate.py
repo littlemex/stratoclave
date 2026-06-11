@@ -190,21 +190,40 @@ def _lookup_invite(
 
 
 def _derive_email_from_session(sts: StsIdentity) -> str:
-    """assumed-role の session_name から email を決定. '@' を含まなければ拒否.
+    """Resolve an email from an assumed-role session.
 
-    auto_provision で session_name が email でない場合のエラーメッセージ:
-    Admin が個別招待で email を map できる hybrid モードの誘導を含める.
+    A-10-sso: do NOT reflect the caller-supplied session name or role
+    name back in the 403 message. They came from the signed STS
+    payload, so they are partially attacker-controlled (any allowlisted
+    account can mint arbitrary RoleSessionName values), and surfacing
+    them in plaintext gave attackers a free oracle for valid session-
+    name shapes plus an XSS sink in any UI that rendered the error.
+    Server-side log keeps the precise context for ops.
     """
     session = (sts.session_name or "").strip()
     if "@" in session:
         return session.lower()
+    _log_sso_provision_failure(sts, reason="session_name_not_email")
     raise HTTPException(
         status_code=403,
         detail=(
-            f"AWS session '{session or '(empty)'}' (role={sts.role_name}) has no email. "
-            f"Ask an administrator to add an invite with iam_user_name='{session}' "
-            "to map this session to an email."
+            "AWS session has no usable email. Ask an administrator to "
+            "add an invite that maps this session to an email."
         ),
+    )
+
+
+def _log_sso_provision_failure(sts: StsIdentity, *, reason: str) -> None:
+    import logging
+
+    logging.getLogger(__name__).info(
+        "sso_auto_provision_rejected",
+        extra={
+            "reason": reason,
+            "account_id": sts.account_id,
+            "role_name": sts.role_name,
+            "session_name": sts.session_name,
+        },
     )
 
 

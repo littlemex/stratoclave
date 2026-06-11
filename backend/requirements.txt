@@ -28,7 +28,10 @@ structlog==25.5.0
 python-json-logger==4.1.0
 
 # Authentication
-PyJWT[crypto]==2.10.1
+# PyJWT 2.13.0 closes 7 advisories (CVE-2026-32597 / CVE-2026-48522..48526
+# / PYSEC-2026-176/177/178/179) including a critical `crit` header
+# bypass and several HMAC / unrestricted URI / DoS issues in PyJWKClient.
+PyJWT[crypto]==2.13.0
 cryptography==47.0.0
 
 # Rate limiting (in-process token bucket shared across routes).

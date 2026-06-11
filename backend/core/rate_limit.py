@@ -143,9 +143,34 @@ RESPOND_RATE_LIMIT = os.getenv("AUTH_RESPOND_RATE_LIMIT", "10/minute")
 SSO_EXCHANGE_RATE_LIMIT = os.getenv("SSO_EXCHANGE_RATE_LIMIT", "20/minute")
 
 
+# A-14-rate: in-process counters reset whenever an ECS task restarts
+# (deploy / scale-out / OOM kill). Operators that scale beyond a
+# single task — or that need horizontal-scaled brute-force resistance
+# — should set ``STRATOCLAVE_RATELIMIT_STORAGE_URI`` to a slowapi-
+# compatible URI (``redis://...`` / ``memcached://...`` / a
+# DynamoDB-backed implementation). When unset, we use the local
+# in-memory counter and emit a one-shot warning so the limitation is
+# visible in CloudWatch Logs at startup.
+_storage_uri = os.getenv("STRATOCLAVE_RATELIMIT_STORAGE_URI") or None
+if _storage_uri is None:
+    _log.warning(
+        "rate_limit_storage_in_process",
+        extra={
+            "event": "rate_limit_storage_warning",
+            "reason": (
+                "Per-IP rate limit counters are stored in-process and "
+                "reset on every ECS task restart. Set "
+                "STRATOCLAVE_RATELIMIT_STORAGE_URI=redis://... "
+                "(or another shared backend) for horizontally-scaled "
+                "deployments."
+            ),
+        },
+    )
+
 limiter = Limiter(
     key_func=_client_key,
     default_limits=[],  # opt-in per route
+    storage_uri=_storage_uri,
     # `headers_enabled=True` makes slowapi's sync decorator try to mutate
     # the handler's return value into a `starlette.responses.Response`
     # and inject `X-RateLimit-*` headers. Our auth handlers return

@@ -130,11 +130,18 @@ describe('EcsStack', () => {
     });
   });
 
-  // ECS-06: CloudWatch LogGroup (/ecs/stratoclave-backend, 1 週間保持) (P1)
+  // ECS-06: CloudWatch LogGroup retention bumped to 90 days (2026-06
+  // hardening, A-08-log) so that incident forensics span the typical
+  // SOC2/ISO27001 audit window. RemovalPolicy is RETAIN so a stack
+  // rebuild does not erase the audit trail.
   test('CloudWatch LogGroup が正しく設定されていること', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/ecs/stratoclave-backend',
-      RetentionInDays: 7,
+      RetentionInDays: 90,
+    });
+    template.hasResource('AWS::Logs::LogGroup', {
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
     });
   });
 

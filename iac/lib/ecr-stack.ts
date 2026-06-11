@@ -19,10 +19,16 @@ export class EcrStack extends cdk.Stack {
 
     const { prefix } = props;
 
+    // A-01-ecr: tag mutability is IMMUTABLE so an attacker who lands a
+    // push to ECR cannot silently overwrite a released `v1.2.3` tag
+    // (or `latest`) with a malicious image. Combined with content-
+    // addressed `@sha256:` references in ECS task definitions
+    // (A-02-docker) this closes the supply-chain hole where a CI key
+    // compromise could quietly swap the running backend.
     this.repository = new ecr.Repository(this, 'BackendRepository', {
       repositoryName: `${prefix}-backend`,
       imageScanOnPush: true,
-      imageTagMutability: ecr.TagMutability.MUTABLE,
+      imageTagMutability: ecr.TagMutability.IMMUTABLE,
       lifecycleRules: [
         {
           description: 'Remove untagged images',
