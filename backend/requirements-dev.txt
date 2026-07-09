@@ -23,4 +23,4 @@ moto[dynamodb,cognitoidp,sts]==5.2.2
 joserfc==1.7.1
 
 # Linting / formatting
-ruff==0.8.4
+ruff==0.15.21
