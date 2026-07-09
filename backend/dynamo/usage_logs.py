@@ -1,10 +1,10 @@
-"""UsageLogs テーブル.
+"""UsageLogs table.
 
-テーブル設計:
+Table design:
   PK: tenant_id
-  SK: timestamp_log_id  (例: "2026-04-25T10:00:00Z#uuid4")
+  SK: timestamp_log_id  (e.g. "2026-04-25T10:00:00Z#uuid4")
   GSI user-id-index: PK user_id, SK timestamp_log_id
-  TTL: ttl (90 日後自動削除)
+  TTL: ttl (auto-deleted after 90 days)
 
 PII handling (A-19-pii):
   Caller emails are *not* persisted in plaintext. ``record()`` accepts
@@ -61,7 +61,7 @@ class UsageLogsRepository:
         output_tokens: int,
         request_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """UsageLog レコードを挿入."""
+        """Insert a UsageLog record."""
         now = _now_iso()
         log_id = request_id or str(uuid4())
         # A-19-pii: never persist the email in plaintext. Hash with a

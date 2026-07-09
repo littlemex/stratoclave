@@ -1,16 +1,16 @@
-"""CLI 用 Cognito User/Pass ログインヘルパー.
+"""CLI Cognito User/Pass login helper.
 
-MVP では CLI が Cognito InitiateAuth を直接叩ける環境権限を持たないため、
-Backend がパススルーで Cognito を叩き、JWT を返す仕組みを用意する.
+In the MVP environment the CLI does not have IAM permissions to call Cognito InitiateAuth
+directly, so the backend acts as a pass-through proxy and returns the JWT.
 
-エンドポイント:
+Endpoints:
   POST /api/mvp/auth/login
-    入力: { "email", "password" }
-    返却: Cognito の AuthenticationResult (成功時) または ChallengeName (初回)
+    Input: { "email", "password" }
+    Returns: Cognito AuthenticationResult (on success) or ChallengeName (first login)
 
   POST /api/mvp/auth/respond
-    入力: { "email", "new_password", "session" } (NEW_PASSWORD_REQUIRED チャレンジへの応答)
-    返却: Cognito の AuthenticationResult
+    Input: { "email", "new_password", "session" } (response to NEW_PASSWORD_REQUIRED challenge)
+    Returns: Cognito AuthenticationResult
 """
 from __future__ import annotations
 

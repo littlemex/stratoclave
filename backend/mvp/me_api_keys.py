@@ -1,18 +1,18 @@
-"""自分の API Keys 管理 (Phase C).
+"""Self-service API Key management (Phase C).
 
-GET    /api/mvp/me/api-keys             自分の key 一覧 (plaintext は含まない)
-POST   /api/mvp/me/api-keys             新規作成 (plaintext を作成時レスポンスで 1 回だけ返す)
-DELETE /api/mvp/me/api-keys/{key_hash}  自分の key を revoke
+GET    /api/mvp/me/api-keys             list own keys (plaintext not included)
+POST   /api/mvp/me/api-keys             create a key (plaintext returned once at creation time)
+DELETE /api/mvp/me/api-keys/{key_hash}  revoke own key
 
-スコープ制約:
-  - リクエスト時に指定した `scopes` は、呼び出し元ユーザーの roles が持つ
-    permissions の subset でなければならない (上位権限への横取りを防ぐ).
-  - `scopes` を未指定 (空 or null) の場合は default ("messages:send", "usage:read-self")
-    を付与.
+Scope constraints:
+  - `scopes` in the request must be a subset of the permissions granted by the
+    caller's roles (prevents privilege escalation).
+  - If `scopes` is unset (empty or null), the defaults are applied
+    ("messages:send", "usage:read-self").
 
-有効期限:
-  - `expires_in_days` で指定. 未指定時は 30 日. `0` or `null` を明示指定したら無期限.
-  - 範囲: 1..3650 (10 年) + 無期限 (null).
+Expiry:
+  - Specified via `expires_in_days`. Defaults to 30 days. Explicit `0` or `null` means no expiry.
+  - Valid range: 1..3650 (10 years) + no expiry (null).
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ DEFAULT_EXPIRES_DAYS = 30
 # Schemas
 # ---------------------------------------------------------------
 class ApiKeySummary(BaseModel):
-    """plaintext を含まない安全な公開表現."""
+    """Safe public representation of an API key — does not include the plaintext."""
 
     key_id: str
     name: str = ""
@@ -71,7 +71,7 @@ class CreateApiKeyRequest(BaseModel):
 
     name: str = Field(default="", max_length=64)
     scopes: Optional[list[str]] = Field(default=None, max_length=32)
-    # None または 0 = 無期限、それ以外は日数指定 (1..3650)
+    # None or 0 = no expiry; any other value specifies days (1..3650).
     expires_in_days: Optional[int] = Field(default=DEFAULT_EXPIRES_DAYS, ge=0, le=3650)
     # P1-B: ephemeral wrapper keys minted by `stratoclave claude`. These
     # keys bypass the per-user active-key cap (so launching claude
@@ -86,7 +86,7 @@ class CreateApiKeyRequest(BaseModel):
 
 
 class CreateApiKeyResponse(BaseModel):
-    """作成直後のみ plaintext を含む特別なレスポンス."""
+    """Special response that includes the plaintext key immediately after creation (only once)."""
 
     key_id: str
     plaintext_key: str
@@ -102,7 +102,7 @@ class CreateApiKeyResponse(BaseModel):
 def _resolve_scopes(
     user: AuthenticatedUser, requested: Optional[list[str]]
 ) -> list[str]:
-    """リクエストされた scopes が user の permissions の subset であることを検証."""
+    """Validate that the requested scopes are a subset of the caller's role permissions."""
     final = list(requested) if requested else list(DEFAULT_SCOPES)
     final = [s.strip() for s in final if isinstance(s, str) and s.strip()]
     if not final:
@@ -127,7 +127,7 @@ def _resolve_scopes(
 
 
 def _resolve_expires_at(expires_in_days: Optional[int]) -> Optional[str]:
-    """日数→ISO 8601. 0/None は無期限 (None)."""
+    """Convert days to an ISO 8601 timestamp. 0 or None means no expiry (returns None)."""
     if expires_in_days is None or expires_in_days == 0:
         return None
     return (datetime.now(timezone.utc) + timedelta(days=expires_in_days)).isoformat()
@@ -170,7 +170,7 @@ def create_my_api_key(
     body: CreateApiKeyRequest,
     user: AuthenticatedUser = Depends(require_permission("apikeys:create-self")),
 ) -> CreateApiKeyResponse:
-    # API Key 自身からの API Key 作成は禁止 (特権昇格防止)
+    # Disallow creating API keys via an API key to prevent privilege escalation.
     if user.auth_kind == "api_key":
         raise HTTPException(
             status_code=403,

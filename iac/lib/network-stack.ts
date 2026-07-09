@@ -6,17 +6,17 @@ import { Construct } from 'constructs';
 import { applyCommonTags, paramPath, putStringParameter } from './_common';
 
 export interface NetworkStackProps extends cdk.StackProps {
-  /** 全リソース名のプレフィックス */
+  /** Prefix applied to all resource names */
   prefix: string;
 
   /**
-   * VPC CIDR ブロック
+   * VPC CIDR block
    * @default '10.0.0.0/16'
    */
   vpcCidr?: string;
 
   /**
-   * AZ 数
+   * Number of AZs
    * @default 2
    */
   maxAzs?: number;
@@ -25,9 +25,9 @@ export interface NetworkStackProps extends cdk.StackProps {
 /**
  * MVP Network Stack
  *
- * - Public Subnet 2 AZ のみ。Private Subnet / NAT Gateway は作らない
- * - ECS Fargate は Public Subnet 直置き（`assignPublicIp=ENABLED`）
- * - RDS/Redis がなくなったため、VPC 内通信は ALB → ECS の 1 本のみ
+ * - Public Subnets in 2 AZs only. No private subnets or NAT Gateway.
+ * - ECS Fargate placed directly in the Public Subnet (`assignPublicIp=ENABLED`)
+ * - With RDS/Redis removed, internal VPC traffic is a single ALB → ECS path
  */
 export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
@@ -154,7 +154,7 @@ export class NetworkStack extends cdk.Stack {
       'Allow traffic from ALB on port 8000'
     );
 
-    // Parameter Store エクスポート
+    // Parameter Store exports
     putStringParameter(this, 'VpcIdParam', {
       prefix: props.prefix,
       relativePath: 'network/vpc-id',

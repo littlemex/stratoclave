@@ -1,10 +1,10 @@
-"""Admin API: Trusted AWS Accounts 管理 (Phase S).
+"""Admin API: Trusted AWS Accounts management (Phase S).
 
-- GET    /api/mvp/admin/trusted-accounts        一覧
-- POST   /api/mvp/admin/trusted-accounts        追加
-- GET    /api/mvp/admin/trusted-accounts/{id}   詳細
-- PATCH  /api/mvp/admin/trusted-accounts/{id}   更新
-- DELETE /api/mvp/admin/trusted-accounts/{id}   削除
+- GET    /api/mvp/admin/trusted-accounts        list accounts
+- POST   /api/mvp/admin/trusted-accounts        create account
+- GET    /api/mvp/admin/trusted-accounts/{id}   get account detail
+- PATCH  /api/mvp/admin/trusted-accounts/{id}   update account
+- DELETE /api/mvp/admin/trusted-accounts/{id}   delete account
 """
 from __future__ import annotations
 

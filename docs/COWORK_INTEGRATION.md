@@ -1,9 +1,7 @@
-<!-- Last updated: 2026-04-27 -->
+<!-- Last updated: 2026-07-10 -->
 <!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
 
 # Using Stratoclave with Claude Desktop Cowork
-
-> A Japanese translation is available at [ja/COWORK_INTEGRATION.md](./ja/COWORK_INTEGRATION.md).
 
 Claude Desktop's **Cowork** feature runs long-form, agentic tasks and can be configured to route its inference requests through a custom gateway instead of calling Anthropic directly. This guide shows how to use a Stratoclave deployment as that gateway, so Cowork requests are authenticated, credit-accounted, and audit-logged per user and per tenant, while the model calls themselves continue to run on Amazon Bedrock.
 
@@ -183,9 +181,9 @@ With an empty **Model list** field, Cowork calls `GET /v1/models` and expects a 
 
 Cowork uses Server-Sent Events (`Accept: text/event-stream`). Stratoclave sets `Cache-Control: no-cache`, `Connection: keep-alive`, and `X-Accel-Buffering: no` so that CloudFront does not buffer the stream. If your deployment has been fronted with another CDN, make sure SSE pass-through is enabled there too.
 
-### `422 max_tokens exceeds 32768`
+### `422 max_tokens exceeds 65536`
 
-The backend caps `max_tokens` at 32768 per request. Cowork lets you configure a lower client-side limit; set it to 32768 or less.
+The backend caps `max_tokens` at 65536 per request. Cowork lets you configure a lower client-side limit; set it to 65536 or less.
 
 ---
 

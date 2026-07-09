@@ -1,7 +1,8 @@
 //! Output formatting module.
 //!
-//! Phase 2 (v2.1) 以降の admin / team-lead / usage コマンドは直接 `println!` で整形出力しており、
-//! 本モジュールは pipe / chat モードで human/json を出し分けるために残存。
+//! From Phase 2 (v2.1) onward, admin / team-lead / usage commands format output
+//! directly with `println!`. This module is retained to switch between human-readable
+//! and JSON output in pipe / chat mode.
 #![allow(dead_code)]
 
 use crate::OutputFormat;

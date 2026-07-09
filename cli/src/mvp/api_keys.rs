@@ -1,11 +1,12 @@
-//! Phase C: 長期 API Key の CLI 操作.
+//! Phase C: CLI operations for long-lived API keys.
 //!
 //! `stratoclave api-key create [--name N] [--scope S]... [--expires-days D]`
 //! `stratoclave api-key list [--include-revoked]`
 //! `stratoclave api-key revoke <key_hash>`
 //!
-//! 発行時はプレーンテキストが 1 回だけ返る. CLI はこれを強調表示で出力し、
-//! ユーザーが cowork 等の gateway API key フィールドに貼れるようにする.
+//! On creation, the plaintext key is returned exactly once. The CLI prints it
+//! with emphasis so the user can paste it into the gateway API key field
+//! (e.g. Claude Desktop cowork).
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -136,7 +137,7 @@ pub async fn revoke(key_hash: String) -> Result<()> {
     Ok(())
 }
 
-// Admin 代理発行/管理サブコマンド (将来拡張用、CLI のヘルプに並べる)
+// Admin-proxy issuance / management subcommands (reserved for future extension; listed in CLI help)
 pub async fn admin_list_all(include_revoked: bool) -> Result<()> {
     let client = ApiClient::new()?;
     let path = if include_revoked {

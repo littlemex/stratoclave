@@ -3,8 +3,8 @@ import * as React from 'react'
 import { cn } from '@/lib/utils'
 
 /**
- * Card: データ密度の高い面はデフォルトで sharp corners (rounded-none)。
- * Dialog や login など hero な面は variant="soft" で角を残す。
+ * Card: data-dense surfaces default to sharp corners (rounded-none).
+ * Hero surfaces such as Dialog or Login use variant="soft" to retain rounded corners.
  */
 type CardVariant = 'sharp' | 'soft'
 

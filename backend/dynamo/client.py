@@ -1,4 +1,4 @@
-"""DynamoDB クライアント / テーブル名解決."""
+"""DynamoDB client and table name resolution."""
 import os
 from functools import lru_cache
 
@@ -7,13 +7,13 @@ import boto3
 
 @lru_cache(maxsize=1)
 def get_dynamodb_resource():
-    """Process-wide な DynamoDB resource を返す (stringset シリアライズ対応版)."""
+    """Return the process-wide DynamoDB resource (with StringSet serialisation support)."""
     region = os.getenv("AWS_REGION", "us-east-1")
     return boto3.resource("dynamodb", region_name=region)
 
 
 def table_name(env_var: str, fallback: str) -> str:
-    """環境変数優先でテーブル名を返す."""
+    """Return the table name from the environment variable, falling back to the default."""
     return os.getenv(env_var, fallback)
 
 

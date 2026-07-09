@@ -2,13 +2,13 @@
 
 GET /api/mvp/admin/usage-logs
 
-フィルタ:
-  - tenant_id: Tenant で絞る (PK Query 可)
-  - user_id: User で絞る (user-id-index GSI Query)
-  - since / until: ISO 8601 (timestamp_log_id は "{iso}#{uuid}" 形式なので SK Range 可)
-  - limit + cursor (UsageLogs の LastEvaluatedKey)
+Filters:
+  - tenant_id: narrow by tenant (PK Query)
+  - user_id: narrow by user (user-id-index GSI Query)
+  - since / until: ISO 8601 (timestamp_log_id has "{iso}#{uuid}" format, enabling SK range queries)
+  - limit + cursor (UsageLogs LastEvaluatedKey)
 
-tenant_id も user_id も無い場合は最新 Scan (limit 上限 100 で truncate)。
+When neither tenant_id nor user_id is provided, falls back to a full Scan (truncated at limit 100).
 """
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def list_usage_logs(
     repo = UsageLogsRepository()
     decoded_cursor = _decode_cursor(cursor)
 
-    # filter の優先順: tenant_id > user_id > scan
+    # Filter priority: tenant_id > user_id > full scan.
     if tenant_id:
         key = boto3_key("tenant_id").eq(tenant_id)
         if since:
@@ -127,7 +127,7 @@ def list_usage_logs(
             kwargs["ExclusiveStartKey"] = decoded_cursor
         resp = repo._table.query(**kwargs)
     else:
-        # 全体 Scan (admin 専用、limit 100 で truncate)
+        # Full Scan (admin only, truncated at limit 100).
         kwargs = {"Limit": limit}
         if decoded_cursor:
             kwargs["ExclusiveStartKey"] = decoded_cursor

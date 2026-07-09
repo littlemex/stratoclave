@@ -1,9 +1,7 @@
-<!-- Last updated: 2026-04-27 -->
+<!-- Last updated: 2026-07-10 -->
 <!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
 
 # Deployment Guide
-
-> A Japanese translation is available at [ja/DEPLOYMENT.md](./ja/DEPLOYMENT.md).
 
 This guide walks you through deploying Stratoclave into your own AWS account. The target audience is a platform engineer comfortable with the AWS CLI, AWS CDK v2, and a container runtime.
 
@@ -76,11 +74,11 @@ A successful `deploy-all.sh` run provisions **nine CloudFormation stacks** in de
 | # | Stack                 | Resources                                                             | Purpose |
 | - | --------------------- | --------------------------------------------------------------------- | ------- |
 | 1 | `<Prefix>NetworkStack`  | VPC, 2 public subnets, SGs, VPC Flow Logs (CloudWatch, 30 d)          | Public-subnet-only network (no NAT). ALB SG inbound is restricted to the AWS-managed **CloudFront origin-facing prefix list** — direct ALB DNS probes fail at L4. |
-| 2 | `<Prefix>DynamodbStack` | 13 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN), `api-keys` (RETAIN + PITR), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence) | All persistent state, `PAY_PER_REQUEST`. Audit-critical tables survive `cdk destroy`. |
+| 2 | `<Prefix>DynamodbStack` | 15 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff) | All persistent state, `PAY_PER_REQUEST`. Audit-critical tables (`usage-logs`, `api-keys`) survive `cdk destroy`. |
 | 3 | `<Prefix>EcrStack`      | Private ECR repository (RETAIN)                                       | Holds the backend container image. Rollback surface of last resort. |
 | 4 | `<Prefix>AlbStack`      | Internet-facing ALB, target group, HTTP listener on :80, `deletionProtection=true` in production | Public entry point for the backend; listeners use `open:false` so no 0.0.0.0/0 ingress is punched on the ALB SG. |
 | 5 | `<Prefix>WafStack`      | **WAFv2 WebACL** (CLOUDFRONT scope, `us-east-1`): CommonRuleSet, KnownBadInputs, IpReputation, rate-based (5-minute window, per-IP), optional IPSet allowlist | Opt-out with `ENABLE_WAF=false`. ARN is cross-stack referenced by FrontendStack. |
-| 6 | `<Prefix>FrontendStack` | S3 bucket (private, SSL-enforced), CloudFront distribution (**OAC**, minTLS 1.2_2021, ResponseHeadersPolicy with HSTS 730 d + strict CSP + `frame-ancestors 'none'`), SPA fallback function | Static web UI hosting. Uses **Origin Access Control** (not legacy OAI) — S3 bucket policy is scoped by `aws:SourceArn`. |
+| 6 | `<Prefix>FrontendStack` | S3 bucket (private, SSL-enforced), CloudFront distribution (**OAC**, minTLS 1.2_2021, ResponseHeadersPolicy with HSTS 730 d + preload + strict CSP + `frame-ancestors 'none'`), SPA fallback function | Static web UI hosting. Uses **Origin Access Control** (not legacy OAI) — S3 bucket policy is scoped by both `aws:SourceArn` **and** `aws:SourceAccount`. API responses (`/api/*`, `/v1/*`) carry HSTS set by the backend middleware (365 d, no preload). |
 | 7 | `<Prefix>CognitoStack`  | User Pool, app client, hosted-UI domain                               | Authentication. Imports the CloudFront domain to wire up callback URLs. |
 | 8 | `<Prefix>EcsStack`      | ECS cluster, Fargate service (1 task), task role, task definition     | Backend runtime. All environment variables are injected here. |
 | 9 | `<Prefix>ConfigStack`   | SSM Parameter Store entries                                           | Static runtime values consumed by the backend and helper scripts. |
@@ -90,6 +88,32 @@ Several archived stacks (RDS, Redis, CodeBuild, Verified Permissions) live under
 ### Synth-time security checks (cdk-nag)
 
 Every `cdk synth` / `cdk deploy` runs the `AwsSolutionsChecks` Aspect from `cdk-nag`. Known, documented tradeoffs (default CloudFront cert, managed-prefix-list ingress, non-ENFORCED Cognito advanced security, etc.) are suppressed in `iac/bin/iac.ts` with rationale comments; any **new** `[Error at ...]` from cdk-nag will fail `cdk synth`. Set `CDK_NAG=off` only for the rare local debugging session.
+
+### Security headers: two-layer architecture
+
+Security headers are applied by **two independent layers**; each layer controls a separate traffic path:
+
+| Layer | Applies to | HSTS | CSP |
+|-------|-----------|------|-----|
+| CloudFront `ResponseHeadersPolicy` (`iac/lib/frontend-stack.ts`) | SPA responses (default cache behaviour, S3 origin) | `max-age=63072000` (730 d) + `includeSubDomains` + `preload` | Permissive SPA policy: `script-src 'self'`, `connect-src 'self' https: wss:`, Google Fonts allowed |
+| Backend `SecurityHeadersMiddleware` (`backend/main.py`) | API responses (`/api/*`, `/v1/*`, `/openai/*`) | `max-age=31536000` (365 d) + `includeSubDomains`, **no preload** | Restrictive API policy: `script-src 'none'`, `connect-src 'self'`, `object-src 'none'` |
+
+CloudFront does **not** attach the `ResponseHeadersPolicy` to the API or `.well-known` cache behaviours; those responses flow straight from the backend unchanged, so the backend middleware is the sole source of security headers for API paths.
+
+### Logging and audit retention
+
+| Log source | Retention | Notes |
+|-----------|-----------|-------|
+| ECS backend logs (`/ecs/<prefix>-backend`, CloudWatch) | **90 days** (`THREE_MONTHS`) | Covers most SOC2/ISO27001 audit windows. `RemovalPolicy.RETAIN` — survives `cdk destroy`. |
+| VPC Flow Logs (CloudWatch) | **30 days** | Provisioned by `NetworkStack`. |
+
+### Network egress restrictions
+
+The ECS task security group (`iac/lib/network-stack.ts`) allows outbound traffic only on **port 443 (HTTPS)** and **port 53 (DNS)**. Arbitrary outbound TCP is blocked; a compromised container cannot exfiltrate data over non-standard ports.
+
+### Request body limit
+
+The backend enforces a hard cap of **2 MB** (`REQUEST_MAX_BODY_BYTES`, default `2 * 1024 * 1024`) via an ASGI-layer middleware (`MaxBodySizeASGIMiddleware` in `backend/main.py`). Requests exceeding the cap are rejected with HTTP `413` before the body is buffered. The cap applies to `POST`, `PUT`, and `PATCH` requests and works correctly for both `Content-Length` and chunked transfers.
 
 ---
 
@@ -252,7 +276,7 @@ Representative monthly spend for a low-traffic single-team deployment in `us-eas
 | ECS Fargate (0.25 vCPU / 0.5 GiB, 1 task)         | ~$12 |
 | Application Load Balancer                         | ~$17 |
 | CloudFront (~1 GiB egress, first 10 GB free)      | <$1 |
-| WAFv2 (5 rules + WebACL association)              | ~$10 to $12 (fixed) |
+| WAFv2 (4 rules + WebACL association; +1 rule if `WAF_IP_ALLOWLIST_ENABLED=true`) | ~$10 to $12 (fixed) |
 | VPC Flow Logs → CloudWatch (30 d retention)       | ~$1 |
 | DynamoDB (PAY_PER_REQUEST, small write volume)    | ~$1 |
 | S3 + CloudWatch Logs + SSM Parameter Store        | ~$1 |
@@ -378,6 +402,8 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `CDK_NAG`                                | IaC-only                | n/a         | Set to `off` to skip the cdk-nag synth-time aspect. Default: `on`. |
 | `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`      | optional                | no          | If set, the backend auto-provisions this email as admin on first startup when no admin exists. Idempotent. |
 | `ALLOW_ADMIN_CREATION`                   | bootstrap only          | yes (default `false`) | See [Locking down after bootstrap](#locking-down-after-bootstrap). |
+| `CODEX_ENABLED`                          | optional                | yes (default `true`)  | Enables the OpenAI Responses API endpoint (`/openai/v1/*`). Set `CODEX_ENABLED=false` to disable. |
+| `STRATOCLAVE_RATELIMIT_STORAGE_URI`      | optional                | no          | slowapi-compatible URI for shared rate-limit storage (e.g., `redis://...`). Default: unset — counters are **in-process** and reset on every ECS task restart. For multi-task or horizontally-scaled deployments, set this to a shared backend to avoid per-task isolation of rate-limit buckets. |
 | `EXPOSE_TEMPORARY_PASSWORD`              | optional                | no          | If `true`, `admin user create` returns the one-time password in the response. Default `false` (response field is `null`). Not recommended for production. |
 
 If the backend refuses to start and the CloudWatch log says `environment variable X is required`, compare the task definition's `environment` array against this list.

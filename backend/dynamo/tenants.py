@@ -1,12 +1,12 @@
-"""Tenants テーブル (Phase 2).
+"""Tenants table (Phase 2).
 
-テーブル設計 (iac/lib/dynamodb-stack.ts):
+Table design (iac/lib/dynamodb-stack.ts):
   PK: tenant_id
   GSI team-lead-index: PK team_lead_user_id, SK created_at, ProjectionType ALL
-  属性:
+  Attributes:
     tenant_id: str
     name: str
-    team_lead_user_id: str  (Cognito sub, Admin 所有は "admin-owned")
+    team_lead_user_id: str  (Cognito sub; "admin-owned" when owned by an admin)
     default_credit: int
     status: "active" | "archived"
     created_at: str (ISO 8601)
@@ -35,7 +35,7 @@ def _now_iso() -> str:
 
 
 def _default_credit_fallback() -> int:
-    """Tenant.default_credit の最終フォールバック値."""
+    """Last-resort fallback value for Tenant.default_credit."""
     return int(os.getenv("DEFAULT_TENANT_CREDIT", "100000"))
 
 
@@ -44,17 +44,17 @@ def _tenants_table_name() -> str:
 
 
 class TenantNotFoundError(Exception):
-    """Tenant が存在しない."""
+    """Raised when the requested tenant does not exist."""
 
 
 class TenantLimitExceededError(Exception):
-    """Team Lead の Tenant 作成上限を超えた."""
+    """Raised when a team lead exceeds the tenant creation limit."""
 
 
 class TenantsRepository:
-    """Tenants テーブルへの CRUD.
+    """CRUD operations for the Tenants table.
 
-    Team Lead 50 Tenant 上限 (v2.1 §4.4) は `create` で enforce する。
+    The team lead limit of 50 tenants (v2.1 §4.4) is enforced in `create`.
     """
 
     TEAM_LEAD_TENANT_LIMIT = 50
@@ -109,7 +109,7 @@ class TenantsRepository:
         return int(resp.get("Count", 0))
 
     def list_all(self, *, cursor: Optional[dict[str, Any]] = None, limit: int = 100) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
-        """全 Tenant を Scan で取得 (Admin 専用、limit<=100 を上位で強制)."""
+        """Fetch all tenants via Scan (admin only; limit<=100 enforced by the caller)."""
         kwargs: dict[str, Any] = {"Limit": min(limit, 100)}
         if cursor:
             kwargs["ExclusiveStartKey"] = cursor
@@ -126,8 +126,8 @@ class TenantsRepository:
         created_by: str,
         tenant_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Tenant を新規作成。既存 tenant_id を指定した場合は ConditionalCheckFailed を raise."""
-        # team_lead 上限チェック (admin-owned は上限対象外)
+        """Create a new tenant. Raises ConditionalCheckFailed if the tenant_id already exists."""
+        # Check the team lead cap (admin-owned tenants are exempt).
         if team_lead_user_id != ADMIN_OWNED:
             existing = self.count_by_owner(team_lead_user_id)
             if existing >= self.TEAM_LEAD_TENANT_LIMIT:
@@ -166,7 +166,7 @@ class TenantsRepository:
         name: Optional[str] = None,
         default_credit: Optional[int] = None,
     ) -> dict[str, Any]:
-        """name / default_credit のみ更新可。team_lead_user_id は別 API (set_owner) 経由。"""
+        """Update name and/or default_credit only. team_lead_user_id is updated via set_owner."""
         updates: list[str] = []
         values: dict[str, Any] = {":now": _now_iso(), ":active": "active"}
         expr_names: dict[str, str] = {"#s": "status"}
@@ -200,7 +200,7 @@ class TenantsRepository:
         return resp.get("Attributes", {})
 
     def set_owner(self, *, tenant_id: str, new_owner_user_id: str) -> dict[str, Any]:
-        """Cognito ユーザー削除/再作成で孤児化した Tenant を Admin が再割当 (v2.1 C-C)."""
+        """Reassign a tenant orphaned by Cognito user deletion/recreation (v2.1 C-C)."""
         try:
             resp = self._table.update_item(
                 Key={"tenant_id": tenant_id},
@@ -301,16 +301,16 @@ class TenantsRepository:
         default_credit: Optional[int] = None,
         created_by: str = "system-seed",
     ) -> dict[str, Any]:
-        """OSS zero-touch 起動用の default Tenant を idempotent put する.
+        """Idempotently put the default tenant for OSS zero-touch startup.
 
-        冪等性: ConditionExpression='attribute_not_exists(tenant_id)' を付けるので
-        既に存在すれば書き込みは発生せず、touch もしない。
+        Idempotency: ConditionExpression='attribute_not_exists(tenant_id)' ensures
+        no write occurs if the record already exists, and it is never touched.
 
-        戻り値: {"tenant_id": str, "created": bool, "item": dict}
-          - created=True: 今回新規作成した
-          - created=False: 既に存在していた (no-op)
+        Returns: {"tenant_id": str, "created": bool, "item": dict}
+          - created=True: newly created by this call
+          - created=False: already existed (no-op)
         """
-        # 既存レコードがあれば (archived でも) touch せず返す
+        # If a record exists (even archived), return it without touching it.
         existing = self.get_including_archived(tenant_id)
         if existing:
             return {"tenant_id": tenant_id, "created": False, "item": existing}
@@ -319,8 +319,8 @@ class TenantsRepository:
         item: dict[str, Any] = {
             "tenant_id": tenant_id,
             "name": name,
-            # 初回 seed 時点では Admin 含めユーザーが存在しないため、
-            # ADMIN_OWNED sentinel を使う (上限チェック対象外、Admin 所有扱い)
+            # At the time of first seed, no users (including admins) exist yet,
+            # so we use the ADMIN_OWNED sentinel (exempt from the cap, treated as admin-owned).
             "team_lead_user_id": ADMIN_OWNED,
             "default_credit": Decimal(default_credit or _default_credit_fallback()),
             "status": "active",
@@ -335,7 +335,7 @@ class TenantsRepository:
             )
         except ClientError as e:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                # race 条件 (別プロセスが先に seed した): no-op
+                # Race condition: another process seeded first — no-op.
                 existing = self.get_including_archived(tenant_id) or item
                 return {"tenant_id": tenant_id, "created": False, "item": existing}
             raise

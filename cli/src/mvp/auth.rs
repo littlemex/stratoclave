@@ -1,12 +1,13 @@
-//! Cognito User/Pass 認証 (CLI).
+//! Cognito User/Pass authentication (CLI).
 //!
-//! フロー:
-//!   1. email / password を取得 (プロンプト or `--email` / `--password`)
-//!   2. POST /api/mvp/auth/login で Cognito InitiateAuth
-//!   3. NEW_PASSWORD_REQUIRED なら新パスワードをプロンプト、POST /api/mvp/auth/respond
-//!   4. 取得した JWT を ~/.stratoclave/mvp_tokens.json に 0600 で保存
+//! Flow:
+//!   1. Obtain email / password (via prompt or `--email` / `--password`)
+//!   2. POST /api/mvp/auth/login to trigger Cognito InitiateAuth
+//!   3. If NEW_PASSWORD_REQUIRED, prompt for a new password and POST /api/mvp/auth/respond
+//!   4. Save the resulting JWT to ~/.stratoclave/mvp_tokens.json with mode 0600
 //!
-//! Keychain 連携 (macOS: `security` CLI) は opt-in。--save-password フラグ付き時のみ保存。
+//! OS keychain integration (macOS: `security` CLI) is opt-in; credentials are
+//! stored only when the --save-password flag is passed.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -210,7 +211,7 @@ pub fn logout() -> Result<()> {
     Ok(())
 }
 
-// ---- プロンプト ----
+// ---- Prompts ----
 
 fn prompt(msg: &str) -> Result<String> {
     print!("{}", msg);
@@ -221,8 +222,8 @@ fn prompt(msg: &str) -> Result<String> {
 }
 
 fn prompt_password(msg: &str) -> Result<String> {
-    // ターミナルエコーをオフにしつつ入力を取る。rpassword が依存に無いので
-    // stty を呼び出して実装する (macOS / Linux 両対応).
+    // Read input with terminal echo disabled. Because rpassword is not a
+    // dependency, this is implemented by invoking stty (works on macOS and Linux).
     print!("{}", msg);
     io::stdout().flush()?;
     let prev = run_stty(&["-g"]).ok();

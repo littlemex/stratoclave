@@ -1,13 +1,13 @@
 /**
  * AuthContext (Phase 2)
  *
- * - access_token を localStorage に保存
- * - email / roles / org_id は login 直後に `GET /api/mvp/me` から取得
- * - 入口は 3 経路:
- *   1. CLI から開かれた `?token=<access_token>` (stratoclave ui open 経由)
- *   2. Hosted UI からの `/callback?code=...` (Callback.tsx)
- *   3. 既存 localStorage のトークン
- * - refresh_token があれば 5 分マージンで自動更新
+ * - access_token is stored in localStorage
+ * - email / roles / org_id are fetched via `GET /api/mvp/me` immediately after login
+ * - Three entry paths:
+ *   1. Opened from the CLI with `?token=<access_token>` (via stratoclave ui open)
+ *   2. Redirect from the Hosted UI as `/callback?code=...` (Callback.tsx)
+ *   3. Existing localStorage tokens
+ * - If a refresh_token is available, tokens are refreshed automatically with a 5-minute margin
  */
 
 import {
@@ -279,14 +279,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      // 2. 既存 sessionStorage のトークン (P0-7)
+      // 2. Existing sessionStorage tokens (P0-7)
       const stored = getStoredTokens()
       if (!stored) {
         dispatch({ type: 'AUTH_FAILURE', error: 'No tokens' })
         return
       }
 
-      // 期限切れに近ければ refresh
+      // Refresh if close to expiry
       if (stored.expires_at < Date.now() + TOKEN_REFRESH_MARGIN) {
         if (stored.refresh_token) {
           const fresh = await refreshTokensFromCognito(stored.refresh_token)
@@ -309,7 +309,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      // 有効トークンがあるので me を叩いて確定
+      // Valid tokens exist — call /me to confirm the session
       try {
         const user = await fetchMe()
         dispatch({ type: 'AUTH_SUCCESS', user, tokens: stored })

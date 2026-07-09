@@ -1,7 +1,7 @@
 //! Build script to embed enterprise policy at compile time
 //!
-//! policy.toml が存在する場合、その内容を Rust コードに埋め込む。
-//! cargo build --features enterprise でエンタープライズビルドを生成。
+//! If policy.toml exists, its contents are embedded into the generated Rust code.
+//! Producing an enterprise build requires the policy file to be present.
 
 use std::env;
 use std::fs;
@@ -15,7 +15,7 @@ fn main() {
     let dest_path = Path::new(&out_dir).join("policy.rs");
 
     let policy_content = if Path::new("policy.toml").exists() {
-        // policy.toml が存在する場合はパース
+        // Parse policy.toml if it exists
         match fs::read_to_string("policy.toml") {
             Ok(content) => generate_policy_code(&content),
             Err(e) => {
@@ -24,7 +24,7 @@ fn main() {
             }
         }
     } else {
-        // policy.toml が存在しない場合はデフォルト
+        // Fall back to default policy when policy.toml is absent
         generate_default_policy_code()
     };
 
@@ -32,7 +32,7 @@ fn main() {
 }
 
 fn generate_policy_code(toml_content: &str) -> String {
-    // シンプルなTOMLパーサー（tomlクレートを避けてビルド依存を最小化）
+    // Simple TOML parser (avoids the toml crate to keep build dependencies minimal)
     let mut org_name = String::from("Unknown");
     let mut disable_debug = false;
     let mut allowed_env_vars: Vec<String> = Vec::new();

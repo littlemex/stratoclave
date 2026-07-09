@@ -1,6 +1,8 @@
-//! Phase 1 時代の単発 admin user create 実装 (互換維持のため残存、main.rs から呼ばれない).
+//! Phase 1 era single-shot admin user create implementation (kept for compatibility,
+//! not called from main.rs).
 //!
-//! Phase 2 (v2.1) の本命は `mvp/admin.rs::user_create` (`stratoclave admin user create`).
+//! The canonical Phase 2 (v2.1) implementation is `mvp/admin.rs::user_create`
+//! (`stratoclave admin user create`).
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};

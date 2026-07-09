@@ -1,4 +1,4 @@
-"""ユーザー自身の情報 + クレジット残高 + 所属 Tenant 名 + 使用履歴 (Phase 2)."""
+"""User's own profile, credit balance, tenant name, and usage history (Phase 2)."""
 from __future__ import annotations
 
 import base64
@@ -79,7 +79,7 @@ def _resolve_locale(raw: Optional[str]) -> Locale:
 @router.get("/me", response_model=MeResponse)
 def me(user: AuthenticatedUser = Depends(get_current_user)) -> MeResponse:
     users_repo = UsersRepository()
-    # deps.py で backfill 済みだが念のため
+    # deps.py should have already backfilled; re-fetch defensively.
     row = users_repo.get_by_user_id(user.user_id)
     if row is None:
         row = users_repo.put_user(
@@ -155,7 +155,7 @@ def update_me(
 
 
 # ------------------------------------------------------------------
-# Phase D: 自分の使用履歴・集計
+# Phase D: own usage history and aggregation
 # ------------------------------------------------------------------
 class UsageSummaryResponse(BaseModel):
     tenant_id: str
@@ -203,13 +203,13 @@ def usage_summary(
     since_days: int = Query(30, ge=1, le=365),
     user: AuthenticatedUser = Depends(require_permission("usage:read-self")),
 ) -> UsageSummaryResponse:
-    """自分の使用量を model 別 / tenant 別に集計。
+    """Aggregate the caller's own token usage by model and tenant.
 
-    スコープは「現在 active な tenant (user.org_id) のみ」。
-    過去に archived された tenant の消費は by_tenant に含めず、別エンドポイント
-    (/me/usage-history) で時系列として参照する。これは画面上の
-    「総消費」と「残クレジット」のスコープを揃えるため (クレジットは active tenant の
-    credit_used に紐づく)。
+    Scope is limited to the currently active tenant (user.org_id).
+    Consumption recorded against previously archived tenants is excluded from by_tenant;
+    it is accessible as a time series via /me/usage-history. This ensures the displayed
+    "total consumed" and "remaining credit" match in scope (credit is tied to
+    credit_used on the active tenant).
     """
     user_tenants_repo = UserTenantsRepository()
     active = user_tenants_repo.get(user.user_id, user.org_id) or {}
@@ -267,7 +267,7 @@ def usage_history(
     cursor: Optional[str] = None,
     user: AuthenticatedUser = Depends(require_permission("usage:read-self")),
 ) -> UsageHistoryResponse:
-    """自分の使用履歴を時系列で返す (tenant_name も lookup して付与)."""
+    """Return the caller's usage history in chronological order, including a resolved tenant_name."""
     since_iso = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
     logs_repo = UsageLogsRepository()
     kwargs = {
@@ -275,7 +275,7 @@ def usage_history(
         "KeyConditionExpression": boto3_key("user_id").eq(user.user_id)
         & boto3_key("timestamp_log_id").gte(since_iso),
         "Limit": limit,
-        "ScanIndexForward": False,  # 新しい順
+        "ScanIndexForward": False,  # newest first
     }
     decoded = _decode_cursor(cursor)
     if decoded:

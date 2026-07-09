@@ -1,19 +1,19 @@
-"""SSO identity の Gate 判定 (Phase S、hybrid 対応版).
+"""SSO identity gate evaluation (Phase S, hybrid support).
 
-フロー (design doc §4.4、改訂版):
-  Gate 0: identity_type (iam_user / instance_profile) の許可チェック
-  Gate 1: role_pattern の allowlist チェック
-  Gate 2: 招待 lookup (email or session_name→iam_user_name 形式)
-  Gate 3: 招待がなければ provisioning_policy にフォールバック
-     - invite_only (default): 拒否
-     - auto_provision: session_name から email を抽出して自動 provision
+Flow (design doc §4.4, revised):
+  Gate 0: check whether identity_type (iam_user / instance_profile) is allowed
+  Gate 1: check role_pattern against the allowlist
+  Gate 2: invite lookup (email, or session_name → iam_user_name format)
+  Gate 3: fall back to provisioning_policy if no invite is found
+     - invite_only (default): deny
+     - auto_provision: extract email from session_name and auto-provision
 
-Hybrid 方針:
-  - 招待が存在すれば常に招待を優先 (どのポリシーでも)
-  - 招待がなければ trusted account の provisioning_policy に従う
-  - 同じ account に対して「社員は自動 provision、特定の外部ユーザは email 明示招待」を併用可能
+Hybrid policy:
+  - Invites always take priority over the provisioning policy.
+  - If no invite is found, follow the trusted account's provisioning_policy.
+  - For the same account, "auto-provision employees + explicit email invites for specific external users" can coexist.
 
-Out: TrustedSsoIdentity (Cognito provisioning に渡す)
+Output: TrustedSsoIdentity (passed to Cognito provisioning)
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ Role = Literal["admin", "team_lead", "user"]
 
 @dataclass(frozen=True)
 class TrustedSsoIdentity:
-    """Cognito / Users テーブルへの provisioning に渡すための解決結果."""
+    """Resolved identity data to be passed to Cognito / Users table provisioning."""
 
     email: str
     account_id: str
@@ -48,7 +48,7 @@ class TrustedSsoIdentity:
 
 
 def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
-    """Gate 判定を通し、TrustedSsoIdentity を返す. 拒否なら HTTPException."""
+    """Run all gate checks and return a TrustedSsoIdentity; raise HTTPException on denial."""
 
     trusted = TrustedAccountsRepository().get(sts.account_id)
     if not trusted:
@@ -60,7 +60,7 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
             ),
         )
 
-    # Gate 0: identity_type 許可
+    # Gate 0: check whether identity_type is permitted.
     if sts.identity_type == "instance_profile":
         if not bool(trusted.get("allow_instance_profile")):
             raise HTTPException(
@@ -77,7 +77,7 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
                 detail="IAM user login is not allowed for this account.",
             )
 
-    # Gate 1: role_pattern 許可 (iam_user には role がないため対象外)
+    # Gate 1: check role_pattern allowlist (not applicable to iam_user, which has no role).
     role_patterns: list[str] = list(trusted.get("allowed_role_patterns") or [])
     if sts.role_name and role_patterns:
         if not any(fnmatch.fnmatch(sts.role_name, p) for p in role_patterns):
@@ -92,11 +92,11 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
     invites_repo = SsoPreRegistrationsRepository()
     policy = str(trusted.get("provisioning_policy") or "invite_only")
 
-    # Gate 2: まず招待 lookup を試す (identity_type 別に)
+    # Gate 2: attempt invite lookup (strategy varies by identity_type).
     invite = _lookup_invite(sts, invites_repo)
 
     if invite:
-        # 招待あり: account 整合性チェック後、招待値で解決
+        # Invite found: verify account consistency and resolve using invite values.
         invite_account = str(invite.get("account_id") or "")
         if invite_account and invite_account != sts.account_id:
             raise HTTPException(
@@ -120,8 +120,8 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
             source_arn=sts.arn,
         )
 
-    # Gate 3: 招待なし → policy で分岐
-    # iam_user は常に招待必須 (auto_provision では救済しない)
+    # Gate 3: no invite found → branch on provisioning_policy.
+    # IAM users always require an invite; auto_provision does not apply to them.
     if sts.identity_type == "iam_user":
         raise HTTPException(
             status_code=403,
@@ -154,7 +154,7 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
             email=email,
             account_id=sts.account_id,
             identity_type=sts.identity_type,
-            target_role="user",  # auto_provision は常に user、昇格は Admin API
+            target_role="user",  # auto_provision always assigns user role; elevation requires the Admin API.
             target_tenant_id=str(target_tenant) if target_tenant is not None else None,
             target_credit=int(target_credit) if target_credit is not None else None,
             source_arn=sts.arn,
@@ -173,17 +173,17 @@ def _lookup_invite(
     sts: StsIdentity,
     invites_repo: SsoPreRegistrationsRepository,
 ) -> Optional[dict]:
-    """identity_type 別に招待を探す. 見つからなければ None."""
+    """Look up an invite by identity_type. Returns None if no invite is found."""
     if sts.identity_type == "iam_user":
         return invites_repo.find_by_iam_user(sts.account_id, sts.iam_user_name or "")
 
     session = (sts.session_name or "").strip()
     if "@" in session:
-        # 通常ルート: session_name が email の場合
+        # Normal path: session_name is an email address.
         return invites_repo.get(session.lower())
 
     if session:
-        # フォールバック: Isengard / 社内 SAML 等で session が email でない場合
+        # Fallback: session is not an email (e.g. Isengard / internal SAML).
         return invites_repo.find_by_iam_user(sts.account_id, session)
 
     return None

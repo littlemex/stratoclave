@@ -6,11 +6,11 @@ import { applyCommonTags, putStringParameter } from './_common';
 export interface CognitoStackProps extends cdk.StackProps {
   prefix: string;
   /**
-   * Cognito Hosted UI のドメインプレフィックス（グローバル一意）
-   * 未指定なら `${prefix}-auth` + ランダムサフィックスを自動生成
+   * Cognito Hosted UI domain prefix (globally unique).
+   * If not specified, auto-generated as `${prefix}-auth` + a random suffix.
    */
   domainPrefix?: string;
-  /** 本番 CloudFront ドメイン（callback URL 登録用） */
+  /** Production CloudFront domain (used to register callback URLs) */
   cloudFrontDomainName?: string;
   additionalCallbackUrls?: string[];
   additionalLogoutUrls?: string[];
@@ -29,10 +29,10 @@ export interface CognitoStackProps extends cdk.StackProps {
 /**
  * MVP Cognito Stack
  *
- * - User/Pass 認証を有効化（`USER_PASSWORD_AUTH` + `ADMIN_USER_PASSWORD_AUTH`）
- * - Admin が `AdminCreateUser` でユーザー作成（temp password 自動生成、メール送信は SUPPRESS）
- * - 初回ログイン時 `NEW_PASSWORD_REQUIRED` で CLI が対話的にパスワード変更
- * - OAuth 2.0 + PKCE は Frontend (Cognito Hosted UI) 用にも保持
+ * - User/Password auth enabled (`USER_PASSWORD_AUTH` + `ADMIN_USER_PASSWORD_AUTH`)
+ * - Admin creates users via `AdminCreateUser` (temp password auto-generated, email delivery SUPPRESSED)
+ * - On first login the CLI handles `NEW_PASSWORD_REQUIRED` interactively
+ * - OAuth 2.0 + PKCE retained for Frontend (Cognito Hosted UI)
  */
 export class CognitoStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
@@ -115,8 +115,8 @@ export class CognitoStack extends cdk.Stack {
       generateSecret: false,
       authFlows: {
         userSrp: true,
-        userPassword: true, // CLI で直接 User/Pass 認証を行うため
-        adminUserPassword: true, // Backend が AdminInitiateAuth するため
+        userPassword: true, // required for direct User/Pass auth from the CLI
+        adminUserPassword: true, // required for the backend to call AdminInitiateAuth
       },
       oAuth: {
         flows: { authorizationCodeGrant: true },

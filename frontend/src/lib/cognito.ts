@@ -1,10 +1,10 @@
 /**
  * Cognito Authentication (PKCE OAuth 2.0)
  *
- * - Hosted UI から Authorization Code を受け取り、access_token / id_token / refresh_token に交換
- * - Backend は access_token のみ受理するため、Frontend も access_token を API 認可に使う
- * - トークンは localStorage("stratoclave_tokens") に保存 (0.25rem 角丸 UI 仕様とは別、純粋なデータ)
- * - CLI から URL クエリ `?token=xxx` で開かれたケースも本モジュールで吸収 (StoredTokens.access_token のみ埋める)
+ * - Receives an Authorization Code from the Hosted UI and exchanges it for access_token / id_token / refresh_token
+ * - Because the backend only accepts access_token, the frontend also uses access_token for API authorization
+ * - Tokens are stored in localStorage("stratoclave_tokens") (unrelated to the 0.25rem rounded UI spec; purely data)
+ * - The case of being opened from the CLI via URL query `?token=xxx` is also handled here (only StoredTokens.access_token is populated)
  */
 
 import type { StoredTokens } from '@/types/auth'
@@ -79,7 +79,7 @@ export async function startLogin(): Promise<void> {
   window.location.href = `${getCognitoDomain()}/oauth2/authorize?${params.toString()}`
 }
 
-/** Cognito Hosted UI から戻ってきた `?code=...` を token に交換して保存 */
+/** Exchange the `?code=...` returned from the Cognito Hosted UI for tokens and store them */
 export async function handleCallback(): Promise<StoredTokens> {
   const params = new URLSearchParams(window.location.search)
   const code = params.get('code')
@@ -239,7 +239,7 @@ export async function refreshTokens(
 }
 
 // ---------- Logout ----------
-/** localStorage をクリアして Hosted UI の logout へ redirect */
+/** Clear localStorage and redirect to the Hosted UI logout endpoint */
 export function logoutRedirect(): void {
   clearTokens()
   const params = new URLSearchParams({
@@ -284,7 +284,7 @@ export function clearTokens(): void {
   sessionStorage.removeItem(NONCE_KEY)
 }
 
-/** 5 分マージンで現時点の有効トークンを取得 */
+/** Retrieve the current valid token with a 5-minute margin */
 export function getAccessToken(): string | null {
   const tokens = getStoredTokens()
   if (!tokens) return null

@@ -16,9 +16,9 @@ export interface AlbStackProps extends cdk.StackProps {
   healthCheckPath?: string;
   /** target port @default 8000 */
   targetPort?: number;
-  /** HTTPS 証明書 (optional) */
+  /** HTTPS certificate (optional) */
   certificateArn?: string;
-  /** 表示用の独自ドメイン (optional) */
+  /** Custom domain name for display purposes (optional) */
   domainName?: string;
   /**
    * Enable ALB deletion protection. Production must set this to true so

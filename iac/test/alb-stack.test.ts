@@ -39,8 +39,8 @@ describe('AlbStack', () => {
     template = Template.fromStack(stack);
   });
 
-  // ALB-01: ALB が Internet-facing で作成されること (P0)
-  test('ALB が Internet-facing で作成されること', () => {
+  // ALB-01: ALB is created as Internet-facing (P0)
+  test('ALB is created as Internet-facing', () => {
     template.hasResourceProperties('AWS::ElasticLoadBalancingV2::LoadBalancer', {
       Name: 'stratoclave-alb',
       Scheme: 'internet-facing',
@@ -48,8 +48,8 @@ describe('AlbStack', () => {
     });
   });
 
-  // ALB-02: Target Group のヘルスチェック設定 (path=/health, interval=30s) (P1)
-  test('Target Group のヘルスチェック設定が正しいこと', () => {
+  // ALB-02: Target Group health check settings (path=/health, interval=30s) (P1)
+  test('Target Group has the correct health check settings', () => {
     template.hasResourceProperties('AWS::ElasticLoadBalancingV2::TargetGroup', {
       Name: 'stratoclave-backend-tg',
       Port: 8000,
@@ -64,8 +64,8 @@ describe('AlbStack', () => {
     });
   });
 
-  // ALB-03: HTTP Listener (port 80) が作成されること (P0)
-  test('HTTP Listener (port 80) が作成されること', () => {
+  // ALB-03: HTTP Listener (port 80) is created (P0)
+  test('HTTP Listener (port 80) is created', () => {
     template.hasResourceProperties('AWS::ElasticLoadBalancingV2::Listener', {
       Port: 80,
       Protocol: 'HTTP',

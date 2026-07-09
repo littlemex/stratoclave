@@ -4,18 +4,18 @@ set -e
 #
 # Cognito Configuration Validator
 #
-# このスクリプトは以下をチェックします：
-# 1. User Pool Client の CallbackURLs に CloudFront URL が含まれているか
-# 2. User Pool Client の LogoutURLs に CloudFront URL が含まれているか
-# 3. User Pool Domain が正しいか
-# 4. config.json の cognito.domain と User Pool Domain が一致しているか
-# 5. config.json の cognito.client_id が有効か
+# This script checks the following:
+# 1. Whether CloudFront URL is included in User Pool Client CallbackURLs
+# 2. Whether CloudFront URL is included in User Pool Client LogoutURLs
+# 3. Whether User Pool Domain is correct
+# 4. Whether config.json cognito.domain matches User Pool Domain
+# 5. Whether config.json cognito.client_id is valid
 #
 
 echo "[INFO] Cognito Configuration Validator"
 echo "========================================"
 
-# 環境変数の確認
+# Validate environment variables
 if [ -z "$USER_POOL_ID" ]; then
   echo "[ERROR] USER_POOL_ID is not set"
   exit 1
@@ -36,7 +36,7 @@ echo "[INFO] CLIENT_ID: $CLIENT_ID"
 echo "[INFO] CLOUDFRONT_DOMAIN: $CLOUDFRONT_DOMAIN"
 echo ""
 
-# User Pool Client の設定を取得
+# Fetch User Pool Client configuration
 echo "[CHECK 1] Fetching User Pool Client configuration..."
 CLIENT_CONFIG=$(aws cognito-idp describe-user-pool-client \
   --user-pool-id "$USER_POOL_ID" \
@@ -48,7 +48,7 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# CallbackURLs のチェック
+# Validate CallbackURLs
 echo "[CHECK 2] Validating CallbackURLs..."
 CALLBACK_URLS=$(echo "$CLIENT_CONFIG" | jq -r '.UserPoolClient.CallbackURLs[]')
 CLOUDFRONT_CALLBACK="https://${CLOUDFRONT_DOMAIN}/callback"
@@ -62,7 +62,7 @@ else
   exit 1
 fi
 
-# LogoutURLs のチェック
+# Validate LogoutURLs
 echo "[CHECK 3] Validating LogoutURLs..."
 LOGOUT_URLS=$(echo "$CLIENT_CONFIG" | jq -r '.UserPoolClient.LogoutURLs[]')
 CLOUDFRONT_LOGOUT="https://${CLOUDFRONT_DOMAIN}"
@@ -76,7 +76,7 @@ else
   exit 1
 fi
 
-# User Pool Domain のチェック
+# Validate User Pool Domain
 echo "[CHECK 4] Validating User Pool Domain..."
 USER_POOL_DOMAIN=$(aws cognito-idp describe-user-pool \
   --user-pool-id "$USER_POOL_ID" \
@@ -91,7 +91,7 @@ fi
 echo "[INFO] User Pool Domain: $USER_POOL_DOMAIN"
 EXPECTED_COGNITO_DOMAIN="https://${USER_POOL_DOMAIN}.auth.${AWS_REGION}.amazoncognito.com"
 
-# config.json のチェック（S3 から取得）
+# Validate config.json (fetched from S3)
 if [ -n "$CONFIG_S3_URL" ]; then
   echo "[CHECK 5] Validating config.json from S3..."
   CONFIG_JSON=$(curl -s "$CONFIG_S3_URL")
@@ -104,7 +104,7 @@ if [ -n "$CONFIG_S3_URL" ]; then
   CONFIG_CLIENT_ID=$(echo "$CONFIG_JSON" | jq -r '.cognito.client_id')
   CONFIG_DOMAIN=$(echo "$CONFIG_JSON" | jq -r '.cognito.domain')
 
-  # client_id のチェック
+  # Validate client_id
   if [ "$CONFIG_CLIENT_ID" != "$CLIENT_ID" ]; then
     echo "[ERROR] config.json client_id mismatch"
     echo "[ERROR] Expected: $CLIENT_ID"
@@ -112,7 +112,7 @@ if [ -n "$CONFIG_S3_URL" ]; then
     exit 1
   fi
 
-  # domain のチェック
+  # Validate domain
   if [ "$CONFIG_DOMAIN" != "$EXPECTED_COGNITO_DOMAIN" ]; then
     echo "[ERROR] config.json cognito domain mismatch"
     echo "[ERROR] Expected: $EXPECTED_COGNITO_DOMAIN"
@@ -123,7 +123,7 @@ if [ -n "$CONFIG_S3_URL" ]; then
   echo "[OK] config.json is valid"
 fi
 
-# AllowedOAuthFlows のチェック
+# Validate AllowedOAuthFlows
 echo "[CHECK 6] Validating OAuth flows..."
 OAUTH_FLOWS=$(echo "$CLIENT_CONFIG" | jq -r '.UserPoolClient.AllowedOAuthFlows[]')
 
@@ -134,7 +134,7 @@ else
   exit 1
 fi
 
-# AllowedOAuthScopes のチェック
+# Validate AllowedOAuthScopes
 echo "[CHECK 7] Validating OAuth scopes..."
 OAUTH_SCOPES=$(echo "$CLIENT_CONFIG" | jq -r '.UserPoolClient.AllowedOAuthScopes[]')
 

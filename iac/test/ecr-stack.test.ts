@@ -16,8 +16,8 @@ describe('EcrStack', () => {
     template = Template.fromStack(stack);
   });
 
-  // ECR-01: ECR リポジトリが作成されること (P0)
-  test('ECR リポジトリが作成されること', () => {
+  // ECR-01: ECR repository is created (P0)
+  test('ECR repository is created', () => {
     template.hasResourceProperties('AWS::ECR::Repository', {
       RepositoryName: 'stratoclave-backend',
       ImageScanningConfiguration: {
@@ -26,8 +26,8 @@ describe('EcrStack', () => {
     });
   });
 
-  // ECR-02: imageScanOnPush が有効であること (P1)
-  test('imageScanOnPush が有効であること', () => {
+  // ECR-02: imageScanOnPush is enabled (P1)
+  test('imageScanOnPush is enabled', () => {
     template.hasResourceProperties('AWS::ECR::Repository', {
       ImageScanningConfiguration: {
         ScanOnPush: true,
@@ -35,8 +35,8 @@ describe('EcrStack', () => {
     });
   });
 
-  // ECR-04: removalPolicy が RETAIN であること (P1)
-  test('DeletionPolicy が Retain であること', () => {
+  // ECR-04: removalPolicy is RETAIN (P1)
+  test('DeletionPolicy is Retain', () => {
     template.hasResource('AWS::ECR::Repository', {
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',

@@ -1,23 +1,23 @@
 """
 Stratoclave Backend (MVP)
 
-MVP スコープ: Bedrock プロキシゲートウェイ (Anthropic Messages API 互換)
-              + Cognito 認証 + DynamoDB クレジット管理
+MVP scope: Bedrock proxy gateway (Anthropic Messages API compatible)
+           + Cognito authentication + DynamoDB credit management
 
-既存の複雑な ACP / Session / STS 認証系は MVP では無効化し、
-backend/mvp/ 配下の最小構成のみで起動する。
-Phase 2 以降で必要に応じて既存ルーターを段階的に復活させる。
+The complex legacy ACP / Session / STS auth stack is disabled for MVP;
+only the minimal configuration under backend/mvp/ is started.
+Existing routers will be re-enabled incrementally as Phase 2+ features are added.
 """
 import os
 
-# .env 読込 (ローカル開発向け、本番は環境変数経由)
+# Load .env for local development (production uses environment variables directly).
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-# ロギングを最初にセットアップ
+# Set up logging first.
 from core.logging import setup_logging
 
 environment = os.getenv("ENVIRONMENT", "production")
@@ -40,16 +40,16 @@ from mvp.admin_tenants import router as mvp_admin_tenants_router
 from mvp.admin_usage import router as mvp_admin_usage_router
 from mvp.team_lead import router as mvp_team_lead_router
 from mvp.cognito_auth import router as mvp_cognito_auth_router
-# Phase S: AWS SSO / STS ログイン
+# Phase S: AWS SSO / STS login.
 from mvp.sso_exchange import router as mvp_sso_exchange_router
 from mvp.admin_trusted_accounts import router as mvp_admin_trusted_accounts_router
 from mvp.admin_sso_invites import router as mvp_admin_sso_invites_router
 # P0-8 follow-up: CLI → SPA handoff via single-use tickets
 from mvp.ui_ticket import router as mvp_ui_ticket_router
-# Phase C: 長期 API Key (cowork 等の gateway クライアント用)
+# Phase C: Long-lived API keys (for gateway clients such as cowork).
 from mvp.me_api_keys import router as mvp_me_api_keys_router
 from mvp.admin_api_keys import router as mvp_admin_api_keys_router
-# CLI bootstrap (未認証: CloudFront URL から CLI 用設定を配布)
+# CLI bootstrap (unauthenticated: distributes CLI config from the CloudFront URL).
 from mvp.well_known import router as mvp_well_known_router
 
 
@@ -57,7 +57,7 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Startup 環境変数チェック
+# Startup environment variable checks
 # ---------------------------------------------------------------------------
 
 _REQUIRED_IN_PRODUCTION = [
@@ -108,14 +108,16 @@ async def lifespan(app: FastAPI):
             environment=environment,
         )
 
-    # OSS zero-touch seed: Permissions / Default Tenant を idempotent 投入.
-    # 失敗しても Backend は起動継続 (運用継続優先、seed_all 内で握り潰し).
+    # OSS zero-touch seed: idempotently populate Permissions / Default Tenant.
+    # A failure here does not prevent the backend from starting (service continuity first;
+    # exceptions are suppressed inside seed_all).
     try:
         from bootstrap import seed_all
         seed_all()
     except Exception as exc:
-        # seed_all 自身は例外を外に漏らさない想定だが、import 時の ImportError
-        # などを拾うための最外 guard。ここに来た場合は設定ミスなので ERROR で記録.
+        # seed_all itself is not expected to raise, but this outer guard catches
+        # ImportError and similar issues at import time. Reaching here indicates a
+        # misconfiguration, so we log at ERROR level.
         logger.error(
             "seed_bootstrap_failed",
             error=str(exc),
@@ -151,7 +153,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # ---------------------------------------------------------------------------
-# セキュリティヘッダー
+# Security headers
 # ---------------------------------------------------------------------------
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -312,7 +314,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(MaxBodySizeASGIMiddleware)
 app.add_middleware(CorrelationIDMiddleware)
 
-# CORS (Starlette は LIFO なので CORS を最後に add = 最初に実行)
+# CORS (Starlette processes middleware in LIFO order, so adding CORS last means it runs first).
 from core.constants import DEFAULT_CORS_ORIGINS
 
 
@@ -367,8 +369,8 @@ app.add_middleware(
         "Authorization",
         "Content-Type",
         "X-Correlation-ID",
-        # X-Tenant-ID は Phase 2 (v2.1) で撤去: Backend が JWT + Users.org_id から
-        # tenant_id を解決するため、Frontend / CLI からのヘッダ指定経路は閉じる
+        # X-Tenant-ID was removed in Phase 2 (v2.1): the backend now resolves
+        # tenant_id from the JWT + Users.org_id, closing the Frontend/CLI header path.
         "anthropic-version",
         "anthropic-beta",
         "x-api-key",
@@ -379,7 +381,7 @@ app.add_middleware(
 __all__ = ["app", "_validate_cors_origins"]
 
 # ---------------------------------------------------------------------------
-# ルーター登録
+# Router registration
 # ---------------------------------------------------------------------------
 
 # MVP / Phase 2 routers
@@ -403,8 +405,8 @@ app.include_router(mvp_admin_api_keys_router)            # /api/mvp/admin/api-ke
 # CLI bootstrap
 app.include_router(mvp_well_known_router)                # GET /.well-known/stratoclave-config
 
-# Frontend 旧実装との互換用: /api/users/me/credit を /api/mvp/me にエイリアス
-# (Frontend が /api/users/me/credit を叩いている)
+# Compatibility alias for the old frontend: maps /api/users/me/credit to /api/mvp/me.
+# (The frontend still calls /api/users/me/credit.)
 from fastapi import Depends
 from mvp.deps import AuthenticatedUser, get_current_user
 from dynamo import UserTenantsRepository
@@ -419,7 +421,7 @@ _DEPRECATION_HEADERS = {
 
 @app.get("/api/users/me/credit", tags=["compat"], deprecated=True)
 def legacy_credit(user: AuthenticatedUser = Depends(get_current_user)):
-    """Phase 2 完了時に削除予定。Frontend は /api/mvp/me に移行すること."""
+    """Scheduled for removal when Phase 2 is complete. Frontend should migrate to /api/mvp/me."""
     from fastapi.responses import JSONResponse
     repo = UserTenantsRepository()
     repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
@@ -430,7 +432,7 @@ def legacy_credit(user: AuthenticatedUser = Depends(get_current_user)):
 
 @app.get("/api/users/me", tags=["compat"], deprecated=True)
 def legacy_me(user: AuthenticatedUser = Depends(get_current_user)):
-    """Phase 2 完了時に削除予定。Frontend は /api/mvp/me に移行すること."""
+    """Scheduled for removal when Phase 2 is complete. Frontend should migrate to /api/mvp/me."""
     from fastapi.responses import JSONResponse
     body = {
         "email": user.email,

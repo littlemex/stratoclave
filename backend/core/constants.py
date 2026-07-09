@@ -1,8 +1,8 @@
 """
 Application-wide Constants
 
-ページネーション、日付範囲制限等の共通定数。
-複数モジュールで同じ値を使う場合はここに定義する。
+Common constants for pagination, date range limits, and similar shared values.
+Define here when the same value is referenced across multiple modules.
 """
 
 # ---------------------------------------------------------------------------

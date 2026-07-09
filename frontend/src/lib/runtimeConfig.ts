@@ -1,9 +1,9 @@
 /**
  * Runtime Configuration Loader
  *
- * config.json を起動時に 1 回だけロードしてキャッシュ。
- * 本番: scripts/generate-config-json.sh が SSM から生成し S3 配置 (snake_case)
- * 開発: frontend/public/config.json を Vite が配信 (同スキーマ)
+ * Loads and caches config.json once at startup.
+ * Production: scripts/generate-config-json.sh generates it from SSM and places it in S3 (snake_case)
+ * Development: Vite serves frontend/public/config.json (same schema)
  */
 
 export interface RuntimeConfig {

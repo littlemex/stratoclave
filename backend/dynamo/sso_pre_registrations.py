@@ -1,20 +1,20 @@
-"""SsoPreRegistrations テーブル (Phase S).
+"""SsoPreRegistrations table (Phase S).
 
-`invite_only` プロビジョニング用、Admin が email を事前登録するテーブル.
+Stores admin-pre-registered emails for invite_only provisioning.
 
-テーブル設計 (iac/lib/dynamodb-stack.ts):
+Table design (iac/lib/dynamodb-stack.ts):
   PK: email  (lowercase)
   GSI iam-user-index: PK iam_user_lookup_key  ("<account_id>#<iam_user_name>")
-  属性:
+  Attributes:
     email: str (lowercase)
     account_id: str
     invited_role: "user" | "team_lead"
     tenant_id: str | None
     total_credit: int | None
-    iam_user_lookup_key: str | None   "<account_id>#<iam_user_name>" (IAM user 招待時)
+    iam_user_lookup_key: str | None   "<account_id>#<iam_user_name>" (for IAM user invites)
     invited_by: str  (Admin user_id)
     invited_at: str (ISO 8601)
-    consumed_at: str | None           初回 SSO login で consume、None なら未使用
+    consumed_at: str | None           Set on first SSO login; None = not yet used
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _table_name() -> str:
 
 
 class SsoInviteNotFoundError(Exception):
-    """指定 email の SSO 招待が存在しない."""
+    """Raised when no SSO invite exists for the given email."""
 
 
 def build_iam_user_lookup_key(account_id: str, iam_user_name: str) -> str:
@@ -52,7 +52,7 @@ def build_iam_user_lookup_key(account_id: str, iam_user_name: str) -> str:
 
 
 class SsoPreRegistrationsRepository:
-    """SSO 事前招待 (invite_only ポリシー専用) の CRUD."""
+    """CRUD operations for SSO pre-registrations (invite_only policy only)."""
 
     def __init__(self, table_name: Optional[str] = None) -> None:
         self._table = get_dynamodb_resource().Table(table_name or _table_name())
@@ -75,7 +75,7 @@ class SsoPreRegistrationsRepository:
     def list_by_account(
         self, account_id: str, *, limit: int = 100
     ) -> list[dict[str, Any]]:
-        # email の PK に account_id がないため Scan + filter (件数限定なので OK)
+        # The email PK does not include account_id, so Scan + filter is used (bounded count is acceptable).
         resp = self._table.scan(
             FilterExpression=Key("account_id").eq(account_id),
             Limit=min(limit, 200),
@@ -132,7 +132,7 @@ class SsoPreRegistrationsRepository:
         return item
 
     def mark_consumed(self, email: str) -> None:
-        """初回 SSO login 成功時、consumed_at に現在時刻を記録."""
+        """Record the current timestamp in consumed_at on the first successful SSO login."""
         try:
             self._table.update_item(
                 Key={"email": email.lower()},

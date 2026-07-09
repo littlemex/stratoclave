@@ -53,7 +53,7 @@ class AdminApiKeysListResponse(BaseModel):
 
 
 class AdminCreateApiKeyRequest(BaseModel):
-    """Admin が任意ユーザーに代理発行する際のリクエスト."""
+    """Request body for an admin issuing a key on behalf of an arbitrary user."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -147,7 +147,7 @@ def list_user_api_keys(
     include_revoked: bool = False,
     _admin: AuthenticatedUser = Depends(require_permission("apikeys:read")),
 ) -> list[ApiKeySummary]:
-    # 対象ユーザー存在確認 (404 統一)
+    # Verify target user exists (unified 404 on miss).
     _target_user_roles(user_id)
     repo = ApiKeysRepository()
     items = repo.list_by_user(user_id, include_revoked=include_revoked)
@@ -164,7 +164,7 @@ def create_api_key_on_behalf(
     body: AdminCreateApiKeyRequest,
     actor: AuthenticatedUser = Depends(require_permission("apikeys:create")),
 ) -> CreateApiKeyResponse:
-    # API Key 自身での代理発行は禁止 (特権昇格防止)
+    # Disallow issuing keys via an API key to prevent privilege escalation.
     if actor.auth_kind == "api_key":
         raise HTTPException(
             status_code=403,

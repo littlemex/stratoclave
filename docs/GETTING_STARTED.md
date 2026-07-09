@@ -1,9 +1,7 @@
-<!-- Last updated: 2026-04-27 -->
+<!-- Last updated: 2026-07-10 -->
 <!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
 
 # Getting Started
-
-> A Japanese translation is available at [ja/GETTING_STARTED.md](./ja/GETTING_STARTED.md).
 
 Stratoclave is a self-hosted gateway that puts a tenant-aware credit budget and role-based access control in front of Amazon Bedrock. This guide walks a first-time user from a fresh laptop through signing in, running their first Claude call, and opening the web console.
 
@@ -272,7 +270,7 @@ The web console shows your remaining credit, your tenant, your role, and a usage
 stratoclave ui open
 ```
 
-The CLI appends `?token=<access_token>` to the URL so the browser lands already authenticated.
+The CLI mints a single-use handoff ticket and opens `?ui_ticket=<ticket>` (≈30-second TTL) so the browser lands already authenticated — your access token is never placed in the URL. See [`CLI_GUIDE.md`](CLI_GUIDE.md#ui-open) for the mechanism.
 
 From the Dashboard you can:
 
@@ -321,7 +319,7 @@ Everything is visible from the Dashboard and `stratoclave usage show` seconds la
 | Requests fail with `401 Unauthorized` | Access tokens expire after one hour. Run `stratoclave auth login` or `stratoclave auth sso` again. |
 | Requests fail with `402 Payment Required` / `credit_exhausted` | Your tenant credit is used up. Ask your administrator to raise it with `stratoclave admin user set-credit <user_id> --total N --reset-used`. |
 | Requests fail with `400 invalid_model` | The requested model is not on the deployment's allowlist. See the model table in [CLI_GUIDE.md](CLI_GUIDE.md#supported-model-ids) and ask your administrator if the model you want is missing. |
-| Requests fail with `422 max_tokens exceeds 32768` | The backend caps `max_tokens` at 32768 per request. Reduce the value in your SDK call. |
+| Requests fail with `422 max_tokens exceeds 65536` | The backend caps `max_tokens` at 65536 per request. Reduce the value in your SDK call. |
 | `ui open` shows a stale page | CloudFront caching. Hard reload with `Cmd+Shift+R` / `Ctrl+Shift+R`. |
 | `stratoclave claude` reports `Failed to spawn claude` | The `claude` binary is not on your `PATH`. Install Claude Code from the [official docs](https://docs.claude.com/en/docs/claude-code/overview). |
 

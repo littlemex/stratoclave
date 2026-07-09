@@ -1,20 +1,20 @@
-"""Admin API: ユーザー作成 (Phase 2 v2.1).
+"""Admin API: User creation (Phase 2 v2.1).
 
 POST /api/mvp/admin/users
-    入力: {
+    Input: {
       "email": "user@example.com",
       "role": "user" | "team_lead" | "admin"  (optional, default "user"),
       "tenant_id": "tenant-xxx"  (optional, default DEFAULT_ORG_ID),
-      "total_credit": int  (optional, Tenant の default_credit を override)
+      "total_credit": int  (optional, overrides Tenant.default_credit)
     }
-    処理:
-      1. `users:create` permission を require
-      2. role=="admin" の場合は環境変数 `ALLOW_ADMIN_CREATION=true` ゲート (Critical C-D)
-      3. Cognito AdminCreateUser (一時パスワード自動生成、メール送信は SUPPRESS)
-      4. DynamoDB Users + UserTenants を指定 tenant で作成
-         - total_credit 未指定 → Tenant.default_credit、無ければ DEFAULT_TENANT_CREDIT
-      5. Audit log 出力 (admin 作成時は event=admin_created)
-    レスポンス:
+    Steps:
+      1. Require `users:create` permission.
+      2. For role=="admin", check the ALLOW_ADMIN_CREATION=true env gate (Critical C-D).
+      3. Cognito AdminCreateUser (auto-generate temporary password, SUPPRESS email delivery).
+      4. Create DynamoDB Users + UserTenants records for the specified tenant.
+         - If total_credit is unset, fall back to Tenant.default_credit, then DEFAULT_TENANT_CREDIT.
+      5. Emit audit log (event=admin_created when creating an admin user).
+    Response:
       { "email", "user_id", "temporary_password", "user_pool_id", "org_id", "role" }
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ Role = Literal["admin", "team_lead", "user"]
 
 
 class CreateUserRequest(BaseModel):
-    """Pydantic Literal + extra=forbid で型制約 (Critical C-D / Security 4.1)."""
+    """Pydantic Literal + extra=forbid enforces type constraints (Critical C-D / Security 4.1)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -71,10 +71,10 @@ class CreateUserRequest(BaseModel):
 class CreateUserResponse(BaseModel):
     email: str
     user_id: str
-    # temporary_password はデフォルトでレスポンスから外す (P0-3).
-    # access log / HAR / browser devtools 経由の漏洩を防ぐため。
-    # 互換のために環境変数 EXPOSE_TEMPORARY_PASSWORD=true の時だけ含める。
-    # 推奨: ForcePasswordReset + SES メール配信 / one-time secret link への移行 (P1).
+    # P0-3: temporary_password is omitted from responses by default to prevent
+    # leakage via access logs, HAR files, or browser devtools.
+    # Included only when EXPOSE_TEMPORARY_PASSWORD=true is set (for compatibility).
+    # Recommended migration: ForcePasswordReset + SES delivery / one-time secret link (P1).
     temporary_password: Optional[str] = None
     user_pool_id: str
     org_id: str
@@ -124,7 +124,7 @@ def create_user(
     if "@" not in email:
         raise HTTPException(status_code=422, detail="invalid email format")
 
-    # Tenant 解決: 指定あれば存在チェック、無ければ default-org
+    # Resolve tenant: if specified, verify it exists; otherwise fall back to default-org.
     tenant_id = body.tenant_id or DEFAULT_ORG_ID
     tenants_repo = TenantsRepository()
     tenant_rec = tenants_repo.get(tenant_id)
@@ -161,7 +161,7 @@ def create_user(
     if not sub:
         raise HTTPException(status_code=502, detail="Cognito response missing sub")
 
-    # 一時パスワードを明示発行 (Permanent=False で NEW_PASSWORD_REQUIRED を発火)
+    # Issue an explicit temporary password (Permanent=False triggers NEW_PASSWORD_REQUIRED).
     temp_password = _generate_temp_password()
     try:
         cognito.admin_set_user_password(
@@ -200,7 +200,7 @@ def create_user(
         allow_resurrection=True,
     )
 
-    # Audit log: admin 作成は常に、その他 role も記録
+    # Always emit an audit log; use event=admin_created when the new user is an admin.
     log_audit_event(
         event="admin_created" if body.role == "admin" else "user_created",
         actor_id=actor.user_id,
@@ -211,10 +211,10 @@ def create_user(
         details={"email": email, "role": body.role, "allow_admin_creation": admin_creation_allowed()},
     )
 
-    # temporary_password のレスポンス露出は環境変数 EXPOSE_TEMPORARY_PASSWORD=true の時のみ。
-    # デフォルトでは None にして、access log / HAR / browser devtools 経由の漏洩を防ぐ。
-    # この場合、Admin は Cognito コンソール経由でパスワードリセットメールを送るか、
-    # bootstrap-admin.sh の手動実行で取得する運用になる。
+    # Expose temporary_password in the response only when EXPOSE_TEMPORARY_PASSWORD=true.
+    # By default it is None to prevent leakage via access logs, HAR files, or browser devtools.
+    # In the default case, admins should use the Cognito console to send a password-reset email
+    # or retrieve the password by running bootstrap-admin.sh manually.
     expose_temp_password = (
         os.getenv("EXPOSE_TEMPORARY_PASSWORD", "false").lower() == "true"
     )
@@ -229,7 +229,7 @@ def create_user(
 
 
 def _generate_temp_password(length: int = 16) -> str:
-    """Cognito のパスワードポリシー (大小英数記号各1以上) を満たす乱数パスワード."""
+    """Generate a random password satisfying Cognito's policy (at least one upper, lower, digit, and symbol)."""
     import secrets
     import string
 
@@ -297,7 +297,7 @@ def _decode_cursor(cursor: Optional[str]) -> Optional[dict]:
 
 
 def _enrich_user_with_credit(user_item: dict, repo: UserTenantsRepository) -> UserSummary:
-    """Users item に active UserTenants の credit を付けて UserSummary 化."""
+    """Build a UserSummary by attaching active UserTenants credit data to a Users item."""
     org_id = str(user_item.get("org_id") or DEFAULT_ORG_ID)
     summary = repo.credit_summary(str(user_item["user_id"]), org_id)
     roles_raw = user_item.get("roles") or []
@@ -332,10 +332,10 @@ def list_users(
     tenant_id: Optional[str] = None,
     _admin: AuthenticatedUser = Depends(require_permission("users:read")),
 ) -> UsersListResponse:
-    """全ユーザー一覧 (Scan + cursor pagination)。
+    """List all users (Scan + cursor pagination).
 
-    MVP の規模では Users は Scan で十分。role/tenant はサーバー側で filter する。
-    limit は 100 を上限にクリップ (H2)。
+    A full Scan is sufficient at MVP scale. role/tenant filtering is applied server-side.
+    limit is clamped to a maximum of 100 (H2).
     """
     users_repo = UsersRepository()
     user_tenants_repo = UserTenantsRepository()
@@ -346,7 +346,7 @@ def list_users(
     if decoded:
         scan_kwargs["ExclusiveStartKey"] = decoded
 
-    resp = users_repo._table.scan(**scan_kwargs)  # 単一テーブル Scan、PROFILE SK でフィルタは後段
+    resp = users_repo._table.scan(**scan_kwargs)  # Single-table Scan; PROFILE SK filter applied below.
     raw_items = resp.get("Items", [])
     next_cursor = _encode_cursor(resp.get("LastEvaluatedKey"))
 
@@ -381,12 +381,12 @@ def get_user(
 # Delete (with last-admin protection)
 # -----------------------------------------------------------------------
 def _count_active_admins() -> int:
-    """DynamoDB Users から `roles` に admin を含む *active* user 数を数える.
+    """Count active users whose `roles` include admin in DynamoDB Users.
 
-    A-03-admin: ``mark_deleted`` で生成されたソフト削除トンbストーン (status=
-    "deleted") は active 扱いしない。さもないと最後の admin を削除した直後に
-    まだ tombstone が残っているため delete API が無条件で許可されてしまい、
-    その後 active admin がゼロになる。
+    A-03-admin: soft-delete tombstones (status="deleted") created by ``mark_deleted``
+    are not counted as active. Without this check, the delete API would incorrectly
+    permit the deletion of the last admin immediately after the tombstone is written,
+    leaving zero active admins.
     """
     repo = UsersRepository()
     resp = repo._table.scan()
@@ -407,10 +407,10 @@ def delete_user_endpoint(
     user_id: str,
     actor: AuthenticatedUser = Depends(require_permission("users:delete")),
 ) -> Response:
-    """Cognito + DynamoDB からユーザーを削除。
+    """Delete a user from Cognito and DynamoDB.
 
-    Last admin 削除防止: 対象が admin ロールを持ち、かつ active admin が 1 人しか居ない場合 409。
-    UsageLogs は監査用に残す。
+    Last-admin protection: returns 409 if the target holds the admin role and is the only active admin.
+    UsageLogs are retained for audit purposes.
     """
     users_repo = UsersRepository()
     item = users_repo.get_by_user_id(user_id)
@@ -424,11 +424,11 @@ def delete_user_endpoint(
     if "admin" in roles_list and _count_active_admins() <= 1:
         raise HTTPException(status_code=409, detail="Cannot delete the last admin user")
 
-    # 自分自身削除も禁止 (操作事故防止)
+    # Prevent self-deletion to avoid accidental lockout.
     if user_id == actor.user_id:
         raise HTTPException(status_code=409, detail="Cannot delete yourself")
 
-    # Cognito 側削除 (先に実行。失敗したら中断)
+    # Delete from Cognito first; abort if this fails.
     if email:
         cognito_delete_user(email)
     # X-1 (2026-04 critical-sweep follow-up): Cognito's admin_delete_user
@@ -445,7 +445,7 @@ def delete_user_endpoint(
     except Exception as e:  # pragma: no cover — Cognito hiccup
         _log.warning("global_sign_out_failed_on_delete", extra={"user_id": user_id, "error": str(e)})
 
-    # DynamoDB Users は物理削除ではなく soft-delete (X-1)。
+    # Soft-delete the Users row instead of a physical delete (X-1).
     users_repo.mark_deleted(user_id)
 
     # Z-1 (2026-04 third blind review): sk-stratoclave-* API keys live
@@ -475,7 +475,7 @@ def delete_user_endpoint(
             extra={"user_id": user_id, "error": str(e)},
         )
 
-    # UserTenants を archived にする (履歴は残す)
+    # Archive UserTenants rows (preserve history).
     from datetime import datetime, timezone
     now_iso = datetime.now(timezone.utc).isoformat()
     user_tenants_repo = UserTenantsRepository()
@@ -572,7 +572,7 @@ def assign_tenant(
     body: AssignTenantRequest,
     actor: AuthenticatedUser = Depends(require_permission("users:assign-tenant")),
 ) -> UserSummary:
-    """User を指定 Tenant に切替 (TransactWriteItems + Cognito Saga)."""
+    """Switch a user to the specified tenant (TransactWriteItems + Cognito saga)."""
     users_repo = UsersRepository()
     user_item = users_repo.get_by_user_id(user_id)
     if not user_item:
@@ -603,7 +603,7 @@ def assign_tenant(
     except ValueError as e:
         raise HTTPException(status_code=409, detail=f"Tenant switch conflict: {e}")
 
-    # (2) Cognito Saga: attribute 更新 → global sign out
+    # (2) Cognito saga: update attribute then global sign out.
     update_org_id(user_id, new_tenant_id)
     global_sign_out(user_id)
     # C-C (2026-04 critical sweep): stamp a server-side session
@@ -640,7 +640,7 @@ def assign_tenant(
         after={"tenant_id": new_tenant_id, "role": body.new_role, "total_credit": body.total_credit},
     )
 
-    # 最新の Users を読み直して返す
+    # Re-fetch the Users row to return up-to-date data.
     fresh = users_repo.get_by_user_id(user_id) or user_item
     return _enrich_user_with_credit(fresh, user_tenants_repo)
 

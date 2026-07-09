@@ -1,6 +1,6 @@
-"""Backend bootstrap (lifespan-time 初期化処理).
+"""Backend bootstrap (lifespan initialization).
 
-OSS zero-touch 起動のための idempotent seed を提供する.
+Provides idempotent seed functions for OSS zero-touch startup.
 """
 from .seed import seed_all, seed_permissions, seed_default_tenant
 

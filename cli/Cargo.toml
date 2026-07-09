@@ -35,7 +35,7 @@ rustyline = "18"
 # `atty` was removed (RUSTSEC-2024-0375 unmaintained, RUSTSEC-2021-0145
 # unsound). Stdin TTY detection now uses std::io::IsTerminal, stable
 # since Rust 1.70.
-# Phase S: AWS SSO / STS 経由ログイン用
+# Phase S: AWS SSO / STS login support
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sts = "1"
 aws-sigv4 = "1"

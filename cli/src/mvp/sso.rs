@@ -1,12 +1,12 @@
-//! Phase S: AWS SSO / STS 経由ログイン.
+//! Phase S: Login via AWS SSO / STS.
 //!
-//! フロー:
-//!   1. AWS credentials provider chain (profile / env / EC2 metadata) から
-//!      (access_key, secret_key, session_token) をロード
-//!   2. sts:GetCallerIdentity を sigv4 署名した POST リクエストを組み立てる
-//!   3. Backend `/api/mvp/auth/sso-exchange` に method/url/headers を転送
-//!   4. Backend が STS を叩いて身元確認 → Cognito access_token を返却
-//!   5. `~/.stratoclave/mvp_tokens.json` に保存
+//! Flow:
+//!   1. Load (access_key, secret_key, session_token) from the AWS credentials
+//!      provider chain (profile / env / EC2 metadata)
+//!   2. Build a SigV4-signed POST request for sts:GetCallerIdentity
+//!   3. Forward method/url/headers to the backend at `/api/mvp/auth/sso-exchange`
+//!   4. The backend calls STS to verify identity and returns a Cognito access_token
+//!   5. Save the token to `~/.stratoclave/mvp_tokens.json`
 
 use anyhow::{anyhow, bail, Context, Result};
 use aws_config::BehaviorVersion;
@@ -82,9 +82,10 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
         .await
         .context("Failed to resolve AWS credentials. Run `aws sso login` or set AWS_PROFILE.")?;
 
-    // 2. sts:GetCallerIdentity の署名済みリクエストを生成
+    // 2. Build the signed request for sts:GetCallerIdentity
     //    (POST form body: Action=GetCallerIdentity&Version=2011-06-15)
-    //    STS は us-east-1 グローバルを使用 (regional endpoint でも可、ここではシンプルに us-east-1)
+    //    Using the us-east-1 global STS endpoint (a regional endpoint also works;
+    //    us-east-1 is used here for simplicity)
     let sts_region = region_str.clone();
     let sts_host = format!("sts.{}.amazonaws.com", sts_region);
     let url = format!("https://{}/", sts_host);
@@ -117,7 +118,7 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
     let (signing_instructions, _signature) =
         sign(signable, &sign_params)?.into_parts();
 
-    // 署名済みヘッダーを取得
+    // Retrieve the signed headers
     let mut req = http::Request::builder()
         .method(Method::POST)
         .uri(url.clone())
@@ -130,7 +131,7 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
     }
     signing_instructions.apply_to_request_http1x(&mut req);
 
-    // リクエストから headers を抽出して HashMap 化 (Backend に送る形式)
+    // Extract headers from the request into a HashMap (the format the backend expects)
     let mut signed_headers: HashMap<String, String> = HashMap::new();
     for (name, value) in req.headers() {
         signed_headers.insert(
@@ -139,7 +140,7 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
         );
     }
 
-    // 3. Backend に転送
+    // 3. Forward to backend
     eprintln!("[INFO] Presenting identity to Stratoclave backend...");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -174,7 +175,7 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
         bail!("Unexpected status from backend: {}", login.status);
     }
 
-    // 4. トークン保存
+    // 4. Save tokens
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_secs();

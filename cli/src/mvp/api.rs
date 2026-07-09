@@ -1,7 +1,8 @@
 //! MVP API client: authorization header injection + 401 handling.
 //!
-//! すべての Phase 2 サブコマンド (admin / team-lead / usage) はこのヘルパーを経由する。
-//! 401 を検知したら「`stratoclave auth login` で再ログインしてください」を促す。
+//! All Phase 2 subcommands (admin / team-lead / usage) go through this helper.
+//! On a 401 response, users are instructed to re-authenticate with
+//! `stratoclave auth login`.
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
@@ -83,7 +84,7 @@ impl ApiClient {
         handle_response(resp).await
     }
 
-    /// DELETE は通常 204 body 無しなので bool 的に返す。
+    /// DELETE typically returns 204 with no body; returns () on success.
     pub async fn delete(&self, path: &str) -> Result<()> {
         let resp = self.send(self.http.delete(self.api_url(path))).await?;
         let status = resp.status();

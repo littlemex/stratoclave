@@ -1,7 +1,7 @@
 //! Cognito User Pool authentication provider (Phase 1 legacy: browser / device flow).
 //!
-//! Phase 2 (v2.1) 以降は `mvp/auth.rs` の User/Pass + Backend /api/mvp/auth/login を使う。
-//! 本モジュールはビルド互換のため残存。
+//! From Phase 2 (v2.1) onward, authentication goes through `mvp/auth.rs`
+//! (User/Pass + Backend /api/mvp/auth/login). This module is kept for build compatibility only.
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};

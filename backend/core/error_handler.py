@@ -1,8 +1,8 @@
 """
 Error Handler
 
-エラーレスポンスのサニタイズとセキュアなエラーハンドリング。
-AWS アカウント情報、ファイルパス、認証情報などの漏洩を防ぐ。
+Sanitization of error responses and secure error handling.
+Prevents leakage of AWS account information, file paths, credentials, and similar sensitive data.
 """
 import re
 from typing import Optional, Dict, Any
@@ -15,39 +15,40 @@ logger = get_logger(__name__)
 
 
 def sanitize_exception_message(message: str) -> str:
-    """例外メッセージから機密情報を除去する。
+    """Strip sensitive information from an exception message.
 
-    以下の情報をサニタイズします：
-    - AWS アカウント ID (12桁の数字)
-    - AWS ARN (arn:aws:...)
-    - ファイルパス (/home/, /usr/, /var/, C:\\, etc.)
-    - API キー、トークン (sk-, pk-, Bearer, etc.)
-    - IP アドレス
+    Sanitizes the following:
+    - AWS account IDs (12-digit numbers)
+    - AWS ARNs (arn:aws:...)
+    - File paths (/home/, /usr/, /var/, C:\\, etc.)
+    - API keys and tokens (sk-, pk-, Bearer, etc.)
+    - IP addresses
 
     Args:
-        message: 元の例外メッセージ
+        message: The original exception message.
 
     Returns:
-        サニタイズされたメッセージ
+        The sanitized message.
     """
-    # AWS ARN を除去（アカウント ID を含む）
+    # Remove AWS ARNs (which contain account IDs).
     message = re.sub(r'arn:aws:[a-z0-9\-]+:[a-z0-9\-]*:\d{12}:[a-zA-Z0-9\-/_]+', '[ARN]', message)
 
-    # AWS アカウント ID (12桁の数字) を除去
-    # SEC-07: この正規表現は 12 桁の数字全般にマッチするため、
-    # 電話番号やタイムスタンプなど AWS アカウント ID 以外の値も置換される可能性がある。
-    # 現時点ではセキュリティ優先でこの挙動を維持する（false positive は安全側に倒れる）。
-    # より厳密な判定が必要な場合は、ARN コンテキストやプレフィックスでの判定を検討する。
+    # Remove AWS account IDs (12-digit numbers).
+    # SEC-07: This regex matches any 12-digit sequence, so values such as
+    # phone numbers or timestamps may also be replaced. We accept this
+    # trade-off in favour of security (false positives are safe-side errors).
+    # If more precise matching is needed, consider restricting to ARN context
+    # or known prefixes.
     message = re.sub(r'\b\d{12}\b', '[ACCOUNT_ID]', message)
 
-    # ファイルパス（絶対パス）を除去
+    # Remove absolute file paths.
     message = re.sub(r'(?:/[a-zA-Z0-9_\-\.]+)+/[a-zA-Z0-9_\-\.]+\.[a-z]+', '[FILE_PATH]', message)
     message = re.sub(r'[A-Z]:\\(?:[a-zA-Z0-9_\-\.]+\\)+[a-zA-Z0-9_\-\.]+\.[a-z]+', '[FILE_PATH]', message)
 
-    # API キー、トークンを除去
+    # Remove API keys and tokens.
     message = re.sub(r'(sk|pk|Bearer|token)[-_][a-zA-Z0-9\-]{15,}', '[CREDENTIALS]', message, flags=re.IGNORECASE)
 
-    # IP アドレスを除去
+    # Remove IP addresses.
     message = re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', '[IP_ADDRESS]', message)
 
     return message
@@ -59,19 +60,19 @@ def create_error_response(
     correlation_id: Optional[str] = None,
     log_details: Optional[Dict[str, Any]] = None
 ) -> JSONResponse:
-    """セキュアなエラーレスポンスを作成する。
+    """Build a secure error response.
 
-    ユーザーには汎用的なエラーメッセージを返し、
-    詳細情報はログにのみ記録する。
+    Returns a generic error message to the caller while recording
+    the full details only in the log.
 
     Args:
-        status_code: HTTP ステータスコード
-        message: ユーザーに表示するエラーメッセージ（汎用的なもの）
-        correlation_id: リクエスト追跡用の相関 ID（オプション）
-        log_details: ログに記録する詳細情報（オプション）
+        status_code: HTTP status code.
+        message: Generic error message shown to the user.
+        correlation_id: Request correlation ID for tracing (optional).
+        log_details: Detailed information recorded only in the log (optional).
 
     Returns:
-        JSONResponse オブジェクト
+        A JSONResponse object.
 
     Example:
         ```python
@@ -86,7 +87,7 @@ def create_error_response(
             )
         ```
     """
-    # 詳細情報をログに記録（ユーザーには返さない）
+    # Log details internally — do not include them in the response body.
     if log_details:
         logger.error(
             "api_error",
@@ -96,7 +97,7 @@ def create_error_response(
             **log_details
         )
 
-    # ユーザーには汎用的なメッセージのみ返す
+    # Return only the generic message to the caller.
     response_body = {
         "detail": message,
     }
@@ -114,14 +115,14 @@ def internal_server_error(
     correlation_id: Optional[str] = None,
     log_details: Optional[Dict[str, Any]] = None
 ) -> JSONResponse:
-    """500 Internal Server Error レスポンスを作成する。
+    """Build a 500 Internal Server Error response.
 
     Args:
-        correlation_id: リクエスト追跡用の相関 ID
-        log_details: ログに記録する詳細情報
+        correlation_id: Request correlation ID for tracing.
+        log_details: Detailed information recorded only in the log.
 
     Returns:
-        JSONResponse (500 エラー)
+        JSONResponse (500 error).
     """
     return create_error_response(
         status_code=500,
@@ -136,15 +137,15 @@ def bad_request_error(
     correlation_id: Optional[str] = None,
     log_details: Optional[Dict[str, Any]] = None
 ) -> JSONResponse:
-    """400 Bad Request レスポンスを作成する。
+    """Build a 400 Bad Request response.
 
     Args:
-        message: エラーメッセージ（汎用的なもの）
-        correlation_id: リクエスト追跡用の相関 ID
-        log_details: ログに記録する詳細情報
+        message: Generic error message shown to the user.
+        correlation_id: Request correlation ID for tracing.
+        log_details: Detailed information recorded only in the log.
 
     Returns:
-        JSONResponse (400 エラー)
+        JSONResponse (400 error).
     """
     return create_error_response(
         status_code=400,

@@ -1,10 +1,10 @@
 /**
- * Phase 2 認証モデル
+ * Phase 2 auth model
  *
- * - `roles` の真実源は Backend DynamoDB Users テーブル (`cognito:groups` は無視)
- * - Backend は access_token のみ受理 (id_token は 401)
- * - Frontend は access_token を fetch の Authorization ヘッダに乗せる
- * - email / roles は login 直後に `GET /api/mvp/me` から取得 (access_token には email claim 非存在)
+ * - Source of truth for `roles` is the Backend DynamoDB Users table (`cognito:groups` is ignored)
+ * - The backend only accepts access_token (id_token returns 401)
+ * - The frontend attaches access_token in the Authorization header of fetch requests
+ * - email / roles are fetched via `GET /api/mvp/me` immediately after login (access_token carries no email claim)
  */
 
 export type UserRole = 'admin' | 'team_lead' | 'user'

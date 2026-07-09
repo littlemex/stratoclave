@@ -1,7 +1,7 @@
 """
 Common Validation Helpers
 
-日付範囲チェック等、複数エンドポイントで共有するバリデーションロジック。
+Shared validation logic used across multiple endpoints, such as date range checks.
 """
 from datetime import datetime
 from typing import Optional
@@ -16,15 +16,15 @@ def validate_date_range(
     parsed_end: Optional[datetime],
     max_days: int = MAX_DATE_RANGE_DAYS,
 ) -> None:
-    """日付範囲が上限以内かを検証する。
+    """Validate that a date range does not exceed the allowed maximum.
 
     Args:
-        parsed_start: 開始日時 (None 可)。
-        parsed_end: 終了日時 (None 可)。
-        max_days: 許容する最大日数。デフォルト 90。
+        parsed_start: Start datetime (may be None).
+        parsed_end: End datetime (may be None).
+        max_days: Maximum allowed span in days. Defaults to 90.
 
     Raises:
-        HTTPException(422): 日付範囲が max_days を超過した場合。
+        HTTPException(422): When the range exceeds max_days.
     """
     if parsed_start and parsed_end:
         if (parsed_end - parsed_start).days > max_days:
@@ -35,17 +35,17 @@ def validate_date_range(
 
 
 def parse_iso_date(value: Optional[str], field_name: str) -> Optional[datetime]:
-    """ISO 8601 文字列を datetime に変換する。
+    """Parse an ISO 8601 string into a datetime object.
 
     Args:
-        value: ISO 8601 形式の日付文字列 (None 可)。
-        field_name: エラーメッセージ用のフィールド名。
+        value: ISO 8601 date string (may be None).
+        field_name: Field name used in error messages.
 
     Returns:
-        パース済み datetime、または None。
+        Parsed datetime, or None.
 
     Raises:
-        HTTPException(422): フォーマットが不正な場合。
+        HTTPException(422): When the format is invalid.
     """
     if not value:
         return None

@@ -9,18 +9,18 @@ use serde_json::{json, Value};
 
 use super::api::ApiClient;
 
-/// email で Users テーブルをスキャンして user_id (Cognito sub) を解決するヘルパ.
+/// Helper that scans the Users table to resolve a user_id (Cognito sub) by email.
 ///
-/// `--team-lead-email foo@example.com` のように指定された場合、Backend は
-/// team_lead_user_id として Cognito sub を期待するため、CLI 側で email → sub を
-/// 変換する必要がある (v2.1 §4.1)。
+/// When `--team-lead-email foo@example.com` is specified, the backend expects a
+/// Cognito sub as `team_lead_user_id`, so the CLI must translate email → sub
+/// before sending the request (v2.1 §4.1).
 ///
-/// `admin:users:read` 権限が必要 (admin 経路限定)。
+/// Requires the `admin:users:read` permission (admin path only).
 async fn resolve_user_id_by_email(client: &ApiClient, email: &str) -> Result<String> {
     let needle = email.to_ascii_lowercase();
     let mut cursor: Option<String> = None;
     for _ in 0..20 {
-        // ページング上限 20 iteration × 100 users = 2000 件までは探索
+        // Pagination cap: 20 iterations × 100 users = up to 2 000 users searched
         let mut path = String::from("/api/mvp/admin/users?limit=100");
         if let Some(c) = &cursor {
             path.push_str(&format!("&cursor={c}"));
@@ -52,12 +52,12 @@ async fn resolve_user_id_by_email(client: &ApiClient, email: &str) -> Result<Str
     ))
 }
 
-/// `--team-lead` / `--team-lead-email` を解決して Cognito sub を返す.
+/// Resolves `--team-lead` / `--team-lead-email` to a Cognito sub.
 ///
-/// - `team_lead_id` が指定されていればそのまま返す (sub or `admin-owned`)
-/// - `team_lead_email` が指定されていれば email → user_id を API で解決
-/// - 両方未指定なら `admin-owned` を返す (Admin 経路のデフォルト)
-/// - 両方指定されていた場合は明示エラー (あいまいさ排除)
+/// - If `team_lead_id` is provided, return it as-is (a sub or `admin-owned`).
+/// - If `team_lead_email` is provided, resolve email → user_id via the API.
+/// - If neither is provided, return `admin-owned` (default for the admin path).
+/// - If both are provided, return an explicit error to avoid ambiguity.
 async fn resolve_team_lead(
     client: &ApiClient,
     team_lead_id: Option<&str>,
@@ -433,7 +433,7 @@ fn print_breakdown(label: &str, value: Option<&Value>) {
         return;
     }
     println!("  {label}:");
-    // トークン数の降順で安定表示
+    // Sort by token count descending for a stable, readable display
     let mut entries: Vec<(&String, i64)> = map
         .iter()
         .map(|(k, v)| (k, v.as_i64().unwrap_or(0)))

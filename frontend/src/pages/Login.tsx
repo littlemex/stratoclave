@@ -15,14 +15,14 @@ import {
 import { useAuth } from '@/contexts/AuthContext'
 
 /**
- * Login 画面
- * - 背景・ロゴ・カード・cursor halo すべてがマウス位置に反応
- * - mouse 座標を CSS custom properties (--mx/--my/--sx/--sy/--cx/--cy) に raf + spring 補間で直接注入
- * - カードは rotateX/Y で 3 度の範囲で tilt (覗き込む視点)
- * - prefers-reduced-motion を尊重、全動きを OFF に
+ * Login screen
+ * - Background, logo, card, and cursor halo all react to mouse position
+ * - Mouse coordinates are injected directly into CSS custom properties (--mx/--my/--sx/--sy/--cx/--cy) via rAF + spring interpolation
+ * - The card tilts within ±3 degrees via rotateX/Y (a peering-in perspective)
+ * - Respects prefers-reduced-motion by disabling all motion
  */
 
-/** 初回訪問時の「トークンが無い」という正常な状態はエラーとして表示しない. */
+/** The "no tokens" state on first visit is normal and should not be displayed as an error. */
 const BENIGN_AUTH_MESSAGES = new Set([
   'No tokens',
   'No tokens found',
@@ -43,7 +43,7 @@ export default function Login() {
   const containerRef = useRef<HTMLDivElement>(null)
   const cardRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number | null>(null)
-  // targetRef: [-1..1] の mouse 位置、currentRef: spring 補間済み現在値
+  // targetRef: mouse position in [-1..1], currentRef: spring-interpolated current value
   const targetRef = useRef({ x: 0, y: 0, cx: 0, cy: 0 })
   const currentRef = useRef({ x: 0, y: 0, cx: 0, cy: 0 })
   const [parallax, setParallax] = useState({ x: 0, y: 0 })
@@ -75,7 +75,7 @@ export default function Login() {
     }
 
     const tick = () => {
-      // spring 補間
+      // spring interpolation
       const dx = targetRef.current.x - currentRef.current.x
       const dy = targetRef.current.y - currentRef.current.y
       const dcx = targetRef.current.cx - currentRef.current.cx
@@ -97,7 +97,7 @@ export default function Login() {
 
         const container = containerRef.current
         if (container) {
-          // ページ内の 0..100% 位置 (spotlight / aurora 用)
+          // Position within the page as 0..100% (for spotlight / aurora)
           const rect = container.getBoundingClientRect()
           const sx = Math.max(
             0,
@@ -115,7 +115,7 @@ export default function Login() {
           container.style.setProperty('--cy', `${currentRef.current.cy.toFixed(1)}px`)
         }
 
-        // カード tilt (控えめ: 最大 ±3 度)
+        // Card tilt (subtle: maximum ±3 degrees)
         if (cardRef.current) {
           const tiltX = (-currentRef.current.y * 3).toFixed(2)
           const tiltY = (currentRef.current.x * 3).toFixed(2)
@@ -247,12 +247,12 @@ stratoclave ui open`}
 }
 
 /**
- * 背景装飾:
- *  - 氷河 blob (primary) : マウスに吸い寄せられる
- *  - 枢機卿赤 blob       : 逆方向に動く
- *  - 地層ライン 3 本      : mouse X で微妙に傾く
- *  - aurora 糸 3 本       : 画面幅の光の線、mouse Y で波打つ
- *  - 微粒子               : 静的、氷河の粉雪
+ * Background decoration:
+ *  - Glacier blob (primary) : drawn toward the mouse
+ *  - Cardinal red blob       : moves in the opposite direction
+ *  - 3 stratum lines         : tilt subtly with mouse X
+ *  - 3 aurora threads        : full-width light lines that undulate with mouse Y
+ *  - Particles               : static, glacial powder-snow feel
  */
 function BackgroundStrata() {
   return (
@@ -260,7 +260,7 @@ function BackgroundStrata() {
       aria-hidden
       className="pointer-events-none absolute inset-0 -z-10 overflow-hidden"
     >
-      {/* 氷河光: mouse に吸い寄せられる */}
+      {/* Glacial glow: drawn toward the mouse */}
       <div
         className="absolute left-1/2 top-[-5%] h-[70vh] w-[95vw] -translate-x-1/2 blur-3xl"
         style={{
@@ -272,7 +272,7 @@ function BackgroundStrata() {
         }}
       />
 
-      {/* 枢機卿赤: 反対方向に動く */}
+      {/* Cardinal red: moves in the opposite direction */}
       <div
         className="absolute bottom-[-15%] left-[-10%] h-[46vh] w-[48vw] blur-3xl"
         style={{
@@ -284,12 +284,12 @@ function BackgroundStrata() {
         }}
       />
 
-      {/* Aurora 糸 3 本 (mouse Y に応じて波打つ) */}
+      {/* 3 aurora threads (undulate with mouse Y) */}
       <div className="strato-aurora strato-aurora--a" />
       <div className="strato-aurora strato-aurora--b" />
       <div className="strato-aurora strato-aurora--c" />
 
-      {/* 地層ライン (mouse X で傾く) */}
+      {/* Stratum lines (tilt with mouse X) */}
       <div
         className="absolute inset-x-0 top-[42%] h-px"
         style={{
@@ -321,7 +321,7 @@ function BackgroundStrata() {
         }}
       />
 
-      {/* 微粒子 (静的、氷河の粉雪感) */}
+      {/* Particles (static, glacial powder-snow feel) */}
       <svg
         className="absolute inset-0 opacity-[0.18]"
         width="100%"

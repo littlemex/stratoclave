@@ -4,20 +4,20 @@ set -e
 #
 # Post-Deployment Validation Script
 #
-# CDK デプロイ後に自動実行し、Cognito 設定と config.json の整合性を確認します。
-# このスクリプトは CI/CD パイプラインや手動デプロイの最後に実行されるべきです。
+# Runs automatically after CDK deployment to verify consistency between Cognito settings and config.json.
+# This script should be executed at the end of a CI/CD pipeline or a manual deployment.
 #
 
 echo "[INFO] Post-Deployment Validation"
 echo "=================================="
 
-# AWS リージョン
+# AWS region
 export AWS_REGION=${AWS_REGION:-us-east-1}
 
-# CloudFormation スタックから Outputs を取得
+# Fetch Outputs from CloudFormation stacks
 echo "[INFO] Fetching CloudFormation stack outputs..."
 
-# Cognito Stack
+# Cognito stack
 COGNITO_STACK_NAME="StratoclaveCognitoStack"
 USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name "$COGNITO_STACK_NAME" \
@@ -29,7 +29,7 @@ CLIENT_ID=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
   --output text 2>/dev/null || echo "")
 
-# Frontend Stack
+# Frontend stack
 FRONTEND_STACK_NAME="StratoclaveFrontendStack"
 CLOUDFRONT_DOMAIN=$(aws cloudformation describe-stacks \
   --stack-name "$FRONTEND_STACK_NAME" \
@@ -41,7 +41,7 @@ FRONTEND_BUCKET=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
   --output text 2>/dev/null || echo "")
 
-# 必須パラメータのチェック
+# Validate required parameters
 if [ -z "$USER_POOL_ID" ]; then
   echo "[ERROR] USER_POOL_ID not found in CloudFormation outputs"
   exit 1
@@ -68,16 +68,16 @@ echo "[INFO] CLOUDFRONT_DOMAIN: $CLOUDFRONT_DOMAIN"
 echo "[INFO] FRONTEND_BUCKET: $FRONTEND_BUCKET"
 echo ""
 
-# config.json の URL
+# URL for config.json
 export CONFIG_S3_URL="https://${CLOUDFRONT_DOMAIN}/config.json"
 
-# Cognito 設定の検証
+# Validate Cognito configuration
 export USER_POOL_ID
 export CLIENT_ID
 export CLOUDFRONT_DOMAIN
 export CONFIG_S3_URL
 
-# validate-cognito-config.sh を実行
+# Run validate-cognito-config.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/validate-cognito-config.sh"
 

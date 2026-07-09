@@ -1,14 +1,14 @@
 /**
- * StratoMark — Stratoclave のブランドマーク
+ * StratoMark — Stratoclave brand mark
  *
- * コンセプト:
- *   - Strato (成層): 3 層の菱形 (上から「氷」「石」「岩盤」) を積み重ね
- *   - Conclave (集会): 中央の光点が常時呼吸し、四方から細い十字光が集束
+ * Concept:
+ *   - Strato (stratification): three stacked diamond layers (top-to-bottom: "ice", "stone", "bedrock")
+ *   - Conclave (assembly): a central light point that breathes continuously, with thin cross-rays converging from all four sides
  *
  * Props:
- *   - size: 視覚サイズ (px)
- *   - animated: true で breathing + 光点アニメーション、false は静止 (Header 等)
- *   - parallax: [-1..1] の範囲で 3 層が独立 tilt、Login 画面で mouse 追従
+ *   - size: visual size in px
+ *   - animated: true enables breathing + light-point animation; false is static (for use in Header, etc.)
+ *   - parallax: [-1..1] range — the three layers tilt independently; used for mouse-tracking on the Login screen
  */
 
 import { cn } from '@/lib/utils'
@@ -29,9 +29,9 @@ export function StratoMark({
   const px = parallax?.x ?? 0
   const py = parallax?.y ?? 0
 
-  // 層ごとの視差量 (上層ほど大きく動く = 近いほど速い)
+  // Parallax amount per layer (upper layers move more = closer layers move faster)
   const layerStyle = (depth: number): React.CSSProperties => {
-    const factor = depth // 0 (奥) .. 1 (手前)
+    const factor = depth // 0 (far back) .. 1 (front)
     return {
       transform: `translate3d(${px * factor * 6}px, ${py * factor * 6}px, 0)`,
       transition: 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)',
@@ -53,7 +53,7 @@ export function StratoMark({
       }}
       aria-hidden
     >
-      {/* 背景の氷光 */}
+      {/* Background ice glow */}
       <div
         className="strato-mark__halo pointer-events-none absolute inset-0"
         style={{
@@ -74,22 +74,22 @@ export function StratoMark({
         }}
       >
         <defs>
-          {/* 氷層 - 上層 */}
+          {/* Ice layer - upper */}
           <linearGradient id="strato-ice" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="hsl(200 95% 78%)" stopOpacity="0.95" />
             <stop offset="100%" stopColor="hsl(200 85% 55%)" stopOpacity="0.85" />
           </linearGradient>
-          {/* 石層 - 中層 */}
+          {/* Stone layer - middle */}
           <linearGradient id="strato-stone" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="hsl(210 25% 70%)" stopOpacity="0.9" />
             <stop offset="100%" stopColor="hsl(215 20% 45%)" stopOpacity="0.7" />
           </linearGradient>
-          {/* 岩盤 - 底層 */}
+          {/* Bedrock - bottom layer */}
           <linearGradient id="strato-bedrock" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="hsl(220 15% 40%)" stopOpacity="0.6" />
             <stop offset="100%" stopColor="hsl(220 18% 20%)" stopOpacity="0.9" />
           </linearGradient>
-          {/* 枢機卿赤の滲み - 右下 */}
+          {/* Cardinal red bleed - bottom right */}
           <radialGradient id="strato-cardinal" cx="0.7" cy="0.7" r="0.5">
             <stop offset="0%" stopColor="hsl(355 70% 50%)" stopOpacity="0.35" />
             <stop offset="100%" stopColor="hsl(355 70% 50%)" stopOpacity="0" />
@@ -102,10 +102,10 @@ export function StratoMark({
           </linearGradient>
         </defs>
 
-        {/* 枢機卿赤のわずかな滲み (最奥) */}
+        {/* Faint cardinal red bleed (furthest back) */}
         <rect x="0" y="0" width="120" height="120" fill="url(#strato-cardinal)" />
 
-        {/* 岩盤 (最下層、最奥) */}
+        {/* Bedrock (lowest layer, furthest back) */}
         <g style={layerStyle(0.2)}>
           <polygon
             points="60,98 34,72 60,46 86,72"
@@ -115,7 +115,7 @@ export function StratoMark({
           />
         </g>
 
-        {/* 中層 (石) */}
+        {/* Middle layer (stone) */}
         <g style={layerStyle(0.55)}>
           <polygon
             points="60,80 38,58 60,36 82,58"
@@ -126,7 +126,7 @@ export function StratoMark({
           />
         </g>
 
-        {/* 上層 (氷) */}
+        {/* Upper layer (ice) */}
         <g style={layerStyle(1)}>
           <polygon
             points="60,62 44,46 60,30 76,46"
@@ -137,7 +137,7 @@ export function StratoMark({
           />
         </g>
 
-        {/* 十字の光線 (Conclave の集束) */}
+        {/* Cross rays (Conclave convergence) */}
         <g className="strato-rays" style={layerStyle(0.8)}>
           <line
             x1="60"
@@ -175,7 +175,7 @@ export function StratoMark({
           />
         </g>
 
-        {/* 中央の集会光点 (Conclave の焦点) */}
+        {/* Central assembly light point (Conclave focal point) */}
         <circle
           cx="60"
           cy="46"

@@ -3,15 +3,15 @@
 @tailwind utilities;
 
 /*
-  Stratoclave デザインシステム (Phase F6)
+  Stratoclave Design System (Phase F6)
   ---------------------------------------------------------------
-  世界観: Strato (岩盤・成層) × Conclave (秘密集会)
-  - background: 深い石盤 (near-black slate with a touch of blue)
-  - foreground: 氷河の霧 (cool off-white)
-  - primary  : glacier blue (主要 CTA / リンク)
-  - accent   : cardinal red (強調・警告前段)
-  - destructive: 血赤 (削除のみ)
-  - border   : 石の削り面 (subtle, 3px radius 以下)
+  Aesthetic: Strato (bedrock / stratification) × Conclave (secret assembly)
+  - background: deep stone slab (near-black slate with a touch of blue)
+  - foreground: glacial mist (cool off-white)
+  - primary  : glacier blue (primary CTA / links)
+  - accent   : cardinal red (emphasis / pre-warning)
+  - destructive: blood red (delete actions only)
+  - border   : stone cut face (subtle, 3px radius or less)
   ---------------------------------------------------------------
 */
 
@@ -52,7 +52,7 @@
   }
   html {
     color-scheme: dark;
-    /* 背景に地層のような非常に微かなグラデーション: 石盤感 */
+    /* Very subtle stratum-like gradient in the background: stone-slab feel */
     background:
       radial-gradient(
         ellipse 80% 60% at 50% -10%,
@@ -76,7 +76,7 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Fraunces: 見出しの重心。h1 / h2 / h3 は optical sizing で磨く */
+  /* Fraunces: heading weight anchor. h1 / h2 / h3 are refined with optical sizing */
   h1,
   h2,
   h3 {
@@ -84,7 +84,7 @@
     font-optical-sizing: auto;
     font-feature-settings: 'ss01', 'ss02';
   }
-  /* h4 以下は sans で可読性優先 (設計書 §8.2) */
+  /* h4 and below use sans-serif for readability (design spec §8.2) */
   h4,
   h5,
   h6,
@@ -97,19 +97,19 @@
     @apply font-mono;
   }
 
-  /* Focus ring: 白金のような細い光 */
+  /* Focus ring: thin platinum-like glow */
   :focus-visible {
     outline: 2px solid hsl(var(--ring));
     outline-offset: 2px;
   }
 
-  /* Selection: 薄氷 */
+  /* Selection: thin ice */
   ::selection {
     background: hsl(var(--primary) / 0.28);
     color: hsl(var(--foreground));
   }
 
-  /* Scrollbar (WebKit): 岩肌に薄くエッチング */
+  /* Scrollbar (WebKit): lightly etched into rock surface */
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -128,7 +128,7 @@
 
 @layer components {
   /*
-    Glass card: ログイン背景など重要な 1 箇所限定 (レビュー対応、テーブル/グリッドでは禁止)
+    Glass card: reserved for a single prominent surface such as the login background (per review; prohibited on tables/grids)
   */
   .strato-glass {
     background: linear-gradient(
@@ -145,8 +145,8 @@
   }
 
   /*
-    Layered hairline: 地層を示すセクション下線
-    ::before で微かな氷河光が周期的に左→右に横切る (post-login ambient)
+    Layered hairline: section underline representing geological strata
+    ::before carries a faint glacial light that periodically sweeps left to right (post-login ambient)
   */
   .strato-hairline {
     position: relative;
@@ -181,13 +181,13 @@
     width: 30%;
     animation: strato-hairline-sweep 9s ease-in-out infinite;
   }
-  /* Footer (第 2 の hairline) は逆位相でスタート → 画面上下が交互に呼吸 */
+  /* Footer (second hairline) starts in reverse phase → top and bottom of screen breathe alternately */
   .strato-hairline--reverse::before {
     animation-delay: -4.5s;
   }
 
   /*
-    Stat emphasis: ダッシュボードのカウンタ見出しに使う金属光沢の 1 筋
+    Stat emphasis: a single metallic sheen applied to dashboard counter headings
   */
   .strato-stat {
     background: linear-gradient(
@@ -201,7 +201,7 @@
   }
 
   /*
-    Brand mark animations — 呼吸する中心光点とタイトル shimmer
+    Brand mark animations — breathing central light point and title shimmer
   */
   @keyframes strato-core-breathe {
     0%, 100% { opacity: 0.55; transform: scale(1); }
@@ -229,7 +229,7 @@
   }
 
   /*
-    Title shimmer — "Stratoclave" の文字に非常にゆっくり氷河光が横切る
+    Title shimmer — a very slow glacial light sweeps across the "Stratoclave" text
   */
   @keyframes strato-title-shimmer {
     0%   { background-position: -150% 0; }
@@ -254,7 +254,7 @@
   }
 
   /*
-    Motion-reduce 対応: prefers-reduced-motion のユーザーにはアニメーション停止
+    Motion-reduce support: animations are disabled for users who prefer reduced motion
   */
   @media (prefers-reduced-motion: reduce) {
     .strato-mark--animated .strato-core,
@@ -277,8 +277,8 @@
   }
 
   /*
-    Login 画面: カード表面を舐める光の反射 (mouse 位置依存)
-    --sx/--sy は 0..100 (%) で、login page の全画面内の mouse 位置を注入する
+    Login screen: light reflection that grazes the card surface (depends on mouse position)
+    --sx/--sy are 0..100 (%) injected from the mouse position within the full login page
   */
   .strato-card-spotlight {
     position: relative;
@@ -301,7 +301,7 @@
   }
 
   /*
-    Cursor halo: マウス位置に追従する柔らかい光 (Login 画面限定)
+    Cursor halo: soft glow that follows the mouse position (Login screen only)
   */
   .strato-cursor-halo {
     position: fixed;
@@ -327,7 +327,7 @@
   }
 
   /*
-    Aurora threads: 画面幅いっぱいの極細光の糸 3 本、mouse Y で波打つ
+    Aurora threads: three ultra-thin light threads spanning the full screen width, undulating with mouse Y
   */
   @keyframes strato-aurora-pulse {
     0%, 100% { opacity: 0.35; }
@@ -390,8 +390,8 @@
   }
 
   /*
-    Login card の 3D tilt (controlled via inline style on the element)
-    ここでは transition だけ定義、rotateX/Y はコンポーネント側から inline style で
+    Login card 3D tilt (controlled via inline style on the element)
+    Only the transition is defined here; rotateX/Y are injected as inline styles from the component
   */
   .strato-card-tilt {
     transform-style: preserve-3d;
@@ -400,8 +400,8 @@
   }
 
   /*
-    Tenant beacon: footer の tenant_id 横に置く小さな灯火 + 波紋
-    Conclave (閉ざされた集会の中央にある焦点) のメタファ
+    Tenant beacon: small flame + ripple placed beside the tenant_id in the footer
+    Metaphor for Conclave (the focal point at the centre of the closed assembly)
   */
   @keyframes strato-beacon-core {
     0%, 100% { opacity: 0.55; transform: scale(1); }
@@ -435,12 +435,12 @@
     border: 1px solid hsl(200 95% 70% / 0.55);
     animation: strato-beacon-ring 3.2s ease-out infinite;
   }
-  /* 2 本目の波紋は 1.6s 遅らせて連続的に見せる */
+  /* Second ripple is delayed by 1.6s to appear continuous */
   .strato-beacon__ring--delayed {
     animation-delay: 1.6s;
   }
 
-  /* Motion-reduce: beacon と hairline sweep も停止 */
+  /* Motion-reduce: beacon and hairline sweep are also stopped */
   @media (prefers-reduced-motion: reduce) {
     .strato-hairline::before,
     .strato-beacon__core,

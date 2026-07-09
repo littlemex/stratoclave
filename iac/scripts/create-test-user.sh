@@ -10,7 +10,7 @@ if [ -z "$3" ]; then
 fi
 PASSWORD=$3
 
-# ユーザー作成
+# Create user
 aws cognito-idp admin-create-user \
   --user-pool-id "$USER_POOL_ID" \
   --username "$EMAIL" \
@@ -18,7 +18,7 @@ aws cognito-idp admin-create-user \
   --temporary-password "$PASSWORD" \
   --message-action SUPPRESS
 
-# パスワードを恒久化
+# Set permanent password
 aws cognito-idp admin-set-user-password \
   --user-pool-id "$USER_POOL_ID" \
   --username "$EMAIL" \

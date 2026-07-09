@@ -1,14 +1,14 @@
-"""TrustedAccounts テーブル (Phase S).
+"""TrustedAccounts table (Phase S).
 
-SSO / STS 経由ログイン時、どの AWS Account ID からの principal を許可するかの allowlist.
+Allowlist of AWS Account IDs whose principals are permitted to log in via SSO/STS.
 
-テーブル設計 (iac/lib/dynamodb-stack.ts):
+Table design (iac/lib/dynamodb-stack.ts):
   PK: account_id
-  属性:
-    account_id: str                    12 桁の AWS Account ID
+  Attributes:
+    account_id: str                    12-digit AWS Account ID
     description: str
     provisioning_policy: str           "invite_only" | "auto_provision"
-    allowed_role_patterns: list[str]   glob (空 list なら全 role 許可)
+    allowed_role_patterns: list[str]   glob patterns (empty list = allow all roles)
     allow_iam_user: bool               default False
     allow_instance_profile: bool       default False
     default_tenant_id: str | None
@@ -40,11 +40,11 @@ def _table_name() -> str:
 
 
 class TrustedAccountNotFoundError(Exception):
-    """指定 account_id の trusted_account が存在しない."""
+    """Raised when no trusted account exists for the given account_id."""
 
 
 class TrustedAccountsRepository:
-    """AWS account ごとの SSO 受入ポリシーを CRUD."""
+    """CRUD operations for per-AWS-account SSO acceptance policies."""
 
     def __init__(self, table_name: Optional[str] = None) -> None:
         self._table = get_dynamodb_resource().Table(table_name or _table_name())
@@ -102,7 +102,7 @@ class TrustedAccountsRepository:
             "updated_at": now,
             "created_by": created_by,
         }
-        # None は DynamoDB で書けないので除去
+        # DynamoDB cannot store None; drop those keys.
         item = {k: v for k, v in item.items() if v is not None}
         self._table.put_item(Item=item)
         return item

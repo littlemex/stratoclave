@@ -30,7 +30,7 @@ export default function Callback() {
     return () => {
       cancelled = true
     }
-    // reloadUser は安定参照 (useCallback)、navigate も react-router 由来
+    // reloadUser is a stable reference (useCallback); navigate is from react-router
   }, [navigate, reloadUser])
 
   if (error) {

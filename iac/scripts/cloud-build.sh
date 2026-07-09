@@ -16,7 +16,7 @@ set -euo pipefail
 
 echo "[WARN] cloud-build.sh is deprecated. Use scripts/build-and-push.sh instead." >&2
 
-# 色付きログ
+# Colored log helpers
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -28,7 +28,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_step()  { echo -e "${BLUE}[STEP]${NC} $1"; }
 
-# 設定
+# Configuration
 AWS_REGION="${AWS_REGION:-us-east-1}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -36,13 +36,13 @@ BACKEND_DIR="$PROJECT_ROOT/backend"
 ARCHIVE_NAME="backend-source.tar.gz"
 TMP_DIR=$(mktemp -d)
 
-# クリーンアップ
+# Cleanup handler
 cleanup() {
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
-# 前提チェック
+# Prerequisites check
 log_step "Checking prerequisites..."
 
 if ! command -v aws &> /dev/null; then
@@ -60,7 +60,7 @@ if [ ! -f "$BACKEND_DIR/Dockerfile" ]; then
     exit 1
 fi
 
-# CloudFormation から設定値を取得
+# Fetch configuration values from CloudFormation
 log_step "Fetching stack outputs..."
 
 S3_BUCKET=$(aws cloudformation describe-stacks \
@@ -84,7 +84,7 @@ BUILD_PROJECT=$(aws cloudformation describe-stacks \
 log_info "S3 Bucket: $S3_BUCKET"
 log_info "CodeBuild Project: $BUILD_PROJECT"
 
-# ソースコードのアーカイブ
+# Archive source code
 log_step "Creating source archive..."
 
 tar -czf "$TMP_DIR/$ARCHIVE_NAME" \
@@ -106,7 +106,7 @@ tar -czf "$TMP_DIR/$ARCHIVE_NAME" \
 ARCHIVE_SIZE=$(ls -lh "$TMP_DIR/$ARCHIVE_NAME" | awk '{print $5}')
 log_info "Archive size: $ARCHIVE_SIZE"
 
-# S3 にアップロード
+# Upload source to S3
 log_step "Uploading source to S3..."
 
 aws s3 cp "$TMP_DIR/$ARCHIVE_NAME" "s3://$S3_BUCKET/$ARCHIVE_NAME" \
@@ -115,7 +115,7 @@ aws s3 cp "$TMP_DIR/$ARCHIVE_NAME" "s3://$S3_BUCKET/$ARCHIVE_NAME" \
 
 log_info "Source uploaded to s3://$S3_BUCKET/$ARCHIVE_NAME"
 
-# CodeBuild ビルド開始
+# Start CodeBuild build
 log_step "Starting CodeBuild build..."
 
 BUILD_ID=$(aws codebuild start-build \
@@ -127,7 +127,7 @@ BUILD_ID=$(aws codebuild start-build \
 log_info "Build started: $BUILD_ID"
 log_info "Console: https://${AWS_REGION}.console.aws.amazon.com/codesuite/codebuild/projects/${BUILD_PROJECT}/build/${BUILD_ID}/log"
 
-# ビルド進捗のストリーミング
+# Stream build progress
 log_step "Waiting for build to complete (streaming logs)..."
 
 PREV_PHASE=""
@@ -170,7 +170,7 @@ while true; do
     esac
 done
 
-# 完了
+# Done
 echo ""
 log_info "Build and deploy completed successfully."
 log_info "ECS service update has been triggered."

@@ -1,3 +1,5 @@
+<!-- Last updated: 2026-07-10 -->
+
 # Security Policy
 
 Stratoclave takes security seriously. We appreciate reports from security
@@ -144,3 +146,19 @@ Extend `ALLOWLIST_REGEX` in
 rather than hard-coding the value. Prefer anchor strings like `test-`,
 `fake-`, `dummy-`, or angle-bracket placeholders that are obviously
 non-production.
+
+## Dependency vulnerability scanning
+
+A separate CI workflow ([`.github/workflows/audit.yml`](.github/workflows/audit.yml)) scans every language ecosystem for known CVEs on every push to `main`, on every pull request, and on a weekly schedule (Mondays at 06:00 UTC). This is distinct from the secrets scan described above.
+
+| Scanner | Scope | Policy |
+|---------|-------|--------|
+| `pip-audit --strict` | `backend/requirements.txt` and `requirements-dev.txt` | Any finding blocks merge. |
+| `cargo audit --deny warnings` | `cli/Cargo.lock` | Any advisory (including warnings) blocks merge. Approved deferrals are listed in `cli/audit.toml` with inline justification. |
+| `npm audit --audit-level=high` | `iac/package-lock.json` and `frontend/package-lock.json` | Findings at `high` or `critical` severity block merge. |
+
+The weekly schedule ensures that a new CVE against an already-pinned dependency surfaces without requiring a code change to the repository.
+
+## ECS task role: S3 permissions
+
+The ECS backend task role (`iac/lib/ecs-stack.ts`) has **no S3 permissions at all**. The backend container does not read from or write to S3 at runtime; all state is stored in DynamoDB. The frontend S3 bucket is accessible only to the CloudFront distribution via its OAC service principal — not to the ECS task.
