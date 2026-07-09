@@ -35,7 +35,7 @@
     "aws-cdk": "2.1126.0",
     "ts-node": "^10.9.2",
     "typescript": "~6.0.3",
-    "cdk-nag": "^2.38.1"
+    "cdk-nag": "^3.0.1"
   },
   "dependencies": {
     "aws-cdk-lib": "2.258.1",
