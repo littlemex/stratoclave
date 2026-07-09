@@ -53,7 +53,11 @@ from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
 from ._bedrock_clients import bedrock_runtime_client
-from ._pipeline import reserve_credit, settle_reservation_and_log
+from ._pipeline import (
+    reserve_credit,
+    reserve_credit_for_model,
+    settle_reservation_and_log,
+)
 from .authz import require_permission
 from .deps import AuthenticatedUser, get_current_user
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
@@ -62,6 +66,7 @@ from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 # functions from this module. New code should import directly from
 # `mvp._pipeline`.
 _reserve_credit = reserve_credit
+_reserve_credit_for_model = reserve_credit_for_model
 _settle_reservation_and_log = settle_reservation_and_log
 
 
@@ -378,7 +383,13 @@ def messages(
         )
 
     reservation = _estimate_reservation_tokens(body)
-    tenants_repo = _reserve_credit(user, reservation)
+    tenants_repo = _reserve_credit_for_model(
+        user,
+        reservation,
+        model_name=body.model,
+        input_tokens_est=max(reservation - body.max_tokens, 0),
+        max_output_tokens=body.max_tokens,
+    )
 
     if body.stream:
         return StreamingResponse(
@@ -423,6 +434,7 @@ def messages(
         actual_input_tokens=input_tokens,
         actual_output_tokens=output_tokens,
         model_id=model_id,
+        context=tenants_repo,
     )
 
     content_blocks: list[dict[str, Any]] = []
@@ -573,6 +585,7 @@ async def _stream_messages(
                 actual_input_tokens=input_tokens,
                 actual_output_tokens=output_tokens,
                 model_id=model_id,
+                context=tenants_repo,
             )
             settled = True
             return
@@ -609,6 +622,7 @@ async def _stream_messages(
             actual_input_tokens=input_tokens,
             actual_output_tokens=output_tokens,
             model_id=model_id,
+            context=tenants_repo,
         )
         settled = True
     finally:
@@ -622,6 +636,7 @@ async def _stream_messages(
                 actual_input_tokens=input_tokens,
                 actual_output_tokens=output_tokens,
                 model_id=model_id,
+                context=tenants_repo,
             )
 
 

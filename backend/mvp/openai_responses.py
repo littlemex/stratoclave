@@ -42,7 +42,11 @@ from core.error_handler import sanitize_exception_message
 from core.logging import get_logger
 from dynamo import UserTenantsRepository
 
-from ._pipeline import reserve_credit, settle_reservation_and_log
+from ._pipeline import (
+    reserve_credit,
+    reserve_credit_for_model,
+    settle_reservation_and_log,
+)
 from .authz import require_permission
 from .deps import AuthenticatedUser
 from .models import ModelEntry, _REGISTRY, resolve_model
@@ -196,17 +200,26 @@ def _estimate_reservation_tokens(body: OpenAIResponsesRequest) -> int:
                     elif isinstance(block, str):
                         chars += len(block)
 
-    effort = "none"
-    if body.reasoning:
-        raw = body.reasoning.get("effort")
-        if isinstance(raw, str):
-            effort = raw.lower()
-    multiplier = _REASONING_MULTIPLIERS.get(effort, 1)
+    multiplier = _reasoning_multiplier(body)
 
     return max(
         (chars // 3) + body.max_output_tokens * multiplier,
         _MIN_RESERVATION_TOKENS_OPENAI,
     )
+
+
+def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
+    """Reasoning-effort output multiplier (1/2/4/8) for a request.
+
+    Extracted so both the token reservation estimate and the dollar pool cost
+    estimate use the same multiplier for the output leg.
+    """
+    effort = "none"
+    if body.reasoning:
+        raw = body.reasoning.get("effort")
+        if isinstance(raw, str):
+            effort = raw.lower()
+    return _REASONING_MULTIPLIERS.get(effort, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +419,15 @@ async def create_response(
         )
 
     reservation = _estimate_reservation_tokens(body)
-    tenants_repo = reserve_credit(user, reservation)
+    _multiplier = _reasoning_multiplier(body)
+    tenants_repo = reserve_credit_for_model(
+        user,
+        reservation,
+        model_name=body.model,
+        input_tokens_est=max(reservation - body.max_output_tokens * _multiplier, 0),
+        max_output_tokens=body.max_output_tokens,
+        effort_multiplier=_multiplier,
+    )
 
     if body.stream:
         return StreamingResponse(
@@ -461,6 +482,7 @@ async def create_response(
         actual_input_tokens=input_tokens,
         actual_output_tokens=output_tokens,
         model_id=entry.bedrock_model_id,
+        context=tenants_repo,
     )
     return data
 
@@ -652,6 +674,7 @@ async def _stream_response(
             actual_input_tokens=input_tokens,
             actual_output_tokens=output_tokens,
             model_id=entry.bedrock_model_id,
+            context=tenants_repo,
         )
         settled = True
     finally:
@@ -665,6 +688,7 @@ async def _stream_response(
                 actual_input_tokens=input_tokens,
                 actual_output_tokens=output_tokens,
                 model_id=entry.bedrock_model_id,
+                context=tenants_repo,
             )
 
 

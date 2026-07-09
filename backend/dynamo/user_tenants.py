@@ -325,6 +325,71 @@ class UserTenantsRepository:
         used_new = int(attrs.get("credit_used", 0))
         return max(total_new - used_new, 0)
 
+    # ----- transaction item builders (for atomic pool + per-user reserve) -----
+    # These mirror reserve()/refund() but emit low-level TransactWriteItems
+    # fragments so the pipeline can debit the per-user balance and the tenant
+    # pool in a single all-or-nothing transaction. `reserve()` above stays the
+    # single-table fast path used when a tenant has no pool budget.
+
+    def reserve_txn_item(
+        self, *, user_id: str, tenant_id: str, tokens: int, expected_total: int
+    ) -> dict[str, Any]:
+        """Transaction item reserving `tokens` against the per-user balance.
+
+        `expected_total` is the caller's snapshot of `total_credit`; the same
+        optimistic precondition as reserve() (unchanged total, room under it,
+        active status) is enforced, so a lost race cancels the transaction and
+        the caller retries with a fresh snapshot.
+        """
+        max_allowed_used = int(expected_total) - int(tokens)
+        return {
+            "Update": {
+                "TableName": self._table.name,
+                "Key": {
+                    "user_id": {"S": user_id},
+                    "tenant_id": {"S": tenant_id},
+                },
+                "UpdateExpression": "ADD credit_used :tokens SET updated_at = :now",
+                "ConditionExpression": (
+                    "credit_used <= :max_allowed_used AND "
+                    "total_credit = :expected_total AND "
+                    "(attribute_not_exists(#s) OR #s = :active)"
+                ),
+                "ExpressionAttributeNames": {"#s": "status"},
+                "ExpressionAttributeValues": {
+                    ":tokens": {"N": str(int(tokens))},
+                    ":max_allowed_used": {"N": str(max_allowed_used)},
+                    ":expected_total": {"N": str(int(expected_total))},
+                    ":active": {"S": "active"},
+                    ":now": {"S": _now_iso()},
+                },
+            }
+        }
+
+    def settle_txn_item(
+        self, *, user_id: str, tenant_id: str, delta_tokens: int
+    ) -> dict[str, Any]:
+        """Transaction item adjusting per-user `credit_used` by `delta_tokens`.
+
+        Positive delta tops up (actual > reservation), negative refunds. No
+        ConditionExpression: settlement of a live request must not fail, and
+        the amount is bounded by the prior reservation by construction.
+        """
+        return {
+            "Update": {
+                "TableName": self._table.name,
+                "Key": {
+                    "user_id": {"S": user_id},
+                    "tenant_id": {"S": tenant_id},
+                },
+                "UpdateExpression": "ADD credit_used :delta SET updated_at = :now",
+                "ExpressionAttributeValues": {
+                    ":delta": {"N": str(int(delta_tokens))},
+                    ":now": {"S": _now_iso()},
+                },
+            }
+        }
+
     def credit_summary(self, user_id: str, tenant_id: str) -> dict[str, int]:
         item = self.get(user_id, tenant_id)
         if not item:

@@ -22,12 +22,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo import (
     ADMIN_OWNED,
+    TenantBudgetsRepository,
     TenantLimitExceededError,
     TenantNotFoundError,
     TenantsRepository,
     UsersRepository,
     UserTenantsRepository,
     UsageLogsRepository,
+    current_period,
 )
 
 from .authz import log_audit_event, require_permission
@@ -110,6 +112,61 @@ class UsageBucket(BaseModel):
     by_model: dict[str, int] = {}
     by_user: dict[str, int] = {}
     sample_size: int = 0
+
+
+class SetPoolBudgetRequest(BaseModel):
+    """Set a tenant's dollar pool budget for a period.
+
+    The limit is given in whole USD cents for precision without floats; the
+    repository stores it as integer micro-USD. `period` defaults to the
+    current calendar month (UTC) when omitted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    limit_usd_cents: int = Field(
+        ge=0,
+        le=100_000_000,  # up to $1,000,000.00 per period
+        description="Pool ceiling for the period, in whole USD cents.",
+    )
+    period: Optional[str] = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}$",
+        description="Billing period YYYY-MM (UTC). Defaults to the current month.",
+    )
+    status: Literal["active", "suspended"] = "active"
+
+
+class PoolBudgetResponse(BaseModel):
+    tenant_id: str
+    period: str
+    status: str
+    pool_limit_microusd: int
+    pool_reserved_microusd: int
+    pool_settled_microusd: int
+    remaining_microusd: int
+    # Convenience mirrors in USD cents for admin surfaces that prefer dollars.
+    pool_limit_usd_cents: int
+    remaining_usd_cents: int
+
+
+_MICRO_USD_PER_CENT = 10_000  # 1 cent = 10_000 micro-USD
+
+
+def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetResponse":
+    limit = int(summary["pool_limit_microusd"])
+    remaining = int(summary["remaining_microusd"])
+    return PoolBudgetResponse(
+        tenant_id=tenant_id,
+        period=period,
+        status=str(summary.get("status", "active")),
+        pool_limit_microusd=limit,
+        pool_reserved_microusd=int(summary["pool_reserved_microusd"]),
+        pool_settled_microusd=int(summary["pool_settled_microusd"]),
+        remaining_microusd=remaining,
+        pool_limit_usd_cents=limit // _MICRO_USD_PER_CENT,
+        remaining_usd_cents=remaining // _MICRO_USD_PER_CENT,
+    )
 
 
 # -----------------------------------------------------------------------
@@ -369,3 +426,81 @@ def get_tenant_usage(
         user_email = str(it.get("user_email") or it.get("user_id") or "unknown")
         bucket.by_user[user_email] = bucket.by_user.get(user_email, 0) + tokens
     return bucket
+
+
+@router.put("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
+def set_pool_budget(
+    tenant_id: str,
+    body: SetPoolBudgetRequest,
+    actor: AuthenticatedUser = Depends(require_permission("tenants:update")),
+) -> PoolBudgetResponse:
+    """Set (create or update) the tenant's dollar pool budget for a period.
+
+    The pool is enforced *before* every inference call in the credit pipeline:
+    when a tenant has a pool for the current period, each request reserves its
+    dollar cost from the pool atomically with the per-user token debit, so the
+    tenant cannot overspend its budget even under concurrency. This is a
+    control a credential broker cannot offer — there is no request-time choke
+    point outside a gateway.
+    """
+    tenant = TenantsRepository().get(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    period = body.period or current_period()
+    limit_microusd = int(body.limit_usd_cents) * _MICRO_USD_PER_CENT
+
+    repo = TenantBudgetsRepository()
+    before = repo.pool_summary(tenant_id, period)
+    repo.set_pool_limit(
+        tenant_id=tenant_id,
+        period=period,
+        pool_limit_microusd=limit_microusd,
+        status=body.status,
+    )
+    summary = repo.pool_summary(tenant_id, period)
+    assert summary is not None  # just written
+
+    log_audit_event(
+        event="tenant_pool_budget_set",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=tenant_id,
+        target_type="tenant",
+        before={
+            "pool_limit_microusd": (before or {}).get("pool_limit_microusd"),
+            "status": (before or {}).get("status"),
+        },
+        after={
+            "period": period,
+            "pool_limit_microusd": limit_microusd,
+            "status": body.status,
+        },
+    )
+    return _pool_response(tenant_id, period, summary)
+
+
+@router.get("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
+def get_pool_budget(
+    tenant_id: str,
+    period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    _admin: AuthenticatedUser = Depends(require_permission("tenants:read-all")),
+) -> PoolBudgetResponse:
+    """Return the tenant's pool budget and live usage for a period.
+
+    404 when the tenant has no pool budget for the period (pool budgeting is
+    opt-in; absence means the tenant is unlimited at the pool level and only
+    per-user token budgets apply).
+    """
+    tenant = TenantsRepository().get(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    resolved_period = period or current_period()
+    summary = TenantBudgetsRepository().pool_summary(tenant_id, resolved_period)
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pool budget set for tenant {tenant_id} period {resolved_period}",
+        )
+    return _pool_response(tenant_id, resolved_period, summary)

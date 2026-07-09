@@ -175,7 +175,32 @@
     "archive_confirm_label": "確認のために <1>{{id}}</1> を入力してください",
     "archive_submit": "アーカイブ",
     "archive_submitting": "実行中…",
-    "archive_error_fallback": "アーカイブに失敗しました"
+    "archive_error_fallback": "アーカイブに失敗しました",
+    "pool": {
+      "title": "プール予算",
+      "desc": "テナント全メンバー横断の、請求期間ごとの共有ドル上限。全リクエスト前に強制される。各推論はドル換算コストをユーザ単位トークン消費と同一トランザクションでプールから予約するため、同時実行下でもテナントは予算を超過できない。",
+      "period_label": "期間",
+      "status_label": "状態",
+      "limit_label": "上限",
+      "reserved_label": "予約中(処理中リクエスト)",
+      "settled_label": "確定(記録済み消費)",
+      "remaining_label": "残高",
+      "none_title": "プール予算なし",
+      "none_desc": "このテナントには {{period}} のドルプールが設定されていません。ユーザ単位のトークン予算のみが適用されます。テナント全体のドル消費に上限をかけるにはプールを設定してください。",
+      "set_button": "プール予算を設定",
+      "edit_button": "プール予算を編集",
+      "dialog_title": "プール予算の設定",
+      "dialog_desc": "上限は米ドル単位で入力し、浮動小数を使わず正確に保存されます。期間の途中で変更しても記録済みの消費はリセットされません。",
+      "limit_usd_label": "上限(USD)",
+      "limit_usd_placeholder": "500",
+      "period_input_label": "期間(YYYY-MM)",
+      "status_active": "有効",
+      "status_suspended": "停止",
+      "apply": "保存",
+      "applying": "保存中…",
+      "error_fallback": "プール予算の設定に失敗しました",
+      "invalid_amount": "有効なドル金額を入力してください(小数点以下2桁まで)。"
+    }
   },
   "error_toast": {
     "server": "サーバーエラー",

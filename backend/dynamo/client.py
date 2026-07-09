@@ -52,3 +52,26 @@ def ui_tickets_table_name() -> str:
     unconsumed tickets after ~30 s.
     """
     return table_name("DYNAMODB_UI_TICKETS_TABLE", "stratoclave-ui-tickets")
+
+
+def tenant_budgets_table_name() -> str:
+    """Pool budgets shared across all users of a tenant.
+
+    PK `tenant_id`, SK `BUDGET#<period>` (e.g. `BUDGET#2026-07`). Holds the
+    dollar pool limit and the reserved/settled running totals in integer
+    micro-USD. Reserved atomically alongside the per-user balance in a single
+    TransactWriteItems so a tenant cannot overspend its pool even under
+    concurrency.
+    """
+    return table_name("DYNAMODB_TENANT_BUDGETS_TABLE", "stratoclave-tenant-budgets")
+
+
+def pricing_config_table_name() -> str:
+    """Admin-editable per-model pricing used to convert tokens to micro-USD.
+
+    PK `CONFIG#pricing`, SK `<pricing_key>#v<n>` for each versioned rate row,
+    plus a single `CURRENT` pointer item naming the active version. The
+    pricing module polls only the pointer on a short TTL and reloads rows on
+    version change.
+    """
+    return table_name("DYNAMODB_PRICING_CONFIG_TABLE", "stratoclave-pricing-config")

@@ -84,11 +84,14 @@ def stub_auth_user() -> AuthenticatedUser:
 def _stub_credit_pipeline(monkeypatch: pytest.MonkeyPatch):
     """Take DynamoDB out of the picture entirely.
 
-    `reserve_credit` / `settle_reservation_and_log` get monkeypatched at
-    the module attribute level (not the source module) because that's
-    what `mvp.openai_responses` imported. Settlements are captured so
-    individual tests can assert on the actual_input/output_tokens that
-    reached settle.
+    `reserve_credit_for_model` / `settle_reservation_and_log` get
+    monkeypatched at the module attribute level (not the source module)
+    because that's what `mvp.openai_responses` imported. The route calls
+    the pricing-aware `reserve_credit_for_model` wrapper (which passes
+    `model_name`/`input_tokens_est`/`max_output_tokens`/`effort_multiplier`
+    as keywords), so the stub accepts `**kwargs`. Settlements are captured
+    so individual tests can assert on the actual_input/output_tokens that
+    reached settle; the route now also passes `context=`, absorbed here.
     """
     settle_calls: list[dict[str, Any]] = []
 
@@ -96,11 +99,11 @@ def _stub_credit_pipeline(monkeypatch: pytest.MonkeyPatch):
         def refund(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
             return 0
 
-    def _fake_reserve(user, reservation_tokens):  # noqa: ANN001 — match signature
+    def _fake_reserve(user, reservation_tokens, **kwargs):  # noqa: ANN001 — match signature
         return _StubRepo()
 
     def _fake_settle(*, user, tenants_repo, reservation, actual_input_tokens,
-                     actual_output_tokens, model_id):
+                     actual_output_tokens, model_id, **kwargs):
         settle_calls.append(
             {
                 "reservation": reservation,
@@ -110,7 +113,7 @@ def _stub_credit_pipeline(monkeypatch: pytest.MonkeyPatch):
             }
         )
 
-    monkeypatch.setattr(orx, "reserve_credit", _fake_reserve)
+    monkeypatch.setattr(orx, "reserve_credit_for_model", _fake_reserve)
     monkeypatch.setattr(orx, "settle_reservation_and_log", _fake_settle)
     yield settle_calls
 

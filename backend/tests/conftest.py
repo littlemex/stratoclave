@@ -45,6 +45,8 @@ _TABLE_ENVS = {
     "DYNAMODB_API_KEYS_TABLE": "stratoclave-api-keys",
     "DYNAMODB_TRUSTED_ACCOUNTS_TABLE": "stratoclave-trusted-accounts",
     "DYNAMODB_SSO_PRE_REGISTRATIONS_TABLE": "stratoclave-sso-pre-registrations",
+    "DYNAMODB_TENANT_BUDGETS_TABLE": "stratoclave-tenant-budgets",
+    "DYNAMODB_PRICING_CONFIG_TABLE": "stratoclave-pricing-config",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -130,6 +132,34 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             BillingMode="PAY_PER_REQUEST",
         )
 
+        # TenantBudgets: PK tenant_id, SK sk ("BUDGET#<period>")
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_TENANT_BUDGETS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "tenant_id", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "tenant_id", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # PricingConfig: PK pk ("CONFIG#pricing"), SK sk
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_PRICING_CONFIG_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
         yield dynamodb
 
 
@@ -146,3 +176,34 @@ def seed_active_tenant(dynamodb_mock) -> dict:
     repo = UserTenantsRepository()
     repo.ensure(user_id=user_id, tenant_id=tenant_id, role="user", total_credit=10_000)
     return {"user_id": user_id, "tenant_id": tenant_id, "total_credit": 10_000}
+
+
+@pytest.fixture
+def seed_tenant_with_pool(dynamodb_mock) -> dict:
+    """Seed an active UserTenants row plus a TenantBudgets pool for the current
+    period, and yield the identifiers and limits used by the pool tests.
+
+    The per-user token balance is generous (1e9) so pool tests exercise the
+    dollar pool ceiling rather than the per-user token cap unless a test
+    deliberately sets a tighter personal balance.
+    """
+    from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+    from dynamo.user_tenants import UserTenantsRepository
+
+    user_id = "user-22222222-2222-2222-2222-222222222222"
+    tenant_id = "acme-eng"
+    period = current_period()
+    pool_limit_microusd = 5_000_000  # $5.00
+
+    UserTenantsRepository().ensure(
+        user_id=user_id, tenant_id=tenant_id, role="user", total_credit=1_000_000_000
+    )
+    TenantBudgetsRepository().set_pool_limit(
+        tenant_id=tenant_id, period=period, pool_limit_microusd=pool_limit_microusd
+    )
+    return {
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "period": period,
+        "pool_limit_microusd": pool_limit_microusd,
+    }

@@ -337,6 +337,54 @@ pub async fn tenant_usage(tenant_id: &str, since_days: u32) -> Result<()> {
 }
 
 // ============================================================
+// TENANT POOL BUDGET (A-1)
+// ============================================================
+/// Set (create or update) the tenant's dollar pool budget for a period.
+///
+/// `limit_usd` is a human dollar string ("500", "$500", "500.50"); it is
+/// converted to whole USD cents locally (never via float) and sent to the
+/// backend, which stores it as integer micro-USD. When the tenant has a pool
+/// for the period, every inference reserves its dollar cost from the pool
+/// atomically with the per-user token debit — a ceiling a credential broker
+/// cannot enforce because it has no request-time choke point.
+pub async fn tenant_pool_budget_set(
+    tenant_id: &str,
+    limit_usd: &str,
+    period: Option<&str>,
+    status: &str,
+) -> Result<()> {
+    let limit_usd_cents = parse_usd_to_cents(limit_usd)?;
+    let client = ApiClient::new()?;
+    let mut body = json!({
+        "limit_usd_cents": limit_usd_cents,
+        "status": status,
+    });
+    if let Some(p) = period {
+        body["period"] = Value::String(p.to_string());
+    }
+    let path = format!("/api/mvp/admin/tenants/{tenant_id}/pool-budget");
+    let res: Value = client.put_json(&path, &body).await?;
+    println!("[OK] Pool budget set");
+    print_pool_budget(&res);
+    Ok(())
+}
+
+/// Show the tenant's pool budget and live usage for a period.
+///
+/// The backend returns 404 when no pool is set for the period (pool budgeting
+/// is opt-in; absence means only per-user token budgets apply).
+pub async fn tenant_pool_budget_show(tenant_id: &str, period: Option<&str>) -> Result<()> {
+    let client = ApiClient::new()?;
+    let path = match period {
+        Some(p) => format!("/api/mvp/admin/tenants/{tenant_id}/pool-budget?period={p}"),
+        None => format!("/api/mvp/admin/tenants/{tenant_id}/pool-budget"),
+    };
+    let res: Value = client.get_json(&path).await?;
+    print_pool_budget(&res);
+    Ok(())
+}
+
+// ============================================================
 // USAGE LOGS (admin)
 // ============================================================
 pub async fn usage_logs(
@@ -441,5 +489,170 @@ fn print_breakdown(label: &str, value: Option<&Value>) {
     entries.sort_by(|a, b| b.1.cmp(&a.1));
     for (k, n) in entries {
         println!("    {k}: {n}");
+    }
+}
+
+/// Parse a human dollar string ("500", "$500", "500.50", "1,000") into whole
+/// USD cents, without ever touching a float. Rejects sub-cent precision and
+/// negative values so an operator cannot silently set a wrong ceiling.
+///
+/// The backend takes `limit_usd_cents` and multiplies by 10_000 to store
+/// micro-USD; keeping the cent conversion integer-exact here means the pool
+/// ceiling is precise end to end.
+pub(crate) fn parse_usd_to_cents(input: &str) -> Result<u64> {
+    let cleaned: String = input
+        .trim()
+        .chars()
+        .filter(|c| *c != '$' && *c != ',' && !c.is_whitespace())
+        .collect();
+    if cleaned.is_empty() {
+        return Err(anyhow!("empty dollar amount"));
+    }
+    if cleaned.starts_with('-') {
+        return Err(anyhow!("dollar amount must not be negative: {input}"));
+    }
+    let (dollars_str, cents_str) = match cleaned.split_once('.') {
+        Some((d, c)) => (d, c),
+        None => (cleaned.as_str(), ""),
+    };
+    // Empty integer part ("$.50") means zero dollars.
+    let dollars: u64 = if dollars_str.is_empty() {
+        0
+    } else {
+        dollars_str
+            .parse()
+            .map_err(|_| anyhow!("invalid dollar amount: {input}"))?
+    };
+    let cents: u64 = match cents_str.len() {
+        0 => 0,
+        1 => {
+            // "500.5" == 50 cents
+            let n: u64 = cents_str
+                .parse()
+                .map_err(|_| anyhow!("invalid cents in amount: {input}"))?;
+            n * 10
+        }
+        2 => cents_str
+            .parse()
+            .map_err(|_| anyhow!("invalid cents in amount: {input}"))?,
+        _ => {
+            return Err(anyhow!(
+                "sub-cent precision is not allowed: {input} (use at most 2 decimals)"
+            ))
+        }
+    };
+    dollars
+        .checked_mul(100)
+        .and_then(|d| d.checked_add(cents))
+        .ok_or_else(|| anyhow!("dollar amount too large: {input}"))
+}
+
+/// Render integer USD cents as a `$X.YY` string (display only, no float).
+pub(crate) fn format_cents_as_usd(cents: i64) -> String {
+    let neg = cents < 0;
+    let abs = cents.unsigned_abs();
+    let sign = if neg { "-" } else { "" };
+    format!("{sign}${}.{:02}", abs / 100, abs % 100)
+}
+
+fn print_pool_budget(v: &Value) {
+    let period = v.get("period").and_then(|x| x.as_str()).unwrap_or("");
+    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+    let limit_cents = v
+        .get("pool_limit_usd_cents")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let remaining_cents = v
+        .get("remaining_usd_cents")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let limit_micro = v
+        .get("pool_limit_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let reserved_micro = v
+        .get("pool_reserved_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let settled_micro = v
+        .get("pool_settled_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let remaining_micro = v
+        .get("remaining_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+
+    println!(
+        "  tenant_id:  {}",
+        v.get("tenant_id").and_then(|x| x.as_str()).unwrap_or("")
+    );
+    println!("  period:     {period}");
+    println!("  status:     {status}");
+    println!(
+        "  limit:      {} ({limit_micro} micro-USD)",
+        format_cents_as_usd(limit_cents)
+    );
+    println!("  reserved:   {reserved_micro} micro-USD (in-flight requests)");
+    println!("  settled:    {settled_micro} micro-USD (recorded spend)");
+    println!(
+        "  remaining:  {} ({remaining_micro} micro-USD)",
+        format_cents_as_usd(remaining_cents)
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_plain_integer_dollars() {
+        assert_eq!(parse_usd_to_cents("500").unwrap(), 50_000);
+    }
+
+    #[test]
+    fn parse_strips_dollar_sign_and_commas() {
+        assert_eq!(parse_usd_to_cents("$1,000").unwrap(), 100_000);
+    }
+
+    #[test]
+    fn parse_two_decimal_cents() {
+        assert_eq!(parse_usd_to_cents("500.50").unwrap(), 50_050);
+        assert_eq!(parse_usd_to_cents("0.01").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_one_decimal_is_tenths_of_a_dollar() {
+        // "500.5" is $500.50, i.e. 50_050 cents — not 505.
+        assert_eq!(parse_usd_to_cents("500.5").unwrap(), 50_050);
+    }
+
+    #[test]
+    fn parse_leading_decimal_is_zero_dollars() {
+        assert_eq!(parse_usd_to_cents("$.50").unwrap(), 50);
+    }
+
+    #[test]
+    fn parse_rejects_sub_cent_precision() {
+        assert!(parse_usd_to_cents("1.234").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_negative() {
+        assert!(parse_usd_to_cents("-5").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert!(parse_usd_to_cents("abc").is_err());
+        assert!(parse_usd_to_cents("").is_err());
+    }
+
+    #[test]
+    fn format_cents_roundtrips_display() {
+        assert_eq!(format_cents_as_usd(50_000), "$500.00");
+        assert_eq!(format_cents_as_usd(50_050), "$500.50");
+        assert_eq!(format_cents_as_usd(1), "$0.01");
+        assert_eq!(format_cents_as_usd(0), "$0.00");
     }
 }

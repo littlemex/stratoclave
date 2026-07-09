@@ -42,6 +42,10 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly ssoNoncesTable: dynamodb.Table;
   /** P0-8 follow-up: single-use CLI → SPA handoff tickets */
   public readonly uiTicketsTable: dynamodb.Table;
+  /** A-1: per-tenant dollar pool budgets, debited atomically with per-user tokens */
+  public readonly tenantBudgetsTable: dynamodb.Table;
+  /** A-2: admin-editable per-model pricing (token → micro-USD conversion) */
+  public readonly pricingConfigTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -304,6 +308,26 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'expires_at',
     });
 
+    // A-1: tenant dollar pool budgets. PK tenant_id, SK "BUDGET#<period>".
+    // Debited atomically with the per-user token balance in a single
+    // TransactWriteItems so a tenant can never overspend its pool under
+    // concurrency. Audit-critical (spend record) → RETAIN + PITR in prod.
+    this.tenantBudgetsTable = new dynamodb.Table(this, 'TenantBudgetsTable', {
+      ...baseTableProps,
+      tableName: `${prefix}-tenant-budgets`,
+      partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+
+    // A-2: admin-editable per-model pricing. PK "CONFIG#pricing", SK versioned
+    // rate rows + a CURRENT pointer. Small, rarely written, keyed reads only.
+    this.pricingConfigTable = new dynamodb.Table(this, 'PricingConfigTable', {
+      ...baseTableProps,
+      tableName: `${prefix}-pricing-config`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -320,6 +344,8 @@ export class DynamoDBStack extends cdk.Stack {
       this.apiKeysTable.tableArn,
       this.ssoNoncesTable.tableArn,
       this.uiTicketsTable.tableArn,
+      this.tenantBudgetsTable.tableArn,
+      this.pricingConfigTable.tableArn,
     ];
 
     // Parameter Store exports
@@ -339,6 +365,8 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableApiKeysParam', 'dynamodb/table-api-keys', this.apiKeysTable],
       ['TableSsoNoncesParam', 'dynamodb/table-sso-nonces', this.ssoNoncesTable],
       ['TableUiTicketsParam', 'dynamodb/table-ui-tickets', this.uiTicketsTable],
+      ['TableTenantBudgetsParam', 'dynamodb/table-tenant-budgets', this.tenantBudgetsTable],
+      ['TablePricingConfigParam', 'dynamodb/table-pricing-config', this.pricingConfigTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

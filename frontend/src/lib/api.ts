@@ -186,6 +186,21 @@ export interface UsageBucket {
   sample_size: number
 }
 
+// A-1: tenant dollar pool budget. All money is integer micro-USD
+// (1 USD = 1_000_000 micro-USD); the *_usd_cents mirrors are integer cents
+// the backend derives, so the UI never does float money math.
+export interface PoolBudget {
+  tenant_id: string
+  period: string
+  status: string
+  pool_limit_microusd: number
+  pool_reserved_microusd: number
+  pool_settled_microusd: number
+  remaining_microusd: number
+  pool_limit_usd_cents: number
+  remaining_usd_cents: number
+}
+
 export interface UsageLogEntry {
   tenant_id: string
   user_id: string
@@ -423,6 +438,27 @@ export const api = {
         `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/usage${q}`,
       )
     },
+    // A-1: get the tenant's dollar pool budget for a period. Throws a 404
+    // (err.status === 404) when the tenant has no pool for the period — the
+    // caller treats that as "no pool set" rather than an error.
+    getPoolBudget: (tenant_id: string, period?: string) => {
+      const q = period ? `?period=${encodeURIComponent(period)}` : ''
+      return jsonRequest<PoolBudget>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/pool-budget${q}`,
+      )
+    },
+    setPoolBudget: (
+      tenant_id: string,
+      body: { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' },
+    ) =>
+      jsonRequest<PoolBudget>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/pool-budget`,
+        {
+          method: 'PUT',
+          headers: jsonHeaders,
+          body: JSON.stringify(body),
+        },
+      ),
     usageLogs: (opts?: {
       tenant_id?: string
       user_id?: string

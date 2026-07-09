@@ -79,7 +79,7 @@ Commands:
     admin-revoke <key_hash>   Admin only: revoke any key by SHA-256 hash.
   admin
     user     create | list | show | delete | assign-tenant | set-credit
-    tenant   create | list | show | delete | set-owner | members | usage
+    tenant   create | list | show | delete | set-owner | members | usage | pool-budget
     usage    show
   team-lead
     tenant   create | list | show | members | usage
@@ -727,6 +727,38 @@ Aggregate usage for a single tenant.
 ```bash
 stratoclave admin tenant usage <tenant_id> [--since-days N]
 ```
+
+### `admin tenant pool-budget`
+
+Manage a tenant's **dollar pool budget** — a shared spending ceiling for a
+billing period (`YYYY-MM`, UTC). While a per-user credit caps how many tokens
+each member may spend, a pool budget caps the tenant's **total dollar cost**
+across all its members for the period. When a pool is set, every inference
+reserves its estimated dollar cost from the pool atomically with the per-user
+token debit, so the tenant cannot overspend even under concurrent requests; a
+request that would breach the pool is rejected with HTTP 402
+(`reason=tenant_pool_exhausted`). Pool budgeting is opt-in per tenant — a
+tenant with no pool for the period keeps the plain per-user token behaviour.
+
+```bash
+# Set (create or update) the ceiling for the current month.
+stratoclave admin tenant pool-budget set <tenant_id> --limit-usd 500
+
+# Set a ceiling for a specific period, or suspend the pool.
+stratoclave admin tenant pool-budget set <tenant_id> \
+  --limit-usd 1500.50 \
+  --period 2026-08 \
+  --status active
+
+# Show the ceiling and live usage (reserved + settled + remaining).
+stratoclave admin tenant pool-budget show <tenant_id> [--period 2026-08]
+```
+
+`--limit-usd` accepts a plain dollar amount (`500`, `$500`, `1,000`, `500.50`);
+it is converted to whole USD cents locally without floating point, so the
+ceiling is exact end to end. Changing the ceiling mid-period never resets the
+period's recorded spend. `show` returns HTTP 404 when the tenant has no pool
+for the period.
 
 ### `admin usage show`
 
