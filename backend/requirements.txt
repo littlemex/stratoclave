@@ -32,7 +32,7 @@ python-json-logger==4.1.0
 # / PYSEC-2026-176/177/178/179) including a critical `crit` header
 # bypass and several HMAC / unrestricted URI / DoS issues in PyJWKClient.
 PyJWT[crypto]==2.13.0
-cryptography==48.0.1
+cryptography==49.0.0
 
 # Rate limiting (in-process token bucket shared across routes).
 slowapi==0.1.9
