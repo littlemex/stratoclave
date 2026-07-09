@@ -1,12 +1,12 @@
-"""Admin API: SSO Pre-Registrations (invite_only 専用) 管理 (Phase S).
+"""Admin API: SSO Pre-Registrations (invite_only) management (Phase S).
 
-- GET    /api/mvp/admin/sso-invites                一覧
-- POST   /api/mvp/admin/sso-invites                追加
-- DELETE /api/mvp/admin/sso-invites/{email}        削除
+- GET    /api/mvp/admin/sso-invites                list invites
+- POST   /api/mvp/admin/sso-invites                create invite
+- DELETE /api/mvp/admin/sso-invites/{email}        delete invite
 
-特記事項:
-- IAM user を招待する場合は iam_user_name を指定 -> iam_user_lookup_key を DB に保存
-- invited_role は "user" | "team_lead" (admin は SSO 経由での自動 provisioning 禁止)
+Notes:
+- When inviting an IAM user, supply iam_user_name -> stored as iam_user_lookup_key in DB.
+- invited_role must be "user" or "team_lead" (admin provisioning via SSO is prohibited).
 """
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def list_invites(
 ) -> SsoInvitesListResponse:
     repo = SsoPreRegistrationsRepository()
     if account_id:
-        # 特定 account で絞る場合は Scan+filter、cursor は利用しない (件数小想定)
+        # Filtering by a specific account uses Scan+filter; cursor is not used (low volume expected).
         items = repo.list_by_account(account_id, limit=limit)
         return SsoInvitesListResponse(
             invites=[_to_item(it) for it in items],
@@ -129,7 +129,7 @@ def create_invite(
     body: CreateSsoInviteRequest,
     actor: AuthenticatedUser = Depends(require_permission("accounts:create")),
 ) -> SsoInviteItem:
-    # 招待先 trusted_account が存在することを検証
+    # Verify that the target trusted_account is registered.
     ta_repo = TrustedAccountsRepository()
     if not ta_repo.get(body.account_id):
         raise HTTPException(

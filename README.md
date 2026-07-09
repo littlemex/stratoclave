@@ -18,9 +18,11 @@
 
 ## Overview
 
-Stratoclave is a self-hosted gateway that sits in front of Amazon Bedrock and
-adds the three things raw Bedrock does not give you on its own: **who called
-which model, under whose budget, and through which identity**.
+Stratoclave is a self-hosted **inference gateway** that sits in the data path
+in front of Amazon Bedrock and adds the three things raw Bedrock does not give
+you on its own: **who called which model, under whose budget, and through
+which identity** — enforced *before* the model is invoked, on every single
+request.
 
 It exposes two independent inference routes: an Anthropic `Messages API`-
 compatible endpoint at `/v1/messages` (for the Anthropic SDKs, Claude Code,
@@ -37,6 +39,45 @@ account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito
 for token issuance, and AWS CDK v2 for the entire topology. There is no
 Postgres, no Redis, no external control plane, and no SaaS dependency.
 
+## Why a gateway? (what a credential broker cannot do)
+
+There are two ways to put Claude Code / codex on Bedrock in front of an
+organization. A **credential broker** (such as the AWS *Guidance for Claude
+Code with Amazon Bedrock*) hands each machine short-lived STS credentials and
+lets the client call Bedrock **directly** — nothing sits in the data path.
+Stratoclave takes the other route: it is a **gateway** that terminates every
+inference call. That single architectural choice is what unlocks the
+following, none of which a broker can offer because it has no request-time
+choke point:
+
+- **Real tenants, not just users.** `admin tenant create` provisions a tenant
+  as a first-class object; users are assigned into it and can be moved between
+  tenants atomically (`TransactWriteItems`). A broker has only the identity the
+  IdP already emits — there is no "tenant" to create, budget, or reassign.
+- **Budget enforced *per request*, before the call — not after.** Every call
+  reserves `max_tokens + input_estimate` with a conditional DynamoDB write
+  *before* Bedrock is invoked, and refunds the unused remainder afterwards.
+  Concurrent requests that would overshoot a quota lose the conditional write
+  and are rejected with `402`. A broker can only check a counter at credential
+  **refresh** time (≈ every hour), and its usage numbers come from client-side
+  telemetry the user can simply stop sending.
+- **Both Claude and codex through one control plane.** The same identity,
+  budget, and audit primitives cover the Anthropic Messages API *and* the
+  OpenAI Responses API (GPT-5.x via bedrock-mantle). A Bedrock credential
+  broker is Anthropic-only.
+- **App-layer model / capability policy.** The model allowlist, and (on the
+  roadmap) per-tenant reasoning-effort and tool caps, are enforced in the
+  request handler. IAM can allow or deny a *model ARN*, but it cannot express
+  "this tenant may not use `reasoning.effort = xhigh`".
+- **A web console for non-engineers.** Tenants, users, credit, API keys and
+  usage are managed from a React admin UI, not only a CLI.
+
+The trade-off is honest and stated up front: a gateway is a component **you**
+run and secure, it sits on the availability path of every call, and it sees
+prompt text. See [Non-goals and honest limitations](#non-goals-and-honest-limitations)
+and [Stratoclave vs. LiteLLM vs. a credential broker](#stratoclave-vs-litellm-vs-a-credential-broker)
+for where a broker is the better choice.
+
 ## Highlights
 
 - **Anthropic-compatible endpoint.** `POST /v1/messages` and `GET /v1/models`
@@ -46,15 +87,21 @@ Postgres, no Redis, no external control plane, and no SaaS dependency.
 - **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
   `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
   them to GPT-5.x models on Amazon Bedrock via the bedrock-mantle service
-  (us-east-2 / us-west-2). The `stratoclave codex` CLI subcommand wraps the
-  `codex` binary against this endpoint with an ephemeral key; the `--codex`
-  flag on `stratoclave setup` patches `~/.codex/config.toml` for direct use.
-  Gated by the `CODEX_ENABLED` ECS env flag.
-- **Two-level credit governance.** Every tenant has a default credit, every
-  user can carry a per-user override, and every inference call — to
-  `/v1/messages` (Anthropic) or `/openai/v1/responses` (OpenAI) — reserves
-  tokens atomically with a conditional DynamoDB write before Bedrock is
-  invoked. Unused credit is refunded from the real token counts on return.
+  (GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). The `stratoclave codex` CLI
+  subcommand wraps the `codex` binary against this endpoint with an ephemeral
+  key; the `--codex` flag on `stratoclave setup` patches `~/.codex/config.toml`
+  for direct use. Controlled by the `CODEX_ENABLED` ECS env flag, which
+  **defaults to `true`**; set `CODEX_ENABLED=false` to disable the OpenAI
+  routes (they then return `503`).
+- **Two-level credit governance, enforced pre-flight.** Every tenant has a
+  default credit, every user can carry a per-user override, and every
+  inference call — to `/v1/messages` (Anthropic) or `/openai/v1/responses`
+  (OpenAI) — reserves tokens atomically with a conditional DynamoDB write
+  *before* Bedrock is invoked (`backend/dynamo/user_tenants.py:reserve`).
+  Unused credit is refunded from the real token counts on return. Because the
+  reservation is a conditional `UpdateItem`, concurrent requests that would
+  push a balance past its limit lose the condition and are rejected — quotas
+  cannot be raced past.
 - **Three role RBAC, tenant-scoped.** `admin`, `team_lead`, and `user` roles
   are normalized into DynamoDB from a versioned
   [`permissions.json`](./backend/permissions.json). Team leads see only the
@@ -72,13 +119,18 @@ Postgres, no Redis, no external control plane, and no SaaS dependency.
   frontend, Cognito User Pool, and the Fargate service in a single AWS
   region. `cdk-nag` runs at every synth so regressions in security posture
   fail the build.
-- **Defense in depth at the edge.** CloudFront terminates TLS at 1.2_2021+
-  with HSTS 730 d + preload, a strict CSP (`frame-ancestors 'none'`), and
-  a managed WAF (CommonRuleSet + KnownBadInputs + IpReputation + per-IP
-  rate limit). The S3 origin uses **Origin Access Control** with a
-  `aws:SourceArn`-scoped bucket policy, and the ALB security group only
-  accepts the AWS-managed CloudFront origin-facing prefix list — direct
-  ALB DNS probes fail at L4.
+- **Defense in depth at the edge.** CloudFront terminates TLS at 1.2_2021+.
+  The SPA responses carry HSTS 730 d + preload and a strict CSP via a
+  CloudFront `ResponseHeadersPolicy`; the API responses carry their own
+  headers from the backend middleware (HSTS 365 d, `script-src 'none'`,
+  `frame-ancestors 'none'`). A managed WAFv2 WebACL applies four rules by
+  default — CommonRuleSet, KnownBadInputs, IpReputation, and a per-IP
+  rate-limit rule (an optional IP-allowlist rule makes five). The S3 origin
+  uses **Origin Access Control** with a bucket policy scoped by both
+  `aws:SourceArn` and `aws:SourceAccount`, and the ALB security group only
+  accepts the AWS-managed CloudFront origin-facing prefix list — direct ALB
+  DNS probes fail at L4. The Fargate task's own egress is locked to TCP/443
+  and UDP/53 (`allowAllOutbound: false`).
 - **Auditable by construction.** Every privileged action is emitted as a
   structured JSON log to CloudWatch, keyed by the correlation ID the backend
   injects on ingress. Emails are redacted into stable SHA-256 markers so
@@ -286,32 +338,40 @@ supported providers. Any model outside the explicit allowlist is rejected
 with HTTP 400. The full registry lives in
 [`backend/mvp/models.py`](./backend/mvp/models.py).
 
-## Stratoclave vs. LiteLLM Proxy
+## Stratoclave vs. LiteLLM vs. a credential broker
 
-Both projects are Bedrock-capable OSS LLM proxies; they optimize for
-different constraints. Stratoclave is a focused tool for AWS-only teams that
-want to avoid operational dependencies (no Postgres, no Redis, no
-per-provider glue); LiteLLM is a general-purpose gateway across 100+
-providers with a richer budgeting feature set in its commercial tier.
+Three different answers to "let my org use Claude/codex on Bedrock safely".
+A **credential broker** (e.g. the AWS *Guidance for Claude Code with Amazon
+Bedrock*) is not a proxy at all — it federates identities to short-lived STS
+credentials and the client calls Bedrock directly. **LiteLLM** is a
+general-purpose proxy across 100+ providers. **Stratoclave** is a focused,
+AWS-native gateway that trades breadth for depth of per-tenant control.
 
-| Dimension                 | Stratoclave                                                           | LiteLLM Proxy                                                                   |
-|---------------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------------------|
-| Providers                 | Amazon Bedrock (Claude family via `converse`; OpenAI GPT-5.x via bedrock-mantle Responses) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, Ollama, ...)           |
-| State                     | DynamoDB only (serverless)                                            | Postgres required, Redis recommended                                            |
-| RBAC                      | admin / team_lead / user, tenant-scoped                               | Proxy / Internal User / Team, global / team / user / key / model budgets        |
-| API keys                  | `sk-stratoclave-*`, scope narrowing, cap of 5 active, immediate revoke| Virtual keys with `expires / max_budget / rpm_limit / tpm_limit / models`       |
-| SSO / STS                 | Built-in (Vouch by STS, covers `aws sso`, `saml2aws`, IAM users)      | Enterprise tier (Okta / Entra ID / OIDC / SAML)                                 |
-| Deploy                    | AWS CDK v2, Fargate from 256 CPU / 512 MiB                            | Docker / Helm / ECS / EKS / Cloud Run; ~4 CPU / 8 GB recommended                |
-| License                   | Apache 2.0 (all features OSS)                                         | Dual license (MIT + Commercial); SSO and audit features are commercial          |
-| Audit / observability     | `UsageLogs` in DynamoDB + CloudWatch structured JSON                  | Langfuse / Datadog / OpenTelemetry / S3 / GCS / SQS / DynamoDB                  |
-| Claude Code integration   | `stratoclave claude -- "..."` wrapper; `stratoclave codex -- "..."` for OpenAI codex CLI | `ANTHROPIC_BASE_URL` override                                                   |
-| Claude Desktop Cowork     | Tested; `/v1/v1` guard in CloudFront Function                         | Possible in principle; not formally documented                                  |
+| Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
+|---|---|---|---|
+| Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
+| Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
+| Tenants as a managed object | **Yes** — create / assign / atomically reassign | Teams (global/team/user/key budgets) | **No** — only the IdP identity |
+| Budget model | **Pool + per-user, reserved *pre-flight* per request** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
+| Can a user race/bypass the budget? | No (atomic conditional write) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
+| OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
+| Model / capability policy | App-layer allowlist (+ per-tenant effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
+| Identity | Cognito password, **Vouch-by-STS** (aws sso / saml2aws / IAM user), `sk-stratoclave-*` keys | Enterprise tier (Okta/Entra/OIDC/SAML) | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
+| State / ops footprint | DynamoDB only (serverless), one Fargate task | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
+| Admin surface | **React web console** + CLI | Web UI + CLI | CLI (`ccwb`) |
+| Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
+| Data residency / GovCloud | us-east-1 today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
+| Availability of inference | Depends on the gateway (single region today) | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
+| License | Apache 2.0 (all features OSS) | MIT + Commercial (SSO/audit are commercial) | MIT (AWS Solutions sample) |
 
-**Pick Stratoclave** when your organization is AWS-native, Bedrock-only,
-already uses IAM Identity Center / `saml2aws`, and does not want to run an
-RDBMS for a proxy. **Pick LiteLLM** when you need a single proxy across
-multiple providers, already operate Postgres, want fine-grained RPM/TPM
-budgeting, or need deep integration with third-party observability stacks.
+**Pick Stratoclave** when you need tenant-scoped, pre-flight, per-request
+budget enforcement that a user cannot bypass; when you want Claude *and* codex
+under one control plane; or when you want a web console to run tenants and
+keys. **Pick a credential broker** when you must distribute to a large fleet
+via MDM, need GovCloud / EU data residency, or cannot accept any new component
+on the inference availability path — and post-hoc audit (Bedrock invocation
+logging + CloudTrail) is sufficient. **Pick LiteLLM** when you need one proxy
+across many non-Bedrock providers or already operate Postgres.
 
 ## Documentation
 
@@ -347,7 +407,8 @@ Infrastructure-level hardening is enforced at synth time by `cdk-nag`
 - WAFv2 managed rules + per-IP rate limit on the CloudFront distribution,
 - CloudFront OAC with a `aws:SourceArn`-scoped S3 bucket policy,
 - ALB SG inbound restricted to the CloudFront origin-facing prefix list,
-- DynamoDB `RETAIN` + PITR on audit-critical tables (`usage-logs`, `api-keys`),
+- DynamoDB `RETAIN` on audit-critical tables (`usage-logs`, `api-keys`); PITR
+  is always on for `api-keys` and enabled for `usage-logs` in production,
 - Vouch-by-STS replay defence via the `sso-nonces` TTL table,
 - VPC Flow Logs (CloudWatch, 30 d),
 - structured-log PII redaction (emails → SHA-256 markers),
@@ -358,10 +419,51 @@ Infrastructure-level hardening is enforced at synth time by `cdk-nag`
   `GET /openai/v1/models`; all three identity paths (Cognito, STS vouch,
   `sk-stratoclave-*`) must carry this scope to reach the OpenAI routes.
 
-See the *Security considerations* section of
-[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the detailed attack
-model and the residual risks that are explicitly called out (5-minute
-replay window, invite-only provisioning, DoS of the SSO exchange endpoint).
+Vouch-by-STS replay is closed by the `sso-nonces` table: each signed
+`GetCallerIdentity` request is consumed once (`attribute_not_exists(nonce)`,
+10-minute TTL) and the check is fail-closed — if the nonce store is
+unreachable the exchange returns `401` rather than trusting the request. See
+the *Security considerations* section of
+[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the detailed attack model
+and the residual risks that are explicitly called out (unauthenticated
+availability of the SSO exchange endpoint, invite-policy edge cases).
+
+## Non-goals and honest limitations
+
+Stratoclave is opinionated, and the gateway model has real costs. What it
+deliberately does **not** do today:
+
+- **It is not a fleet-distribution tool.** There is no MDM integration and no
+  managed Claude Desktop rollout. If your primary need is pushing Claude Code /
+  Claude Desktop to thousands of managed laptops with per-device policy, a
+  credential broker with MDM support fits that better; Stratoclave governs the
+  *inference*, not the *endpoint fleet*.
+- **Single region, single control plane.** Everything runs in `us-east-1`
+  today. There is no GovCloud partition support and no EU/AU data-residency
+  selection. Because the gateway is in the data path, its availability is the
+  availability of your inference — a broker that lets clients call Bedrock
+  directly has no such single point of failure.
+- **The gateway sees prompt text.** Every request transits the FastAPI service,
+  which is what makes pre-flight DLP and enforcement possible — but it also
+  means the operator is in scope as a data processor. Weigh this for regulated
+  workloads. (Note: full-fidelity *audit* does not require a proxy — Bedrock
+  model invocation logging + CloudTrail give you that with a broker too. A
+  proxy is for *intervention before the call*, not merely observation.)
+- **Rate limiting is in-process by default.** The `slowapi` counters reset when
+  an ECS task restarts and are per-task; for multi-task deployments set
+  `STRATOCLAVE_RATELIMIT_STORAGE_URI` to a shared store. Credit reservation is
+  *not* affected by this — it is always atomic in DynamoDB.
+- **Budget is denominated in tokens, not dollars.** A per-model dollar pricing
+  layer is on the roadmap; today a token budget does not distinguish Opus from
+  Haiku spend.
+- **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
+  commit, run it in an account you control, and read the threat model in
+  [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.
+
+If these are dealbreakers, the honest recommendation is a credential broker
+for distribution plus (if you need inline control) a supported commercial
+gateway — and to treat Stratoclave's design as a reference for what that
+control plane should enforce.
 
 ## Project status
 

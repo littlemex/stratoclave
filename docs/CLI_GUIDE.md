@@ -1,9 +1,7 @@
-<!-- Last updated: 2026-04-27 -->
+<!-- Last updated: 2026-07-10 -->
 <!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
 
 # CLI Reference
-
-> A Japanese translation is available at [ja/CLI_GUIDE.md](./ja/CLI_GUIDE.md).
 
 `stratoclave` is the single CLI for every user- and administrator-facing operation: signing in, issuing API keys, running Claude through the gateway, managing users and tenants, and inspecting usage. This document is the authoritative reference for every subcommand, flag, and environment variable.
 
@@ -89,7 +87,7 @@ Commands:
 
 Run `stratoclave <command> --help` for flag-level help at any level.
 
-When the CLI is invoked with no arguments **and** stdin is a pipe (not a TTY), it enters a legacy non-interactive pipe mode used by older shell wrappers. This mode accepts a single prompt on stdin and emits a single assistant reply on stdout. It is kept only for backward compatibility; new work should use explicit subcommands (`stratoclave claude`, `stratoclave mcp`, or direct Anthropic SDK calls). To avoid accidentally invoking it, always pass an explicit subcommand, or redirect stdin from `/dev/null` (`stratoclave --help </dev/null`).
+When the CLI is invoked with no arguments **and** stdin is a pipe (not a TTY), it enters a legacy non-interactive pipe mode used by older shell wrappers. This mode accepts a single prompt on stdin and emits a single assistant reply on stdout. It is kept only for backward compatibility; new work should use explicit subcommands (`stratoclave claude`, `stratoclave codex`, or direct Anthropic SDK calls). To avoid accidentally invoking it, always pass an explicit subcommand, or redirect stdin from `/dev/null` (`stratoclave --help </dev/null`).
 
 > **Important.** There are no plural forms of `admin user` or `admin tenant`. `stratoclave admin users list` and `stratoclave admin tenants list` do **not** exist. Always use the singular nouns (`admin user list`, `admin tenant list`).
 
@@ -163,7 +161,10 @@ Tokens issued by `auth login` or `auth sso` are stored at `~/.stratoclave/mvp_to
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `STRATOCLAVE_API_ENDPOINT` | Overrides the API endpoint. Required for most subcommands. | From `config.toml` (when present). |
-| `STRATOCLAVE_DEFAULT_MODEL` | Overrides `[defaults] model`. | `claude-opus-4-7`. |
+| `STRATOCLAVE_DEFAULT_MODEL` | Overrides `[defaults] model` for `stratoclave claude`. | `claude-opus-4-7`. |
+| `STRATOCLAVE_DEFAULT_CODEX_MODEL` | Overrides `[defaults] codex_model` for `stratoclave codex`. | `openai.gpt-5.4`. |
+| `STRATOCLAVE_CODEX_OPENAI_BASE_PATH` | Overrides the sub-path under the API endpoint for the OpenAI Responses route (e.g. `/openai/v1`). | From `[codex] openai_base_path` in `config.toml`, else `/openai/v1`. |
+| `STRATOCLAVE_PASSWORD` | Password for `auth login`. Preferred over `--password` because the value never appears in the process list. Takes priority over the keychain and the interactive prompt. | (not set) |
 | `STRATOCLAVE_CONFIG_DIR` | Alternative location for `config.toml` and `mvp_tokens.json`. | `$HOME/.stratoclave`. |
 | `STRATOCLAVE_CLIENT_ID` | Overrides the Cognito App Client ID. | From `config.toml`. |
 | `STRATOCLAVE_COGNITO_DOMAIN` | Overrides the Cognito hosted-UI domain. | From `config.toml`. |
@@ -182,7 +183,7 @@ Tokens issued by `auth login` or `auth sso` are stored at `~/.stratoclave/mvp_to
 Bootstrap the CLI configuration from a deployment URL. Recommended as the first command after install.
 
 ```bash
-stratoclave setup <api_endpoint> [--dry-run] [--force]
+stratoclave setup <api_endpoint> [--dry-run] [--force] [--codex]
 ```
 
 ### Arguments
@@ -197,6 +198,7 @@ stratoclave setup <api_endpoint> [--dry-run] [--force]
 |------|-------------|
 | `--dry-run` | Print the rendered `config.toml` to stdout without writing or touching the filesystem. |
 | `-f`, `--force` | Overwrite an existing `config.toml` without prompting. The previous file is preserved as `config.toml.bak.<epoch>`. |
+| `--codex` | Also patch `~/.codex/config.toml` by appending a `[model_providers.stratoclave]` block. Backs up the existing file first. Prompts before changing the top-level `model_provider` value (or skips in non-TTY without `--force`). Requires the deployment to advertise codex support in its well-known document. |
 
 ### Behaviour
 
@@ -253,14 +255,20 @@ Authentication subcommands. All of them read from, or write to, `~/.stratoclave/
 Sign in with a Cognito email and password. Handles the `NEW_PASSWORD_REQUIRED` challenge in the same session for first-time logins.
 
 ```bash
-stratoclave auth login [--email EMAIL] [--password PASSWORD] [--save-password]
+stratoclave auth login [--email EMAIL] [--save-password]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--email` | Email address. Prompted interactively when omitted. |
-| `--password` | Password. Read from a silent prompt when omitted. The password is typed into the terminal; the browser is **not** opened. |
 | `--save-password` | macOS only. Store the password in the OS Keychain (service name `stratoclave`). Opt-in. |
+
+Password resolution order:
+
+1. `STRATOCLAVE_PASSWORD` environment variable — preferred for scripts because the value never appears in the process list (`/proc/<pid>/cmdline` or `ps` output).
+2. `--password` flag — **DEPRECATED**. The flag is hidden from `--help` and emits a deprecation warning to stderr when used. Retained for migration scripts only. Use `STRATOCLAVE_PASSWORD` instead.
+3. OS Keychain (macOS only) — used automatically when `--save-password` was passed on a previous login.
+4. Interactive prompt — the password is typed with terminal echo disabled; no browser is opened.
 
 Successful output ends with `[OK] Logged in as <email>. Token saved to ~/.stratoclave/mvp_tokens.json`.
 
@@ -337,8 +345,8 @@ exit. The subprocess sees:
 | `ANTHROPIC_MODEL` | `--model` override, else `[defaults] model`, else `claude-opus-4-7`. |
 
 The Cognito access token from `mvp_tokens.json` is **not** exported into
-the child. Stratoclave also unsets `CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION`,
-`AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+the child. Stratoclave also unsets `CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`,
+`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_SESSION_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`, and
 `STRATOCLAVE_{ACCESS,ID,REFRESH}_TOKEN` so Claude Code cannot bypass the
 proxy or pivot back into the user's AWS / Cognito session.
@@ -434,7 +442,13 @@ for CI / remote agents), see [`CODEX_GUIDE.md`](./CODEX_GUIDE.md).
 
 ### `ui open`
 
-Open the Stratoclave web console in the default browser. The CLI appends `?token=<access_token>` to the URL so the console lands already authenticated.
+Open the Stratoclave web console in the default browser, already
+authenticated. The CLI does **not** put your access token in the URL. Instead
+it POSTs your saved tokens to `/api/mvp/auth/ui-ticket`, receives a single-use
+handoff ticket (≈30-second TTL), and opens `https://<host>/?ui_ticket=<ticket>`.
+The SPA exchanges the ticket once via `/api/mvp/auth/ui-ticket/consume` and
+strips it from the URL before any frame renders. This closes the session-
+fixation hole a raw `?token=` would open. (See `cli/src/commands/ui.rs`.)
 
 ```bash
 stratoclave ui open
@@ -444,14 +458,18 @@ Fails with a clear message if you have not logged in or if your token has expire
 
 ### `ui url`
 
-Print the URL (with token) to stdout. Useful over SSH or inside sandboxes where you want to copy the URL elsewhere.
+Print the pre-authenticated URL (with a fresh single-use `ui_ticket`) to
+stdout instead of opening a browser. Useful over SSH or inside sandboxes where
+you want to copy the URL elsewhere.
 
 ```bash
 stratoclave ui url
-# https://<your-deployment>.cloudfront.net?token=eyJ...
+# https://<your-deployment>.cloudfront.net?ui_ticket=...
 ```
 
-Treat the output as a secret. Do not commit it to git or paste it into tickets.
+Treat the output as a secret, but note the ticket self-invalidates on first
+use and expires in ≈30 seconds — so a leaked, already-consumed URL is inert.
+Do not commit it to git or paste it into tickets.
 
 ---
 
@@ -801,10 +819,6 @@ See [`admin user create`](#admin-user-create). Provision the first-login passwor
 ### `admin trusted-accounts` has no CLI subcommand
 
 The trusted-account allowlist used by `auth sso` is administered through the Web UI or by calling the HTTP API at `POST /api/mvp/admin/trusted-accounts` directly. A `stratoclave admin trusted-account ...` family of subcommands is planned.
-
-### SSO nonce replay window
-
-The backend validates that the signed `GetCallerIdentity` request has an `X-Amz-Date` within five minutes of its wall clock, but does not yet record per-signature nonces. A future release will add an STS nonce table with a five-minute TTL so the replay window is eliminated.
 
 ---
 

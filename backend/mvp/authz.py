@@ -1,12 +1,12 @@
-"""Phase 2 RBAC / Tenant 認可ロジック.
+"""Phase 2 RBAC / Tenant authorization logic.
 
-設計書 §3 に従う:
-- Permissions テーブル (DynamoDB) が真実源、permissions.json から seed
-- Cognito Group は使わない、`cognito:groups` claim は無視
-- ワイルドカードは resource 名完全一致のみ許可 (users:* は users:create をカバーするが
-  users-admin:create はカバーしない。resource 名に - _ 禁止を前提)
-- require_tenant_owner は admin 以外を 404 統一 (enumeration 防御)
-- Admin 高リスク操作は CloudWatch に構造化 audit JSON 出力
+Follows design doc §3:
+- DynamoDB Permissions table is the source of truth, seeded from permissions.json.
+- Cognito Groups are not used; the `cognito:groups` claim is ignored.
+- Wildcards match only on exact resource name (users:* covers users:create but not
+  users-admin:create; resource names must not contain - or _).
+- require_tenant_owner returns unified 404 for non-admins (enumeration defense).
+- High-risk admin operations emit structured audit JSON to CloudWatch.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .deps import AuthenticatedUser, get_current_user
 
 
 # -----------------------------------------------------------------
-# Permissions キャッシュ (TTL 10 秒、ECS マルチタスク時の整合劣化を最小化)
+# Permissions cache (TTL 10 seconds, minimizes consistency lag across ECS tasks)
 # -----------------------------------------------------------------
 _PERMS_CACHE: dict[str, tuple[list[str], float]] = {}
 _PERMS_TTL = 10.0
@@ -42,21 +42,21 @@ def _get_permissions_for_role(role: str) -> list[str]:
 
 
 def _clear_permissions_cache() -> None:
-    """主にテスト用."""
+    """Primarily for use in tests."""
     _PERMS_CACHE.clear()
 
 
 def _split_resource(permission: str) -> str:
-    """permission 文字列から resource 部分 (最初のコロンより前) を抽出."""
+    """Extract the resource portion (everything before the first colon) of a permission string."""
     return permission.split(":", 1)[0]
 
 
 def has_permission(roles: Iterable[str], permission: str) -> bool:
-    """roles のいずれかが permission を保持するか判定.
+    """Return True if any of the given roles grants the specified permission.
 
-    - ワイルドカード: "users:*" は "users:create", "users:read" をカバー。
-      resource 名完全一致のみ (users-admin:* などには誤マッチしない)
-    - 複数 role (例 ["admin", "team_lead"]) は和集合評価
+    - Wildcards: "users:*" covers "users:create" and "users:read",
+      but only on an exact resource-name match (will not match "users-admin:*").
+    - Multiple roles (e.g. ["admin", "team_lead"]) are evaluated as a union.
     """
     target_resource = _split_resource(permission)
     for role in roles:
@@ -72,10 +72,10 @@ def has_permission(roles: Iterable[str], permission: str) -> bool:
 
 
 def _permission_matches(perms: Iterable[str], permission: str) -> bool:
-    """permission 文字列のリストから判定 (role 解決なし).
+    """Check a permission directly against a list of permission strings (no role resolution).
 
-    `has_permission(roles, ...)` と違い、roles → Permissions テーブル lookup を
-    経由せず直接 permissions リストで判定する. API Key の scopes 用.
+    Unlike `has_permission(roles, ...)`, this bypasses the roles → Permissions table lookup
+    and evaluates against a raw permissions list. Used for API Key scope checks.
     """
     target_resource = _split_resource(permission)
     for p in perms:
@@ -89,16 +89,16 @@ def _permission_matches(perms: Iterable[str], permission: str) -> bool:
 
 
 def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
-    """JWT (Cognito) と API Key (sk-stratoclave) を統一的に判定.
+    """Evaluate a permission uniformly for both JWT (Cognito) and API Key (sk-stratoclave) auth.
 
-    - JWT 認証: user.roles が permission を保持していれば true
-    - API Key 認証: user.roles と user.key_scopes の **両方** が permission を持つ
-      (= API Key scopes は User の roles の subset として有効化)
+    - JWT auth: returns True if user.roles grants the permission.
+    - API Key auth: requires **both** user.roles and user.key_scopes to grant the permission
+      (API Key scopes are effective only as a subset of the owner's role grants).
     """
     if user.auth_kind == "api_key" and user.key_scopes is not None:
         if not _permission_matches(user.key_scopes, permission):
             return False
-        # さらに owner の roles 側にも permission があることを確認
+        # Also verify the owner's roles include the permission.
         return has_permission(user.roles, permission)
     return has_permission(user.roles, permission)
 
@@ -107,10 +107,10 @@ def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
 # FastAPI dependency helpers
 # -----------------------------------------------------------------
 def require_permission(permission: str) -> Callable[..., AuthenticatedUser]:
-    """指定 permission を持つユーザーのみ通過させる FastAPI Depends.
+    """FastAPI dependency that allows only users holding the specified permission.
 
-    API Key 認証の場合は user.roles と user.key_scopes の両方が permission を
-    持つことを要求する (user_has_permission 経由).
+    For API Key auth, requires both user.roles and user.key_scopes to grant
+    the permission (evaluated via user_has_permission).
     """
 
     def _dep(user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
@@ -122,7 +122,7 @@ def require_permission(permission: str) -> Callable[..., AuthenticatedUser]:
 
 
 def require_any_role(*allowed_roles: str) -> Callable[..., AuthenticatedUser]:
-    """指定 role のいずれかを持つユーザーのみ通過 (permission より粗い判定)."""
+    """FastAPI dependency that allows only users holding at least one of the specified roles (coarser than permission checks)."""
 
     def _dep(user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
         if not any(r in user.roles for r in allowed_roles):
@@ -133,10 +133,10 @@ def require_any_role(*allowed_roles: str) -> Callable[..., AuthenticatedUser]:
 
 
 def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., AuthenticatedUser]:
-    """Tenant の所有者 (team_lead_user_id == user.user_id) のみ通過。
+    """Allow only the tenant owner (team_lead_user_id == user.user_id) or an admin.
 
-    admin は全 Tenant にアクセス可。
-    非所有者・非存在は一律 404 に統一 (§3.7、enumeration 防御)。
+    Admins have access to all tenants.
+    Non-owners and non-existent tenants both return a unified 404 (§3.7, enumeration defense).
     """
 
     def _dep(
@@ -152,8 +152,8 @@ def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., Au
             raise HTTPException(status_code=404, detail="Tenant not found")
         return user
 
-    # FastAPI が path param を inject できるよう、param 名が "tenant_id" の場合は
-    # そのまま動作する。別名を使いたい場合はエンドポイント側で path param を tenant_id にすること。
+    # When the param name is "tenant_id", FastAPI injects the path parameter automatically.
+    # For a different name, ensure the endpoint uses "tenant_id" as the path param name.
     _dep.__name__ = f"require_tenant_owner_{tenant_id_param}"
     return _dep
 
@@ -266,7 +266,7 @@ def warn_if_admin_creation_enabled_in_production(logger: logging.Logger) -> None
 
 
 # -----------------------------------------------------------------
-# Audit log (CloudWatch 構造化 JSON、Phase 3 で専用テーブルへ昇格)
+# Audit log (structured JSON to CloudWatch; will be promoted to a dedicated table in Phase 3)
 # -----------------------------------------------------------------
 _audit_logger = logging.getLogger("stratoclave.audit")
 
@@ -283,10 +283,10 @@ def log_audit_event(
     after: Optional[dict[str, Any]] = None,
     details: Optional[dict[str, Any]] = None,
 ) -> None:
-    """高リスク Admin 操作の audit log を CloudWatch に出力.
+    """Emit an audit log entry for high-risk admin operations to CloudWatch.
 
-    `event` 例: "admin_created", "tenant_owner_changed", "user_tenant_switched",
-              "credit_overwritten", "user_deleted"
+    Example `event` values: "admin_created", "tenant_owner_changed",
+    "user_tenant_switched", "credit_overwritten", "user_deleted".
     """
     payload: dict[str, Any] = {
         "event": event,
@@ -308,5 +308,5 @@ def log_audit_event(
     if details:
         payload["details"] = details
 
-    # structlog を使っているが、audit ログは意図を伝えるため明示的な JSON 1 行を出す
+    # Using structlog, but audit entries are written as explicit single-line JSON for clarity.
     _audit_logger.info(json.dumps(payload, default=str, ensure_ascii=False))

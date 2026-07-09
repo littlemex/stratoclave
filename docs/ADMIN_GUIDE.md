@@ -1,9 +1,7 @@
-<!-- Last updated: 2026-04-27 -->
+<!-- Last updated: 2026-07-10 -->
 <!-- Applies to: Stratoclave main @ 48b9533 (or later) -->
 
 # Administrator Guide
-
-> A Japanese translation is available at [ja/ADMIN_GUIDE.md](./ja/ADMIN_GUIDE.md).
 
 This guide is for operators holding the `admin` role on a Stratoclave deployment. It covers the day-to-day tasks an administrator is expected to perform: managing users and tenants, issuing API keys, allow-listing AWS accounts for SSO, inspecting usage, and locking down the control plane after bootstrap.
 
@@ -393,7 +391,9 @@ From this point on, new admins can only be promoted by an existing admin via the
 
 ## Audit log reference
 
-The backend emits structured JSON logs to CloudWatch Logs group `/ecs/<prefix>-backend` for every privileged action. Useful CloudWatch Logs Insights query:
+The backend emits structured JSON logs to CloudWatch Logs group `/ecs/<prefix>-backend` for every privileged action. Logs are retained for **90 days** (three months) — this covers the typical SOC2/ISO27001 audit window. The log group is set to `RemovalPolicy.RETAIN` so it survives a `cdk destroy`. VPC Flow Logs are retained separately for **30 days** in CloudWatch.
+
+Useful CloudWatch Logs Insights query:
 
 ```
 fields @timestamp, event, actor_email, target_email, tenant_id

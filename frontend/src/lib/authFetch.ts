@@ -1,15 +1,16 @@
 /**
  * Authenticated fetch wrapper
  *
- * Backend (`backend/mvp/deps.py`) は `Authorization: Bearer <access_token>` を要求する。
- * - 401: tokens を消してログインへ
+ * The backend (`backend/mvp/deps.py`) requires `Authorization: Bearer <access_token>`.
+ * - 401: clear tokens and redirect to login
  * - 403: permission denied
- * - 429 / 5xx: エラーメッセージ表示 (グローバルハンドラ登録があれば)
+ * - 429 / 5xx: display error message (if a global handler is registered)
  */
 
 import type { ErrorType } from '@/contexts/ErrorContext'
 
 import { getAccessToken } from './cognito'
+import i18n from './i18n'
 
 let errorSink: ((message: string, kind: ErrorType) => void) | null = null
 let logoutSink: (() => void) | null = null
@@ -19,7 +20,11 @@ export function unregisterErrorHandler(): void { errorSink = null }
 export function registerLogoutHandler(h: typeof logoutSink): void { logoutSink = h }
 export function unregisterLogoutHandler(): void { logoutSink = null }
 
-function report(message: string, kind: ErrorType): void {
+// Resolve the localized toast message for an error kind. Falls back to the
+// generic message when a specific key is missing. A server-provided `detail`
+// (403/5xx) takes precedence over the localized default when supplied.
+function report(kind: ErrorType, detail?: string): void {
+  const message = detail ?? i18n.t(`error_toast.${kind}`)
   if (errorSink) errorSink(message, kind)
   else console.error(`[authFetch] ${kind}: ${message}`)
 }
@@ -49,45 +54,45 @@ export async function authFetch(
     clearTimeout(timeoutId)
 
     if (res.status === 401) {
-      report('認証が切れました。再度ログインしてください。', 'unauthorized')
+      report('unauthorized')
       if (logoutSink) logoutSink()
       return res
     }
     if (res.status === 403) {
-      let detail = 'この操作を実行する権限がありません。'
+      let detail: string | undefined
       try {
         const body = await res.clone().json()
         if (body?.detail) detail = body.detail
       } catch {
         // ignore
       }
-      report(detail, 'forbidden')
+      report('forbidden', detail)
       return res
     }
     if (res.status === 429) {
-      report('リクエストが多すぎます。しばらく待ってから再試行してください。', 'rate_limit')
+      report('rate_limit')
       return res
     }
     if (res.status >= 500) {
-      let detail = 'サーバーエラーが発生しました。少し待ってから再度お試しください。'
+      let detail: string | undefined
       try {
         const body = await res.clone().json()
         if (body?.detail) detail = body.detail
       } catch {
         // ignore
       }
-      report(detail, 'server')
+      report('server', detail)
       return res
     }
     return res
   } catch (err) {
     clearTimeout(timeoutId)
     if (err instanceof DOMException && err.name === 'AbortError') {
-      report('通信がタイムアウトしました。', 'timeout')
+      report('timeout')
       throw err
     }
     if (err instanceof TypeError) {
-      report('ネットワークエラーが発生しました。', 'network')
+      report('network')
       throw err
     }
     throw err

@@ -1,4 +1,4 @@
-//! Team Lead subcommands (自分の所有 Tenant のみ).
+//! Team Lead subcommands (scoped to tenants owned by the current user).
 //!
 //! `stratoclave team-lead tenant create | list | show | members | usage`
 

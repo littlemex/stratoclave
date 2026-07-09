@@ -115,7 +115,7 @@ export class DynamoDBStack extends cdk.Stack {
       partitionKey: { name: 'auth_provider_user_id', type: dynamodb.AttributeType.STRING },
     });
 
-    // 4. UserTenants (credit 情報を保持)
+    // 4. UserTenants (holds credit information)
     this.userTenantsTable = new dynamodb.Table(this, 'UserTenantsTable', {
       ...baseTableProps,
       tableName: `${prefix}-user-tenants`,
@@ -128,7 +128,7 @@ export class DynamoDBStack extends cdk.Stack {
       sortKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
     });
 
-    // 5. UsageLogs (TTL 付き) — RETAIN: tenant billing history, must survive
+    // 5. UsageLogs (with TTL) — RETAIN: tenant billing history, must survive
     // dev stack rebuilds / accidental teardowns.
     this.usageLogsTable = new dynamodb.Table(this, 'UsageLogsTable', {
       ...baseTableProps,
@@ -160,7 +160,7 @@ export class DynamoDBStack extends cdk.Stack {
       sortKey: { name: 'tag_name', type: dynamodb.AttributeType.STRING },
     });
 
-    // 8. SseTokens (Redis 代替、TTL 5 分想定)
+    // 8. SseTokens (Redis replacement, TTL ~5 minutes)
     this.sseTokensTable = new dynamodb.Table(this, 'SseTokensTable', {
       ...baseTableProps,
       pointInTimeRecovery: false,
@@ -169,11 +169,11 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'ttl',
     });
 
-    // 9. Tenants (Phase 2 新設、tenant メタデータ)
+    // 9. Tenants (new in Phase 2, tenant metadata)
     //    Item schema:
     //      tenant_id: String (PK)
     //      name: String
-    //      team_lead_user_id: String  (Cognito sub、Admin 所有は "admin-owned" 固定値)
+    //      team_lead_user_id: String  (Cognito sub; "admin-owned" constant for admin-owned tenants)
     //      default_credit: Number
     //      status: String  ("active" | "archived")
     //      created_at: String (ISO 8601)
@@ -205,16 +205,16 @@ export class DynamoDBStack extends cdk.Stack {
       partitionKey: { name: 'role', type: dynamodb.AttributeType.STRING },
     });
 
-    // 11. TrustedAccounts (Phase S 新設、SSO login 時の account_id allowlist)
+    // 11. TrustedAccounts (new in Phase S, account_id allowlist for SSO login)
     //     Item schema:
-    //       account_id: String (PK)         AWS Account ID (12 桁)
+    //       account_id: String (PK)         AWS Account ID (12 digits)
     //       description: String
     //       provisioning_policy: String     "invite_only" | "auto_provision"
-    //       allowed_role_patterns: List<String>  glob パターン (空 list = 全 role 許可)
+    //       allowed_role_patterns: List<String>  glob patterns (empty list = all roles allowed)
     //       allow_iam_user: Bool            default false
     //       allow_instance_profile: Bool    default false
-    //       default_tenant_id: String       新規 user 初期テナント (null なら default-org)
-    //       default_credit: Number          新規 user 初期クレジット (null なら tenant default)
+    //       default_tenant_id: String       initial tenant for new users (null defaults to default-org)
+    //       default_credit: Number          initial credit for new users (null defaults to tenant default)
     //       created_at / updated_at: String (ISO 8601)
     //       created_by: String
     this.trustedAccountsTable = new dynamodb.Table(this, 'TrustedAccountsTable', {
@@ -223,40 +223,40 @@ export class DynamoDBStack extends cdk.Stack {
       partitionKey: { name: 'account_id', type: dynamodb.AttributeType.STRING },
     });
 
-    // 12. SsoPreRegistrations (Phase S 新設、invite_only ポリシー用)
+    // 12. SsoPreRegistrations (new in Phase S, for invite_only policy)
     //     Item schema:
     //       email: String (PK)         lowercase
-    //       account_id: String         どの trusted_account 経由で入るか
-    //       invited_role: String       "user" | "team_lead" (admin 自動 provision 禁止)
-    //       tenant_id: String?         null なら trusted_account.default_tenant_id
+    //       account_id: String         which trusted_account the user enters through
+    //       invited_role: String       "user" | "team_lead" (admin auto-provisioning is prohibited)
+    //       tenant_id: String?         null falls back to trusted_account.default_tenant_id
     //       total_credit: Number?
-    //       iam_user_lookup_key: String?  "<account_id>#<iam_user_name>" (IAM user 招待時)
+    //       iam_user_lookup_key: String?  "<account_id>#<iam_user_name>" (used for IAM user invitations)
     //       invited_by: String         Admin user_id
     //       invited_at: String (ISO 8601)
-    //       consumed_at: String?       初回 SSO login で consume、null なら未使用
+    //       consumed_at: String?       consumed on first SSO login; null means not yet used
     this.ssoPreRegistrationsTable = new dynamodb.Table(this, 'SsoPreRegistrationsTable', {
       ...baseTableProps,
       pointInTimeRecovery: false,
       tableName: `${prefix}-sso-pre-registrations`,
       partitionKey: { name: 'email', type: dynamodb.AttributeType.STRING },
     });
-    // IAM user を招待する場合、arn から email を逆引きできないため
-    // "<account_id>#<iam_user_name>" で lookup する GSI を用意
+    // When inviting IAM users, the email cannot be reverse-looked-up from the ARN,
+    // so a GSI keyed on "<account_id>#<iam_user_name>" is provided for lookups.
     this.ssoPreRegistrationsTable.addGlobalSecondaryIndex({
       indexName: 'iam-user-index',
       partitionKey: { name: 'iam_user_lookup_key', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // 13. ApiKeys (Phase C、長期 API キー)
+    // 13. ApiKeys (Phase C, long-lived API keys)
     //     Item schema:
-    //       key_hash: String (PK)     sha256(plaintext) の hex
-    //       key_id: String            表示用 "sk-stratoclave-<first 4 chars>...<last 4 chars>"
-    //       user_id: String           所有者
-    //       name: String              ユーザーラベル
-    //       scopes: List<String>      付与された permission 文字列
+    //       key_hash: String (PK)     hex of sha256(plaintext)
+    //       key_id: String            display identifier "sk-stratoclave-<first 4 chars>...<last 4 chars>"
+    //       user_id: String           owner
+    //       name: String              user-supplied label
+    //       scopes: List<String>      granted permission strings
     //       created_at / expires_at / revoked_at / last_used_at: String ISO 8601
-    //       created_by: String        Admin 代理発行時は actor の user_id
+    //       created_by: String        actor user_id when issued on behalf of another user by an admin
     // RETAIN: long-lived API key hashes are the only link between a key
     // string in the wild and the user it was issued to. Losing this table
     // silently turns valid keys into 401s *and* erases the audit trail.
@@ -322,7 +322,7 @@ export class DynamoDBStack extends cdk.Stack {
       this.uiTicketsTable.tableArn,
     ];
 
-    // Parameter Store エクスポート
+    // Parameter Store exports
     const tableParams: Array<[string, string, dynamodb.Table]> = [
       ['TableUsersParam', 'dynamodb/table-users', this.usersTable],
       ['TableUserTenantsParam', 'dynamodb/table-user-tenants', this.userTenantsTable],

@@ -1,6 +1,7 @@
 //! Authentication provider trait and common types.
 //!
-//! Phase 2 (v2.1) 以降は `mvp/*` が主経路で、本 trait は pipe / chat / ui 経由の legacy 用。
+//! From Phase 2 (v2.1) onward, `mvp/*` is the primary path.
+//! This trait is retained for legacy flows via pipe / chat / ui.
 #![allow(dead_code)]
 
 use anyhow::Result;

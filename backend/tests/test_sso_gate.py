@@ -168,7 +168,7 @@ def test_instance_profile_allowed_when_opted_in(sso_tables):
         sso_tables,
         "111111111111",
         allow_instance_profile=True,
-        provisioning_policy="invite_only",  # invite_only でも instance は session が email でないため 403 ルートになるはず
+        provisioning_policy="invite_only",  # even with invite_only, an instance profile session is not an email so it hits the 403 path
     )
 
     sts = StsIdentity(

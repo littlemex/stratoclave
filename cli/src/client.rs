@@ -1,8 +1,9 @@
-//! Backend API client module (legacy, pipe / chat 用).
+//! Backend API client module (legacy, for pipe / chat modes).
 //!
-//! Phase 2 (v2.1) 以降、`admin` / `team-lead` / `usage` サブコマンドは `mvp/api.rs` を使う。
-//! 本モジュールは pipe / chat モード (旧 converse エンドポイント) でのみ使用され、
-//! 旧 REST API クライアントメソッド (list_sessions / list_users 等) はビルド互換のため残存。
+//! From Phase 2 (v2.1) onward, the `admin` / `team-lead` / `usage` subcommands
+//! use `mvp/api.rs`. This module is used only in pipe / chat mode (legacy converse
+//! endpoint). The older REST API client methods (list_sessions / list_users, etc.)
+//! remain for build compatibility.
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};

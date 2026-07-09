@@ -1,32 +1,32 @@
-"""Backend lifespan 起動時の idempotent seed.
+"""Idempotent seed executed at backend lifespan startup.
 
-OSS 利用者が clone → deploy → admin login を zero-touch で動かせるよう、
-Backend 起動時に以下を DynamoDB へ idempotent に投入する:
+Enables OSS users to go from clone → deploy → admin login with zero manual
+steps. On startup, the following are written to DynamoDB idempotently:
 
-1. Permissions (admin / team_lead / user の 3 role)
-   - backend/permissions.json が真実源
-   - 既存 version と一致すれば no-op、不一致なら上書き
+1. Permissions (3 roles: admin / team_lead / user)
+   - backend/permissions.json is the source of truth
+   - No-op if the existing version matches; overwrites on mismatch
 2. Default Tenant (default-org)
-   - tenants テーブルに attribute_not_exists で put
-   - 既存があれば touch しない
+   - Written with attribute_not_exists on the tenants table
+   - Left untouched if it already exists
 
-不変条件:
-- 2 回実行しても同じ状態 (idempotent)
-- permissions.json が壊れていても Backend 起動は継続 (warn しつつ)
-- 既存 permissions と version が同じなら DynamoDB への書き込みは発生しない
+Invariants:
+- Running twice produces the same state (idempotent)
+- A broken permissions.json does not prevent backend startup (logged as warning)
+- No DynamoDB write occurs when the existing permissions version matches
 
-環境変数:
-- DEFAULT_ORG_ID: default tenant の tenant_id (default "default-org")
-- DEFAULT_TENANT_CREDIT: default_credit (default 100000、int)
-- PERMISSIONS_SEED_FILE: permissions.json の path (default backend/permissions.json)
-- STRATOCLAVE_DISABLE_SEED: "true" なら seed をスキップ (テスト用)
-- STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL: 初回 admin の email (optional).
-    設定されており、かつ Users テーブルに admin role のユーザが 1 人も存在しない場合、
-    Cognito に admin ユーザを作成して Users テーブルに登録する (P0-1).
-    bootstrap-admin.sh 経由の 401/422 を回避し、OSS fork 即死を防ぐ。
-    一時パスワードは CloudWatch Logs に structured log として 1 回だけ INFO 出力する
-    (平文だが Backend 内のログに閉じる; admin はログ確認後に自分でローテートする前提)。
-- STRATOCLAVE_BOOTSTRAP_ADMIN_ORG_ID: 初回 admin の所属 tenant (default DEFAULT_ORG_ID)
+Environment variables:
+- DEFAULT_ORG_ID: tenant_id for the default tenant (default "default-org")
+- DEFAULT_TENANT_CREDIT: default_credit value (default 100000, int)
+- PERMISSIONS_SEED_FILE: path to permissions.json (default backend/permissions.json)
+- STRATOCLAVE_DISABLE_SEED: skip seed when set to "true" (for testing)
+- STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL: email for the initial admin user (optional).
+    When set and no admin-role user exists in the Users table, creates a Cognito
+    admin user and registers it in the Users table (P0-1).
+    Prevents 401/422 failures on bootstrap-admin.sh and avoids dead-on-arrival
+    OSS forks. The temporary password is written to AWS Secrets Manager
+    (not to logs) — see _stash_bootstrap_password for details.
+- STRATOCLAVE_BOOTSTRAP_ADMIN_ORG_ID: tenant for the initial admin (default DEFAULT_ORG_ID)
 """
 from __future__ import annotations
 
@@ -46,8 +46,8 @@ from dynamo import (
 logger = get_logger(__name__)
 
 
-# permissions.json の default path (backend/ ディレクトリ直下)
-# このファイルは backend/bootstrap/seed.py なので、親の親が backend/
+# Default path for permissions.json (directly under the backend/ directory).
+# This file is backend/bootstrap/seed.py, so parent.parent is backend/.
 _DEFAULT_PERMISSIONS_FILE = Path(__file__).resolve().parent.parent / "permissions.json"
 
 
@@ -59,12 +59,12 @@ def _permissions_file_path() -> Path:
 
 
 def seed_permissions() -> dict[str, int]:
-    """Permissions テーブルを permissions.json から idempotent に seed する.
+    """Seed the Permissions table from permissions.json idempotently.
 
-    戻り値: PermissionsRepository.seed_from_file の結果
+    Returns the result from PermissionsRepository.seed_from_file:
       {"total": N, "changed": M, "skipped": S}
 
-    例外は呼び出し元で握り潰す (seed_all 経由) 方針。
+    Exceptions are suppressed by the caller (via seed_all).
     """
     path = _permissions_file_path()
     if not path.exists():
@@ -87,10 +87,10 @@ def seed_permissions() -> dict[str, int]:
 
 
 def seed_default_tenant() -> dict[str, Any]:
-    """Default Tenant (default-org) を idempotent put する.
+    """Idempotently put the default tenant (default-org).
 
-    既存があれば touch しない。
-    戻り値: {"tenant_id": str, "created": bool, "item": dict}
+    Leaves the record untouched if it already exists.
+    Returns: {"tenant_id": str, "created": bool, "item": dict}
     """
     tenant_id = os.getenv("DEFAULT_ORG_ID", "default-org")
     default_credit_env = os.getenv("DEFAULT_TENANT_CREDIT")
@@ -151,7 +151,7 @@ def _stash_bootstrap_password(*, prefix: str, password: str, email: str) -> str:
 
 
 def _generate_temp_password(length: int = 20) -> str:
-    """Cognito password policy (大小英数記号各 1+) を満たす乱数パスワード."""
+    """Generate a random password satisfying Cognito's policy (at least one upper, lower, digit, and symbol)."""
     import secrets
     import string
 
@@ -173,21 +173,21 @@ def _generate_temp_password(length: int = 20) -> str:
 
 
 def seed_bootstrap_admin() -> dict[str, Any]:
-    """Zero-state (Users テーブルに admin が 1 人もいない) 時に Cognito + DynamoDB を
-    seed して OSS fork 即死を回避する.
+    """Seed Cognito + DynamoDB when no admin exists yet (zero-state), preventing
+    dead-on-arrival OSS forks.
 
-    動作:
-      - `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` 未設定なら何もしない
-      - 既に admin role を持つユーザが 1 人以上いれば何もしない
-      - どちらも満たす場合:
+    Behavior:
+      - No-op if STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL is not set
+      - No-op if at least one admin-role user already exists
+      - When both conditions are met:
           1. Cognito AdminCreateUser (lower(email), custom:org_id=tenant_id)
-          2. ランダム永続パスワードを設定 (admin は事後に変更)
-          3. Users テーブルに `roles=[admin, user]` で put
-          4. UserTenants テーブルに role=admin で ensure
-          5. 一時パスワードを CloudWatch Logs に INFO で 1 回だけ出力
+          2. Set a random permanent password (admin should change it afterward)
+          3. Put the user in the Users table with roles=[admin, user]
+          4. Ensure a UserTenants row with role=admin
+          5. Stash the temporary password in AWS Secrets Manager (not in logs)
 
-    Cognito で AdminCreateUser が失敗 (UsernameExists 等) した場合は既存ユーザを
-    そのまま採用して Users/UserTenants 側だけ整合する。
+    If AdminCreateUser fails (e.g. UsernameExistsException), adopts the existing
+    Cognito user and reconciles only the Users/UserTenants side.
     """
     import boto3
     from botocore.exceptions import ClientError
@@ -209,7 +209,7 @@ def seed_bootstrap_admin() -> dict[str, Any]:
     )
 
     users_repo = UsersRepository()
-    # 既に admin が 1 人以上いるなら no-op (idempotent)
+    # No-op if at least one admin already exists (idempotent).
     existing_admins = users_repo.scan_admins(limit=1)
     if existing_admins:
         logger.info(
@@ -283,10 +283,10 @@ def seed_bootstrap_admin() -> dict[str, Any]:
             error=str(e),
             email=email_env,
         )
-        # password 設定に失敗しても Users 側は書いておく (後で reset 可能)
+        # Even if password setting fails, write the Users row (can be reset later).
         temp_password = ""
 
-    # Users テーブル
+    # Users table
     users_repo.put_user(
         user_id=sub,
         email=email_env,
@@ -295,7 +295,7 @@ def seed_bootstrap_admin() -> dict[str, Any]:
         org_id=tenant_id,
         roles=["admin", "user"],
     )
-    # UserTenants テーブル (admin role で active)
+    # UserTenants table (active with admin role)
     UserTenantsRepository().ensure(
         user_id=sub,
         tenant_id=tenant_id,
@@ -386,13 +386,14 @@ def seed_bootstrap_admin() -> dict[str, Any]:
 
 
 def seed_all() -> dict[str, Any]:
-    """Backend lifespan から呼ばれる top-level エントリ.
+    """Top-level entry point called from the backend lifespan.
 
-    各 seed 関数を呼び、一部が失敗しても他は続行する (best-effort).
-    戻り値は summary dict。呼び出し元 (main.py lifespan) は戻り値を無視しても
-    良い (全て logger に出力される)。
+    Calls each seed function in order; individual failures do not stop
+    the remaining seeds (best-effort). Returns a summary dict. The caller
+    (main.py lifespan) may ignore the return value — all outcomes are
+    recorded via the logger.
 
-    環境変数 STRATOCLAVE_DISABLE_SEED=true の場合はスキップ。
+    Skipped entirely when STRATOCLAVE_DISABLE_SEED=true.
     """
     if os.getenv("STRATOCLAVE_DISABLE_SEED", "false").lower() == "true":
         logger.info("seed_skipped", reason="STRATOCLAVE_DISABLE_SEED=true")
@@ -424,7 +425,7 @@ def seed_all() -> dict[str, Any]:
         )
         summary["default_tenant"] = {"error": str(exc)}
 
-    # 3. Bootstrap Admin (STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL が設定済み & admin 0 件の時のみ)
+    # 3. Bootstrap Admin (only when STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL is set and no admins exist)
     try:
         summary["bootstrap_admin"] = seed_bootstrap_admin()
     except Exception as exc:

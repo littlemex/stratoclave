@@ -1,21 +1,21 @@
-"""MVP 用の FastAPI 依存関係 (Phase 2 v2.1 + Phase C).
+"""FastAPI dependencies for MVP (Phase 2 v2.1 + Phase C).
 
-Bearer トークンを受け取り、以下 2 種類を判別する:
-  - 値が `sk-stratoclave-*` で始まる → 長期 API Key (Phase C)
-  - それ以外 → Cognito access_token (Phase 2)
+Accepts a Bearer token and distinguishes between two auth types:
+  - Starts with `sk-stratoclave-*` → long-lived API Key (Phase C)
+  - Anything else → Cognito access_token (Phase 2)
 
-変更点 (v1 → v2.1):
-- `cognito:groups` / `roles` claim を **完全に無視**
-- `token_use == "access"` を必須検証 (id_token は 401)
-- roles / email / org_id は DynamoDB Users テーブルから取得 (RBAC 真実源)
-- email が空 (access_token に email claim なし) の場合は Users テーブルから補填、
-  それでも無ければ `cognito-idp:AdminGetUser` で取得して Users に put (冪等)
+Changes (v1 → v2.1):
+- `cognito:groups` / `roles` claims are **completely ignored**.
+- `token_use == "access"` is required; id_token returns 401.
+- roles / email / org_id are sourced from the DynamoDB Users table (RBAC source of truth).
+- If email is missing from the access_token, it is backfilled from the Users table;
+  if still missing, fetched via `cognito-idp:AdminGetUser` and written to Users (idempotent).
 
-変更点 (v2.1 → Phase C):
-- `AuthenticatedUser` に `auth_kind` と `key_scopes` を追加
-- `sk-stratoclave-*` を prefix に持つトークンは SHA-256 でハッシュ化し
-  ApiKeys テーブルで lookup. expires_at / revoked_at を検証、有効なら
-  key owner の roles と scopes を組み合わせて AuthenticatedUser を構築
+Changes (v2.1 → Phase C):
+- Added `auth_kind` and `key_scopes` to `AuthenticatedUser`.
+- Tokens with the `sk-stratoclave-*` prefix are SHA-256-hashed and looked up in the
+  ApiKeys table. expires_at / revoked_at are validated; on success, AuthenticatedUser
+  is built from the key owner's roles combined with the key's scopes.
 """
 from __future__ import annotations
 
@@ -51,14 +51,14 @@ AuthKind = Literal["jwt", "api_key"]
 
 @dataclass(frozen=True)
 class AuthenticatedUser:
-    """認証済みユーザー情報 (DynamoDB Users 由来)."""
+    """Authenticated user information sourced from the DynamoDB Users table."""
 
     user_id: str          # Cognito sub
     email: str
     org_id: str
-    roles: list[str]      # DynamoDB Users.roles、Cognito Group は参照しない
+    roles: list[str]      # From DynamoDB Users.roles; Cognito Groups are not used.
     raw_claims: dict[str, Any] = field(default_factory=dict)
-    # Phase C 追加: 認証種別と API Key scopes
+    # Added in Phase C: auth type and API Key scopes.
     auth_kind: AuthKind = "jwt"
     key_scopes: Optional[list[str]] = None
     api_key_hash: Optional[str] = None
@@ -134,11 +134,11 @@ def _jwks_client() -> PyJWKClient:
 
 
 def _decode_cognito_access_token(token: str) -> dict[str, Any]:
-    """Cognito access_token のみを受け入れる (id_token は拒否).
+    """Accept only Cognito access_tokens (id_token is rejected).
 
-    v2.1 §3.8, Security H1 対応:
-    - token_use="access" を必須化
-    - access_token は aud claim を持たないため、client_id claim で検証
+    v2.1 §3.8, Security H1:
+    - token_use="access" is required.
+    - access_token has no aud claim, so the client_id claim is used for validation.
     """
     issuer = os.getenv("OIDC_ISSUER_URL")
     client_id = os.getenv("OIDC_AUDIENCE") or os.getenv("COGNITO_CLIENT_ID")
@@ -159,12 +159,12 @@ def _decode_cognito_access_token(token: str) -> dict[str, Any]:
             signing_key,
             algorithms=["RS256"],
             issuer=issuer,
-            options={"verify_aud": False},  # access_token は aud を持たないため手動検証
+            options={"verify_aud": False},  # access_token has no aud claim; validated manually via client_id.
         )
     except PyJWTError as e:
         raise HTTPException(status_code=401, detail=f"JWT verification failed: {e}")
 
-    # token_use claim は access / id / refresh のいずれか (Cognito 仕様)
+    # Cognito token_use claim is one of: access / id / refresh.
     token_use = claims.get("token_use")
     if token_use != "access":
         raise HTTPException(
@@ -194,7 +194,7 @@ def _get_cognito_idp():
 
 
 def _fetch_email_from_cognito(sub: str) -> Optional[str]:
-    """access_token 由来の sub から email を引く (Users テーブルに無い場合の最終手段)."""
+    """Resolve an email from the sub extracted from an access_token (last resort when the Users table has no email)."""
     pool_id = os.getenv("COGNITO_USER_POOL_ID")
     if not pool_id:
         return None
@@ -216,14 +216,14 @@ def _fetch_email_from_cognito(sub: str) -> Optional[str]:
 # API Key path (Phase C)
 # ---------------------------------------------------------------
 def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
-    """`sk-stratoclave-*` プレーンキーを検証し、対応する owner の AuthenticatedUser を返す.
+    """Validate a `sk-stratoclave-*` plaintext key and return the owner's AuthenticatedUser.
 
-    検証項目:
-      - DB に key_hash が存在
-      - revoked_at が None
-      - expires_at が未設定、または未来
-      - owner の Users が存在
-    成功時は last_used_at を best-effort 更新.
+    Validation checks:
+      - key_hash exists in the DB
+      - revoked_at is None
+      - expires_at is unset or in the future
+      - owner exists in the Users table
+    On success, updates last_used_at on a best-effort basis.
     """
     repo = ApiKeysRepository()
     key_hash = hash_api_key(plain_key)
@@ -298,7 +298,7 @@ def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
         [roles_raw] if isinstance(roles_raw, str) else [str(r) for r in roles_raw]
     )
 
-    # last_used_at を更新 (失敗は黙殺)
+    # Update last_used_at (failures are silently ignored).
     repo.touch_last_used(key_hash)
 
     return AuthenticatedUser(
@@ -320,9 +320,10 @@ def get_current_user(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
 ) -> AuthenticatedUser:
-    """`Authorization: Bearer <token>` または `x-api-key: <token>` を受け付ける.
+    """Accept `Authorization: Bearer <token>` or `x-api-key: <token>`.
 
-    prefix が `sk-stratoclave-` ならば長期 API Key、そうでなければ Cognito access_token.
+    Tokens with a `sk-stratoclave-` prefix are treated as long-lived API Keys;
+    all others are treated as Cognito access_tokens.
     """
     token: Optional[str] = None
     if authorization and authorization.lower().startswith("bearer "):
@@ -347,7 +348,7 @@ def get_current_user(
     if not sub:
         raise HTTPException(status_code=401, detail="JWT has no 'sub' claim")
 
-    # ---- DynamoDB Users を真実源として roles / email / org_id を解決 ----
+    # ---- Resolve roles / email / org_id from DynamoDB Users as the source of truth. ----
     users_repo = UsersRepository()
     user_record = users_repo.get_by_user_id(sub)
 
@@ -398,16 +399,17 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # email 空 (access_token に email claim が無いケースの #1 fix):
-    # 1. Users テーブルにあれば使う (上で済み)
-    # 2. Cognito AdminGetUser で email を引いて Users に backfill (冪等)
+    # If email is empty (access_token has no email claim — fix #1):
+    # 1. Use the value from the Users table if available (already resolved above).
+    # 2. Fetch from Cognito AdminGetUser and backfill into Users (idempotent).
     if not email:
         fetched = _fetch_email_from_cognito(sub)
         if fetched:
             email = fetched
             needs_backfill = True
 
-    # roles が空 = 未登録。`user` ロールで backfill する (admin への昇格は API 経由のみ)
+    # Empty roles means the user is not yet registered; backfill with the `user` role
+    # (elevation to admin requires an explicit API call).
     if not roles:
         roles = ["user"]
         needs_backfill = True
@@ -423,7 +425,7 @@ def get_current_user(
                 roles=roles,
             )
         except Exception as e:
-            # 書き込み失敗しても認証結果は返す (次回 me.py で再度補填される)
+            # Return the auth result even if the write fails; me.py will retry the backfill on the next request.
             _log.warning("users_backfill_failed", extra={"sub": sub, "error": str(e)})
 
     return AuthenticatedUser(

@@ -1,9 +1,7 @@
-<!-- Last updated: 2026-06-03 -->
-<!-- Applies to: Stratoclave main with `feature/openai-responses-proxy` (or later) -->
+<!-- Last updated: 2026-07-10 -->
+<!-- Applies to: Stratoclave main -->
 
 # Architecture
-
-> A Japanese translation is available at [ja/ARCHITECTURE.md](./ja/ARCHITECTURE.md).
 
 Stratoclave is a **thin proxy gateway in front of Amazon Bedrock and the
 OpenAI Responses API on Bedrock** that adds multi-tenancy, role-based access
@@ -118,6 +116,8 @@ repository lives at [`https://github.com/littlemex/stratoclave`](https://github.
                                  │   ApiKeys                │
                                  │   TrustedAccounts        │
                                  │   SsoPreRegistrations    │
+                                 │   SsoNonces (10-min TTL) │
+                                 │   UiTickets (30-s TTL)   │
                                  └──────────────────────────┘
 
                                  ┌──────────────────────────┐
@@ -182,15 +182,17 @@ backend/
 │   └── correlation.py         # X-Correlation-ID propagation
 ├── dynamo/                    # Repository layer (one module per table)
 │   ├── users.py
-│   ├── user_tenants.py        # Credit accounting with optimistic locking
+│   ├── user_tenants.py        # Credit accounting with pessimistic reservation (reserve/refund)
 │   ├── usage_logs.py
 │   ├── tenants.py
 │   ├── permissions.py
 │   ├── api_keys.py            # SHA-256 stored, plaintext never persisted
 │   ├── trusted_accounts.py
-│   └── sso_pre_registrations.py
+│   ├── sso_pre_registrations.py
+│   ├── sso_nonces.py          # Vouch-by-STS replay-protection nonce store (10-min TTL, fail-closed)
+│   └── ui_tickets.py          # Short-lived one-time CLI→SPA handoff tickets (30-s TTL)
 └── mvp/                       # FastAPI routers + auth/authz helpers
-    ├── deps.py                # JWT verification + API key path
+    ├── deps.py                # JWT verification + API key path (Bearer and x-api-key headers)
     ├── authz.py               # has_permission, require_permission, audit log
     ├── anthropic.py           # POST /v1/messages, GET /v1/models
     ├── openai_responses.py    # POST /openai/v1/responses, GET /openai/v1/models
@@ -206,10 +208,11 @@ backend/
     ├── admin_sso_invites.py
     ├── team_lead.py
     ├── cognito_auth.py        # Email + password login
-    ├── sso_sts.py             # Presigned URL validation + STS round-trip
+    ├── sso_sts.py             # Presigned URL validation + STS round-trip (nonce consume is inline)
     ├── sso_gate.py            # Identity-type classifier + allowlist gates
     ├── sso_exchange.py        # POST /api/mvp/auth/sso-exchange
     ├── me_api_keys.py         # Self-serve long-lived API key management
+    ├── ui_ticket.py           # POST /api/mvp/auth/ui-ticket + /consume
     └── well_known.py          # GET /.well-known/stratoclave-config
 ```
 
@@ -261,7 +264,12 @@ frontend/src/
 ```
 
 **AuthContext** accepts `access_token` through three ingress paths:
-(1) a `?token=` URL parameter written by the CLI during `stratoclave ui open`,
+(1) a `?ui_ticket=<nonce>` URL parameter written by the CLI during
+`stratoclave ui open` — the SPA exchanges the nonce for the real token bundle
+via `POST /api/mvp/auth/ui-ticket/consume`, then strips the query parameter
+from `window.location` immediately so the plaintext token never appears in the
+URL bar or server access logs (session-fixation fix, P0-8 2026-04 review;
+nonce has a 30-second TTL and is single-use),
 (2) the Cognito Hosted UI callback with PKCE, and (3) a previously saved token
 in `localStorage`. The backend enforces `token_use=access`, so the frontend
 never passes `id_token`.
@@ -450,12 +458,14 @@ bearer token with a lifetime longer than an `access_token`'s 1 hour.
 ```
   Client (Cowork / SDK)          Backend
     │  Authorization:              │
-    │  Bearer sk-stratoclave-...   │
+    │  Bearer sk-stratoclave-...   │   (also accepted via x-api-key header)
     │ ────────────────────────────▶│
     │                              │  Token starts with "sk-stratoclave-"?
     │                              │   → SHA-256 hash
     │                              │   → Lookup ApiKeys by hash
     │                              │   → Check revoked_at, expires_at
+    │                              │   → Check owner is_user_deleted (tombstone)
+    │                              │   → Check key.created_at >= Users.token_revoked_after
     │                              │   → Load owner from Users
     │                              │   → AuthenticatedUser(
     │                              │       auth_kind="api_key",
@@ -468,8 +478,16 @@ bearer token with a lifetime longer than an `access_token`'s 1 hour.
 
 The plaintext of an API key is returned **once**, in the response to
 `POST /api/mvp/me/api-keys`, and is never stored on the server. Only the
-SHA-256 hash is persisted. Revoking a key is a conditional update that takes
-effect on the next request (no in-process caching).
+SHA-256 hash is persisted. The `x-api-key` header is accepted as an
+alternative to `Authorization: Bearer` for clients that cannot set the
+`Authorization` header.
+
+Revoking a key is a conditional update that takes effect on the next request
+(no in-process caching). When a user is deleted or switched to a new tenant,
+`ApiKeysRepository.revoke_all_for_user` bulk-revokes all keys belonging to
+that user, and a `token_revoked_after` watermark is stamped on the `Users`
+row; any key minted before the watermark is refused even if its `revoked_at`
+field has not been individually set.
 
 ---
 
@@ -502,9 +520,10 @@ API on bedrock-mantle). The two are independent: a key issued with only
 
 ### How permissions are seeded
 
-`backend/permissions.json` is the human-editable source of truth. On
-application startup, `backend/bootstrap/seed.py` compares the file's
-`version` field to whatever is in the `Permissions` DynamoDB table and
+`backend/permissions.json` is the human-editable source of truth. The file's
+top-level `"version"` field uses a `"YYYY-MM-DD.N"` scheme (e.g.
+`"2026-06-02.1"`). On application startup, `backend/bootstrap/seed.py`
+compares this version to whatever is in the `Permissions` DynamoDB table and
 writes only when they differ. The seed is idempotent: re-running it (by
 redeploying or restarting) is always safe, and it is a no-op when the
 version is already current.
@@ -558,20 +577,33 @@ across tenants; moving a user to a new tenant initializes a fresh balance.
 
 ### Accounting
 
-`backend/dynamo/user_tenants.py` performs the decrement with a conditional
-update that uses the previous `credit_used` value as a precondition:
+`backend/dynamo/user_tenants.py` atomically reserves credit **before** the
+Bedrock call via `reserve()`, then settles the difference via `refund()` after
+the call returns:
 
 ```
+# reserve() — called before Bedrock
 UpdateItem(
     Key = {user_id, tenant_id},
-    UpdateExpression    = "SET credit_used = :new_used",
-    ConditionExpression = "credit_used = :old_used AND total_credit >= :new_used"
+    UpdateExpression    = "ADD credit_used :tokens SET updated_at = :now",
+    ConditionExpression = "credit_used <= :max_allowed_used AND
+                           total_credit = :expected_total AND
+                           (attribute_not_exists(#s) OR #s = :active)"
+)
+
+# refund() — returns the unused portion (reservation - actual) after Bedrock
+UpdateItem(
+    Key = {user_id, tenant_id},
+    UpdateExpression    = "ADD credit_used :neg_tokens SET updated_at = :now",
+    ConditionExpression = "credit_used >= :tokens"
 )
 ```
 
-If another request decremented the balance since we last read it, this call
-raises `ConditionalCheckFailedException`, which the backend translates into
-a `503 Service Unavailable` with a retry hint.
+If `ConditionalCheckFailedException` is raised during `reserve()` — because
+a concurrent reserve or admin overwrite changed `total_credit` — the backend
+re-reads the row and retries up to five times. If the balance is genuinely
+exhausted, `reserve_credit()` in `backend/mvp/_pipeline.py` raises
+**HTTP 402 Payment Required** with a `credit_exhausted` detail body.
 
 ### Priority order for initial balance
 
@@ -582,14 +614,24 @@ by the first matching rule:
 2. Otherwise the tenant's `default_credit` → `credit_source = tenant_default`.
 3. Otherwise the deployment-wide default (100 000 tokens) → `credit_source = global_default`.
 
-### Post-call decrement (and the credit-debt window)
+### Pre-call reservation and post-call settlement
 
-`/v1/messages` checks only that `remaining > 0` *before* the call, then
-decrements by the real `input_tokens + output_tokens` reported by Bedrock
-*after* the response. This means a balance can transiently go slightly
-negative if a single request consumes more tokens than are left. The
-behavior is documented in the endpoint's docstring and is acceptable for the
-alpha release; a future reservation-based model will close the window.
+Both `/v1/messages` and `/openai/v1/responses` use a pessimistic reservation
+model implemented in `backend/mvp/_pipeline.py`:
+
+1. `reserve_credit()` atomically debits an estimated token budget before the
+   Bedrock call. If the balance is insufficient the request is refused
+   immediately with **HTTP 402**; the Bedrock API is never reached.
+2. After Bedrock returns (or the stream completes), `settle_reservation_and_log()`
+   refunds the difference between the reservation and actual usage, then
+   writes an immutable `UsageLogs` row with the true token counts.
+   - If actual usage exceeds the reservation (rare for reasoning-heavy workloads),
+     the pipeline attempts a best-effort top-up reserve for the overrun; if
+     the user is now out of credit the overage is clamped and a
+     `credit_overrun` warning is emitted to CloudWatch.
+
+The net result is that the balance never permanently exceeds `total_credit`
+except for the bounded, logged overrun case.
 
 ### Refills
 
@@ -649,17 +691,30 @@ events without pulling in normal request traffic.
 
 | Event | Emitted by | Key fields |
 |-------|------------|------------|
-| `admin_created` | `admin_users.py` | `actor_id`, `target_id`, `email` |
-| `user_deleted` | `admin_users.py` | `actor_id`, `target_id`, `tenant_id` |
+| `admin_created` | `admin_users.py` | `actor_id`, `target_id`, `email`, `role` |
+| `user_created` | `admin_users.py` | `actor_id`, `target_id`, `email`, `role` |
+| `user_deleted` | `admin_users.py` | `actor_id`, `target_id`, `email`, `roles` |
+| `user_locale_updated_by_admin` | `admin_users.py` | `actor_id`, `target_id`, `before`, `after` |
+| `user_locale_updated` | `me.py` | `actor_id`, `before`, `after` |
 | `user_tenant_switched` | `admin_users.py` | `actor_id`, `target_id`, `before`, `after` |
+| `api_keys_revoked_on_user_delete` | `admin_users.py` | `actor_id`, `target_id`, `count` |
 | `credit_overwritten` | `admin_users.py` | `actor_id`, `target_id`, `before`, `after` |
+| `tenant_created` | `admin_tenants.py` | `actor_id`, `target_id` (=tenant) |
+| `tenant_updated` | `admin_tenants.py` | `actor_id`, `target_id`, `before`, `after` |
+| `tenant_archived` | `admin_tenants.py` | `actor_id`, `target_id` |
 | `tenant_owner_changed` | `admin_tenants.py` | `actor_id`, `target_id`, `before`, `after` |
+| `team_lead_tenant_created` | `team_lead.py` | `actor_id`, `target_id` (=tenant) |
+| `team_lead_tenant_updated` | `team_lead.py` | `actor_id`, `target_id`, `before`, `after` |
+| `sso_invite_created` | `admin_sso_invites.py` | `actor_id`, `target_id` (=email) |
+| `sso_invite_deleted` | `admin_sso_invites.py` | `actor_id`, `target_id` |
 | `sso_login_success` | `sso_exchange.py` | `actor_id`, `account_id`, `identity_type`, `arn`, `new_user` |
 | `sso_login_denied` | `sso_exchange.py` | `reason`, `account_id`, `identity_type`, `arn` |
 | `sso_user_provisioned` | `sso_exchange.py` | `target_id`, `email`, `role`, `tenant_id` |
 | `api_key_created` | `me_api_keys.py`, `admin_api_keys.py` | `actor_id`, `target_id`, `scopes`, `expires_at`, `on_behalf_of` |
 | `api_key_revoked` | `me_api_keys.py`, `admin_api_keys.py` | `actor_id`, `target_id`, `owner_user_id` |
 | `trusted_account_created` / `_updated` / `_deleted` | `admin_trusted_accounts.py` | `actor_id`, `target_id` (=account), `details` |
+| `ui_ticket_minted` | `ui_ticket.py` | `actor_id`, `target_id="(ui-handoff)"`, `expires_at` |
+| `ui_ticket_mint_subject_mismatch` | `ui_ticket.py` | `actor_id`, `reason` |
 
 Every audit event carries `timestamp` in RFC 3339 UTC. A future release will
 promote audit events to a dedicated DynamoDB table with a search UI; the
@@ -690,10 +745,20 @@ Response shape (schema_version = `"1"`):
   },
   "cli": {
     "default_model": "us.anthropic.claude-opus-4-7",
-    "callback_port": 18080
+    "callback_port": 18080,
+    "codex": {
+      "default_model": "openai.gpt-5.4",
+      "openai_base_path": "/openai/v1",
+      "supported_regions": ["us-east-2", "us-west-2"]
+    }
   }
 }
 ```
+
+The `cli.codex` block is present **only when `CODEX_ENABLED=true`** is set on
+the ECS task; it is absent entirely when the OpenAI Responses path is
+disabled. Old CLIs that never see `cli.codex` simply never offer the
+`codex` subcommand bootstrap.
 
 `api_endpoint` above is the sample deployment URL used throughout these docs;
 your actual value is whatever CloudFront URL `deploy-all.sh` prints at the end
@@ -751,7 +816,8 @@ access pattern (small, bursty) and removes the need to tune capacity.
 | `api-keys` | `key_hash` (SHA-256) | — | `user-id-index` | Long-lived API keys; plaintext never stored |
 | `trusted-accounts` | `account_id` | — | — | SSO allowlist + provisioning policy |
 | `sso-pre-registrations` | `email` | — | `iam-user-index` | Invitations for invite-only provisioning |
-| `sso-nonces` | `nonce` (SHA-256 of `Authorization + \x00 + X-Amz-Date`) | — | — | Vouch-by-STS replay defence. 10-minute TTL. Written with `attribute_not_exists(nonce)` before the STS round trip — a second submission of the same signed request returns 401. |
+| `sso-nonces` | `nonce` (SHA-256 of `Authorization + \x00 + X-Amz-Date`) | — | — | Vouch-by-STS replay defence. 10-minute TTL. Written with `attribute_not_exists(nonce)` before the STS round trip — a second submission of the same signed request returns 401. Fail-closed: any store error returns 401. |
+| `ui-tickets` | `ticket_hash` (SHA-256 of the plaintext nonce) | — | — | CLI→SPA one-time handoff. Plaintext nonce (`stt_` prefix + 32 CSPRNG bytes) is returned to the CLI and placed in the `?ui_ticket=` URL parameter. SPA exchanges it via `POST /api/mvp/auth/ui-ticket/consume` (atomic delete-and-return). 30-second TTL. Plaintext never stored on the backend. |
 
 ### Notable invariants
 
@@ -846,12 +912,51 @@ call on behalf of a caller. `backend/mvp/sso_sts.py` defends:
 - The `X-Amz-Date` header must be within ±5 minutes of the backend's
   wall clock.
 - The request is made with a 10-second timeout.
+- The `Authorization` + `X-Amz-Date` headers are SHA-256 fingerprinted and
+  consumed via `SsoNoncesRepository.consume()` before the STS forward, using
+  an `attribute_not_exists(nonce)` conditional put with a 10-minute TTL. A
+  second submission of the same signed request within that window is
+  rejected with **401**. The check is **fail-closed**: if the nonce store is
+  unreachable for any reason (DynamoDB error, IAM drift, unprovisioned table),
+  the entire SSO exchange returns 401 rather than silently degrading to
+  skew-only protection.
 
-A future release will add an STS signature-nonce table (TTL 5 minutes) to
-close the replay window within the 5-minute skew. This is deliberately
-omitted for the current release because the attack requires simultaneous
-possession of the signed request **and** network access to the backend; see
-[Extension points](#extension-points).
+### Production bootstrap gate
+
+`POST /api/mvp/admin/users` is gated by `backend/mvp/authz.py`'s
+`admin_creation_allowed()` for the `admin` role. The bootstrap window
+behaves differently per environment:
+
+- **Development / staging** (`ENVIRONMENT` ≠ `production`): set
+  `ALLOW_ADMIN_CREATION=true` for the classic sticky-flag behavior.
+- **Production** (`ENVIRONMENT=production`): the boolean flag alone is
+  **not sufficient**. The operator must also set
+  `ALLOW_ADMIN_CREATION_UNTIL=<epoch-seconds>` to a future instant. The
+  gate auto-closes when `now > epoch`, so forgetting to clear the flag
+  after bootstrap is not a permanent exposure. A malformed or absent
+  `ALLOW_ADMIN_CREATION_UNTIL` value is treated as 0 (gate closed).
+
+A per-request audit warning is emitted to CloudWatch whenever the gate is
+open in production, rate-limited to once per 5 minutes per process.
+
+### ECS network egress restriction
+
+The ECS task security group (`network-stack.ts`) allows only:
+- TCP/443 outbound — all AWS SDK calls (Bedrock, STS, Cognito, DynamoDB,
+  ECR, CloudWatch Logs, SSM) use HTTPS.
+- UDP/53 outbound — Route 53 Resolver for AWS endpoint DNS.
+
+All other egress is denied. This limits the blast radius of a container
+compromise to the above AWS service endpoints and prevents arbitrary
+outbound connections.
+
+### Request body size limit
+
+`MaxBodySizeASGIMiddleware` in `backend/main.py` enforces a 2 MiB cap on
+`POST`/`PUT`/`PATCH` bodies at the ASGI layer — before Pydantic or any
+handler sees the payload. Both `Content-Length` fast-path and streaming
+chunked-transfer slow-path are covered. Oversized requests return HTTP 413.
+The limit is configurable via `REQUEST_MAX_BODY_BYTES`.
 
 ### Secrets management
 
@@ -873,9 +978,6 @@ but not yet implemented.
   don't require CloudWatch Insights.
 - **Tenant hierarchy.** A `parent_tenant_id` attribute on `tenants` would
   enable nested organizations (for example, departments inside a company).
-- **Reservation-based credits.** Pre-reserve an estimate before the Bedrock
-  call and settle the difference afterwards, eliminating the transient
-  credit-debt window described in [Credit model](#credit-model).
 - **Verified Permissions.** For deployments that need conditional
   authorization (e.g. "allow up to $X per day"), integrate Amazon Verified
   Permissions at the `require_permission` boundary.
@@ -893,9 +995,6 @@ repository URL is
 The following are known, tracked gaps. Each is slated for a follow-up
 release; in the meantime, work around them as described.
 
-- **STS replay window.** Signed `GetCallerIdentity` requests are accepted
-  within a ±5 minute skew without a nonce table. See the
-  [Extension points](#extension-points) for the planned fix.
 - **`api-key revoke` requires the SHA-256 hash.** The CLI output of
   `api-key list` currently shows the masked `key_id`
   (`sk-stratoclave-XXXX...YYYY`) but not `key_hash`, so revoking from the CLI

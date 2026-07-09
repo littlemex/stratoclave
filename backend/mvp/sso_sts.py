@@ -1,13 +1,13 @@
 """STS presigned URL verification + identity parsing (Phase S).
 
-CLI から受け取った `sts:GetCallerIdentity` 署名済みリクエストを Backend 自身が
-STS に転送し、返ってきた Arn / UserId / Account を抽出する.
+The backend forwards the `sts:GetCallerIdentity` signed request received from the CLI
+directly to STS and extracts the returned Arn / UserId / Account.
 
-セキュリティ方針 (design doc §7.4):
-- SSRF 防御: https://sts.*.amazonaws.com/ 系のみ許可
-- method=POST かつ Action=GetCallerIdentity のみ許可
-- X-Amz-Date が ±5 分以内かチェック (replay 緩和、nonce テーブルは Phase 3 で追加)
-- timeout 10 秒
+Security policy (design doc §7.4):
+- SSRF defense: only https://sts.*.amazonaws.com/ hosts are allowed.
+- Only method=POST and Action=GetCallerIdentity are accepted.
+- X-Amz-Date must be within ±5 minutes of now (replay mitigation; nonce table added in Phase 3).
+- timeout: 10 seconds.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ _ALLOWED_STS_HOSTS = {
 
 _STS_ACTION = "GetCallerIdentity"
 
-# EC2 Instance Profile 判定: session 部が i-<hex 8-17> のみ
+# EC2 Instance Profile detection: session part is i-<hex 8-17> only.
 _INSTANCE_PROFILE_SESSION_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 
 
@@ -49,15 +49,15 @@ IdentityType = Literal["sso_user", "federated_role", "iam_user", "instance_profi
 
 @dataclass(frozen=True)
 class StsIdentity:
-    """STS GetCallerIdentity から抽出した 4 つ組 + 分類結果."""
+    """4-tuple extracted from STS GetCallerIdentity plus the classification result."""
 
     arn: str
     user_id: str
     account_id: str
     identity_type: IdentityType
-    role_name: Optional[str]       # assumed-role のとき
-    session_name: Optional[str]    # assumed-role の末尾 (email or username or instance-id)
-    iam_user_name: Optional[str]   # iam_user のとき
+    role_name: Optional[str]       # set for assumed-role identities
+    session_name: Optional[str]    # tail of the assumed-role ARN (email, username, or instance-id)
+    iam_user_name: Optional[str]   # set for iam_user identities
 
 
 def verify_and_call_sts(
@@ -66,7 +66,7 @@ def verify_and_call_sts(
     headers: dict[str, str],
     body: str = "",
 ) -> StsIdentity:
-    """CLI から受け取った presigned リクエストを検証し、STS を直接呼んで身元確認する.
+    """Validate the presigned request received from the CLI and call STS directly to verify identity.
 
     Replay protection (P3-1): before transporting the signed request to
     STS, record its fingerprint in the nonces table with a short TTL.
@@ -132,7 +132,7 @@ def verify_and_call_sts(
             ),
         )
 
-    # 署名済みのまま STS に転送 (body は sigv4 署名に含まれるため改変不可)
+    # Forward the signed request to STS unchanged (body is part of the sigv4 signature and must not be modified).
     try:
         with httpx.Client(timeout=10.0) as client:
             resp = client.request(
@@ -155,7 +155,7 @@ def verify_and_call_sts(
             ),
         )
 
-    # XML parse
+    # Parse the XML response.
     try:
         return _parse_sts_response(resp.text)
     except (ET.ParseError, KeyError) as e:
@@ -176,19 +176,19 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str]) -> None:
             detail=f"STS host not allowed: {parsed.hostname}",
         )
 
-    # Action=GetCallerIdentity の検証 (query または body どちらでも、一応 URL 側を確認)
+    # Validate Action=GetCallerIdentity (check the URL side; it can also be in the body).
     query = parse_qs(parsed.query)
     action_values = query.get("Action", [])
-    # aws-sdk-rust の presigning では body に Action が入るケースがあるため、
-    # URL に Action が無ければ Authorization ヘッダで signed-payload として含まれる想定.
-    # ここでは URL に Action があれば厳密チェック、無ければ pass (最終的に STS が弾く)
+    # aws-sdk-rust presigning sometimes puts Action in the body instead of the URL;
+    # if Action is absent from the URL, it is assumed to be in the Authorization signed-payload.
+    # We enforce strictly when Action is in the URL; otherwise pass (STS will reject invalid requests).
     if action_values and action_values[0] != _STS_ACTION:
         raise HTTPException(
             status_code=400,
             detail=f"Only Action={_STS_ACTION} is accepted",
         )
 
-    # X-Amz-Date 検証 (ヘッダ名は大文字小文字を区別しないことを考慮)
+    # Validate X-Amz-Date (header names are case-insensitive).
     lowered = {k.lower(): v for k, v in headers.items()}
     x_amz_date = lowered.get("x-amz-date")
     if not x_amz_date:
@@ -206,7 +206,7 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str]) -> None:
             detail=f"Presigned URL timestamp out of range ({int(skew)}s skew)",
         )
 
-    # Authorization ヘッダ存在チェック (sigv4 署名)
+    # Verify that the Authorization header (sigv4 signature) is present.
     if "authorization" not in lowered:
         raise HTTPException(
             status_code=400, detail="Authorization header (sigv4) is required"
@@ -214,7 +214,7 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str]) -> None:
 
 
 def _parse_sts_response(xml_text: str) -> StsIdentity:
-    """STS GetCallerIdentity XML から Arn/UserId/Account を抽出し identity_type を分類."""
+    """Parse Arn/UserId/Account from the STS GetCallerIdentity XML and classify identity_type."""
     ns = {"sts": "https://sts.amazonaws.com/doc/2011-06-15/"}
     root = ET.fromstring(xml_text)
     arn_elem = root.find(".//sts:Arn", ns)
@@ -231,9 +231,9 @@ def _parse_sts_response(xml_text: str) -> StsIdentity:
 
 
 def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
-    """Arn から identity_type, role_name, session_name, iam_user_name を決定.
+    """Determine identity_type, role_name, session_name, and iam_user_name from an ARN.
 
-    Arn 形式:
+    ARN formats:
       - arn:aws:iam::<acc>:user/<name>                       -> iam_user
       - arn:aws:sts::<acc>:assumed-role/<role>/<session>     -> assumed_role (SSO or federated or instance)
     """
@@ -259,7 +259,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
             )
         role_name, session = parts
 
-        # Instance Profile 判定: session が i-<hex> かつ UserId が AROA* で始まる
+        # Instance Profile detection: session matches i-<hex> and UserId starts with AROA.
         if _INSTANCE_PROFILE_SESSION_RE.match(session) and user_id.startswith("AROA"):
             return StsIdentity(
                 arn=arn,
@@ -271,7 +271,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
                 iam_user_name=None,
             )
 
-        # IAM Identity Center (AWS SSO) の reserved role 形式
+        # IAM Identity Center (AWS SSO) reserved role format.
         if role_name.startswith("AWSReservedSSO_"):
             return StsIdentity(
                 arn=arn,
@@ -283,7 +283,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
                 iam_user_name=None,
             )
 
-        # それ以外の assumed-role は federated / manual AssumeRole
+        # Any other assumed-role is treated as a federated / manual AssumeRole.
         return StsIdentity(
             arn=arn,
             user_id=user_id,

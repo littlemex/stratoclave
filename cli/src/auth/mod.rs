@@ -1,11 +1,14 @@
-//! Authentication module (Phase 1 以前の legacy OIDC / saml2aws フロー).
+//! Authentication module (legacy OIDC / saml2aws flow from Phase 1 and earlier).
 //!
-//! Phase 2 (v2.1) 以降は `mvp/auth.rs` (Cognito User/Pass + Backend /api/mvp/auth/login) が
-//! デフォルト。本モジュールは以下の目的で残されている:
-//! - `AuthMethod` / `SavedTokens` enum が `config.rs` で参照される (AuthMethod の値列挙のため)
-//! - `authenticate()` / `get_token()` が `commands/{pipe,chat,ui}.rs` の pipe / 対話モードで使用
+//! From Phase 2 (v2.1) onward, `mvp/auth.rs` (Cognito User/Pass + Backend
+//! /api/mvp/auth/login) is the default path. This module is kept for the
+//! following reasons:
+//! - `AuthMethod` / `SavedTokens` are referenced by `config.rs` (for enum variants)
+//! - `authenticate()` / `get_token()` are used in pipe / interactive modes
+//!   via `commands/{pipe,chat,ui}.rs`
 //!
-//! 他の関数はビルド互換のため残存しているが呼ばれない。#[allow(dead_code)] で warning 抑制。
+//! Other functions remain for build compatibility but are never called.
+//! `#[allow(dead_code)]` suppresses the resulting warnings.
 #![allow(dead_code)]
 
 mod cognito_provider;
@@ -267,7 +270,7 @@ pub async fn browser_auth_flow(app_config: &AppConfig) -> Result<String> {
     Ok(auth_token.bearer_token)
 }
 
-// Phase 2: device_auth_flow は main.rs から呼ばれない。unused import warning を避けるため再エクスポート撤去。
+// Phase 2: device_auth_flow is no longer called from main.rs; re-export removed to avoid unused-import warnings.
 
 /// Derive Admin UI URL from API endpoint
 fn derive_admin_ui_url(api_endpoint: &str) -> String {

@@ -61,21 +61,22 @@ struct MintResponse {
 
 pub async fn run(cmd: UiCommand, config: &AppConfig) -> Result<()> {
     let saved = tokens::load().context(
-        "`stratoclave auth login` を実行してからもう一度 `stratoclave ui open` を試してください",
+        "Run `stratoclave auth login` and then try `stratoclave ui open` again.",
     )?;
     let access_token = saved.access_token.clone();
     if access_token.is_empty() {
-        bail!("アクセストークンが空です。再度 `stratoclave auth login` を実行してください");
+        bail!("Access token is empty. Please run `stratoclave auth login` again.");
     }
 
-    // 期限切れなら明示エラー (Frontend 側でも検出するが CLI で先に気付けるよう)
+    // Fail early on an expired token (the frontend will also catch this,
+    // but surfacing it in the CLI gives a clearer error message).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if saved.expires_at > 0 && saved.expires_at <= now {
         bail!(
-            "アクセストークンの有効期限が切れています。`stratoclave auth login` を再実行してください"
+            "Access token has expired. Please re-run `stratoclave auth login`."
         );
     }
 
@@ -94,7 +95,7 @@ pub async fn run(cmd: UiCommand, config: &AppConfig) -> Result<()> {
         UiCommand::Open => {
             eprintln!("[INFO] Opening Stratoclave UI: {}", base_url);
             if let Err(e) = open::that(&url_with_ticket) {
-                bail!("ブラウザを起動できませんでした: {}", e);
+                bail!("Failed to open browser: {}", e);
             }
             eprintln!("[OK] UI opened (ticket expires in ~30 s)");
         }
@@ -166,10 +167,10 @@ fn resolve_base_url(config: &AppConfig) -> Result<String> {
     if !config.api_endpoint.is_empty() {
         return Ok(config.api_endpoint.clone());
     }
-    // Final fallback: MvpConfig が環境変数 / config.toml から api_endpoint を拾う
+    // Final fallback: MvpConfig picks up api_endpoint from env vars / config.toml
     let mvp = MvpConfig::load().context(
-        "UI の URL が解決できません。`api_endpoint` を ~/.stratoclave/config.toml か \
-         STRATOCLAVE_API_ENDPOINT 環境変数で設定してください",
+        "Cannot resolve the UI URL. Set `api_endpoint` in ~/.stratoclave/config.toml \
+         or via the STRATOCLAVE_API_ENDPOINT environment variable.",
     )?;
     Ok(mvp.api_endpoint)
 }

@@ -1,7 +1,7 @@
-//! MVP 用のトークン永続化.
+//! Token persistence for the MVP path.
 //!
-//! 既存 `SavedTokens` とは別に、`~/.stratoclave/mvp_tokens.json` を使う.
-//! パーミッション 0600.
+//! Uses `~/.stratoclave/mvp_tokens.json` separately from the legacy `SavedTokens`.
+//! File permissions are set to 0600.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

@@ -1,17 +1,18 @@
 """Team Lead API (Phase 2).
 
-アクセス分離原則 (v2.1 §2):
-- Team Lead は自分が所有する Tenant のみ閲覧・管理できる
-- User 作成・Tenant へのユーザー紐付けは Admin 専権
-- 他 Tenant へのアクセスは 404 統一 (enumeration 防御)
+Access isolation (v2.1 §2):
+- A Team Lead may only view and manage the Tenants they own.
+- Creating users and assigning users to Tenants is an Admin-only privilege.
+- Requests for Tenants the caller does not own (or that do not exist) always
+  return a unified 404 (enumeration defense).
 
 Endpoints:
-- POST   /api/mvp/team-lead/tenants            自分が所有する Tenant を作成
-- GET    /api/mvp/team-lead/tenants            自分の所有 Tenant 一覧
-- GET    /api/mvp/team-lead/tenants/{id}       詳細 (所有者のみ)
-- PATCH  /api/mvp/team-lead/tenants/{id}       name / default_credit 更新
-- GET    /api/mvp/team-lead/tenants/{id}/members 所属ユーザー (user_id 非公開、email のみ)
-- GET    /api/mvp/team-lead/tenants/{id}/usage   Tenant 単位の使用量
+- POST   /api/mvp/team-lead/tenants            Create a Tenant owned by the caller
+- GET    /api/mvp/team-lead/tenants            List the caller's owned Tenants
+- GET    /api/mvp/team-lead/tenants/{id}       Tenant detail (owner only)
+- PATCH  /api/mvp/team-lead/tenants/{id}       Update name / default_credit
+- GET    /api/mvp/team-lead/tenants/{id}/members Members (user_id hidden; email only)
+- GET    /api/mvp/team-lead/tenants/{id}/usage   Per-Tenant usage totals
 """
 from __future__ import annotations
 
@@ -57,7 +58,7 @@ class TenantListResponse(BaseModel):
 
 
 class CreateTenantTeamLeadRequest(BaseModel):
-    """team_lead_user_id は Backend が強制セット (Critical C-E)."""
+    """team_lead_user_id is set by the backend (not accepted from the caller) — Critical C-E."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -66,7 +67,7 @@ class CreateTenantTeamLeadRequest(BaseModel):
 
 
 class UpdateTenantTeamLeadRequest(BaseModel):
-    """team_lead_user_id は受けない (不変性保証)."""
+    """team_lead_user_id is not accepted here (immutability guarantee)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -75,7 +76,7 @@ class UpdateTenantTeamLeadRequest(BaseModel):
 
 
 class TenantMemberPublic(BaseModel):
-    """user_id を含まない Team Lead 用 member summary (他 Tenant 追跡不可保証)."""
+    """Team Lead member summary — does not include user_id (prevents cross-Tenant tracking)."""
 
     email: str
     role: str
@@ -103,7 +104,7 @@ class UsageBucket(BaseModel):
 # Helpers: owner check returning 404 for non-owner / non-existent
 # -----------------------------------------------------------------------
 def _require_owner(tenant_id: str, actor: AuthenticatedUser) -> dict[str, Any]:
-    """admin 以外は所有者のみ許可。非所有者・非存在を一律 404 に統一."""
+    """Allow only the owner (or an admin). Non-owners and non-existent tenants both return a unified 404."""
     tenant = TenantsRepository().get(tenant_id)
     if "admin" in actor.roles:
         if not tenant:
@@ -133,7 +134,7 @@ def create_tenant(
     body: CreateTenantTeamLeadRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
 ) -> TenantItem:
-    """Team Lead が自分が所有する Tenant を作成。team_lead_user_id は user.user_id で強制."""
+    """Create a Tenant owned by the calling Team Lead. team_lead_user_id is forced to user.user_id."""
     try:
         item = TenantsRepository().create(
             name=body.name,
@@ -160,9 +161,9 @@ def create_tenant(
 def list_own_tenants(
     actor: AuthenticatedUser = Depends(require_permission("tenants:read-own")),
 ) -> TenantListResponse:
-    """自分が所有する Tenant 一覧 (team-lead-index Query)."""
+    """List Tenants owned by the caller (team-lead-index Query)."""
     if "admin" in actor.roles:
-        # admin は別 API 使うべきだが、せっかく呼んだので空ではなく全所有を返す
+        # Admins should use the admin API, but since we got a request return all instead of empty.
         items, _ = TenantsRepository().list_all(limit=100)
     else:
         items = TenantsRepository().list_by_owner(actor.user_id)
@@ -209,7 +210,7 @@ def list_members(
     tenant_id: str,
     actor: AuthenticatedUser = Depends(require_permission("tenants:read-own")),
 ) -> TenantMembersResponse:
-    """所属ユーザー (email + credit のみ、user_id は非公開)."""
+    """List members of a tenant (email + credit only; user_id is not exposed)."""
     _require_owner(tenant_id, actor)
     user_tenants_repo = UserTenantsRepository()
     resp = user_tenants_repo._table.query(
@@ -264,7 +265,7 @@ def get_own_tenant_usage(
         bucket.output_tokens += output_tokens
         model = str(it.get("model_id") or "unknown")
         bucket.by_model[model] = bucket.by_model.get(model, 0) + tokens
-        # user_email に集計 (Team Lead には user_id を見せない)
+        # Aggregate by user_email (user_id is not exposed to Team Leads).
         email = str(it.get("user_email") or "unknown")
         bucket.by_user_email[email] = bucket.by_user_email.get(email, 0) + tokens
     return bucket

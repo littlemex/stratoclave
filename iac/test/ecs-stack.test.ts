@@ -74,8 +74,8 @@ describe('EcsStack', () => {
     template = Template.fromStack(stack);
   });
 
-  // ECS-01: ECS Cluster が作成され、Container Insights が有効 (P0)
-  test('ECS Cluster が作成され、Container Insights が有効であること', () => {
+  // ECS-01: ECS Cluster is created with Container Insights enabled (P0)
+  test('ECS Cluster is created with Container Insights enabled', () => {
     template.hasResourceProperties('AWS::ECS::Cluster', {
       ClusterName: 'stratoclave-cluster',
       ClusterSettings: [
@@ -88,7 +88,7 @@ describe('EcsStack', () => {
   });
 
   // ECS-02: Fargate Task Definition (CPU=256, Memory=512) (P0)
-  test('Fargate Task Definition が正しい CPU とメモリで作成されること', () => {
+  test('Fargate Task Definition is created with the correct CPU and memory', () => {
     template.hasResourceProperties('AWS::ECS::TaskDefinition', {
       Family: 'stratoclave-backend',
       Cpu: '256',
@@ -134,7 +134,7 @@ describe('EcsStack', () => {
   // hardening, A-08-log) so that incident forensics span the typical
   // SOC2/ISO27001 audit window. RemovalPolicy is RETAIN so a stack
   // rebuild does not erase the audit trail.
-  test('CloudWatch LogGroup が正しく設定されていること', () => {
+  test('CloudWatch LogGroup is configured correctly', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/ecs/stratoclave-backend',
       RetentionInDays: 90,

@@ -5,22 +5,22 @@
 # FastAPI
 fastapi==0.136.1
 uvicorn[standard]==0.32.0
-python-multipart==0.0.27
+python-multipart==0.0.31
 
 # httpx is used at runtime by the backend to forward signed STS requests
 # and by tests; keep it in the runtime set.
 httpx==0.28.1
 
 # AWS
-boto3==1.42.97
+boto3==1.43.27
 # Mints short-lived bearer tokens for bedrock-mantle (OpenAI Responses API).
 # `expiry=timedelta(seconds=900)` is set in mvp/openai_responses.py so the
 # token TTL stays at 15 min instead of the library default of 1 h.
 aws-bedrock-token-generator==1.1.0
 
 # Utilities
-pydantic[email]==2.13.3
-pydantic-settings==2.14.0
+pydantic[email]==2.13.4
+pydantic-settings==2.14.2
 python-dotenv==1.2.2
 
 # Observability
@@ -32,7 +32,7 @@ python-json-logger==4.1.0
 # / PYSEC-2026-176/177/178/179) including a critical `crit` header
 # bypass and several HMAC / unrestricted URI / DoS issues in PyJWKClient.
 PyJWT[crypto]==2.13.0
-cryptography==47.0.0
+cryptography==48.0.1
 
 # Rate limiting (in-process token bucket shared across routes).
 slowapi==0.1.9

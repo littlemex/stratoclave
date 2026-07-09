@@ -16,11 +16,12 @@ import { Construct } from 'constructs';
 /**
  * Stratoclave IaC entrypoint (Phase 2 v2.1)
  *
- * Topology:
+ * Topology (9 stacks):
  *   - Network (Public Subnet, 2 AZ, no NAT)
- *   - DynamoDB (10 tables; Tenants / Permissions added in Phase 2)
+ *   - DynamoDB (15 tables; Tenants/Permissions added in Phase 2, TrustedAccounts/SsoPreRegistrations/SsoNonces in Phase S, ApiKeys in Phase C, UiTickets in P0-8 follow-up)
  *   - ECR
  *   - ALB (internet-facing, HTTP only)
+ *   - WAF (CloudFront-scope WebACL; opt-out with ENABLE_WAF=false)
  *   - Frontend (S3 + CloudFront + CloudFront Function SPA fallback)
  *   - Cognito User Pool (cross-stack references the Frontend domain)
  *   - ECS Fargate (placed directly in the public subnet)
@@ -57,20 +58,20 @@ const env = {
   region: cdkRegion,
 };
 
-const cognitoEnv = env; // 同一リージョンに統一 (v2.1)
+const cognitoEnv = env; // Unified to the same region (v2.1)
 
-const cognitoDomainPrefix = process.env.COGNITO_DOMAIN_PREFIX; // optional (未指定なら自動生成)
+const cognitoDomainPrefix = process.env.COGNITO_DOMAIN_PREFIX; // optional (auto-generated if not specified)
 
-// Bedrock デフォルトモデル (Backend のマッピング fallback)
+// Default Bedrock model (Backend mapping fallback)
 const defaultBedrockModel =
   process.env.DEFAULT_BEDROCK_MODEL ||
   'us.anthropic.claude-opus-4-7';
 
-// Admin 作成ゲート (Critical C-D): production では bootstrap 後に unset する運用
+// Admin creation gate (Critical C-D): unset after bootstrap in production
 const allowAdminCreation = process.env.ALLOW_ADMIN_CREATION || 'false';
-// P1-A: production では `ALLOW_ADMIN_CREATION_UNTIL=<epoch>` も必要。
-// ここで値を受け取って ECS env に流すことで、operator が SSM を直接
-// 触ることなく CDK deploy 経路で制御できる。
+// P1-A: in production, `ALLOW_ADMIN_CREATION_UNTIL=<epoch>` is also required.
+// Accepting the value here and passing it to the ECS environment lets
+// operators control it via the CDK deploy path without touching SSM directly.
 const allowAdminCreationUntil = process.env.ALLOW_ADMIN_CREATION_UNTIL || '';
 
 // Environment flag drives production-only knobs (deletion protection,
@@ -95,7 +96,7 @@ const wafRateLimit = Number(process.env.WAF_RATE_LIMIT_PER_5MIN || 300);
 const wafIpAllowlistEnabled =
   (process.env.WAF_IP_ALLOWLIST_ENABLED || 'false').toLowerCase() === 'true';
 
-// --- 1. Network (Public Subnet 2 AZ、NAT なし) ---
+// --- 1. Network (Public Subnet 2 AZ, no NAT) ---
 const networkStack = new NetworkStack(app, stackName(prefix, 'network'), {
   env,
   prefix,
@@ -132,7 +133,7 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
 });
 albStack.addDependency(networkStack);
 
-// --- 5a. WAF (CLOUDFRONT scope → us-east-1 固定).
+// --- 5a. WAF (CLOUDFRONT scope, fixed to us-east-1).
 // We already enforce env.region === 'us-east-1' above, so the WAF stack sits
 // in the same region as everything else and no cross-region reference is
 // needed. The WebACL ARN is passed to FrontendStack via props.
@@ -160,8 +161,8 @@ if (wafStack) {
   frontendStack.addDependency(wafStack);
 }
 
-// --- 6. Cognito (Frontend の CloudFront ドメインを cross-stack 参照) ---
-// Blocker B2 (v2.1): crossRegionReferences は削除 (同一 us-east-1)
+// --- 6. Cognito (cross-stack reference to the Frontend CloudFront domain) ---
+// Blocker B2 (v2.1): crossRegionReferences removed (same us-east-1 region)
 const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
   env: cognitoEnv,
   prefix,
@@ -177,8 +178,8 @@ const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
 });
 cognitoStack.addDependency(frontendStack);
 
-// --- 7. ECS (Public Subnet 直置き) ---
-// Blocker B2 (v2.1): crossRegionReferences は削除
+// --- 7. ECS (placed directly in the Public Subnet) ---
+// Blocker B2 (v2.1): crossRegionReferences removed
 const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   env,
   prefix,
@@ -190,7 +191,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   dynamoDbTableArns: dynamoDBStack.allTableArns,
   cpu: 256,
   memory: 512,
-  desiredCount: 1, // in-memory state 前提、単一タスク運用
+  desiredCount: 1, // single-task operation assuming in-memory state
   containerPort: 8000,
   // A-01-ecr follow-through: with the repo IMMUTABLE, every deploy
   // must point at a content-addressed tag. Operators export
@@ -201,7 +202,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     STRATOCLAVE_PREFIX: prefix,
     AWS_REGION: env.region,
 
-    // Backend 実行モード
+    // Backend runtime mode
     DATABASE_TYPE: 'dynamodb',
     AUTH_MODE: 'cognito',
 
@@ -214,7 +215,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     OIDC_AUDIENCE: cognitoStack.clientId,
     OIDC_ORG_CLAIM: 'custom:org_id',
 
-    // DynamoDB テーブル名
+    // DynamoDB table names
     DYNAMODB_USERS_TABLE: dynamoDBStack.usersTable.tableName,
     DYNAMODB_USER_TENANTS_TABLE: dynamoDBStack.userTenantsTable.tableName,
     DYNAMODB_USAGE_LOGS_TABLE: dynamoDBStack.usageLogsTable.tableName,
@@ -223,14 +224,14 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_APP_SETTINGS_TABLE: dynamoDBStack.appSettingsTable.tableName,
     DYNAMODB_TAGS_TABLE: dynamoDBStack.tagsTable.tableName,
     DYNAMODB_SSE_TOKENS_TABLE: dynamoDBStack.sseTokensTable.tableName,
-    // Phase 2 新規テーブル
+    // Phase 2 new tables
     DYNAMODB_TENANTS_TABLE: dynamoDBStack.tenantsTable.tableName,
     DYNAMODB_PERMISSIONS_TABLE: dynamoDBStack.permissionsTable.tableName,
-    // Phase S: AWS SSO / STS ログイン用テーブル
+    // Phase S: tables for AWS SSO / STS login
     DYNAMODB_TRUSTED_ACCOUNTS_TABLE: dynamoDBStack.trustedAccountsTable.tableName,
     DYNAMODB_SSO_PRE_REGISTRATIONS_TABLE:
       dynamoDBStack.ssoPreRegistrationsTable.tableName,
-    // Phase C: 長期 API Key (cowork 等の gateway クライアント用)
+    // Phase C: long-lived API keys (for gateway clients such as cowork)
     DYNAMODB_API_KEYS_TABLE: dynamoDBStack.apiKeysTable.tableName,
     // Phase S: SSO replay-defence nonces (sso_sts.py falls back safely
     // if the table is unreachable, but set it so the fast path is used).
@@ -242,9 +243,9 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,
 
-    // 公開 API エンドポイント (CloudFront の HTTPS URL)
-    // /.well-known/stratoclave-config の api_endpoint として返す値。
-    // ALB 直 URL を返すと CLI が HTTP 経由で叩きに行くため、必ず CloudFront URL を返す。
+    // Public API endpoint (CloudFront HTTPS URL).
+    // This is the value returned as api_endpoint in /.well-known/stratoclave-config.
+    // Always return the CloudFront URL; returning the ALB URL directly would cause the CLI to call it over HTTP.
     STRATOCLAVE_API_ENDPOINT: `https://${frontendStack.cfnDistribution.attrDomainName}`,
 
     // Feature flags (MVP)
@@ -255,9 +256,9 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     TEAM_API_RATE_LIMIT: '30/minute',
     USAGE_API_RATE_LIMIT: '10/minute',
 
-    // Phase 2 (v2.1): Admin 作成ゲート (Critical C-D)
-    // P1-A: production では ALLOW_ADMIN_CREATION_UNTIL=<epoch> が
-    // 追加で必要。空文字列なら未設定扱いで backend が拒否する。
+    // Phase 2 (v2.1): Admin creation gate (Critical C-D).
+    // P1-A: in production, ALLOW_ADMIN_CREATION_UNTIL=<epoch> is also required.
+    // An empty string is treated as unset and the backend will reject the request.
     ALLOW_ADMIN_CREATION: allowAdminCreation,
     ALLOW_ADMIN_CREATION_UNTIL: allowAdminCreationUntil,
 
@@ -292,7 +293,7 @@ ecsStack.addDependency(dynamoDBStack);
 ecsStack.addDependency(cognitoStack);
 ecsStack.addDependency(frontendStack);
 
-// --- 8. Backend Config (Parameter Store 固定値) ---
+// --- 8. Backend Config (static Parameter Store values) ---
 class BackendConfigStack extends Stack {
   constructor(scope: Construct, id: string, stackProps: cdk.StackProps) {
     super(scope, id, stackProps);
@@ -346,7 +347,7 @@ new BackendConfigStack(app, stackName(prefix, 'config'), {
   description: `[${prefix}] Static Parameter Store values`,
 });
 
-// --- 全体タグ ---
+// --- Global tags ---
 cdk.Tags.of(app).add('Project', 'Stratoclave');
 cdk.Tags.of(app).add('Prefix', prefix);
 cdk.Tags.of(app).add('ManagedBy', 'CDK');

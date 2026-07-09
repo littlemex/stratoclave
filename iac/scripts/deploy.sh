@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# CDK スタックのデプロイスクリプト
+# CDK stack deployment script
 set -e
 
-# 色付きログ
+# Colored log helpers
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -26,7 +26,7 @@ log_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
-# 使い方
+# Usage
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
@@ -88,7 +88,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 環境変数のデフォルト設定
+# Set environment variable defaults
 if [ -z "$AWS_REGION" ]; then
     AWS_REGION="us-east-1"
     log_warn "AWS_REGION not set. Using default: $AWS_REGION"
@@ -99,16 +99,16 @@ if [ -n "$AWS_PROFILE" ]; then
     log_info "AWS Profile: $AWS_PROFILE"
 fi
 
-# CDK ディレクトリに移動
+# Change to CDK directory
 cd "$(dirname "$0")/.."
 
-# npm install（初回のみ）
+# Install npm dependencies (first run only)
 if [ ! -d "node_modules" ]; then
     log_step "Installing CDK dependencies..."
     npm install
 fi
 
-# CDK bootstrap（初回のみ）
+# CDK bootstrap (first run only)
 log_step "Checking CDK bootstrap..."
 if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region $AWS_REGION &>/dev/null; then
     log_warn "CDK not bootstrapped in this region. Bootstrapping..."

@@ -1,23 +1,24 @@
-"""UserTenants テーブル (クレジット残高管理 + Phase 2 status/credit_source/switch).
+"""UserTenants table (credit balance management + Phase 2 status/credit_source/switch).
 
-Phase 2 (v2.1) 変更:
-- `status` フィールドを追加: "active" | "archived"
-- `credit_source` フィールドを追加: "user_override" | "tenant_default" | "global_default"
-- `get()` は `status == "active"` のみ返す (archived は履歴として残す)
-- `ensure()` は archived レコードを active に昇格させる (A→B→A 再所属対応)
-- `switch_tenant()` で TransactWriteItems による原子的切替 (+ Cognito Saga は呼び出し側が担当)
+Phase 2 (v2.1) changes:
+- Added `status` field: "active" | "archived"
+- Added `credit_source` field: "user_override" | "tenant_default" | "global_default"
+- `get()` returns only rows where `status == "active"` (archived rows are kept as history)
+- `ensure()` promotes archived rows back to active (supports A→B→A re-membership)
+- `switch_tenant()` performs atomic tenant switching via TransactWriteItems
+  (Cognito Saga steps are handled by the caller)
 
-Phase 3 変更 (credit reservation):
-- 旧 `deduct()` を廃止、代わりに `reserve()` / `refund()` の 2 つに分解
-- `reserve()`: Bedrock 呼び出し**前**に atomic に max_tokens 相当を確保
-    ConditionExpression は比較演算のみサポートのため、
-    `credit_used <= max_allowed_used` かつ `total_credit = expected_total` を
-    スナップショット整合でチェック。total_credit が admin overwrite で変動した
-    場合は ConditionCheckFailed → 再読込して retry (concurrent admin change 対応)。
-- `refund()`: 実消費が reservation より少ない分を戻す。
-    `credit_used >= tokens` で underflow ガード。
-- `_stream_messages` / non-stream 共に「事前 reserve → Bedrock → 実消費で差額 refund」
-  のパターン。silent pass は禁止。
+Phase 3 changes (credit reservation):
+- Removed `deduct()`; replaced with `reserve()` / `refund()` pair
+- `reserve()`: atomically reserves max_tokens worth of credit **before** calling Bedrock.
+    Because ConditionExpression supports only comparisons, uses snapshot consistency:
+    checks `credit_used <= max_allowed_used` AND `total_credit = expected_total`.
+    If total_credit was changed by an admin concurrently, ConditionCheckFailed
+    triggers a re-read and retry (handles concurrent admin overwrites).
+- `refund()`: returns the unused portion when actual consumption is less than reserved.
+    Guards against underflow with `credit_used >= tokens`.
+- Both streaming and non-streaming paths follow the pattern:
+  reserve upfront → call Bedrock → refund the difference. Silent pass is prohibited.
 """
 from __future__ import annotations
 
@@ -35,11 +36,11 @@ def _now_iso() -> str:
 
 
 class CreditExhaustedError(Exception):
-    """クレジット残高が不足している場合に raise."""
+    """Raised when the credit balance is insufficient."""
 
 
 class UserTenantsRepository:
-    DEFAULT_CREDIT = 100_000  # 最終フォールバック (Tenant 未指定 + 個別未指定)
+    DEFAULT_CREDIT = 100_000  # Last-resort fallback (no tenant default and no individual override)
 
     def __init__(self, table_name: Optional[str] = None) -> None:
         self._table = get_dynamodb_resource().Table(
@@ -48,12 +49,12 @@ class UserTenantsRepository:
 
     # ----- read -----
     def get(self, user_id: str, tenant_id: str) -> Optional[dict[str, Any]]:
-        """active なレコードのみ返す (archived は get_including_archived() で)."""
+        """Return only active records (use get_including_archived() for archived rows)."""
         resp = self._table.get_item(Key={"user_id": user_id, "tenant_id": tenant_id})
         item = resp.get("Item")
         if not item:
             return None
-        # 既存データとの互換: status フィールドが無いレコードは active 扱い
+        # Backwards compatibility: rows without a status field are treated as active.
         if item.get("status", "active") != "active":
             return None
         return item
@@ -101,7 +102,7 @@ class UserTenantsRepository:
         now = _now_iso()
 
         if existing is None:
-            # 新規
+            # New row.
             item: dict[str, Any] = {
                 "user_id": user_id,
                 "tenant_id": tenant_id,
@@ -159,11 +160,11 @@ class UserTenantsRepository:
             )
             return resp.get("Attributes", {})
 
-        # active のまま、現状を返す (Credit は変更しない)
+        # Already active — return as-is (credit is not modified).
         return existing
 
     def _resolve_tenant_default(self, tenant_id: str) -> tuple[int, str]:
-        """Tenants.default_credit を参照、無ければグローバルフォールバック."""
+        """Look up Tenants.default_credit; fall back to the global default if absent."""
         try:
             from .tenants import TenantsRepository
             tenant = TenantsRepository().get(tenant_id)
@@ -187,34 +188,33 @@ class UserTenantsRepository:
     _RESERVE_MAX_RETRIES = 5
 
     def reserve(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
-        """原子的にクレジットを確保 (pessimistic reservation).
+        """Atomically reserve credit (pessimistic reservation).
 
-        Bedrock 呼び出し**前**に呼び、max_tokens 相当を先取りする。
-        呼び出し完了後に refund() で差額を戻す。
+        Call this **before** invoking Bedrock to pre-claim max_tokens worth of credit.
+        Call refund() afterward to return the unused portion.
 
-        アトミック性:
-          ConditionExpression は算術演算をサポートしないため、
-          `get → ConditionExpression (credit_used <= max_allowed_used AND
-          total_credit = expected_total) で update` のパターン。
-          並列リクエスト/admin overwrite で total_credit が変動した場合は
-          ConditionCheckFailed となり、再読込して retry する (最大 _RESERVE_MAX_RETRIES 回)。
+        Atomicity:
+          ConditionExpression does not support arithmetic, so we use the pattern:
+          get → update with ConditionExpression (credit_used <= max_allowed_used AND
+          total_credit = expected_total).
+          If total_credit changes due to concurrent requests or an admin overwrite,
+          ConditionCheckFailed triggers a re-read and retry (up to _RESERVE_MAX_RETRIES times).
 
-          - 同一 total_credit 下での並列 reserve: ConditionExpression により
-            合計 credit_used が total_credit を超えた瞬間から以降の reserve は失敗する。
-            超過は発生しない。
-          - admin の overwrite_credit と同時実行: reserve 側が CCF でリトライ、
-            overwrite が active なら update_item は成功。
-          - Tenant archived: (attribute_not_exists(#s) OR #s = :active) で排除。
+          - Concurrent reserves under the same total_credit: ConditionExpression ensures
+            credit_used never exceeds total_credit; the first request to breach the cap fails.
+          - Concurrent admin overwrite_credit: the reserve side retries on CCF; the overwrite
+            succeeds if the row is still active.
+          - Archived tenant: excluded by (attribute_not_exists(#s) OR #s = :active).
 
         Args:
-          tokens: 確保する token 数 (> 0)
+          tokens: Number of tokens to reserve (> 0).
 
         Raises:
-          CreditExhaustedError: 残高不足、または concurrent update で retry 上限到達。
-            Tenant が存在しない / archived の場合も同じ例外。
+          CreditExhaustedError: Insufficient balance, or retry limit reached due to
+            concurrent updates. Also raised when the tenant does not exist or is archived.
 
         Returns:
-          確保後の残高 (remaining = total_credit - credit_used)
+          Remaining balance after reservation (total_credit - credit_used).
         """
         if tokens <= 0:
             return self.remaining_credit(user_id, tenant_id)
@@ -234,8 +234,8 @@ class UserTenantsRepository:
             max_allowed_used = total - tokens
 
             if used > max_allowed_used:
-                # 事前チェックで既に超過 → 並列の他リクエストが埋めた場合でも
-                # ここで即座に残高不足を返す (retry しても意味がない)
+                # Pre-check already shows exhaustion — return immediately even if
+                # another concurrent request filled the gap (retry is pointless).
                 raise CreditExhaustedError(
                     f"Insufficient credit for user_id={user_id} tenant_id={tenant_id} "
                     f"(total={total}, used={used}, requested={tokens})"
@@ -264,7 +264,7 @@ class UserTenantsRepository:
                 )
             except ClientError as e:
                 if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                    # snapshot が古い (他の reserve / admin overwrite) → 再読込で retry
+                    # Snapshot is stale (another reserve or admin overwrite) — re-read and retry.
                     continue
                 raise
 
@@ -280,17 +280,17 @@ class UserTenantsRepository:
         )
 
     def refund(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
-        """確保済みクレジットを戻す (reserve の逆操作).
+        """Return reserved credit (inverse of reserve).
 
-        reserve で確保した額のうち実消費を差し引いた余剰を atomic に戻す。
-        credit_used がアンダーフローしないよう ConditionExpression で守る。
-        Tenant が archived でも refund は許可する (over-charge を避けるため)。
+        Atomically returns the unused portion of the reservation (reserved minus
+        actual consumption). ConditionExpression guards against credit_used underflow.
+        Refund is permitted even on archived tenants to avoid overcharging.
 
         Args:
-          tokens: 戻す token 数 (> 0)
+          tokens: Number of tokens to return (> 0).
 
         Returns:
-          refund 後の残高
+          Remaining balance after the refund.
         """
         if tokens <= 0:
             return self.remaining_credit(user_id, tenant_id)
@@ -309,7 +309,7 @@ class UserTenantsRepository:
             )
         except ClientError as e:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                # underflow ガード: credit_used < tokens → 0 にクランプ
+                # Underflow guard: credit_used < tokens → clamp to 0.
                 item = self.get_including_archived(user_id, tenant_id)
                 if item:
                     return max(
@@ -340,7 +340,7 @@ class UserTenantsRepository:
     def overwrite_credit(
         self, *, user_id: str, tenant_id: str, total_credit: int, reset_used: bool = False
     ) -> dict[str, Any]:
-        """Admin による Credit 上書き (user_override としてマーク)."""
+        """Admin credit overwrite (marks the record as user_override)."""
         update_expr_parts = [
             "total_credit = :total",
             "credit_source = :src",
@@ -383,27 +383,28 @@ class UserTenantsRepository:
         new_role: str = "user",
         new_total_credit: Optional[int] = None,
     ) -> dict[str, Any]:
-        """User を old_tenant から new_tenant に原子的に切替。
+        """Atomically move a user from old_tenant to new_tenant.
 
-        TransactWriteItems で実行 (v2.1 §4.3):
-          1. UserTenants[user_id, old_tenant_id] status=archived (active 限定)
-          2. UserTenants[user_id, new_tenant_id] を active で put (存在なければ)
-          3. Users[user_id] org_id を更新
+        Executed as a TransactWriteItems operation (v2.1 §4.3):
+          1. Set UserTenants[user_id, old_tenant_id] status=archived (active rows only).
+          2. Put UserTenants[user_id, new_tenant_id] as active (if not already present).
+          3. Update Users[user_id] org_id.
 
-        呼び出し側は本メソッド成功後に:
+        After this method returns successfully, the caller must:
           - Cognito AdminUpdateUserAttributes(custom:org_id=new_tenant_id)
-          - Cognito AdminUserGlobalSignOut(sub)  # JWT 即時失効
-        を実行する (Saga パターン、失敗時は Admin に再実行を促す)。
+          - Cognito AdminUserGlobalSignOut(sub)  # immediately invalidate existing JWTs
+        These steps follow the Saga pattern; on failure the admin is responsible for
+        retrying.
 
         Returns:
-          新 UserTenants レコード (dict)
+          The new UserTenants record (dict).
         """
         from .client import users_table_name
 
         if old_tenant_id == new_tenant_id:
             raise ValueError("old_tenant_id == new_tenant_id")
 
-        # 新 Tenant の default_credit 解決
+        # Resolve default_credit for the new tenant.
         if new_total_credit is not None:
             credit = int(new_total_credit)
             credit_source = "user_override"
@@ -413,15 +414,15 @@ class UserTenantsRepository:
         now = _now_iso()
         users_tbl = users_table_name()
         user_tenants_tbl = self._table.name
-        # low-level client for TransactWriteItems (resource.meta.client でも可だが、
-        # 明示的に新規 client を作ると ResourceSerialization の副作用を避けられる)
+        # Use a low-level DynamoDB client for TransactWriteItems.
+        # (resource.meta.client also works, but a fresh client avoids ResourceSerialization side effects.)
         import os as _os
         import boto3 as _boto3
         region = _os.getenv("AWS_REGION", "us-east-1")
         dynamo = _boto3.client("dynamodb", region_name=region)
 
         transact_items: list[dict[str, Any]] = [
-            # (1) 旧 UserTenants を archived に
+            # (1) Archive the old UserTenants row.
             {
                 "Update": {
                     "TableName": user_tenants_tbl,
@@ -439,7 +440,7 @@ class UserTenantsRepository:
                     },
                 }
             },
-            # (2) 新 UserTenants を active で put (既存 archived を上書き、active を上書きは阻止)
+            # (2) Put the new UserTenants row as active (overwrites an existing archived row; blocks overwriting an active row).
             {
                 "Put": {
                     "TableName": user_tenants_tbl,
@@ -461,7 +462,7 @@ class UserTenantsRepository:
                     },
                 }
             },
-            # (3) Users.org_id を更新
+            # (3) Update Users.org_id.
             {
                 "Update": {
                     "TableName": users_tbl,
@@ -484,14 +485,14 @@ class UserTenantsRepository:
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code == "TransactionCanceledException":
-                # ConditionCheckFailed 等。呼び出し側は 409 で再試行を促す
+                # e.g. ConditionCheckFailed — caller should surface a 409 to prompt a retry.
                 reasons = e.response.get("CancellationReasons", [])
                 raise ValueError(
                     f"Tenant switch transaction failed: reasons={reasons}"
                 )
             raise
 
-        # 返却用: 新 UserTenants レコードを取得
+        # Fetch the newly written UserTenants record to return.
         resp = self._table.get_item(
             Key={"user_id": user_id, "tenant_id": new_tenant_id}
         )

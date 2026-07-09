@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-06-03 -->
+<!-- Last updated: 2026-07-10 -->
 <!-- Applies to: Stratoclave main with `feature/openai-responses-proxy` (or later) -->
 
 # Using Stratoclave with OpenAI Codex CLI
@@ -37,7 +37,7 @@ configurations that need to survive across runs (CI, remote workers).
   `codex --version` (≥ 0.136.0 recommended).
 - The Bedrock account behind your deployment must have model access
   enabled for the OpenAI families you intend to call:
-    - `openai.gpt-5.4` — us-east-2 and us-west-2
+    - `openai.gpt-5.4` — us-west-2 only
     - `openai.gpt-5.5` — us-east-2 only
 - Your stratoclave user role must carry the `responses:send` scope.
   All three default roles (`admin`, `team_lead`, `user`) carry it
@@ -134,6 +134,19 @@ model = "openai.gpt-5.4"
 # or every request returns a 400 validation_error.
 web_search = "disabled"
 
+# codex 0.136 walks up from `cwd` looking for a project-local
+# `.codex/config.toml`. When the user is anywhere under $HOME
+# the search reaches `~/.codex/config.toml` itself and emits
+# "Ignored unsupported project-local config keys" for any
+# `model_provider` / `model_providers` entries. An empty list
+# short-circuits the walk so only this file loads.
+project_root_markers = []
+
+# codex's built-in model catalog does not list the GPT-5 family.
+# Without an explicit context window codex warns "Model metadata for
+# ... not found. Defaulting to fallback metadata" on every startup.
+model_context_window = 400000
+
 [model_providers.stratoclave]
 name                   = "Stratoclave (OpenAI via Bedrock)"
 base_url               = "https://<your>.cloudfront.net/openai/v1"
@@ -165,9 +178,13 @@ From the CLI:
 stratoclave api-key revoke <key_hash>
 ```
 
-The hash is printed by `stratoclave api-key create` at issue time, and
-also visible in the "Revocation hash" field of the `Mint a new API key`
-dialog.
+`<key_hash>` is the SHA-256 hex digest of the plaintext key. Note that
+`stratoclave api-key create` does **not** print the hash in its output
+(it shows only `key_id`, scopes, and `expires_at`), and
+`stratoclave api-key list` also does not expose `key_hash`. Until the
+list output is enriched, use the web UI (**Account -> API keys -> Revoke**)
+or call `DELETE /api/mvp/me/api-keys/{key_hash}` directly. See
+[CLI_GUIDE.md -> Known limitations](CLI_GUIDE.md#known-limitations).
 
 ## Path C — direct Bedrock (no Stratoclave)
 

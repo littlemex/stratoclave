@@ -1,17 +1,19 @@
 """
 DynamoDB repositories for MVP (Phase 2 / Phase S).
 
-全テーブル名は環境変数から取得する (CDK 側で SSM Parameter Store にも書かれる)。
-Phase 2 で使うテーブル:
-- Users: ユーザー基本情報 (Cognito sub と 1:1)
-- UserTenants: ユーザー x テナントの紐付け + クレジット残高 (status: active/archived)
-- UsageLogs: トークン消費履歴
-- Tenants: テナントメタデータ (name, owner, default_credit)
-- Permissions: role -> permissions (RBAC 真実源、permissions.json から seed)
+All table names are resolved from environment variables (also written to SSM
+Parameter Store by the CDK stack).
 
-Phase S (AWS SSO / STS login) で使うテーブル:
-- TrustedAccounts: 信頼する AWS Account ID の allowlist + provisioning policy
-- SsoPreRegistrations: invite_only 用の email 事前登録
+Tables used in Phase 2:
+- Users: core user records (1:1 with Cognito sub)
+- UserTenants: user × tenant membership + credit balance (status: active/archived)
+- UsageLogs: token consumption history
+- Tenants: tenant metadata (name, owner, default_credit)
+- Permissions: role → permissions (RBAC source of truth, seeded from permissions.json)
+
+Tables used in Phase S (AWS SSO / STS login):
+- TrustedAccounts: allowlist of trusted AWS account IDs + provisioning policy
+- SsoPreRegistrations: pre-registered emails for invite_only provisioning
 """
 from .client import get_dynamodb_resource
 from .users import UsersRepository

@@ -56,7 +56,7 @@ export default function App() {
     <>
       <ErrorToast />
       <Routes>
-        {/* Cognito callback は認証状態に関わらず到達可能にする */}
+        {/* Cognito callback is reachable regardless of auth state */}
         <Route path="/callback" element={<Callback />} />
 
         {state.status === 'unauthenticated' ? (

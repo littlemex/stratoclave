@@ -1,9 +1,9 @@
 /**
  * Backend API client (Phase 2 `/api/mvp/*`)
  *
- * 同一 origin (= CloudFront / Vite proxy) に配信されたエンドポイントに
- * Bearer access_token を付けて叩く。すべて相対 URL のため、本番・開発で
- * コードは一切変えずに動く。
+ * Calls endpoints served on the same origin (= CloudFront / Vite proxy)
+ * with a Bearer access_token. All URLs are relative, so the code runs
+ * unchanged in both production and development.
  */
 
 import { QueryClient } from '@tanstack/react-query'

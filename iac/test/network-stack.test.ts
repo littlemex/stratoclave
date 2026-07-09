@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import { NetworkStack } from '../lib/network-stack';
 
-describe('NetworkStack (v2.1 MVP: Public Subnet 直置き、NAT なし、WAF+CloudFront 前提)', () => {
+describe('NetworkStack (v2.1 MVP: ECS on Public Subnet, no NAT, WAF+CloudFront assumed)', () => {
   let app: cdk.App;
   let stack: NetworkStack;
   let template: Template;

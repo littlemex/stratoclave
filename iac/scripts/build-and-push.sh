@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Docker イメージのビルドと ECR プッシュスクリプト
+# Build Docker image and push to ECR
 set -e
 
-# 色付きログ
+# Colored log helpers
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,13 +21,13 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
-# 引数チェック
+# Validate required arguments
 if [ -z "$AWS_REGION" ]; then
     AWS_REGION="us-east-1"
     log_warn "AWS_REGION not set. Using default: $AWS_REGION"
 fi
 
-# ECR リポジトリ名を取得
+# Fetch ECR repository name
 ECR_REPO_NAME=$(aws cloudformation describe-stacks \
     --stack-name StratoclaveEcrStack \
     --query 'Stacks[0].Outputs[?OutputKey==`RepositoryName`].OutputValue' \
@@ -42,27 +42,27 @@ fi
 
 log_info "ECR Repository: $ECR_REPO_NAME"
 
-# AWS Account ID の取得
+# Retrieve AWS account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 
 log_info "ECR URI: $ECR_URI"
 
-# ECR ログイン
+# Authenticate to ECR
 log_info "Logging in to ECR..."
 aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_URI
 
-# Docker イメージのビルド
+# Build Docker image
 log_info "Building Docker image..."
 cd "$(dirname "$0")/../../backend"
 docker build -t stratoclave-backend:latest .
 
-# タグ付け
+# Tag image
 log_info "Tagging image..."
 docker tag stratoclave-backend:latest $ECR_URI:latest
 docker tag stratoclave-backend:latest $ECR_URI:$(date +%Y%m%d-%H%M%S)
 
-# ECR にプッシュ
+# Push image to ECR
 log_info "Pushing image to ECR..."
 docker push $ECR_URI:latest
 docker push $ECR_URI:$(date +%Y%m%d-%H%M%S)

@@ -1,9 +1,9 @@
 /**
  * Frontend permissions (Phase 2)
  *
- * Backend `backend/permissions.json` と一致させる。
- * Backend が真実源なので、Frontend の判定はあくまで UI 表示切替用。
- * 実際の認可は Backend が 403/404 で拒否する。
+ * Must stay in sync with `backend/permissions.json`.
+ * The backend is the source of truth; frontend checks are for UI display switching only.
+ * Actual authorization is enforced by the backend via 403/404 responses.
  */
 
 import type { UserRole } from '@/types/auth'

@@ -88,7 +88,7 @@ describe('MeUsage', () => {
 
     render(withClient(<MeUsage />))
 
-    // "期間の総消費" = sum of by_model values → 1,800 + 700 = 2,500 (may
+    // "Period total consumption" = sum of by_model values → 1,800 + 700 = 2,500 (may
     // also appear in the credit_used slot). Using getAllByText confirms
     // at least one occurrence and avoids brittle ordering.
     await waitFor(() =>

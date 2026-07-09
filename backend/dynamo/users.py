@@ -1,4 +1,4 @@
-"""Users テーブルのリポジトリ."""
+"""Repository for the Users table."""
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -18,15 +18,15 @@ def _now_epoch() -> int:
 
 
 class UsersRepository:
-    """Users テーブルへの CRUD.
+    """CRUD operations for the Users table.
 
-    テーブル設計:
+    Table design:
       PK: user_id (Cognito sub)
-      SK: sk      ("PROFILE" など固定)
+      SK: sk      (fixed value such as "PROFILE")
       GSI email-index: PK email
       GSI auth-provider-user-id-index: PK auth_provider_user_id
 
-    Phase S で追加のオプショナル属性:
+    Optional attributes added in Phase S:
       auth_method: "cognito" | "sso"
       sso_account_id: str
       sso_principal_arn: str
@@ -52,13 +52,15 @@ class UsersRepository:
         sso_principal_arn: Optional[str] = None,
         locale: Optional[str] = None,
     ) -> dict[str, Any]:
-        """新規ユーザー作成 or 既存更新.
+        """Create a new user or update an existing one.
 
-        created_at は既存 item があれば保持、無ければ今時刻. Phase S 追加属性も扱う.
+        Preserves created_at from the existing item if present; otherwise uses the current time.
+        Also handles Phase S SSO attributes.
 
-        ``locale`` (i18n): UI 表示言語. 明示指定があれば上書き、無ければ既存値
-        を保持、既存も無ければ default の ``"ja"`` を設定。backend 側では
-        許容値を ``{"en", "ja"}`` に制限する (validation は呼び出し側)。
+        ``locale`` (i18n): UI display language. If explicitly provided it overwrites the
+        stored value; otherwise the existing value is preserved; if neither exists the
+        default ``"ja"`` is used. The backend restricts accepted values to ``{"en", "ja"}``
+        (validation is the caller's responsibility).
         """
         now = _now_iso()
         existing = self.get_by_user_id(user_id)
@@ -82,7 +84,7 @@ class UsersRepository:
             item["locale"] = existing["locale"]
         else:
             item["locale"] = "ja"
-        # Phase S: SSO 系属性 (明示指定時のみ上書き)
+        # Phase S: SSO attributes — overwrite only when explicitly provided.
         if auth_method is not None:
             item["auth_method"] = auth_method
         elif existing and existing.get("auth_method"):
@@ -109,7 +111,7 @@ class UsersRepository:
     def record_sso_login(
         self, *, user_id: str, sso_account_id: str, sso_principal_arn: str
     ) -> None:
-        """SSO login 成功時、last_sso_login_at を更新."""
+        """Update last_sso_login_at upon a successful SSO login."""
         self._table.update_item(
             Key={"user_id": user_id, "sk": self.SK_PROFILE},
             UpdateExpression=(
@@ -239,16 +241,17 @@ class UsersRepository:
         return items[0] if items else None
 
     def scan_admins(self, limit: int = 10) -> list[dict[str, Any]]:
-        """Users テーブルを scan して admin role を持つユーザを最大 limit 件返す.
+        """Scan the Users table and return up to `limit` users that hold the admin role.
 
-        bootstrap-admin の zero-state 判定用。scan はコストが高いが、
-        呼ばれるのは lifespan 時の 1 回だけ、かつ limit で早期打ち切りするため許容範囲.
+        Used for bootstrap-admin zero-state detection. Scans are expensive, but this
+        method is called only once at lifespan startup and exits early via `limit`.
 
-        注意: DynamoDB scan は eventually consistent。lifespan 中に別プロセスが
-        admin を追加していたらミスする可能性があるが、本用途では許容。
+        Note: DynamoDB scans are eventually consistent. A concurrent admin creation
+        during lifespan startup could be missed, but this is acceptable for the
+        intended use case.
 
-        実装メモ: `roles` は DynamoDB の予約語なので ProjectionExpression で
-        直接名指しできない。ExpressionAttributeNames でエイリアス化する。
+        Implementation note: `roles` is a reserved word in DynamoDB and cannot be
+        referenced directly in ProjectionExpression — it is aliased via ExpressionAttributeNames.
         """
         from boto3.dynamodb.conditions import Attr
 

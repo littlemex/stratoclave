@@ -1,13 +1,13 @@
 """Admin Tenant API (Phase 2).
 
-- GET    /api/mvp/admin/tenants            tenant 一覧 (cursor pagination)
-- POST   /api/mvp/admin/tenants            tenant 作成 (team_lead 存在 + role 検証)
-- GET    /api/mvp/admin/tenants/{id}       tenant 詳細
-- PATCH  /api/mvp/admin/tenants/{id}       name / default_credit 更新
-- DELETE /api/mvp/admin/tenants/{id}       論理削除 (status=archived)
-- PUT    /api/mvp/admin/tenants/{id}/owner team_lead_user_id 再割当 (Critical C-C)
-- GET    /api/mvp/admin/tenants/{id}/users tenant 所属 user
-- GET    /api/mvp/admin/tenants/{id}/usage tenant 単位使用量集計
+- GET    /api/mvp/admin/tenants            list tenants (cursor pagination)
+- POST   /api/mvp/admin/tenants            create tenant (validates team_lead existence + role)
+- GET    /api/mvp/admin/tenants/{id}       tenant detail
+- PATCH  /api/mvp/admin/tenants/{id}       update name / default_credit
+- DELETE /api/mvp/admin/tenants/{id}       soft-delete (status=archived)
+- PUT    /api/mvp/admin/tenants/{id}/owner reassign team_lead_user_id (Critical C-C)
+- GET    /api/mvp/admin/tenants/{id}/users list tenant members
+- GET    /api/mvp/admin/tenants/{id}/usage per-tenant usage aggregation
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ class TenantListResponse(BaseModel):
 
 
 class CreateTenantRequest(BaseModel):
-    """Admin が Tenant を作成。team_lead_user_id の存在 + role 検証あり (Critical C-E)."""
+    """Admin tenant creation request. Validates team_lead_user_id existence and role (Critical C-E)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -68,13 +68,13 @@ class CreateTenantRequest(BaseModel):
     team_lead_user_id: str = Field(
         min_length=1,
         max_length=64,
-        description="team_lead role を持つ user の sub、または 'admin-owned'",
+        description="sub of a user with team_lead role, or 'admin-owned'",
     )
     default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
 
 
 class UpdateTenantRequest(BaseModel):
-    """team_lead_user_id はここで受けない (Critical C-C: 不変性保証)."""
+    """team_lead_user_id is not accepted here (Critical C-C: immutability guarantee)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -144,9 +144,9 @@ def _to_tenant_item(item: dict[str, Any]) -> TenantItem:
 
 
 def _verify_team_lead(team_lead_user_id: str) -> None:
-    """team_lead_user_id は実在 user で、roles に team_lead を含むことを要求。
+    """Require that team_lead_user_id refers to an existing user whose roles include team_lead.
 
-    例外: `admin-owned` の場合は検証をスキップ。
+    Exception: validation is skipped when the value is `admin-owned`.
     """
     if team_lead_user_id == ADMIN_OWNED:
         return
@@ -270,7 +270,7 @@ def set_tenant_owner(
     body: SetOwnerRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:update")),
 ) -> TenantItem:
-    """team_lead_user_id を再割当 (Critical C-C: Cognito 削除→再作成で孤児化した Tenant の救済)."""
+    """Reassign team_lead_user_id (Critical C-C: recovers tenants orphaned by Cognito delete-and-recreate)."""
     _verify_team_lead(body.team_lead_user_id)
     repo = TenantsRepository()
     before = repo.get(tenant_id)
@@ -300,7 +300,7 @@ def list_tenant_users(
     tenant_id: str,
     _admin: AuthenticatedUser = Depends(require_permission("tenants:read-all")),
 ) -> TenantMembersResponse:
-    """Tenant 所属ユーザー一覧 (Admin 向け、user_id も含めて返す)."""
+    """List members of a tenant (admin view, includes user_id)."""
     tenant = TenantsRepository().get(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -340,9 +340,9 @@ def get_tenant_usage(
     since_days: int = Query(30, ge=1, le=365),
     _admin: AuthenticatedUser = Depends(require_permission("usage:read-all")),
 ) -> UsageBucket:
-    """Tenant 使用量 (PK=tenant_id で UsageLogs を Query)。
+    """Query UsageLogs by tenant_id (PK) and aggregate by model and user in Python.
 
-    Python 側で model/user 別に集計。limit 1000 件で truncate (MVP 規模想定)。
+    Results are truncated at 1000 items (sufficient for MVP scale).
     """
     tenant = TenantsRepository().get(tenant_id)
     if not tenant:

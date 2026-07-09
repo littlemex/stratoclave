@@ -1,16 +1,16 @@
-"""Permissions テーブル (Phase 2, RBAC 真実源).
+"""Permissions table (Phase 2, RBAC source of truth).
 
-テーブル設計 (iac/lib/dynamodb-stack.ts):
+Table design (iac/lib/dynamodb-stack.ts):
   PK: role (str)
-  属性:
-    role: str         e.g. "admin", "team_lead", "user"
+  Attributes:
+    role: str               e.g. "admin", "team_lead", "user"
     permissions: list[str]  e.g. ["users:*", "messages:send"]
     description: str
     updated_at: str (ISO 8601)
     version: str
 
-seed: backend/permissions.json を backend lifespan 起動時に idempotent put で
-      DynamoDB に同期する (bootstrap.seed.seed_all 経由)。
+Seeded idempotently from backend/permissions.json at backend lifespan startup
+via bootstrap.seed.seed_all.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _now_iso() -> str:
 
 
 class PermissionsRepository:
-    """Permissions テーブルへの read-mostly アクセス + idempotent seed."""
+    """Read-mostly access to the Permissions table, plus idempotent seed support."""
 
     def __init__(self, table_name: Optional[str] = None) -> None:
         self._table = get_dynamodb_resource().Table(
@@ -40,11 +40,11 @@ class PermissionsRepository:
         )
 
     def get(self, role: str) -> list[str]:
-        """指定 role の permissions 一覧を返す。未登録なら空 list."""
+        """Return the permission list for the given role. Returns an empty list if the role is not registered."""
         resp = self._table.get_item(Key={"role": role})
         item = resp.get("Item") or {}
         perms = item.get("permissions") or []
-        # DynamoDB から戻る List<String> は list or set の可能性があるため list 化
+        # The List<String> returned by DynamoDB may be a list or a set; normalise to list.
         return [str(p) for p in perms]
 
     def get_record(self, role: str) -> Optional[dict[str, Any]]:
@@ -59,17 +59,17 @@ class PermissionsRepository:
     # Seed (idempotent)
     # ------------------------------------------------------------------
     def seed_from_file(self, path: str | Path) -> dict[str, int]:
-        """permissions.json を読み込んで idempotent に put する.
+        """Load permissions.json and put records idempotently.
 
-        冪等性の確保:
-          1. まず GET で既存レコードを取得
-          2. 既存 version == 新 version なら no-op (書き込みスキップ)
-          3. 既存無し or version 不一致なら PUT で上書き
+        Idempotency strategy:
+          1. GET the existing record first.
+          2. If the existing version matches the new version, no-op (skip write).
+          3. If missing or version differs, PUT to overwrite.
 
-        戻り値: {"total": N, "changed": M, "skipped": S}
-          - total: permissions.json 内の role 数
-          - changed: 実際に PUT した数
-          - skipped: version 一致で skip した数
+        Returns: {"total": N, "changed": M, "skipped": S}
+          - total: number of roles in permissions.json
+          - changed: number of rows actually written
+          - skipped: number of rows skipped due to matching version
         """
         file_path = Path(path)
         with file_path.open("r", encoding="utf-8") as f:
@@ -91,7 +91,7 @@ class PermissionsRepository:
             existing_version = existing.get("version")
 
             if existing_version == version:
-                # version 一致 → no-op
+                # Version matches → no-op.
                 skipped += 1
                 continue
 

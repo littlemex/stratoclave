@@ -1,8 +1,9 @@
 //! Configuration management module.
 //!
-//! Phase 2 (v2.1): 本モジュールは pipe / chat / ui モードのみで使用。
-//! 新しい admin / team-lead / usage サブコマンドは `mvp/config.rs` (`MvpConfig`) を使う。
-//! 旧トークン永続化 helper (load_tokens / save_tokens 等) は互換のため残存、`#[allow(dead_code)]`。
+//! Phase 2 (v2.1): this module is used only by pipe / chat / ui modes.
+//! The new admin / team-lead / usage subcommands use `mvp/config.rs` (`MvpConfig`).
+//! Legacy token persistence helpers (load_tokens / save_tokens, etc.) are retained
+//! for compatibility and are guarded with `#[allow(dead_code)]`.
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};

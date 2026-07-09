@@ -1,5 +1,6 @@
-// Phase 2 (v2.1): main.rs から参照されるのは ui / pipe / chat / setup のみ。
-// 旧 admin / auth / messages / sessions / teams は 2026-04-25 撤去済み (mvp/ 配下に移行)。
+// Phase 2 (v2.1): only ui / pipe / chat / setup are referenced from main.rs.
+// The old admin / auth / messages / sessions / teams modules were removed on
+// 2026-04-25 and migrated under mvp/.
 pub mod chat;
 pub mod pipe;
 pub mod setup;

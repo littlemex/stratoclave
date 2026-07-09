@@ -1,23 +1,24 @@
 # Stratoclave IAC Scripts
 
-このディレクトリには、Stratoclave のインフラストラクチャ管理とデプロイ検証のためのスクリプトが含まれています。
+This directory contains scripts for managing Stratoclave's infrastructure and
+validating deployments.
 
-## スクリプト一覧
+## Script index
 
 ### validate-cognito-config.sh
 
-Cognito User Pool Client の設定を検証します。
+Validates the Cognito User Pool Client configuration.
 
-**チェック項目**:
-1. CallbackURLs に CloudFront URL が含まれているか
-2. LogoutURLs に CloudFront URL が含まれているか
-3. User Pool Domain が正しいか
-4. config.json の cognito.domain と User Pool Domain が一致しているか
-5. config.json の cognito.client_id が有効か
-6. OAuth flows が正しく設定されているか
-7. OAuth scopes が正しく設定されているか
+**Checks**:
+1. Whether the CallbackURLs include the CloudFront URL
+2. Whether the LogoutURLs include the CloudFront URL
+3. Whether the User Pool Domain is correct
+4. Whether `cognito.domain` in config.json matches the User Pool Domain
+5. Whether `cognito.client_id` in config.json is valid
+6. Whether the OAuth flows are configured correctly
+7. Whether the OAuth scopes are configured correctly
 
-**使用方法**:
+**Usage**:
 
 ```bash
 export USER_POOL_ID=us-east-1_XXXXXXXXX
@@ -31,36 +32,37 @@ export CONFIG_S3_URL=https://<YOUR_DISTRIBUTION>.cloudfront.net/config.json
 
 ### post-deploy-validation.sh
 
-CDK デプロイ後に自動実行し、全体の設定を検証します。
+Runs automatically after a CDK deploy to validate the overall configuration.
 
-**使用方法**:
+**Usage**:
 
 ```bash
-# CloudFormation スタックから自動的に値を取得して検証
+# Automatically resolves values from the CloudFormation stacks and validates
 ./post-deploy-validation.sh
 ```
 
-**デプロイフロー**:
+**Deployment flow**:
 
 ```bash
-# 1. CDK デプロイ
+# 1. CDK deploy
 cd <PROJECT_ROOT>/iac
 npx cdk deploy --all
 
-# 2. フロントエンドビルド・デプロイ
+# 2. Build and deploy the frontend
 aws codebuild start-build --project-name stratoclave-frontend-build
 
-# 3. デプロイ後の検証 (必須)
+# 3. Post-deploy validation (required)
 ./scripts/post-deploy-validation.sh
 ```
 
-## トラブルシューティング
+## Troubleshooting
 
-### エラー: CloudFront callback URL is NOT registered
+### Error: CloudFront callback URL is NOT registered
 
-**原因**: Cognito User Pool Client の CallbackURLs に CloudFront URL が登録されていない。
+**Cause**: The CloudFront URL is not registered in the Cognito User Pool Client's
+CallbackURLs.
 
-**修正方法**:
+**Fix**:
 
 ```bash
 aws cognito-idp update-user-pool-client \
@@ -80,102 +82,102 @@ aws cognito-idp update-user-pool-client \
   --supported-identity-providers "COGNITO"
 ```
 
-または、CDK で修正：
+Or fix it in CDK:
 
 ```typescript
 // iac/bin/iac.ts
 const cloudFrontDomainName = 'xxxxxxxxxx.cloudfront.net';
 
 const cognitoStack = new CognitoStack(app, 'StratoclaveCognitoStack', {
-  cloudFrontDomainName, // この値を正しく設定
+  cloudFrontDomainName, // set this value correctly
 });
 ```
 
-その後、再デプロイ：
+Then redeploy:
 
 ```bash
 npx cdk deploy StratoclaveCognitoStack
 ```
 
-### エラー: config.json cognito domain mismatch
+### Error: config.json cognito domain mismatch
 
-**原因**: config.json に古い Cognito ドメインが残っている。
+**Cause**: config.json still holds an old Cognito domain.
 
-**修正方法**:
+**Fix**:
 
 ```bash
-# フロントエンドを再ビルドして config.json を再生成
+# Rebuild the frontend to regenerate config.json
 aws codebuild start-build --project-name stratoclave-frontend-build
 
-# ビルド完了後、再度検証
+# Once the build completes, validate again
 ./scripts/post-deploy-validation.sh
 ```
 
-### エラー: invalid_request (Cognito Hosted UI)
+### Error: invalid_request (Cognito Hosted UI)
 
-**原因**: 以下のいずれか：
-1. CallbackURLs に現在のオリジンが登録されていない
-2. client_id が間違っている
-3. Cognito ドメインが間違っている
+**Cause**: One of the following:
+1. The current origin is not registered in CallbackURLs
+2. The client_id is wrong
+3. The Cognito domain is wrong
 
-**診断方法**:
+**Diagnosis**:
 
 ```bash
-# 1. 現在の設定を確認
+# 1. Inspect the current configuration
 ./scripts/validate-cognito-config.sh
 
-# 2. config.json を確認
+# 2. Inspect config.json
 curl https://<CLOUDFRONT_DOMAIN>/config.json | jq .
 
-# 3. Cognito User Pool Client を確認
+# 3. Inspect the Cognito User Pool Client
 aws cognito-idp describe-user-pool-client \
   --user-pool-id <USER_POOL_ID> \
   --client-id <CLIENT_ID>
 ```
 
-## CI/CD 統合
+## CI/CD integration
 
-GitHub Actions ワークフローが用意されています：
+A GitHub Actions workflow is provided:
 
 ```yaml
 # .github/workflows/validate-cognito.yml
 
-# Pull Request 時に自動検証
-# main ブランチへのマージ後に検証
-# 手動トリガーも可能
+# Validates automatically on pull requests
+# Validates after merges to the main branch
+# Can also be triggered manually
 ```
 
-**手動トリガー**:
+**Manual trigger**:
 
 GitHub Actions → "Validate Cognito Configuration" → "Run workflow"
 
-## ベストプラクティス
+## Best practices
 
-1. **デプロイ後は必ず検証スクリプトを実行**
+1. **Always run the validation script after a deploy**
    ```bash
    npx cdk deploy --all && ./scripts/post-deploy-validation.sh
    ```
 
-2. **CloudFront ドメインが変わった場合は必ず Cognito を更新**
+2. **Always update Cognito when the CloudFront domain changes**
    ```bash
-   # 新しいドメインを iac/bin/iac.ts に設定
-   # Cognito Stack を再デプロイ
+   # Set the new domain in iac/bin/iac.ts
+   # Redeploy the Cognito stack
    npx cdk deploy StratoclaveCognitoStack
    ```
 
-3. **config.json は常に最新に保つ**
+3. **Keep config.json current**
    ```bash
-   # CDK 変更後は必ずフロントエンドを再ビルド
+   # Always rebuild the frontend after CDK changes
    aws codebuild start-build --project-name stratoclave-frontend-build
    ```
 
-4. **E2E テストを定期的に実行**
+4. **Run E2E tests regularly**
    ```bash
    cd <PROJECT_ROOT>/frontend
    npm test -- tests/cognito-oauth-flow.spec.ts
    ```
 
-## 関連ドキュメント
+## Related documentation
 
 - [Cognito OAuth 2.0 Flow](https://docs.aws.amazon.com/cognito/latest/developerguide/authorization-endpoint.html)
 - [PKCE for Public Clients](https://tools.ietf.org/html/rfc7636)

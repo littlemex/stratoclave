@@ -1,27 +1,27 @@
-"""ApiKeys テーブル (Phase C).
+"""ApiKeys table (Phase C).
 
-cowork 等の Gateway クライアント向けに発行する、期限付きの長期 API Key.
-プレーンテキスト (`sk-stratoclave-<32chars>`) はサーバ側に保存せず、
-SHA-256 ハッシュのみを DB に置く.
+Long-lived API keys issued to Gateway clients such as cowork.
+The plaintext key (`sk-stratoclave-<32chars>`) is never stored server-side;
+only the SHA-256 hash is persisted in DynamoDB.
 
-テーブル設計 (iac/lib/dynamodb-stack.ts):
+Table design (iac/lib/dynamodb-stack.ts):
   PK: key_hash (String, sha256 hex)
   GSI user-id-index: PK user_id, SK created_at
-  属性:
-    key_hash: str            sha256(plaintext) の hex
-    key_id: str              UI 表示用 "sk-stratoclave-XXXX…YYYY"
-    user_id: str             所有者 Cognito sub
-    name: str                ユーザーラベル (任意)
-    scopes: list[str]        付与された permission 文字列
+  Attributes:
+    key_hash: str            hex of sha256(plaintext)
+    key_id: str              masked display ID "sk-stratoclave-XXXX…YYYY"
+    user_id: str             owner's Cognito sub
+    name: str                user-supplied label (optional)
+    scopes: list[str]        granted permission strings
     created_at: str (ISO)
-    expires_at: str or None  None = 無期限
-    revoked_at: str or None  None = 有効
+    expires_at: str or None  None = no expiry
+    revoked_at: str or None  None = active
     last_used_at: str or None
-    created_by: str          通常は user_id、Admin 代理発行時は actor.user_id
+    created_by: str          normally user_id; actor.user_id for admin-issued keys
 
-制約:
-  - 1 ユーザーあたり active (revoked_at None かつ expires_at > now) は 5 個まで
-  - revoke は論理削除 (revoked_at を埋める)
+Constraints:
+  - Maximum 5 active keys per user (revoked_at is None and expires_at > now)
+  - Revocation is logical (sets revoked_at, does not delete the row)
 """
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ from .client import get_dynamodb_resource
 
 MAX_ACTIVE_KEYS_PER_USER = 5
 KEY_PREFIX = "sk-stratoclave-"
-# プレーンキー部分の長さ (prefix 除く). 32 bytes base58 ≒ 43 chars 相当だが
-# base64url 32 chars で十分なエントロピ (192 bits)
+# Length of the random portion (excluding the prefix). 32 bytes base58 ≈ 43 chars,
+# but 32 base64url chars provide sufficient entropy (192 bits).
 KEY_RANDOM_LEN = 32
 
 
@@ -53,21 +53,21 @@ def _table_name() -> str:
 
 
 class ApiKeyLimitExceededError(Exception):
-    """ユーザーの active キー上限超過."""
+    """Raised when a user has reached the active API key limit."""
 
 
 class ApiKeyNotFoundError(Exception):
-    """指定 key が存在しない or 権限外."""
+    """Raised when the specified key does not exist or is out of scope."""
 
 
 # ---------------------------------------------------------------
 # Key generation / hashing helpers
 # ---------------------------------------------------------------
 def generate_plain_key() -> str:
-    """新規プレーンテキストキーを作成. 返り値はクライアントに 1 回だけ返して破棄."""
-    # base64url: 32 bytes = 43 chars (パディングなし), 含まれる文字は [A-Za-z0-9_-]
+    """Generate a new plaintext key. Return it to the client once and then discard."""
+    # base64url: 32 bytes = 43 chars (no padding), characters are [A-Za-z0-9_-].
     raw = secrets.token_urlsafe(KEY_RANDOM_LEN)
-    # 長さが環境依存で変わらないよう切り詰め
+    # Truncate to ensure consistent length regardless of the platform.
     raw = raw[:KEY_RANDOM_LEN]
     return f"{KEY_PREFIX}{raw}"
 
@@ -78,7 +78,7 @@ def hash_key(plain: str) -> str:
 
 
 def build_key_id(plain: str) -> str:
-    """表示用の識別子: 先頭 4 + 末尾 4 文字を残し中間を伏せる."""
+    """Build a display-safe identifier by keeping the first 4 and last 4 characters, masking the middle."""
     body = plain[len(KEY_PREFIX):]
     if len(body) <= 8:
         return f"{KEY_PREFIX}{body}"
@@ -107,7 +107,7 @@ class ApiKeysRepository:
         resp = self._table.query(
             IndexName="user-id-index",
             KeyConditionExpression=Key("user_id").eq(user_id),
-            ScanIndexForward=False,  # 新しい順
+            ScanIndexForward=False,  # newest first
         )
         items = resp.get("Items", [])
         if include_revoked:
@@ -242,10 +242,10 @@ class ApiKeysRepository:
         created_by: str,
         ephemeral: bool = False,
     ) -> tuple[dict[str, Any], str]:
-        """新規キーを作成. 返り値は (DB item, plaintext) の tuple.
+        """Create a new API key. Returns a (DB item, plaintext) tuple.
 
-        plaintext は一度しか返せないため、API レスポンスで即ユーザに表示した後に
-        破棄すること. DB には key_hash のみ保存.
+        The plaintext can only be returned once — surface it immediately in
+        the API response and then discard it. Only the key_hash is stored in DynamoDB.
 
         ``ephemeral=True`` (P1-B): caller is the CLI `claude` wrapper
         minting a throwaway key for a single child-process lifetime.
@@ -260,7 +260,6 @@ class ApiKeysRepository:
         """
         if not scopes:
             raise ValueError("scopes must not be empty")
-        # Only non-ephemeral keys count against the per-user cap.
         if not ephemeral and self.count_active(user_id) >= MAX_ACTIVE_KEYS_PER_USER:
             raise ApiKeyLimitExceededError(
                 f"user {user_id} already has {MAX_ACTIVE_KEYS_PER_USER} active api keys"
@@ -275,13 +274,13 @@ class ApiKeysRepository:
             "name": name or "",
             "scopes": list(scopes),
             "created_at": now,
-            "expires_at": expires_at,  # None 可
+            "expires_at": expires_at,  # None = no expiry
             "revoked_at": None,
             "last_used_at": None,
             "created_by": created_by,
             "ephemeral": ephemeral,
         }
-        # DynamoDB は None を書けないので、expires_at / revoked_at / last_used_at は None のときキーを落とす
+        # DynamoDB cannot store None; drop keys whose value is None.
         db_item = {k: v for k, v in item.items() if v is not None}
         try:
             self._table.put_item(
@@ -290,13 +289,13 @@ class ApiKeysRepository:
             )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                # ほぼありえないが、生成したキーが既存と衝突 (1 in 2^192)
+                # Extremely unlikely, but the generated key collided with an existing one (1 in 2^192).
                 raise RuntimeError("api key collision, regenerate")
             raise
         return item, plain
 
     def revoke(self, key_hash: str, *, actor_user_id: str) -> dict[str, Any]:
-        """論理削除. 既に revoke されていれば idempotent に成功."""
+        """Soft-delete the key. Succeeds idempotently if already revoked."""
         now = _now_iso()
         try:
             resp = self._table.update_item(
@@ -343,7 +342,7 @@ class ApiKeysRepository:
         return revoked
 
     def touch_last_used(self, key_hash: str) -> None:
-        """認証成功時に last_used_at を更新. 失敗は黙殺 (高頻度のため)."""
+        """Update last_used_at on successful authentication. Failures are silently ignored (high-frequency path)."""
         try:
             self._table.update_item(
                 Key={"key_hash": key_hash},
@@ -351,13 +350,13 @@ class ApiKeysRepository:
                 ExpressionAttributeValues={":now": _now_iso()},
             )
         except ClientError:
-            # last_used_at の更新失敗で認証自体を落とさない
+            # A last_used_at update failure must not fail the authentication itself.
             pass
 
 
 # ---------------------------------------------------------------
-# 表示用 shape (UI/CLI 共通).
-# plaintext は作成時のレスポンスにのみ含む (本 dict には出さない)
+# Public shape for UI/CLI (shared).
+# Plaintext is only included in the create response, not in this dict.
 # ---------------------------------------------------------------
 def to_public_dict(item: dict[str, Any]) -> dict[str, Any]:
     return {

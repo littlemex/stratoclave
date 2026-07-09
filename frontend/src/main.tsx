@@ -15,8 +15,8 @@ import App from '@/App'
 import '@/lib/i18n'
 import '@/index.css'
 
-// 開発モードでのみ axe-core を起動。
-// Build 時は vite が dev ブランチを tree-shake で除去する。
+// Launch axe-core in development mode only.
+// Vite tree-shakes the dev branch away at build time.
 if (import.meta.env.DEV) {
   void (async () => {
     const axe = (await import('@axe-core/react')).default

@@ -16,10 +16,10 @@ export interface EcsStackProps extends cdk.StackProps {
   repository: ecr.IRepository;
   targetGroup: elbv2.IApplicationTargetGroup;
 
-  /** Cognito User Pool ARN (Task Role の権限範囲制限用) */
+  /** Cognito User Pool ARN (used to scope Task Role permissions) */
   userPoolArn: string;
 
-  /** DynamoDB テーブル ARN のリスト (権限範囲制限用) */
+  /** List of DynamoDB table ARNs (used to scope Task Role permissions) */
   dynamoDbTableArns: string[];
 
   /** CPU units @default 256 */
@@ -69,9 +69,9 @@ export interface EcsStackProps extends cdk.StackProps {
 /**
  * MVP ECS Stack
  *
- * - Fargate を **Public Subnet 直置き**、NAT Gateway なし
- * - Task Role は prefix スコープで最小権限を付与
- * - Container Insights 有効
+ * - Fargate placed **directly in the Public Subnet**, no NAT Gateway
+ * - Task Role granted least-privilege scoped to the prefix
+ * - Container Insights enabled
  */
 export class EcsStack extends cdk.Stack {
   public readonly cluster: ecs.Cluster;
@@ -140,7 +140,7 @@ export class EcsStack extends cdk.Stack {
       family: `${prefix}-backend`,
     });
 
-    // DynamoDB: 実際のテーブル ARN のみに制限
+    // DynamoDB: restrict to the actual table ARNs only
     const dynamoResources = [
       ...props.dynamoDbTableArns,
       ...props.dynamoDbTableArns.map((arn) => `${arn}/index/*`),
@@ -349,10 +349,10 @@ export class EcsStack extends cdk.Stack {
       );
     }
 
-    // Cognito (指定された User Pool のみ)
-    // Phase 2 (v2.1): Cognito Groups を使わない方針のため、
-    // AdminAddUserToGroup / AdminRemoveUserFromGroup / AdminListGroupsForUser は付与しない。
-    // AdminUserGlobalSignOut は Tenant 切替時の JWT 即時失効に使う。
+    // Cognito (scoped to the specified User Pool only).
+    // Phase 2 (v2.1): Cognito Groups are not used, so
+    // AdminAddUserToGroup / AdminRemoveUserFromGroup / AdminListGroupsForUser are not granted.
+    // AdminUserGlobalSignOut is used to immediately invalidate JWTs on tenant switch.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -407,7 +407,7 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
-    // SSM Parameter Store (/${prefix}/* 配下のみ)
+    // SSM Parameter Store (restricted to /${prefix}/* only)
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -442,7 +442,7 @@ export class EcsStack extends cdk.Stack {
       cluster: this.cluster,
       taskDefinition: this.taskDefinition,
       desiredCount: props.desiredCount ?? 1,
-      assignPublicIp: true, // Public Subnet 直置き
+      assignPublicIp: true, // placed directly in the Public Subnet
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       securityGroups: [props.securityGroup],
       serviceName: `${prefix}-backend`,
@@ -453,7 +453,7 @@ export class EcsStack extends cdk.Stack {
 
     this.service.attachToApplicationTargetGroup(props.targetGroup);
 
-    // Auto scaling (MVP は desiredCount=1 固定推奨、in-memory state のため)
+    // Auto scaling (MVP recommends desiredCount=1 fixed, due to in-memory state)
     const scaling = this.service.autoScaleTaskCount({
       minCapacity: 1,
       maxCapacity: props.desiredCount && props.desiredCount > 1 ? 4 : 1,
@@ -464,7 +464,7 @@ export class EcsStack extends cdk.Stack {
       scaleOutCooldown: cdk.Duration.seconds(60),
     });
 
-    // Parameter Store エクスポート
+    // Parameter Store exports
     putStringParameter(this, 'EcsClusterParam', {
       prefix,
       relativePath: 'backend/ecs-cluster',

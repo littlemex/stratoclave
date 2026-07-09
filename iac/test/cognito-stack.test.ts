@@ -17,8 +17,8 @@ describe('CognitoStack', () => {
     template = Template.fromStack(stack);
   });
 
-  // COG-01: User Pool が作成されること (P0)
-  test('User Pool が作成されること', () => {
+  // COG-01: User Pool is created (P0)
+  test('User Pool is created', () => {
     template.hasResourceProperties('AWS::Cognito::UserPool', {
       UserPoolName: 'stratoclave-user-pool',
       AdminCreateUserConfig: {
@@ -27,8 +27,8 @@ describe('CognitoStack', () => {
     });
   });
 
-  // COG-02: selfSignUpEnabled が false であること (P0)
-  test('selfSignUpEnabled が false であること', () => {
+  // COG-02: selfSignUpEnabled is false (P0)
+  test('selfSignUpEnabled is false', () => {
     template.hasResourceProperties('AWS::Cognito::UserPool', {
       AdminCreateUserConfig: {
         AllowAdminCreateUserOnly: true,
@@ -37,7 +37,7 @@ describe('CognitoStack', () => {
   });
 
   // COG-03: password policy (minLength=12 since 2026-06 hardening, full charset required) (P1)
-  test('パスワードポリシーが正しく設定されていること', () => {
+  test('Password policy is configured correctly', () => {
     template.hasResourceProperties('AWS::Cognito::UserPool', {
       Policies: {
         PasswordPolicy: {
@@ -51,16 +51,16 @@ describe('CognitoStack', () => {
     });
   });
 
-  // COG-04: OAuth フロー (authorizationCodeGrant のみ) (P1)
-  test('OAuth フローが Authorization Code Grant のみであること', () => {
+  // COG-04: OAuth flow (authorizationCodeGrant only) (P1)
+  test('OAuth flow is Authorization Code Grant only', () => {
     template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
       AllowedOAuthFlows: ['code'],
       AllowedOAuthScopes: ['openid', 'email', 'profile'],
     });
   });
 
-  // COG-05: CfnOutput が 4 つエクスポートされること (P2)
-  test('CfnOutput が 4 つ以上エクスポートされること', () => {
+  // COG-05: At least 4 CfnOutputs are exported (P2)
+  test('At least 4 CfnOutputs are exported', () => {
     template.hasOutput('UserPoolId', {});
     template.hasOutput('UserPoolClientId', {});
     template.hasOutput('CognitoDomain', {});

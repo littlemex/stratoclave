@@ -4,9 +4,9 @@
 //! Executes saml2aws login, reads STS credentials from ~/.aws/credentials,
 //! and exchanges them for a JWT via POST /api/auth/sts.
 //!
-//! Phase 2 (v2.1) 以降は `mvp/auth.rs` (Cognito User/Pass) がデフォルト。
-//! 本モジュールは AuthMethod enum の `Saml2Aws` バリアントとして設定ファイルに残るため
-//! コンパイルはされるが、通常経路では呼ばれない。
+//! From Phase 2 (v2.1) onward, `mvp/auth.rs` (Cognito User/Pass) is the default.
+//! This module is still compiled because the `Saml2Aws` variant of `AuthMethod`
+//! can appear in config files, but it is never invoked in the normal flow.
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};

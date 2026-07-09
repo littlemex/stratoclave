@@ -120,7 +120,7 @@ echo "--- AWS Account ID Validation ---"
 if [ ! -f "$OUTPUTS_JSON" ]; then
   warn "outputs.json not found, skipping account validation"
 else
-  # outputs.json からアカウント ID を抽出
+  # Extract account ID from outputs.json
   if command -v python3 &>/dev/null; then
     OUTPUTS_ACCOUNT_ID=$(python3 -c "
 import json, re, sys
@@ -144,7 +144,7 @@ print('')
       info "Skipping AWS account ID comparison (--skip-aws)"
       info "outputs.json account: $OUTPUTS_ACCOUNT_ID"
     else
-      # 現在の AWS_ACCOUNT_ID を取得
+      # Retrieve current AWS_ACCOUNT_ID
       CURRENT_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
 
       if [ -n "$CURRENT_ACCOUNT_ID" ]; then

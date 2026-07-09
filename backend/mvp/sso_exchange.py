@@ -1,22 +1,22 @@
-"""Phase S: AWS SSO / STS 経由でのログインエンドポイント.
+"""Phase S: Login endpoint via AWS SSO / STS.
 
 POST /api/mvp/auth/sso-exchange
 
-入力: CLI が `sts:GetCallerIdentity` を sigv4 署名した presigned リクエスト
+Input: presigned request that the CLI signed with sigv4 for `sts:GetCallerIdentity`
   {
     "method": "POST",
     "url": "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
     "headers": { "Authorization": "AWS4-HMAC-SHA256 ...", "X-Amz-Date": "...", ... }
   }
 
-処理:
-  1. Backend が presigned URL を検証し STS を直接叩いて Arn/UserId/Account を取得
-  2. identity_type (sso_user/federated_role/iam_user/instance_profile) に分類
-  3. TrustedAccounts allowlist + role pattern + provisioning policy で 4 段階 Gate 判定
-  4. Cognito User Pool に対応ユーザーを解決 or 作成 (auth_method=sso)
-  5. 「random password 発行 → admin_initiate_auth → password 破棄」で access_token 発行
+Steps:
+  1. Backend validates the presigned URL, calls STS directly, and extracts Arn/UserId/Account.
+  2. Classifies identity_type (sso_user/federated_role/iam_user/instance_profile).
+  3. Runs a 4-stage gate check using TrustedAccounts allowlist + role patterns + provisioning policy.
+  4. Resolves or creates the corresponding Cognito User Pool user (auth_method=sso).
+  5. Issues an access_token via "mint random password → admin_initiate_auth → discard password".
 
-返却:
+Returns:
   { access_token, id_token, refresh_token, expires_in, token_type, email, user_id,
     roles, org_id, identity_type, new_user }
 """
@@ -55,14 +55,14 @@ _log = logging.getLogger(__name__)
 # Request / Response models
 # ------------------------------------------------------------------
 class SsoExchangeRequest(BaseModel):
-    """CLI が送ってくる sigv4 presigned request."""
+    """The sigv4 presigned request sent by the CLI."""
 
     model_config = ConfigDict(extra="forbid")
     method: str = Field(pattern="^(POST|post)$")
     url: str = Field(min_length=1, max_length=2048)
     headers: dict[str, str]
-    # STS GetCallerIdentity では body は固定文字列だが、sigv4 署名に含まれるため
-    # CLI からそのまま転送する必要がある.
+    # The STS GetCallerIdentity body is a fixed string, but it is included in the sigv4
+    # signature and must be forwarded exactly as received from the CLI.
     body: str = Field(default="", max_length=2048)
 
 
@@ -131,7 +131,7 @@ def _cognito_get_user_sub(pool_id: str, username: str) -> Optional[str]:
 def _cognito_create_sso_user(
     pool_id: str, email: str, tenant_id: str
 ) -> str:
-    """SSO 用に Cognito ユーザーを作成する. Permanent password を自動設定."""
+    """Create a Cognito user for SSO login and set a permanent password automatically."""
     cognito = _cognito_client()
     try:
         resp = cognito.admin_create_user(
@@ -148,7 +148,7 @@ def _cognito_create_sso_user(
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         if code == "UsernameExistsException":
-            # レースで同時作成された場合は get で sub を拾って続行
+            # Concurrent creation race: fetch the existing sub and continue.
             sub = _cognito_get_user_sub(pool_id, email)
             if not sub:
                 raise HTTPException(
@@ -217,7 +217,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
     so an unbounded rate would let an attacker waste our rate budget
     and run identity-enumeration against the allowlisted accounts."""
     _ = request
-    # 1. STS 検証 + 身元抽出
+    # 1. Verify STS presigned request and extract identity.
     sts_identity = verify_and_call_sts(
         method=body.method,
         url=body.url,
@@ -225,7 +225,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
         body=body.body,
     )
 
-    # 2. 4 Gate 判定
+    # 2. Run the 4-gate validation.
     try:
         trusted = validate_sso_identity(sts_identity)
     except HTTPException as e:
@@ -242,7 +242,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
         )
         raise
 
-    # 3. Cognito ユーザー解決 or 作成
+    # 3. Resolve or create the Cognito user.
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
 
@@ -260,11 +260,11 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
     is_new_user = existing is None
 
     if is_new_user:
-        # 既存 Cognito user が cognito auth method で居ないか確認 (U2 衝突チェック)
+        # Check whether a Cognito user already exists under a non-SSO auth method (U2 conflict check).
         existing_sub = _cognito_get_user_sub(pool_id, trusted.email)
         if existing_sub:
-            # Cognito には居るが DynamoDB には居ない -> 他ルートで bootstrap された admin ユーザー等
-            # 既存 Cognito user を SSO に convert はしない (安全側): 拒否
+            # User exists in Cognito but not in DynamoDB — likely an admin bootstrapped via another route.
+            # Refuse to convert the existing Cognito user to SSO (fail safe).
             log_audit_event(
                 event="sso_login_denied",
                 actor_id=f"sso:{sts_identity.account_id}",
@@ -318,7 +318,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
                 "arn": sts_identity.arn,
             },
         )
-        # 招待 consume
+        # Consume the invite.
         # A-10-invite: prior to this fix the consume step swallowed any
         # exception (DynamoDB throttling, race with another consumer,
         # etc.). The login flow then proceeded — but the invite was
@@ -374,15 +374,14 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
                 ),
             )
 
-    # 4. 毎回 random password 発行 → admin_initiate_auth → 即座に再上書きで invalidate
-    # (P1-4): admin_initiate_auth の完了直後に第 2 の乱数で再上書きすることで、
-    # ログ流出 / MITM 等で temp_pw が漏れたとしても Cognito 側では既に別値になっており、
-    # 盗まれた値は再利用不可能になる。再上書きが失敗しても auth は既に完了しているため
-    # フローを止めず、logger.warning で通知のみとする (監査対象)。
+    # 4. Issue a random password → admin_initiate_auth → immediately overwrite to invalidate.
+    # (P1-4): Overwriting with a second random value immediately after admin_initiate_auth
+    # ensures that even if temp_pw leaks via logs or MITM, it is already invalid in Cognito.
+    # A failure to overwrite is non-fatal (auth already succeeded); log a warning for audit.
     temp_pw = _generate_temp_password()
     _cognito_set_permanent_password(pool_id, trusted.email, temp_pw)
     auth_result = _cognito_admin_password_auth(pool_id, client_id, trusted.email, temp_pw)
-    # temp_pw はこの時点でスコープ外に出して再使用しない
+    # Drop temp_pw from scope to prevent accidental reuse.
     del temp_pw
 
     if not auth_result:
@@ -422,7 +421,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
         },
     )
 
-    # ユーザー情報を再読込 (roles は provisioning 直後に決まるが、既存 user の場合は DB 既存を優先)
+    # Re-fetch user data (roles are set at provisioning time; for existing users, prefer the DB value).
     fresh = users_repo.get_by_user_id(sub) or {}
     roles = _extract_roles(fresh)
     org_id = str(fresh.get("org_id") or tenant_id)

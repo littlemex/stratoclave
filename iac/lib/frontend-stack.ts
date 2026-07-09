@@ -8,7 +8,7 @@ import { applyCommonTags, putStringParameter } from './_common';
 
 export interface FrontendStackProps extends cdk.StackProps {
   prefix: string;
-  /** API 呼び出しをプロキシする ALB DNS 名 */
+  /** ALB DNS name to proxy API calls to */
   albDnsName: string;
   /**
    * WAFv2 WebACL ARN (CLOUDFRONT scope, us-east-1). Attaches the WAF
@@ -21,9 +21,9 @@ export interface FrontendStackProps extends cdk.StackProps {
 /**
  * Frontend Stack
  *
- * - S3 (private) + CloudFront (OAI) で SPA 配信
- * - `/api/*` は ALB へプロキシ
- * - デプロイは scripts/deploy-all.sh から `aws s3 sync` + `cloudfront create-invalidation`
+ * - S3 (private) + CloudFront (OAC) for SPA delivery
+ * - `/api/*` proxied to the ALB
+ * - Deployed via `aws s3 sync` + `cloudfront create-invalidation` from scripts/deploy-all.sh
  */
 export class FrontendStack extends cdk.Stack {
   public readonly bucket: s3.Bucket;
@@ -126,9 +126,10 @@ export class FrontendStack extends cdk.Stack {
       'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*'
     );
 
-    // Phase 2 (v2.1 Blocker B1): SPA fallback を CloudFront Function で実装
-    // customErrorResponses 撤去の理由: /api/* /v1/* の ALB 正当 403/404 も HTML に化けて Frontend fetch を破壊するため。
-    // Function は defaultCacheBehavior (S3 origin) のみに attach し、API 系 behavior には attach しない。
+    // Phase 2 (v2.1 Blocker B1): SPA fallback implemented as a CloudFront Function.
+    // Reason for removing customErrorResponses: legitimate ALB 403/404 responses on /api/* and /v1/*
+    // would be rewritten to HTML and break Frontend fetch calls.
+    // The Function is attached only to the defaultCacheBehavior (S3 origin); API behaviors do not use it.
     const spaFallbackFn = new cloudfront.Function(this, 'SpaFallbackFn', {
       functionName: `${prefix}-spa-fallback`,
       comment: 'SPA deep link fallback (viewer-request)',
@@ -187,7 +188,7 @@ export class FrontendStack extends cdk.Stack {
           compress: true,
           allowedMethods: ['GET', 'HEAD', 'OPTIONS'],
           cachedMethods: ['GET', 'HEAD'],
-          // SPA fallback: /admin, /callback, /me/usage 等の deep link を /index.html に書き換え
+          // SPA fallback: rewrites deep links such as /admin, /callback, /me/usage to /index.html
           functionAssociations: [
             {
               functionArn: spaFallbackFn.functionArn,
@@ -205,7 +206,7 @@ export class FrontendStack extends cdk.Stack {
             allowedMethods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'POST', 'PATCH', 'DELETE'],
             cachedMethods: ['GET', 'HEAD'],
             compress: true,
-            // API behavior には Function を attach しない (ALB の正当 403/404 を保護)
+            // Do not attach the Function to API behaviors (preserves legitimate ALB 403/404 responses)
           },
           {
             pathPattern: '/v1/*',
@@ -245,7 +246,7 @@ export class FrontendStack extends cdk.Stack {
             compress: true,
           },
         ],
-        // customErrorResponses は撤去 (Blocker B1)
+        // customErrorResponses removed (Blocker B1)
       },
     });
 

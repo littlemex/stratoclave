@@ -1,11 +1,11 @@
-"""Cognito admin 操作の共通ヘルパー (Phase 2).
+"""Shared helpers for Cognito admin operations (Phase 2).
 
-Backend が Cognito を叩く操作を一箇所にまとめる。
+Centralizes all backend Cognito calls in one place:
 - admin_create_user / admin_set_user_password
 - admin_delete_user
-- admin_update_user_attributes (Tenant 切替時の custom:org_id 更新)
-- admin_user_global_sign_out (Tenant 切替後の JWT 即時失効)
-- admin_get_user (email 補填用)
+- admin_update_user_attributes (updates custom:org_id on tenant switch)
+- admin_user_global_sign_out (immediately invalidates JWTs after a tenant switch)
+- admin_get_user (used to backfill missing email)
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def require_user_pool_id() -> str:
 
 
 def delete_user(email: str) -> None:
-    """Cognito から user を削除。存在しない場合は silently ok."""
+    """Delete a user from Cognito. Silently succeeds if the user does not exist."""
     try:
         get_client().admin_delete_user(
             UserPoolId=require_user_pool_id(),
@@ -53,7 +53,7 @@ def delete_user(email: str) -> None:
 
 
 def update_org_id(sub: str, new_tenant_id: str) -> None:
-    """Cognito の custom:org_id 属性を更新 (Tenant 切替時)."""
+    """Update the Cognito custom:org_id attribute (called on tenant switch)."""
     try:
         get_client().admin_update_user_attributes(
             UserPoolId=require_user_pool_id(),
@@ -69,7 +69,7 @@ def update_org_id(sub: str, new_tenant_id: str) -> None:
 
 
 def global_sign_out(sub: str) -> None:
-    """全デバイスから強制サインアウト (Tenant 切替時の JWT 即時失効)."""
+    """Force sign-out from all devices (immediately invalidates JWTs on tenant switch)."""
     try:
         get_client().admin_user_global_sign_out(
             UserPoolId=require_user_pool_id(),

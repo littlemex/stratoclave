@@ -5,9 +5,9 @@ import { applyCommonTags, putStringParameter } from './_common';
 
 export interface EcrStackProps extends cdk.StackProps {
   prefix: string;
-  /** 保持する最新イメージ数 @default 10 */
+  /** Number of latest images to retain @default 10 */
   maxImageCount?: number;
-  /** untagged 画像の保持日数 @default 30 */
+  /** Retention days for untagged images @default 30 */
   untaggedRetentionDays?: number;
 }
 
