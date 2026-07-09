@@ -78,7 +78,7 @@
     "tailwindcss": "^3.4.19",
     "typescript": "^5.3.3",
     "vite": "^7.1.13",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "esbuild": ">=0.28.1"
