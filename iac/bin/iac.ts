@@ -18,7 +18,7 @@ import { Construct } from 'constructs';
  *
  * Topology (9 stacks):
  *   - Network (Public Subnet, 2 AZ, no NAT)
- *   - DynamoDB (15 tables; Tenants/Permissions added in Phase 2, TrustedAccounts/SsoPreRegistrations/SsoNonces in Phase S, ApiKeys in Phase C, UiTickets in P0-8 follow-up)
+ *   - DynamoDB (17 tables; Tenants/Permissions added in Phase 2, TrustedAccounts/SsoPreRegistrations/SsoNonces in Phase S, ApiKeys in Phase C, UiTickets in P0-8 follow-up, TenantBudgets/PricingConfig in A-1/A-2)
  *   - ECR
  *   - ALB (internet-facing, HTTP only)
  *   - WAF (CloudFront-scope WebACL; opt-out with ENABLE_WAF=false)
@@ -239,6 +239,9 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // P0-8 follow-up: single-use CLI → SPA handoff tickets. Required
     // for `stratoclave ui open` since ?token= handoff was retired.
     DYNAMODB_UI_TICKETS_TABLE: dynamoDBStack.uiTicketsTable.tableName,
+    // A-1/A-2: tenant dollar pool budgets + admin-editable model pricing.
+    DYNAMODB_TENANT_BUDGETS_TABLE: dynamoDBStack.tenantBudgetsTable.tableName,
+    DYNAMODB_PRICING_CONFIG_TABLE: dynamoDBStack.pricingConfigTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,

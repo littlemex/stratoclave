@@ -136,17 +136,18 @@ def test_responses_send_only_passes_scope_layer(monkeypatch):
     """A `responses:send`-only key must clear the scope check.
 
     Past the scope check we hit the credit-reservation step, which
-    needs DynamoDB; we short-circuit it by stubbing `reserve_credit`
-    to raise an HTTPException(402) so the test proves the scope
+    needs DynamoDB; we short-circuit it by stubbing
+    `reserve_credit_for_model` (the pricing-aware wrapper the route now
+    calls) to raise an HTTPException(402) so the test proves the scope
     layer let us through without depending on moto.
     """
     from fastapi import HTTPException
 
-    def fake_reserve_credit(user, reservation_tokens):
+    def fake_reserve(user, reservation_tokens, **kwargs):
         raise HTTPException(402, "stub: scope check passed; aborting before bedrock")
 
     monkeypatch.setattr(
-        "mvp.openai_responses.reserve_credit", fake_reserve_credit
+        "mvp.openai_responses.reserve_credit_for_model", fake_reserve
     )
 
     client = _make_app(monkeypatch, scope_holder=["responses:send"], codex_enabled=True)
@@ -155,6 +156,6 @@ def test_responses_send_only_passes_scope_layer(monkeypatch):
         json={"model": "openai.gpt-5.4", "input": "hi", "max_output_tokens": 4},
     )
     # 402 from the stub means the scope check passed and we reached
-    # reserve_credit; 403 (scope reject) or 422 (schema reject) would
-    # be regressions.
+    # the reservation step; 403 (scope reject) or 422 (schema reject)
+    # would be regressions.
     assert resp.status_code == 402

@@ -60,8 +60,15 @@ class UsageLogsRepository:
         input_tokens: int,
         output_tokens: int,
         request_id: Optional[str] = None,
+        cost_microusd: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Insert a UsageLog record."""
+        """Insert a UsageLog record.
+
+        When the request was priced (a dollar pool was in play), `cost_microusd`
+        is persisted so the pool's `pool_settled` counter can be independently
+        re-derived from the audit log — i.e. spend is auditable, not just
+        asserted. Legacy callers that omit it write no cost field.
+        """
         now = _now_iso()
         log_id = request_id or str(uuid4())
         # A-19-pii: never persist the email in plaintext. Hash with a
@@ -80,5 +87,7 @@ class UsageLogsRepository:
             "recorded_at": now,
             "ttl": _ttl_epoch(),
         }
+        if cost_microusd is not None:
+            item["cost_microusd"] = Decimal(int(cost_microusd))
         self._table.put_item(Item=item)
         return item

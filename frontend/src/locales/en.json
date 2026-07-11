@@ -175,7 +175,32 @@
     "archive_confirm_label": "Type <1>{{id}}</1> to confirm.",
     "archive_submit": "Archive",
     "archive_submitting": "Archiving…",
-    "archive_error_fallback": "Archiving failed"
+    "archive_error_fallback": "Archiving failed",
+    "pool": {
+      "title": "Pool budget",
+      "desc": "A shared dollar ceiling for this tenant across all its members for a billing period. Enforced before every request: each inference reserves its dollar cost from the pool atomically with the per-user token debit, so the tenant cannot overspend even under concurrency.",
+      "period_label": "Period",
+      "status_label": "Status",
+      "limit_label": "Limit",
+      "reserved_label": "Reserved (in-flight)",
+      "settled_label": "Settled (recorded spend)",
+      "remaining_label": "Remaining",
+      "none_title": "No pool budget",
+      "none_desc": "This tenant has no dollar pool for {{period}}. Only per-user token budgets apply. Set a pool to cap the tenant's total dollar spend.",
+      "set_button": "Set pool budget",
+      "edit_button": "Edit pool budget",
+      "dialog_title": "Set pool budget",
+      "dialog_desc": "The ceiling is entered in whole US dollars and stored exactly (no floating point). Changing it mid-period does not reset recorded spend.",
+      "limit_usd_label": "Limit (USD)",
+      "limit_usd_placeholder": "500",
+      "period_input_label": "Period (YYYY-MM)",
+      "status_active": "active",
+      "status_suspended": "suspended",
+      "apply": "Save",
+      "applying": "Saving…",
+      "error_fallback": "Failed to set pool budget",
+      "invalid_amount": "Enter a valid dollar amount (up to 2 decimals)."
+    }
   },
   "error_toast": {
     "server": "Server error",

@@ -53,7 +53,12 @@ from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
 from ._bedrock_clients import bedrock_runtime_client
-from ._pipeline import reserve_credit, settle_reservation_and_log
+from ._pipeline import (
+    release_pool as _release_pool,
+    reserve_credit,
+    reserve_credit_for_model,
+    settle_reservation_and_log,
+)
 from .authz import require_permission
 from .deps import AuthenticatedUser, get_current_user
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
@@ -62,6 +67,7 @@ from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 # functions from this module. New code should import directly from
 # `mvp._pipeline`.
 _reserve_credit = reserve_credit
+_reserve_credit_for_model = reserve_credit_for_model
 _settle_reservation_and_log = settle_reservation_and_log
 
 
@@ -317,6 +323,27 @@ def _build_bedrock_kwargs(
 _MIN_RESERVATION_TOKENS = 1024
 
 
+def _cache_tokens_from_usage(usage: dict[str, Any]) -> tuple[int, int]:
+    """Extract (cache_read, cache_write) token counts from a Bedrock usage block.
+
+    Bedrock's Converse usage reports prompt-cache activity as
+    `cacheReadInputTokens` / `cacheWriteInputTokens` (0 or absent when caching
+    is not used). Returning them lets settle price cached traffic at its own
+    rate instead of billing it at zero. Bad/missing values collapse to 0.
+    """
+    def _int(v) -> int:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return n if n > 0 else 0
+
+    return (
+        _int(usage.get("cacheReadInputTokens")),
+        _int(usage.get("cacheWriteInputTokens")),
+    )
+
+
 def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
     """Estimate how many tokens to pre-reserve before calling Bedrock.
 
@@ -378,7 +405,13 @@ def messages(
         )
 
     reservation = _estimate_reservation_tokens(body)
-    tenants_repo = _reserve_credit(user, reservation)
+    tenants_repo = _reserve_credit_for_model(
+        user,
+        reservation,
+        model_name=body.model,
+        input_tokens_est=max(reservation - body.max_tokens, 0),
+        max_output_tokens=body.max_tokens,
+    )
 
     if body.stream:
         return StreamingResponse(
@@ -395,10 +428,12 @@ def messages(
     try:
         resp = _bedrock_client().converse(**kwargs)
     except ClientError as e:
-        # On a Bedrock error nothing was billed; refund the full reservation.
+        # On a Bedrock error nothing was billed; refund the full reservation
+        # AND release the pool hold (release_pool is a no-op when unpooled).
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
+        _release_pool(tenants_repo)
         # Sanitize the upstream message before returning it: Bedrock errors
         # can leak account IDs, inference-profile ARNs, and internal paths.
         from core.error_handler import sanitize_exception_message
@@ -411,11 +446,13 @@ def messages(
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
+        _release_pool(tenants_repo)
         raise
 
     usage = resp.get("usage", {})
     input_tokens = int(usage.get("inputTokens", 0))
     output_tokens = int(usage.get("outputTokens", 0))
+    cache_read, cache_write = _cache_tokens_from_usage(usage)
     _settle_reservation_and_log(
         user=user,
         tenants_repo=tenants_repo,
@@ -423,6 +460,9 @@ def messages(
         actual_input_tokens=input_tokens,
         actual_output_tokens=output_tokens,
         model_id=model_id,
+        context=tenants_repo,
+        actual_cache_read_tokens=cache_read,
+        actual_cache_write_tokens=cache_write,
     )
 
     content_blocks: list[dict[str, Any]] = []
@@ -467,6 +507,8 @@ async def _stream_messages(
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
     input_tokens = 0
     output_tokens = 0
+    cache_read_tokens = 0
+    cache_write_tokens = 0
     settled = False
 
     try:
@@ -519,10 +561,12 @@ async def _stream_messages(
                     },
                 },
             )
-            # Bedrock was never invoked; refund the full reservation.
+            # Bedrock was never invoked; refund the full reservation and
+            # release the pool hold so it does not leak.
             tenants_repo.refund(
                 user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
             )
+            _release_pool(tenants_repo)
             settled = True
             return
 
@@ -552,6 +596,9 @@ async def _stream_messages(
                     usage = event["metadata"].get("usage", {})
                     input_tokens = int(usage.get("inputTokens", input_tokens))
                     output_tokens = int(usage.get("outputTokens", output_tokens))
+                    cr, cw = _cache_tokens_from_usage(usage)
+                    cache_read_tokens = cr or cache_read_tokens
+                    cache_write_tokens = cw or cache_write_tokens
         except Exception as e:  # pragma: no cover
             from core.error_handler import sanitize_exception_message
 
@@ -573,6 +620,9 @@ async def _stream_messages(
                 actual_input_tokens=input_tokens,
                 actual_output_tokens=output_tokens,
                 model_id=model_id,
+                context=tenants_repo,
+                actual_cache_read_tokens=cache_read_tokens,
+                actual_cache_write_tokens=cache_write_tokens,
             )
             settled = True
             return
@@ -609,6 +659,9 @@ async def _stream_messages(
             actual_input_tokens=input_tokens,
             actual_output_tokens=output_tokens,
             model_id=model_id,
+            context=tenants_repo,
+            actual_cache_read_tokens=cache_read_tokens,
+            actual_cache_write_tokens=cache_write_tokens,
         )
         settled = True
     finally:
@@ -622,6 +675,9 @@ async def _stream_messages(
                 actual_input_tokens=input_tokens,
                 actual_output_tokens=output_tokens,
                 model_id=model_id,
+                context=tenants_repo,
+                actual_cache_read_tokens=cache_read_tokens,
+                actual_cache_write_tokens=cache_write_tokens,
             )
 
 

@@ -8,7 +8,7 @@
 //!   ├── usage     show [--since-days N] [--limit M]
 //!   ├── admin
 //!   │   ├── user   { create | list | show | delete | assign-tenant | set-credit }
-//!   │   ├── tenant { create | list | show | delete | set-owner | members | usage }
+//!   │   ├── tenant { create | list | show | delete | set-owner | members | usage | pool-budget }
 //!   │   └── usage  show [--tenant T] [--user U] [--since X] [--until Y] [--limit N]
 //!   ├── team-lead
 //!   │   └── tenant { create | list | show | members | usage }
@@ -302,6 +302,33 @@ enum AdminTenantAction {
         #[arg(long, default_value_t = 30)]
         since_days: u32,
     },
+    /// Manage the tenant's dollar pool budget (A-1)
+    #[command(name = "pool-budget", subcommand)]
+    PoolBudget(AdminPoolBudgetAction),
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminPoolBudgetAction {
+    /// Set (create or update) the pool ceiling for a period
+    Set {
+        tenant_id: String,
+        /// Ceiling in USD, e.g. "500", "$500", "500.50"
+        #[arg(long)]
+        limit_usd: String,
+        /// Billing period YYYY-MM (UTC). Defaults to the current month.
+        #[arg(long)]
+        period: Option<String>,
+        /// Pool status
+        #[arg(long, default_value = "active", value_parser = ["active", "suspended"])]
+        status: String,
+    },
+    /// Show the pool budget and live usage for a period
+    Show {
+        tenant_id: String,
+        /// Billing period YYYY-MM (UTC). Defaults to the current month.
+        #[arg(long)]
+        period: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -537,6 +564,25 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 tenant_id,
                 since_days,
             } => wrap(mvp::admin::tenant_usage(&tenant_id, since_days).await),
+            AdminTenantAction::PoolBudget(action) => match action {
+                AdminPoolBudgetAction::Set {
+                    tenant_id,
+                    limit_usd,
+                    period,
+                    status,
+                } => wrap(
+                    mvp::admin::tenant_pool_budget_set(
+                        &tenant_id,
+                        &limit_usd,
+                        period.as_deref(),
+                        &status,
+                    )
+                    .await,
+                ),
+                AdminPoolBudgetAction::Show { tenant_id, period } => wrap(
+                    mvp::admin::tenant_pool_budget_show(&tenant_id, period.as_deref()).await,
+                ),
+            },
         },
         AdminAction::Usage { action } => match action {
             AdminUsageAction::Show {

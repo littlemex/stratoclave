@@ -46,6 +46,13 @@ class ModelEntry:
     bedrock_region: str
     aliases: tuple[str, ...]
     wire_protocol: Literal["messages", "responses"]
+    # `pricing_key` names the row in the pricing table (and the built-in
+    # default rate table in `mvp.pricing`) used to convert this model's token
+    # counts into micro-USD for dollar-denominated budgets. Models that share
+    # a price tier share a key (e.g. all Opus 4.x → "opus"). It is decoupled
+    # from `bedrock_model_id` so that re-pricing a tier does not require
+    # touching every registry entry.
+    pricing_key: str = "default"
 
 
 # Source of truth. To add a model: append an entry, redeploy. There is no
@@ -59,6 +66,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-opus-4-7",),
         wire_protocol="messages",
+        pricing_key="opus",
     ),
     ModelEntry(
         provider="anthropic",
@@ -66,6 +74,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-opus-4-6",),
         wire_protocol="messages",
+        pricing_key="opus",
     ),
     ModelEntry(
         provider="anthropic",
@@ -73,6 +82,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-opus-4-5", "claude-opus-4-5-20251101"),
         wire_protocol="messages",
+        pricing_key="opus",
     ),
     ModelEntry(
         provider="anthropic",
@@ -80,6 +90,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-opus-4-1", "claude-opus-4-1-20250805"),
         wire_protocol="messages",
+        pricing_key="opus",
     ),
     ModelEntry(
         provider="anthropic",
@@ -87,6 +98,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-opus-4", "claude-opus-4-20250514"),
         wire_protocol="messages",
+        pricing_key="opus",
     ),
     ModelEntry(
         provider="anthropic",
@@ -94,6 +106,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-sonnet-4-6",),
         wire_protocol="messages",
+        pricing_key="sonnet",
     ),
     ModelEntry(
         provider="anthropic",
@@ -101,6 +114,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"),
         wire_protocol="messages",
+        pricing_key="sonnet",
     ),
     ModelEntry(
         provider="anthropic",
@@ -108,6 +122,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
         wire_protocol="messages",
+        pricing_key="haiku",
     ),
     ModelEntry(
         provider="anthropic",
@@ -115,6 +130,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-3-7-sonnet", "claude-3-7-sonnet-20250219"),
         wire_protocol="messages",
+        pricing_key="sonnet",
     ),
     ModelEntry(
         provider="anthropic",
@@ -122,6 +138,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-3-5-haiku", "claude-3-5-haiku-20241022"),
         wire_protocol="messages",
+        pricing_key="haiku",
     ),
     ModelEntry(
         provider="anthropic",
@@ -129,6 +146,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-3-haiku",),
         wire_protocol="messages",
+        pricing_key="haiku",
     ),
     ModelEntry(
         provider="anthropic",
@@ -136,6 +154,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-3-opus",),
         wire_protocol="messages",
+        pricing_key="opus",
     ),
     ModelEntry(
         provider="anthropic",
@@ -143,6 +162,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-1",
         aliases=("claude-3-sonnet",),
         wire_protocol="messages",
+        pricing_key="sonnet",
     ),
     # ---- OpenAI family on Bedrock (bedrock-mantle, us-east-2 / us-west-2) ----
     # GPT-5.4 is GA in us-east-2 and us-west-2; verified working in us-west-2
@@ -154,6 +174,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-west-2",
         aliases=("gpt-5.4", "openai.gpt-5.4"),
         wire_protocol="responses",
+        pricing_key="gpt-5",
     ),
     ModelEntry(
         provider="openai",
@@ -161,6 +182,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_region="us-east-2",
         aliases=("gpt-5.5", "openai.gpt-5.5"),
         wire_protocol="responses",
+        pricing_key="gpt-5",
     ),
 )
 

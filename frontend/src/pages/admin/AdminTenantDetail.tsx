@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trans, useTranslation } from 'react-i18next'
-import { ArrowLeft, Archive, Edit3, UserCog } from 'lucide-react'
+import { ArrowLeft, Archive, Edit3, UserCog, Wallet } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -31,7 +31,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { api, type TenantItem } from '@/lib/api'
+import { api, type PoolBudget, type TenantItem } from '@/lib/api'
+import { currentPeriodUtc, fmtMicroUsd, parseUsdToCents } from '@/lib/money'
 import { cn } from '@/lib/utils'
 
 function fmt(n: number): string {
@@ -57,6 +58,20 @@ export default function AdminTenantDetail() {
   const usageQuery = useQuery({
     queryKey: ['admin', 'tenants', 'usage', tenantId],
     queryFn: () => api.admin.tenantUsage(tenantId, 30),
+    enabled: !!tenantId,
+  })
+  // A-1: pool budget for the current period. A 404 means "no pool set" — a
+  // normal state, not an error — so we swallow it and render the empty card.
+  const poolQuery = useQuery({
+    queryKey: ['admin', 'tenants', 'pool', tenantId],
+    queryFn: async () => {
+      try {
+        return await api.admin.getPoolBudget(tenantId)
+      } catch (err) {
+        if ((err as { status?: number } | null)?.status === 404) return null
+        throw err
+      }
+    },
     enabled: !!tenantId,
   })
 
@@ -158,6 +173,17 @@ export default function AdminTenantDetail() {
         tenant={tenant}
         onChanged={invalidate}
         onDeleted={() => navigate('/admin/tenants')}
+      />
+
+      <PoolBudgetCard
+        tenantId={tenant.tenant_id}
+        pool={poolQuery.data ?? null}
+        isLoading={poolQuery.isLoading}
+        onChanged={() =>
+          void qc.invalidateQueries({
+            queryKey: ['admin', 'tenants', 'pool', tenantId],
+          })
+        }
       />
 
       <Card>
@@ -383,6 +409,252 @@ function ActionBar({
         onDone={onDeleted}
       />
     </section>
+  )
+}
+
+// ------------------------------------------------------------------
+// Pool budget: shared dollar ceiling for the tenant (A-1)
+// ------------------------------------------------------------------
+function PoolBudgetCard({
+  tenantId,
+  pool,
+  isLoading,
+  onChanged,
+}: {
+  tenantId: string
+  pool: PoolBudget | null
+  isLoading: boolean
+  onChanged: () => void
+}) {
+  const { t } = useTranslation()
+  const [dialogOpen, setDialogOpen] = useState(false)
+
+  return (
+    <Card data-testid="pool-budget-card">
+      <CardHeader>
+        <div className="flex items-start justify-between gap-2">
+          <div className="space-y-1.5">
+            <CardTitle className="flex items-center gap-2 font-sans text-base font-semibold">
+              <Wallet className="h-4 w-4 text-muted-foreground" />
+              {t('admin_tenant_detail.pool.title')}
+            </CardTitle>
+            <CardDescription>{t('admin_tenant_detail.pool.desc')}</CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDialogOpen(true)}
+            data-testid="pool-budget-set-button"
+          >
+            {pool
+              ? t('admin_tenant_detail.pool.edit_button')
+              : t('admin_tenant_detail.pool.set_button')}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
+        ) : pool ? (
+          <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2" data-testid="pool-budget-summary">
+            <PoolStat label={t('admin_tenant_detail.pool.period_label')} value={pool.period} mono />
+            <PoolStat
+              label={t('admin_tenant_detail.pool.status_label')}
+              value={pool.status}
+            />
+            <PoolStat
+              label={t('admin_tenant_detail.pool.limit_label')}
+              value={fmtMicroUsd(pool.pool_limit_microusd)}
+              emphasise
+              testId="pool-limit"
+            />
+            <PoolStat
+              label={t('admin_tenant_detail.pool.remaining_label')}
+              value={fmtMicroUsd(pool.remaining_microusd)}
+              emphasise
+              testId="pool-remaining"
+            />
+            <PoolStat
+              label={t('admin_tenant_detail.pool.reserved_label')}
+              value={fmtMicroUsd(pool.pool_reserved_microusd)}
+            />
+            <PoolStat
+              label={t('admin_tenant_detail.pool.settled_label')}
+              value={fmtMicroUsd(pool.pool_settled_microusd)}
+            />
+          </dl>
+        ) : (
+          <div className="space-y-1" data-testid="pool-budget-empty">
+            <p className="text-sm font-medium">{t('admin_tenant_detail.pool.none_title')}</p>
+            <p className="text-sm text-muted-foreground">
+              {t('admin_tenant_detail.pool.none_desc', { period: currentPeriodUtc() })}
+            </p>
+          </div>
+        )}
+      </CardContent>
+
+      <PoolBudgetDialog
+        open={dialogOpen}
+        tenantId={tenantId}
+        current={pool}
+        onOpenChange={setDialogOpen}
+        onDone={onChanged}
+      />
+    </Card>
+  )
+}
+
+function PoolStat({
+  label,
+  value,
+  mono,
+  emphasise,
+  testId,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  emphasise?: boolean
+  testId?: string
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-border/40 pb-2">
+      <dt className="text-sm text-muted-foreground">{label}</dt>
+      <dd
+        className={cn(
+          'text-sm',
+          mono && 'font-mono',
+          emphasise && 'font-display text-base tracking-tight',
+        )}
+        data-testid={testId}
+      >
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+function PoolBudgetDialog({
+  open,
+  tenantId,
+  current,
+  onOpenChange,
+  onDone,
+}: {
+  open: boolean
+  tenantId: string
+  current: PoolBudget | null
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const { t } = useTranslation()
+  const [limitUsd, setLimitUsd] = useState(
+    current ? String(Math.round(current.pool_limit_usd_cents / 100)) : '',
+  )
+  const [period, setPeriod] = useState(current?.period ?? '')
+  const [status, setStatus] = useState<'active' | 'suspended'>(
+    current?.status === 'suspended' ? 'suspended' : 'active',
+  )
+  const [error, setError] = useState<string | null>(null)
+
+  const cents = parseUsdToCents(limitUsd)
+  const amountValid = cents !== null
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      if (cents === null) throw new Error('invalid amount')
+      return api.admin.setPoolBudget(tenantId, {
+        limit_usd_cents: cents,
+        period: period.trim() === '' ? undefined : period.trim(),
+        status,
+      })
+    },
+    onSuccess: () => {
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (err: unknown) => {
+      const e = err as { detail?: string; message?: string } | null
+      setError(e?.detail ?? e?.message ?? t('admin_tenant_detail.pool.error_fallback'))
+    },
+  })
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) setError(null)
+        onOpenChange(v)
+      }}
+    >
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t('admin_tenant_detail.pool.dialog_title')}</DialogTitle>
+          <DialogDescription>{t('admin_tenant_detail.pool.dialog_desc')}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="pool-limit-usd">
+              {t('admin_tenant_detail.pool.limit_usd_label')}
+            </Label>
+            <Input
+              id="pool-limit-usd"
+              inputMode="decimal"
+              autoComplete="off"
+              value={limitUsd}
+              placeholder={t('admin_tenant_detail.pool.limit_usd_placeholder')}
+              onChange={(e) => setLimitUsd(e.target.value)}
+              data-testid="pool-limit-usd-input"
+            />
+            {limitUsd.trim() !== '' && !amountValid ? (
+              <p className="text-xs text-destructive">
+                {t('admin_tenant_detail.pool.invalid_amount')}
+              </p>
+            ) : null}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="pool-period">
+              {t('admin_tenant_detail.pool.period_input_label')}
+            </Label>
+            <Input
+              id="pool-period"
+              autoComplete="off"
+              value={period}
+              placeholder="2026-07"
+              onChange={(e) => setPeriod(e.target.value)}
+              data-testid="pool-period-input"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="pool-status">{t('admin_tenant_detail.pool.status_label')}</Label>
+            <select
+              id="pool-status"
+              value={status}
+              onChange={(e) => setStatus(e.target.value === 'suspended' ? 'suspended' : 'active')}
+              className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground"
+            >
+              <option value="active">{t('admin_tenant_detail.pool.status_active')}</option>
+              <option value="suspended">{t('admin_tenant_detail.pool.status_suspended')}</option>
+            </select>
+          </div>
+        </div>
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            disabled={!amountValid || mutation.isPending}
+            onClick={() => mutation.mutate()}
+            data-testid="pool-budget-submit"
+          >
+            {mutation.isPending
+              ? t('admin_tenant_detail.pool.applying')
+              : t('admin_tenant_detail.pool.apply')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
