@@ -20,6 +20,7 @@ Bedrock and Anthropic publish list prices, e.g. Opus input at $5/MTok is
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -77,6 +78,10 @@ class _RateCache:
         self._rates: dict[str, Rate] = dict(_DEFAULT_RATES)
         self._version: Optional[str] = None
         self._loaded_at: float = 0.0
+        # Serializes refreshes so concurrent requests don't stampede the table
+        # or interleave a half-swapped rate map. The method really is locked now
+        # (the name previously lied).
+        self._lock = threading.Lock()
 
     def _refresh_locked(self, repo: PricingConfigRepository) -> None:
         try:
@@ -85,7 +90,10 @@ class _RateCache:
             self._loaded_at = time.time()
             return
         if version is None:
-            # No pricing configured: defaults stand.
+            # Pricing overrides were removed (CURRENT pointer gone). Fall back to
+            # built-in defaults rather than keeping the last-loaded override set
+            # alive forever — otherwise a deleted override would never die.
+            self._rates = dict(_DEFAULT_RATES)
             self._version = None
             self._loaded_at = time.time()
             return
@@ -103,8 +111,14 @@ class _RateCache:
     def get(self, pricing_key: str, repo: Optional[PricingConfigRepository] = None) -> Rate:
         now = time.time()
         if now - self._loaded_at >= _CACHE_TTL_SECONDS:
-            self._refresh_locked(repo or PricingConfigRepository())
-        return self._rates.get(pricing_key) or self._rates.get("default") or _DEFAULT_RATES["default"]
+            # Double-checked under the lock: only one thread refreshes; the rest
+            # either wait briefly and see the fresh map, or skip if it was just
+            # loaded. A refresh failure keeps the previous map (fail-static).
+            with self._lock:
+                if time.time() - self._loaded_at >= _CACHE_TTL_SECONDS:
+                    self._refresh_locked(repo or PricingConfigRepository())
+        rates = self._rates
+        return rates.get(pricing_key) or rates.get("default") or _DEFAULT_RATES["default"]
 
     def reset(self) -> None:
         """Test hook: drop cached state so the next get() reloads."""

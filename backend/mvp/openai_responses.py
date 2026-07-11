@@ -43,6 +43,7 @@ from core.logging import get_logger
 from dynamo import UserTenantsRepository
 
 from ._pipeline import (
+    release_pool as _release_pool,
     reserve_credit,
     reserve_credit_for_model,
     settle_reservation_and_log,
@@ -450,6 +451,7 @@ async def create_response(
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
+        _release_pool(tenants_repo)
         raise HTTPException(
             status_code=502,
             detail=f"Bedrock OpenAI error: {sanitize_exception_message(str(e))}",
@@ -458,12 +460,14 @@ async def create_response(
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
+        _release_pool(tenants_repo)
         raise
 
     if resp.status_code >= 400:
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
+        _release_pool(tenants_repo)
         # Map upstream 4xx to our 502 (the client did not directly cause
         # this — it's a downstream/IAM/region issue from the proxy's
         # perspective). 4xx-vs-5xx upstream classification is left to the
@@ -578,6 +582,7 @@ async def _stream_response(
                             tenant_id=user.org_id,
                             tokens=reservation,
                         )
+                        _release_pool(tenants_repo)
                         settled = True
                         return
 
@@ -664,6 +669,7 @@ async def _stream_response(
                     tenant_id=user.org_id,
                     tokens=reservation,
                 )
+                _release_pool(tenants_repo)
                 settled = True
                 return
 

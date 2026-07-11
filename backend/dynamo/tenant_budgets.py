@@ -57,9 +57,20 @@ class TenantBudgetsRepository:
         return self._name
 
     # ----- read -----
-    def get(self, tenant_id: str, period: str) -> Optional[dict[str, Any]]:
+    def get(
+        self, tenant_id: str, period: str, *, consistent_read: bool = False
+    ) -> Optional[dict[str, Any]]:
+        """Read a tenant's pool row for a period.
+
+        `consistent_read=True` forces a strongly-consistent GetItem, used by the
+        reserve loop so the optimistic snapshot lock is taken against the
+        current counters (a stale read makes the equality condition fail
+        forever). Admin/read-only callers keep the cheaper eventually-consistent
+        default.
+        """
         resp = self._table.get_item(
-            Key={"tenant_id": tenant_id, "sk": budget_sk(period)}
+            Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+            ConsistentRead=consistent_read,
         )
         return resp.get("Item")
 

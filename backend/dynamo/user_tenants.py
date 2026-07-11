@@ -22,6 +22,7 @@ Phase 3 changes (credit reservation):
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -33,6 +34,21 @@ from .client import get_dynamodb_resource, user_tenants_table_name
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# A single-item UpdateItem can be transiently cancelled with
+# TransactionConflictException when a concurrent TransactWriteItems is touching
+# the same row (e.g. a pooled reserve on this user's balance while a settle
+# refunds it). It is transient and safe to retry — unlike the value-carrying
+# reserve/settle transactions, a plain refund/overrun UpdateItem is idempotent
+# per attempt and bounded. moto never raises this, so it only appears against
+# real DynamoDB under contention.
+_CONFLICT_RETRIES = 6
+_CONFLICT_BACKOFF_SECONDS = 0.02
+
+
+def _is_transaction_conflict(e: ClientError) -> bool:
+    return e.response.get("Error", {}).get("Code") == "TransactionConflictException"
 
 
 class CreditExhaustedError(Exception):
@@ -48,9 +64,19 @@ class UserTenantsRepository:
         )
 
     # ----- read -----
-    def get(self, user_id: str, tenant_id: str) -> Optional[dict[str, Any]]:
-        """Return only active records (use get_including_archived() for archived rows)."""
-        resp = self._table.get_item(Key={"user_id": user_id, "tenant_id": tenant_id})
+    def get(
+        self, user_id: str, tenant_id: str, *, consistent_read: bool = False
+    ) -> Optional[dict[str, Any]]:
+        """Return only active records (use get_including_archived() for archived rows).
+
+        `consistent_read=True` forces a strongly-consistent GetItem; the credit
+        pipeline needs it before an optimistic-lock reserve so it does not lock
+        on a stale snapshot (which would cancel the transaction forever).
+        """
+        resp = self._table.get_item(
+            Key={"user_id": user_id, "tenant_id": tenant_id},
+            ConsistentRead=consistent_read,
+        )
         item = resp.get("Item")
         if not item:
             return None
@@ -266,6 +292,12 @@ class UserTenantsRepository:
                 if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
                     # Snapshot is stale (another reserve or admin overwrite) — re-read and retry.
                     continue
+                # A concurrent TransactWriteItems on this row transiently
+                # conflicts with this single-item reserve; re-read and retry
+                # within the same bounded loop rather than surfacing a 500.
+                if _is_transaction_conflict(e):
+                    time.sleep(_CONFLICT_BACKOFF_SECONDS * (attempt + 1))
+                    continue
                 raise
 
             attrs = resp.get("Attributes", {})
@@ -295,32 +327,41 @@ class UserTenantsRepository:
         if tokens <= 0:
             return self.remaining_credit(user_id, tenant_id)
 
-        try:
-            resp = self._table.update_item(
-                Key={"user_id": user_id, "tenant_id": tenant_id},
-                UpdateExpression="ADD credit_used :neg_tokens SET updated_at = :now",
-                ConditionExpression="credit_used >= :tokens",
-                ExpressionAttributeValues={
-                    ":neg_tokens": Decimal(-tokens),
-                    ":tokens": Decimal(tokens),
-                    ":now": _now_iso(),
-                },
-                ReturnValues="ALL_NEW",
-            )
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                # Underflow guard: credit_used < tokens → clamp to 0.
-                item = self.get_including_archived(user_id, tenant_id)
-                if item:
-                    return max(
-                        int(item.get("total_credit", 0))
-                        - int(item.get("credit_used", 0)),
-                        0,
-                    )
-                return 0
-            raise
+        resp = None
+        for _attempt in range(_CONFLICT_RETRIES):
+            try:
+                resp = self._table.update_item(
+                    Key={"user_id": user_id, "tenant_id": tenant_id},
+                    UpdateExpression="ADD credit_used :neg_tokens SET updated_at = :now",
+                    ConditionExpression="credit_used >= :tokens",
+                    ExpressionAttributeValues={
+                        ":neg_tokens": Decimal(-tokens),
+                        ":tokens": Decimal(tokens),
+                        ":now": _now_iso(),
+                    },
+                    ReturnValues="ALL_NEW",
+                )
+                break
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    # Underflow guard: credit_used < tokens → clamp to 0.
+                    item = self.get_including_archived(user_id, tenant_id)
+                    if item:
+                        return max(
+                            int(item.get("total_credit", 0))
+                            - int(item.get("credit_used", 0)),
+                            0,
+                        )
+                    return 0
+                # A concurrent TransactWriteItems on this row (e.g. a pooled
+                # reserve) transiently conflicts with this single-item refund.
+                # Retry a few times; a refund must not fail a live request.
+                if _is_transaction_conflict(e) and _attempt < _CONFLICT_RETRIES - 1:
+                    time.sleep(_CONFLICT_BACKOFF_SECONDS * (_attempt + 1))
+                    continue
+                raise
 
-        attrs = resp.get("Attributes", {})
+        attrs = (resp or {}).get("Attributes", {})
         total_new = int(attrs.get("total_credit", 0))
         used_new = int(attrs.get("credit_used", 0))
         return max(total_new - used_new, 0)

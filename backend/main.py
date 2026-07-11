@@ -102,9 +102,13 @@ async def lifespan(app: FastAPI):
     _compat_logger = _std_logging.getLogger("stratoclave.startup")
     if admin_creation_allowed():
         warn_if_admin_creation_enabled_in_production(_compat_logger)
+        # NOTE: structlog's BoundLogger.warning(event, **kw) binds the first
+        # positional arg as `event`; passing `event=` again raises "multiple
+        # values for argument 'event'" and crashes startup. Keep the message
+        # positional and use a differently-named field for the marker.
         logger.warning(
             "admin_creation_gate_open_at_startup",
-            event="allow_admin_creation_warning",
+            gate="allow_admin_creation_warning",
             environment=environment,
         )
 
