@@ -44,7 +44,12 @@ from fastapi import HTTPException
 
 from core.logging import get_logger
 from dynamo import UsageLogsRepository, UserTenantsRepository
-from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+from dynamo.tenant_budgets import (
+    TenantBudgetsRepository,
+    current_period,
+)
+from dynamo.tenant_budgets import hold_sk as _hold_sk
+from dynamo.tenant_budgets import previous_period as _previous_period
 from dynamo.user_tenants import CreditExhaustedError
 
 
@@ -64,6 +69,34 @@ _RESERVE_BACKOFF_SECONDS = 0.01  # base; multiplied by the attempt index.
 # hold, so it is logged at error level for reconciliation).
 _SETTLE_MAX_RETRIES = 4
 
+# Orphan-reservation reaper.
+# --------------------------
+# release_pool() hands a hold back on *handled* error paths, but a task kill /
+# OOM / deploy drain can terminate the process between reserve and settle with
+# neither running — leaking that request's share of `pool_reserved_microusd`
+# forever (there is no server-side timer). To bound and self-heal that leak
+# without adding any infrastructure, every pooled reservation writes a sibling
+# HOLD row (in the same TransactWriteItems as the reserve) carrying its amount
+# and an expiry; settle/release delete it; and each pooled reserve lazily sweeps
+# a few *expired* holds, reclaiming their amount back into the aggregate.
+#
+# The TTL should exceed the longest realistic request (a slow extended-thinking
+# stream, plus Bedrock throttling waits and settle backoff) so a still-running
+# request is not mistaken for a crashed one. Even so, settle/release/reclaim are
+# now written so an early reclaim can only *lose the reclaimer's own work* to the
+# idempotency latch — it can never double-subtract reserved (see
+# `hold_delete_txn_item`). The TTL is therefore a tuning knob for sweep timeliness,
+# not the sole guarantor of money-safety. A hard floor stops a mis-set env var
+# (e.g. a throwaway "60") from turning every in-flight hold into a false orphan.
+_HOLD_TTL_FLOOR_SECONDS = 1800
+_HOLD_TTL_SECONDS = max(
+    int(os.getenv("STRATOCLAVE_POOL_HOLD_TTL_SECONDS", "3600")),
+    _HOLD_TTL_FLOOR_SECONDS,
+)
+# Reclaim only a handful of expired holds per request so the sweep never turns
+# the hot reserve path into an unbounded scan.
+_SWEEP_MAX_HOLDS = int(os.getenv("STRATOCLAVE_POOL_SWEEP_MAX_HOLDS", "5"))
+
 
 def _pool_settle_items(
     *,
@@ -72,15 +105,35 @@ def _pool_settle_items(
     period: str,
     reserved_microusd: int,
     actual_microusd: int,
+    reclaimed_microusd: int = 0,
 ):
     """Build the single TransactWriteItems fragment that settles a pool hold.
 
-    Kept here (rather than inline) so both the settle and the error-path
-    release compose the exact same update — moving `reserved` out of
-    `pool_reserved` and `actual` into `pool_settled`.
+    Kept here (rather than inline) so settle, the error-path release, and the
+    reaper all compose the exact same aggregate update — moving `reserved` out
+    of `pool_reserved` and `actual` into `pool_settled`.
+
+    `attribute_exists(tenant_id)` gates the update: if the pool row was legit-
+    imately deleted mid-flight (the `pool_vanished` path), an in-flight settle
+    or reclaim must NOT resurrect it as a ghost row carrying a negative
+    `pool_reserved` (which a later `set_pool_limit` would preserve, inflating the
+    next period's effective budget). A cancelled update is a no-op: no row means
+    no reservation to reconcile.
+
+    `reclaimed_microusd` (reaper only) records orphan value returned without
+    spend, so operators can reconcile against the Bedrock bill for the rare case
+    where the crash happened *after* a successful model call.
     """
     from dynamo.tenant_budgets import budget_sk
 
+    expr = "ADD pool_reserved_microusd :dr, pool_settled_microusd :actual"
+    values = {
+        ":dr": {"N": str(-int(reserved_microusd))},
+        ":actual": {"N": str(int(actual_microusd))},
+    }
+    if reclaimed_microusd:
+        expr += ", pool_reclaimed_microusd :rec"
+        values[":rec"] = {"N": str(int(reclaimed_microusd))}
     return {
         "Update": {
             "TableName": table_name,
@@ -88,13 +141,9 @@ def _pool_settle_items(
                 "tenant_id": {"S": tenant_id},
                 "sk": {"S": budget_sk(period)},
             },
-            "UpdateExpression": (
-                "ADD pool_reserved_microusd :dr, pool_settled_microusd :actual"
-            ),
-            "ExpressionAttributeValues": {
-                ":dr": {"N": str(-int(reserved_microusd))},
-                ":actual": {"N": str(int(actual_microusd))},
-            },
+            "UpdateExpression": expr,
+            "ConditionExpression": "attribute_exists(tenant_id)",
+            "ExpressionAttributeValues": values,
         }
     }
 
@@ -117,6 +166,14 @@ class ReservationContext:
     pricing_key: Optional[str] = None
     tenant_id: str = ""
     pool_active: bool = False
+    # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
+    # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
+    # the reaper can range-scan by expiry, so settle/release must delete by the
+    # exact SK they hold, not reconstruct it from hold_id. The reaper reclaims
+    # holds whose owning request died before settle/release; settle and release
+    # delete this hold in the same transaction that adjusts the aggregate.
+    hold_id: Optional[str] = None
+    hold_sk: Optional[str] = None
     # Guards the pool hold against being released or settled twice. A single
     # request settles OR releases its pool reservation exactly once; both paths
     # flip this so a defensive double-call (e.g. an error handler plus the
@@ -140,28 +197,66 @@ class ReservationContext:
         ):
             return
         self._pool_finalized = True
+        budgets = TenantBudgetsRepository()
+        # Return the reserved amount AND delete this hold in one transaction, so
+        # the aggregate and the hold vanish together. The hold delete is gated on
+        # `attribute_exists(sk)`: if the reaper already reclaimed this hold (a
+        # slow error path that outlived the TTL), it ALSO already returned the
+        # reserved amount — so the cancelled transaction correctly leaves the
+        # aggregate untouched instead of subtracting `reserved` a second time.
+        items = [
+            _pool_settle_items(
+                table_name=budgets.table_name,
+                tenant_id=self.tenant_id,
+                period=self.period,
+                reserved_microusd=self.pool_reserved_microusd,
+                actual_microusd=0,
+            )
+        ]
+        if self.hold_sk:
+            items.append(
+                budgets.hold_delete_txn_item(
+                    tenant_id=self.tenant_id, sk=self.hold_sk
+                )
+            )
         try:
             client = _low_level_client()
             client.transact_write_items(
-                TransactItems=[
-                    _pool_settle_items(
-                        table_name=TenantBudgetsRepository().table_name,
-                        tenant_id=self.tenant_id,
-                        period=self.period,
-                        reserved_microusd=self.pool_reserved_microusd,
-                        actual_microusd=0,
-                    )
-                ],
+                TransactItems=items,
                 # Fresh per-call token: dedupes only botocore's transparent
                 # retry of THIS release, never collides with a concurrent one.
                 ClientRequestToken=_fresh_idempotency_token(),
             )
-        except ClientError:
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "TransactionCanceledException":
+                # Cancelled because the hold was already reclaimed by the reaper
+                # (reserved already returned) or the pool row is gone — either
+                # way there is nothing left to release. Expected, not an error.
+                logger.info(
+                    "pool_release_noop_already_reconciled",
+                    tenant_id=self.tenant_id,
+                    period=self.period,
+                    reserved_microusd=self.pool_reserved_microusd,
+                )
+            else:
+                logger.warning(
+                    "pool_release_failed",
+                    tenant_id=self.tenant_id,
+                    period=self.period,
+                    reserved_microusd=self.pool_reserved_microusd,
+                    error_code=code,
+                )
+        except Exception:
+            # A non-ClientError (e.g. botocore ReadTimeoutError, which is NOT a
+            # ClientError) must never escape a best-effort release and mask the
+            # original error that sent us down this path.
             logger.warning(
                 "pool_release_failed",
                 tenant_id=self.tenant_id,
                 period=self.period,
                 reserved_microusd=self.pool_reserved_microusd,
+                error_code="non_client_error",
             )
 
     # --- UserTenantsRepository delegation ---------------------------------
@@ -222,6 +317,131 @@ def _fresh_idempotency_token() -> str:
     which is exactly where it was found.
     """
     return str(uuid.uuid4())
+
+
+def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
+    """Reclaim expired pool holds for `tenant_id`, this period AND the previous.
+
+    A hold outlives its reservation only when the owning request's process died
+    between reserve and settle (kill / OOM / drain) — settle and release delete
+    the hold in the same transaction that adjusts the aggregate. This is the
+    self-healing counterpart: each pooled reserve reclaims a few holds whose
+    embedded expiry has passed, moving their amount back out of
+    `pool_reserved_microusd` so a crash cannot permanently strand budget.
+
+    The previous period is swept too: a crash in a month's final moments would
+    otherwise strand that hold forever (this period's sweep only looks at this
+    period's prefix, and native TTL is intentionally unused). One extra bounded
+    range query per reserve is cheap.
+
+    Best-effort and never raises: bounded to `_SWEEP_MAX_HOLDS` reclaims per
+    call and EVERY exception (not just ClientError — botocore ReadTimeoutError
+    is not a ClientError) is swallowed after logging, because a struggling
+    reaper must never fail the live request that happens to be driving it.
+    Returns the total count reclaimed (for tests / observability).
+    """
+    try:
+        total = _sweep_one_period(budgets, tenant_id, period, _SWEEP_MAX_HOLDS)
+        if total < _SWEEP_MAX_HOLDS:
+            total += _sweep_one_period(
+                budgets, tenant_id, _previous_period(period),
+                _SWEEP_MAX_HOLDS - total,
+            )
+        return total
+    except Exception:  # noqa: BLE001 — a reaper must never fail the live request
+        logger.warning("pool_sweep_failed", tenant_id=tenant_id, period=period)
+        return 0
+
+
+def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
+    """Reclaim up to `cap` expired holds for one tenant/period. See
+    `_sweep_expired_holds` for the contract; this is the per-period worker."""
+    if cap <= 0:
+        return 0
+    reclaimed = 0
+    now_epoch = int(time.time())
+    # The SK embeds the (zero-padded) expiry, so this range scan returns only
+    # already-expired holds, oldest-expiry first, and `Limit` bounds it by
+    # expiry — no filter, no risk of an orphan being buried behind live holds.
+    # A small headroom over `cap` covers holds a concurrent sweep grabs first.
+    expired = budgets.query_expired_holds(
+        tenant_id=tenant_id,
+        period=period,
+        now_epoch=now_epoch,
+        limit=cap + _SWEEP_MAX_HOLDS,
+    )
+    if not expired:
+        return 0
+
+    client = _low_level_client()
+    for hold in expired:
+        if reclaimed >= cap:
+            break
+        sk = str(hold.get("sk", ""))
+        amount = int(hold.get("amount_microusd", 0))
+        if not sk:
+            continue
+        if amount <= 0:
+            # A zero/negative-amount hold ties up no budget; just delete it so it
+            # stops being scanned (unconditional single-item delete, no aggregate
+            # change). Best-effort.
+            try:
+                client.delete_item(
+                    TableName=budgets.table_name,
+                    Key={"tenant_id": {"S": tenant_id}, "sk": {"S": sk}},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        try:
+            client.transact_write_items(
+                TransactItems=[
+                    _pool_settle_items(
+                        table_name=budgets.table_name,
+                        tenant_id=tenant_id,
+                        period=period,
+                        reserved_microusd=amount,
+                        actual_microusd=0,
+                        reclaimed_microusd=amount,
+                    ),
+                    budgets.reclaim_hold_txn_item(tenant_id=tenant_id, sk=sk),
+                ],
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+            reclaimed += 1
+            # error level, with amount: an orphan means a request that reserved
+            # budget then vanished. If the crash was AFTER a successful Bedrock
+            # call, real spend happened but is recorded here as actual=0 — this
+            # line + pool_reclaimed_microusd let operators reconcile the bill.
+            logger.error(
+                "pool_hold_reclaimed",
+                tenant_id=tenant_id,
+                period=period,
+                hold_id=str(hold.get("hold_id", "")),
+                amount_microusd=amount,
+            )
+        except ClientError as e:
+            # A cancelled transaction means the hold was already reclaimed or
+            # settled by a concurrent path — expected under contention, not an
+            # error. Anything else is transient; the next request sweeps again.
+            code = e.response.get("Error", {}).get("Code", "")
+            if code != "TransactionCanceledException":
+                logger.warning(
+                    "pool_hold_reclaim_failed",
+                    tenant_id=tenant_id,
+                    period=period,
+                    sk=sk,
+                    error_code=code,
+                )
+        except Exception:  # noqa: BLE001 — never let the reaper fail the request
+            logger.warning(
+                "pool_hold_reclaim_failed",
+                tenant_id=tenant_id,
+                period=period,
+                sk=sk,
+                error_code="non_client_error",
+            )
+    return reclaimed
 
 
 def _err_402(reason: str) -> HTTPException:
@@ -339,8 +559,21 @@ def reserve_credit(
     # race-safe.
     cost = int(cost_microusd)
     client = _low_level_client()
+    # Best-effort reclaim of holds abandoned by dead requests before we take a
+    # fresh snapshot, so this reservation locks on (and can use) budget that
+    # orphaned holds were needlessly tying up. Never blocks or fails the request.
+    _sweep_expired_holds(budgets, user.org_id, period)
     pool_vanished = False
     saw_throttle = False
+    # One hold identity for this logical reservation, stable across our explicit
+    # retries: a cancelled transaction writes nothing (the hold Put included), so
+    # reusing the id on the next attempt cannot collide with a prior commit, and
+    # a lost-ack on a real commit is deduped by botocore's same-token retry
+    # before it could ever reach this loop again. The SK embeds the expiry, so
+    # settle/release delete by this exact string rather than reconstructing it.
+    hold_id = _fresh_idempotency_token()
+    hold_expires_at = int(time.time()) + _HOLD_TTL_SECONDS
+    hold_sk = _hold_sk(period, hold_expires_at, hold_id)
     for _attempt in range(_RESERVE_MAX_RETRIES):
         if _attempt:
             # Small linear backoff so a thundering herd on one hot pool row does
@@ -414,9 +647,16 @@ def reserve_credit(
             expected_reserved=p_reserved,
             expected_settled=p_settled,
         )
+        hold_txn = budgets.hold_put_txn_item(
+            tenant_id=user.org_id,
+            period=period,
+            hold_id=hold_id,
+            amount_microusd=cost,
+            expires_at_epoch=hold_expires_at,
+        )
         try:
             client.transact_write_items(
-                TransactItems=[user_txn, pool_txn],
+                TransactItems=[user_txn, pool_txn, hold_txn],
                 # Fresh token per attempt: dedupes only botocore's transparent
                 # retry of THIS transact call (so a lost ack cannot double-debit)
                 # while staying distinct from every concurrent caller and from
@@ -452,6 +692,8 @@ def reserve_credit(
             pricing_key=pricing_key,
             tenant_id=user.org_id,
             pool_active=True,
+            hold_id=hold_id,
+            hold_sk=hold_sk,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
@@ -513,6 +755,33 @@ def release_pool(context) -> None:
     releaser = getattr(context, "release_pool", None)
     if callable(releaser):
         releaser()
+
+
+def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actual_microusd: int):
+    """Aggregate update that records spend WITHOUT touching `pool_reserved`.
+
+    Used by the settle fallback when the reaper already reclaimed this
+    reservation's hold (and thus already returned its reserved share): we must
+    still record the actual spend, but decrementing `pool_reserved` again would
+    double-subtract. Gated on `attribute_exists(tenant_id)` so a vanished pool
+    row is a no-op.
+    """
+    from dynamo.tenant_budgets import budget_sk
+
+    return {
+        "Update": {
+            "TableName": table_name,
+            "Key": {"tenant_id": {"S": tenant_id}, "sk": {"S": budget_sk(period)}},
+            "UpdateExpression": "ADD pool_settled_microusd :actual",
+            "ConditionExpression": "attribute_exists(tenant_id)",
+            "ExpressionAttributeValues": {":actual": {"N": str(int(actual_microusd))}},
+        }
+    }
+
+
+def _cancellation_codes(e: ClientError) -> list:
+    """Per-item CancellationReasons codes, index-aligned with the TransactItems."""
+    return [r.get("Code", "") for r in (e.response.get("CancellationReasons", []) or [])]
 
 
 def settle_reservation_and_log(
@@ -624,59 +893,24 @@ def settle_reservation_and_log(
         # together, and a defensive double-settle (e.g. error handler + the
         # streaming `finally`) must not double-subtract pool_reserved.
         context._pool_finalized = True
-        table_name = TenantBudgetsRepository().table_name
-        item = _pool_settle_items(
-            table_name=table_name,
-            tenant_id=user.org_id,
-            period=context.period,
-            reserved_microusd=context.pool_reserved_microusd,
-            actual_microusd=int(actual_cost_microusd),
-        )
-        # One fresh token for this settle, generated ONCE before the loop and
-        # reused across our explicit retries: the settle params are timestamp-
-        # free (no updated_at), so a retry after a lost ack carries the same
-        # token+params and DynamoDB dedupes it to success instead of double-
-        # applying. A fresh UUID keeps it distinct from any other request's
-        # settle.
-        token = _fresh_idempotency_token()
-        client = _low_level_client()
-        settled_ok = False
-        for _attempt in range(_SETTLE_MAX_RETRIES):
-            if _attempt:
-                time.sleep(_RESERVE_BACKOFF_SECONDS * _attempt)
-            try:
-                client.transact_write_items(
-                    TransactItems=[item], ClientRequestToken=token
-                )
-                settled_ok = True
-                break
-            except ClientError as e:
-                code = e.response.get("Error", {}).get("Code", "")
-                # A duplicate token means a prior identical call already applied
-                # this exact settlement — treat as success, never re-apply.
-                if code == "IdempotentParameterMismatchException":
-                    settled_ok = True
-                    break
-                logger.warning(
-                    "pool_settle_retry",
-                    tenant_id=user.org_id,
-                    period=context.period,
-                    attempt=_attempt,
-                    error_code=code,
-                )
-                continue
-        if not settled_ok:
-            # Do NOT swallow silently: an unsettled hold leaks pool budget until
-            # an operator reconciles it. Emit a loud, structured record so the
-            # leak is detectable and repairable (there is no reaper).
+        try:
+            _settle_pool_side(user, context, int(actual_cost_microusd))
+        except Exception:  # noqa: BLE001
+            # The pool settle must never prevent the UsageLogs write below: a
+            # non-ClientError (e.g. ReadTimeoutError) here would otherwise lose
+            # the audit record of a Bedrock call that already happened.
             logger.error(
                 "pool_settle_failed",
                 tenant_id=user.org_id,
                 period=context.period,
                 reserved_microusd=context.pool_reserved_microusd,
                 actual_microusd=actual_cost_microusd,
+                error_code="non_client_error",
             )
 
+    # ALWAYS record usage, even if the pool settle above failed: the Bedrock
+    # call happened and its cost must be auditable. This is deliberately outside
+    # any pool try/except so a settle fault cannot swallow the ledger entry.
     UsageLogsRepository().record(
         tenant_id=user.org_id,
         user_id=user.user_id,
@@ -685,4 +919,110 @@ def settle_reservation_and_log(
         input_tokens=actual_input_tokens,
         output_tokens=actual_output_tokens,
         cost_microusd=actual_cost_microusd,
+    )
+
+
+def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
+    """Move this reservation's `reserved` into `settled` and delete its hold in
+    one transaction, with the double-subtract and vanished-row races handled.
+
+    The transaction is [aggregate settle, conditional hold delete]. Three cancel
+    outcomes are reconciled by inspecting the per-item CancellationReasons:
+      - hold-delete (index 1) failed ConditionalCheckFailed → the reaper already
+        reclaimed this hold AND already returned its reserved share, so we must
+        NOT subtract reserved again; record settled-only instead;
+      - aggregate (index 0) failed ConditionalCheckFailed → the pool row was
+        deleted mid-flight (pool_vanished) → nothing to reconcile, no-op;
+      - anything else → transient, retry with the same idempotency token.
+    """
+    budgets = TenantBudgetsRepository()
+    items = [
+        _pool_settle_items(
+            table_name=budgets.table_name,
+            tenant_id=user.org_id,
+            period=context.period,
+            reserved_microusd=context.pool_reserved_microusd,
+            actual_microusd=actual_cost_microusd,
+        )
+    ]
+    if context.hold_sk:
+        items.append(
+            budgets.hold_delete_txn_item(tenant_id=user.org_id, sk=context.hold_sk)
+        )
+    # One fresh token, generated ONCE and reused across our explicit retries: the
+    # settle params are timestamp-free, so a retry after a lost ack carries the
+    # same token+params and DynamoDB dedupes it to success instead of double-
+    # applying. A fresh UUID keeps it distinct from any other request's settle.
+    token = _fresh_idempotency_token()
+    client = _low_level_client()
+    for _attempt in range(_SETTLE_MAX_RETRIES):
+        if _attempt:
+            time.sleep(_RESERVE_BACKOFF_SECONDS * _attempt)
+        try:
+            client.transact_write_items(TransactItems=items, ClientRequestToken=token)
+            return  # settled cleanly (reserved returned, spend recorded, hold gone)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "TransactionCanceledException":
+                reasons = _cancellation_codes(e)
+                hold_gone = (
+                    len(reasons) > 1 and reasons[1] == "ConditionalCheckFailed"
+                )
+                row_gone = reasons and reasons[0] == "ConditionalCheckFailed"
+                if hold_gone:
+                    # Reaper already returned `reserved`; just record the spend.
+                    logger.info(
+                        "pool_settle_hold_already_reclaimed",
+                        tenant_id=user.org_id,
+                        period=context.period,
+                        reserved_microusd=context.pool_reserved_microusd,
+                        actual_microusd=actual_cost_microusd,
+                    )
+                    try:
+                        client.transact_write_items(
+                            TransactItems=[
+                                _settled_only_txn_item(
+                                    table_name=budgets.table_name,
+                                    tenant_id=user.org_id,
+                                    period=context.period,
+                                    actual_microusd=actual_cost_microusd,
+                                )
+                            ],
+                            ClientRequestToken=_fresh_idempotency_token(),
+                        )
+                    except ClientError as e2:
+                        if (
+                            e2.response.get("Error", {}).get("Code")
+                            != "TransactionCanceledException"
+                        ):
+                            raise
+                        # settled-only cancelled → pool row also gone; nothing to do.
+                    return
+                if row_gone:
+                    # Pool row deleted mid-flight (pool_vanished): no reservation
+                    # to reconcile, and we must not resurrect a ghost row.
+                    logger.info(
+                        "pool_settle_row_vanished",
+                        tenant_id=user.org_id,
+                        period=context.period,
+                    )
+                    return
+            # duplicate token or transient capacity → log and retry with the
+            # same token (a genuine duplicate dedupes; a transient one succeeds).
+            logger.warning(
+                "pool_settle_retry",
+                tenant_id=user.org_id,
+                period=context.period,
+                attempt=_attempt,
+                error_code=code,
+            )
+            continue
+    # Retries exhausted: an unsettled hold ties up pool budget until the reaper
+    # reclaims it at TTL. Emit a loud, structured record for reconciliation.
+    logger.error(
+        "pool_settle_failed",
+        tenant_id=user.org_id,
+        period=context.period,
+        reserved_microusd=context.pool_reserved_microusd,
+        actual_microusd=actual_cost_microusd,
     )

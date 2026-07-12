@@ -29,10 +29,10 @@ compatible endpoint at `/v1/messages` (for the Anthropic SDKs, Claude Code,
 and Claude Desktop Cowork) and an OpenAI Responses API-compatible endpoint
 at `/openai/v1/responses` (for the OpenAI SDK and the `codex` CLI, backed by
 GPT-5.x on Amazon Bedrock via the bedrock-mantle service). Both routes
-enforce per-tenant and per-user credit quotas with atomic DynamoDB
-reservations, record every call in an audit log, and accept three orthogonal
-identity paths (Amazon Cognito password, AWS SSO via a Vault-style STS vouch,
-and long-lived `sk-stratoclave-*` keys).
+enforce per-user token quotas and optional per-tenant **dollar pool** budgets
+with atomic DynamoDB reservations, record every call in an audit log, and
+accept three orthogonal identity paths (Amazon Cognito password, AWS SSO via a
+Vault-style STS vouch, and long-lived `sk-stratoclave-*` keys).
 
 Stratoclave is deliberately AWS-native and small: a single region in your own
 account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito
@@ -102,6 +102,22 @@ for where a broker is the better choice.
   reservation is a conditional `UpdateItem`, concurrent requests that would
   push a balance past its limit lose the condition and are rejected — quotas
   cannot be raced past.
+- **Dollar pool budgets, priced per model.** A tenant can additionally carry a
+  shared **dollar pool** for a billing period. Each request debits the caller's
+  per-user tokens *and* reserves the request's cost in integer micro-USD from
+  the pool in **one** `TransactWriteItems`, so neither ceiling can be raced
+  past; a breach returns `402` with a `reason` distinguishing
+  `personal_budget_exhausted` from `tenant_pool_exhausted`. Cost is derived from
+  an admin-editable per-model price table (`PricingConfig`), so Opus and Haiku
+  spend are counted differently — all in integer micro-USD, never floating
+  point. A tenant with no pool row keeps the token-only behaviour unchanged
+  (pools are opt-in per tenant/period).
+- **Crash-resilient budget accounting.** A pooled reservation writes a sibling
+  *hold* record in the same atomic write; settle and release delete it, and if
+  a task is killed (OOM, deploy drain) between reserve and settle, a bounded,
+  self-healing sweep on later requests reclaims the orphaned hold so a crash
+  can never permanently strand pool budget — with no reaper process, timer, or
+  any infrastructure beyond the single DynamoDB table.
 - **Three role RBAC, tenant-scoped.** `admin`, `team_lead`, and `user` roles
   are normalized into DynamoDB from a versioned
   [`permissions.json`](./backend/permissions.json). Team leads see only the
@@ -320,6 +336,35 @@ The credit model, role matrix, and the underlying DynamoDB tables are
 documented in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) and
 [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md).
 
+### Dollar pool budgets and crash-safe accounting
+
+When a tenant has a **dollar pool** for the current period, the same
+reservation additionally reserves the request's cost — priced from the
+per-model `PricingConfig` table — as integer **micro-USD** (1 USD =
+1 000 000 micro-USD; never a float, and cost is rounded *up* so a request is
+never under-charged). The per-user token debit and the pool debit are one
+`TransactWriteItems`: either both commit or neither does, so under concurrency
+a tenant can no more overshoot its dollar pool than a user can overshoot their
+token balance. On settle, the reserved amount is released and the *actual*
+cost — including cache-read/write tokens — is recorded to `pool_settled`.
+
+Because a reservation is money held before the model call, a process killed
+between reserve and settle (OOM, deploy drain) would otherwise strand that
+amount forever. To prevent that **without adding any infrastructure**, each
+reservation writes a sibling *hold* row in the same atomic write, carrying its
+amount and an expiry encoded in the sort key. Settle and release delete the
+hold in the same transaction that adjusts the pool. A killed request leaves its
+hold behind; later pooled requests run a small, bounded **sweep** that reclaims
+expired holds — decrement and delete in one conditional transaction, so a hold
+is reclaimed at most once and the pool can never be double-credited or driven
+negative, even when many requests sweep concurrently. There is no reaper
+process, no timer, and no store beyond the single `TenantBudgets` table.
+
+Set a pool with `stratoclave admin tenant pool-budget set` or the web console;
+the `TenantBudgets` schema and the reclaim invariants are documented in
+[`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md) and
+[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+
 ## API compatibility
 
 | Endpoint                               | Behavior                                                            |
@@ -352,8 +397,9 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
 | Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
 | Tenants as a managed object | **Yes** — create / assign / atomically reassign | Teams (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget model | **Pool + per-user, reserved *pre-flight* per request** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
-| Can a user race/bypass the budget? | No (atomic conditional write) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
+| Budget model | **Dollar pool + per-user tokens, reserved *pre-flight* in one atomic write; priced per model in micro-USD** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
+| Can a user race/bypass the budget? | No (single `TransactWriteItems` over both ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
+| Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via a bounded sweep; no leak, no reaper process | Relies on the proxy + its Postgres/Redis | N/A (no server-side reservation) |
 | OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
 | Model / capability policy | App-layer allowlist (+ per-tenant effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
 | Identity | Cognito password, **Vouch-by-STS** (aws sso / saml2aws / IAM user), `sk-stratoclave-*` keys | Enterprise tier (Okta/Entra/OIDC/SAML) | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
@@ -453,9 +499,6 @@ deliberately does **not** do today:
   an ECS task restarts and are per-task; for multi-task deployments set
   `STRATOCLAVE_RATELIMIT_STORAGE_URI` to a shared store. Credit reservation is
   *not* affected by this — it is always atomic in DynamoDB.
-- **Budget is denominated in tokens, not dollars.** A per-model dollar pricing
-  layer is on the roadmap; today a token budget does not distinguish Opus from
-  Haiku spend.
 - **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
   commit, run it in an account you control, and read the threat model in
   [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.
