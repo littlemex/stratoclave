@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
+from boto3.dynamodb.conditions import Key
+
 from .client import get_dynamodb_resource, tenant_budgets_table_name
 
 
@@ -41,10 +43,55 @@ def budget_sk(period: str) -> str:
     return f"BUDGET#{period}"
 
 
+def hold_sk_prefix(period: str) -> str:
+    """SK prefix that groups a period's per-reservation hold items under the
+    tenant's partition (so they can be range-Queried)."""
+    return f"HOLD#{period}#"
+
+
+# Width of the zero-padded epoch-seconds field embedded in a hold's SK. Ten
+# digits covers all epochs through the year 2286, so lexical SK order == expiry
+# order for the lifetime of this system. The reaper relies on that ordering: it
+# range-scans holds whose embedded expiry is <= now, which lets DynamoDB's Limit
+# bound the scan *by expiry* (oldest orphans first) instead of by arbitrary key
+# order — the fix for the "orphan buried behind live holds, never swept" leak.
+_EXPIRES_WIDTH = 10
+
+
+def hold_sk(period: str, expires_at_epoch: int, hold_id: str) -> str:
+    """Build a hold's sort key with the expiry embedded so SK order is expiry
+    order: ``HOLD#<period>#<expires_at:010d>#<hold_id>``."""
+    return f"{hold_sk_prefix(period)}{int(expires_at_epoch):0{_EXPIRES_WIDTH}d}#{hold_id}"
+
+
+def hold_sk_expiry_ceiling(period: str, now_epoch: int) -> str:
+    """Upper bound (inclusive) for a range scan of holds expired at/-before
+    `now_epoch`: every SK whose embedded expiry is <= now sorts <= this string.
+
+    The trailing high sentinel (``#￿``) makes the bound inclusive of the
+    whole `now_epoch` second regardless of the hold_id suffix.
+    """
+    return f"{hold_sk_prefix(period)}{int(now_epoch):0{_EXPIRES_WIDTH}d}#￿"
+
+
 def current_period() -> str:
     """Return the current billing period key (calendar month, UTC)."""
     now = datetime.now(timezone.utc)
     return f"{now.year:04d}-{now.month:02d}"
+
+
+def previous_period(period: str) -> str:
+    """Return the calendar month immediately before `period` ("2026-07"->"2026-06").
+
+    The reaper sweeps this alongside the current period so a hold orphaned by a
+    crash in the final moments of a month is still reclaimed after the boundary
+    rolls over (otherwise last month's `pool_reserved` would stay inflated and
+    the hold row would linger forever, since native TTL is intentionally unused).
+    """
+    year, month = (int(x) for x in period.split("-"))
+    if month == 1:
+        return f"{year - 1:04d}-12"
+    return f"{year:04d}-{month - 1:02d}"
 
 
 class TenantBudgetsRepository:
@@ -211,3 +258,129 @@ class TenantBudgetsRepository:
                 },
             }
         }
+
+    # ----- hold items (orphan-reservation reaper) -----
+    # Every in-flight reservation writes a sibling HOLD row in the same
+    # transaction as the aggregate `pool_reserved += cost`. The HOLD records how
+    # much *this specific request* is holding and when the hold expires. settle
+    # and release delete the HOLD in the same transaction that decrements the
+    # aggregate, so a HOLD outlives its reservation only when the process died
+    # between reserve and settle (task kill / OOM / drain). The lazy sweep then
+    # reclaims those orphans: `pool_reserved -= amount` plus a conditional
+    # Delete(hold), the condition making the reclaim idempotent (a HOLD is
+    # reclaimed at most once, so the aggregate can never be double-subtracted or
+    # driven negative). This is the ONLY reaper — native DynamoDB TTL is
+    # deliberately NOT used on HOLDs, because a TTL delete would drop the row
+    # without decrementing the aggregate, converting a transient leak into a
+    # permanent one.
+
+    def hold_put_txn_item(
+        self,
+        *,
+        tenant_id: str,
+        period: str,
+        hold_id: str,
+        amount_microusd: int,
+        expires_at_epoch: int,
+    ) -> dict[str, Any]:
+        """Transaction item that records a per-reservation hold.
+
+        Written in the SAME TransactWriteItems as the aggregate reserve, so a
+        hold exists iff its share of `pool_reserved_microusd` is outstanding.
+        The SK embeds the expiry (see `hold_sk`) so the reaper can range-scan by
+        expiry; `attribute_not_exists(sk)` guards against a hold_id collision.
+        """
+        return {
+            "Put": {
+                "TableName": self._name,
+                "Item": {
+                    "tenant_id": {"S": tenant_id},
+                    "sk": {"S": hold_sk(period, expires_at_epoch, hold_id)},
+                    "hold_id": {"S": hold_id},
+                    "period": {"S": period},
+                    "amount_microusd": {"N": str(int(amount_microusd))},
+                    "expires_at": {"N": str(int(expires_at_epoch))},
+                    "created_at": {"S": _now_iso()},
+                },
+                "ConditionExpression": "attribute_not_exists(sk)",
+            }
+        }
+
+    def hold_delete_txn_item(
+        self, *, tenant_id: str, sk: str, require_exists: bool = True
+    ) -> dict[str, Any]:
+        """Transaction item that deletes a hold by its exact `sk`.
+
+        Composed alongside the aggregate settle/release so the hold and its
+        aggregate share disappear together. With `require_exists=True` (the
+        default) the Delete is gated on `attribute_exists(sk)`: this is the
+        latch that keeps the paired aggregate decrement from applying twice. If
+        the reaper already reclaimed this hold (and already returned its
+        reserved share), the condition fails, the whole transaction cancels, and
+        the caller falls back to recording spend WITHOUT decrementing reserved
+        again — the fix for the settle/reclaim double-subtract.
+        """
+        item: dict[str, Any] = {
+            "Delete": {
+                "TableName": self._name,
+                "Key": {
+                    "tenant_id": {"S": tenant_id},
+                    "sk": {"S": sk},
+                },
+            }
+        }
+        if require_exists:
+            item["Delete"]["ConditionExpression"] = "attribute_exists(sk)"
+        return item
+
+    def reclaim_hold_txn_item(
+        self, *, tenant_id: str, sk: str
+    ) -> dict[str, Any]:
+        """Transaction item that deletes an expired hold by exact `sk` *only if
+        it still exists*, so the paired aggregate decrement happens at most once.
+
+        The sweep composes this Delete with an aggregate
+        `pool_reserved_microusd -= amount`. The `attribute_exists(sk)` condition
+        is the idempotency latch: if a concurrent sweep or a late settle already
+        removed the hold, the whole transaction cancels and no double-subtract
+        occurs.
+        """
+        return {
+            "Delete": {
+                "TableName": self._name,
+                "Key": {
+                    "tenant_id": {"S": tenant_id},
+                    "sk": {"S": sk},
+                },
+                "ConditionExpression": "attribute_exists(sk)",
+            }
+        }
+
+    def query_expired_holds(
+        self, *, tenant_id: str, period: str, now_epoch: int, limit: int = 25
+    ) -> list[dict[str, Any]]:
+        """Return up to `limit` holds for the period whose embedded expiry has
+        passed, **oldest-expiry first**. Strongly consistent so the sweep does
+        not act on a stale view and try to reclaim a hold a settle just deleted.
+
+        Because the SK embeds the (zero-padded) expiry, this is a pure key range
+        scan — `between(prefix, expiry-ceiling(now))` — with NO FilterExpression.
+        That matters: DynamoDB's `Limit` bounds items *evaluated*, and a filter
+        is applied after. The previous begins_with + expires_at filter let `Limit`
+        cut the page across live holds (arbitrary uuid order) so an expired
+        orphan sitting behind `Limit` live holds was never returned and leaked
+        forever. Ranging by embedded expiry makes `Limit` count only already-
+        expired holds, oldest first, so bounded sweeps drain the backlog.
+        """
+        resp = self._table.query(
+            KeyConditionExpression=(
+                Key("tenant_id").eq(tenant_id)
+                & Key("sk").between(
+                    hold_sk_prefix(period),
+                    hold_sk_expiry_ceiling(period, now_epoch),
+                )
+            ),
+            ConsistentRead=True,
+            Limit=int(limit),
+        )
+        return resp.get("Items", [])
