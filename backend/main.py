@@ -136,7 +136,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stratoclave",
     description="Bedrock proxy gateway with tenant-level RBAC (Phase 2)",
-    version="2.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
