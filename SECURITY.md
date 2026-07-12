@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-07-10 -->
+<!-- Last updated: 2026-07-12 -->
 
 # Security Policy
 
@@ -8,14 +8,15 @@ describes how to report vulnerabilities and what to expect in response.
 
 ## Supported Versions
 
-Stratoclave is currently **alpha** software. No stable release has been cut;
-only the latest commit on the `main` branch is supported. Once we cut `v0.1.0`,
-this section will be updated to reflect supported release lines.
+Stratoclave is currently **alpha** software on the `0.x` series. Only the
+latest tagged minor release and the latest commit on the `main` branch are
+supported; older `0.x` tags do not receive backported fixes while in alpha.
 
-| Version / Branch       | Supported          |
-|------------------------|--------------------|
-| `main` (latest commit) | :white_check_mark: |
-| everything else        | :x:                |
+| Version / Branch          | Supported          |
+|---------------------------|--------------------|
+| `main` (latest commit)    | :white_check_mark: |
+| latest `v0.x` tag         | :white_check_mark: |
+| older tags / everything else | :x:             |
 
 ## Reporting a Vulnerability
 
