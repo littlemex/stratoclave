@@ -511,9 +511,9 @@ control plane should enforce.
 ## Project status
 
 Stratoclave is **alpha** software. Public HTTP surfaces, DynamoDB schemas,
-and CDK construct props may change without notice until `v0.1.0` is cut.
-Breaking changes will be called out in release notes from that point on.
-Issues and pull requests are welcome; see
+and CDK construct props may still change between minor releases while on the
+`0.x` series. Breaking changes are called out in the release notes for each
+tagged version. Issues and pull requests are welcome; see
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## Contributing
