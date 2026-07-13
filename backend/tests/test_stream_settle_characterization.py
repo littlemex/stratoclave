@@ -27,9 +27,9 @@ from dataclasses import dataclass
 import pytest
 from botocore.exceptions import ClientError
 
-from mvp import _pipeline
+from mvp import _budget_flow, _pipeline
 from mvp import anthropic as anth
-from mvp._pipeline import reserve_credit
+from mvp._pipeline import reserve_credit, settle_reservation_and_log, release_pool
 
 
 @dataclass
@@ -94,31 +94,27 @@ def _make_body():
     )
 
 
-def _install_settle_counter(monkeypatch) -> dict:
+def _make_settle_counter() -> tuple[dict, callable]:
     """Wrap the real settle so tests can count invocations AND keep real effects
-    (pool move + UsageLogs write). Returns a mutable counter dict.
+    (pool move + UsageLogs write). Returns (counter_dict, counting_settle).
     """
     counter = {"n": 0}
-    real_settle = _pipeline.settle_reservation_and_log
 
     def counting_settle(**kwargs):
         counter["n"] += 1
-        return real_settle(**kwargs)
+        return settle_reservation_and_log(**kwargs)
 
-    monkeypatch.setattr(anth, "_settle_reservation_and_log", counting_settle)
-    return counter
+    return counter, counting_settle
 
 
-def _install_release_counter(monkeypatch) -> dict:
+def _make_release_counter() -> tuple[dict, callable]:
     counter = {"n": 0}
-    real_release = _pipeline.release_pool
 
     def counting_release(ctx):
         counter["n"] += 1
-        return real_release(ctx)
+        return release_pool(ctx)
 
-    monkeypatch.setattr(anth, "_release_pool", counting_release)
-    return counter
+    return counter, counting_release
 
 
 async def _drive(gen, *, stop_after=None) -> list:
@@ -144,7 +140,7 @@ async def _drive(gen, *, stop_after=None) -> list:
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("stop_after", [1, 2, 3, 4, 5, 6, 7, None])
 def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
-    seed_tenant_with_pool, monkeypatch, stop_after
+    seed_tenant_with_pool, stop_after
 ):
     """Disconnecting at ANY yield (or running to completion, stop_after=None)
     must settle the reservation exactly once and leave pool_reserved at zero.
@@ -155,15 +151,19 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
     ctx = reserve_credit(user, reservation, pricing_key="opus", cost_microusd=2_000_000)
     assert _pool(seed)["pool_reserved_microusd"] == 2_000_000
 
-    settle_calls = _install_settle_counter(monkeypatch)
-    monkeypatch.setattr(anth, "_bedrock_client", lambda: _FakeBedrock(stream=_SuccessStream()))
+    settle_calls, counting_settle = _make_settle_counter()
+    fake = _FakeBedrock(stream=_SuccessStream())
 
-    gen = anth._stream_messages(
+    gen = _budget_flow.run_stream(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
+        model_alias="us.anthropic.claude-opus-4-7",
         user=user,
         tenants_repo=ctx,
         reservation=reservation,
+        invoke_stream=lambda *, body, model_id: fake.converse_stream(),
+        settle=counting_settle,
+        release=lambda ctx: release_pool(ctx),
     )
     asyncio.run(_drive(gen, stop_after=stop_after))
 
@@ -180,7 +180,7 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
 # invoke-time failure: full refund + release, NO settle.
 # ---------------------------------------------------------------------------
 def test_invoke_time_failure_releases_pool_and_does_not_settle(
-    seed_tenant_with_pool, monkeypatch
+    seed_tenant_with_pool,
 ):
     seed = seed_tenant_with_pool
     user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
@@ -188,20 +188,26 @@ def test_invoke_time_failure_releases_pool_and_does_not_settle(
     ctx = reserve_credit(user, reservation, pricing_key="opus", cost_microusd=2_000_000)
     assert _pool(seed)["pool_reserved_microusd"] == 2_000_000
 
-    settle_calls = _install_settle_counter(monkeypatch)
-    release_calls = _install_release_counter(monkeypatch)
+    settle_calls, counting_settle = _make_settle_counter()
+    release_calls, counting_release = _make_release_counter()
     err = ClientError(
         {"Error": {"Code": "ValidationException", "Message": "bad request"}},
         "ConverseStream",
     )
-    monkeypatch.setattr(anth, "_bedrock_client", lambda: _FakeBedrock(raise_on_call=err))
 
-    gen = anth._stream_messages(
+    def raising_invoke(*, body, model_id):
+        raise err
+
+    gen = _budget_flow.run_stream(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
+        model_alias="us.anthropic.claude-opus-4-7",
         user=user,
         tenants_repo=ctx,
         reservation=reservation,
+        invoke_stream=raising_invoke,
+        settle=counting_settle,
+        release=counting_release,
     )
     chunks = asyncio.run(_drive(gen))
 
@@ -218,25 +224,26 @@ def test_invoke_time_failure_releases_pool_and_does_not_settle(
 # mid-stream failure: partial settle once, NO release.
 # ---------------------------------------------------------------------------
 def test_mid_stream_failure_settles_once_and_does_not_release(
-    seed_tenant_with_pool, monkeypatch
+    seed_tenant_with_pool,
 ):
     seed = seed_tenant_with_pool
     user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
     reservation = 4000
     ctx = reserve_credit(user, reservation, pricing_key="opus", cost_microusd=2_000_000)
 
-    settle_calls = _install_settle_counter(monkeypatch)
-    release_calls = _install_release_counter(monkeypatch)
-    monkeypatch.setattr(
-        anth, "_bedrock_client", lambda: _FakeBedrock(stream=_RaisingMidStream())
-    )
+    settle_calls, counting_settle = _make_settle_counter()
+    release_calls, counting_release = _make_release_counter()
 
-    gen = anth._stream_messages(
+    gen = _budget_flow.run_stream(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
+        model_alias="us.anthropic.claude-opus-4-7",
         user=user,
         tenants_repo=ctx,
         reservation=reservation,
+        invoke_stream=lambda *, body, model_id: {"stream": _RaisingMidStream()},
+        settle=counting_settle,
+        release=counting_release,
     )
     chunks = asyncio.run(_drive(gen))
 
