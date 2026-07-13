@@ -4,108 +4,108 @@
     <mxCell id="1" parent="0" />
 
     <!-- Lane L1: CLI -->
-    <mxCell id="L1" value="" style="swimlane;startSize=0;fillColor=#FFF3E0;strokeColor=#E65100;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
+    <mxCell id="L1" value="" style="swimlane;startSize=0;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
       <mxGeometry x="0" y="0" width="550" height="1370" as="geometry" />
     </mxCell>
-    <mxCell id="L1T" value="CLI" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#E65100;" vertex="1" parent="1">
+    <mxCell id="L1T" value="CLI" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#14442F;" vertex="1" parent="1">
       <mxGeometry x="10" y="10" width="530" height="50" as="geometry" />
     </mxCell>
 
     <!-- Lane L2: Stratoclave Backend -->
-    <mxCell id="L2" value="" style="swimlane;startSize=0;fillColor=#E3F2FD;strokeColor=#0D47A1;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
+    <mxCell id="L2" value="" style="swimlane;startSize=0;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
       <mxGeometry x="550" y="0" width="550" height="1370" as="geometry" />
     </mxCell>
-    <mxCell id="L2T" value="Stratoclave Backend" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#0D47A1;" vertex="1" parent="1">
+    <mxCell id="L2T" value="Stratoclave Backend" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#14442F;" vertex="1" parent="1">
       <mxGeometry x="560" y="10" width="530" height="50" as="geometry" />
     </mxCell>
 
     <!-- Lane L3: AWS STS -->
-    <mxCell id="L3" value="" style="swimlane;startSize=0;fillColor=#FFF8E1;strokeColor=#F57F17;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
+    <mxCell id="L3" value="" style="swimlane;startSize=0;fillColor=#F4FBF7;strokeColor=#1E7E5A;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
       <mxGeometry x="1100" y="0" width="550" height="1370" as="geometry" />
     </mxCell>
-    <mxCell id="L3T" value="AWS STS" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#F57F17;" vertex="1" parent="1">
+    <mxCell id="L3T" value="AWS STS" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#14442F;" vertex="1" parent="1">
       <mxGeometry x="1110" y="10" width="530" height="50" as="geometry" />
     </mxCell>
 
     <!-- Lane L4: DynamoDB + Cognito -->
-    <mxCell id="L4" value="" style="swimlane;startSize=0;fillColor=#F3E5F5;strokeColor=#6A1B9A;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
+    <mxCell id="L4" value="" style="swimlane;startSize=0;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;swimlaneLine=1;fontStyle=0;collapsible=0;horizontal=0;pointerEvents=0;" vertex="1" parent="1">
       <mxGeometry x="1650" y="0" width="550" height="1370" as="geometry" />
     </mxCell>
-    <mxCell id="L4T" value="DynamoDB + Cognito" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#6A1B9A;" vertex="1" parent="1">
+    <mxCell id="L4T" value="DynamoDB + Cognito" style="text;html=1;align=center;verticalAlign=top;fontStyle=1;fontSize=16;strokeColor=none;fillColor=none;fontColor=#14442F;" vertex="1" parent="1">
       <mxGeometry x="1660" y="10" width="530" height="50" as="geometry" />
     </mxCell>
 
     <!-- Step Boxes -->
 
     <!-- B1: CLI sign -->
-    <mxCell id="B1" value="SigV4-sign locally&#xa;POST GetCallerIdentity&#xa;(no creds leave this box)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFF3E0;strokeColor=#E65100;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
+    <mxCell id="B1" value="SigV4-sign locally&#xa;POST GetCallerIdentity&#xa;(no creds leave this box)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
       <mxGeometry x="20" y="100" width="510" height="80" as="geometry" />
     </mxCell>
 
     <!-- B2: Backend validate -->
-    <mxCell id="B2" value="Validate request shape:&#xa;- Action=GetCallerIdentity only&#xa;- method=POST&#xa;- X-Amz-Date ±5 min&#xa;- URL allowlist sts.*.amazonaws.com" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#E3F2FD;strokeColor=#0D47A1;fontStyle=0;fontSize=12;align=left;spacingLeft=8;" vertex="1" parent="1">
+    <mxCell id="B2" value="Validate request shape:&#xa;- Action=GetCallerIdentity only&#xa;- method=POST&#xa;- X-Amz-Date ±5 min&#xa;- URL allowlist sts.*.amazonaws.com" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=left;spacingLeft=8;" vertex="1" parent="1">
       <mxGeometry x="570" y="250" width="510" height="100" as="geometry" />
     </mxCell>
 
     <!-- B3: Backend replay -->
-    <mxCell id="B3" value="Replay signed request to STS verbatim&#xa;(backend does not modify it)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#E3F2FD;strokeColor=#0D47A1;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
+    <mxCell id="B3" value="Replay signed request to STS verbatim&#xa;(backend does not modify it)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
       <mxGeometry x="570" y="420" width="510" height="70" as="geometry" />
     </mxCell>
 
     <!-- B4: STS verify -->
-    <mxCell id="B4" value="Verify SigV4 signature&#xa;Return { Arn, UserId, Account }" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFF8E1;strokeColor=#F57F17;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
+    <mxCell id="B4" value="Verify SigV4 signature&#xa;Return { Arn, UserId, Account }" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#F4FBF7;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
       <mxGeometry x="1120" y="520" width="510" height="70" as="geometry" />
     </mxCell>
 
     <!-- B5: Backend identity gates -->
-    <mxCell id="B5" value="Resolve identity-type gates:&#xa;- trusted-accounts allowlist&#xa;- allowed_role_patterns (fnmatch)&#xa;- Default DENY: iam_user, instance_profile" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#E3F2FD;strokeColor=#0D47A1;fontStyle=0;fontSize=12;align=left;spacingLeft=8;" vertex="1" parent="1">
+    <mxCell id="B5" value="Resolve identity-type gates:&#xa;- trusted-accounts allowlist&#xa;- allowed_role_patterns (fnmatch)&#xa;- Default DENY: iam_user, instance_profile" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=left;spacingLeft=8;" vertex="1" parent="1">
       <mxGeometry x="570" y="660" width="510" height="90" as="geometry" />
     </mxCell>
 
     <!-- B6: Backend+DDB provision -->
-    <mxCell id="B6" value="On ACCEPT: ensure user record&#xa;in DynamoDB / Cognito&#xa;Mint access_token" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#E3F2FD;strokeColor=#0D47A1;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
+    <mxCell id="B6" value="On ACCEPT: ensure user record&#xa;in DynamoDB / Cognito&#xa;Mint access_token" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
       <mxGeometry x="570" y="820" width="510" height="80" as="geometry" />
     </mxCell>
 
     <!-- B6b: DDB upsert -->
-    <mxCell id="B6b" value="Upsert user record&#xa;(DynamoDB + Cognito)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
+    <mxCell id="B6b" value="Upsert user record&#xa;(DynamoDB + Cognito)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
       <mxGeometry x="1670" y="820" width="510" height="80" as="geometry" />
     </mxCell>
 
     <!-- B7: CLI store token -->
-    <mxCell id="B7" value="Receive access_token&#xa;Write ~/.stratoclave/mvp_tokens.json&#xa;(mode 0600)&#xa;Subsequent API calls use token" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFF3E0;strokeColor=#E65100;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
+    <mxCell id="B7" value="Receive access_token&#xa;Write ~/.stratoclave/mvp_tokens.json&#xa;(mode 0600)&#xa;Subsequent API calls use token" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=center;" vertex="1" parent="1">
       <mxGeometry x="20" y="1000" width="510" height="80" as="geometry" />
     </mxCell>
 
     <!-- Edges -->
 
     <!-- E1: B1 bottom -> B2 top-left (CLI -> Backend) -->
-    <mxCell id="E1" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#555555;strokeWidth=2;flowAnimation=0;" edge="1" source="B1" target="B2" parent="1">
+    <mxCell id="E1" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#2FA374;strokeWidth=2;flowAnimation=0;" edge="1" source="B1" target="B2" parent="1">
       <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
     <!-- E2: B3 bottom -> B4 top-left (Backend -> STS) -->
-    <mxCell id="E2" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#555555;strokeWidth=2;" edge="1" source="B3" target="B4" parent="1">
+    <mxCell id="E2" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#2FA374;strokeWidth=2;" edge="1" source="B3" target="B4" parent="1">
       <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
     <!-- E3: B4 bottom -> B5 top-right (STS -> Backend) -->
-    <mxCell id="E3" style="edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#555555;strokeWidth=2;" edge="1" source="B4" target="B5" parent="1">
+    <mxCell id="E3" style="edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#2FA374;strokeWidth=2;" edge="1" source="B4" target="B5" parent="1">
       <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
     <!-- E4: B5 bottom -> B6 top (Backend internal, downward) -->
-    <mxCell id="E4" style="edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#555555;strokeWidth=2;" edge="1" source="B5" target="B6" parent="1">
+    <mxCell id="E4" style="edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#2FA374;strokeWidth=2;" edge="1" source="B5" target="B6" parent="1">
       <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
     <!-- E4b: B6 right -> B6b left (Backend -> DDB) -->
-    <mxCell id="E4b" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#555555;strokeWidth=2;" edge="1" source="B6" target="B6b" parent="1">
+    <mxCell id="E4b" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#2FA374;strokeWidth=2;" edge="1" source="B6" target="B6b" parent="1">
       <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
     <!-- E5: B6 bottom -> B7 (Backend -> CLI, access_token response) -->
-    <mxCell id="E5" style="edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#555555;strokeWidth=2;" edge="1" source="B6" target="B7" parent="1">
+    <mxCell id="E5" style="edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;rounded=1;orthogonalLoop=1;jettySize=auto;strokeColor=#2FA374;strokeWidth=2;" edge="1" source="B6" target="B7" parent="1">
       <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
@@ -137,22 +137,22 @@
     </mxCell>
 
     <!-- Step number annotations for sequence clarity -->
-    <mxCell id="SN1" value="Step 1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#E0E0E0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
+    <mxCell id="SN1" value="Step 1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#EAF7F0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
       <mxGeometry x="230" y="200" width="60" height="25" as="geometry" />
     </mxCell>
-    <mxCell id="SN2" value="Step 2" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#E0E0E0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
+    <mxCell id="SN2" value="Step 2" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#EAF7F0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
       <mxGeometry x="570" y="375" width="60" height="25" as="geometry" />
     </mxCell>
-    <mxCell id="SN3" value="Step 3" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#E0E0E0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
+    <mxCell id="SN3" value="Step 3" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#EAF7F0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
       <mxGeometry x="1120" y="465" width="60" height="25" as="geometry" />
     </mxCell>
-    <mxCell id="SN4" value="Step 4" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#E0E0E0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
+    <mxCell id="SN4" value="Step 4" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#EAF7F0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
       <mxGeometry x="570" y="610" width="60" height="25" as="geometry" />
     </mxCell>
-    <mxCell id="SN5" value="Step 5" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#E0E0E0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
+    <mxCell id="SN5" value="Step 5" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#EAF7F0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
       <mxGeometry x="570" y="765" width="60" height="25" as="geometry" />
     </mxCell>
-    <mxCell id="SN6" value="Step 6" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#E0E0E0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
+    <mxCell id="SN6" value="Step 6" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;strokeColor=none;fillColor=#EAF7F0;fontSize=11;fontStyle=1;rounded=1;" vertex="1" parent="1">
       <mxGeometry x="20" y="945" width="60" height="25" as="geometry" />
     </mxCell>
 

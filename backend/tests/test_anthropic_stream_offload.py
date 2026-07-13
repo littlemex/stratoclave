@@ -128,7 +128,8 @@ def test_stream_messages_uses_to_thread_for_converse_stream(monkeypatch):
             converse_thread_holder["tid"] = threading.get_ident()
             return {"stream": FakeStream()}
 
-    monkeypatch.setattr(anth, "_bedrock_client", lambda: FakeBedrock())
+    from mvp.routing import infrarouter
+    monkeypatch.setattr(infrarouter, "bedrock_client", lambda region: FakeBedrock())
 
     # Simulate the minimum tenants_repo / user surface the generator needs.
     class FakeRepo:

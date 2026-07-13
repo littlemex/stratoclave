@@ -93,7 +93,11 @@ async def normalized_events(
     """
     block_index = 0
     started_indices: set[int] = set()
-    async for event in _aiter_blocking_stream(event_source):
+    if hasattr(event_source, "__aiter__"):
+        event_iter = event_source
+    else:
+        event_iter = _aiter_blocking_stream(event_source)
+    async for event in event_iter:
         if "contentBlockStart" in event:
             start = event["contentBlockStart"]
             idx = start.get("contentBlockIndex", block_index)

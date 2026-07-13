@@ -10,6 +10,7 @@
 [![CLI: Rust](https://img.shields.io/badge/cli-Rust-dea584.svg)](./cli)
 [![Infra: AWS CDK v2](https://img.shields.io/badge/infra-AWS_CDK_v2-FF9900.svg)](./iac)
 [![API: Anthropic Messages](https://img.shields.io/badge/API-Anthropic_Messages-C1572F.svg)](#api-compatibility)
+[![API: OpenAI Chat](https://img.shields.io/badge/API-OpenAI_Chat_Completions-10A37F.svg)](#api-compatibility)
 [![API: OpenAI Responses](https://img.shields.io/badge/API-OpenAI_Responses-412991.svg)](#api-compatibility)
 
 </div>
@@ -24,15 +25,18 @@ you on its own: **who called which model, under whose budget, and through
 which identity** — enforced *before* the model is invoked, on every single
 request.
 
-It exposes two independent inference routes: an Anthropic `Messages API`-
-compatible endpoint at `/v1/messages` (for the Anthropic SDKs, Claude Code,
-and Claude Desktop Cowork) and an OpenAI Responses API-compatible endpoint
-at `/openai/v1/responses` (for the OpenAI SDK and the `codex` CLI, backed by
-GPT-5.x on Amazon Bedrock via the bedrock-mantle service). Both routes
-enforce per-user token quotas and optional per-tenant **dollar pool** budgets
-with atomic DynamoDB reservations, record every call in an audit log, and
-accept three orthogonal identity paths (Amazon Cognito password, AWS SSO via a
-Vault-style STS vouch, and long-lived `sk-stratoclave-*` keys).
+It exposes three inference routes: an Anthropic `Messages API`-compatible
+endpoint at `/v1/messages` (for the Anthropic SDKs, Claude Code, and Claude
+Desktop Cowork), an OpenAI `Chat Completions`-compatible endpoint at
+`/v1/chat/completions` (for the OpenAI SDK, on the same Bedrock converse
+backend), and an OpenAI Responses API-compatible endpoint at
+`/openai/v1/responses` (for the `codex` CLI, backed by GPT-5.x on Amazon
+Bedrock via the bedrock-mantle service). Every route enforces per-user token
+quotas and optional per-tenant **dollar pool** and **per-model** budgets with
+atomic DynamoDB reservations, wraps each Bedrock call in retry + cross-region
+failover, records every call in an audit log, and accepts three orthogonal
+identity paths (Amazon Cognito password, AWS SSO via a Vault-style STS vouch,
+and long-lived `sk-stratoclave-*` keys).
 
 Stratoclave is deliberately AWS-native and small: a single region in your own
 account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito
@@ -129,6 +133,24 @@ for where a broker is the better choice.
   spend are counted differently — all in integer micro-USD, never floating
   point. A tenant with no pool row keeps the token-only behaviour unchanged
   (pools are opt-in per tenant/period).
+- **Infrastructure resilience — retry, cross-region failover.** Every request
+  flows through an **InfraRouter** that wraps the Bedrock call: a
+  `ThrottlingException` (429), `ServiceUnavailableException`, timeout, or empty
+  stream **fails over to the same model in another region** (e.g.
+  `us-east-1 → us-west-2`), which is a fresh throttle bucket. A **first-event
+  commit** rule guarantees that once the first stream byte is sent, the target
+  is locked — a mid-stream failure never silently re-runs the model or
+  double-bills. `ValidationException`/`AccessDenied` are fatal and fail fast.
+  Retries are invisible to the client: same SSE shape, one settle, actual
+  tokens only.
+- **Staged breaker + cascading model fallback.** An advisory budget check
+  shapes routing before the atomic reserve: at **≤25% remaining** it caps the
+  model tier (Opus → Sonnet → Haiku), at **≤5%** it rejects with `402`. Tenants
+  can define per-model quotas and a fallback chain, so "use Opus until its
+  budget is gone, then Sonnet, then Haiku" is a config, not code — enforced by
+  the same atomic `TransactWriteItems` that guards the pool, so a user can never
+  race past a per-model quota. (Opt-in; a tenant with no routing config keeps
+  today's single-model behaviour.)
 - **Crash-resilient budget accounting.** A pooled reservation writes a sibling
   *hold* record in the same atomic write; settle and release delete it, and if
   a task is killed (OOM, deploy drain) between reserve and settle, a bounded,
@@ -172,7 +194,7 @@ for where a broker is the better choice.
 ## Architecture at a glance
 
 <p align="center">
-  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to ECS Fargate, with DynamoDB, Cognito, Bedrock, STS, and CloudWatch Logs." width="100%">
+  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus bedrock-mantle." width="100%">
 </p>
 
 The Stratoclave control plane lives inside a single AWS region (us-east-1)
@@ -182,14 +204,27 @@ service. The backend is stateless — all mutable state lives in DynamoDB,
 authenticated by either a Cognito `access_token` or a `sk-stratoclave-*` API
 key.
 
-Inference fans out to two Bedrock surfaces. Anthropic Messages calls
-(`/v1/messages`) invoke Bedrock `converse` / `converseStream` in us-east-1
-against an inference-profile allowlist. OpenAI Responses calls
-(`/openai/v1/responses`) are forwarded by httpx to the bedrock-mantle service
-at `bedrock-mantle.{region}.api.aws/openai/v1`, where the region is per-model
-(GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). The cross-region bedrock-mantle
-calls originate from the single Fargate task in us-east-1; no second
-control-plane region is deployed.
+Inference fans out to two Bedrock surfaces. Anthropic Messages
+(`/v1/messages`) and OpenAI Chat Completions (`/v1/chat/completions`) share a
+single Bedrock `converse` / `converseStream` backend in us-east-1 against an
+inference-profile allowlist — different wire shapes, one control core. OpenAI
+Responses calls (`/openai/v1/responses`) are forwarded by httpx to the
+bedrock-mantle service at `bedrock-mantle.{region}.api.aws/openai/v1`, where the
+region is per-model (GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). The
+cross-region bedrock-mantle calls originate from the single Fargate task in
+us-east-1; no second control-plane region is deployed.
+
+### One request, end to end
+
+Every call passes through the same money-and-routing pipeline: **budget
+authorize → staged breaker → model selection → infrastructure retry/failover →
+settle**, wrapped around exactly one Bedrock invocation. Retries and
+cross-region failover are invisible to the client; the reservation settles once
+against actual usage, even on mid-stream disconnect.
+
+<p align="center">
+  <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock, then settle once and return; DynamoDB holds budgets, quotas, usage log, and routing config." width="100%">
+</p>
 
 For a detailed walkthrough of components, data model, and invariants, see
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
@@ -386,7 +421,8 @@ the `TenantBudgets` schema and the reclaim invariants are documented in
 
 | Endpoint                               | Behavior                                                            |
 |----------------------------------------|---------------------------------------------------------------------|
-| `POST /v1/messages`                    | Anthropic `Messages API` payload; translated to Bedrock `converse` / `converseStream`. Requires the `messages:send` scope. |
+| `POST /v1/messages`                    | Anthropic `Messages API` payload; translated to Bedrock `converse` / `converseStream`. Tools, vision (base64), thinking, prompt caching. Requires the `messages:send` scope. |
+| `POST /v1/chat/completions`            | OpenAI `Chat Completions` payload on the **same** Bedrock converse backend. Streaming + tool calls. Unsupported params (`n>1`, `logprobs`, `response_format`, `image_url`) rejected with `400`, never silently dropped. Requires the `messages:send` scope. |
 | `GET  /v1/models`                      | Returns the Claude-family inference profiles mapped by the backend. |
 | `POST /openai/v1/responses`            | OpenAI Responses API payload; forwarded to `bedrock-mantle.{region}.api.aws/openai/v1`. Requires the `responses:send` scope. Gated by the `CODEX_ENABLED` ECS env flag. |
 | `GET  /openai/v1/models`               | Returns OpenAI-family entries from the model registry, in the OpenAI `/v1/models` shape. Requires the `responses:send` scope. |
@@ -413,18 +449,20 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
 | Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
+| API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / atomically reassign | Teams (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget model | **Dollar pool + per-user tokens, reserved *pre-flight* in one atomic write; priced per model in micro-USD** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
-| Can a user race/bypass the budget? | No (single `TransactWriteItems` over both ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
+| Budget model | **Dollar pool + per-user tokens + per-model quotas, reserved *pre-flight* in one atomic write; priced per model in micro-USD** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
+| Can a user race/bypass the budget? | No (single `TransactWriteItems` over all ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
+| Resilience / routing | **Retry + cross-region failover, first-event commit, staged breaker, cascading per-model fallback** | Retries, fallbacks, load-balancing across deployments | None (client calls Bedrock; Bedrock CRIS only) |
 | Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via a bounded sweep; no leak, no reaper process | Relies on the proxy + its Postgres/Redis | N/A (no server-side reservation) |
 | OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
-| Model / capability policy | App-layer allowlist (+ per-tenant effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
+| Model / capability policy | App-layer allowlist + per-tenant/user fallback chains (+ effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
 | Identity | Cognito password, **Vouch-by-STS** (aws sso / saml2aws / IAM user), `sk-stratoclave-*` keys | Enterprise tier (Okta/Entra/OIDC/SAML) | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
 | State / ops footprint | DynamoDB only (serverless), one Fargate task | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
 | Admin surface | **React web console** + CLI | Web UI + CLI | CLI (`ccwb`) |
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
 | Data residency / GovCloud | us-east-1 today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
-| Availability of inference | Depends on the gateway (single region today) | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
+| Availability of inference | Gateway (single control-plane region) **+ cross-region Bedrock failover** | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
 | License | Apache 2.0 (all features OSS) | MIT + Commercial (SSO/audit are commercial) | MIT (AWS Solutions sample) |
 
 **Pick Stratoclave** when you need tenant-scoped, pre-flight, per-request

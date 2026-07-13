@@ -166,6 +166,7 @@ class ReservationContext:
     pricing_key: Optional[str] = None
     tenant_id: str = ""
     pool_active: bool = False
+    quota_lines: list = None  # list[dict] of per-model quota txn items (Phase 0: always None)
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -504,6 +505,7 @@ def reserve_credit(
     *,
     pricing_key: Optional[str] = None,
     cost_microusd: Optional[int] = None,
+    quota_lines: Optional[list] = None,
 ) -> ReservationContext:
     """Atomically reserve budget before invoking Bedrock.
 
@@ -654,9 +656,12 @@ def reserve_credit(
             amount_microusd=cost,
             expires_at_epoch=hold_expires_at,
         )
+        txn_items = [user_txn, pool_txn, hold_txn]
+        if quota_lines:
+            txn_items.extend(quota_lines)
         try:
             client.transact_write_items(
-                TransactItems=[user_txn, pool_txn, hold_txn],
+                TransactItems=txn_items,
                 # Fresh token per attempt: dedupes only botocore's transparent
                 # retry of THIS transact call (so a lost ack cannot double-debit)
                 # while staying distinct from every concurrent caller and from
@@ -694,6 +699,7 @@ def reserve_credit(
             pool_active=True,
             hold_id=hold_id,
             hold_sk=hold_sk,
+            quota_lines=quota_lines,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.

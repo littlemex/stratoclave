@@ -57,7 +57,11 @@ async def run_stream(
             yield frame
 
         try:
-            resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
+            import inspect
+            if inspect.iscoroutinefunction(invoke_stream):
+                resp = await invoke_stream(body=body, model_id=model_id)
+            else:
+                resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
         except Exception as e:
             tenants_repo.refund(
                 user_id=user.user_id, tenant_id=user.org_id, tokens=reservation

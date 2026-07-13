@@ -44,7 +44,7 @@ import uuid
 from typing import Any, AsyncGenerator, Iterator, Optional
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -473,6 +473,7 @@ def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
 @router.post("/v1/messages")
 def messages(
     body: AnthropicMessagesRequest,
+    request: Request,
     # X-2 (2026-04 critical-sweep follow-up): enforce the scope layer
     # on the Bedrock invocation path. See list_models() for the full
     # rationale.
@@ -487,6 +488,8 @@ def messages(
             detail={"type": "invalid_model", "message": str(e)},
         )
 
+    fault_spec = request.headers.get("x-sc-fault")
+
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit_for_model(
         user,
@@ -498,7 +501,7 @@ def messages(
 
     if body.stream:
         return StreamingResponse(
-            _stream_messages(body, model_id, user, tenants_repo, reservation),
+            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -588,6 +591,7 @@ async def _stream_messages(
     user: AuthenticatedUser,
     tenants_repo: UserTenantsRepository,
     reservation: int,
+    fault_spec: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Delegation shim — forwards to `_budget_flow.run_stream`.
 
@@ -597,10 +601,23 @@ async def _stream_messages(
     from . import _budget_flow
     from ._wire import anthropic_wire as wire
 
-    def _invoke(*, body, model_id):
+    async def _invoke(*, body, model_id):
+        from .routing import route_stream as _route
+        from .routing.types import RouteRequest
+
         kwargs = _build_bedrock_kwargs(body, model_id)
-        client = _bedrock_client()
-        return client.converse_stream(**kwargs)
+        kwargs.pop("modelId", None)
+
+        req = RouteRequest(
+            alias=model_id,
+            payload=kwargs,
+            tenant_id=user.org_id,
+            request_id=f"msg_{uuid.uuid4().hex[:12]}",
+            fault_spec=fault_spec,
+        )
+
+        routed = await _route(req)
+        return {"stream": routed.events}
 
     class _AnthropicAdapter:
         def __init__(self):

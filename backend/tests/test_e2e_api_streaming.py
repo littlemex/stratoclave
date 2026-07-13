@@ -73,11 +73,13 @@ def api_client(dynamodb_mock, seed_active_tenant):
 
     with patch("mvp.anthropic._bedrock_client") as mock_bedrock:
         with patch("mvp.chat_completions._bedrock_client") as mock_chat_bedrock:
-            mock_bedrock.return_value.converse.side_effect = _mock_converse
-            mock_bedrock.return_value.converse_stream.side_effect = _mock_converse_stream
-            mock_chat_bedrock.return_value.converse.side_effect = _mock_converse
-            mock_chat_bedrock.return_value.converse_stream.side_effect = _mock_converse_stream
-            yield TestClient(app)
+            with patch("mvp.routing.infrarouter.bedrock_client") as mock_routing:
+                mock_bedrock.return_value.converse.side_effect = _mock_converse
+                mock_bedrock.return_value.converse_stream.side_effect = _mock_converse_stream
+                mock_chat_bedrock.return_value.converse.side_effect = _mock_converse
+                mock_chat_bedrock.return_value.converse_stream.side_effect = _mock_converse_stream
+                mock_routing.return_value.converse_stream.side_effect = _mock_converse_stream
+                yield TestClient(app)
 
 
 # ---------------------------------------------------------------------------
