@@ -8,22 +8,22 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
     <!-- Client Lane -->
-    <mxCell id="lane-client" value="Client" style="swimlane;startSize=40;fillColor=#E65100;strokeColor=#E65100;fontColor=#FFFFFF;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#FFF3E0;" vertex="1" parent="1">
+    <mxCell id="lane-client" value="Client" style="swimlane;startSize=40;fillColor=#2FA374;strokeColor=#1E7E5A;fontColor=#14442F;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#EAF7F0;" vertex="1" parent="1">
       <mxGeometry x="10" y="10" width="360" height="1640" as="geometry"/>
     </mxCell>
 
     <!-- Backend Lane -->
-    <mxCell id="lane-backend" value="Backend" style="swimlane;startSize=40;fillColor=#0D47A1;strokeColor=#0D47A1;fontColor=#FFFFFF;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#E3F2FD;" vertex="1" parent="1">
+    <mxCell id="lane-backend" value="Backend" style="swimlane;startSize=40;fillColor=#1E7E5A;strokeColor=#1E7E5A;fontColor=#14442F;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#F4FBF7;" vertex="1" parent="1">
       <mxGeometry x="380" y="10" width="760" height="1640" as="geometry"/>
     </mxCell>
 
     <!-- DynamoDB Lane -->
-    <mxCell id="lane-dynamo" value="DynamoDB" style="swimlane;startSize=40;fillColor=#6A1B9A;strokeColor=#6A1B9A;fontColor=#FFFFFF;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#F3E5F5;" vertex="1" parent="1">
+    <mxCell id="lane-dynamo" value="DynamoDB" style="swimlane;startSize=40;fillColor=#14442F;strokeColor=#1E7E5A;fontColor=#14442F;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#F4FBF7;" vertex="1" parent="1">
       <mxGeometry x="1150" y="10" width="380" height="1640" as="geometry"/>
     </mxCell>
 
     <!-- Upstream Lane -->
-    <mxCell id="lane-upstream" value="Bedrock / bedrock-mantle" style="swimlane;startSize=40;fillColor=#2E7D32;strokeColor=#2E7D32;fontColor=#FFFFFF;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#E8F5E9;" vertex="1" parent="1">
+    <mxCell id="lane-upstream" value="Bedrock / bedrock-mantle" style="swimlane;startSize=40;fillColor=#2FA374;strokeColor=#1E7E5A;fontColor=#14442F;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#EAF7F0;" vertex="1" parent="1">
       <mxGeometry x="1540" y="10" width="450" height="1640" as="geometry"/>
     </mxCell>
 
@@ -31,7 +31,7 @@
     <!-- STEP 1 — Client sends request                                      -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step1-client" value="POST /v1/messages&#xa;(Anthropic: max_tokens)&#xa;&#xa;POST /openai/v1/responses&#xa;(OpenAI: max_output_tokens)" style="rounded=0;whiteSpace=wrap;fillColor=#FFE0B2;strokeColor=#E65100;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step1-client" value="POST /v1/messages&#xa;(Anthropic: max_tokens)&#xa;&#xa;POST /openai/v1/responses&#xa;(OpenAI: max_output_tokens)" style="rounded=0;whiteSpace=wrap;fillColor=#F4FBF7;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="20" y="80" width="340" height="90" as="geometry"/>
     </mxCell>
 
@@ -39,7 +39,7 @@
     <!-- Arrow: Client → Backend (Step 1)                                   -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="edge-1-to-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#555555;" edge="1" source="box-step1-client" target="box-step2-backend" parent="1">
+    <mxCell id="edge-1-to-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#2FA374;" edge="1" source="box-step1-client" target="box-step2-backend" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -51,7 +51,7 @@
     <!-- STEP 2 — Backend: Auth + Reservation                               -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step2-backend" value="Auth: Cognito JWT or sk-stratoclave-* API key&#xa;Scope: messages:send or responses:send&#xa;&#xa;Reservation R:&#xa;  Anthropic: R = max_tokens + chars_in_input//3, floor 1024&#xa;  OpenAI:    R = max_output_tokens × effort_multiplier + chars_in_input//3, floor 8192&#xa;             (effort_multiplier: low=1 / medium=2 / high=4 / xhigh=8)" style="rounded=0;whiteSpace=wrap;fillColor=#BBDEFB;strokeColor=#0D47A1;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step2-backend" value="Auth: Cognito JWT or sk-stratoclave-* API key&#xa;Scope: messages:send or responses:send&#xa;&#xa;Reservation R:&#xa;  Anthropic: R = max_tokens + chars_in_input//3, floor 1024&#xa;  OpenAI:    R = max_output_tokens × effort_multiplier + chars_in_input//3, floor 8192&#xa;             (effort_multiplier: low=1 / medium=2 / high=4 / xhigh=8)" style="rounded=0;whiteSpace=wrap;fillColor=#EAF7F0;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="390" y="60" width="740" height="140" as="geometry"/>
     </mxCell>
 
@@ -59,7 +59,7 @@
     <!-- Arrow: Backend → DynamoDB (Step 3 — conditional UpdateItem)        -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="edge-2-to-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#6A1B9A;" edge="1" source="box-step2-backend" target="box-step3-dynamo" parent="1">
+    <mxCell id="edge-2-to-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step2-backend" target="box-step3-dynamo" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -71,7 +71,7 @@
     <!-- STEP 3 — DynamoDB: Conditional UpdateItem                          -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step3-dynamo" value="UserTenants UpdateItem&#xa;SET credit_used = credit_used + :R&#xa;Condition: credit_used + :R &lt;= total_credit&#xa;&#xa;Fail → 402 Payment Required&#xa;(no upstream call)" style="rounded=0;whiteSpace=wrap;fillColor=#E1BEE7;strokeColor=#6A1B9A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step3-dynamo" value="UserTenants UpdateItem&#xa;SET credit_used = credit_used + :R&#xa;Condition: credit_used + :R &lt;= total_credit&#xa;&#xa;Fail → 402 Payment Required&#xa;(no upstream call)" style="rounded=0;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="1160" y="220" width="360" height="130" as="geometry"/>
     </mxCell>
 
@@ -80,7 +80,7 @@
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
-    <mxCell id="lbl-edge-3-402" value="402 if condition fails" style="text;fontSize=10;background=#FFEBEE;opacity=90;align=center;verticalAlign=middle;whiteSpace=wrap;fontColor=#C62828;" vertex="1" parent="1">
+    <mxCell id="lbl-edge-3-402" value="402 if condition fails" style="text;fontSize=10;background=#FFEBEE;opacity=90;align=center;verticalAlign=middle;whiteSpace=wrap;fontColor=#14442F;" vertex="1" parent="1">
       <mxGeometry x="1140" y="320" width="160" height="24" as="geometry"/>
     </mxCell>
 
@@ -88,12 +88,12 @@
     <!-- STEP 4 — Backend: Upstream invocation box                          -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step4-backend" value="Invoke upstream:&#xa;  Anthropic → Bedrock converse/converseStream (us-east-1, boto3, IAM task role)&#xa;  OpenAI    → httpx POST bedrock-mantle.{us-west-2,us-east-2}.api.aws/openai/v1/responses&#xa;              bearer token via aws-bedrock-token-generator.provide_token (15-min TTL)" style="rounded=0;whiteSpace=wrap;fillColor=#BBDEFB;strokeColor=#0D47A1;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step4-backend" value="Invoke upstream:&#xa;  Anthropic → Bedrock converse/converseStream (us-east-1, boto3, IAM task role)&#xa;  OpenAI    → httpx POST bedrock-mantle.{us-west-2,us-east-2}.api.aws/openai/v1/responses&#xa;              bearer token via aws-bedrock-token-generator.provide_token (15-min TTL)" style="rounded=0;whiteSpace=wrap;fillColor=#EAF7F0;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="390" y="420" width="740" height="100" as="geometry"/>
     </mxCell>
 
     <!-- Arrow: Backend → Upstream (Step 4) -->
-    <mxCell id="edge-4-to-upstream" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#2E7D32;" edge="1" source="box-step4-backend" target="box-step4-upstream" parent="1">
+    <mxCell id="edge-4-to-upstream" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step4-backend" target="box-step4-upstream" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -102,7 +102,7 @@
     </mxCell>
 
     <!-- STEP 4 — Upstream box -->
-    <mxCell id="box-step4-upstream" value="Bedrock converse / converseStream&#xa;OR bedrock-mantle /openai/v1/responses" style="rounded=0;whiteSpace=wrap;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step4-upstream" value="Bedrock converse / converseStream&#xa;OR bedrock-mantle /openai/v1/responses" style="rounded=0;whiteSpace=wrap;fillColor=#EAF7F0;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="1550" y="420" width="430" height="70" as="geometry"/>
     </mxCell>
 
@@ -110,12 +110,12 @@
     <!-- STEP 5 — Upstream: Response                                        -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step5-upstream" value="Anthropic: {input_tokens, output_tokens, stopReason}&#xa;OpenAI: {input_tokens, output_tokens&#xa;         incl. reasoning_tokens, stop signal}" style="rounded=0;whiteSpace=wrap;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step5-upstream" value="Anthropic: {input_tokens, output_tokens, stopReason}&#xa;OpenAI: {input_tokens, output_tokens&#xa;         incl. reasoning_tokens, stop signal}" style="rounded=0;whiteSpace=wrap;fillColor=#EAF7F0;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="1550" y="540" width="430" height="80" as="geometry"/>
     </mxCell>
 
     <!-- Arrow: Upstream response → Backend (Step 5) -->
-    <mxCell id="edge-5-to-backend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#2E7D32;" edge="1" source="box-step5-upstream" target="box-step6-backend" parent="1">
+    <mxCell id="edge-5-to-backend" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step5-upstream" target="box-step6-backend" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -127,12 +127,12 @@
     <!-- STEP 6 — Backend: Compute diff                                     -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step6-backend" value="Compute diff = R − actual&#xa;where actual = input_tokens + output_tokens" style="rounded=0;whiteSpace=wrap;fillColor=#BBDEFB;strokeColor=#0D47A1;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step6-backend" value="Compute diff = R − actual&#xa;where actual = input_tokens + output_tokens" style="rounded=0;whiteSpace=wrap;fillColor=#EAF7F0;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="390" y="680" width="740" height="60" as="geometry"/>
     </mxCell>
 
     <!-- Arrow: Backend → DynamoDB (Step 7) -->
-    <mxCell id="edge-6-to-dynamo" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#6A1B9A;" edge="1" source="box-step6-backend" target="box-step7-dynamo" parent="1">
+    <mxCell id="edge-6-to-dynamo" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step6-backend" target="box-step7-dynamo" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -144,7 +144,7 @@
     <!-- STEP 7 — DynamoDB: Refund/overrun + UsageLogs                      -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step7-dynamo" value="If diff &gt;= 0:&#xa;  SET credit_used = credit_used - diff (refund)&#xa;If diff &lt; 0: best-effort re-reserve&#xa;  up to total_credit;&#xa;  log credit_overrun warning&#xa;&#xa;PutItem UsageLogs:&#xa;  model_id, input_tokens, output_tokens,&#xa;  actor, timestamp" style="rounded=0;whiteSpace=wrap;fillColor=#E1BEE7;strokeColor=#6A1B9A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step7-dynamo" value="If diff &gt;= 0:&#xa;  SET credit_used = credit_used - diff (refund)&#xa;If diff &lt; 0: best-effort re-reserve&#xa;  up to total_credit;&#xa;  log credit_overrun warning&#xa;&#xa;PutItem UsageLogs:&#xa;  model_id, input_tokens, output_tokens,&#xa;  actor, timestamp" style="rounded=0;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="1160" y="800" width="360" height="160" as="geometry"/>
     </mxCell>
 
@@ -152,12 +152,12 @@
     <!-- STEP 8 — Backend: Return response                                   -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="box-step8-backend" value="Return upstream response body to Client&#xa;(Anthropic-shaped or OpenAI-Responses-shaped)" style="rounded=0;whiteSpace=wrap;fillColor=#BBDEFB;strokeColor=#0D47A1;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step8-backend" value="Return upstream response body to Client&#xa;(Anthropic-shaped or OpenAI-Responses-shaped)" style="rounded=0;whiteSpace=wrap;fillColor=#EAF7F0;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="390" y="1000" width="740" height="60" as="geometry"/>
     </mxCell>
 
     <!-- Arrow: Backend → Client (Step 8) -->
-    <mxCell id="edge-8-to-client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#E65100;" edge="1" source="box-step8-backend" target="box-step8-client" parent="1">
+    <mxCell id="edge-8-to-client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step8-backend" target="box-step8-client" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -166,7 +166,7 @@
     </mxCell>
 
     <!-- STEP 8 — Client: Receive response -->
-    <mxCell id="box-step8-client" value="Response received&#xa;(Anthropic or OpenAI shape)" style="rounded=0;whiteSpace=wrap;fillColor=#FFE0B2;strokeColor=#E65100;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="box-step8-client" value="Response received&#xa;(Anthropic or OpenAI shape)" style="rounded=0;whiteSpace=wrap;fillColor=#F4FBF7;strokeColor=#1E7E5A;fontSize=11;align=left;spacingLeft=6;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="20" y="1000" width="340" height="60" as="geometry"/>
     </mxCell>
 
@@ -175,17 +175,17 @@
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
     <!-- Backend step2 → step4 -->
-    <mxCell id="edge-backend-2-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#0D47A1;" edge="1" source="box-step2-backend" target="box-step4-backend" parent="1">
+    <mxCell id="edge-backend-2-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step2-backend" target="box-step4-backend" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
     <!-- Backend step4 → step6 -->
-    <mxCell id="edge-backend-4-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#0D47A1;" edge="1" source="box-step4-backend" target="box-step6-backend" parent="1">
+    <mxCell id="edge-backend-4-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step4-backend" target="box-step6-backend" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
     <!-- Backend step6 → step8 -->
-    <mxCell id="edge-backend-6-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#0D47A1;" edge="1" source="box-step6-backend" target="box-step8-backend" parent="1">
+    <mxCell id="edge-backend-6-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step6-backend" target="box-step8-backend" parent="1">
       <mxGeometry relative="1" as="geometry">
         <Array as="points">
           <mxPoint x="760" y="770"/>
@@ -195,12 +195,12 @@
     </mxCell>
 
     <!-- Upstream step4 → step5 -->
-    <mxCell id="edge-upstream-4-5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#2E7D32;" edge="1" source="box-step4-upstream" target="box-step5-upstream" parent="1">
+    <mxCell id="edge-upstream-4-5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E7E5A;" edge="1" source="box-step4-upstream" target="box-step5-upstream" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
     <!-- DynamoDB step3 → step7 (success path) -->
-    <mxCell id="edge-dynamo-3-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#6A1B9A;dashed=1;" edge="1" source="box-step3-dynamo" target="box-step7-dynamo" parent="1">
+    <mxCell id="edge-dynamo-3-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E7E5A;dashed=1;" edge="1" source="box-step3-dynamo" target="box-step7-dynamo" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -209,7 +209,7 @@
     </mxCell>
 
     <!-- Client step1 → step8 (vertical flow line) -->
-    <mxCell id="edge-client-1-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#E65100;dashed=1;endArrow=none;" edge="1" source="box-step1-client" target="box-step8-client" parent="1">
+    <mxCell id="edge-client-1-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#1E7E5A;dashed=1;endArrow=none;" edge="1" source="box-step1-client" target="box-step8-client" parent="1">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
 
@@ -217,35 +217,35 @@
     <!-- STEP LABELS / ANNOTATIONS                                          -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="ann-step1" value="① Request" style="text;fontSize=10;fontStyle=1;fontColor=#E65100;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step1" value="① Request" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="20" y="62" width="100" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step2" value="② Auth + Reserve" style="text;fontSize=10;fontStyle=1;fontColor=#0D47A1;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step2" value="② Auth + Reserve" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="390" y="42" width="180" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step3" value="③ Conditional Write" style="text;fontSize=10;fontStyle=1;fontColor=#6A1B9A;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step3" value="③ Conditional Write" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="1160" y="200" width="180" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step4" value="④ Invoke Upstream" style="text;fontSize=10;fontStyle=1;fontColor=#0D47A1;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step4" value="④ Invoke Upstream" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="390" y="400" width="180" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step5" value="⑤ Usage Response" style="text;fontSize=10;fontStyle=1;fontColor=#2E7D32;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step5" value="⑤ Usage Response" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="1550" y="522" width="180" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step6" value="⑥ Compute Diff" style="text;fontSize=10;fontStyle=1;fontColor=#0D47A1;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step6" value="⑥ Compute Diff" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="390" y="662" width="160" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step7" value="⑦ Reconcile Credits" style="text;fontSize=10;fontStyle=1;fontColor=#6A1B9A;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step7" value="⑦ Reconcile Credits" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="1160" y="782" width="180" height="20" as="geometry"/>
     </mxCell>
 
-    <mxCell id="ann-step8" value="⑧ Return Response" style="text;fontSize=10;fontStyle=1;fontColor=#0D47A1;align=left;" vertex="1" parent="1">
+    <mxCell id="ann-step8" value="⑧ Return Response" style="text;fontSize=10;fontStyle=1;fontColor=#14442F;align=left;" vertex="1" parent="1">
       <mxGeometry x="390" y="982" width="180" height="20" as="geometry"/>
     </mxCell>
 
@@ -253,7 +253,7 @@
     <!-- TAKEAWAY BOX                                                       -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
-    <mxCell id="takeaway" value="One pipeline (mvp/_pipeline.py) covers both inference routes. Conditional UpdateItem prevents N concurrent requests from racing past the&#xa;quota. Under-spend is refunded; over-spend is best-effort re-reserved and surfaced as a credit_overrun audit event. UsageLogs always reflect&#xa;the upstream-reported token counts (Bedrock or bedrock-mantle), never the reservation." style="rounded=1;whiteSpace=wrap;fillColor=#FFFDE7;strokeColor=#F57F17;fontSize=12;fontStyle=2;align=left;spacingLeft=10;verticalAlign=middle;" vertex="1" parent="1">
+    <mxCell id="takeaway" value="One pipeline (mvp/_pipeline.py) covers both inference routes. Conditional UpdateItem prevents N concurrent requests from racing past the&#xa;quota. Under-spend is refunded; over-spend is best-effort re-reserved and surfaced as a credit_overrun audit event. UsageLogs always reflect&#xa;the upstream-reported token counts (Bedrock or bedrock-mantle), never the reservation." style="rounded=1;whiteSpace=wrap;fillColor=#FFFDE7;strokeColor=#1E7E5A;fontSize=12;fontStyle=2;align=left;spacingLeft=10;verticalAlign=middle;" vertex="1" parent="1">
       <mxGeometry x="10" y="1665" width="1980" height="110" as="geometry"/>
     </mxCell>
 
