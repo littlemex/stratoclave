@@ -59,9 +59,11 @@ class AnthropicStreamState:
 
 
 def stream_prologue(state: AnthropicStreamState) -> Iterable[bytes]:
-    """Leading SSE: message_start + content_block_start (index 0, empty text).
+    """Leading SSE: message_start only.
 
-    Today emits both up-front, before the Bedrock stream opens.
+    content_block_start is emitted lazily when the first ContentBlockStart or
+    ContentToolUseStart event arrives — this prevents a phantom text block
+    at index 0 when the model's first block is a toolUse.
     """
     yield _sse_event(
         "message_start",
@@ -77,14 +79,6 @@ def stream_prologue(state: AnthropicStreamState) -> Iterable[bytes]:
                 "stop_sequence": None,
                 "usage": {"input_tokens": 0, "output_tokens": 0},
             },
-        },
-    )
-    yield _sse_event(
-        "content_block_start",
-        {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
         },
     )
 
