@@ -45,10 +45,14 @@ class ChatMessage(BaseModel):
     tool_call_id: Optional[str] = None
 
 
+_MAX_CHAT_MESSAGES = 500
+_MAX_CHAT_CONTENT_CHARS = 200_000
+
+
 class ChatCompletionsRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     model: str = Field(min_length=1, max_length=256)
-    messages: list[ChatMessage]
+    messages: list[ChatMessage] = Field(max_length=_MAX_CHAT_MESSAGES)
     max_tokens: Optional[int] = Field(default=4096, ge=1, le=65536)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -108,6 +112,8 @@ def _convert_chat_messages(
                     if isinstance(part, dict):
                         if part.get("type") == "text":
                             content_blocks.append({"text": part.get("text", "")})
+                        elif part.get("type") == "image_url":
+                            raise ValueError("image_url content parts are not supported; use the Anthropic /v1/messages endpoint with base64 images")
 
         if msg.tool_calls:
             for tc in msg.tool_calls:
@@ -179,6 +185,14 @@ def _build_chat_bedrock_kwargs(
 
     tool_config = _convert_chat_tools(body.tools)
     if tool_config:
+        tc = body.tool_choice
+        if tc is not None:
+            if tc == "required" or (isinstance(tc, dict) and tc.get("type") == "required"):
+                tool_config["toolChoice"] = {"any": {}}
+            elif isinstance(tc, dict) and tc.get("type") == "function":
+                tool_config["toolChoice"] = {"tool": {"name": tc.get("function", {}).get("name", "")}}
+            else:
+                tool_config["toolChoice"] = {"auto": {}}
         kwargs["toolConfig"] = tool_config
 
     return kwargs
@@ -227,9 +241,25 @@ def chat_completions(
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "invalid_model"}})
 
-    char_count = sum(
-        len(m.content) if isinstance(m.content, str) else 0 for m in body.messages
-    )
+    char_count = 0
+    for m in body.messages:
+        if isinstance(m.content, str):
+            char_count += len(m.content)
+        elif isinstance(m.content, list):
+            for part in m.content:
+                if isinstance(part, dict):
+                    text = part.get("text", "")
+                    if isinstance(text, str):
+                        char_count += len(text)
+        if m.tool_calls:
+            for tc in m.tool_calls:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                args = fn.get("arguments", "")
+                char_count += len(args) if isinstance(args, str) else 0
+    if body.tools:
+        char_count += sum(len(json.dumps(t)) for t in body.tools)
+    if char_count > _MAX_CHAT_CONTENT_CHARS:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"content exceeds {_MAX_CHAT_CONTENT_CHARS} char cap", "type": "invalid_request_error", "code": "content_too_large"}})
     input_est = max(char_count // 3, 0)
     max_out = body.max_tokens or 4096
     reservation = max(max_out + input_est, 1024)
@@ -253,8 +283,8 @@ def chat_completions(
         )
 
     # Non-streaming path
-    kwargs = _build_chat_bedrock_kwargs(body, model_id)
     try:
+        kwargs = _build_chat_bedrock_kwargs(body, model_id)
         resp = _bedrock_client().converse(**kwargs)
     except Exception as e:
         tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
