@@ -597,10 +597,22 @@ async def _stream_messages(
     from . import _budget_flow
     from ._wire import anthropic_wire as wire
 
-    def _invoke(*, body, model_id):
+    async def _invoke(*, body, model_id):
+        from .routing import route_stream as _route
+        from .routing.types import RouteRequest
+
         kwargs = _build_bedrock_kwargs(body, model_id)
-        client = _bedrock_client()
-        return client.converse_stream(**kwargs)
+        kwargs.pop("modelId", None)
+
+        req = RouteRequest(
+            alias=model_id,
+            payload=kwargs,
+            tenant_id=user.org_id,
+            request_id=f"msg_{uuid.uuid4().hex[:12]}",
+        )
+
+        routed = await _route(req)
+        return {"stream": routed.events}
 
     class _AnthropicAdapter:
         def __init__(self):
