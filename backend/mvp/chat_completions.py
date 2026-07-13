@@ -19,14 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .anthropic import (
-    _bedrock_client,
-    _build_bedrock_kwargs,
-    _convert_content_blocks,
-    _convert_system,
-    _estimate_reservation_tokens,
-    AnthropicMessagesRequest,
-)
+from .anthropic import _bedrock_client
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit_for_model,
@@ -134,6 +127,8 @@ def _convert_chat_messages(
 
         if content_blocks:
             converse_msgs.append({"role": role, "content": content_blocks})
+        elif role == "assistant":
+            converse_msgs.append({"role": "assistant", "content": [{"text": ""}]})
 
     system = [{"text": "\n".join(system_texts)}] if system_texts else None
     return converse_msgs, system
@@ -224,6 +219,8 @@ def chat_completions(
         raise HTTPException(status_code=400, detail={"error": {"message": "top_logprobs is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
     if body.response_format is not None:
         raise HTTPException(status_code=400, detail={"error": {"message": "response_format is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
+    if body.stream and body.tools:
+        raise HTTPException(status_code=400, detail={"error": {"message": "streaming with tools is not yet supported; use stream=false for tool-calling requests", "type": "invalid_request_error", "code": "unsupported_parameter"}})
 
     try:
         model_id = resolve_bedrock_model(body.model)
@@ -365,10 +362,10 @@ async def _stream_chat(
             client = _bedrock_client()
             resp = await asyncio.to_thread(client.converse_stream, **kwargs)
         except ClientError as e:
-            yield _sse({"error": {"message": sanitize_exception_message(str(e)), "type": "api_error"}})
             tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
             _release_pool(tenants_repo)
             settled = True
+            yield _sse({"error": {"message": sanitize_exception_message(str(e)), "type": "api_error"}})
             return
 
         stop_reason_bedrock = None

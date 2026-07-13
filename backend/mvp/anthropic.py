@@ -241,10 +241,27 @@ def _bedrock_client():
     return bedrock_runtime_client(region)
 
 
+def _decode_image_source(source: dict[str, Any]) -> dict[str, Any]:
+    """Decode an Anthropic image source to Bedrock image block. Raises ValueError for unsupported."""
+    import base64 as _b64
+    import binascii
+
+    src_type = source.get("type", "")
+    if src_type == "base64":
+        media = source.get("media_type", "image/png")
+        fmt = media.split("/", 1)[-1] if "/" in media else media
+        try:
+            raw = _b64.b64decode(source.get("data", ""))
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(f"invalid base64 image data: {e}") from e
+        return {"image": {"format": fmt, "source": {"bytes": raw}}}
+    raise ValueError(
+        f"unsupported image source type '{src_type}'; only base64 data: URIs are accepted"
+    )
+
+
 def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
     """Convert Anthropic-shaped content (str or list[dict]) into Bedrock Converse content."""
-    import base64 as _b64
-
     if isinstance(content, str):
         return [{"text": content}]
     if isinstance(content, list):
@@ -257,11 +274,7 @@ def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
                 out.append({"text": block.get("text", "")})
             elif btype == "image":
                 source = block.get("source", {})
-                if source.get("type") == "base64":
-                    media = source.get("media_type", "image/png")
-                    fmt = media.split("/", 1)[-1] if "/" in media else media
-                    raw = _b64.b64decode(source.get("data", ""))
-                    out.append({"image": {"format": fmt, "source": {"bytes": raw}}})
+                out.append(_decode_image_source(source))
             elif btype == "tool_use":
                 out.append({
                     "toolUse": {
@@ -271,21 +284,19 @@ def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
                     }
                 })
             elif btype == "tool_result":
+                raw_content = block.get("content", [])
                 tr_content = []
-                for sub in block.get("content", []):
-                    if isinstance(sub, str):
-                        tr_content.append({"text": sub})
-                    elif isinstance(sub, dict):
-                        if sub.get("type") == "text":
-                            tr_content.append({"text": sub.get("text", "")})
-                        elif sub.get("type") == "image":
-                            src = sub.get("source", {})
-                            if src.get("type") == "base64":
-                                m = src.get("media_type", "image/png")
-                                f = m.split("/", 1)[-1] if "/" in m else m
-                                tr_content.append({
-                                    "image": {"format": f, "source": {"bytes": _b64.b64decode(src.get("data", ""))}}
-                                })
+                if isinstance(raw_content, str):
+                    tr_content.append({"text": raw_content})
+                elif isinstance(raw_content, list):
+                    for sub in raw_content:
+                        if isinstance(sub, str):
+                            tr_content.append({"text": sub})
+                        elif isinstance(sub, dict):
+                            if sub.get("type") == "text":
+                                tr_content.append({"text": sub.get("text", "")})
+                            elif sub.get("type") == "image":
+                                tr_content.append(_decode_image_source(sub.get("source", {})))
                 tr_entry: dict[str, Any] = {
                     "toolUseId": block.get("tool_use_id", ""),
                     "content": tr_content or [{"text": ""}],
@@ -294,14 +305,11 @@ def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
                     tr_entry["status"] = "error"
                 out.append({"toolResult": tr_entry})
             elif btype == "thinking":
-                out.append({
-                    "reasoningContent": {
-                        "reasoningText": {
-                            "text": block.get("thinking", ""),
-                            "signature": block.get("signature", ""),
-                        }
-                    }
-                })
+                entry: dict[str, Any] = {"text": block.get("thinking", "")}
+                sig = block.get("signature")
+                if sig:
+                    entry["signature"] = sig
+                out.append({"reasoningContent": {"reasoningText": entry}})
             else:
                 out.append({"text": json.dumps(block)})
             if block.get("cache_control"):
@@ -477,6 +485,14 @@ def messages(
         raise HTTPException(
             status_code=400,
             detail={"type": "invalid_model", "message": str(e)},
+        )
+
+    tools = getattr(body, "tools", None)
+    if body.stream and tools:
+        raise HTTPException(
+            status_code=400,
+            detail={"type": "invalid_request_error",
+                    "message": "streaming with tools is not yet supported; use stream=false"},
         )
 
     reservation = _estimate_reservation_tokens(body)

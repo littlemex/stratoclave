@@ -76,13 +76,15 @@ async def run_stream(
             resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
         except ClientError as e:
             # ---- invoke-time failure ----
-            for frame in wire.error_event(sanitize_exception_message(str(e))):
-                yield frame
+            # Refund BEFORE yielding so a disconnect at the error frame
+            # cannot convert this into a settle path.
             tenants_repo.refund(
                 user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
             )
             release(tenants_repo)
             settled = True
+            for frame in wire.error_event(sanitize_exception_message(str(e))):
+                yield frame
             return
 
         # iterate the normalized event stream
