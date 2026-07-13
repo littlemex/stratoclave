@@ -243,6 +243,8 @@ def _bedrock_client():
 
 def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
     """Convert Anthropic-shaped content (str or list[dict]) into Bedrock Converse content."""
+    import base64 as _b64
+
     if isinstance(content, str):
         return [{"text": content}]
     if isinstance(content, list):
@@ -254,11 +256,56 @@ def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
             if btype == "text":
                 out.append({"text": block.get("text", "")})
             elif btype == "image":
-                # MVP does not support image input (Claude Code is text-mostly); skip.
-                continue
+                source = block.get("source", {})
+                if source.get("type") == "base64":
+                    media = source.get("media_type", "image/png")
+                    fmt = media.split("/", 1)[-1] if "/" in media else media
+                    raw = _b64.b64decode(source.get("data", ""))
+                    out.append({"image": {"format": fmt, "source": {"bytes": raw}}})
+            elif btype == "tool_use":
+                out.append({
+                    "toolUse": {
+                        "toolUseId": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input": block.get("input", {}),
+                    }
+                })
+            elif btype == "tool_result":
+                tr_content = []
+                for sub in block.get("content", []):
+                    if isinstance(sub, str):
+                        tr_content.append({"text": sub})
+                    elif isinstance(sub, dict):
+                        if sub.get("type") == "text":
+                            tr_content.append({"text": sub.get("text", "")})
+                        elif sub.get("type") == "image":
+                            src = sub.get("source", {})
+                            if src.get("type") == "base64":
+                                m = src.get("media_type", "image/png")
+                                f = m.split("/", 1)[-1] if "/" in m else m
+                                tr_content.append({
+                                    "image": {"format": f, "source": {"bytes": _b64.b64decode(src.get("data", ""))}}
+                                })
+                tr_entry: dict[str, Any] = {
+                    "toolUseId": block.get("tool_use_id", ""),
+                    "content": tr_content or [{"text": ""}],
+                }
+                if block.get("is_error"):
+                    tr_entry["status"] = "error"
+                out.append({"toolResult": tr_entry})
+            elif btype == "thinking":
+                out.append({
+                    "reasoningContent": {
+                        "reasoningText": {
+                            "text": block.get("thinking", ""),
+                            "signature": block.get("signature", ""),
+                        }
+                    }
+                })
             else:
-                # Unknown block types are text-stringified rather than skipped.
                 out.append({"text": json.dumps(block)})
+            if block.get("cache_control"):
+                out.append({"cachePoint": {"type": "default"}})
         return out or [{"text": ""}]
     # fallback
     return [{"text": str(content)}]
@@ -311,6 +358,34 @@ def _build_bedrock_kwargs(
     system = _convert_system(body.system)
     if system:
         kwargs["system"] = system
+
+    tools = getattr(body, "tools", None)
+    if tools:
+        tool_config: dict[str, Any] = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": t.get("name", "") if isinstance(t, dict) else "",
+                        "description": t.get("description", "") if isinstance(t, dict) else "",
+                        "inputSchema": {
+                            "json": t.get("input_schema", {}) if isinstance(t, dict) else {}
+                        },
+                    }
+                }
+                for t in tools
+            ]
+        }
+        tool_choice = getattr(body, "tool_choice", None)
+        if isinstance(tool_choice, dict):
+            tc_type = tool_choice.get("type", "auto")
+            if tc_type == "any":
+                tool_config["toolChoice"] = {"any": {}}
+            elif tc_type == "tool":
+                tool_config["toolChoice"] = {"tool": {"name": tool_choice.get("name", "")}}
+            else:
+                tool_config["toolChoice"] = {"auto": {}}
+        kwargs["toolConfig"] = tool_config
+
     return kwargs
 
 
