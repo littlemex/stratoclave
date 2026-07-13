@@ -92,11 +92,13 @@ async def normalized_events(
     events are added in step 2 with their own red->green tests.
     """
     block_index = 0
+    started_indices: set[int] = set()
     async for event in _aiter_blocking_stream(event_source):
         if "contentBlockStart" in event:
             start = event["contentBlockStart"]
             idx = start.get("contentBlockIndex", block_index)
             block_index = idx
+            started_indices.add(idx)
             start_obj = start.get("start", {})
             if "toolUse" in start_obj:
                 tu = start_obj["toolUse"]
@@ -113,6 +115,9 @@ async def normalized_events(
             delta_obj = delta_block.get("delta", {})
             text = delta_obj.get("text", "")
             if text:
+                if idx not in started_indices:
+                    started_indices.add(idx)
+                    yield t.ContentBlockStart(index=idx, block_type="text")
                 yield t.ContentTextDelta(index=idx, text=text)
             elif "toolUse" in delta_obj:
                 partial = delta_obj["toolUse"].get("input", "")
