@@ -83,7 +83,23 @@ for where a broker is the better choice.
 - **Anthropic-compatible endpoint.** `POST /v1/messages` and `GET /v1/models`
   accept the same payloads as `api.anthropic.com`. Point `ANTHROPIC_BASE_URL`
   at your deployment and the Anthropic SDKs, Claude Code, and Claude Desktop
-  Cowork work unchanged.
+  work unchanged. Supports streaming, tool calling, vision (base64
+  images), extended thinking, and prompt caching (`cache_control`).
+- **OpenAI Chat Completions endpoint.** `POST /v1/chat/completions` accepts
+  the same payloads as the OpenAI Chat Completions API — point
+  `OPENAI_BASE_URL` at your deployment and use the OpenAI SDKs directly.
+  Supports streaming, tool calling (including streaming `tool_calls`
+  chunks), system messages, and `stop` sequences. Unsupported parameters —
+  `n > 1`, `logprobs`, `response_format`, `image_url` content parts, and
+  `parallel_tool_calls: false` — are rejected with an explicit 400 rather
+  than silently dropped, so incompatible requests fail loudly instead of
+  degrading quietly. For vision, use `/v1/messages` with base64 images.
+  Both endpoints route to the same backend, so model behavior, limits, and
+  credit accounting are identical regardless of which API shape you use.
+  Auth: set your Stratoclave API key (`sk-stratoclave-*`) as
+  `OPENAI_API_KEY`. Model names use Bedrock identifiers (e.g.
+  `us.anthropic.claude-sonnet-4-6`); see `GET /v1/models` for the full
+  list.
 - **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
   `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
   them to GPT-5.x models on Amazon Bedrock via the bedrock-mantle service
@@ -95,8 +111,9 @@ for where a broker is the better choice.
   routes (they then return `503`).
 - **Two-level credit governance, enforced pre-flight.** Every tenant has a
   default credit, every user can carry a per-user override, and every
-  inference call — to `/v1/messages` (Anthropic) or `/openai/v1/responses`
-  (OpenAI) — reserves tokens atomically with a conditional DynamoDB write
+  inference call — to `/v1/messages` (Anthropic), `/v1/chat/completions`
+  (OpenAI Chat), or `/openai/v1/responses` (OpenAI Responses) — reserves
+  tokens atomically with a conditional DynamoDB write
   *before* Bedrock is invoked (`backend/dynamo/user_tenants.py:reserve`).
   Unused credit is refunded from the real token counts on return. Because the
   reservation is a conditional `UpdateItem`, concurrent requests that would
