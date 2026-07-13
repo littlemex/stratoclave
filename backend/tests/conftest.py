@@ -19,11 +19,11 @@ import pytest
 
 # AWS credentials must be dummies *before* any boto3 import surface that
 # might read the environment happens. Keep this at module load time.
-os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
-os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
-os.environ.setdefault("AWS_SESSION_TOKEN", "testing")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("AWS_REGION", "us-east-1")
+os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+os.environ["AWS_SESSION_TOKEN"] = "testing"
+os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+os.environ["AWS_REGION"] = "us-east-1"
 # Disable the lifespan seed so tests control state explicitly.
 os.environ.setdefault("STRATOCLAVE_DISABLE_SEED", "true")
 # Main.py treats env=production as strict (raises on missing required
@@ -68,8 +68,11 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
     The table schemas mirror production sufficiently for repository-level
     tests. GSIs are included where the repos query against them.
     """
+    from dynamo.client import get_dynamodb_resource
+
     moto = pytest.importorskip("moto")
     with moto.mock_aws():
+        get_dynamodb_resource.cache_clear()
         dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
         # UserTenants: PK user_id, SK tenant_id
