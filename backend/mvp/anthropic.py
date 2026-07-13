@@ -552,6 +552,14 @@ def messages(
     for block in resp.get("output", {}).get("message", {}).get("content", []):
         if "text" in block:
             content_blocks.append({"type": "text", "text": block["text"]})
+        elif "toolUse" in block:
+            tu = block["toolUse"]
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tu.get("toolUseId", ""),
+                "name": tu.get("name", ""),
+                "input": tu.get("input", {}),
+            })
 
     stop_reason_bedrock = resp.get("stopReason", "end_turn")
     stop_reason = _map_stop_reason(stop_reason_bedrock)
