@@ -604,7 +604,7 @@ async def _stream_messages(
         def render_event(self, event):
             from . import _converse_types as t
             if isinstance(event, (t.Usage, t.MessageStop)):
-                wire.render_stream_event(event, self.state)
+                list(wire.render_stream_event(event, self.state))
                 return ()
             return wire.render_stream_event(event, self.state)
 
