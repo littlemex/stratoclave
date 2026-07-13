@@ -2,25 +2,24 @@
 
 Owns the ONE canonical reserve → invoke → settle skeleton, the two error paths
 (invoke-time full-refund+release vs mid-stream partial-settle), and the streaming
-finally-settle guard. Knows nothing about Converse, mantle, or any specific wire
-format — drives injected callables for invoke/settle/release AND an adapter
-protocol for rendering frames.
+finally-settle guard.
 
-The adapter protocol (`StreamAdapter`) is a simple set of callbacks the caller
-provides. This lets both the Anthropic Messages wire and the OpenAI Chat
-Completions wire share the single settle-once machine without either knowing
-about the other.
+The event loop drives normalized StreamEvents (from _converse_core.normalized_events)
+through an injected adapter. Both the Anthropic Messages wire and the OpenAI Chat
+Completions wire share this single settle-once machine.
 """
 from __future__ import annotations
 
 from typing import Any, AsyncGenerator, Callable, Iterable, Protocol
+
+from . import _converse_types as t
 
 
 class StreamAdapter(Protocol):
     """Protocol for wire-format adapters driven by run_stream."""
 
     def prologue(self) -> Iterable[bytes]: ...
-    def render_raw_event(self, event: dict[str, Any]) -> Iterable[bytes]: ...
+    def render_event(self, event: t.StreamEvent) -> Iterable[bytes]: ...
     def epilogue(self) -> Iterable[bytes]: ...
     def error_event(self, message: str) -> Iterable[bytes]: ...
 
@@ -46,16 +45,11 @@ async def run_stream(
     """
     import asyncio
 
-    from botocore.exceptions import ClientError
-
     from core.error_handler import sanitize_exception_message
 
     from . import _converse_core as core
 
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
-    cache_write_tokens = 0
+    acc = t.UsageAccumulator()
     settled = False
 
     try:
@@ -64,10 +58,7 @@ async def run_stream(
 
         try:
             resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
-        except (ClientError, Exception) as e:
-            # ---- invoke-time failure ----
-            # Refund BEFORE yielding so a disconnect at the error frame
-            # cannot convert this into a settle path.
+        except Exception as e:
             tenants_repo.refund(
                 user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
             )
@@ -78,26 +69,20 @@ async def run_stream(
             return
 
         try:
-            async for event in core._aiter_blocking_stream(resp.get("stream", [])):
-                if "metadata" in event:
-                    usage = event["metadata"].get("usage", {})
-                    input_tokens = int(usage.get("inputTokens", input_tokens))
-                    output_tokens = int(usage.get("outputTokens", output_tokens))
-                    cr, cw = core.cache_tokens_from_usage(usage)
-                    cache_read_tokens = cr or cache_read_tokens
-                    cache_write_tokens = cw or cache_write_tokens
-                for frame in adapter.render_raw_event(event):
+            async for event in core.normalized_events(resp.get("stream", [])):
+                acc.absorb(event)
+                for frame in adapter.render_event(event):
                     yield frame
         except Exception as e:
-            # ---- mid-stream failure ----
             for frame in adapter.error_event(sanitize_exception_message(str(e))):
                 yield frame
             settle(
                 user=user, tenants_repo=tenants_repo, reservation=reservation,
-                actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
+                actual_input_tokens=acc.input_tokens,
+                actual_output_tokens=acc.output_tokens,
                 model_id=model_id, context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens,
-                actual_cache_write_tokens=cache_write_tokens,
+                actual_cache_read_tokens=acc.cache_read_tokens,
+                actual_cache_write_tokens=acc.cache_write_tokens,
             )
             settled = True
             return
@@ -107,18 +92,20 @@ async def run_stream(
 
         settle(
             user=user, tenants_repo=tenants_repo, reservation=reservation,
-            actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
+            actual_input_tokens=acc.input_tokens,
+            actual_output_tokens=acc.output_tokens,
             model_id=model_id, context=tenants_repo,
-            actual_cache_read_tokens=cache_read_tokens,
-            actual_cache_write_tokens=cache_write_tokens,
+            actual_cache_read_tokens=acc.cache_read_tokens,
+            actual_cache_write_tokens=acc.cache_write_tokens,
         )
         settled = True
     finally:
         if not settled:
             settle(
                 user=user, tenants_repo=tenants_repo, reservation=reservation,
-                actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
+                actual_input_tokens=acc.input_tokens,
+                actual_output_tokens=acc.output_tokens,
                 model_id=model_id, context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens,
-                actual_cache_write_tokens=cache_write_tokens,
+                actual_cache_read_tokens=acc.cache_read_tokens,
+                actual_cache_write_tokens=acc.cache_write_tokens,
             )

@@ -109,13 +109,53 @@ def render_stream_event(
                     "delta": {"type": "text_delta", "text": event.text},
                 },
             )
+    elif isinstance(event, t.ContentBlockStart):
+        if event.block_type == "tool_use":
+            pass  # tool_use block_start rendered via ContentToolUseStart
+        else:
+            yield _sse_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": event.index,
+                    "content_block": {"type": event.block_type, "text": ""}
+                    if event.block_type == "text"
+                    else {"type": event.block_type},
+                },
+            )
+    elif isinstance(event, t.ContentToolUseStart):
+        yield _sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": event.index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": event.tool_use_id,
+                    "name": event.name,
+                    "input": {},
+                },
+            },
+        )
+    elif isinstance(event, t.ContentToolUseDelta):
+        yield _sse_event(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": event.index,
+                "delta": {"type": "input_json_delta", "partial_json": event.partial_json},
+            },
+        )
+    elif isinstance(event, t.ContentBlockStop):
+        yield _sse_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": event.index},
+        )
     elif isinstance(event, t.Usage):
         state.input_tokens = event.input or state.input_tokens
         state.output_tokens = event.output or state.output_tokens
     elif isinstance(event, t.MessageStop):
         state.stop_reason = event.stop_reason
-    # MessageStart / ContentBlockStart / ContentBlockStop / reasoning / tool_use
-    # produce no frame in the step-1a single-block shape (added in step 2).
 
 
 def stream_epilogue(state: AnthropicStreamState) -> Iterable[bytes]:
