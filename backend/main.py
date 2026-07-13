@@ -415,6 +415,7 @@ app.include_router(mvp_well_known_router)                # GET /.well-known/stra
 # (The frontend still calls /api/users/me/credit.)
 from fastapi import Depends
 from mvp.deps import AuthenticatedUser, get_current_user
+from mvp.authz import require_permission
 from dynamo import UserTenantsRepository
 
 
@@ -451,7 +452,26 @@ def legacy_me(user: AuthenticatedUser = Depends(get_current_user)):
 
 @app.get("/health", tags=["system"])
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "git_sha": os.getenv("GIT_SHA", "unknown")}
+
+
+@app.get("/debug/runtime", tags=["system"])
+async def debug_runtime(
+    _user=Depends(require_permission("tenants:read-all")),
+):
+    """Runtime diagnostics for live testing — thread counts, reader threads.
+
+    Admin-only. Used to detect reader-thread leaks after disconnect tests.
+    """
+    import threading
+
+    threads = threading.enumerate()
+    reader_threads = [t for t in threads if t.name.startswith("sc-reader")]
+    return {
+        "active_count": threading.active_count(),
+        "reader_threads": len(reader_threads),
+        "thread_names": [t.name for t in threads][:50],
+    }
 
 
 @app.get("/", tags=["system"])

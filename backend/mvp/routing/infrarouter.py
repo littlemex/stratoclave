@@ -61,39 +61,62 @@ async def _peek_first_event(
 ) -> tuple[dict, AsyncIterator[dict]]:
     """Await the first event from a Bedrock stream. Returns (first_event, rest).
 
-    Uses a dedicated reader thread pumping into an asyncio.Queue to avoid
-    per-event thread-pool round trips. First event is awaited with a timeout
-    so hung connections don't block the chain deadline.
+    A dedicated daemon reader thread pumps events into an asyncio.Queue via
+    call_soon_threadsafe (thread-safe). First event is awaited with a timeout
+    so hung connections don't block the chain deadline. A stop flag lets the
+    consumer signal the reader to exit on disconnect (checked between events),
+    preventing thread leaks.
     """
+    import threading
+
+    loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
     sentinel = object()
+    stop = threading.Event()
+
+    def _put(item):
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:
+            # Event loop closed (consumer gone) — nothing to deliver to.
+            pass
 
     def _reader():
         try:
             for item in stream:
-                queue.put_nowait(item) if not queue.full() else queue.put(item)
+                if stop.is_set():
+                    break
+                _put(item)
         except Exception as e:
-            queue.put_nowait(e)
+            _put(e)
         finally:
-            queue.put_nowait(sentinel)
+            _put(sentinel)
 
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _reader)
+    reader_thread = threading.Thread(target=_reader, name="sc-reader", daemon=True)
+    reader_thread.start()
 
-    first = await asyncio.wait_for(queue.get(), timeout=_FIRST_EVENT_TIMEOUT_S)
+    try:
+        first = await asyncio.wait_for(queue.get(), timeout=_FIRST_EVENT_TIMEOUT_S)
+    except (asyncio.TimeoutError, Exception):
+        stop.set()
+        raise
     if first is sentinel:
         raise RuntimeError("Bedrock returned empty stream")
     if isinstance(first, Exception):
         raise first
 
     async def _rest():
-        while True:
-            item = await queue.get()
-            if item is sentinel:
-                return
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        try:
+            while True:
+                item = await queue.get()
+                if item is sentinel:
+                    return
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            # Consumer done/abandoned → signal reader to stop on next event.
+            stop.set()
 
     return first, _rest()
 
@@ -126,9 +149,22 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
 
             t0 = time.monotonic()
             try:
-                resp = await _attempt_invoke(target, req.payload)
-                raw_stream = resp.get("stream", iter([]))
-                first_event, rest = await _peek_first_event(raw_stream)
+                if req.fault_spec:
+                    from . import fault
+                    fault_attempt = fault.next_attempt(req.request_id)
+                    fault.maybe_raise_pre_stream(req.fault_spec, req.request_id, fault_attempt)
+                    if fault.maybe_hang(req.fault_spec):
+                        await asyncio.sleep(_FIRST_EVENT_TIMEOUT_S + 5)
+                    if fault.maybe_empty_stream(req.fault_spec, fault_attempt):
+                        first_event, rest = await _peek_first_event(iter([]))
+                    else:
+                        resp = await _attempt_invoke(target, req.payload)
+                        raw_stream = resp.get("stream", iter([]))
+                        first_event, rest = await _peek_first_event(raw_stream)
+                else:
+                    resp = await _attempt_invoke(target, req.payload)
+                    raw_stream = resp.get("stream", iter([]))
+                    first_event, rest = await _peek_first_event(raw_stream)
             except Exception as e:
                 latency = int((time.monotonic() - t0) * 1000)
                 disposition = classify(e, target)
@@ -166,14 +202,20 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                     latency_ms=latency,
                 ))
 
-                async def _prepend(first, rest_iter):
+                fault_spec = req.fault_spec
+
+                async def _prepend(first, rest_iter, spec):
                     yield first
+                    if spec:
+                        from . import fault
+                        if fault.should_fail_mid_stream(spec):
+                            raise RuntimeError("injected mid-stream failure")
                     async for ev in rest_iter:
                         yield ev
 
                 return RoutedStream(
                     target=target,
-                    events=_prepend(first_event, rest),
+                    events=_prepend(first_event, rest, fault_spec),
                     attempt_facts=attempts,
                 )
 

@@ -60,6 +60,7 @@ class RouteRequest:
     group_id: Optional[str] = None
     exclude: tuple[Target, ...] = ()
     pin: Optional[Target] = None
+    fault_spec: Optional[str] = None  # test-only fault injection (gated on SC_FAULT_INJECTION)
 
 
 @dataclass
