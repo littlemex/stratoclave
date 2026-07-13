@@ -194,7 +194,7 @@ for where a broker is the better choice.
 ## Architecture at a glance
 
 <p align="center">
-  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to ECS Fargate, with DynamoDB, Cognito, Bedrock, STS, and CloudWatch Logs." width="100%">
+  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus bedrock-mantle." width="100%">
 </p>
 
 The Stratoclave control plane lives inside a single AWS region (us-east-1)

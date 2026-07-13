@@ -1,113 +1,137 @@
-<mxGraphModel dx="2000" dy="1280" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1120" math="0" shadow="0">
-  <root>
-    <mxCell id="0"/>
-    <mxCell id="1" parent="0"/>
-
-    <!-- ===== Title ===== -->
-    <mxCell id="title" value="How one request flows through Stratoclave"
-      style="text;html=1;align=center;fontSize=36;fontStyle=1;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="0" y="28" width="1700" height="48" as="geometry"/></mxCell>
-    <mxCell id="subtitle" value="Budget authorize → model selection → infra resilience → settle, all before and around one Bedrock call."
-      style="text;html=1;align=center;fontSize=24;fontColor=#2FA374;"
-      vertex="1" parent="1"><mxGeometry x="0" y="80" width="1700" height="32" as="geometry"/></mxCell>
-
-    <!-- ===== Client ===== -->
-    <mxCell id="client" value="Client&#10;SDK · Claude Code · CLI"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="60" y="500" width="230" height="120" as="geometry"/></mxCell>
-
-    <!-- ===== L1 Gateway band ===== -->
-    <mxCell id="gwband" value=""
-      style="rounded=1;fillColor=#F4FBF7;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;"
-      vertex="1" parent="1"><mxGeometry x="360" y="150" width="960" height="820" as="geometry"/></mxCell>
-    <mxCell id="gwband_l" value="Stratoclave gateway  ·  ECS Fargate  ·  single settle-once money machine"
-      style="text;html=1;align=left;fontSize=22;fontStyle=2;fontColor=#2FA374;"
-      vertex="1" parent="1"><mxGeometry x="380" y="160" width="920" height="30" as="geometry"/></mxCell>
-
-    <!-- Budget authorize (L3) -->
-    <mxCell id="budget" value="Budget authorize&#10;atomic reserve"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E7E5A;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="400" y="240" width="230" height="110" as="geometry"/></mxCell>
-    <mxCell id="budget_note" value="TransactWriteItems&#10;over pool $ + per-model quota"
-      style="text;html=1;align=center;fontSize=18;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="390" y="356" width="250" height="46" as="geometry"/></mxCell>
-
-    <!-- Staged breaker -->
-    <mxCell id="breaker" value="Staged breaker"
-      style="rhombus;whiteSpace=wrap;html=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=22;fontColor=#14442F;fontStyle=1;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="700" y="230" width="220" height="130" as="geometry"/></mxCell>
-    <mxCell id="breaker_note" value="≤5% → reject 402&#10;≤25% → downgrade tier"
-      style="text;html=1;align=center;fontSize=18;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="690" y="366" width="240" height="46" as="geometry"/></mxCell>
-
-    <!-- ModelResolver -->
-    <mxCell id="resolver" value="Model resolver&#10;cascading fallback"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA374;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="400" y="470" width="230" height="110" as="geometry"/></mxCell>
-    <mxCell id="resolver_note" value="allowlist ∩ user chain&#10;Opus→Sonnet→Haiku on quota-out"
-      style="text;html=1;align=center;fontSize=18;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="380" y="586" width="270" height="46" as="geometry"/></mxCell>
-
-    <!-- InfraRouter -->
-    <mxCell id="infra" value="InfraRouter&#10;retry + region failover"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E7E5A;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="740" y="470" width="240" height="110" as="geometry"/></mxCell>
-    <mxCell id="infra_note" value="429 → failover region&#10;first-event commit (no double-bill)"
-      style="text;html=1;align=center;fontSize=18;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="720" y="586" width="290" height="46" as="geometry"/></mxCell>
-
-    <!-- Settle -->
-    <mxCell id="settle" value="Settle once&#10;refund unused"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E7E5A;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="400" y="760" width="230" height="110" as="geometry"/></mxCell>
-    <mxCell id="settle_note" value="actual tokens billed&#10;disconnect-safe"
-      style="text;html=1;align=center;fontSize=18;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="390" y="876" width="250" height="46" as="geometry"/></mxCell>
-
-    <!-- DynamoDB -->
-    <mxCell id="ddb" value="DynamoDB&#10;single store"
-      style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=22;fontColor=#14442F;fontStyle=1;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="1080" y="240" width="180" height="150" as="geometry"/></mxCell>
-    <mxCell id="ddb_note" value="budgets · quotas&#10;usage log · routing config"
-      style="text;html=1;align=center;fontSize=18;fontColor=#14442F;"
-      vertex="1" parent="1"><mxGeometry x="1050" y="396" width="240" height="46" as="geometry"/></mxCell>
-
-    <!-- ===== Bedrock band ===== -->
-    <mxCell id="brband" value=""
-      style="rounded=1;fillColor=#F4FBF7;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;"
-      vertex="1" parent="1"><mxGeometry x="1380" y="430" width="260" height="360" as="geometry"/></mxCell>
-    <mxCell id="brband_l" value="Amazon Bedrock"
-      style="text;html=1;align=center;fontSize=22;fontStyle=2;fontColor=#2FA374;"
-      vertex="1" parent="1"><mxGeometry x="1380" y="440" width="260" height="28" as="geometry"/></mxCell>
-    <mxCell id="br1" value="Converse&#10;us-east-1"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=22;fontColor=#14442F;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="1420" y="490" width="180" height="80" as="geometry"/></mxCell>
-    <mxCell id="br2" value="Converse&#10;us-west-2 (failover)"
-      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CDE9DC;strokeWidth=2;fontSize=22;fontColor=#2FA374;verticalAlign=middle;shadow=1;"
-      vertex="1" parent="1"><mxGeometry x="1420" y="640" width="180" height="80" as="geometry"/></mxCell>
-
-    <!-- ===== Edges ===== -->
-    <mxCell id="e_client_budget" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=18;fontColor=#14442F;" edge="1" parent="1" source="client" target="budget"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="e_client_lbl" value="request" style="text;html=1;fontSize=18;fontColor=#14442F;fontStyle=2;" vertex="1" parent="1"><mxGeometry x="300" y="400" width="110" height="24" as="geometry"/></mxCell>
-
-    <mxCell id="e_budget_breaker" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="budget" target="breaker"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="e_breaker_resolver" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="breaker" target="resolver"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="810" y="430"/><mxPoint x="515" y="430"/></Array></mxGeometry></mxCell>
-    <mxCell id="e_resolver_infra" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=18;fontColor=#14442F;" edge="1" parent="1" source="resolver" target="infra"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="e_resolver_lbl" value="chosen model" style="text;html=1;fontSize=18;fontColor=#14442F;fontStyle=2;" vertex="1" parent="1"><mxGeometry x="635" y="490" width="110" height="24" as="geometry"/></mxCell>
-
-    <mxCell id="e_infra_br1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;" edge="1" parent="1" source="infra" target="br1"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="e_infra_br2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2FA374;strokeWidth=2;dashed=1;endArrow=block;endFill=1;fontSize=16;fontColor=#2FA374;" edge="1" parent="1" source="infra" target="br2"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="e_failover_lbl" value="on 429 /&#10;empty" style="text;html=1;fontSize=16;fontColor=#2FA374;fontStyle=2;align=center;" vertex="1" parent="1"><mxGeometry x="1250" y="640" width="120" height="44" as="geometry"/></mxCell>
-
-    <mxCell id="e_infra_settle" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=18;fontColor=#14442F;" edge="1" parent="1" source="infra" target="settle"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="620" y="700"/></Array></mxGeometry></mxCell>
-    <mxCell id="e_settle_lbl" value="stream done / disconnect" style="text;html=1;fontSize=18;fontColor=#14442F;fontStyle=2;" vertex="1" parent="1"><mxGeometry x="640" y="690" width="230" height="24" as="geometry"/></mxCell>
-
-    <mxCell id="e_settle_client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=18;fontColor=#14442F;" edge="1" parent="1" source="settle" target="client"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="175" y="815"/></Array></mxGeometry></mxCell>
-    <mxCell id="e_response_lbl" value="response (SSE)" style="text;html=1;fontSize=18;fontColor=#14442F;fontStyle=2;" vertex="1" parent="1"><mxGeometry x="60" y="700" width="180" height="24" as="geometry"/></mxCell>
-
-    <!-- budget <-> ddb -->
-    <mxCell id="e_budget_ddb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=2;endArrow=open;startArrow=open;dashed=1;" edge="1" parent="1" source="budget" target="ddb"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="e_settle_ddb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=2;endArrow=open;dashed=1;" edge="1" parent="1" source="settle" target="ddb"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1170" y="815"/></Array></mxGeometry></mxCell>
-
-  </root>
-</mxGraphModel>
+<mxfile host="embed.diagrams.net">
+  <diagram id="zT2jZHyn7p3Xis0FTAVg" name="ページ-1">
+    <mxGraphModel dx="2054" dy="1103" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1120" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=center;fontSize=36;fontStyle=1;fontColor=#14442F;" value="How one request flows through Stratoclave" vertex="1">
+          <mxGeometry height="48" width="1700" y="28" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#2FA374;" value="Budget authorize → model selection → infra resilience → settle, all before and around one Bedrock call." vertex="1">
+          <mxGeometry height="32" width="1700" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="client" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="Client SDK&lt;div&gt;Claude Code&lt;/div&gt;&lt;div&gt;CLI&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="230" x="60" y="500" as="geometry" />
+        </mxCell>
+        <mxCell id="gwband" parent="1" style="rounded=1;fillColor=#F4FBF7;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;arcSize=5;" value="" vertex="1">
+          <mxGeometry height="820" width="960" x="360" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="budget" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E7E5A;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;" value="Budget authorize&#xa;atomic reserve" vertex="1">
+          <mxGeometry height="110" width="230" x="400" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="budget_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="atomic reserve · pool $&#xa;+ per-model quota" vertex="1">
+          <mxGeometry height="66" width="310" x="360" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="breaker" parent="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;fontStyle=1;shadow=1;" value="Staged breaker" vertex="1">
+          <mxGeometry height="130" width="220" x="700" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="breaker_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="≤5% reject 402&#xa;≤25% downgrade tier" vertex="1">
+          <mxGeometry height="72" width="240" x="690" y="358" as="geometry" />
+        </mxCell>
+        <mxCell id="resolver" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA374;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;" value="Model resolver&#xa;cascading fallback" vertex="1">
+          <mxGeometry height="110" width="230" x="400" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="resolver_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="allowlist ∩ user chain&#xa;Opus → Sonnet → Haiku" vertex="1">
+          <mxGeometry height="72" width="320" x="355" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="infra" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E7E5A;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;" value="InfraRouter&#xa;retry + region failover" vertex="1">
+          <mxGeometry height="110" width="240" x="820" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="infra_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="429 → failover region&#xa;first-event commit" vertex="1">
+          <mxGeometry height="72" width="290" x="795" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="settle" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1E7E5A;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;" value="Settle once&#xa;refund unused" vertex="1">
+          <mxGeometry height="110" width="230" x="400" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="settle_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="actual tokens billed&#xa;disconnect-safe" vertex="1">
+          <mxGeometry height="72" width="250" x="390" y="876" as="geometry" />
+        </mxCell>
+        <mxCell id="ddb" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;fontStyle=1;shadow=1;" value="DynamoDB&#xa;single store" vertex="1">
+          <mxGeometry height="150" width="180" x="1080" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="ddb_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="budgets · quotas&#xa;usage log · routing config" vertex="1">
+          <mxGeometry height="72" width="290" x="1025" y="380" as="geometry" />
+        </mxCell>
+        <mxCell id="brband" parent="1" style="rounded=1;fillColor=#F4FBF7;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;" value="" vertex="1">
+          <mxGeometry height="360" width="260" x="1380" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="brband_l" parent="1" style="text;html=1;align=center;fontSize=26;fontStyle=2;fontColor=#2FA374;" value="Amazon Bedrock" vertex="1">
+          <mxGeometry height="28" width="260" x="1380" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="br1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="Converse&#xa;us-east-1" vertex="1">
+          <mxGeometry height="80" width="180" x="1420" y="485" as="geometry" />
+        </mxCell>
+        <mxCell id="br2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CDE9DC;strokeWidth=2;fontSize=26;fontColor=#2FA374;verticalAlign=middle;shadow=1;" value="Converse&#xa;us-west-2 (failover)" vertex="1">
+          <mxGeometry height="130" width="180" x="1420" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="e_client_budget" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=24;fontColor=#14442F;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="budget">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_client_lbl" parent="1" style="text;html=1;fontSize=24;fontColor=#14442F;fontStyle=2;" value="request" vertex="1">
+          <mxGeometry height="24" width="110" x="190" y="372" as="geometry" />
+        </mxCell>
+        <mxCell id="e_budget_breaker" edge="1" parent="1" source="budget" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="breaker">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_breaker_resolver" edge="1" parent="1" source="breaker" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="resolver">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="810" y="430" />
+              <mxPoint x="515" y="430" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_resolver_infra" edge="1" parent="1" source="resolver" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=24;fontColor=#14442F;" target="infra">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_resolver_lbl" parent="1" style="text;html=1;fontSize=24;fontColor=#14442F;fontStyle=2;" value="chosen model" vertex="1">
+          <mxGeometry height="24" width="110" x="650" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="e_infra_br1" edge="1" parent="1" source="infra" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;" target="br1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_infra_br2" edge="1" parent="1" source="infra" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2FA374;strokeWidth=2;dashed=1;endArrow=block;endFill=1;fontSize=24;fontColor=#2FA374;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="br2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_failover_lbl" parent="1" style="text;html=1;fontSize=24;fontColor=#2FA374;fontStyle=2;align=center;" value="on 429 / empty" vertex="1">
+          <mxGeometry height="44" width="130" x="1250" y="710" as="geometry" />
+        </mxCell>
+        <mxCell id="e_infra_settle" edge="1" parent="1" source="infra" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=24;fontColor=#14442F;" target="settle">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="620" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_settle_lbl" parent="1" style="text;html=1;fontSize=24;fontColor=#14442F;fontStyle=2;" value="stream done / disconnect" vertex="1">
+          <mxGeometry height="24" width="230" x="640" y="700" as="geometry" />
+        </mxCell>
+        <mxCell id="e_settle_client" edge="1" parent="1" source="settle" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=24;fontColor=#14442F;" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="175" y="815" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_response_lbl" parent="1" style="text;html=1;fontSize=24;fontColor=#14442F;fontStyle=2;" value="response (SSE)" vertex="1">
+          <mxGeometry height="24" width="180" x="180" y="670" as="geometry" />
+        </mxCell>
+        <mxCell id="e_budget_ddb" edge="1" parent="1" source="budget" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=2;endArrow=open;startArrow=open;dashed=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" target="ddb">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="515" y="180" />
+              <mxPoint x="1170" y="180" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_settle_ddb" edge="1" parent="1" source="settle" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=2;endArrow=open;dashed=1;" target="ddb">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1170" y="815" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
