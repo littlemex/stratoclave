@@ -29,4 +29,7 @@ def classify(exc: Exception, target: Target) -> Disposition:
     if isinstance(exc, (ReadTimeoutError, ConnectTimeoutError, TimeoutError, OSError)):
         return Disposition.FAILOVER
 
+    if isinstance(exc, RuntimeError) and "empty stream" in str(exc).lower():
+        return Disposition.FAILOVER
+
     return Disposition.FATAL

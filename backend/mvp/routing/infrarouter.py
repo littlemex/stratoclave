@@ -59,13 +59,18 @@ async def _peek_first_event(
     """Await the first event from a Bedrock stream. Returns (first_event, rest).
 
     If the stream raises before yielding, the exception propagates for classification.
+    Empty streams raise RuntimeError (treated as FAILOVER by classify).
     """
-    it = stream.__iter__()
+    it = iter(stream)
+    sentinel = object()
 
     def _next():
-        return next(it)
+        result = next(it, sentinel)
+        return result
 
     first = await asyncio.to_thread(_next)
+    if first is sentinel:
+        raise RuntimeError("Bedrock returned empty stream")
 
     async def _rest():
         sentinel = object()

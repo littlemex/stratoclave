@@ -97,7 +97,7 @@ def resolve_chain(
             filtered = downgraded
 
     if not filtered:
-        filtered = targets[:1]
+        raise ValueError(f"No targets available for alias '{alias}' after applying constraints")
 
     ordered = _region_diversify(filtered)
     return Chain(targets=tuple(ordered))

@@ -19,6 +19,16 @@ from mvp.routing.types import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clean_routing_state():
+    """Reset module-level caches between tests."""
+    from mvp.routing import infrarouter, chains
+    infrarouter._cooldowns.clear()
+    chains._CATALOG.clear()
+    yield
+    infrarouter._cooldowns.clear()
+
+
 # ---------------------------------------------------------------------------
 # Breaker
 # ---------------------------------------------------------------------------
@@ -143,9 +153,8 @@ class TestInfraRouterExecution:
             assert result.attempt_facts[0].outcome == "success"
 
     def test_failover_on_throttle(self):
-        from mvp.routing.infrarouter import route_stream, _cooldowns
+        from mvp.routing.infrarouter import route_stream
 
-        _cooldowns.clear()
         call_count = {"n": 0}
 
         def mock_converse(**kwargs):

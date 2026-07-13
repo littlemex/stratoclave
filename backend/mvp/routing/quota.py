@@ -116,15 +116,16 @@ def build_reserve_txn_items(
         pk = _pk_tenant(tenant_id)
         sk = _sk(model, period)
         ensure_counter(pk, sk)
+        headroom = max(tenant_limit - amount, 0)
         items.append({
             "Update": {
                 "TableName": table_name,
                 "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
-                "UpdateExpression": "ADD reserved :amt",
-                "ConditionExpression": "reserved + settled + :amt <= :lim",
+                "UpdateExpression": "SET reserved = reserved + :amt",
+                "ConditionExpression": "reserved + settled <= :headroom",
                 "ExpressionAttributeValues": {
                     ":amt": {"N": str(amount)},
-                    ":lim": {"N": str(tenant_limit)},
+                    ":headroom": {"N": str(headroom)},
                 },
             }
         })
@@ -133,15 +134,16 @@ def build_reserve_txn_items(
         pk = _pk_user(tenant_id, user_id)
         sk = _sk(model, period)
         ensure_counter(pk, sk)
+        headroom = max(user_limit - amount, 0)
         items.append({
             "Update": {
                 "TableName": table_name,
                 "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
-                "UpdateExpression": "ADD reserved :amt",
-                "ConditionExpression": "reserved + settled + :amt <= :lim",
+                "UpdateExpression": "SET reserved = reserved + :amt",
+                "ConditionExpression": "reserved + settled <= :headroom",
                 "ExpressionAttributeValues": {
                     ":amt": {"N": str(amount)},
-                    ":lim": {"N": str(user_limit)},
+                    ":headroom": {"N": str(headroom)},
                 },
             }
         })
