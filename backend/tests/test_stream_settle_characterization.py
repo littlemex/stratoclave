@@ -30,6 +30,8 @@ from botocore.exceptions import ClientError
 from mvp import _budget_flow, _pipeline
 from mvp import anthropic as anth
 from mvp._pipeline import reserve_credit, settle_reservation_and_log, release_pool
+from mvp._wire import anthropic_wire as wire
+from mvp import _converse_types as t
 
 
 @dataclass
@@ -81,6 +83,35 @@ class _FakeBedrock:
         if self._raise_on_call is not None:
             raise self._raise_on_call
         return {"stream": self._stream}
+
+
+class _TestAdapter:
+    """Minimal adapter for characterization tests — renders same frames as Anthropic wire."""
+    def __init__(self, model="us.anthropic.claude-opus-4-7"):
+        self.state = wire.AnthropicStreamState(model=model)
+
+    def prologue(self):
+        return wire.stream_prologue(self.state)
+
+    def render_raw_event(self, event):
+        if "contentBlockDelta" in event:
+            delta_obj = event["contentBlockDelta"].get("delta", {})
+            text = delta_obj.get("text", "")
+            if text:
+                return wire.render_stream_event(t.ContentTextDelta(index=0, text=text), self.state)
+        elif "messageStop" in event:
+            self.state.stop_reason = event["messageStop"].get("stopReason")
+        elif "metadata" in event:
+            usage = event["metadata"].get("usage", {})
+            self.state.input_tokens = int(usage.get("inputTokens", 0))
+            self.state.output_tokens = int(usage.get("outputTokens", 0))
+        return ()
+
+    def epilogue(self):
+        return wire.stream_epilogue(self.state)
+
+    def error_event(self, message):
+        return wire.error_event(message)
 
 
 def _make_body():
@@ -164,6 +195,7 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
         invoke_stream=lambda *, body, model_id: fake.converse_stream(),
         settle=counting_settle,
         release=lambda ctx: release_pool(ctx),
+        adapter=_TestAdapter(),
     )
     asyncio.run(_drive(gen, stop_after=stop_after))
 
@@ -208,6 +240,7 @@ def test_invoke_time_failure_releases_pool_and_does_not_settle(
         invoke_stream=raising_invoke,
         settle=counting_settle,
         release=counting_release,
+        adapter=_TestAdapter(),
     )
     chunks = asyncio.run(_drive(gen))
 
@@ -244,6 +277,7 @@ def test_mid_stream_failure_settles_once_and_does_not_release(
         invoke_stream=lambda *, body, model_id: {"stream": _RaisingMidStream()},
         settle=counting_settle,
         release=counting_release,
+        adapter=_TestAdapter(),
     )
     chunks = asyncio.run(_drive(gen))
 
