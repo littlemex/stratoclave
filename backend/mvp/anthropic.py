@@ -241,6 +241,25 @@ def _bedrock_client():
     return bedrock_runtime_client(region)
 
 
+def _decode_image_source(source: dict[str, Any]) -> dict[str, Any]:
+    """Decode an Anthropic image source to Bedrock image block. Raises ValueError for unsupported."""
+    import base64 as _b64
+    import binascii
+
+    src_type = source.get("type", "")
+    if src_type == "base64":
+        media = source.get("media_type", "image/png")
+        fmt = media.split("/", 1)[-1] if "/" in media else media
+        try:
+            raw = _b64.b64decode(source.get("data", ""))
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(f"invalid base64 image data: {e}") from e
+        return {"image": {"format": fmt, "source": {"bytes": raw}}}
+    raise ValueError(
+        f"unsupported image source type '{src_type}'; only base64 data: URIs are accepted"
+    )
+
+
 def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
     """Convert Anthropic-shaped content (str or list[dict]) into Bedrock Converse content."""
     if isinstance(content, str):
@@ -254,11 +273,47 @@ def _convert_content_blocks(content: Any) -> list[dict[str, Any]]:
             if btype == "text":
                 out.append({"text": block.get("text", "")})
             elif btype == "image":
-                # MVP does not support image input (Claude Code is text-mostly); skip.
-                continue
+                source = block.get("source", {})
+                out.append(_decode_image_source(source))
+            elif btype == "tool_use":
+                out.append({
+                    "toolUse": {
+                        "toolUseId": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input": block.get("input", {}),
+                    }
+                })
+            elif btype == "tool_result":
+                raw_content = block.get("content", [])
+                tr_content = []
+                if isinstance(raw_content, str):
+                    tr_content.append({"text": raw_content})
+                elif isinstance(raw_content, list):
+                    for sub in raw_content:
+                        if isinstance(sub, str):
+                            tr_content.append({"text": sub})
+                        elif isinstance(sub, dict):
+                            if sub.get("type") == "text":
+                                tr_content.append({"text": sub.get("text", "")})
+                            elif sub.get("type") == "image":
+                                tr_content.append(_decode_image_source(sub.get("source", {})))
+                tr_entry: dict[str, Any] = {
+                    "toolUseId": block.get("tool_use_id", ""),
+                    "content": tr_content or [{"text": ""}],
+                }
+                if block.get("is_error"):
+                    tr_entry["status"] = "error"
+                out.append({"toolResult": tr_entry})
+            elif btype == "thinking":
+                entry: dict[str, Any] = {"text": block.get("thinking", "")}
+                sig = block.get("signature")
+                if sig:
+                    entry["signature"] = sig
+                out.append({"reasoningContent": {"reasoningText": entry}})
             else:
-                # Unknown block types are text-stringified rather than skipped.
                 out.append({"text": json.dumps(block)})
+            if block.get("cache_control"):
+                out.append({"cachePoint": {"type": "default"}})
         return out or [{"text": ""}]
     # fallback
     return [{"text": str(content)}]
@@ -311,6 +366,34 @@ def _build_bedrock_kwargs(
     system = _convert_system(body.system)
     if system:
         kwargs["system"] = system
+
+    tools = getattr(body, "tools", None)
+    if tools:
+        tool_config: dict[str, Any] = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": t.get("name", "") if isinstance(t, dict) else "",
+                        "description": t.get("description", "") if isinstance(t, dict) else "",
+                        "inputSchema": {
+                            "json": t.get("input_schema", {}) if isinstance(t, dict) else {}
+                        },
+                    }
+                }
+                for t in tools
+            ]
+        }
+        tool_choice = getattr(body, "tool_choice", None)
+        if isinstance(tool_choice, dict):
+            tc_type = tool_choice.get("type", "auto")
+            if tc_type == "any":
+                tool_config["toolChoice"] = {"any": {}}
+            elif tc_type == "tool":
+                tool_config["toolChoice"] = {"tool": {"name": tool_choice.get("name", "")}}
+            else:
+                tool_config["toolChoice"] = {"auto": {}}
+        kwargs["toolConfig"] = tool_config
+
     return kwargs
 
 
@@ -469,6 +552,14 @@ def messages(
     for block in resp.get("output", {}).get("message", {}).get("content", []):
         if "text" in block:
             content_blocks.append({"type": "text", "text": block["text"]})
+        elif "toolUse" in block:
+            tu = block["toolUse"]
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tu.get("toolUseId", ""),
+                "name": tu.get("name", ""),
+                "input": tu.get("input", {}),
+            })
 
     stop_reason_bedrock = resp.get("stopReason", "end_turn")
     stop_reason = _map_stop_reason(stop_reason_bedrock)
@@ -498,187 +589,52 @@ async def _stream_messages(
     tenants_repo: UserTenantsRepository,
     reservation: int,
 ) -> AsyncGenerator[bytes, None]:
-    """Streaming path.
+    """Delegation shim — forwards to `_budget_flow.run_stream`.
 
-    Credit is reserved at entry, so no mid-stream balance check is
-    required. On completion (success or failure) we settle the
-    reservation against the actual usage.
+    Closures resolve module globals (`_bedrock_client`, `_settle_reservation_and_log`,
+    `_release_pool`) AT CALL TIME so existing monkeypatches pass straight through.
     """
-    message_id = f"msg_{uuid.uuid4().hex[:24]}"
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
-    cache_write_tokens = 0
-    settled = False
+    from . import _budget_flow
+    from ._wire import anthropic_wire as wire
 
-    try:
-        # 1. message_start
-        yield _sse_event(
-            "message_start",
-            {
-                "type": "message_start",
-                "message": {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": body.model,
-                    "content": [],
-                    "stop_reason": None,
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0},
-                },
-            },
-        )
-        # 2. content_block_start
-        yield _sse_event(
-            "content_block_start",
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            },
-        )
-
+    def _invoke(*, body, model_id):
         kwargs = _build_bedrock_kwargs(body, model_id)
-        try:
-            # boto3's `converse_stream` is synchronous. Calling it directly
-            # from this async generator pins the uvicorn event loop for the
-            # entire Bedrock TCP handshake; multi-tenant traffic to other
-            # endpoints (incl. /healthz) blocks until it returns. Offload
-            # to the default thread executor so the loop stays responsive.
-            client = _bedrock_client()
-            resp = await asyncio.to_thread(client.converse_stream, **kwargs)
-        except ClientError as e:
-            from core.error_handler import sanitize_exception_message
+        client = _bedrock_client()
+        return client.converse_stream(**kwargs)
 
-            yield _sse_event(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": sanitize_exception_message(str(e)),
-                    },
-                },
-            )
-            # Bedrock was never invoked; refund the full reservation and
-            # release the pool hold so it does not leak.
-            tenants_repo.refund(
-                user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-            )
-            _release_pool(tenants_repo)
-            settled = True
-            return
+    class _AnthropicAdapter:
+        def __init__(self):
+            self.state = wire.AnthropicStreamState(model=body.model)
 
-        stop_reason_bedrock: Optional[str] = None
+        def prologue(self):
+            return wire.stream_prologue(self.state)
 
-        try:
-            # The Bedrock event stream is a sync iterator backed by a
-            # blocking socket read. Wrap it in `_aiter_blocking_stream`
-            # so each `next(...)` runs in a worker thread and the event
-            # loop is free to service other requests in between events.
-            async for event in _aiter_blocking_stream(resp.get("stream", [])):
-                if "contentBlockDelta" in event:
-                    delta_obj = event["contentBlockDelta"].get("delta", {})
-                    text = delta_obj.get("text", "")
-                    if text:
-                        yield _sse_event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {"type": "text_delta", "text": text},
-                            },
-                        )
-                elif "messageStop" in event:
-                    stop_reason_bedrock = event["messageStop"].get("stopReason")
-                elif "metadata" in event:
-                    usage = event["metadata"].get("usage", {})
-                    input_tokens = int(usage.get("inputTokens", input_tokens))
-                    output_tokens = int(usage.get("outputTokens", output_tokens))
-                    cr, cw = _cache_tokens_from_usage(usage)
-                    cache_read_tokens = cr or cache_read_tokens
-                    cache_write_tokens = cw or cache_write_tokens
-        except Exception as e:  # pragma: no cover
-            from core.error_handler import sanitize_exception_message
+        def render_event(self, event):
+            from . import _converse_types as t
+            if isinstance(event, (t.Usage, t.MessageStop)):
+                list(wire.render_stream_event(event, self.state))
+                return ()
+            return wire.render_stream_event(event, self.state)
 
-            yield _sse_event(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": sanitize_exception_message(str(e)),
-                    },
-                },
-            )
-            # Partial usage has already been observed; settle that and refund the rest.
-            _settle_reservation_and_log(
-                user=user,
-                tenants_repo=tenants_repo,
-                reservation=reservation,
-                actual_input_tokens=input_tokens,
-                actual_output_tokens=output_tokens,
-                model_id=model_id,
-                context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens,
-                actual_cache_write_tokens=cache_write_tokens,
-            )
-            settled = True
-            return
+        def epilogue(self):
+            return wire.stream_epilogue(self.state)
 
-        # 3. content_block_stop
-        yield _sse_event(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": 0},
-        )
+        def error_event(self, message):
+            return wire.error_event(message)
 
-        stop_reason = _map_stop_reason(stop_reason_bedrock or "end_turn")
-
-        # 4. message_delta (carries usage and stop_reason)
-        yield _sse_event(
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                },
-            },
-        )
-
-        # 5. message_stop
-        yield _sse_event("message_stop", {"type": "message_stop"})
-
-        # 6. Settle the reservation against actual usage.
-        _settle_reservation_and_log(
-            user=user,
-            tenants_repo=tenants_repo,
-            reservation=reservation,
-            actual_input_tokens=input_tokens,
-            actual_output_tokens=output_tokens,
-            model_id=model_id,
-            context=tenants_repo,
-            actual_cache_read_tokens=cache_read_tokens,
-            actual_cache_write_tokens=cache_write_tokens,
-        )
-        settled = True
-    finally:
-        # Defensive: if the client disconnected mid-stream, settle now
-        # so the reservation does not leak. Settling with zero is fine.
-        if not settled:
-            _settle_reservation_and_log(
-                user=user,
-                tenants_repo=tenants_repo,
-                reservation=reservation,
-                actual_input_tokens=input_tokens,
-                actual_output_tokens=output_tokens,
-                model_id=model_id,
-                context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens,
-                actual_cache_write_tokens=cache_write_tokens,
-            )
+    async for frame in _budget_flow.run_stream(
+        body=body,
+        model_id=model_id,
+        model_alias=body.model,
+        user=user,
+        tenants_repo=tenants_repo,
+        reservation=reservation,
+        invoke_stream=_invoke,
+        settle=lambda **kw: _settle_reservation_and_log(**kw),
+        release=lambda ctx: _release_pool(ctx),
+        adapter=_AnthropicAdapter(),
+    ):
+        yield frame
 
 
 async def _aiter_blocking_stream(

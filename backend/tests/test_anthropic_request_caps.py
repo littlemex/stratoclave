@@ -324,6 +324,7 @@ class TestExtraAllowPassthroughSafety:
             "messages",
             "inferenceConfig",
             "system",
+            "toolConfig",
         }
         # Server-resolved model, never the attacker's smuggled one.
         assert kwargs["modelId"] == "us.anthropic.claude-opus-4-7"
