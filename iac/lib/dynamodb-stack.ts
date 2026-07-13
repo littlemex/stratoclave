@@ -46,6 +46,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly tenantBudgetsTable: dynamodb.Table;
   /** A-2: admin-editable per-model pricing (token → micro-USD conversion) */
   public readonly pricingConfigTable: dynamodb.Table;
+  /** Per-IP fixed-window rate-limit counters, shared across ECS tasks (TTL-reaped) */
+  public readonly rateLimitsTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -328,6 +330,19 @@ export class DynamoDBStack extends cdk.Stack {
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
     });
 
+    // Per-IP rate-limit counters (fixed-window). PK "RL#<scope>#<ip>#<window>",
+    // one atomic `ADD hits` per request, TTL (`expires_at`) reaps expired
+    // windows. Shared across all ECS tasks so per-IP auth caps hold under
+    // horizontal scale-out — no Redis, no new infra class. Ephemeral →
+    // no PITR.
+    this.rateLimitsTable = new dynamodb.Table(this, 'RateLimitsTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-rate-limits`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -346,6 +361,7 @@ export class DynamoDBStack extends cdk.Stack {
       this.uiTicketsTable.tableArn,
       this.tenantBudgetsTable.tableArn,
       this.pricingConfigTable.tableArn,
+      this.rateLimitsTable.tableArn,
     ];
 
     // Parameter Store exports
@@ -367,6 +383,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableUiTicketsParam', 'dynamodb/table-ui-tickets', this.uiTicketsTable],
       ['TableTenantBudgetsParam', 'dynamodb/table-tenant-budgets', this.tenantBudgetsTable],
       ['TablePricingConfigParam', 'dynamodb/table-pricing-config', this.pricingConfigTable],
+      ['TableRateLimitsParam', 'dynamodb/table-rate-limits', this.rateLimitsTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

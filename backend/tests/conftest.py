@@ -47,6 +47,7 @@ _TABLE_ENVS = {
     "DYNAMODB_SSO_PRE_REGISTRATIONS_TABLE": "stratoclave-sso-pre-registrations",
     "DYNAMODB_TENANT_BUDGETS_TABLE": "stratoclave-tenant-budgets",
     "DYNAMODB_PRICING_CONFIG_TABLE": "stratoclave-pricing-config",
+    "DYNAMODB_RATE_LIMITS_TABLE": "stratoclave-rate-limits",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -160,6 +161,14 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
                 {"AttributeName": "pk", "AttributeType": "S"},
                 {"AttributeName": "sk", "AttributeType": "S"},
             ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # RateLimits: PK pk ("RL#<scope>#<ip>#<window>"), TTL expires_at
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_RATE_LIMITS_TABLE"],
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
 

@@ -34,5 +34,5 @@ python-json-logger==4.1.0
 PyJWT[crypto]==2.13.0
 cryptography==48.0.1
 
-# Rate limiting (in-process token bucket shared across routes).
-slowapi==0.1.9
+# Rate limiting is DynamoDB-backed (core/rate_limit_ddb.py) — no external
+# dependency. Per-IP fixed-window counters are shared across ECS tasks.

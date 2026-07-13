@@ -67,7 +67,7 @@ class RespondRequest(BaseModel):
 def login(request: Request, body: LoginRequest) -> LoginResponse:
     """P0-3: limited to `AUTH_LOGIN_RATE_LIMIT` per source IP (default
     10/minute). Credential stuffing + user enumeration mitigation."""
-    _ = request  # slowapi requires it to be in the signature
+    _ = request  # the rate limiter reads it from the signature
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()

@@ -191,7 +191,13 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   dynamoDbTableArns: dynamoDBStack.allTableArns,
   cpu: 256,
   memory: 512,
-  desiredCount: 1, // single-task operation assuming in-memory state
+  // Two tasks so the ECS service spreads across both AZs (the VPC has
+  // maxAzs=2): no single task or AZ is a SPOF, and rolling deploys keep
+  // a task serving. Safe now that per-IP rate limits live in DynamoDB
+  // (no in-memory state that a second task would diverge on); budget
+  // reserve/settle was already atomic in DynamoDB, and the InfraRouter
+  // cooldown map / config cache are per-task advisory by design.
+  desiredCount: 2,
   containerPort: 8000,
   // A-01-ecr follow-through: with the repo IMMUTABLE, every deploy
   // must point at a content-addressed tag. Operators export
@@ -242,6 +248,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // A-1/A-2: tenant dollar pool budgets + admin-editable model pricing.
     DYNAMODB_TENANT_BUDGETS_TABLE: dynamoDBStack.tenantBudgetsTable.tableName,
     DYNAMODB_PRICING_CONFIG_TABLE: dynamoDBStack.pricingConfigTable.tableName,
+    // Per-IP rate-limit counters, shared across ECS tasks (multi-task/AZ safe).
+    DYNAMODB_RATE_LIMITS_TABLE: dynamoDBStack.rateLimitsTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,
@@ -287,7 +295,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   secrets: {},
   // P1-C: shell-into-task is opt-in (false in production by default).
   enableExecuteCommand: enableEcsExec,
-  description: `[${prefix}] ECS Fargate (Public Subnet, desiredCount=1)`,
+  description: `[${prefix}] ECS Fargate (Public Subnet, desiredCount=2, multi-AZ)`,
 });
 ecsStack.addDependency(networkStack);
 ecsStack.addDependency(ecrStack);

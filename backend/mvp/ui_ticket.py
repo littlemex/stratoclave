@@ -200,7 +200,7 @@ def consume_ui_ticket(
     IP to slow down blind guessing. 256-bit ticket entropy already
     makes guessing uneconomic; the limiter is belt-and-braces.
     """
-    _ = request  # slowapi reads it from the signature
+    _ = request  # the rate limiter reads it from the signature
     try:
         attrs = UiTicketsRepository().consume(body.ticket)
     except TicketNotFoundError:
