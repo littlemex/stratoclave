@@ -159,11 +159,7 @@ def render_stream_event(
 
 
 def stream_epilogue(state: AnthropicStreamState) -> Iterable[bytes]:
-    """Trailing SSE: content_block_stop, message_delta (usage + stop), message_stop."""
-    yield _sse_event(
-        "content_block_stop",
-        {"type": "content_block_stop", "index": 0},
-    )
+    """Trailing SSE: message_delta (usage + stop), message_stop."""
     yield _sse_event(
         "message_delta",
         {
