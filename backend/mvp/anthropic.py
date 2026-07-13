@@ -498,187 +498,30 @@ async def _stream_messages(
     tenants_repo: UserTenantsRepository,
     reservation: int,
 ) -> AsyncGenerator[bytes, None]:
-    """Streaming path.
+    """Delegation shim — forwards to `_budget_flow.run_stream`.
 
-    Credit is reserved at entry, so no mid-stream balance check is
-    required. On completion (success or failure) we settle the
-    reservation against the actual usage.
+    Closures resolve module globals (`_bedrock_client`, `_settle_reservation_and_log`,
+    `_release_pool`) AT CALL TIME so existing monkeypatches pass straight through.
     """
-    message_id = f"msg_{uuid.uuid4().hex[:24]}"
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
-    cache_write_tokens = 0
-    settled = False
+    from . import _budget_flow
 
-    try:
-        # 1. message_start
-        yield _sse_event(
-            "message_start",
-            {
-                "type": "message_start",
-                "message": {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": body.model,
-                    "content": [],
-                    "stop_reason": None,
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0},
-                },
-            },
-        )
-        # 2. content_block_start
-        yield _sse_event(
-            "content_block_start",
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            },
-        )
-
+    def _invoke(*, body, model_id):
         kwargs = _build_bedrock_kwargs(body, model_id)
-        try:
-            # boto3's `converse_stream` is synchronous. Calling it directly
-            # from this async generator pins the uvicorn event loop for the
-            # entire Bedrock TCP handshake; multi-tenant traffic to other
-            # endpoints (incl. /healthz) blocks until it returns. Offload
-            # to the default thread executor so the loop stays responsive.
-            client = _bedrock_client()
-            resp = await asyncio.to_thread(client.converse_stream, **kwargs)
-        except ClientError as e:
-            from core.error_handler import sanitize_exception_message
+        client = _bedrock_client()
+        return client.converse_stream(**kwargs)
 
-            yield _sse_event(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": sanitize_exception_message(str(e)),
-                    },
-                },
-            )
-            # Bedrock was never invoked; refund the full reservation and
-            # release the pool hold so it does not leak.
-            tenants_repo.refund(
-                user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-            )
-            _release_pool(tenants_repo)
-            settled = True
-            return
-
-        stop_reason_bedrock: Optional[str] = None
-
-        try:
-            # The Bedrock event stream is a sync iterator backed by a
-            # blocking socket read. Wrap it in `_aiter_blocking_stream`
-            # so each `next(...)` runs in a worker thread and the event
-            # loop is free to service other requests in between events.
-            async for event in _aiter_blocking_stream(resp.get("stream", [])):
-                if "contentBlockDelta" in event:
-                    delta_obj = event["contentBlockDelta"].get("delta", {})
-                    text = delta_obj.get("text", "")
-                    if text:
-                        yield _sse_event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {"type": "text_delta", "text": text},
-                            },
-                        )
-                elif "messageStop" in event:
-                    stop_reason_bedrock = event["messageStop"].get("stopReason")
-                elif "metadata" in event:
-                    usage = event["metadata"].get("usage", {})
-                    input_tokens = int(usage.get("inputTokens", input_tokens))
-                    output_tokens = int(usage.get("outputTokens", output_tokens))
-                    cr, cw = _cache_tokens_from_usage(usage)
-                    cache_read_tokens = cr or cache_read_tokens
-                    cache_write_tokens = cw or cache_write_tokens
-        except Exception as e:  # pragma: no cover
-            from core.error_handler import sanitize_exception_message
-
-            yield _sse_event(
-                "error",
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": sanitize_exception_message(str(e)),
-                    },
-                },
-            )
-            # Partial usage has already been observed; settle that and refund the rest.
-            _settle_reservation_and_log(
-                user=user,
-                tenants_repo=tenants_repo,
-                reservation=reservation,
-                actual_input_tokens=input_tokens,
-                actual_output_tokens=output_tokens,
-                model_id=model_id,
-                context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens,
-                actual_cache_write_tokens=cache_write_tokens,
-            )
-            settled = True
-            return
-
-        # 3. content_block_stop
-        yield _sse_event(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": 0},
-        )
-
-        stop_reason = _map_stop_reason(stop_reason_bedrock or "end_turn")
-
-        # 4. message_delta (carries usage and stop_reason)
-        yield _sse_event(
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                },
-            },
-        )
-
-        # 5. message_stop
-        yield _sse_event("message_stop", {"type": "message_stop"})
-
-        # 6. Settle the reservation against actual usage.
-        _settle_reservation_and_log(
-            user=user,
-            tenants_repo=tenants_repo,
-            reservation=reservation,
-            actual_input_tokens=input_tokens,
-            actual_output_tokens=output_tokens,
-            model_id=model_id,
-            context=tenants_repo,
-            actual_cache_read_tokens=cache_read_tokens,
-            actual_cache_write_tokens=cache_write_tokens,
-        )
-        settled = True
-    finally:
-        # Defensive: if the client disconnected mid-stream, settle now
-        # so the reservation does not leak. Settling with zero is fine.
-        if not settled:
-            _settle_reservation_and_log(
-                user=user,
-                tenants_repo=tenants_repo,
-                reservation=reservation,
-                actual_input_tokens=input_tokens,
-                actual_output_tokens=output_tokens,
-                model_id=model_id,
-                context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens,
-                actual_cache_write_tokens=cache_write_tokens,
-            )
+    async for frame in _budget_flow.run_stream(
+        body=body,
+        model_id=model_id,
+        model_alias=body.model,
+        user=user,
+        tenants_repo=tenants_repo,
+        reservation=reservation,
+        invoke_stream=_invoke,
+        settle=lambda **kw: _settle_reservation_and_log(**kw),
+        release=lambda ctx: _release_pool(ctx),
+    ):
+        yield frame
 
 
 async def _aiter_blocking_stream(
