@@ -333,96 +333,66 @@ async def _stream_chat(
     tenants_repo: Any,
     reservation: int,
 ) -> AsyncGenerator[bytes, None]:
-    """SSE stream in OpenAI chat.completion.chunk format."""
-    import asyncio
-    from botocore.exceptions import ClientError
-    from core.error_handler import sanitize_exception_message
-    from ._converse_core import _aiter_blocking_stream, cache_tokens_from_usage
+    """SSE stream via the shared _budget_flow.run_stream + ChatAdapter."""
+    from . import _budget_flow
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
-    cache_write_tokens = 0
-    settled = False
+    created = int(time.time())
 
     def _sse(data: dict) -> bytes:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
 
-    try:
-        # First chunk: role
-        yield _sse({
-            "id": chat_id, "object": "chat.completion.chunk",
-            "created": int(time.time()), "model": body.model,
-            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
-        })
+    class _ChatAdapter:
+        def __init__(self):
+            self.stop_reason = None
 
+        def prologue(self):
+            yield _sse({
+                "id": chat_id, "object": "chat.completion.chunk",
+                "created": created, "model": body.model,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+            })
+
+        def render_raw_event(self, event):
+            if "contentBlockDelta" in event:
+                delta_obj = event["contentBlockDelta"].get("delta", {})
+                text = delta_obj.get("text", "")
+                if text:
+                    yield _sse({
+                        "id": chat_id, "object": "chat.completion.chunk",
+                        "created": created, "model": body.model,
+                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    })
+            elif "messageStop" in event:
+                self.stop_reason = event["messageStop"].get("stopReason")
+
+        def epilogue(self):
+            finish_reason = _map_finish_reason(self.stop_reason)
+            yield _sse({
+                "id": chat_id, "object": "chat.completion.chunk",
+                "created": created, "model": body.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            })
+            yield b"data: [DONE]\n\n"
+
+        def error_event(self, message):
+            yield _sse({"error": {"message": message, "type": "api_error"}})
+
+    def _invoke(*, body, model_id):
         kwargs = _build_chat_bedrock_kwargs(body, model_id)
-        try:
-            client = _bedrock_client()
-            resp = await asyncio.to_thread(client.converse_stream, **kwargs)
-        except ClientError as e:
-            tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
-            _release_pool(tenants_repo)
-            settled = True
-            yield _sse({"error": {"message": sanitize_exception_message(str(e)), "type": "api_error"}})
-            return
+        client = _bedrock_client()
+        return client.converse_stream(**kwargs)
 
-        stop_reason_bedrock = None
-        try:
-            async for event in _aiter_blocking_stream(resp.get("stream", [])):
-                if "contentBlockDelta" in event:
-                    delta_obj = event["contentBlockDelta"].get("delta", {})
-                    text = delta_obj.get("text", "")
-                    if text:
-                        yield _sse({
-                            "id": chat_id, "object": "chat.completion.chunk",
-                            "created": int(time.time()), "model": body.model,
-                            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-                        })
-                elif "messageStop" in event:
-                    stop_reason_bedrock = event["messageStop"].get("stopReason")
-                elif "metadata" in event:
-                    usage = event["metadata"].get("usage", {})
-                    input_tokens = int(usage.get("inputTokens", input_tokens))
-                    output_tokens = int(usage.get("outputTokens", output_tokens))
-                    cr, cw = cache_tokens_from_usage(usage)
-                    cache_read_tokens = cr or cache_read_tokens
-                    cache_write_tokens = cw or cache_write_tokens
-        except Exception as e:
-            yield _sse({"error": {"message": sanitize_exception_message(str(e)), "type": "api_error"}})
-            _settle_reservation_and_log(
-                user=user, tenants_repo=tenants_repo, reservation=reservation,
-                actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
-                model_id=model_id, context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens, actual_cache_write_tokens=cache_write_tokens,
-            )
-            settled = True
-            return
-
-        # Final chunk with finish_reason
-        finish_reason = _map_finish_reason(stop_reason_bedrock)
-        yield _sse({
-            "id": chat_id, "object": "chat.completion.chunk",
-            "created": int(time.time()), "model": body.model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-            "usage": {"prompt_tokens": input_tokens, "completion_tokens": output_tokens, "total_tokens": input_tokens + output_tokens},
-        })
-
-        yield b"data: [DONE]\n\n"
-
-        _settle_reservation_and_log(
-            user=user, tenants_repo=tenants_repo, reservation=reservation,
-            actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
-            model_id=model_id, context=tenants_repo,
-            actual_cache_read_tokens=cache_read_tokens, actual_cache_write_tokens=cache_write_tokens,
-        )
-        settled = True
-    finally:
-        if not settled:
-            _settle_reservation_and_log(
-                user=user, tenants_repo=tenants_repo, reservation=reservation,
-                actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
-                model_id=model_id, context=tenants_repo,
-                actual_cache_read_tokens=cache_read_tokens, actual_cache_write_tokens=cache_write_tokens,
-            )
+    async for frame in _budget_flow.run_stream(
+        body=body,
+        model_id=model_id,
+        model_alias=body.model,
+        user=user,
+        tenants_repo=tenants_repo,
+        reservation=reservation,
+        invoke_stream=_invoke,
+        settle=lambda **kw: _settle_reservation_and_log(**kw),
+        release=lambda ctx: _release_pool(ctx),
+        adapter=_ChatAdapter(),
+    ):
+        yield frame
