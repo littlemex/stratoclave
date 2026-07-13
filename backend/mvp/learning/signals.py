@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 _TABLE_NAME = os.getenv("DYNAMODB_ROUTING_SIGNALS_TABLE", "stratoclave-routing-signals")
 
 
-def emit_signal(
+def emit_signal_sync(
     *,
     tenant_id: str,
     group_id: str,
@@ -37,7 +37,6 @@ def emit_signal(
 ) -> None:
     """Fire-and-forget signal write. Never raises."""
     try:
-        import boto3
         from dynamo.client import get_dynamodb_resource
 
         table = get_dynamodb_resource().Table(_TABLE_NAME)
@@ -65,3 +64,13 @@ def emit_signal(
         })
     except Exception as e:
         logger.warning("routing_signal_write_failed", error=str(e))
+
+
+def emit_signal(**kwargs) -> None:
+    """Fire-and-forget signal write, off the event loop. Never raises."""
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, lambda: emit_signal_sync(**kwargs))
+    except RuntimeError:
+        emit_signal_sync(**kwargs)

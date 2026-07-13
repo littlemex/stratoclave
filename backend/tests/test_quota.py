@@ -8,7 +8,7 @@ from mvp.routing.quota import (
     _pk_user,
     _sk,
     build_reserve_txn_items,
-    build_settle_updates,
+    settle_quota,
     ensure_counter,
     soft_check_exhausted,
 )
@@ -152,7 +152,7 @@ class TestSettle:
         sk = _sk("claude-sonnet-4-6", "2026-07")
         table.put_item(Item={"pk": pk, "sk": sk, "reserved": 5000, "settled": 10000})
 
-        build_settle_updates(
+        settle_quota(
             tenant_id="acme",
             user_id=None,
             model="claude-sonnet-4-6",

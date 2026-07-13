@@ -53,31 +53,46 @@ async def _attempt_invoke(target: Target, payload: dict) -> dict:
     return await asyncio.to_thread(client.converse_stream, **kwargs)
 
 
+_FIRST_EVENT_TIMEOUT_S = 10.0
+
+
 async def _peek_first_event(
     stream: Any,
 ) -> tuple[dict, AsyncIterator[dict]]:
     """Await the first event from a Bedrock stream. Returns (first_event, rest).
 
-    If the stream raises before yielding, the exception propagates for classification.
-    Empty streams raise RuntimeError (treated as FAILOVER by classify).
+    Uses a dedicated reader thread pumping into an asyncio.Queue to avoid
+    per-event thread-pool round trips. First event is awaited with a timeout
+    so hung connections don't block the chain deadline.
     """
-    it = iter(stream)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
     sentinel = object()
 
-    def _next():
-        result = next(it, sentinel)
-        return result
+    def _reader():
+        try:
+            for item in stream:
+                queue.put_nowait(item) if not queue.full() else queue.put(item)
+        except Exception as e:
+            queue.put_nowait(e)
+        finally:
+            queue.put_nowait(sentinel)
 
-    first = await asyncio.to_thread(_next)
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _reader)
+
+    first = await asyncio.wait_for(queue.get(), timeout=_FIRST_EVENT_TIMEOUT_S)
     if first is sentinel:
         raise RuntimeError("Bedrock returned empty stream")
+    if isinstance(first, Exception):
+        raise first
 
     async def _rest():
-        sentinel = object()
         while True:
-            item = await asyncio.to_thread(lambda: next(it, sentinel))
+            item = await queue.get()
             if item is sentinel:
                 return
+            if isinstance(item, Exception):
+                raise item
             yield item
 
     return first, _rest()

@@ -88,6 +88,12 @@ def resolve_model(
     # 2. Build candidate chain
     chain = _resolve_chain(requested_model, tenant_config, user_config)
 
+    # 2b. Allowlist enforcement (filter to allowed models only)
+    if tenant_config.allowlist:
+        chain = [m for m in chain if m in tenant_config.allowlist]
+        if not chain:
+            chain = [requested_model] if requested_model in tenant_config.allowlist else list(tenant_config.allowlist[:1])
+
     # 3. Apply breaker tier cap
     if breaker_max_tier is not None:
         from .chains import _tier_for

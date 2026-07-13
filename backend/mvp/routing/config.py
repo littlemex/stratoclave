@@ -16,6 +16,7 @@ from .model_resolver import ModelQuotaConfig, RoutingConfig, UserRoutingConfig
 
 _TABLE = os.getenv("DYNAMODB_USER_TENANTS_TABLE", "stratoclave-user-tenants")
 _CACHE_TTL_S = 60.0
+_MISS = object()
 _cache: dict[str, tuple[Any, float]] = {}
 
 
@@ -23,7 +24,7 @@ def _get_cached(key: str):
     entry = _cache.get(key)
     if entry and entry[1] > time.monotonic():
         return entry[0]
-    return None
+    return _MISS
 
 
 def _set_cached(key: str, value: Any):
@@ -34,7 +35,7 @@ def get_tenant_routing_config(tenant_id: str) -> RoutingConfig:
     """Load tenant routing config, with 60s TTL cache."""
     cache_key = f"tenant:{tenant_id}"
     cached = _get_cached(cache_key)
-    if cached is not None:
+    if cached is not _MISS:
         return cached
 
     table = get_dynamodb_resource().Table(_TABLE)
@@ -63,7 +64,7 @@ def get_user_routing_config(tenant_id: str, user_id: str) -> Optional[UserRoutin
     """Load user routing overrides, with 60s TTL cache."""
     cache_key = f"user:{tenant_id}:{user_id}"
     cached = _get_cached(cache_key)
-    if cached is not None:
+    if cached is not _MISS:
         return cached
 
     table = get_dynamodb_resource().Table(_TABLE)

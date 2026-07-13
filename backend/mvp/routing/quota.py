@@ -151,7 +151,7 @@ def build_reserve_txn_items(
     return items
 
 
-def build_settle_updates(
+def settle_quota(
     tenant_id: str,
     user_id: Optional[str],
     model: str,
@@ -165,26 +165,55 @@ def build_settle_updates(
     """
     table = _table()
 
-    # Tenant counter
     pk = _pk_tenant(tenant_id)
     sk = _sk(model, period)
     table.update_item(
         Key={"pk": pk, "sk": sk},
-        UpdateExpression="ADD reserved :neg_res, settled :actual",
+        UpdateExpression="SET reserved = reserved - :res, settled = settled + :actual",
         ExpressionAttributeValues={
-            ":neg_res": -reserved_amount,
+            ":res": reserved_amount,
             ":actual": actual_amount,
         },
     )
 
-    # User counter
     if user_id:
         pk = _pk_user(tenant_id, user_id)
         table.update_item(
             Key={"pk": pk, "sk": sk},
-            UpdateExpression="ADD reserved :neg_res, settled :actual",
+            UpdateExpression="SET reserved = reserved - :res, settled = settled + :actual",
             ExpressionAttributeValues={
-                ":neg_res": -reserved_amount,
+                ":res": reserved_amount,
                 ":actual": actual_amount,
             },
+        )
+
+
+def release_quota(
+    tenant_id: str,
+    user_id: Optional[str],
+    model: str,
+    period: str,
+    reserved_amount: int,
+) -> None:
+    """Release quota reservation without settling (invoke-time failure).
+
+    Decrements reserved without adding to settled — the request never
+    consumed any tokens on this model.
+    """
+    table = _table()
+
+    pk = _pk_tenant(tenant_id)
+    sk = _sk(model, period)
+    table.update_item(
+        Key={"pk": pk, "sk": sk},
+        UpdateExpression="SET reserved = reserved - :res",
+        ExpressionAttributeValues={":res": reserved_amount},
+    )
+
+    if user_id:
+        pk = _pk_user(tenant_id, user_id)
+        table.update_item(
+            Key={"pk": pk, "sk": sk},
+            UpdateExpression="SET reserved = reserved - :res",
+            ExpressionAttributeValues={":res": reserved_amount},
         )
