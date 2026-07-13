@@ -93,19 +93,8 @@ class _TestAdapter:
     def prologue(self):
         return wire.stream_prologue(self.state)
 
-    def render_raw_event(self, event):
-        if "contentBlockDelta" in event:
-            delta_obj = event["contentBlockDelta"].get("delta", {})
-            text = delta_obj.get("text", "")
-            if text:
-                return wire.render_stream_event(t.ContentTextDelta(index=0, text=text), self.state)
-        elif "messageStop" in event:
-            self.state.stop_reason = event["messageStop"].get("stopReason")
-        elif "metadata" in event:
-            usage = event["metadata"].get("usage", {})
-            self.state.input_tokens = int(usage.get("inputTokens", 0))
-            self.state.output_tokens = int(usage.get("outputTokens", 0))
-        return ()
+    def render_event(self, event):
+        return wire.render_stream_event(event, self.state)
 
     def epilogue(self):
         return wire.stream_epilogue(self.state)

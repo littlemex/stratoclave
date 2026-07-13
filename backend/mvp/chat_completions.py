@@ -233,9 +233,6 @@ def chat_completions(
         raise HTTPException(status_code=400, detail={"error": {"message": "top_logprobs is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
     if body.response_format is not None:
         raise HTTPException(status_code=400, detail={"error": {"message": "response_format is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
-    if body.stream and body.tools:
-        raise HTTPException(status_code=400, detail={"error": {"message": "streaming with tools is not yet supported; use stream=false for tool-calling requests", "type": "invalid_request_error", "code": "unsupported_parameter"}})
-
     try:
         model_id = resolve_bedrock_model(body.model)
     except ValueError as e:
@@ -374,7 +371,11 @@ async def _stream_chat(
 
     class _ChatAdapter:
         def __init__(self):
+            from . import _converse_types as t
+            self._t = t
             self.stop_reason = None
+            self._tool_calls: list[dict] = []
+            self._tc_idx = 0
 
         def prologue(self):
             yield _sse({
@@ -383,18 +384,33 @@ async def _stream_chat(
                 "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
             })
 
-        def render_raw_event(self, event):
-            if "contentBlockDelta" in event:
-                delta_obj = event["contentBlockDelta"].get("delta", {})
-                text = delta_obj.get("text", "")
-                if text:
-                    yield _sse({
-                        "id": chat_id, "object": "chat.completion.chunk",
-                        "created": created, "model": body.model,
-                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-                    })
-            elif "messageStop" in event:
-                self.stop_reason = event["messageStop"].get("stopReason")
+        def render_event(self, event):
+            t = self._t
+            if isinstance(event, t.ContentTextDelta):
+                yield _sse({
+                    "id": chat_id, "object": "chat.completion.chunk",
+                    "created": created, "model": body.model,
+                    "choices": [{"index": 0, "delta": {"content": event.text}, "finish_reason": None}],
+                })
+            elif isinstance(event, t.ContentToolUseStart):
+                tc = {"index": self._tc_idx, "id": event.tool_use_id, "type": "function",
+                      "function": {"name": event.name, "arguments": ""}}
+                self._tc_idx += 1
+                yield _sse({
+                    "id": chat_id, "object": "chat.completion.chunk",
+                    "created": created, "model": body.model,
+                    "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": None}],
+                })
+            elif isinstance(event, t.ContentToolUseDelta):
+                yield _sse({
+                    "id": chat_id, "object": "chat.completion.chunk",
+                    "created": created, "model": body.model,
+                    "choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": self._tc_idx - 1, "function": {"arguments": event.partial_json}}
+                    ]}, "finish_reason": None}],
+                })
+            elif isinstance(event, t.MessageStop):
+                self.stop_reason = event.stop_reason
 
         def epilogue(self):
             finish_reason = _map_finish_reason(self.stop_reason)

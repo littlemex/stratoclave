@@ -91,12 +91,36 @@ async def normalized_events(
     The single-block, index-0 shape mirrors today; multi-block and reasoning
     events are added in step 2 with their own red->green tests.
     """
+    block_index = 0
     async for event in _aiter_blocking_stream(event_source):
-        if "contentBlockDelta" in event:
-            delta_obj = event["contentBlockDelta"].get("delta", {})
+        if "contentBlockStart" in event:
+            start = event["contentBlockStart"]
+            idx = start.get("contentBlockIndex", block_index)
+            block_index = idx
+            start_obj = start.get("start", {})
+            if "toolUse" in start_obj:
+                tu = start_obj["toolUse"]
+                yield t.ContentToolUseStart(
+                    index=idx,
+                    tool_use_id=tu.get("toolUseId", ""),
+                    name=tu.get("name", ""),
+                )
+            else:
+                yield t.ContentBlockStart(index=idx, block_type="text")
+        elif "contentBlockDelta" in event:
+            delta_block = event["contentBlockDelta"]
+            idx = delta_block.get("contentBlockIndex", block_index)
+            delta_obj = delta_block.get("delta", {})
             text = delta_obj.get("text", "")
             if text:
-                yield t.ContentTextDelta(index=0, text=text)
+                yield t.ContentTextDelta(index=idx, text=text)
+            elif "toolUse" in delta_obj:
+                partial = delta_obj["toolUse"].get("input", "")
+                if partial:
+                    yield t.ContentToolUseDelta(index=idx, partial_json=partial)
+        elif "contentBlockStop" in event:
+            idx = event["contentBlockStop"].get("contentBlockIndex", block_index)
+            yield t.ContentBlockStop(index=idx)
         elif "messageStop" in event:
             yield t.MessageStop(stop_reason=event["messageStop"].get("stopReason"))
         elif "metadata" in event:
