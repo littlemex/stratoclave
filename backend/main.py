@@ -33,6 +33,7 @@ from middleware.correlation import CorrelationIDMiddleware
 
 # MVP / Phase 2 routers
 from mvp.anthropic import router as mvp_anthropic_router
+from mvp.chat_completions import router as mvp_chat_completions_router
 from mvp.openai_responses import router as mvp_openai_responses_router
 from mvp.me import router as mvp_me_router
 from mvp.admin_users import router as mvp_admin_users_router
@@ -390,6 +391,7 @@ __all__ = ["app", "_validate_cors_origins"]
 
 # MVP / Phase 2 routers
 app.include_router(mvp_anthropic_router)         # POST /v1/messages
+app.include_router(mvp_chat_completions_router)  # POST /v1/chat/completions
 app.include_router(mvp_openai_responses_router)  # POST /openai/v1/responses, GET /openai/v1/models
 app.include_router(mvp_me_router)                # GET  /api/mvp/me + usage-summary / usage-history
 app.include_router(mvp_admin_users_router)       # /api/mvp/admin/users[*]
