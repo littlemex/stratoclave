@@ -107,6 +107,7 @@ def test_full_stream_is_byte_identical_to_todays_frames():
         {"contentBlockDelta": {"delta": {"text": "he"}}},
         {"contentBlockDelta": {"delta": {"text": ""}}},  # dropped, as today
         {"contentBlockDelta": {"delta": {"text": "llo"}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
         {"messageStop": {"stopReason": "end_turn"}},
         {"metadata": {"usage": {"inputTokens": 12, "outputTokens": 3}}},
     ]
@@ -123,6 +124,7 @@ def test_tool_use_stop_reason_maps_like_today():
     model = "us.anthropic.claude-sonnet-4-7"
     bedrock_events = [
         {"contentBlockDelta": {"delta": {"text": "x"}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
         {"messageStop": {"stopReason": "tool_use"}},
         {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}},
     ]
@@ -137,6 +139,7 @@ def test_unknown_stop_reason_defaults_to_end_turn():
     model = "us.anthropic.claude-opus-4-7"
     bedrock_events = [
         {"contentBlockDelta": {"delta": {"text": "x"}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
         {"messageStop": {"stopReason": "some_future_reason"}},
         {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}},
     ]
