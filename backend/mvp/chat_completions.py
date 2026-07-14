@@ -442,9 +442,13 @@ async def _stream_chat(
             yield _sse({"error": {"message": message, "type": "api_error"}})
 
     def _invoke(*, body, model_id):
-        # kwargs was built (and validated) pre-reserve by the caller.
+        # kwargs was built (and validated) pre-reserve by the caller. Honour the
+        # model_id run_stream passes so the payload can't drift from the caller
+        # (today they always match — this path does not go through InfraRouter,
+        # so there is no model failover — but keeping model_id load-bearing
+        # avoids a silent same-model re-invoke if that ever changes).
         client = _bedrock_client()
-        return client.converse_stream(**kwargs)
+        return client.converse_stream(**{**kwargs, "modelId": model_id})
 
     async for frame in _budget_flow.run_stream(
         body=body,

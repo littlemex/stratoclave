@@ -57,8 +57,18 @@ for k, v in _TABLE_ENVS.items():
 def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guarantee AWS_PROFILE is not set during tests so the mock endpoints
     stay in effect even if the host has a real profile configured.
+
+    Also reset the rate limiter's cached low-level client between tests: it is
+    lazily built on first use and cached in a module global, so a client built
+    outside a moto mock (or in a prior test's mock) must not leak into the next
+    test. Each test rebuilds it inside its own context.
     """
     monkeypatch.delenv("AWS_PROFILE", raising=False)
+    import core.rate_limit_ddb as _rl
+    _rl._rl_client = None
+    # Fresh in-process fallback counter per test (degraded-mode limiter state
+    # must not leak across tests).
+    _rl._local_fallback = _rl._LocalWindows()
 
 
 @pytest.fixture
@@ -74,10 +84,10 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
     moto = pytest.importorskip("moto")
     with moto.mock_aws():
         get_dynamodb_resource.cache_clear()
-        # The rate limiter holds its own (short-timeout) DynamoDB resource;
+        # The rate limiter holds its own (short-timeout) DynamoDB client;
         # reset it so it is rebuilt inside this moto mock.
         import core.rate_limit_ddb as _rl
-        _rl._rl_resource = None
+        _rl._rl_client = None
         dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
         # UserTenants: PK user_id, SK tenant_id

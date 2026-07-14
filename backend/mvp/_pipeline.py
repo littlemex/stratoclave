@@ -605,6 +605,11 @@ def reserve_credit(
     hold_id = _fresh_idempotency_token()
     hold_expires_at = int(time.time()) + _HOLD_TTL_SECONDS
     hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+    # This loop's blocking boto3 calls + time.sleep are safe on the request
+    # thread: the /v1/messages and /v1/chat/completions handlers are sync
+    # `def`, so FastAPI runs them (and this reserve) on the threadpool, NOT the
+    # event loop. (The settle at the tail runs inside an async generator on the
+    # loop and IS offloaded to a thread — see _budget_flow.run_stream.)
     for _attempt in range(_RESERVE_MAX_RETRIES):
         if _attempt:
             # Full-jitter exponential backoff so a thundering herd on one hot
@@ -975,6 +980,12 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
       - anything else → transient, retry with the same idempotency token.
     """
     budgets = TenantBudgetsRepository()
+    # TransactItems ORDER IS A CONTRACT: index 0 = pool-row settle, index 1 =
+    # hold delete. The cancellation-reason parsing below reads reasons[_POOL_IDX]
+    # / reasons[_HOLD_IDX] by position, so these must stay in sync with the order
+    # items are appended here. Do not reorder without updating both.
+    _POOL_IDX = 0
+    _HOLD_IDX = 1
     items = [
         _pool_settle_items(
             table_name=budgets.table_name,
@@ -1008,9 +1019,11 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
             if code == "TransactionCanceledException":
                 reasons = _cancellation_codes(e)
                 hold_gone = (
-                    len(reasons) > 1 and reasons[1] == "ConditionalCheckFailed"
+                    len(reasons) > _HOLD_IDX and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
                 )
-                row_gone = reasons and reasons[0] == "ConditionalCheckFailed"
+                row_gone = (
+                    len(reasons) > _POOL_IDX and reasons[_POOL_IDX] == "ConditionalCheckFailed"
+                )
                 if hold_gone:
                     # Reaper already returned `reserved`; just record the spend.
                     logger.info(

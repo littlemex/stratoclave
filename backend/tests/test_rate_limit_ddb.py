@@ -72,50 +72,75 @@ class TestCheckEnforcement:
         _check("login", "10.0.0.20", limit=1, window_seconds=60)
         _check("respond", "10.0.0.20", limit=1, window_seconds=60)  # different scope, fresh
 
-    def test_fail_open_on_connection_error(self, monkeypatch):
-        # A genuine outage (connectivity) must NOT lock users out of auth:
-        # fail open (allow), but the limiter logs it (alarmable elsewhere).
-        import core.rate_limit_ddb as rl
-        from botocore.exceptions import EndpointConnectionError
-
-        def boom():
-            raise EndpointConnectionError(endpoint_url="https://dynamodb")
-        monkeypatch.setattr(rl, "_table", boom)
-        # Should not raise despite the backend being unreachable.
-        _check("login", "10.0.0.99", limit=1, window_seconds=60)
-        _check("login", "10.0.0.99", limit=1, window_seconds=60)
-
-    def test_fail_closed_on_throttle(self, monkeypatch):
-        # Throttling of the counter item is evidence the IP is hammering one
-        # hot key — that IS the breach the limiter exists to stop. Fail CLOSED.
+    def _patch_client_error(self, monkeypatch, code):
         import core.rate_limit_ddb as rl
         from botocore.exceptions import ClientError
 
-        def throttled():
-            raise ClientError(
-                {"Error": {"Code": "ProvisionedThroughputExceededException"}},
-                "UpdateItem",
-            )
-
-        class _T:
+        class _C:
             def update_item(self, **kw):
-                throttled()
+                raise ClientError({"Error": {"Code": code}}, "UpdateItem")
 
-        monkeypatch.setattr(rl, "_table", lambda: _T())
+        monkeypatch.setattr(rl, "_client", lambda: _C())
+
+    def _reset_local(self):
+        import core.rate_limit_ddb as rl
+        rl._local_fallback = rl._LocalWindows()
+
+    def test_outage_degrades_to_local_limiter(self, monkeypatch):
+        # A genuine outage (connectivity) must NOT lock users out, but must NOT
+        # fail fully open either: degrade to the in-process limiter. Under the
+        # limit → allowed; over it → 429 from the local fallback.
+        import core.rate_limit_ddb as rl
+        from botocore.exceptions import EndpointConnectionError
+        self._reset_local()
+
+        class _C:
+            def update_item(self, **kw):
+                raise EndpointConnectionError(endpoint_url="https://dynamodb")
+        monkeypatch.setattr(rl, "_client", lambda: _C())
+        # limit=2: first two allowed, third trips the LOCAL fallback.
+        _check("login", "10.0.0.99", limit=2, window_seconds=60)
+        _check("login", "10.0.0.99", limit=2, window_seconds=60)
+        with pytest.raises(HTTPException) as exc:
+            _check("login", "10.0.0.99", limit=2, window_seconds=60)
+        assert exc.value.status_code == 429
+
+    def test_fail_closed_on_partition_throttle(self, monkeypatch):
+        # Per-partition throttle of the counter item is evidence the IP is
+        # hammering one hot key — the breach the limiter exists to stop.
+        self._patch_client_error(monkeypatch, "ProvisionedThroughputExceededException")
         with pytest.raises(HTTPException) as exc:
             _check("login", "10.0.0.98", limit=1, window_seconds=60)
         assert exc.value.status_code == 429
+
+    def test_account_scoped_throttle_degrades_to_local(self, monkeypatch):
+        # RequestLimitExceeded is account/table-scoped: a noisy neighbour can
+        # trip it, so failing closed would 429 every auth user. Degrade to the
+        # local limiter instead (bounded bypass, not a lockout).
+        self._reset_local()
+        self._patch_client_error(monkeypatch, "RequestLimitExceeded")
+        # Under the local limit → allowed.
+        _check("login", "10.0.0.96", limit=5, window_seconds=60)
+
+    def test_fail_closed_on_misconfig(self, monkeypatch):
+        # Wrong table / missing IAM / key-schema mismatch is a broken control,
+        # not a transient outage — must NOT run auth unlimited.
+        for code in ("ResourceNotFoundException", "AccessDeniedException", "ValidationException"):
+            self._patch_client_error(monkeypatch, code)
+            with pytest.raises(HTTPException) as exc:
+                _check("login", "10.0.0.95", limit=1, window_seconds=60)
+            assert exc.value.status_code == 429, code
 
     def test_programming_error_propagates(self, monkeypatch):
         # A bug in the limiter (e.g. TypeError) must surface as a 500, never be
         # swallowed into silent unlimited auth.
         import core.rate_limit_ddb as rl
 
-        class _T:
+        class _C:
             def update_item(self, **kw):
                 raise TypeError("bug in limiter")
 
-        monkeypatch.setattr(rl, "_table", lambda: _T())
+        monkeypatch.setattr(rl, "_client", lambda: _C())
         with pytest.raises(TypeError):
             _check("login", "10.0.0.97", limit=1, window_seconds=60)
 
@@ -166,11 +191,28 @@ class TestDecoratorInterface:
         assert client.post("/respond").status_code == 429
 
     def test_missing_request_param_raises_at_decoration(self):
-        # A handler without a `request` param must fail loudly at import, not
-        # silently run unlimited (SEV-2: a refactor dropping `request` would
-        # otherwise disable the cap with no signal).
+        # A handler without a Request param must fail loudly at import, not
+        # silently run unlimited (SEV-2: a refactor dropping it would otherwise
+        # disable the cap with no signal).
         limiter = DynamoRateLimiter(client_key_func=_key)
-        with pytest.raises(RuntimeError, match="request"):
+        with pytest.raises(RuntimeError, match="Request"):
             @limiter.limit("2/minute")
-            def handler(body: dict):  # no request param
+            def handler(body: dict):  # no Request param
                 return body
+
+    def test_request_param_under_nonstandard_name_is_enforced(self, dynamodb_mock):
+        # N2 regression: FastAPI passes the Request under the handler's own
+        # param name. A handler declared `req: Request` (not literally
+        # "request") must STILL be rate-limited, not silently skipped.
+        app = FastAPI()
+        limiter = DynamoRateLimiter(client_key_func=_key)
+
+        @app.post("/login")
+        @limiter.limit("2/minute")
+        def login(req: Request):  # non-standard param name
+            return {"ok": True}
+
+        client = TestClient(app)
+        assert client.post("/login").status_code == 200
+        assert client.post("/login").status_code == 200
+        assert client.post("/login").status_code == 429  # would be 200 if skipped

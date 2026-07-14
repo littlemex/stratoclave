@@ -52,6 +52,17 @@ async def run_stream(
     acc = t.UsageAccumulator()
     settled = False
 
+    def _do_settle():
+        # settle does blocking boto3 (transact_write_items + jittered sleeps).
+        settle(
+            user=user, tenants_repo=tenants_repo, reservation=reservation,
+            actual_input_tokens=acc.input_tokens,
+            actual_output_tokens=acc.output_tokens,
+            model_id=model_id, context=tenants_repo,
+            actual_cache_read_tokens=acc.cache_read_tokens,
+            actual_cache_write_tokens=acc.cache_write_tokens,
+        )
+
     try:
         for frame in adapter.prologue():
             yield frame
@@ -63,10 +74,12 @@ async def run_stream(
             else:
                 resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
         except Exception as e:
-            tenants_repo.refund(
-                user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
+            # refund + release are blocking boto3 too; keep them off the loop.
+            await asyncio.to_thread(
+                tenants_repo.refund,
+                user_id=user.user_id, tenant_id=user.org_id, tokens=reservation,
             )
-            release(tenants_repo)
+            await asyncio.to_thread(release, tenants_repo)
             settled = True
             for frame in adapter.error_event(sanitize_exception_message(str(e))):
                 yield frame
@@ -80,36 +93,22 @@ async def run_stream(
         except Exception as e:
             for frame in adapter.error_event(sanitize_exception_message(str(e))):
                 yield frame
-            settle(
-                user=user, tenants_repo=tenants_repo, reservation=reservation,
-                actual_input_tokens=acc.input_tokens,
-                actual_output_tokens=acc.output_tokens,
-                model_id=model_id, context=tenants_repo,
-                actual_cache_read_tokens=acc.cache_read_tokens,
-                actual_cache_write_tokens=acc.cache_write_tokens,
-            )
+            # Offload the blocking settle so it doesn't freeze co-located
+            # streams on the event loop.
+            await asyncio.to_thread(_do_settle)
             settled = True
             return
 
         for frame in adapter.epilogue():
             yield frame
 
-        settle(
-            user=user, tenants_repo=tenants_repo, reservation=reservation,
-            actual_input_tokens=acc.input_tokens,
-            actual_output_tokens=acc.output_tokens,
-            model_id=model_id, context=tenants_repo,
-            actual_cache_read_tokens=acc.cache_read_tokens,
-            actual_cache_write_tokens=acc.cache_write_tokens,
-        )
+        await asyncio.to_thread(_do_settle)
         settled = True
     finally:
         if not settled:
-            settle(
-                user=user, tenants_repo=tenants_repo, reservation=reservation,
-                actual_input_tokens=acc.input_tokens,
-                actual_output_tokens=acc.output_tokens,
-                model_id=model_id, context=tenants_repo,
-                actual_cache_read_tokens=acc.cache_read_tokens,
-                actual_cache_write_tokens=acc.cache_write_tokens,
-            )
+            # This runs on the disconnect/GeneratorExit path. Awaiting inside a
+            # closing async generator is unsafe (it can raise "async generator
+            # ignored GeneratorExit"), so the final settle stays synchronous —
+            # it must fire exactly once and fast, and the loop is being torn
+            # down for this request anyway.
+            _do_settle()

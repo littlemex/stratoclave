@@ -335,6 +335,14 @@ export class DynamoDBStack extends cdk.Stack {
     // windows. Shared across all ECS tasks so per-IP auth caps hold under
     // horizontal scale-out — no Redis, no new infra class. Ephemeral →
     // no PITR.
+    //
+    // MUST stay PAY_PER_REQUEST (inherited from baseTableProps). The limiter
+    // (core/rate_limit_ddb.py) treats a ProvisionedThroughputExceeded/Throttling
+    // error as a PER-PARTITION (per-key) signal and fails CLOSED on it. That is
+    // only sound on-demand, where throttling is per-partition and one hot key
+    // can't throttle the whole table. Switching to provisioned mode would make
+    // a table-wide throttle lock out every auth user — do not change the
+    // billing mode without revisiting that failure policy.
     this.rateLimitsTable = new dynamodb.Table(this, 'RateLimitsTable', {
       ...baseTableProps,
       pointInTimeRecovery: false,
