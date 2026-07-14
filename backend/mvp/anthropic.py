@@ -44,7 +44,7 @@ import uuid
 from typing import Any, AsyncGenerator, Iterator, Optional
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -60,7 +60,8 @@ from ._pipeline import (
     settle_reservation_and_log,
 )
 from .authz import require_permission
-from .deps import AuthenticatedUser, get_current_user
+from .deps import AuthenticatedUser, get_current_user, get_request_context
+from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 
 # Backward-compatible aliases for tests that import the underscore-prefixed
@@ -494,11 +495,19 @@ def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
 def messages(
     body: AnthropicMessagesRequest,
     request: Request,
+    response: Response,
     # X-2 (2026-04 critical-sweep follow-up): enforce the scope layer
     # on the Bedrock invocation path. See list_models() for the full
     # rationale.
     user: AuthenticatedUser = Depends(require_permission("messages:send")),
+    ctx: RequestContext = Depends(get_request_context),
 ):
+    # Echo the correlation ids (server-assigned span, workflow run) so a client
+    # can stitch its calls into one run. Set on `response`; StreamingResponse
+    # below copies them into its own header block (P0-12).
+    corr = _corr_headers(ctx)
+    response.headers.update(corr)
+
     # Allowlist check first; reject with 400 before reserving credit.
     try:
         model_id = resolve_bedrock_model(body.model)
@@ -529,12 +538,13 @@ def messages(
 
     if body.stream:
         return StreamingResponse(
-            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec),
+            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec, ctx=ctx),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                **corr,
             },
         )
 
@@ -620,6 +630,7 @@ async def _stream_messages(
     tenants_repo: UserTenantsRepository,
     reservation: int,
     fault_spec: Optional[str] = None,
+    ctx: Optional[RequestContext] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Delegation shim — forwards to `_budget_flow.run_stream`.
 
@@ -636,11 +647,17 @@ async def _stream_messages(
         kwargs = _build_bedrock_kwargs(body, model_id)
         kwargs.pop("modelId", None)
 
+        # P0-12: propagate the edge-minted correlation ids as opaque pass-through
+        # (the routing layer must NOT read them). Falls back to a locally-minted
+        # request_id when no ctx is threaded (e.g. a direct unit-test call).
         req = RouteRequest(
             alias=model_id,
             payload=kwargs,
             tenant_id=user.org_id,
-            request_id=f"msg_{uuid.uuid4().hex[:12]}",
+            request_id=(ctx.request_id if ctx else f"msg_{uuid.uuid4().hex[:12]}"),
+            span_id=(ctx.span_id if ctx else None),
+            group_id=(ctx.group_id if ctx else None),
+            workflow_run_id=(ctx.workflow_run_id if ctx else None),
             fault_spec=fault_spec,
         )
 

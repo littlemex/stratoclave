@@ -24,12 +24,15 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
+
+if TYPE_CHECKING:
+    from .observability.context import RequestContext
 
 import boto3
 import jwt as pyjwt
 from botocore.exceptions import ClientError
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from jwt import PyJWKClient
 from jwt.exceptions import PyJWTError
 
@@ -438,3 +441,39 @@ def get_current_user(
         key_scopes=None,
         api_key_hash=None,
     )
+
+
+# ---------------------------------------------------------------
+# Request-scoped correlation context (P0-12)
+# ---------------------------------------------------------------
+def get_request_context(
+    request: Request,
+    user: "AuthenticatedUser" = Depends(get_current_user),
+) -> "RequestContext":
+    """FastAPI dependency: build the request's correlation context.
+
+    Mints the ``request_id``/``span_id`` at the edge (moved out of the handlers)
+    and parses the optional ``x-sc-group-id`` / ``x-sc-workflow-run-id`` headers.
+    ``tenant_id`` is taken from the authenticated principal, never a header, so
+    correlation ids can never address another tenant's records. A malformed
+    (present but out-of-grammar) header is a 400; absence is the compatible
+    default and never errors.
+    """
+    from .observability.context import (
+        HDR_GROUP_ID,
+        HDR_WORKFLOW_RUN_ID,
+        InvalidCorrelationHeader,
+        build_request_context,
+    )
+
+    try:
+        return build_request_context(
+            tenant_id=user.org_id,
+            group_id_header=request.headers.get(HDR_GROUP_ID),
+            workflow_run_id_header=request.headers.get(HDR_WORKFLOW_RUN_ID),
+        )
+    except InvalidCorrelationHeader as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"type": "invalid_correlation_header", "message": str(e)},
+        )

@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,7 +26,8 @@ from ._pipeline import (
     settle_reservation_and_log as _settle_reservation_and_log,
 )
 from .authz import require_permission
-from .deps import AuthenticatedUser
+from .deps import AuthenticatedUser, get_request_context
+from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import resolve_bedrock_model
 
 router = APIRouter(tags=["mvp-chat-completions"])
@@ -222,8 +223,14 @@ def _map_finish_reason(bedrock_reason: Optional[str]) -> str:
 @router.post("/v1/chat/completions")
 def chat_completions(
     body: ChatCompletionsRequest,
+    response: Response,
     user: AuthenticatedUser = Depends(require_permission("messages:send")),
+    ctx: RequestContext = Depends(get_request_context),
 ):
+    # P0-12: echo the correlation ids so a client can stitch calls into a run.
+    corr = _corr_headers(ctx)
+    response.headers.update(corr)
+
     # Reject unsupported parameters explicitly (no silent drops)
     if body.n is not None and body.n > 1:
         raise HTTPException(status_code=400, detail={"error": {"message": "n > 1 is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
@@ -299,6 +306,7 @@ def chat_completions(
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                **corr,
             },
         )
 
