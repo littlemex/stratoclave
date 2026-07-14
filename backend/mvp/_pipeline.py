@@ -195,7 +195,15 @@ class ReservationContext:
     pricing_key: Optional[str] = None
     tenant_id: str = ""
     pool_active: bool = False
-    quota_lines: list = None  # list[dict] of per-model quota txn items (Phase 0: always None)
+    quota_lines: list = None  # list[dict] of per-model quota txn items (None = no quota)
+    # Per-model quota bookkeeping (set when a quota reservation was committed),
+    # so settle/release can move the same model's `used` counter. `selected_model`
+    # is the model the cascade actually landed on (may differ from requested).
+    selected_model: Optional[str] = None
+    quota_reserved_amount: int = 0
+    quota_user_id: Optional[str] = None
+    quota_tenant_limit: Optional[int] = None
+    quota_user_limit: Optional[int] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -506,6 +514,19 @@ def _err_402(reason: str) -> HTTPException:
     )
 
 
+class QuotaExhausted(Exception):
+    """A per-model quota condition failed during reserve — the caller's
+    cascading fallback should try the next model. Carries which model's quota
+    was exhausted so the caller can advance the chain. NOT an HTTP error: it is
+    caught by `reserve_with_model_cascade` and only surfaces as 402 if EVERY
+    candidate is exhausted.
+    """
+
+    def __init__(self, model: str):
+        super().__init__(f"quota exhausted for model {model}")
+        self.model = model
+
+
 def reserve_credit_for_model(
     user,
     reservation_tokens: int,
@@ -551,6 +572,8 @@ def reserve_credit(
     pricing_key: Optional[str] = None,
     cost_microusd: Optional[int] = None,
     quota_lines: Optional[list] = None,
+    quota_model: Optional[str] = None,
+    selected_model: Optional[str] = None,
 ) -> ReservationContext:
     """Atomically reserve budget before invoking Bedrock.
 
@@ -734,6 +757,20 @@ def reserve_credit(
             # rather than a misleading 402 "out of budget".
             reasons = e.response.get("CancellationReasons", []) or []
             codes = {r.get("Code", "") for r in reasons}
+            # txn_items order is [user_txn(0), pool_txn(1), hold_txn(2),
+            # *quota_lines(3..)]. A ConditionalCheckFailed at a QUOTA index means
+            # the per-model quota is exhausted — NOT a snapshot race — so retrying
+            # would fail forever. Surface QuotaExhausted so the caller's cascade
+            # advances to the next model. (The pool/user snapshot indices 0-1 are
+            # the retryable race; index 2 is the hold_id collision guard.)
+            if quota_model is not None and len(reasons) > 3:
+                for r in reasons[3:]:
+                    if r.get("Code", "") == "ConditionalCheckFailed":
+                        logger.info(
+                            "model_quota_exhausted",
+                            tenant_id=user.org_id, model=quota_model, period=period,
+                        )
+                        raise QuotaExhausted(quota_model)
             if codes & {
                 "ThrottlingError",
                 "ProvisionedThroughputExceeded",
@@ -754,6 +791,9 @@ def reserve_credit(
             hold_id=hold_id,
             hold_sk=hold_sk,
             quota_lines=quota_lines,
+            selected_model=selected_model,
+            quota_reserved_amount=cost if quota_lines else 0,
+            quota_user_id=user.user_id,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
@@ -804,6 +844,94 @@ def reserve_credit(
     raise _err_402("tenant_pool_exhausted")
 
 
+def reserve_with_model_cascade(
+    user,
+    reservation_tokens: int,
+    *,
+    requested_model: str,
+    pricing_key: Optional[str] = None,
+    cost_microusd: Optional[int] = None,
+    breaker_max_tier: Optional[int] = None,
+) -> ReservationContext:
+    """Reserve budget with per-model quota + cascading fallback (P0-11).
+
+    Opt-in: a tenant with NO routing config behaves exactly like plain
+    `reserve_credit` on the requested model (backward compatible). With config,
+    `resolve_model` yields an ordered candidate chain (allowlist ∩ chain ∩
+    breaker tier). We try each candidate: build its quota lines and reserve;
+    if the quota is exhausted (QuotaExhausted), advance to the next candidate.
+    Budget-exhaustion (402) is NOT a cascade trigger — it means no money at all,
+    so we surface it immediately. If every candidate's quota is exhausted, 402
+    `model_quota_exhausted`.
+
+    Returns a ReservationContext whose `selected_model` is the model to invoke.
+    """
+    from .routing import quota as _quota
+    from .routing.config import get_tenant_routing_config, get_user_routing_config
+    from .routing.model_resolver import resolve_model
+
+    tenant_cfg = get_tenant_routing_config(user.org_id)
+    # No config at all → passthrough: single model, no quota lines.
+    if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
+        return reserve_credit(
+            user, reservation_tokens,
+            pricing_key=pricing_key, cost_microusd=cost_microusd,
+        )
+
+    user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    fallback_allowed = (tenant_cfg.fallback_default == "on")
+    if user_cfg and user_cfg.fallback is not None:
+        fallback_allowed = (user_cfg.fallback == "on")
+
+    selection = resolve_model(
+        requested_model=requested_model,
+        tenant_config=tenant_cfg,
+        user_config=user_cfg,
+        breaker_max_tier=breaker_max_tier,
+        fallback_allowed=fallback_allowed,
+    )
+
+    # Candidate chain to attempt in order (resolve_model returns the head; we
+    # rebuild the full ordered list for the cascade).
+    from .routing.model_resolver import _resolve_chain
+    candidates = _resolve_chain(requested_model, tenant_cfg, user_cfg)
+    if tenant_cfg.allowlist:
+        candidates = [m for m in candidates if m in tenant_cfg.allowlist] or [selection.selected_model]
+    if breaker_max_tier is not None:
+        from .routing.chains import _tier_for
+        capped = [m for m in candidates if _tier_for(m) <= breaker_max_tier]
+        candidates = capped or candidates
+    if not fallback_allowed:
+        candidates = candidates[:1]
+    if not candidates:
+        candidates = [selection.selected_model]
+
+    period = current_period()
+    for model in candidates:
+        q = tenant_cfg.quotas.get(model)
+        tenant_limit = q.limit if q else None
+        quota_lines = _quota.build_reserve_txn_items(
+            tenant_id=user.org_id, user_id=user.user_id, model=model,
+            period=period, amount=cost_microusd or 0,
+            tenant_limit=tenant_limit,
+        ) if (cost_microusd and tenant_limit is not None) else None
+        try:
+            return reserve_credit(
+                user, reservation_tokens,
+                pricing_key=pricing_key, cost_microusd=cost_microusd,
+                quota_lines=quota_lines,
+                quota_model=model if quota_lines else None,
+                selected_model=model,
+            )
+        except QuotaExhausted as e:
+            logger.info("quota_cascade_advance", tenant_id=user.org_id,
+                        exhausted_model=e.model, period=period)
+            continue
+    # Every candidate's quota is exhausted.
+    logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
+    raise _err_402("model_quota_exhausted")
+
+
 def release_pool(context) -> None:
     """Release a pooled reservation on an error path (no billable usage).
 
@@ -815,6 +943,46 @@ def release_pool(context) -> None:
     releaser = getattr(context, "release_pool", None)
     if callable(releaser):
         releaser()
+    # Release the per-model quota reservation too (invoke failed, no spend), so
+    # a failed attempt doesn't leak `used` until period rollover.
+    _release_quota_for(context)
+
+
+def _release_quota_for(context) -> None:
+    model = getattr(context, "selected_model", None)
+    amt = int(getattr(context, "quota_reserved_amount", 0) or 0)
+    if not model or amt <= 0:
+        return
+    try:
+        from .routing import quota as _quota
+        _quota.release_quota(
+            tenant_id=getattr(context, "tenant_id", ""),
+            user_id=getattr(context, "quota_user_id", None),
+            model=model,
+            period=getattr(context, "period", None) or current_period(),
+            reserved_amount=amt,
+        )
+    except Exception:  # noqa: BLE001 — quota release must never fail the request
+        logger.warning("quota_release_failed", model=model, exc_info=True)
+
+
+def _settle_quota_for(context, actual_microusd: int) -> None:
+    model = getattr(context, "selected_model", None)
+    reserved = int(getattr(context, "quota_reserved_amount", 0) or 0)
+    if not model or reserved <= 0:
+        return
+    try:
+        from .routing import quota as _quota
+        _quota.settle_quota(
+            tenant_id=getattr(context, "tenant_id", ""),
+            user_id=getattr(context, "quota_user_id", None),
+            model=model,
+            period=getattr(context, "period", None) or current_period(),
+            reserved_amount=reserved,
+            actual_amount=int(actual_microusd),
+        )
+    except Exception:  # noqa: BLE001 — quota settle must never fail the request
+        logger.warning("quota_settle_failed", model=model, exc_info=True)
 
 
 def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actual_microusd: int):
@@ -967,6 +1135,9 @@ def settle_reservation_and_log(
                 actual_microusd=actual_cost_microusd,
                 error_code="non_client_error",
             )
+        # Settle the per-model quota too: move `used` from the reserved estimate
+        # to the actual spend (actual<=reserved so used only ever decreases here).
+        _settle_quota_for(context, int(actual_cost_microusd))
 
     # ALWAYS record usage, even if the pool settle above failed: the Bedrock
     # call happened and its cost must be auditable. This is deliberately outside
