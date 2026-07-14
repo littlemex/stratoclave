@@ -50,10 +50,11 @@ from typing import Callable, Optional
 
 from botocore.config import Config
 from botocore.exceptions import (
-    BotoCoreError,
     ClientError,
     ConnectionError as BotoConnectionError,
+    ConnectTimeoutError,
     EndpointConnectionError,
+    ReadTimeoutError,
 )
 from fastapi import HTTPException, Request
 
@@ -75,15 +76,16 @@ _RL_CLIENT_CONFIG = Config(
     retries={"max_attempts": 1, "mode": "standard"},
 )
 
-# Per-*partition* throttle of the counter item: on an on-demand table this is
-# evidence THIS key (RL#scope#ip#window) is being hammered — the breach the
-# limiter exists to stop — so fail CLOSED. We deliberately do NOT put
-# account/table-scoped throttles here: `RequestLimitExceeded` is an on-demand
-# account throughput quota that any traffic (even another table) can trip, so
-# failing closed on it would let one noisy neighbour 429 every auth user. Those
-# go to the fail-open bucket instead. (`ProvisionedThroughputExceeded` is
-# table-level under provisioned mode; we pin this table to PAY_PER_REQUEST in
-# IaC precisely so this stays a per-partition signal.)
+# Throttle of the counter write → fail CLOSED. On an on-demand table this is
+# USUALLY a per-partition signal (the hot RL#scope#ip#window key being
+# hammered = the breach we exist to stop). It is not *exclusively* per-key: a
+# table-wide default-quota hit or the peak-doubling ramp after a legitimate
+# multi-IP surge can also throttle, so a brief window of innocent 429s is
+# possible — an accepted trade-off (fail-open here is a trivially inducible
+# bypass). We still keep account-scoped `RequestLimitExceeded` OUT of this set
+# (it degrades to the local limiter instead) because a noisy neighbour on an
+# unrelated table can trip it. The table is pinned PAY_PER_REQUEST in IaC to
+# keep throttling as per-partition as DynamoDB allows.
 _THROTTLE_CODES = frozenset(
     {
         "ProvisionedThroughputExceededException",
@@ -114,22 +116,30 @@ class _LocalWindows:
     """
 
     def __init__(self):
-        self._counts: dict[tuple[str, str, int], int] = {}
+        # key -> (count, expires_at_epoch). Expiry is stored per entry so the
+        # prune is by real expiry, not the current caller's window_start (which
+        # would wrongly evict a still-live longer-window counter — a minute
+        # caller's window_start is later than a live hour/day entry's).
+        self._counts: dict[tuple[str, str, int], tuple[int, int]] = {}
         self._lock = threading.Lock()
 
     def over_limit(self, scope: str, client_key: str, limit: int, window_seconds: int) -> bool:
         now = int(time.time())
         window_start = (now // window_seconds) * window_seconds
-        key = (scope, client_key, window_start)
+        # window_seconds is part of the key so different-period scopes on the
+        # same (scope, client_key) never collide into one bucket.
+        key = (scope, client_key, window_start * 1_000_000 + window_seconds)
+        expiry = window_start + window_seconds
         with self._lock:
-            # Prune expired windows opportunistically (bounded work).
+            # Prune genuinely-expired windows opportunistically (bounded work).
             if len(self._counts) > 4096:
                 self._counts = {
-                    k: v for k, v in self._counts.items() if k[2] >= window_start
+                    k: v for k, v in self._counts.items() if v[1] > now
                 }
-            n = self._counts.get(key, 0) + 1
-            self._counts[key] = n
-            return n > limit
+            count, _ = self._counts.get(key, (0, expiry))
+            count += 1
+            self._counts[key] = (count, expiry)
+            return count > limit
 
 
 _local_fallback = _LocalWindows()
@@ -250,9 +260,11 @@ def _check(scope: str, client_key: str, limit: int, window_seconds: int) -> None
         _log.warning("rate_limit_degrade_to_local", scope=scope, code=code, error=str(e))
         _degraded_check(scope, client_key, limit, window_seconds)
         return
-    except (EndpointConnectionError, BotoConnectionError, BotoCoreError) as e:
+    except (EndpointConnectionError, BotoConnectionError, ConnectTimeoutError, ReadTimeoutError) as e:
         # Connectivity/timeout to DynamoDB → outage; degrade to local, don't
-        # fail fully open.
+        # fail fully open. NOTE we do NOT catch the BotoCoreError base here: a
+        # ParamValidationError (malformed request = a bug in this module) must
+        # propagate as a loud 500, not silently weaken the shared control.
         _log.warning("rate_limit_degrade_to_local", scope=scope, error=str(e))
         _degraded_check(scope, client_key, limit, window_seconds)
         return

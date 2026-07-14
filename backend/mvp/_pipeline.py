@@ -1018,6 +1018,15 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
             code = e.response.get("Error", {}).get("Code", "")
             if code == "TransactionCanceledException":
                 reasons = _cancellation_codes(e)
+                # Reading reasons by position is sound ONLY because each item's
+                # ConditionExpression is single-clause: the pool item (index
+                # _POOL_IDX) is guarded solely by `attribute_exists(tenant_id)`
+                # (see _pool_settle_items) and the hold delete (index _HOLD_IDX)
+                # solely by `attribute_exists(sk)`. So a ConditionalCheckFailed
+                # at that index unambiguously means "row/hold gone", never a
+                # contention/underflow guard. If either condition ever becomes
+                # compound, disambiguate via ReturnValuesOnConditionCheckFailure
+                # instead of trusting the reason index.
                 hold_gone = (
                     len(reasons) > _HOLD_IDX and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
                 )
@@ -1043,7 +1052,10 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                                     actual_microusd=actual_cost_microusd,
                                 )
                             ],
-                            ClientRequestToken=_fresh_idempotency_token(),
+                            # Derive from the primary settle token (not a fresh
+                            # UUID) so a lost-ack here that gets retried dedupes
+                            # to the same write instead of double-recording spend.
+                            ClientRequestToken=f"{token}-so",
                         )
                     except ClientError as e2:
                         if (

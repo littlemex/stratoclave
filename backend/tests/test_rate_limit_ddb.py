@@ -1,8 +1,10 @@
 """Tests for the DynamoDB-backed fixed-window rate limiter.
 
 Verifies the limiter enforces per-IP caps using a shared DynamoDB counter
-(so multi-task deployments share state), fails open on DynamoDB errors,
-and preserves the slowapi-compatible decorator interface.
+(so multi-task deployments share state), applies the discriminated failure
+policy (per-partition throttle / misconfig → fail CLOSED; transient outage →
+degrade to the in-process fallback; programming error → propagate), and
+preserves the slowapi-compatible decorator interface.
 """
 from __future__ import annotations
 
@@ -44,6 +46,39 @@ class TestParseSpec:
     def test_non_integer_limit_raises(self):
         with pytest.raises(ValueError):
             _parse_spec("ten/minute")
+
+
+class TestLocalFallbackWindows:
+    def test_enforces_limit_within_window(self):
+        from core.rate_limit_ddb import _LocalWindows
+        w = _LocalWindows()
+        assert w.over_limit("s", "ip", limit=2, window_seconds=60) is False
+        assert w.over_limit("s", "ip", limit=2, window_seconds=60) is False
+        assert w.over_limit("s", "ip", limit=2, window_seconds=60) is True
+
+    def test_periods_do_not_collide(self):
+        # Same (scope, client) but different window lengths must be separate
+        # buckets — window_seconds is part of the key.
+        from core.rate_limit_ddb import _LocalWindows
+        w = _LocalWindows()
+        assert w.over_limit("s", "ip", limit=1, window_seconds=60) is False
+        # A day-window entry for the same key is independent, not already at 1.
+        assert w.over_limit("s", "ip", limit=1, window_seconds=86400) is False
+
+    def test_prune_keeps_live_longer_window(self):
+        # SEV-2 regression: pruning at >4096 entries must drop only genuinely
+        # expired windows, NEVER a still-live hour/day counter just because a
+        # minute-caller's window_start is later.
+        from core.rate_limit_ddb import _LocalWindows
+        w = _LocalWindows()
+        # Seed a live day-window counter at its limit.
+        assert w.over_limit("login", "victim", limit=1, window_seconds=86400) is False
+        assert w.over_limit("login", "victim", limit=1, window_seconds=86400) is True
+        # Flood minute-window entries to trigger the prune (>4096).
+        for i in range(4200):
+            w.over_limit("login", f"flood-{i}", limit=100, window_seconds=60)
+        # The day counter must still be over-limit (not silently reset).
+        assert w.over_limit("login", "victim", limit=1, window_seconds=86400) is True
 
 
 class TestCheckEnforcement:
@@ -116,11 +151,30 @@ class TestCheckEnforcement:
     def test_account_scoped_throttle_degrades_to_local(self, monkeypatch):
         # RequestLimitExceeded is account/table-scoped: a noisy neighbour can
         # trip it, so failing closed would 429 every auth user. Degrade to the
-        # local limiter instead (bounded bypass, not a lockout).
+        # local limiter instead (bounded bypass, not a lockout) — under the
+        # local limit allowed, over it the LOCAL fallback 429s.
         self._reset_local()
         self._patch_client_error(monkeypatch, "RequestLimitExceeded")
-        # Under the local limit → allowed.
-        _check("login", "10.0.0.96", limit=5, window_seconds=60)
+        _check("login", "10.0.0.96", limit=2, window_seconds=60)
+        _check("login", "10.0.0.96", limit=2, window_seconds=60)
+        with pytest.raises(HTTPException) as exc:
+            _check("login", "10.0.0.96", limit=2, window_seconds=60)
+        assert exc.value.status_code == 429
+
+    def test_param_validation_error_propagates(self, monkeypatch):
+        # ParamValidationError is a BotoCoreError subclass = a bug in this
+        # module (malformed request). It must PROPAGATE as a loud 500, not be
+        # swallowed into a silent degrade (the overbroad BotoCoreError catch bug).
+        import core.rate_limit_ddb as rl
+        from botocore.exceptions import ParamValidationError
+
+        class _C:
+            def update_item(self, **kw):
+                raise ParamValidationError(report="bad params")
+
+        monkeypatch.setattr(rl, "_client", lambda: _C())
+        with pytest.raises(ParamValidationError):
+            _check("login", "10.0.0.94", limit=1, window_seconds=60)
 
     def test_fail_closed_on_misconfig(self, monkeypatch):
         # Wrong table / missing IAM / key-schema mismatch is a broken control,

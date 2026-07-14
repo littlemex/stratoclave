@@ -55,27 +55,36 @@ async def _attempt_invoke(target: Target, payload: dict) -> dict:
 
 _FIRST_EVENT_TIMEOUT_S = 10.0
 
+# Sentinel handed to _peek_first_event by the timeout-first-event fault so the
+# reader's stop Event can be threaded into the hang loop (see _peek_first_event).
+_HANG_MARKER = object()
 
-def _never_yields():
+
+def _never_yields(should_stop=None):
     """A synchronous stream that never produces a first event.
 
     Used only by the `timeout-first-event` fault: the reader thread spins in
-    short sleeps (bounded so the reader isn't a hard-busy loop) and never
-    reaches the `yield`, so no event is ever put on the queue. This forces the
-    real first-event `wait_for` guard to fire exactly as a genuinely hung
-    Bedrock connection would. The generator never yields in practice.
+    short sleeps and never reaches the `yield`, so no event is ever put on the
+    queue. This forces the real first-event `wait_for` guard to fire exactly as
+    a genuinely hung Bedrock connection would.
+
+    `should_stop` is the reader's stop `Event` (a `threading.Event`). Once the
+    first-event guard times out and the peek sets `stop`, this exits promptly —
+    otherwise a leaked reader thread would nap in the shared threadpool and, at
+    scale, starve the executor that also runs settles / rate-limit checks. A
+    hard cap bounds it even if no stop is wired.
     """
     import time as _t
 
-    # Cap the spin so a leaked reader thread can't run forever; well past the
-    # 10s first-event timeout and any chain deadline, the reader exits and the
-    # (already-failed-over or released) request is unaffected.
-    deadline = _FIRST_EVENT_TIMEOUT_S * 6
+    deadline = _FIRST_EVENT_TIMEOUT_S + 2.0  # just past the guard; hard backstop
     waited = 0.0
     while waited < deadline:
-        _t.sleep(0.2)
-        waited += 0.2
-    yield  # pragma: no cover - unreachable within any live request's lifetime
+        if should_stop is not None and should_stop.is_set():
+            break
+        _t.sleep(0.1)
+        waited += 0.1
+    return
+    yield  # pragma: no cover - marks this a generator; never reached
 
 
 async def _peek_first_event(
@@ -95,6 +104,13 @@ async def _peek_first_event(
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
     sentinel = object()
     stop = threading.Event()
+
+    # The timeout-first-event fault passes a marker rather than a pre-built
+    # generator, so the reader's stop Event can reach the hang loop and reap it
+    # promptly once the guard times out (otherwise the reader naps in the shared
+    # threadpool and can starve settles / rate-limit checks under load).
+    if stream is _HANG_MARKER:
+        stream = _never_yields(stop)
 
     def _put(item):
         try:
@@ -181,7 +197,7 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                         # (not an ad-hoc sleep) is what fires. This exercises
                         # the production timeout path: TimeoutError -> classify
                         # -> failover, and chain-exhaustion -> clean release.
-                        first_event, rest = await _peek_first_event(_never_yields())
+                        first_event, rest = await _peek_first_event(_HANG_MARKER)
                     elif fault.maybe_empty_stream(req.fault_spec, fault_attempt):
                         first_event, rest = await _peek_first_event(iter([]))
                     else:
