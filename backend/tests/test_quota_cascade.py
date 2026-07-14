@@ -258,3 +258,137 @@ class TestReleaseSettle:
             actual_cost_microusd=actual,
         )
         assert _used("claude-sonnet-4-6") == actual
+
+
+@pytest.fixture
+def no_pool_env(dynamodb_mock):
+    """Tenant with a per-user balance but NO pool budget (Fable F-3 scenario)."""
+    _cfg_cache.clear()
+    UserTenantsRepository().ensure(
+        user_id=USER, tenant_id=TENANT, role="user", total_credit=10**12,
+    )
+    # deliberately NO set_pool_limit
+    yield
+    _cfg_cache.clear()
+
+
+class TestQuotaWithoutPool:
+    """Fable F-3: per-model quota must be enforced even when the tenant has no
+    dollar pool. Previously reserve_credit short-circuited on `pool is None` and
+    committed no quota line → pool-less tenants were served unmetered, and the
+    cascade / selected_model were bypassed entirely."""
+
+    def test_quota_enforced_and_charged_without_pool(self, no_pool_env):
+        _put_routing_config(
+            chain=["claude-sonnet-4-6"],
+            quotas={"claude-sonnet-4-6": {"limit": 10**9}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6")
+        assert ctx.pool_active is False
+        assert ctx.selected_model == "claude-sonnet-4-6"   # not None anymore
+        assert ctx.quota_reserved_amount > 0
+        assert ctx.quota_period == current_period()
+        assert _used("claude-sonnet-4-6") == ctx.quota_reserved_amount
+
+    def test_cascade_without_pool(self, no_pool_env):
+        # sonnet quota ~0 → must cascade to haiku even with no pool
+        _put_routing_config(
+            chain=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={"claude-sonnet-4-6": {"limit": 1}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6")
+        assert ctx.pool_active is False
+        assert ctx.selected_model == "claude-haiku-4-5"
+        assert _used("claude-sonnet-4-6") == 0  # sonnet never charged
+
+    def test_all_exhausted_without_pool_raises_402(self, no_pool_env):
+        _put_routing_config(
+            chain=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={"claude-sonnet-4-6": {"limit": 1}, "claude-haiku-4-5": {"limit": 1}},
+            fallback_default="on",
+        )
+        with pytest.raises(HTTPException) as e:
+            _reserve("claude-sonnet-4-6")
+        assert e.value.status_code == 402
+        assert e.value.detail["reason"] == "model_quota_exhausted"
+
+    def test_release_returns_quota_without_pool(self, no_pool_env):
+        _put_routing_config(
+            chain=["claude-sonnet-4-6"],
+            quotas={"claude-sonnet-4-6": {"limit": 10**9}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6")
+        assert _used("claude-sonnet-4-6") == ctx.quota_reserved_amount
+        _pipeline.release_pool(ctx)
+        assert _used("claude-sonnet-4-6") == 0
+
+
+class TestQuotaIdempotencyAndPeriod:
+    """Fable F-1 (period) + F-6 (idempotent settle/release)."""
+
+    def test_double_release_is_idempotent(self, env):
+        _put_routing_config(
+            chain=["claude-sonnet-4-6"],
+            quotas={"claude-sonnet-4-6": {"limit": 10**9}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6")
+        assert _used("claude-sonnet-4-6") == ctx.quota_reserved_amount
+        _pipeline.release_pool(ctx)
+        assert _used("claude-sonnet-4-6") == 0
+        # Second release must NOT drive `used` negative (F-6).
+        _pipeline.release_pool(ctx)
+        assert _used("claude-sonnet-4-6") == 0
+
+    def test_release_after_settle_is_idempotent(self, env):
+        _put_routing_config(
+            chain=["claude-sonnet-4-6"],
+            quotas={"claude-sonnet-4-6": {"limit": 10**9}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6")
+        reserved = ctx.quota_reserved_amount
+        _pipeline.settle_reservation_and_log(
+            user=_User(user_id=USER, org_id=TENANT), tenants_repo=ctx,
+            reservation=1000, actual_input_tokens=0, actual_output_tokens=0,
+            model_id="claude-sonnet-4-6", context=ctx,
+            actual_cost_microusd=reserved // 2,
+        )
+        settled_used = _used("claude-sonnet-4-6")
+        assert settled_used == reserved // 2
+        # A stray release after settle must not subtract again (F-6).
+        _pipeline.release_pool(ctx)
+        assert _used("claude-sonnet-4-6") == settled_used
+
+    def test_settle_uses_reserved_period_not_current(self, env):
+        # Simulate a month-boundary crossing: reserve stamps quota_period, then
+        # the wall clock advances a month before settle. Settle must adjust the
+        # RESERVED period's row, never a fresh current_period() (F-1).
+        _put_routing_config(
+            chain=["claude-sonnet-4-6"],
+            quotas={"claude-sonnet-4-6": {"limit": 10**9}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6")
+        reserved_period = ctx.quota_period
+        reserved = ctx.quota_reserved_amount
+        assert _used("claude-sonnet-4-6") == reserved
+        # Force the context's period to look "old" by leaving quota_period as-is
+        # (that's exactly what settle must key on). Settle to a smaller actual.
+        _pipeline.settle_reservation_and_log(
+            user=_User(user_id=USER, org_id=TENANT), tenants_repo=ctx,
+            reservation=1000, actual_input_tokens=0, actual_output_tokens=0,
+            model_id="claude-sonnet-4-6", context=ctx,
+            actual_cost_microusd=reserved // 4,
+        )
+        # The reserved period's row moved to `actual`; no other period touched.
+        tbl = boto3.resource("dynamodb", region_name="us-east-1").Table(
+            "stratoclave-model-quotas")
+        row = tbl.get_item(Key={
+            "pk": _quota._pk_tenant(TENANT),
+            "sk": _quota._sk("claude-sonnet-4-6", reserved_period),
+        }).get("Item")
+        assert int(row["used"]) == reserved // 4

@@ -202,6 +202,11 @@ class ReservationContext:
     selected_model: Optional[str] = None
     quota_reserved_amount: int = 0
     quota_user_id: Optional[str] = None
+    # The period the quota `used` counter was reserved against. settle/release
+    # MUST key off this, never a fresh current_period() — a long request (or a
+    # stream) that crosses a month boundary would otherwise settle the wrong
+    # period's row (leaking the reserved period, negative-seeding the new one).
+    quota_period: Optional[str] = None
     quota_tenant_limit: Optional[int] = None
     quota_user_limit: Optional[int] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
@@ -728,8 +733,9 @@ def reserve_credit(
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
-    # No pool budget → original single-table fast path (fully backward compat).
-    if pool is None or cost_microusd is None:
+    # No pool budget AND no per-model quota to enforce → original single-table
+    # fast path (fully backward compat).
+    if (pool is None or cost_microusd is None) and not quota_lines:
         try:
             repo.reserve(
                 user_id=user.user_id,
@@ -754,6 +760,19 @@ def reserve_credit(
             pricing_key=pricing_key,
             tenant_id=user.org_id,
             pool_active=False,
+            selected_model=selected_model,
+        )
+
+    # No pool budget but a per-model quota IS configured → enforce the quota
+    # atomically alongside the per-user token reserve, WITHOUT a pool debit.
+    # (Fable F-3: quota enforcement must not be coupled to having a pool — a
+    # pool-less tenant with a per-model quota was previously served unmetered.)
+    if pool is None or cost_microusd is None:
+        return _reserve_quota_without_pool(
+            user, reservation_tokens, repo=repo, period=period,
+            pricing_key=pricing_key, quota_lines=quota_lines,
+            quota_model=quota_model, selected_model=selected_model,
+            quota_reserved_amount=int(cost_microusd or 0),
         )
 
     # Pool budget present → atomic two-table reservation. Both the per-user
@@ -930,10 +949,21 @@ def reserve_credit(
             selected_model=selected_model,
             quota_reserved_amount=cost if quota_lines else 0,
             quota_user_id=user.user_id,
+            quota_period=period if quota_lines else None,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
     if pool_vanished:
+        # Pool disappeared mid-flight → no pool ceiling, but a configured
+        # per-model quota still applies. Route through the same quota-only path
+        # so quota is enforced and `selected_model` is set (Fable F-3).
+        if quota_lines:
+            return _reserve_quota_without_pool(
+                user, reservation_tokens, repo=repo, period=period,
+                pricing_key=pricing_key, quota_lines=quota_lines,
+                quota_model=quota_model, selected_model=selected_model,
+                quota_reserved_amount=int(cost_microusd or 0),
+            )
         try:
             repo.reserve(
                 user_id=user.user_id,
@@ -949,6 +979,7 @@ def reserve_credit(
             pricing_key=pricing_key,
             tenant_id=user.org_id,
             pool_active=False,
+            selected_model=selected_model,
         )
 
     # Retries exhausted under contention while the pool was still present. We
@@ -980,6 +1011,95 @@ def reserve_credit(
     raise _err_402("tenant_pool_exhausted")
 
 
+def _reserve_quota_without_pool(
+    user,
+    reservation_tokens: int,
+    *,
+    repo,
+    period: str,
+    pricing_key: Optional[str],
+    quota_lines: list,
+    quota_model: Optional[str],
+    selected_model: Optional[str],
+    quota_reserved_amount: int,
+) -> ReservationContext:
+    """Reserve per-user tokens AND a per-model quota atomically, with NO pool.
+
+    For tenants that configure a per-model quota but no dollar pool. Same
+    snapshot-optimistic retry as the pooled path, but the transaction is just
+    [user_txn, *quota_lines] — no pool debit, no HOLD row. A quota
+    ConditionalCheckFailed (index >= 1) means the quota is exhausted → raise
+    QuotaExhausted so the caller's cascade advances; a user-row CCF (index 0) is
+    the retryable snapshot race. Fails closed: a quota-configured request must
+    never slip through unmetered (the Fable F-3 hole).
+    """
+    client = _low_level_client()
+    saw_throttle = False
+    for _attempt in range(_RESERVE_MAX_RETRIES):
+        if _attempt:
+            time.sleep(_contention_backoff(_attempt))
+        item = repo.get(user.user_id, user.org_id, consistent_read=True)
+        if not item:
+            raise _err_402("personal_budget_exhausted")
+        total = int(item.get("total_credit", 0))
+        used = int(item.get("credit_used", 0))
+        if used + reservation_tokens > total:
+            logger.info("credit_exhausted_402", user_id=user.user_id,
+                        tenant_id=user.org_id, reason="personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted")
+
+        user_txn = repo.reserve_txn_item(
+            user_id=user.user_id, tenant_id=user.org_id,
+            tokens=reservation_tokens, expected_total=total,
+        )
+        txn_items = [user_txn, *quota_lines]
+        try:
+            client.transact_write_items(
+                TransactItems=txn_items,
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "TransactionCanceledException":
+                raise
+            reasons = e.response.get("CancellationReasons", []) or []
+            # Quota lines start at index 1 here (index 0 is the user row). A
+            # ConditionalCheckFailed on any quota line = quota exhausted.
+            if quota_model is not None and len(reasons) > 1:
+                for r in reasons[1:]:
+                    if r.get("Code", "") == "ConditionalCheckFailed":
+                        logger.info("model_quota_exhausted", tenant_id=user.org_id,
+                                    model=quota_model, period=period)
+                        raise QuotaExhausted(quota_model)
+            codes = {r.get("Code", "") for r in reasons}
+            if codes & {"ThrottlingError", "ProvisionedThroughputExceeded",
+                        "TransactionConflict", "RequestLimitExceeded"}:
+                saw_throttle = True
+            continue
+
+        return ReservationContext(
+            tenants_repo=repo,
+            reservation_tokens=reservation_tokens,
+            period=period,
+            pricing_key=pricing_key,
+            tenant_id=user.org_id,
+            pool_active=False,
+            quota_lines=quota_lines,
+            selected_model=selected_model,
+            quota_reserved_amount=quota_reserved_amount,
+            quota_user_id=user.user_id,
+            quota_period=period,
+        )
+
+    logger.warning("quota_reserve_retries_exhausted", user_id=user.user_id,
+                   tenant_id=user.org_id, period=period, throttled=saw_throttle)
+    if saw_throttle:
+        raise HTTPException(status_code=503, detail={
+            "type": "budget_unavailable", "reason": "quota_reservation_contended",
+            "message": "Quota reservation is temporarily unavailable. Retry shortly."})
+    # Lost every snapshot race for the user row — treat as personal budget.
+    raise _err_402("personal_budget_exhausted")
+
+
 def release_pool(context) -> None:
     """Release a pooled reservation on an error path (no billable usage).
 
@@ -996,10 +1116,23 @@ def release_pool(context) -> None:
     _release_quota_for(context)
 
 
+def _quota_period(context) -> Optional[str]:
+    """The period the quota was RESERVED against — never a fresh current_period().
+
+    Settling/releasing against `current_period()` at settle time (Fable F-1)
+    would hit the WRONG month's row for any request that crossed midnight
+    between reserve and settle: the reserved period leaks (never released) and
+    the new period is negative-seeded (over-admits). A missing value is treated
+    as "no known reserved period" → the caller no-ops rather than guessing.
+    """
+    return getattr(context, "quota_period", None)
+
+
 def _release_quota_for(context) -> None:
     model = getattr(context, "selected_model", None)
     amt = int(getattr(context, "quota_reserved_amount", 0) or 0)
-    if not model or amt <= 0:
+    period = _quota_period(context)
+    if not model or amt <= 0 or not period:
         return
     try:
         from .routing import quota as _quota
@@ -1007,17 +1140,22 @@ def _release_quota_for(context) -> None:
             tenant_id=getattr(context, "tenant_id", ""),
             user_id=getattr(context, "quota_user_id", None),
             model=model,
-            period=getattr(context, "period", None) or current_period(),
+            period=period,
             reserved_amount=amt,
         )
     except Exception:  # noqa: BLE001 — quota release must never fail the request
         logger.warning("quota_release_failed", model=model, exc_info=True)
+    finally:
+        # Idempotent: a second release/settle on the same context is a no-op
+        # (Fable F-6), so no double -reserved can drive `used` negative.
+        context.quota_reserved_amount = 0
 
 
 def _settle_quota_for(context, actual_microusd: int) -> None:
     model = getattr(context, "selected_model", None)
     reserved = int(getattr(context, "quota_reserved_amount", 0) or 0)
-    if not model or reserved <= 0:
+    period = _quota_period(context)
+    if not model or reserved <= 0 or not period:
         return
     try:
         from .routing import quota as _quota
@@ -1025,12 +1163,15 @@ def _settle_quota_for(context, actual_microusd: int) -> None:
             tenant_id=getattr(context, "tenant_id", ""),
             user_id=getattr(context, "quota_user_id", None),
             model=model,
-            period=getattr(context, "period", None) or current_period(),
+            period=period,
             reserved_amount=reserved,
             actual_amount=int(actual_microusd),
         )
     except Exception:  # noqa: BLE001 — quota settle must never fail the request
         logger.warning("quota_settle_failed", model=model, exc_info=True)
+    finally:
+        # Idempotent (Fable F-6): clear so a later release/double-settle no-ops.
+        context.quota_reserved_amount = 0
 
 
 def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actual_microusd: int):
