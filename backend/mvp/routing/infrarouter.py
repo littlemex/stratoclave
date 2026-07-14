@@ -55,6 +55,37 @@ async def _attempt_invoke(target: Target, payload: dict) -> dict:
 
 _FIRST_EVENT_TIMEOUT_S = 10.0
 
+# Sentinel handed to _peek_first_event by the timeout-first-event fault so the
+# reader's stop Event can be threaded into the hang loop (see _peek_first_event).
+_HANG_MARKER = object()
+
+
+def _never_yields(should_stop=None):
+    """A synchronous stream that never produces a first event.
+
+    Used only by the `timeout-first-event` fault: the reader thread spins in
+    short sleeps and never reaches the `yield`, so no event is ever put on the
+    queue. This forces the real first-event `wait_for` guard to fire exactly as
+    a genuinely hung Bedrock connection would.
+
+    `should_stop` is the reader's stop `Event` (a `threading.Event`). Once the
+    first-event guard times out and the peek sets `stop`, this exits promptly —
+    otherwise a leaked reader thread would nap in the shared threadpool and, at
+    scale, starve the executor that also runs settles / rate-limit checks. A
+    hard cap bounds it even if no stop is wired.
+    """
+    import time as _t
+
+    deadline = _FIRST_EVENT_TIMEOUT_S + 2.0  # just past the guard; hard backstop
+    waited = 0.0
+    while waited < deadline:
+        if should_stop is not None and should_stop.is_set():
+            break
+        _t.sleep(0.1)
+        waited += 0.1
+    return
+    yield  # pragma: no cover - marks this a generator; never reached
+
 
 async def _peek_first_event(
     stream: Any,
@@ -73,6 +104,13 @@ async def _peek_first_event(
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
     sentinel = object()
     stop = threading.Event()
+
+    # The timeout-first-event fault passes a marker rather than a pre-built
+    # generator, so the reader's stop Event can reach the hang loop and reap it
+    # promptly once the guard times out (otherwise the reader naps in the shared
+    # threadpool and can starve settles / rate-limit checks under load).
+    if stream is _HANG_MARKER:
+        stream = _never_yields(stop)
 
     def _put(item):
         try:
@@ -154,8 +192,13 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                     fault_attempt = fault.next_attempt(req.request_id)
                     fault.maybe_raise_pre_stream(req.fault_spec, req.request_id, fault_attempt)
                     if fault.maybe_hang(req.fault_spec):
-                        await asyncio.sleep(_FIRST_EVENT_TIMEOUT_S + 5)
-                    if fault.maybe_empty_stream(req.fault_spec, fault_attempt):
+                        # Feed _peek_first_event a stream that never yields a
+                        # first event, so the real first-event wait_for guard
+                        # (not an ad-hoc sleep) is what fires. This exercises
+                        # the production timeout path: TimeoutError -> classify
+                        # -> failover, and chain-exhaustion -> clean release.
+                        first_event, rest = await _peek_first_event(_HANG_MARKER)
+                    elif fault.maybe_empty_stream(req.fault_spec, fault_attempt):
                         first_event, rest = await _peek_first_event(iter([]))
                     else:
                         resp = await _attempt_invoke(target, req.payload)

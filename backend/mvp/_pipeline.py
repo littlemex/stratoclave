@@ -33,6 +33,7 @@ Each route owns its own minimum-reservation floor (`anthropic.py` uses 1024;
 from __future__ import annotations
 
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -62,12 +63,40 @@ logger = get_logger(__name__)
 # the retries ARE exhausted we fail *closed* (see reserve_credit): a pooled
 # tenant must never have a request slip through unpriced just because the pool
 # row was hot.
-_RESERVE_MAX_RETRIES = 8
-_RESERVE_BACKOFF_SECONDS = 0.01  # base; multiplied by the attempt index.
+# The reserve is a single hot-row optimistic write: under an N-way concurrent
+# burst on one tenant, at most one writer wins per round, so the last writer
+# needs ~N rounds to drain. 12 rounds + full-jitter backoff comfortably clears
+# a 20-way burst; the reserve completes *before* the Bedrock call, so these
+# retries add latency only during genuine contention, never to a quiet request.
+_RESERVE_MAX_RETRIES = 12
+_RESERVE_BACKOFF_SECONDS = 0.01  # base delay for the exponential backoff below.
+_RESERVE_BACKOFF_CAP_SECONDS = 0.4  # ceiling so a hot row can't stall a request.
 # Settlement must not fail a live request; it retries a few times against
 # transient capacity errors before giving up loudly (a lost settle leaks the
 # hold, so it is logged at error level for reconciliation).
 _SETTLE_MAX_RETRIES = 4
+# Settle runs at the tail of the STREAMING path (from run_stream's async
+# generator, on the event loop), so its backoff sleep blocks every co-located
+# stream. Settle contention is far rarer and less bursty than the reserve
+# thundering-herd, so cap its jitter much tighter: worst case ~0.05s×retries
+# instead of ~0.4s×retries.
+_SETTLE_BACKOFF_CAP_SECONDS = 0.05
+
+
+def _contention_backoff(attempt: int, cap: float = _RESERVE_BACKOFF_CAP_SECONDS) -> float:
+    """Full-jitter exponential backoff for a hot single-row transaction.
+
+    Linear backoff synchronises a thundering herd: every loser of an optimistic
+    lock race sleeps the *same* interval and collides again on the next attempt,
+    so a burst of concurrent reserves against one tenant's pool row exhausts all
+    retries and fails closed (503). Exponential growth with full jitter spreads
+    the retries across a widening window, so colliding writers desynchronise and
+    the snapshot lock actually makes progress. `attempt` is 1-based (0 never
+    backs off). Uses AWS's recommended full-jitter: sleep ∈ [0, min(cap, base*2^n)].
+    `cap` lets the settle path use a tighter ceiling than the reserve path.
+    """
+    ceiling = min(cap, _RESERVE_BACKOFF_SECONDS * (2 ** attempt))
+    return random.uniform(0, ceiling)
 
 # Orphan-reservation reaper.
 # --------------------------
@@ -318,6 +347,22 @@ def _fresh_idempotency_token() -> str:
     which is exactly where it was found.
     """
     return str(uuid.uuid4())
+
+
+# Namespace for deriving a stable-but-distinct token from a primary settle
+# token. uuid5 keeps the result EXACTLY 36 chars (a raw UUID string), so it
+# stays within DynamoDB's 36-char ClientRequestToken limit — unlike a naive
+# f"{token}-so" (39 chars), which raises ValidationException on every call.
+_SETTLED_ONLY_NS = uuid.UUID("5f2b9c14-0000-4000-8000-000000000001")
+
+
+def _derived_token(primary: str, tag: str) -> str:
+    """A 36-char ClientRequestToken deterministically derived from `primary`.
+
+    Same `primary`+`tag` → same token, so a lost-ack retry of the derived write
+    dedupes instead of double-recording; different primaries → different tokens.
+    """
+    return str(uuid.uuid5(_SETTLED_ONLY_NS, f"{primary}:{tag}"))
 
 
 def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
@@ -576,12 +621,21 @@ def reserve_credit(
     hold_id = _fresh_idempotency_token()
     hold_expires_at = int(time.time()) + _HOLD_TTL_SECONDS
     hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+    # This loop's blocking boto3 calls + time.sleep are safe on the request
+    # thread: the /v1/messages and /v1/chat/completions handlers are sync
+    # `def`, so FastAPI runs them (and this reserve) on the threadpool, NOT the
+    # event loop. (The settle at the tail runs inside an async generator on the
+    # loop and IS offloaded to a thread — see _budget_flow.run_stream.)
     for _attempt in range(_RESERVE_MAX_RETRIES):
         if _attempt:
-            # Small linear backoff so a thundering herd on one hot pool row does
-            # not burn all retries in the same microsecond. Keeps the snapshot
-            # lock viable under contention instead of collapsing into fail-open.
-            time.sleep(_RESERVE_BACKOFF_SECONDS * _attempt)
+            # Full-jitter exponential backoff so a thundering herd on one hot
+            # pool row desynchronises instead of colliding in lockstep every
+            # attempt. Linear backoff let a 20-way concurrent burst on one
+            # tenant exhaust all retries and fail closed (503); jittered
+            # exponential keeps the snapshot lock making progress under the
+            # same contention. Still fails closed if it truly can't win — a
+            # pooled tenant must never slip through unpriced.
+            time.sleep(_contention_backoff(_attempt))
 
         # ConsistentRead: the snapshot we lock on MUST be current, or a stale
         # eventually-consistent read yields expected_* values that no longer
@@ -942,6 +996,12 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
       - anything else → transient, retry with the same idempotency token.
     """
     budgets = TenantBudgetsRepository()
+    # TransactItems ORDER IS A CONTRACT: index 0 = pool-row settle, index 1 =
+    # hold delete. The cancellation-reason parsing below reads reasons[_POOL_IDX]
+    # / reasons[_HOLD_IDX] by position, so these must stay in sync with the order
+    # items are appended here. Do not reorder without updating both.
+    _POOL_IDX = 0
+    _HOLD_IDX = 1
     items = [
         _pool_settle_items(
             table_name=budgets.table_name,
@@ -963,7 +1023,10 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
     client = _low_level_client()
     for _attempt in range(_SETTLE_MAX_RETRIES):
         if _attempt:
-            time.sleep(_RESERVE_BACKOFF_SECONDS * _attempt)
+            # Tighter cap than reserve: settle runs on the event loop at the
+            # tail of the streaming path, so a long sleep here freezes every
+            # co-located stream.
+            time.sleep(_contention_backoff(_attempt, cap=_SETTLE_BACKOFF_CAP_SECONDS))
         try:
             client.transact_write_items(TransactItems=items, ClientRequestToken=token)
             return  # settled cleanly (reserved returned, spend recorded, hold gone)
@@ -971,10 +1034,21 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
             code = e.response.get("Error", {}).get("Code", "")
             if code == "TransactionCanceledException":
                 reasons = _cancellation_codes(e)
+                # Reading reasons by position is sound ONLY because each item's
+                # ConditionExpression is single-clause: the pool item (index
+                # _POOL_IDX) is guarded solely by `attribute_exists(tenant_id)`
+                # (see _pool_settle_items) and the hold delete (index _HOLD_IDX)
+                # solely by `attribute_exists(sk)`. So a ConditionalCheckFailed
+                # at that index unambiguously means "row/hold gone", never a
+                # contention/underflow guard. If either condition ever becomes
+                # compound, disambiguate via ReturnValuesOnConditionCheckFailure
+                # instead of trusting the reason index.
                 hold_gone = (
-                    len(reasons) > 1 and reasons[1] == "ConditionalCheckFailed"
+                    len(reasons) > _HOLD_IDX and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
                 )
-                row_gone = reasons and reasons[0] == "ConditionalCheckFailed"
+                row_gone = (
+                    len(reasons) > _POOL_IDX and reasons[_POOL_IDX] == "ConditionalCheckFailed"
+                )
                 if hold_gone:
                     # Reaper already returned `reserved`; just record the spend.
                     logger.info(
@@ -994,7 +1068,13 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                                     actual_microusd=actual_cost_microusd,
                                 )
                             ],
-                            ClientRequestToken=_fresh_idempotency_token(),
+                            # Derive from the primary settle token (not a fresh
+                            # UUID) so a lost-ack here that gets retried dedupes
+                            # to the same write instead of double-recording spend.
+                            # Must stay <=36 chars: f"{token}-so" would be 39 and
+                            # ValidationException every time (silent revenue leak
+                            # on the reaper-race path). uuid5 keeps it exactly 36.
+                            ClientRequestToken=_derived_token(token, "settled-only"),
                         )
                     except ClientError as e2:
                         if (

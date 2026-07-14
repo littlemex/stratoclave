@@ -255,3 +255,98 @@ def test_multi_block_disconnect_settles_once(stop_after):
     assert len(settle_calls) == 1, (
         f"Multi-block: expected 1 settle at stop_after={stop_after}, got {len(settle_calls)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SEV-1 regression (full-branch Fable review): disconnect WHILE the offloaded
+# settle is running in its thread must NOT double-settle. The settle now runs
+# via asyncio.to_thread; a client that closes on `data: [DONE]` cancels the
+# await, but the thread still commits — the finally must not settle again.
+# ---------------------------------------------------------------------------
+
+def test_disconnect_during_offloaded_settle_settles_once():
+    """Close the generator while settle is mid-flight in its thread.
+
+    Regression for the double-settle: with fresh idempotency tokens per settle,
+    a second settle would subtract `reserved` twice (pool over-admission) and
+    double-bill. The once-guard must make it exactly one settle.
+    """
+    import threading
+
+    settle_count = {"n": 0}
+    in_settle = threading.Event()
+    release_settle = threading.Event()
+    lock = threading.Lock()
+
+    def slow_settle(**kw):
+        with lock:
+            settle_count["n"] += 1
+        in_settle.set()          # signal we're inside settle
+        release_settle.wait(2.0)  # hold the thread (simulate slow DDB)
+
+    repo = _FakeRepo()
+    gen = _budget_flow.run_stream(
+        body=None, model_id="test", model_alias="test", user=_User(),
+        tenants_repo=repo, reservation=5000,
+        invoke_stream=lambda *, body, model_id: {"stream": _simple_stream()},
+        settle=slow_settle,
+        release=lambda ctx: setattr(ctx, "released", True),
+        adapter=_TestAdapter(),
+    )
+
+    async def run():
+        agen = gen.__aiter__()
+        # Consume everything so the clean-completion settle is triggered.
+        async def _consume():
+            try:
+                while True:
+                    await agen.__anext__()
+            except StopAsyncIteration:
+                pass
+        task = asyncio.create_task(_consume())
+        # Wait until settle has started in its thread, then close/cancel.
+        await asyncio.to_thread(in_settle.wait, 2.0)
+        release_settle.set()   # let the in-flight settle finish
+        await task
+        await agen.aclose()    # finally runs here — must not settle again
+
+    asyncio.run(run())
+    assert settle_count["n"] == 1, f"expected exactly 1 settle, got {settle_count['n']}"
+
+
+def test_invoke_error_disconnect_does_not_settle_after_refund():
+    """Invoke-time failure refunds+releases and must NEVER settle — even if the
+    generator is closed right after (the finally must respect the claim)."""
+    settle_count = {"n": 0}
+    refund_release = {"n": 0}
+
+    def boom(*, body, model_id):
+        raise RuntimeError("invoke failed")
+
+    repo = _FakeRepo()
+
+    def _refund(**kw):
+        refund_release["n"] += 1
+
+    gen = _budget_flow.run_stream(
+        body=None, model_id="test", model_alias="test", user=_User(),
+        tenants_repo=repo, reservation=5000,
+        invoke_stream=boom,
+        settle=lambda **kw: settle_count.__setitem__("n", settle_count["n"] + 1),
+        release=lambda ctx: refund_release.__setitem__("n", refund_release["n"] + 1),
+        adapter=_TestAdapter(),
+    )
+    repo.refund = _refund  # count refund calls
+
+    async def run():
+        agen = gen.__aiter__()
+        try:
+            while True:
+                await agen.__anext__()
+        except StopAsyncIteration:
+            pass
+        await agen.aclose()
+
+    asyncio.run(run())
+    # Invoke-error path: refund+release happened, settle NEVER did.
+    assert settle_count["n"] == 0, f"invoke-error path must not settle, got {settle_count['n']}"

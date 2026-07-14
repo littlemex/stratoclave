@@ -143,14 +143,14 @@ for where a broker is the better choice.
   double-bills. `ValidationException`/`AccessDenied` are fatal and fail fast.
   Retries are invisible to the client: same SSE shape, one settle, actual
   tokens only.
-- **Staged breaker + cascading model fallback.** An advisory budget check
-  shapes routing before the atomic reserve: at **≤25% remaining** it caps the
-  model tier (Opus → Sonnet → Haiku), at **≤5%** it rejects with `402`. Tenants
-  can define per-model quotas and a fallback chain, so "use Opus until its
-  budget is gone, then Sonnet, then Haiku" is a config, not code — enforced by
-  the same atomic `TransactWriteItems` that guards the pool, so a user can never
-  race past a per-model quota. (Opt-in; a tenant with no routing config keeps
-  today's single-model behaviour.)
+- **Staged budget breaker.** An advisory budget check shapes routing before
+  the atomic reserve: at **≤25% remaining** it caps the model tier, at **≤5%**
+  it rejects with `402` before any Bedrock call. This is live today. (Per-model
+  quotas and cascading model fallback — "use Opus until its budget is gone,
+  then Sonnet, then Haiku" — are designed and the enforcement primitive
+  (`quota_lines` on the atomic reserve) is in place, but the resolver is not yet
+  wired into the request path. See [Roadmap](#project-status); do not rely on
+  cascading fallback yet.)
 - **Crash-resilient budget accounting.** A pooled reservation writes a sibling
   *hold* record in the same atomic write; settle and release delete it, and if
   a task is killed (OOM, deploy drain) between reserve and settle, a bounded,
@@ -199,8 +199,9 @@ for where a broker is the better choice.
 
 The Stratoclave control plane lives inside a single AWS region (us-east-1)
 in your own account. Clients reach CloudFront for TLS termination; static
-paths hit S3, API paths hit an internal ALB fronting a single-task Fargate
-service. The backend is stateless — all mutable state lives in DynamoDB,
+paths hit S3, API paths hit an internal ALB fronting a Fargate service that
+runs at least two tasks spread across availability zones. The backend is
+stateless — all mutable state lives in DynamoDB,
 authenticated by either a Cognito `access_token` or a `sk-stratoclave-*` API
 key.
 
@@ -220,7 +221,10 @@ Every call passes through the same money-and-routing pipeline: **budget
 authorize → staged breaker → model selection → infrastructure retry/failover →
 settle**, wrapped around exactly one Bedrock invocation. Retries and
 cross-region failover are invisible to the client; the reservation settles once
-against actual usage, even on mid-stream disconnect.
+against actual usage, even on mid-stream disconnect. The *model selection* stage
+resolves the requested model today; the cascading per-model fallback shown below
+is a designed extension, not yet wired into the request path (see
+[Roadmap](#project-status)).
 
 <p align="center">
   <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock, then settle once and return; DynamoDB holds budgets, quotas, usage log, and routing config." width="100%">
@@ -451,18 +455,18 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / atomically reassign | Teams (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget model | **Dollar pool + per-user tokens + per-model quotas, reserved *pre-flight* in one atomic write; priced per model in micro-USD** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
-| Can a user race/bypass the budget? | No (single `TransactWriteItems` over all ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
-| Resilience / routing | **Retry + cross-region failover, first-event commit, staged breaker, cascading per-model fallback** | Retries, fallbacks, load-balancing across deployments | None (client calls Bedrock; Bedrock CRIS only) |
+| Budget model | **Dollar pool + per-user tokens, reserved *pre-flight* in one atomic write; priced per model in micro-USD** (per-model quotas: primitive in place, enforcement on the roadmap) | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
+| Can a user race/bypass the budget? | No (single `TransactWriteItems` over both ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
+| Resilience / routing | **Retry + cross-region failover, first-event commit, staged breaker** (cascading per-model fallback on the roadmap) | Retries, fallbacks, load-balancing across deployments | None (client calls Bedrock; Bedrock CRIS only) |
 | Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via a bounded sweep; no leak, no reaper process | Relies on the proxy + its Postgres/Redis | N/A (no server-side reservation) |
 | OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
 | Model / capability policy | App-layer allowlist + per-tenant/user fallback chains (+ effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
 | Identity | Cognito password, **Vouch-by-STS** (aws sso / saml2aws / IAM user), `sk-stratoclave-*` keys | Enterprise tier (Okta/Entra/OIDC/SAML) | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
-| State / ops footprint | DynamoDB only (serverless), one Fargate task | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
+| State / ops footprint | DynamoDB only (serverless), multi-task Fargate across AZs, no Redis | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
 | Admin surface | **React web console** + CLI | Web UI + CLI | CLI (`ccwb`) |
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
 | Data residency / GovCloud | us-east-1 today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
-| Availability of inference | Gateway (single control-plane region) **+ cross-region Bedrock failover** | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
+| Availability of inference | **Multi-task, multi-AZ** gateway (single region) **+ cross-region Bedrock failover**; no single-task/single-AZ SPOF, but still in-path in one region | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
 | License | Apache 2.0 (all features OSS) | MIT + Commercial (SSO/audit are commercial) | MIT (AWS Solutions sample) |
 
 **Pick Stratoclave** when you need tenant-scoped, pre-flight, per-request
@@ -539,21 +543,24 @@ deliberately does **not** do today:
   Claude Desktop to thousands of managed laptops with per-device policy, a
   credential broker with MDM support fits that better; Stratoclave governs the
   *inference*, not the *endpoint fleet*.
-- **Single region, single control plane.** Everything runs in `us-east-1`
-  today. There is no GovCloud partition support and no EU/AU data-residency
-  selection. Because the gateway is in the data path, its availability is the
-  availability of your inference — a broker that lets clients call Bedrock
-  directly has no such single point of failure.
+- **Single region (though multi-AZ within it).** The gateway runs multiple
+  Fargate tasks across availability zones in `us-east-1`, so a single task or
+  AZ is not a point of failure — but everything still lives in one region.
+  There is no GovCloud partition support and no EU/AU data-residency selection,
+  and because the gateway is in the data path, a full-region outage takes your
+  inference with it — a broker that lets clients call Bedrock directly has no
+  such in-path dependency.
 - **The gateway sees prompt text.** Every request transits the FastAPI service,
   which is what makes pre-flight DLP and enforcement possible — but it also
   means the operator is in scope as a data processor. Weigh this for regulated
   workloads. (Note: full-fidelity *audit* does not require a proxy — Bedrock
   model invocation logging + CloudTrail give you that with a broker too. A
   proxy is for *intervention before the call*, not merely observation.)
-- **Rate limiting is in-process by default.** The `slowapi` counters reset when
-  an ECS task restarts and are per-task; for multi-task deployments set
-  `STRATOCLAVE_RATELIMIT_STORAGE_URI` to a shared store. Credit reservation is
-  *not* affected by this — it is always atomic in DynamoDB.
+- **Rate limiting is coarse.** Auth-endpoint caps are per-IP fixed-window
+  counters in DynamoDB (shared across all tasks, no Redis), which is enough to
+  blunt credential stuffing but is not a token-bucket or a per-tenant inference
+  quota. Credit reservation is the real spend ceiling and is always atomic in
+  DynamoDB.
 - **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
   commit, run it in an account you control, and read the threat model in
   [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.
@@ -570,6 +577,25 @@ and CDK construct props may still change between minor releases while on the
 `0.x` series. Breaking changes are called out in the release notes for each
 tagged version. Issues and pull requests are welcome; see
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+**Shipped today:** dollar-pool + per-user-token budgets reserved pre-flight in
+one atomic `TransactWriteItems`; per-model micro-USD pricing; crash-safe hold
+sweep; staged budget breaker (tier cap at ≤25%, `402` at ≤5%); InfraRouter
+retry + cross-region failover with first-event commit; OpenAI Chat Completions
+and Responses (codex) surfaces; multi-task / multi-AZ ECS with DynamoDB-backed
+per-IP rate limiting.
+
+**On the roadmap (designed, not yet wired into the request path):**
+
+- **Per-model quotas + cascading fallback.** The enforcement primitive
+  (`quota_lines` on the atomic reserve, so a user cannot race past a per-model
+  ceiling) is in place, but the resolver that emits those lines and walks the
+  Opus → Sonnet → Haiku chain is not yet connected. Until it is, requests
+  resolve to the single requested model. Do not rely on cascading fallback.
+- **Per-tenant reasoning-effort and tool caps.** App-layer policy hooks exist;
+  enforcement is not wired.
+- **Multi-region control plane, data-residency selection, external audit.**
+  See [Non-goals and honest limitations](#non-goals-and-honest-limitations).
 
 ## Contributing
 

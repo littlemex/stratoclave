@@ -449,20 +449,51 @@ export class EcsStack extends cdk.Stack {
       // P1-C: default off. Callers must opt in explicitly.
       enableExecuteCommand: props.enableExecuteCommand ?? false,
       healthCheckGracePeriod: cdk.Duration.seconds(60),
+      // Fargate automatically spreads tasks across the AZs of the given
+      // subnets (the VPC has maxAzs=2), so desiredCount>=2 yields one task
+      // per AZ — no single AZ is a SPOF. No placementStrategies here:
+      // those are EC2-launch-type only.
+      //
+      // Keep at least the desired count running through a rolling deploy
+      // (start replacements before draining) so there is no single-task
+      // gap window during deploys.
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200,
     });
 
     this.service.attachToApplicationTargetGroup(props.targetGroup);
 
-    // Auto scaling (MVP recommends desiredCount=1 fixed, due to in-memory state)
+    // Auto scaling. Floor tracks the desired count so we never scale below
+    // the multi-task/multi-AZ baseline; ceiling gives headroom under load.
+    const baseCount = props.desiredCount ?? 1;
     const scaling = this.service.autoScaleTaskCount({
-      minCapacity: 1,
-      maxCapacity: props.desiredCount && props.desiredCount > 1 ? 4 : 1,
+      minCapacity: baseCount,
+      maxCapacity: baseCount > 1 ? Math.max(baseCount * 2, 4) : 1,
     });
     scaling.scaleOnCpuUtilization('CpuScaling', {
       targetUtilizationPercent: 70,
       scaleInCooldown: cdk.Duration.seconds(60),
       scaleOutCooldown: cdk.Duration.seconds(60),
     });
+
+    // When Application Auto Scaling manages the task count, a `DesiredCount`
+    // baked into the CFN template makes every `cdk deploy` reset the running
+    // count — including snapping back down mid-incident when the scaler had
+    // grown the fleet. Drop `DesiredCount` from the template so deploys leave
+    // the running count alone and the scaler (floored at `minCapacity =
+    // baseCount`) owns it.
+    //
+    // Trade-off on a FRESH stack: with `DesiredCount` absent, CFN creates the
+    // service at its default of 1 task, waits for that one to stabilise, and
+    // THEN the scalable target registers and scales out to `minCapacity`. So a
+    // brand-new stack briefly runs a single task before reaching the multi-AZ
+    // floor (self-healing within a scaling interval). Acceptable here; if a
+    // deploy gate ever requires >=2 healthy targets at create time, seed the
+    // initial size differently (e.g. a context flag flipped after bootstrap).
+    if (baseCount > 1) {
+      const cfnService = this.service.node.defaultChild as ecs.CfnService;
+      cfnService.addPropertyDeletionOverride('DesiredCount');
+    }
 
     // Parameter Store exports
     putStringParameter(this, 'EcsClusterParam', {

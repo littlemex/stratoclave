@@ -47,9 +47,10 @@ Operators with a different topology override ``RATE_LIMIT_TRUSTED_HOPS``:
 * CloudFront → ALB → ECS                       → 1 (default)
 * custom WAF → CloudFront → ALB → ECS          → 2
 
-The limiter itself is slowapi. In-memory storage is fine for our
-single-task deployment; a move to DynamoDB/Redis via ``storage_uri``
-is the P1 follow-up.
+The limiter is backed by DynamoDB (fixed-window counters with TTL), so
+per-IP caps hold across a horizontally-scaled multi-task / multi-AZ
+deployment without Redis or any new infrastructure class — see
+``core/rate_limit_ddb.py``.
 """
 from __future__ import annotations
 
@@ -57,11 +58,27 @@ import logging
 import os
 
 from fastapi import Request
-from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 _log = logging.getLogger(__name__)
+
+
+def get_remote_address(request: Request) -> str:
+    """Return the direct peer IP, or a stable placeholder when unknown.
+
+    Replaces slowapi's helper of the same name so the rate-limit path has
+    no slowapi dependency. Used as the fallback bucket key when no trusted
+    X-Forwarded-For entry is available.
+    """
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+# `RateLimitExceeded` is a real HTTPException *subclass* (see rate_limit_ddb),
+# re-exported here for import-site compatibility. It is NOT an alias for
+# HTTPException — aliasing would make any `isinstance`/exception-handler on it
+# match every HTTPException in the app (401/402/404...). Import the concrete
+# type so handlers can target 429s specifically.
+from core.rate_limit_ddb import RateLimitExceeded  # noqa: E402,F401
 
 
 def _trusted_hops() -> int:
@@ -143,45 +160,14 @@ RESPOND_RATE_LIMIT = os.getenv("AUTH_RESPOND_RATE_LIMIT", "10/minute")
 SSO_EXCHANGE_RATE_LIMIT = os.getenv("SSO_EXCHANGE_RATE_LIMIT", "20/minute")
 
 
-# A-14-rate: in-process counters reset whenever an ECS task restarts
-# (deploy / scale-out / OOM kill). Operators that scale beyond a
-# single task — or that need horizontal-scaled brute-force resistance
-# — should set ``STRATOCLAVE_RATELIMIT_STORAGE_URI`` to a slowapi-
-# compatible URI (``redis://...`` / ``memcached://...`` / a
-# DynamoDB-backed implementation). When unset, we use the local
-# in-memory counter and emit a one-shot warning so the limitation is
-# visible in CloudWatch Logs at startup.
-_storage_uri = os.getenv("STRATOCLAVE_RATELIMIT_STORAGE_URI") or None
-if _storage_uri is None:
-    _log.warning(
-        "rate_limit_storage_in_process",
-        extra={
-            "event": "rate_limit_storage_warning",
-            "reason": (
-                "Per-IP rate limit counters are stored in-process and "
-                "reset on every ECS task restart. Set "
-                "STRATOCLAVE_RATELIMIT_STORAGE_URI=redis://... "
-                "(or another shared backend) for horizontally-scaled "
-                "deployments."
-            ),
-        },
-    )
+# The limiter is DynamoDB-backed (fixed-window, TTL-reaped). Per-IP
+# counters are shared across every ECS task, so caps hold under
+# horizontal scale-out and survive task restarts — no Redis, no new
+# infra class. The client key derivation (XFF algebra above) is reused
+# verbatim; only the counter storage moved from in-process to DynamoDB.
+from core.rate_limit_ddb import DynamoRateLimiter  # noqa: E402
 
-limiter = Limiter(
-    key_func=_client_key,
-    default_limits=[],  # opt-in per route
-    storage_uri=_storage_uri,
-    # `headers_enabled=True` makes slowapi's sync decorator try to mutate
-    # the handler's return value into a `starlette.responses.Response`
-    # and inject `X-RateLimit-*` headers. Our auth handlers return
-    # pydantic models via `response_model=...`, so the injector blows up
-    # with `parameter response must be an instance of starlette.responses.Response`
-    # and turns every authenticated request into a 500. Disable the
-    # header injection; the 429 emission on cap breach is independent of
-    # headers_enabled and still fires through the exception handler.
-    headers_enabled=False,
-    swallow_errors=False,
-)
+limiter = DynamoRateLimiter(client_key_func=_client_key)
 
 
 __all__ = [

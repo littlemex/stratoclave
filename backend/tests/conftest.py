@@ -17,6 +17,26 @@ from typing import Iterator
 import boto3
 import pytest
 
+# Hypothesis profiles for the stateful billing tests. `ci` fixes the
+# exploration so a CI run is deterministic (derandomize) and won't flake on a
+# time-based deadline; `dev` (default) explores more per run. Select with
+# HYPOTHESIS_PROFILE=ci. No-op if hypothesis isn't installed.
+try:
+    from hypothesis import HealthCheck, settings
+
+    settings.register_profile(
+        "ci",
+        max_examples=200,
+        stateful_step_count=50,
+        deadline=None,
+        derandomize=True,
+        suppress_health_check=[HealthCheck.too_slow],
+    )
+    settings.register_profile("dev", max_examples=100, stateful_step_count=30, deadline=None)
+    settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "dev"))
+except Exception:  # pragma: no cover - hypothesis optional at import time
+    pass
+
 # AWS credentials must be dummies *before* any boto3 import surface that
 # might read the environment happens. Keep this at module load time.
 os.environ["AWS_ACCESS_KEY_ID"] = "testing"
@@ -47,6 +67,7 @@ _TABLE_ENVS = {
     "DYNAMODB_SSO_PRE_REGISTRATIONS_TABLE": "stratoclave-sso-pre-registrations",
     "DYNAMODB_TENANT_BUDGETS_TABLE": "stratoclave-tenant-budgets",
     "DYNAMODB_PRICING_CONFIG_TABLE": "stratoclave-pricing-config",
+    "DYNAMODB_RATE_LIMITS_TABLE": "stratoclave-rate-limits",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -56,8 +77,18 @@ for k, v in _TABLE_ENVS.items():
 def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guarantee AWS_PROFILE is not set during tests so the mock endpoints
     stay in effect even if the host has a real profile configured.
+
+    Also reset the rate limiter's cached low-level client between tests: it is
+    lazily built on first use and cached in a module global, so a client built
+    outside a moto mock (or in a prior test's mock) must not leak into the next
+    test. Each test rebuilds it inside its own context.
     """
     monkeypatch.delenv("AWS_PROFILE", raising=False)
+    import core.rate_limit_ddb as _rl
+    _rl._rl_client = None
+    # Fresh in-process fallback counter per test (degraded-mode limiter state
+    # must not leak across tests).
+    _rl._local_fallback = _rl._LocalWindows()
 
 
 @pytest.fixture
@@ -73,6 +104,10 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
     moto = pytest.importorskip("moto")
     with moto.mock_aws():
         get_dynamodb_resource.cache_clear()
+        # The rate limiter holds its own (short-timeout) DynamoDB client;
+        # reset it so it is rebuilt inside this moto mock.
+        import core.rate_limit_ddb as _rl
+        _rl._rl_client = None
         dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
         # UserTenants: PK user_id, SK tenant_id
@@ -160,6 +195,14 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
                 {"AttributeName": "pk", "AttributeType": "S"},
                 {"AttributeName": "sk", "AttributeType": "S"},
             ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # RateLimits: PK pk ("RL#<scope>#<ip>#<window>"), TTL expires_at
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_RATE_LIMITS_TABLE"],
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
 

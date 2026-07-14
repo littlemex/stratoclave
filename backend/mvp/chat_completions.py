@@ -261,6 +261,18 @@ def chat_completions(
     max_out = body.max_tokens or 4096
     reservation = max(max_out + input_est, 1024)
 
+    # Build the Bedrock kwargs BEFORE the reserve. `_build_chat_bedrock_kwargs`
+    # is pure, and it is the single place that rejects unsupported content
+    # (image_url, etc.). Doing it pre-reserve turns every conversion error into
+    # a clean 400 request error instead of a post-reserve 502, avoids a needless
+    # hold, and removes the twin-validation drift hazard (no separate pre-check
+    # that can diverge from the converter). The same kwargs are reused by both
+    # the streaming and non-streaming paths below.
+    try:
+        kwargs = _build_chat_bedrock_kwargs(body, model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
+
     tenants_repo = reserve_credit_for_model(
         user, reservation,
         model_name=body.model,
@@ -270,7 +282,7 @@ def chat_completions(
 
     if body.stream:
         return StreamingResponse(
-            _stream_chat(body, model_id, user, tenants_repo, reservation),
+            _stream_chat(body, model_id, user, tenants_repo, reservation, kwargs),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -281,7 +293,6 @@ def chat_completions(
 
     # Non-streaming path
     try:
-        kwargs = _build_chat_bedrock_kwargs(body, model_id)
         resp = _bedrock_client().converse(**kwargs)
     except Exception as e:
         tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
@@ -359,8 +370,14 @@ async def _stream_chat(
     user: AuthenticatedUser,
     tenants_repo: Any,
     reservation: int,
+    kwargs: dict,
 ) -> AsyncGenerator[bytes, None]:
-    """SSE stream via the shared _budget_flow.run_stream + ChatAdapter."""
+    """SSE stream via the shared _budget_flow.run_stream + ChatAdapter.
+
+    `kwargs` is the pre-built Bedrock converse payload (built once, pre-reserve,
+    by the caller) so conversion errors surface as a 400 before any hold and
+    the build isn't duplicated on the streaming path.
+    """
     from . import _budget_flow
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -425,9 +442,13 @@ async def _stream_chat(
             yield _sse({"error": {"message": message, "type": "api_error"}})
 
     def _invoke(*, body, model_id):
-        kwargs = _build_chat_bedrock_kwargs(body, model_id)
+        # kwargs was built (and validated) pre-reserve by the caller. Honour the
+        # model_id run_stream passes so the payload can't drift from the caller
+        # (today they always match — this path does not go through InfraRouter,
+        # so there is no model failover — but keeping model_id load-bearing
+        # avoids a silent same-model re-invoke if that ever changes).
         client = _bedrock_client()
-        return client.converse_stream(**kwargs)
+        return client.converse_stream(**{**kwargs, "modelId": model_id})
 
     async for frame in _budget_flow.run_stream(
         body=body,

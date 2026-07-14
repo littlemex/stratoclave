@@ -142,6 +142,26 @@ class TestParameterRejection:
             chat_completions(body, user=None)
         assert exc.value.status_code == 400
 
+    def test_image_url_content_part_rejected_pre_reservation(self):
+        # Fable F4/F5: image_url parts must be rejected with a 400 request error
+        # BEFORE the reserve, not surface as a post-reserve 502 from the
+        # converter. Reaching this raise with user=None proves the check runs
+        # ahead of reserve_credit_for_model (which would need a real user).
+        from fastapi import HTTPException
+        from mvp.chat_completions import chat_completions
+
+        body = ChatCompletionsRequest.model_validate({
+            "model": "us.anthropic.claude-opus-4-7",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}],
+            }],
+        })
+        with pytest.raises(HTTPException) as exc:
+            chat_completions(body, user=None)
+        assert exc.value.status_code == 400
+        assert exc.value.detail["error"]["code"] == "unsupported_content"
+
 
 # ---------------------------------------------------------------------------
 # Unit: bedrock kwargs building

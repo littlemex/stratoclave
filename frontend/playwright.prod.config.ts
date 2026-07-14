@@ -8,7 +8,10 @@ const baseURL = process.env.PROD_FRONTEND_URL ?? 'https://example.invalid'
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['prod-deploy-2026-06-11.spec.ts'],
+  testMatch: [
+    'prod-deploy-2026-06-11.spec.ts',
+    'prod-authenticated-shell.spec.ts',
+  ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 0,

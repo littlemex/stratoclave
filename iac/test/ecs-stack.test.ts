@@ -150,3 +150,48 @@ describe('EcsStack', () => {
     template.hasOutput('ServiceName', {});
   });
 });
+
+// Multi-task (desiredCount>1) + autoscaling: the CFN template must OMIT
+// DesiredCount (so deploys don't reset the count / snap the fleet down
+// mid-incident) and floor the scalable target at MinCapacity=baseCount.
+describe('EcsStack multi-task/autoscaling', () => {
+  function synth(desiredCount: number): Template {
+    const app = new cdk.App();
+    const net = new cdk.Stack(app, 'Net', { env: { account: '123456789012', region: 'us-west-2' } });
+    const vpc = new ec2.Vpc(net, 'Vpc', { maxAzs: 2 });
+    const sg = new ec2.SecurityGroup(net, 'Sg', { vpc });
+    const repo = ecr.Repository.fromRepositoryName(net, 'Repo', 'stratoclave-backend');
+    const tg = new elbv2.ApplicationTargetGroup(net, 'Tg', {
+      vpc, port: 8000, protocol: elbv2.ApplicationProtocol.HTTP, targetType: elbv2.TargetType.IP,
+    });
+    const stack = new EcsStack(app, `Ecs${desiredCount}`, {
+      env: { account: '123456789012', region: 'us-west-2' },
+      prefix: 'stratoclave', vpc, securityGroup: sg, repository: repo, targetGroup: tg,
+      userPoolArn: 'arn:aws:cognito-idp:us-west-2:123456789012:userpool/us-west-2_t',
+      dynamoDbTableArns: ['arn:aws:dynamodb:us-west-2:123456789012:table/stratoclave-users'],
+      cpu: 256, memory: 512, desiredCount,
+      environment: { DATABASE_TYPE: 'dynamodb', AUTH_MODE: 'cognito' },
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('desiredCount=2 omits DesiredCount from the service template', () => {
+    const t = synth(2);
+    const services = t.findResources('AWS::ECS::Service');
+    const props = Object.values(services)[0].Properties;
+    expect(props.DesiredCount).toBeUndefined();
+  });
+
+  test('scalable target is floored at MinCapacity=2', () => {
+    const t = synth(2);
+    t.hasResourceProperties('AWS::ApplicationAutoScaling::ScalableTarget', {
+      MinCapacity: 2,
+      MaxCapacity: 4,
+    });
+  });
+
+  test('desiredCount=1 keeps DesiredCount (no override, pinned 1..1)', () => {
+    const t = synth(1);
+    t.hasResourceProperties('AWS::ECS::Service', { DesiredCount: 1 });
+  });
+});
