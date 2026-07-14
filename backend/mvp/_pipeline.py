@@ -535,34 +535,134 @@ def reserve_credit_for_model(
     input_tokens_est: int,
     max_output_tokens: int,
     effort_multiplier: int = 1,
+    breaker_max_tier: Optional[int] = None,
 ) -> ReservationContext:
-    """Reserve credit for a request, pricing the pool debit from the model.
+    """Reserve credit for a request, with per-model quota + cascading fallback.
 
-    Thin wrapper the route handlers call: resolves the model's `pricing_key`,
-    estimates the dollar cost of the reservation, and delegates to
-    `reserve_credit`. When the tenant has no pool budget this is exactly the
-    per-user token reservation as before; the pricing work is cheap and only
-    matters when a pool is present.
+    The single chokepoint every route handler calls. Two regimes:
+
+    - **No routing config** (the common case): prices the pool debit from the
+      requested model and delegates to `reserve_credit` — exactly the per-user
+      token reservation as before, plus the pool debit when a pool is present.
+      `context.selected_model` is the requested model so the handler invokes it.
+
+    - **Routing config present** (P0-11): resolves the ordered candidate chain
+      (allowlist ∩ chain ∩ breaker tier, honouring the fallback toggle) and
+      tries each candidate in turn. Each candidate is priced from ITS OWN
+      `pricing_key` — a cheaper fallback is reserved AND later settled at the
+      cheaper rate — and reserved against its per-model quota inside the same
+      atomic transaction as the pool debit. A `QuotaExhausted` on one candidate
+      advances to the next; a budget 402 (no money at all) surfaces immediately.
+      If every candidate's quota is exhausted, 402 `model_quota_exhausted`.
+
+    The chosen model is returned as `context.selected_model`; the handler
+    re-resolves that to a Bedrock model id for the actual invoke.
     """
-    from .models import resolve_model
+    from .models import resolve_model as _resolve_pricing
     from .pricing import estimate_cost_microusd
+    from .routing.config import get_tenant_routing_config, get_user_routing_config
 
-    try:
-        pricing_key = resolve_model(model_name).pricing_key
-    except ValueError:
-        pricing_key = "default"
-    cost = estimate_cost_microusd(
-        pricing_key=pricing_key,
-        input_tokens_est=input_tokens_est,
-        max_output_tokens=max_output_tokens,
-        effort_multiplier=effort_multiplier,
+    def _price(model: str) -> tuple[str, int]:
+        try:
+            pk = _resolve_pricing(model).pricing_key
+        except ValueError:
+            pk = "default"
+        return pk, estimate_cost_microusd(
+            pricing_key=pk,
+            input_tokens_est=input_tokens_est,
+            max_output_tokens=max_output_tokens,
+            effort_multiplier=effort_multiplier,
+        )
+
+    tenant_cfg = get_tenant_routing_config(user.org_id)
+    # No routing config at all → passthrough on the requested model (fully
+    # backward compatible: same reservation as before, no quota lines).
+    if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
+        pk, cost = _price(model_name)
+        return reserve_credit(
+            user, reservation_tokens,
+            pricing_key=pk, cost_microusd=cost,
+            selected_model=model_name,
+        )
+
+    user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    candidates = _resolve_candidate_chain(
+        requested_model=model_name,
+        tenant_cfg=tenant_cfg,
+        user_cfg=user_cfg,
+        breaker_max_tier=breaker_max_tier,
     )
-    return reserve_credit(
-        user,
-        reservation_tokens,
-        pricing_key=pricing_key,
-        cost_microusd=cost,
+
+    from .routing import quota as _quota
+
+    period = current_period()
+    for model in candidates:
+        pk, cost = _price(model)
+        q = tenant_cfg.quotas.get(model)
+        tenant_limit = q.limit if q else None
+        quota_lines = (
+            _quota.build_reserve_txn_items(
+                tenant_id=user.org_id, user_id=user.user_id, model=model,
+                period=period, amount=cost, tenant_limit=tenant_limit,
+            )
+            if (cost and tenant_limit is not None)
+            else None
+        )
+        try:
+            return reserve_credit(
+                user, reservation_tokens,
+                pricing_key=pk, cost_microusd=cost,
+                quota_lines=quota_lines,
+                quota_model=model if quota_lines else None,
+                selected_model=model,
+            )
+        except QuotaExhausted as e:
+            logger.info("quota_cascade_advance", tenant_id=user.org_id,
+                        exhausted_model=e.model, period=period)
+            continue
+    logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
+    raise _err_402("model_quota_exhausted")
+
+
+def _resolve_candidate_chain(
+    *,
+    requested_model: str,
+    tenant_cfg,
+    user_cfg,
+    breaker_max_tier: Optional[int],
+) -> list:
+    """Ordered list of models to attempt for a request (P0-11 cascade).
+
+    Mirrors `model_resolver.resolve_model`'s filtering but returns the FULL
+    ordered list rather than just the head, so the caller can walk it on quota
+    exhaustion. Honours: chain start position, allowlist intersection, breaker
+    tier cap, and the tenant/user fallback toggle (which truncates to the head).
+    Always returns at least the requested model.
+    """
+    from .routing.model_resolver import _resolve_chain, resolve_model
+
+    fallback_allowed = (tenant_cfg.fallback_default == "on")
+    if user_cfg and user_cfg.fallback is not None:
+        fallback_allowed = (user_cfg.fallback == "on")
+
+    selection = resolve_model(
+        requested_model=requested_model,
+        tenant_config=tenant_cfg,
+        user_config=user_cfg,
+        breaker_max_tier=breaker_max_tier,
+        fallback_allowed=fallback_allowed,
     )
+
+    candidates = _resolve_chain(requested_model, tenant_cfg, user_cfg)
+    if tenant_cfg.allowlist:
+        candidates = [m for m in candidates if m in tenant_cfg.allowlist] or [selection.selected_model]
+    if breaker_max_tier is not None:
+        from .routing.chains import _tier_for
+        capped = [m for m in candidates if _tier_for(m) <= breaker_max_tier]
+        candidates = capped or candidates
+    if not fallback_allowed:
+        candidates = candidates[:1]
+    return candidates or [selection.selected_model]
 
 
 def reserve_credit(
@@ -842,94 +942,6 @@ def reserve_credit(
             },
         )
     raise _err_402("tenant_pool_exhausted")
-
-
-def reserve_with_model_cascade(
-    user,
-    reservation_tokens: int,
-    *,
-    requested_model: str,
-    pricing_key: Optional[str] = None,
-    cost_microusd: Optional[int] = None,
-    breaker_max_tier: Optional[int] = None,
-) -> ReservationContext:
-    """Reserve budget with per-model quota + cascading fallback (P0-11).
-
-    Opt-in: a tenant with NO routing config behaves exactly like plain
-    `reserve_credit` on the requested model (backward compatible). With config,
-    `resolve_model` yields an ordered candidate chain (allowlist ∩ chain ∩
-    breaker tier). We try each candidate: build its quota lines and reserve;
-    if the quota is exhausted (QuotaExhausted), advance to the next candidate.
-    Budget-exhaustion (402) is NOT a cascade trigger — it means no money at all,
-    so we surface it immediately. If every candidate's quota is exhausted, 402
-    `model_quota_exhausted`.
-
-    Returns a ReservationContext whose `selected_model` is the model to invoke.
-    """
-    from .routing import quota as _quota
-    from .routing.config import get_tenant_routing_config, get_user_routing_config
-    from .routing.model_resolver import resolve_model
-
-    tenant_cfg = get_tenant_routing_config(user.org_id)
-    # No config at all → passthrough: single model, no quota lines.
-    if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
-        return reserve_credit(
-            user, reservation_tokens,
-            pricing_key=pricing_key, cost_microusd=cost_microusd,
-        )
-
-    user_cfg = get_user_routing_config(user.org_id, user.user_id)
-    fallback_allowed = (tenant_cfg.fallback_default == "on")
-    if user_cfg and user_cfg.fallback is not None:
-        fallback_allowed = (user_cfg.fallback == "on")
-
-    selection = resolve_model(
-        requested_model=requested_model,
-        tenant_config=tenant_cfg,
-        user_config=user_cfg,
-        breaker_max_tier=breaker_max_tier,
-        fallback_allowed=fallback_allowed,
-    )
-
-    # Candidate chain to attempt in order (resolve_model returns the head; we
-    # rebuild the full ordered list for the cascade).
-    from .routing.model_resolver import _resolve_chain
-    candidates = _resolve_chain(requested_model, tenant_cfg, user_cfg)
-    if tenant_cfg.allowlist:
-        candidates = [m for m in candidates if m in tenant_cfg.allowlist] or [selection.selected_model]
-    if breaker_max_tier is not None:
-        from .routing.chains import _tier_for
-        capped = [m for m in candidates if _tier_for(m) <= breaker_max_tier]
-        candidates = capped or candidates
-    if not fallback_allowed:
-        candidates = candidates[:1]
-    if not candidates:
-        candidates = [selection.selected_model]
-
-    period = current_period()
-    for model in candidates:
-        q = tenant_cfg.quotas.get(model)
-        tenant_limit = q.limit if q else None
-        quota_lines = _quota.build_reserve_txn_items(
-            tenant_id=user.org_id, user_id=user.user_id, model=model,
-            period=period, amount=cost_microusd or 0,
-            tenant_limit=tenant_limit,
-        ) if (cost_microusd and tenant_limit is not None) else None
-        try:
-            return reserve_credit(
-                user, reservation_tokens,
-                pricing_key=pricing_key, cost_microusd=cost_microusd,
-                quota_lines=quota_lines,
-                quota_model=model if quota_lines else None,
-                selected_model=model,
-            )
-        except QuotaExhausted as e:
-            logger.info("quota_cascade_advance", tenant_id=user.org_id,
-                        exhausted_model=e.model, period=period)
-            continue
-    # Every candidate's quota is exhausted.
-    logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
-    raise _err_402("model_quota_exhausted")
 
 
 def release_pool(context) -> None:

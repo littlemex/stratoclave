@@ -430,6 +430,24 @@ async def create_response(
         effort_multiplier=_multiplier,
     )
 
+    # The reservation may have cascaded to a fallback model (P0-11). Invoke the
+    # model actually priced/quota-charged — but ONLY if it still speaks the
+    # `responses` wire protocol; a cross-protocol fallback (e.g. to a Claude
+    # entry) cannot be served on this route, so keep the requested entry rather
+    # than routing to the wrong backend.
+    _selected = getattr(tenants_repo, "selected_model", None)
+    if _selected and _selected != body.model:
+        try:
+            _sel_entry = resolve_model(_selected)
+            if _sel_entry.wire_protocol == "responses":
+                entry = _sel_entry
+            else:
+                logger.warning("cascade_model_wrong_protocol",
+                               selected_model=_selected,
+                               wire_protocol=_sel_entry.wire_protocol)
+        except ValueError:
+            logger.warning("cascade_model_unresolvable", selected_model=_selected)
+
     if body.stream:
         return StreamingResponse(
             _stream_response(body, entry, user, tenants_repo, reservation),

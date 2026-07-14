@@ -96,18 +96,33 @@ def soft_check_exhausted(
 def _reserve_item(pk: str, sk: str, amount: int, limit: int, expires_at: int) -> dict[str, Any]:
     """One TransactWriteItems Update that reserves `amount` against `limit`.
 
-    No cross-attribute arithmetic (DynamoDB forbids it): the condition is
-    `attribute_not_exists(used) OR used <= :headroom` with :headroom computed
-    client-side, and the write is a plain `ADD used :amt`. Also sets the TTL on
-    first touch via if_not_exists so counters self-expire after the period.
+    No cross-attribute arithmetic (DynamoDB forbids it): we gate on the
+    client-computed `:headroom = limit - amount` with a plain `ADD used :amt`.
+
+    The condition has TWO cases because a missing `used` reads as 0:
+      - amount <= limit (headroom >= 0): a first reservation (no `used` yet) is
+        fine, and an existing one is fine iff `used <= headroom`. Condition:
+        `attribute_not_exists(used) OR used <= :headroom`.
+      - amount  > limit (headroom  < 0): the request alone exceeds the whole
+        limit; it must NEVER be admitted, not even as the first reservation. We
+        DROP the `attribute_not_exists` branch so the condition is just
+        `used <= :headroom` — false on a missing attribute AND on any real value
+        (headroom is negative), so it always cancels. (Without this, the
+        `attribute_not_exists` branch would short-circuit TRUE and over-admit a
+        single oversized request past the limit.)
+    Also sets the TTL on first touch via if_not_exists so counters self-expire.
     """
-    headroom = limit - amount  # may be negative → condition never holds → cancels
+    headroom = limit - amount
+    if headroom >= 0:
+        condition = "attribute_not_exists(used) OR used <= :headroom"
+    else:
+        condition = "used <= :headroom"
     return {
         "Update": {
             "TableName": _TABLE,
             "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
             "UpdateExpression": "ADD used :amt SET expires_at = if_not_exists(expires_at, :ttl)",
-            "ConditionExpression": "attribute_not_exists(used) OR used <= :headroom",
+            "ConditionExpression": condition,
             "ExpressionAttributeValues": {
                 ":amt": {"N": str(int(amount))},
                 ":headroom": {"N": str(int(headroom))},

@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .anthropic import _bedrock_client
+from .anthropic import _bedrock_client, _selected_bedrock_model
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit_for_model,
@@ -279,6 +279,14 @@ def chat_completions(
         input_tokens_est=input_est,
         max_output_tokens=max_out,
     )
+
+    # The reservation may have cascaded to a fallback model (P0-11). Re-point
+    # both the invoke target and the pre-built kwargs at the model actually
+    # priced/quota-charged so the Bedrock call agrees with the pool + quota.
+    selected_id = _selected_bedrock_model(tenants_repo, model_id)
+    if selected_id != model_id:
+        model_id = selected_id
+        kwargs["modelId"] = model_id
 
     if body.stream:
         return StreamingResponse(

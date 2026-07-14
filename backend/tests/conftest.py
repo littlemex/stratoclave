@@ -68,6 +68,7 @@ _TABLE_ENVS = {
     "DYNAMODB_TENANT_BUDGETS_TABLE": "stratoclave-tenant-budgets",
     "DYNAMODB_PRICING_CONFIG_TABLE": "stratoclave-pricing-config",
     "DYNAMODB_RATE_LIMITS_TABLE": "stratoclave-rate-limits",
+    "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -203,6 +204,21 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             TableName=_TABLE_ENVS["DYNAMODB_RATE_LIMITS_TABLE"],
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
             AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # ModelQuotas: PK pk ("TENANT#..." / "TENANT#...#USER#..."), SK sk
+        # ("MQ#<model>#<period>"), TTL expires_at. One `used` counter per row.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_MODEL_QUOTAS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
             BillingMode="PAY_PER_REQUEST",
         )
 

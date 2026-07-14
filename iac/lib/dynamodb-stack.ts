@@ -48,6 +48,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly pricingConfigTable: dynamodb.Table;
   /** Per-IP fixed-window rate-limit counters, shared across ECS tasks (TTL-reaped) */
   public readonly rateLimitsTable: dynamodb.Table;
+  /** P0-11: per-model quota counters (one `used` counter per scope/model/period), TTL-reaped */
+  public readonly modelQuotasTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -350,6 +352,25 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'expires_at',
     });
 
+    // P0-11: per-model quota counters. One item per (scope, model, period):
+    //   PK "TENANT#<id>" | "TENANT#<id>#USER#<uid>", SK "MQ#<model>#<period>".
+    // A single monotonic `used` counter (reserved-in-flight + settled) is
+    // charged inside the SAME TransactWriteItems as the pooled-budget debit, so
+    // budget + quota commit atomically. `expires_at` TTL reaps a period's rows a
+    // few days after month-end. No new infra class — DynamoDB only.
+    //
+    // Audit note: unlike the budget pool this is a soft policy limit, not a
+    // spend record, so it does not need PITR/RETAIN — the tenant-budgets table
+    // remains the source of truth for money. Ephemeral → no PITR.
+    this.modelQuotasTable = new dynamodb.Table(this, 'ModelQuotasTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-model-quotas`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -369,6 +390,7 @@ export class DynamoDBStack extends cdk.Stack {
       this.tenantBudgetsTable.tableArn,
       this.pricingConfigTable.tableArn,
       this.rateLimitsTable.tableArn,
+      this.modelQuotasTable.tableArn,
     ];
 
     // Parameter Store exports
@@ -391,6 +413,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableTenantBudgetsParam', 'dynamodb/table-tenant-budgets', this.tenantBudgetsTable],
       ['TablePricingConfigParam', 'dynamodb/table-pricing-config', this.pricingConfigTable],
       ['TableRateLimitsParam', 'dynamodb/table-rate-limits', this.rateLimitsTable],
+      ['TableModelQuotasParam', 'dynamodb/table-model-quotas', this.modelQuotasTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

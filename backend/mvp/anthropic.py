@@ -72,6 +72,26 @@ _settle_reservation_and_log = settle_reservation_and_log
 
 
 logger = get_logger(__name__)
+
+
+def _selected_bedrock_model(context, default_model_id: str) -> str:
+    """Bedrock model id the reservation actually chose (P0-11 cascade).
+
+    The reservation carries `selected_model` (a client-facing name); when the
+    cascade fell back to a different model we must invoke THAT one so the
+    Bedrock call matches the pool debit and quota charge. Falls back to the
+    already-resolved default id when there's no selection or it can't be
+    resolved (e.g. an out-of-allowlist chain entry) — safer to invoke the model
+    we validated up front than to fail the request.
+    """
+    selected = getattr(context, "selected_model", None)
+    if not selected:
+        return default_model_id
+    try:
+        return resolve_bedrock_model(selected)
+    except ValueError:
+        logger.warning("cascade_model_unresolvable", selected_model=selected)
+        return default_model_id
 router = APIRouter(tags=["mvp-anthropic"])
 
 
@@ -498,6 +518,11 @@ def messages(
         input_tokens_est=max(reservation - body.max_tokens, 0),
         max_output_tokens=body.max_tokens,
     )
+
+    # The reservation may have cascaded to a fallback model (P0-11). Invoke the
+    # model the reservation actually priced/quota-charged, not the requested one,
+    # so the Bedrock call, the pool debit, and the per-model quota all agree.
+    model_id = _selected_bedrock_model(tenants_repo, model_id)
 
     if body.stream:
         return StreamingResponse(

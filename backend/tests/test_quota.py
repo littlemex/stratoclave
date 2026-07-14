@@ -18,17 +18,8 @@ from mvp.routing.quota import (
 
 @pytest.fixture
 def quota_table(dynamodb_mock):
-    """Create the model-quotas table (PK pk, SK sk) in the moto mock."""
-    db = boto3.resource("dynamodb", region_name="us-east-1")
-    db.create_table(
-        TableName=_TABLE,
-        KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"},
-                   {"AttributeName": "sk", "KeyType": "RANGE"}],
-        AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"},
-                              {"AttributeName": "sk", "AttributeType": "S"}],
-        BillingMode="PAY_PER_REQUEST",
-    )
-    return db.Table(_TABLE)
+    """The model-quotas table (created by the shared dynamodb_mock fixture)."""
+    return boto3.resource("dynamodb", region_name="us-east-1").Table(_TABLE)
 
 
 class TestSoftCheck:
