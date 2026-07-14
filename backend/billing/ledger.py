@@ -106,10 +106,13 @@ class BillingLedger:
             raise HoldNotFound(hold_id)
         if actual < 0:
             raise ValueError("actual must be >= 0")
-        # In prod `actual <= reserved` holds by construction (reservation is the
-        # max plausible cost). Enforce it so the model matches that contract.
-        if actual > hold.amount:
-            raise ValueError(f"actual {actual} exceeds reserved {hold.amount}")
+        # `actual` MAY exceed the reservation: the reserve is a heuristic
+        # (max_out + input_est), and cache read/write tokens are settled but not
+        # reserved at all, so a real settle can bill more than it held. The
+        # SET-based settle (ADD reserved -x, settled +actual) stays
+        # conservation-correct regardless; the excess just shows up as bounded
+        # ceiling overshoot (R+S can exceed L by the overshoot — same class as
+        # an admin lowering the limit; see the Z3 CE test). Do NOT reject it.
         self._reserved -= hold.amount
         self._settled += actual
         del self._live[hold_id]

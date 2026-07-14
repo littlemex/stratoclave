@@ -349,6 +349,22 @@ def _fresh_idempotency_token() -> str:
     return str(uuid.uuid4())
 
 
+# Namespace for deriving a stable-but-distinct token from a primary settle
+# token. uuid5 keeps the result EXACTLY 36 chars (a raw UUID string), so it
+# stays within DynamoDB's 36-char ClientRequestToken limit — unlike a naive
+# f"{token}-so" (39 chars), which raises ValidationException on every call.
+_SETTLED_ONLY_NS = uuid.UUID("5f2b9c14-0000-4000-8000-000000000001")
+
+
+def _derived_token(primary: str, tag: str) -> str:
+    """A 36-char ClientRequestToken deterministically derived from `primary`.
+
+    Same `primary`+`tag` → same token, so a lost-ack retry of the derived write
+    dedupes instead of double-recording; different primaries → different tokens.
+    """
+    return str(uuid.uuid5(_SETTLED_ONLY_NS, f"{primary}:{tag}"))
+
+
 def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
     """Reclaim expired pool holds for `tenant_id`, this period AND the previous.
 
@@ -1055,7 +1071,10 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                             # Derive from the primary settle token (not a fresh
                             # UUID) so a lost-ack here that gets retried dedupes
                             # to the same write instead of double-recording spend.
-                            ClientRequestToken=f"{token}-so",
+                            # Must stay <=36 chars: f"{token}-so" would be 39 and
+                            # ValidationException every time (silent revenue leak
+                            # on the reaper-race path). uuid5 keeps it exactly 36.
+                            ClientRequestToken=_derived_token(token, "settled-only"),
                         )
                     except ClientError as e2:
                         if (

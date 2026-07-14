@@ -137,8 +137,25 @@ async def run_stream(
         # teardown; process death is covered by the hold reaper) — never block
         # the SHARED event loop with settle's boto3 + sleeps here.
         if _claim_finalize():
+            def _do_settle_logged():
+                # This is the MOST COMMON finalizer (clients close on [DONE]),
+                # and its future is discarded — so a raised settle here would be
+                # only "exception never retrieved" GC noise. Make a failed
+                # disconnect-settle a first-class, alarmable log line instead.
+                try:
+                    _do_settle()
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception(
+                        "disconnect_settle_failed", extra={"model_id": model_id}
+                    )
+                    raise
             try:
                 loop = asyncio.get_running_loop()
-                loop.run_in_executor(None, _do_settle)
+                loop.run_in_executor(None, _do_settle_logged)
             except RuntimeError:
-                _do_settle()
+                try:
+                    _do_settle()
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception("disconnect_settle_failed")

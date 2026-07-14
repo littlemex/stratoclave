@@ -86,15 +86,17 @@ class BillingMachine(RuleBasedStateMachine):
             self.ledger.reserve(amount)
         return multiple()  # rejected: contribute nothing to the bundle
 
-    @rule(hold_id=consumes(holds), frac=st.floats(min_value=0.0, max_value=1.0))
-    def settle(self, hold_id, frac):
-        # In prod actual <= reserved always (the reservation is the max
-        # plausible cost). Draw actual within [0, reserved] to honour that
-        # contract — settle never overshoots the ceiling; only set_limit does.
+    @rule(hold_id=consumes(holds), actual=USAGE)
+    def settle(self, hold_id, actual):
+        # `actual` MAY exceed the reservation: the reserve is a heuristic and
+        # cache tokens are settled but never reserved, so a real settle can bill
+        # more than it held. The excess becomes bounded ceiling overshoot (the
+        # same class as an admin lowering the limit) — fold it into the debt so
+        # the ceiling-with-debt invariant stays exact.
         reserved = self.live.pop(hold_id)
-        actual = int(reserved * frac)
         self.ledger.settle(hold_id, actual)
         self.settled[hold_id] = actual
+        self.overshoot_debt += max(0, actual - reserved)
 
     @rule(hold_id=consumes(holds))
     def release(self, hold_id):

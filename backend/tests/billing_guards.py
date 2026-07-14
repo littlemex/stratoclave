@@ -337,11 +337,21 @@ def _assignments_to(func, name):
     return out
 
 
+# Calls that deterministically DERIVE a stable token from their arguments
+# (same inputs -> same token), so a lost-ack retry dedupes. Distinct from
+# FRESHNESS_CALLS (which return a new value each call).
+STABLE_DERIVING_CALLS = frozenset({"_derived_token", "uuid5", "uuid3"})
+
+
 def classify_token_expr(expr, func, depth: int = 4) -> str:
     """'fresh' | 'stable' | 'constant' | 'unknown'.  Heuristic; 'unknown'
     fails closed and points at the runtime contract test."""
     if expr is None or depth == 0:
         return "unknown"
+    # A deterministic-derivation call is stable (top-level only — a fresh
+    # component nested inside would still make the result fresh).
+    if isinstance(expr, ast.Call) and _callee_name(expr.func) in STABLE_DERIVING_CALLS:
+        return "stable"
     for n in ast.walk(expr):
         if isinstance(n, ast.Call) and _callee_name(n.func) in FRESHNESS_CALLS:
             return "fresh"
@@ -419,10 +429,17 @@ def check_transact_tokens(sites, expected_kinds):
                      f"(expected {expected!r}). Simplify the expression or "
                      f"cover this site in the runtime A5 contract test, then "
                      f"update the registry.")
-        elif kind != expected:
-            v.append(f"{s.module}:{s.lineno} {s.qualname}: token classified "
-                     f"{kind!r} but A5 requires {expected!r} here. "
-                     f"(reserve=fresh per attempt; settle=stable for dedupe.)")
+        else:
+            # `expected` may be a single kind or a set/tuple of allowed kinds
+            # (a qualname with >1 transact site can legitimately mix fresh +
+            # stable — e.g. settle mints a fresh primary token AND a derived
+            # stable token for its settled-only fallback).
+            allowed = {expected} if isinstance(expected, str) else set(expected)
+            if kind not in allowed:
+                v.append(f"{s.module}:{s.lineno} {s.qualname}: token classified "
+                         f"{kind!r} but A5 requires one of {sorted(allowed)!r} "
+                         f"here. (reserve=fresh per attempt; settle=stable for "
+                         f"dedupe.)")
     return v
 
 # ------------------------------------------------ attribute_exists latches

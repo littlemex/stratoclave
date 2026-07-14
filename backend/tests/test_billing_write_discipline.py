@@ -127,7 +127,11 @@ EXPECTED_TOKEN_KIND = {
         "reserve_credit": "fresh",
         "ReservationContext.release_pool": "fresh",
         "_sweep_one_period": "fresh",
-        "_settle_pool_side": "fresh",
+        # settle has TWO transact sites: the main settle (fresh-minted `token`,
+        # reused across its retry loop) and the settled-only fallback
+        # (_derived_token(token,...) = deterministic/stable so a lost-ack
+        # dedupes). Both kinds are allowed here.
+        "_settle_pool_side": ("fresh", "stable"),
     },
     "backend/dynamo/user_tenants.py": {
         # tenant reassignment: idempotent SET (attribute_exists-guarded), not a

@@ -1031,3 +1031,24 @@ def test_zero_amount_hold_is_deleted_not_skipped(seed_tenant_with_pool):
 
     _pipeline._sweep_expired_holds(repo, seed["tenant_id"], seed["period"])
     assert _holds(seed) == [], "zero-amount hold must be deleted, not skipped"
+
+
+# ---------------------------------------------------------------------------
+# F1 regression (final Fable review): every ClientRequestToken must fit
+# DynamoDB's 36-char limit. The settled-only fallback derives its token from
+# the primary; a naive f"{token}-so" would be 39 chars and ValidationException
+# on every reaper-race settle (silent revenue leak).
+# ---------------------------------------------------------------------------
+def test_all_idempotency_tokens_within_dynamodb_limit():
+    from mvp import _pipeline as p
+
+    for _ in range(1000):
+        primary = p._fresh_idempotency_token()
+        assert len(primary) <= 36, f"primary token too long: {len(primary)}"
+        derived = p._derived_token(primary, "settled-only")
+        assert len(derived) <= 36, f"derived token too long: {len(derived)}"
+        # deterministic per (primary, tag) so a lost-ack retry dedupes
+        assert derived == p._derived_token(primary, "settled-only")
+        # distinct from the primary and from a different tag
+        assert derived != primary
+        assert derived != p._derived_token(primary, "other")
