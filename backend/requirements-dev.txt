@@ -24,3 +24,11 @@ joserfc==1.7.1
 
 # Linting / formatting
 ruff==0.8.4
+
+# Formal / property-based tests for the pooled-billing logic.
+# test_billing_formal_z3.py proves the concurrency invariants with an SMT
+# solver (all interleavings, not examples); test_billing_stateful.py fuzzes
+# the reserve/settle/release/reap/set-limit lifecycle with Hypothesis against
+# billing/ledger.py (the executable spec of the DynamoDB money logic).
+z3-solver==4.13.0.0
+hypothesis==6.112.1

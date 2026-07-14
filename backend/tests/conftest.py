@@ -17,6 +17,26 @@ from typing import Iterator
 import boto3
 import pytest
 
+# Hypothesis profiles for the stateful billing tests. `ci` fixes the
+# exploration so a CI run is deterministic (derandomize) and won't flake on a
+# time-based deadline; `dev` (default) explores more per run. Select with
+# HYPOTHESIS_PROFILE=ci. No-op if hypothesis isn't installed.
+try:
+    from hypothesis import HealthCheck, settings
+
+    settings.register_profile(
+        "ci",
+        max_examples=200,
+        stateful_step_count=50,
+        deadline=None,
+        derandomize=True,
+        suppress_health_check=[HealthCheck.too_slow],
+    )
+    settings.register_profile("dev", max_examples=100, stateful_step_count=30, deadline=None)
+    settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "dev"))
+except Exception:  # pragma: no cover - hypothesis optional at import time
+    pass
+
 # AWS credentials must be dummies *before* any boto3 import surface that
 # might read the environment happens. Keep this at module load time.
 os.environ["AWS_ACCESS_KEY_ID"] = "testing"
