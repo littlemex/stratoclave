@@ -33,6 +33,13 @@ Homepage = "https://github.com/littlemex/stratoclave"
 Repository = "https://github.com/littlemex/stratoclave"
 Issues = "https://github.com/littlemex/stratoclave/issues"
 
+[tool.pytest.ini_options]
+markers = [
+    # Hits REAL AWS (DynamoDB / CloudFront). Skipped by default; opt in with the
+    # documented env var. NOT a per-commit gate — run it pre-merge.
+    "live: exercises real AWS resources; requires opt-in env + credentials",
+]
+
 [tool.ruff]
 # Applies to backend/ only (project root is `backend/`).
 line-length = 100
