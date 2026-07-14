@@ -536,6 +536,7 @@ def reserve_credit_for_model(
     max_output_tokens: int,
     effort_multiplier: int = 1,
     breaker_max_tier: Optional[int] = None,
+    wire_protocol: Optional[str] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -591,6 +592,7 @@ def reserve_credit_for_model(
         tenant_cfg=tenant_cfg,
         user_cfg=user_cfg,
         breaker_max_tier=breaker_max_tier,
+        wire_protocol=wire_protocol,
     )
 
     from .routing import quota as _quota
@@ -630,6 +632,7 @@ def _resolve_candidate_chain(
     tenant_cfg,
     user_cfg,
     breaker_max_tier: Optional[int],
+    wire_protocol: Optional[str] = None,
 ) -> list:
     """Ordered list of models to attempt for a request (P0-11 cascade).
 
@@ -638,7 +641,19 @@ def _resolve_candidate_chain(
     exhaustion. Honours: chain start position, allowlist intersection, breaker
     tier cap, and the tenant/user fallback toggle (which truncates to the head).
     Always returns at least the requested model.
+
+    SERVABILITY FILTER (Fable F2/F3/F4 root fix): the handler invokes whatever
+    the cascade selects, so a candidate that can't actually be served on this
+    route is a money bug waiting to happen — if it won the cascade, the handler
+    would silently invoke the *requested* model instead, PAST its exhausted
+    quota and mispriced. So we drop any candidate that (a) doesn't resolve in the
+    model registry, or (b) — when `wire_protocol` is given — doesn't speak this
+    route's wire protocol. The requested model is exempt from the protocol drop
+    (it was already validated by the route) so a bad chain entry never fails an
+    otherwise-valid direct request. If filtering empties the chain, we keep the
+    requested model as the sole candidate.
     """
+    from .models import resolve_model as _resolve_registry
     from .routing.model_resolver import _resolve_chain, resolve_model
 
     fallback_allowed = (tenant_cfg.fallback_default == "on")
@@ -662,7 +677,28 @@ def _resolve_candidate_chain(
         candidates = capped or candidates
     if not fallback_allowed:
         candidates = candidates[:1]
-    return candidates or [selection.selected_model]
+    candidates = candidates or [selection.selected_model]
+
+    def _servable(model: str) -> bool:
+        # The requested model is exempt: the route already validated it.
+        if model == requested_model:
+            return True
+        try:
+            entry = _resolve_registry(model)
+        except ValueError:
+            logger.warning("cascade_candidate_unresolvable",
+                           tenant_id=tenant_cfg and getattr(tenant_cfg, "tenant_id", None),
+                           candidate=model)
+            return False
+        if wire_protocol is not None and entry.wire_protocol != wire_protocol:
+            logger.warning("cascade_candidate_wrong_protocol",
+                           candidate=model, wire_protocol=entry.wire_protocol,
+                           route_protocol=wire_protocol)
+            return False
+        return True
+
+    servable = [m for m in candidates if _servable(m)]
+    return servable or [requested_model]
 
 
 def reserve_credit(

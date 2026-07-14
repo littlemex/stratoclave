@@ -189,13 +189,31 @@ def release_quota(
 
 
 def _adjust_used(tenant_id, user_id, model, period, delta: int) -> None:
+    """Adjust `used` on the reserved rows only (settle/release).
+
+    Gated on `attribute_exists(used)`: a scope is only ever reserved when it had
+    a configured limit (see `build_reserve_txn_items`), so its row already
+    carries `used`. A scope that was NOT reserved (e.g. tenant limit set but no
+    per-user limit) has no row — adjusting it unconditionally would CREATE a
+    phantom row with a negative `used`, which later (if a limit is added) would
+    let that scope over-spend by |delta|. The condition makes the missing-row
+    case a clean no-op instead. `ConditionalCheckFailed` is that no-op, so it is
+    swallowed; any other error propagates to the caller's guard.
+    """
+    from botocore.exceptions import ClientError
+
     tbl = _table()
     sk = _sk(model, period)
     for pk in (_pk_tenant(tenant_id), _pk_user(tenant_id, user_id) if user_id else None):
         if pk is None:
             continue
-        tbl.update_item(
-            Key={"pk": pk, "sk": sk},
-            UpdateExpression="ADD used :d",
-            ExpressionAttributeValues={":d": delta},
-        )
+        try:
+            tbl.update_item(
+                Key={"pk": pk, "sk": sk},
+                UpdateExpression="ADD used :d",
+                ConditionExpression="attribute_exists(used)",
+                ExpressionAttributeValues={":d": delta},
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise

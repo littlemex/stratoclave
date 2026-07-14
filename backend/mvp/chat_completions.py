@@ -278,11 +278,14 @@ def chat_completions(
         model_name=body.model,
         input_tokens_est=input_est,
         max_output_tokens=max_out,
+        wire_protocol="messages",
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point
     # both the invoke target and the pre-built kwargs at the model actually
     # priced/quota-charged so the Bedrock call agrees with the pool + quota.
+    # The cascade only selects registry-resolvable `messages`-protocol models,
+    # so a cross-protocol / typo'd chain entry can never win here.
     selected_id = _selected_bedrock_model(tenants_repo, model_id)
     if selected_id != model_id:
         model_id = selected_id

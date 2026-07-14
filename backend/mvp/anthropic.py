@@ -517,11 +517,14 @@ def messages(
         model_name=body.model,
         input_tokens_est=max(reservation - body.max_tokens, 0),
         max_output_tokens=body.max_tokens,
+        wire_protocol="messages",
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
     # model the reservation actually priced/quota-charged, not the requested one,
-    # so the Bedrock call, the pool debit, and the per-model quota all agree.
+    # so the Bedrock call, the pool debit, and the per-model quota all agree. The
+    # cascade only ever selects a registry-resolvable `messages`-protocol model
+    # (servability filter), so this re-resolve cannot land on the wrong model.
     model_id = _selected_bedrock_model(tenants_repo, model_id)
 
     if body.stream:

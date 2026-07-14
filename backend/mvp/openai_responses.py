@@ -428,24 +428,25 @@ async def create_response(
         input_tokens_est=max(reservation - body.max_output_tokens * _multiplier, 0),
         max_output_tokens=body.max_output_tokens,
         effort_multiplier=_multiplier,
+        wire_protocol="responses",
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
-    # model actually priced/quota-charged — but ONLY if it still speaks the
-    # `responses` wire protocol; a cross-protocol fallback (e.g. to a Claude
-    # entry) cannot be served on this route, so keep the requested entry rather
-    # than routing to the wrong backend.
+    # model actually priced/quota-charged. The cascade's servability filter only
+    # ever selects a registry-resolvable `responses`-protocol model, so the
+    # selection is always servable on this route (a cross-protocol / typo'd chain
+    # entry is dropped before it can win). Re-resolve defensively all the same.
     _selected = getattr(tenants_repo, "selected_model", None)
     if _selected and _selected != body.model:
         try:
             _sel_entry = resolve_model(_selected)
             if _sel_entry.wire_protocol == "responses":
                 entry = _sel_entry
-            else:
+            else:  # pragma: no cover — filtered out upstream
                 logger.warning("cascade_model_wrong_protocol",
                                selected_model=_selected,
                                wire_protocol=_sel_entry.wire_protocol)
-        except ValueError:
+        except ValueError:  # pragma: no cover — filtered out upstream
             logger.warning("cascade_model_unresolvable", selected_model=_selected)
 
     if body.stream:
