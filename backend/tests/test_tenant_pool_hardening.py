@@ -248,6 +248,35 @@ def test_retry_exhaustion_fails_closed_not_open(seed_tenant_with_pool, monkeypat
     _pipeline._LOW_LEVEL_CLIENT = real_client
 
 
+def test_contention_backoff_is_jittered_and_capped():
+    """Full-jitter exponential backoff for the hot-row reserve retries.
+
+    Regression: linear backoff (delay = base * attempt) synchronised a
+    concurrent burst on one tenant's pool row so it fund-exhausted its retries
+    and failed closed (503) under a 20-way live load. The jittered version must
+    (a) grow with the attempt, (b) stay within [0, cap], and (c) actually vary
+    run-to-run so colliding writers desynchronise.
+    """
+    cap = _pipeline._RESERVE_BACKOFF_CAP_SECONDS
+    # Every sample is within [0, cap] for a range of attempts.
+    for attempt in range(1, 12):
+        for _ in range(20):
+            d = _pipeline._contention_backoff(attempt)
+            assert 0.0 <= d <= cap
+
+    # High attempts saturate at the cap ceiling (full-jitter → mean ≈ cap/2),
+    # and are not a single fixed value (jitter present).
+    highs = [_pipeline._contention_backoff(10) for _ in range(50)]
+    assert len(set(highs)) > 1  # jittered, not deterministic
+    assert max(highs) <= cap
+
+    # Early attempts have a strictly smaller ceiling than the cap, so the
+    # window widens with the attempt rather than being flat.
+    early_ceiling = min(cap, _pipeline._RESERVE_BACKOFF_SECONDS * (2 ** 1))
+    assert early_ceiling < cap
+    assert all(_pipeline._contention_backoff(1) <= early_ceiling for _ in range(50))
+
+
 def test_throttle_exhaustion_surfaces_503(seed_tenant_with_pool, monkeypatch):
     """When the cancellations are throttles (transient capacity), exhausting
     retries surfaces a retryable 503 rather than a misleading 402.

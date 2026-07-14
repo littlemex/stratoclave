@@ -33,6 +33,7 @@ Each route owns its own minimum-reservation floor (`anthropic.py` uses 1024;
 from __future__ import annotations
 
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -62,12 +63,33 @@ logger = get_logger(__name__)
 # the retries ARE exhausted we fail *closed* (see reserve_credit): a pooled
 # tenant must never have a request slip through unpriced just because the pool
 # row was hot.
-_RESERVE_MAX_RETRIES = 8
-_RESERVE_BACKOFF_SECONDS = 0.01  # base; multiplied by the attempt index.
+# The reserve is a single hot-row optimistic write: under an N-way concurrent
+# burst on one tenant, at most one writer wins per round, so the last writer
+# needs ~N rounds to drain. 12 rounds + full-jitter backoff comfortably clears
+# a 20-way burst; the reserve completes *before* the Bedrock call, so these
+# retries add latency only during genuine contention, never to a quiet request.
+_RESERVE_MAX_RETRIES = 12
+_RESERVE_BACKOFF_SECONDS = 0.01  # base delay for the exponential backoff below.
+_RESERVE_BACKOFF_CAP_SECONDS = 0.4  # ceiling so a hot row can't stall a request.
 # Settlement must not fail a live request; it retries a few times against
 # transient capacity errors before giving up loudly (a lost settle leaks the
 # hold, so it is logged at error level for reconciliation).
 _SETTLE_MAX_RETRIES = 4
+
+
+def _contention_backoff(attempt: int) -> float:
+    """Full-jitter exponential backoff for a hot single-row transaction.
+
+    Linear backoff synchronises a thundering herd: every loser of an optimistic
+    lock race sleeps the *same* interval and collides again on the next attempt,
+    so a burst of concurrent reserves against one tenant's pool row exhausts all
+    retries and fails closed (503). Exponential growth with full jitter spreads
+    the retries across a widening window, so colliding writers desynchronise and
+    the snapshot lock actually makes progress. `attempt` is 1-based (0 never
+    backs off). Uses AWS's recommended full-jitter: sleep ∈ [0, min(cap, base*2^n)].
+    """
+    ceiling = min(_RESERVE_BACKOFF_CAP_SECONDS, _RESERVE_BACKOFF_SECONDS * (2 ** attempt))
+    return random.uniform(0, ceiling)
 
 # Orphan-reservation reaper.
 # --------------------------
@@ -578,10 +600,14 @@ def reserve_credit(
     hold_sk = _hold_sk(period, hold_expires_at, hold_id)
     for _attempt in range(_RESERVE_MAX_RETRIES):
         if _attempt:
-            # Small linear backoff so a thundering herd on one hot pool row does
-            # not burn all retries in the same microsecond. Keeps the snapshot
-            # lock viable under contention instead of collapsing into fail-open.
-            time.sleep(_RESERVE_BACKOFF_SECONDS * _attempt)
+            # Full-jitter exponential backoff so a thundering herd on one hot
+            # pool row desynchronises instead of colliding in lockstep every
+            # attempt. Linear backoff let a 20-way concurrent burst on one
+            # tenant exhaust all retries and fail closed (503); jittered
+            # exponential keeps the snapshot lock making progress under the
+            # same contention. Still fails closed if it truly can't win — a
+            # pooled tenant must never slip through unpriced.
+            time.sleep(_contention_backoff(_attempt))
 
         # ConsistentRead: the snapshot we lock on MUST be current, or a stale
         # eventually-consistent read yields expected_* values that no longer
@@ -963,7 +989,7 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
     client = _low_level_client()
     for _attempt in range(_SETTLE_MAX_RETRIES):
         if _attempt:
-            time.sleep(_RESERVE_BACKOFF_SECONDS * _attempt)
+            time.sleep(_contention_backoff(_attempt))
         try:
             client.transact_write_items(TransactItems=items, ClientRequestToken=token)
             return  # settled cleanly (reserved returned, spend recorded, hold gone)
