@@ -75,9 +75,15 @@ _RESERVE_BACKOFF_CAP_SECONDS = 0.4  # ceiling so a hot row can't stall a request
 # transient capacity errors before giving up loudly (a lost settle leaks the
 # hold, so it is logged at error level for reconciliation).
 _SETTLE_MAX_RETRIES = 4
+# Settle runs at the tail of the STREAMING path (from run_stream's async
+# generator, on the event loop), so its backoff sleep blocks every co-located
+# stream. Settle contention is far rarer and less bursty than the reserve
+# thundering-herd, so cap its jitter much tighter: worst case ~0.05s×retries
+# instead of ~0.4s×retries.
+_SETTLE_BACKOFF_CAP_SECONDS = 0.05
 
 
-def _contention_backoff(attempt: int) -> float:
+def _contention_backoff(attempt: int, cap: float = _RESERVE_BACKOFF_CAP_SECONDS) -> float:
     """Full-jitter exponential backoff for a hot single-row transaction.
 
     Linear backoff synchronises a thundering herd: every loser of an optimistic
@@ -87,8 +93,9 @@ def _contention_backoff(attempt: int) -> float:
     the retries across a widening window, so colliding writers desynchronise and
     the snapshot lock actually makes progress. `attempt` is 1-based (0 never
     backs off). Uses AWS's recommended full-jitter: sleep ∈ [0, min(cap, base*2^n)].
+    `cap` lets the settle path use a tighter ceiling than the reserve path.
     """
-    ceiling = min(_RESERVE_BACKOFF_CAP_SECONDS, _RESERVE_BACKOFF_SECONDS * (2 ** attempt))
+    ceiling = min(cap, _RESERVE_BACKOFF_SECONDS * (2 ** attempt))
     return random.uniform(0, ceiling)
 
 # Orphan-reservation reaper.
@@ -989,7 +996,10 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
     client = _low_level_client()
     for _attempt in range(_SETTLE_MAX_RETRIES):
         if _attempt:
-            time.sleep(_contention_backoff(_attempt))
+            # Tighter cap than reserve: settle runs on the event loop at the
+            # tail of the streaming path, so a long sleep here freezes every
+            # co-located stream.
+            time.sleep(_contention_backoff(_attempt, cap=_SETTLE_BACKOFF_CAP_SECONDS))
         try:
             client.transact_write_items(TransactItems=items, ClientRequestToken=token)
             return  # settled cleanly (reserved returned, spend recorded, hold gone)

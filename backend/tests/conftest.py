@@ -74,6 +74,10 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
     moto = pytest.importorskip("moto")
     with moto.mock_aws():
         get_dynamodb_resource.cache_clear()
+        # The rate limiter holds its own (short-timeout) DynamoDB resource;
+        # reset it so it is rebuilt inside this moto mock.
+        import core.rate_limit_ddb as _rl
+        _rl._rl_resource = None
         dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
         # UserTenants: PK user_id, SK tenant_id

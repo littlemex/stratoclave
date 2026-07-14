@@ -57,7 +57,7 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 _log = logging.getLogger(__name__)
 
@@ -73,10 +73,12 @@ def get_remote_address(request: Request) -> str:
         return request.client.host
     return "unknown"
 
-# `RateLimitExceeded` is exported for main.py's exception handler. With the
-# DynamoDB limiter a breach is raised as an HTTPException(429) directly, so
-# this alias keeps the import site working while the handler also covers 429s.
-RateLimitExceeded = HTTPException
+# `RateLimitExceeded` is a real HTTPException *subclass* (see rate_limit_ddb),
+# re-exported here for import-site compatibility. It is NOT an alias for
+# HTTPException — aliasing would make any `isinstance`/exception-handler on it
+# match every HTTPException in the app (401/402/404...). Import the concrete
+# type so handlers can target 429s specifically.
+from core.rate_limit_ddb import RateLimitExceeded  # noqa: E402,F401
 
 
 def _trusted_hops() -> int:

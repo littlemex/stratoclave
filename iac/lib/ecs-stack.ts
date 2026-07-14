@@ -476,6 +476,18 @@ export class EcsStack extends cdk.Stack {
       scaleOutCooldown: cdk.Duration.seconds(60),
     });
 
+    // When Application Auto Scaling manages the task count, a `DesiredCount`
+    // baked into the CFN template makes every `cdk deploy` reset the running
+    // count to `desiredCount` — including snapping back down mid-incident when
+    // the scaler had grown the fleet. Drop `DesiredCount` from the template so
+    // the first deploy sets the initial size and the scaler (floored at
+    // `minCapacity = baseCount`) owns it thereafter. Only do this once the
+    // scaler exists so a fresh stack still launches at the baseline.
+    if (baseCount > 1) {
+      const cfnService = this.service.node.defaultChild as ecs.CfnService;
+      cfnService.addPropertyDeletionOverride('DesiredCount');
+    }
+
     // Parameter Store exports
     putStringParameter(this, 'EcsClusterParam', {
       prefix,
