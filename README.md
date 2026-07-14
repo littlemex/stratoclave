@@ -199,8 +199,9 @@ for where a broker is the better choice.
 
 The Stratoclave control plane lives inside a single AWS region (us-east-1)
 in your own account. Clients reach CloudFront for TLS termination; static
-paths hit S3, API paths hit an internal ALB fronting a single-task Fargate
-service. The backend is stateless — all mutable state lives in DynamoDB,
+paths hit S3, API paths hit an internal ALB fronting a Fargate service that
+runs at least two tasks spread across availability zones. The backend is
+stateless — all mutable state lives in DynamoDB,
 authenticated by either a Cognito `access_token` or a `sk-stratoclave-*` API
 key.
 
@@ -461,11 +462,11 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
 | Model / capability policy | App-layer allowlist + per-tenant/user fallback chains (+ effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
 | Identity | Cognito password, **Vouch-by-STS** (aws sso / saml2aws / IAM user), `sk-stratoclave-*` keys | Enterprise tier (Okta/Entra/OIDC/SAML) | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
-| State / ops footprint | DynamoDB only (serverless), one Fargate task | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
+| State / ops footprint | DynamoDB only (serverless), multi-task Fargate across AZs, no Redis | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
 | Admin surface | **React web console** + CLI | Web UI + CLI | CLI (`ccwb`) |
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
 | Data residency / GovCloud | us-east-1 today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
-| Availability of inference | Gateway (single control-plane region) **+ cross-region Bedrock failover** | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
+| Availability of inference | **Multi-task, multi-AZ** gateway (single region) **+ cross-region Bedrock failover**; no single-task/single-AZ SPOF, but still in-path in one region | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
 | License | Apache 2.0 (all features OSS) | MIT + Commercial (SSO/audit are commercial) | MIT (AWS Solutions sample) |
 
 **Pick Stratoclave** when you need tenant-scoped, pre-flight, per-request
@@ -542,11 +543,13 @@ deliberately does **not** do today:
   Claude Desktop to thousands of managed laptops with per-device policy, a
   credential broker with MDM support fits that better; Stratoclave governs the
   *inference*, not the *endpoint fleet*.
-- **Single region, single control plane.** Everything runs in `us-east-1`
-  today. There is no GovCloud partition support and no EU/AU data-residency
-  selection. Because the gateway is in the data path, its availability is the
-  availability of your inference — a broker that lets clients call Bedrock
-  directly has no such single point of failure.
+- **Single region (though multi-AZ within it).** The gateway runs multiple
+  Fargate tasks across availability zones in `us-east-1`, so a single task or
+  AZ is not a point of failure — but everything still lives in one region.
+  There is no GovCloud partition support and no EU/AU data-residency selection,
+  and because the gateway is in the data path, a full-region outage takes your
+  inference with it — a broker that lets clients call Bedrock directly has no
+  such in-path dependency.
 - **The gateway sees prompt text.** Every request transits the FastAPI service,
   which is what makes pre-flight DLP and enforcement possible — but it also
   means the operator is in scope as a data processor. Weigh this for regulated
