@@ -56,6 +56,28 @@ async def _attempt_invoke(target: Target, payload: dict) -> dict:
 _FIRST_EVENT_TIMEOUT_S = 10.0
 
 
+def _never_yields():
+    """A synchronous stream that never produces a first event.
+
+    Used only by the `timeout-first-event` fault: the reader thread spins in
+    short sleeps (bounded so the reader isn't a hard-busy loop) and never
+    reaches the `yield`, so no event is ever put on the queue. This forces the
+    real first-event `wait_for` guard to fire exactly as a genuinely hung
+    Bedrock connection would. The generator never yields in practice.
+    """
+    import time as _t
+
+    # Cap the spin so a leaked reader thread can't run forever; well past the
+    # 10s first-event timeout and any chain deadline, the reader exits and the
+    # (already-failed-over or released) request is unaffected.
+    deadline = _FIRST_EVENT_TIMEOUT_S * 6
+    waited = 0.0
+    while waited < deadline:
+        _t.sleep(0.2)
+        waited += 0.2
+    yield  # pragma: no cover - unreachable within any live request's lifetime
+
+
 async def _peek_first_event(
     stream: Any,
 ) -> tuple[dict, AsyncIterator[dict]]:
@@ -154,8 +176,13 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                     fault_attempt = fault.next_attempt(req.request_id)
                     fault.maybe_raise_pre_stream(req.fault_spec, req.request_id, fault_attempt)
                     if fault.maybe_hang(req.fault_spec):
-                        await asyncio.sleep(_FIRST_EVENT_TIMEOUT_S + 5)
-                    if fault.maybe_empty_stream(req.fault_spec, fault_attempt):
+                        # Feed _peek_first_event a stream that never yields a
+                        # first event, so the real first-event wait_for guard
+                        # (not an ad-hoc sleep) is what fires. This exercises
+                        # the production timeout path: TimeoutError -> classify
+                        # -> failover, and chain-exhaustion -> clean release.
+                        first_event, rest = await _peek_first_event(_never_yields())
+                    elif fault.maybe_empty_stream(req.fault_spec, fault_attempt):
                         first_event, rest = await _peek_first_event(iter([]))
                     else:
                         resp = await _attempt_invoke(target, req.payload)

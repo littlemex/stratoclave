@@ -94,6 +94,47 @@ class TestFailover:
             assert len(events) == 2
 
 
+class TestFirstEventTimeout:
+    def test_timeout_first_event_never_settles_as_success(self, monkeypatch):
+        """timeout-first-event: every attempt hangs past the first-event
+        guard, so no attempt commits. The chain exhausts and route_stream
+        raises (release path), never returning a success stream.
+
+        Regression: the fault used to `asyncio.sleep` and then invoke the real
+        Bedrock client, so it produced a *successful* response instead of
+        exercising the first-event timeout — the guard was never tested.
+        """
+        from unittest.mock import MagicMock, patch
+
+        # Shrink the guard so the test is fast; the fault feeds a stream that
+        # never yields, so wait_for must time out on every attempt.
+        monkeypatch.setattr("mvp.routing.infrarouter._FIRST_EVENT_TIMEOUT_S", 0.5)
+
+        invoked = {"n": 0}
+
+        def mock_client(region):
+            invoked["n"] += 1
+            c = MagicMock()
+            # If the router ever reached a real invoke under this fault, it
+            # would get a valid stream — and the test would wrongly pass. It
+            # must NOT: the hang path bypasses _attempt_invoke entirely.
+            c.converse_stream.return_value = {"stream": _mock_stream()}
+            return c
+
+        with patch("mvp.routing.infrarouter.bedrock_client", side_effect=mock_client):
+            async def run():
+                routed = await route_stream(_req(fault_spec="timeout-first-event", rid="hang"))
+                # Should not get here; if we do, drain to surface the bug.
+                return [e async for e in routed.events]
+
+            with pytest.raises(Exception) as exc:
+                asyncio.run(run())
+            # The surfaced error is the timeout/last-exc, not a success.
+            assert not isinstance(exc.value, StopAsyncIteration)
+            # Every attempt classified as failover (timeout), none succeeded.
+            # (invoked may be 0 because the hang path never calls the client.)
+
+
 class TestFirstEventCommit:
     def test_mid_stream_failure_no_retry(self):
         """500-mid-stream: after first event committed, error propagates,

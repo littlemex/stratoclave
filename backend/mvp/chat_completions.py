@@ -245,6 +245,13 @@ def chat_completions(
         elif isinstance(m.content, list):
             for part in m.content:
                 if isinstance(part, dict):
+                    # Reject unsupported content parts pre-reservation so the
+                    # client gets a clean 400 (not a post-reserve 502). The
+                    # conversion in _convert_chat_messages also rejects these,
+                    # but only after the reserve/refund dance — validating here
+                    # keeps the error a request error and avoids a needless hold.
+                    if part.get("type") == "image_url":
+                        raise HTTPException(status_code=400, detail={"error": {"message": "image_url content parts are not supported; use the Anthropic /v1/messages endpoint with base64 images", "type": "invalid_request_error", "code": "unsupported_content"}})
                     text = part.get("text", "")
                     if isinstance(text, str):
                         char_count += len(text)
