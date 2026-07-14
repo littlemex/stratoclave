@@ -145,12 +145,15 @@ for where a broker is the better choice.
   tokens only.
 - **Staged budget breaker.** An advisory budget check shapes routing before
   the atomic reserve: at **≤25% remaining** it caps the model tier, at **≤5%**
-  it rejects with `402` before any Bedrock call. This is live today. (Per-model
-  quotas and cascading model fallback — "use Opus until its budget is gone,
-  then Sonnet, then Haiku" — are designed and the enforcement primitive
-  (`quota_lines` on the atomic reserve) is in place, but the resolver is not yet
-  wired into the request path. See [Roadmap](#project-status); do not rely on
-  cascading fallback yet.)
+  it rejects with `402` before any Bedrock call. This is live today.
+- **Per-model quotas + cascading model fallback.** "Use Opus until its per-model
+  budget is gone, then Sonnet, then Haiku." Each model has an optional per-tenant
+  (and per-user) quota, charged in the *same* atomic `TransactWriteItems` as the
+  budget reserve — so a request can never race past a per-model limit. When a
+  model's quota is exhausted the request cascades to the next model in the
+  tenant/user chain; each candidate is priced and settled at *its own* rate, and
+  the request is served by the model actually reserved. Live today across the
+  Anthropic Messages, OpenAI Chat Completions, and Responses routes.
 - **Crash-resilient budget accounting.** A pooled reservation writes a sibling
   *hold* record in the same atomic write; settle and release delete it, and if
   a task is killed (OOM, deploy drain) between reserve and settle, a bounded,
@@ -222,9 +225,9 @@ authorize → staged breaker → model selection → infrastructure retry/failov
 settle**, wrapped around exactly one Bedrock invocation. Retries and
 cross-region failover are invisible to the client; the reservation settles once
 against actual usage, even on mid-stream disconnect. The *model selection* stage
-resolves the requested model today; the cascading per-model fallback shown below
-is a designed extension, not yet wired into the request path (see
-[Roadmap](#project-status)).
+resolves the requested model and, when a per-model quota is exhausted, cascades
+down the tenant/user fallback chain — reserving and settling each candidate at
+its own price and serving the model actually reserved.
 
 <p align="center">
   <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock, then settle once and return; DynamoDB holds budgets, quotas, usage log, and routing config." width="100%">
@@ -455,9 +458,9 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / atomically reassign | Teams (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget model | **Dollar pool + per-user tokens, reserved *pre-flight* in one atomic write; priced per model in micro-USD** (per-model quotas: primitive in place, enforcement on the roadmap) | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
+| Budget model | **Dollar pool + per-user tokens + per-model quotas, all reserved *pre-flight* in one atomic write; priced per model in micro-USD** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
 | Can a user race/bypass the budget? | No (single `TransactWriteItems` over both ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
-| Resilience / routing | **Retry + cross-region failover, first-event commit, staged breaker** (cascading per-model fallback on the roadmap) | Retries, fallbacks, load-balancing across deployments | None (client calls Bedrock; Bedrock CRIS only) |
+| Resilience / routing | **Retry + cross-region failover, first-event commit, staged breaker, quota-driven cascading per-model fallback** | Retries, fallbacks, load-balancing across deployments | None (client calls Bedrock; Bedrock CRIS only) |
 | Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via a bounded sweep; no leak, no reaper process | Relies on the proxy + its Postgres/Redis | N/A (no server-side reservation) |
 | OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
 | Model / capability policy | App-layer allowlist + per-tenant/user fallback chains (+ effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
@@ -579,19 +582,15 @@ tagged version. Issues and pull requests are welcome; see
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 **Shipped today:** dollar-pool + per-user-token budgets reserved pre-flight in
-one atomic `TransactWriteItems`; per-model micro-USD pricing; crash-safe hold
-sweep; staged budget breaker (tier cap at ≤25%, `402` at ≤5%); InfraRouter
-retry + cross-region failover with first-event commit; OpenAI Chat Completions
-and Responses (codex) surfaces; multi-task / multi-AZ ECS with DynamoDB-backed
-per-IP rate limiting.
+one atomic `TransactWriteItems`; per-model micro-USD pricing; **per-model quotas
++ quota-driven cascading fallback** (Opus → Sonnet → Haiku, priced and settled
+per candidate, across all three API surfaces); crash-safe hold sweep; staged
+budget breaker (tier cap at ≤25%, `402` at ≤5%); InfraRouter retry + cross-region
+failover with first-event commit; OpenAI Chat Completions and Responses (codex)
+surfaces; multi-task / multi-AZ ECS with DynamoDB-backed per-IP rate limiting.
 
 **On the roadmap (designed, not yet wired into the request path):**
 
-- **Per-model quotas + cascading fallback.** The enforcement primitive
-  (`quota_lines` on the atomic reserve, so a user cannot race past a per-model
-  ceiling) is in place, but the resolver that emits those lines and walks the
-  Opus → Sonnet → Haiku chain is not yet connected. Until it is, requests
-  resolve to the single requested model. Do not rely on cascading fallback.
 - **Per-tenant reasoning-effort and tool caps.** App-layer policy hooks exist;
   enforcement is not wired.
 - **Multi-region control plane, data-residency selection, external audit.**
