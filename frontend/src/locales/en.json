@@ -347,7 +347,9 @@
     "col_total": "Total",
     "row_empty": "No logs match.",
     "count_showing": "{{shown}} results",
-    "count_more": " / more pages"
+    "count_more": " / more pages",
+    "fallback_badge": "fallback",
+    "fallback_from": "Fell back from requested {{requested}}"
   },
   "admin_tenants": {
     "title": "Tenant administration",
@@ -499,7 +501,10 @@
     "col_tenant": "Tenant",
     "col_input": "Input",
     "col_output": "Output",
-    "col_total": "Total"
+    "col_total": "Total",
+    "fallback_badge": "fallback",
+    "fallback_from": "Fell back from requested {{requested}}",
+    "fallback_count": "{{count}} request(s) served by a fallback model"
   },
   "me_api_keys": {
     "label": "API Keys",

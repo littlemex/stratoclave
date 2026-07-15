@@ -166,21 +166,49 @@ class UsageSummaryResponse(BaseModel):
     by_tenant: dict[str, int] = {}
     sample_size: int
     since_days: int
+    # P0-11: number of sampled requests served by a fallback model (requested
+    # model canonically differs from the effective model). Legacy rows without
+    # a recorded requested model are not counted (unknown, not a fallback).
+    fallback_count: int = 0
 
 
 class UsageHistoryEntry(BaseModel):
     tenant_id: str
     tenant_name: Optional[str] = None
-    model_id: str
+    model_id: str  # the EFFECTIVE model the request was served by
     input_tokens: int
     output_tokens: int
     total_tokens: int
     recorded_at: str
+    # P0-11 fallback visibility. `requested_model_id` is the client-requested
+    # model (canonicalized); `fallback_occurred` is derived from the two ids at
+    # read. Both None on legacy rows written before this field existed —
+    # None means "unknown", NOT "no fallback" (and never True).
+    requested_model_id: Optional[str] = None
+    fallback_occurred: Optional[bool] = None
 
 
 class UsageHistoryResponse(BaseModel):
     history: list[UsageHistoryEntry]
     next_cursor: Optional[str] = None
+
+
+def _derive_fallback(requested: Optional[str], effective: str) -> Optional[bool]:
+    """P0-11 fallback visibility, derived at read from the two model ids.
+
+    Returns None when `requested` is absent (a legacy row written before the
+    field existed) — "unknown", never False and never True.
+
+    Both ids are stored in the SAME spelling space at write (their bedrock ids),
+    so this is a plain string comparison with NO read-time canonicalization.
+    That is deliberate (Fable #65 rev1 BUG 1): canonicalizing at read made the
+    result depend on the live registry, so a model leaving the registry flipped
+    historical non-fallback rows to a spurious True. Comparing the stored
+    bedrock ids directly is stable forever — the stored bytes never change.
+    """
+    if not requested:
+        return None
+    return requested != effective
 
 
 def _encode_cursor(last_key: Optional[dict]) -> Optional[str]:
@@ -234,6 +262,7 @@ def usage_summary(
     by_model: dict[str, int] = {}
     by_tenant: dict[str, int] = {}
     active_sample = 0
+    fallback_count = 0
     for it in items:
         tid = str(it.get("tenant_id") or "unknown")
         if tid != user.org_id:
@@ -244,8 +273,13 @@ def usage_summary(
             continue
         tokens = int(it.get("total_tokens", 0))
         by_tenant[tid] = by_tenant.get(tid, 0) + tokens
+        # `by_model` keys on the EFFECTIVE model only — it is what actually
+        # consumed capacity and generated cost (quota/pricing keyed on it).
+        # Requested is display metadata, not an aggregation dimension.
         model = str(it.get("model_id") or "unknown")
         by_model[model] = by_model.get(model, 0) + tokens
+        if _derive_fallback(it.get("requested_model_id"), model) is True:
+            fallback_count += 1
         active_sample += 1
 
     return UsageSummaryResponse(
@@ -257,6 +291,7 @@ def usage_summary(
         by_tenant=by_tenant,
         sample_size=active_sample,
         since_days=since_days,
+        fallback_count=fallback_count,
     )
 
 
@@ -302,6 +337,12 @@ def usage_history(
             output_tokens=int(it.get("output_tokens", 0)),
             total_tokens=int(it.get("total_tokens", 0)),
             recorded_at=str(it.get("recorded_at") or ""),
+            requested_model_id=(
+                str(it["requested_model_id"]) if it.get("requested_model_id") else None
+            ),
+            fallback_occurred=_derive_fallback(
+                it.get("requested_model_id"), str(it.get("model_id") or "")
+            ),
         )
         for it in resp.get("Items", [])
     ]

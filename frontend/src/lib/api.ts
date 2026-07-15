@@ -86,16 +86,22 @@ export interface UsageSummary {
   by_tenant: Record<string, number>
   sample_size: number
   since_days: number
+  // P0-11: count of sampled requests served by a fallback model.
+  fallback_count?: number
 }
 
 export interface UsageHistoryEntry {
   tenant_id: string
   tenant_name?: string | null
-  model_id: string
+  model_id: string // the EFFECTIVE model the request was served by
   input_tokens: number
   output_tokens: number
   total_tokens: number
   recorded_at: string
+  // P0-11 fallback visibility. null = legacy row (unknown), never rendered as
+  // a fallback.
+  requested_model_id?: string | null
+  fallback_occurred?: boolean | null
 }
 
 export interface UsageHistoryResponse {
@@ -232,12 +238,15 @@ export interface UsageLogEntry {
   tenant_id: string
   user_id: string
   user_email?: string | null
-  model_id: string
+  model_id: string // the EFFECTIVE model the request was served by
   input_tokens: number
   output_tokens: number
   total_tokens: number
   recorded_at: string
   timestamp_log_id: string
+  // P0-11 fallback visibility. null = legacy row (unknown), never a fallback.
+  requested_model_id?: string | null
+  fallback_occurred?: boolean | null
 }
 
 export interface UsageLogsResponse {

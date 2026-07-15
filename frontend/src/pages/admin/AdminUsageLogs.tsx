@@ -203,7 +203,19 @@ export default function AdminUsageLogs() {
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {log.tenant_id}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{log.model_id}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {log.model_id}
+                    {log.fallback_occurred === true && (
+                      <span
+                        className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800"
+                        title={t('admin_usage_logs.fallback_from', {
+                          requested: log.requested_model_id ?? '?',
+                        })}
+                      >
+                        {t('admin_usage_logs.fallback_badge')}
+                      </span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-right font-mono text-xs">
                     {fmt(log.input_tokens)}
                   </TableCell>

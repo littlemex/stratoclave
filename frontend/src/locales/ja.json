@@ -347,7 +347,9 @@
     "col_total": "Total",
     "row_empty": "該当するログがありません。",
     "count_showing": "{{shown}} 件表示",
-    "count_more": " / 次ページあり"
+    "count_more": " / 次ページあり",
+    "fallback_badge": "フォールバック",
+    "fallback_from": "要求モデル {{requested}} からフォールバック"
   },
   "admin_tenants": {
     "title": "テナント管理",
@@ -499,7 +501,10 @@
     "col_tenant": "テナント",
     "col_input": "Input",
     "col_output": "Output",
-    "col_total": "Total"
+    "col_total": "Total",
+    "fallback_badge": "フォールバック",
+    "fallback_from": "要求モデル {{requested}} からフォールバック",
+    "fallback_count": "フォールバックで別モデルが使われたリクエスト: {{count}} 件"
   },
   "me_api_keys": {
     "label": "API Keys",

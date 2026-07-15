@@ -200,6 +200,13 @@ class ReservationContext:
     # so settle/release can move the same model's `used` counter. `selected_model`
     # is the model the cascade actually landed on (may differ from requested).
     selected_model: Optional[str] = None
+    # `requested_model` is what the client asked for (body.model, pre-cascade),
+    # kept so settle can record P0-11 fallback visibility. Stamped for EVERY
+    # request by `reserve_credit_for_model` (the single reserve chokepoint all
+    # three handlers go through — verified: no handler calls bare
+    # `reserve_credit`), so a live row never has this None. It defaults None
+    # only for defensively-constructed contexts / tests.
+    requested_model: Optional[str] = None
     quota_reserved_amount: int = 0
     quota_user_id: Optional[str] = None
     # The period the quota `used` counter was reserved against. settle/release
@@ -614,21 +621,35 @@ def reserve_credit_for_model(
     # reserve) — so pinning reuses all the money machinery, only the candidate
     # SELECTION changes. Handled before the no-config passthrough so a pin is
     # honoured whether or not the tenant has routing config.
+    def _stamp_requested(ctx: ReservationContext) -> ReservationContext:
+        # Record the client-requested model (pre-cascade) on the context so
+        # settle can log P0-11 fallback visibility. Single chokepoint => every
+        # handler gets it without threading through each reserve return path.
+        ctx.requested_model = model_name
+        return ctx
+
     if vsr_hard_model:
         _validate_model_pin(vsr_hard_model, tenant_cfg, wire_protocol)
-        return _reserve_over_candidates(
+        ctx = _reserve_over_candidates(
             user, reservation_tokens, candidates=[vsr_hard_model],
             tenant_cfg=tenant_cfg, price=_price,
         )
+        # A VSR hard pin is a deliberate policy override, NOT a P0-11 quota
+        # cascade fallback (Fable #65 rev1 BUG 2). Record the effective (pinned)
+        # model as the "requested" one so the pin never inflates fallback_count
+        # or shows a spurious fallback badge — the two events are semantically
+        # different and the derived bool must not conflate them.
+        ctx.requested_model = ctx.selected_model or vsr_hard_model
+        return ctx
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
     if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
         pk, cost = _price(model_name)
-        return reserve_credit(
+        return _stamp_requested(reserve_credit(
             user, reservation_tokens,
             pricing_key=pk, cost_microusd=cost,
             selected_model=model_name,
-        )
+        ))
 
     user_cfg = get_user_routing_config(user.org_id, user.user_id)
     candidates = _resolve_candidate_chain(
@@ -638,10 +659,10 @@ def reserve_credit_for_model(
         breaker_max_tier=breaker_max_tier,
         wire_protocol=wire_protocol,
     )
-    return _reserve_over_candidates(
+    return _stamp_requested(_reserve_over_candidates(
         user, reservation_tokens, candidates=candidates,
         tenant_cfg=tenant_cfg, price=_price,
-    )
+    ))
 
 
 def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg, price):
@@ -1314,6 +1335,7 @@ def settle_reservation_and_log(
     actual_cost_microusd: Optional[int] = None,
     actual_cache_read_tokens: int = 0,
     actual_cache_write_tokens: int = 0,
+    requested_model: Optional[str] = None,
 ) -> None:
     """Settle the reservation against actual usage and write a UsageLogs row.
 
@@ -1432,6 +1454,31 @@ def settle_reservation_and_log(
     # ALWAYS record usage, even if the pool settle above failed: the Bedrock
     # call happened and its cost must be auditable. This is deliberately outside
     # any pool try/except so a settle fault cannot swallow the ledger entry.
+    # P0-11 visibility: store the client-requested model in the SAME spelling
+    # space as the effective `model_id` (its bedrock id), so the read layer can
+    # decide fallback with a plain string compare — no read-time canonicalization,
+    # hence immune to registry drift/retirement (Fable #65 rev1 BUG 1: an
+    # asymmetric canonical-vs-bedrock compare false-positived once a model left
+    # the registry). resolve_bedrock_model is total-ish: it raises only for a
+    # never-registered id, in which case we fall back to the raw string (a
+    # non-empty requested must never fail the ALWAYS-record invariant).
+    requested = requested_model or (context.requested_model if context else None)
+    requested_stored = None
+    if requested:
+        try:
+            # General registry resolve (handles Claude AND OpenAI families) so
+            # the stored requested id matches how the effective `model_id` is
+            # spelled (bedrock id). resolve_bedrock_model is Claude-only and
+            # would leave OpenAI ids un-normalized -> spurious fallback.
+            from .models import resolve_model as _resolve
+            requested_stored = _resolve(requested).bedrock_model_id
+        except Exception:
+            # Residual (Fable #65 rev2): if `requested` is not in the registry
+            # (retirement race / out-of-registry chain entry), we store the raw
+            # string, which won't equal the bedrock effective id -> that single
+            # row reads as a fallback. Window-scoped and non-retroactive
+            # (stored bytes are stable); acceptable for P1 visibility.
+            requested_stored = requested
     UsageLogsRepository().record(
         tenant_id=user.org_id,
         user_id=user.user_id,
@@ -1440,6 +1487,7 @@ def settle_reservation_and_log(
         input_tokens=actual_input_tokens,
         output_tokens=actual_output_tokens,
         cost_microusd=actual_cost_microusd,
+        requested_model_id=requested_stored,
     )
 
 
