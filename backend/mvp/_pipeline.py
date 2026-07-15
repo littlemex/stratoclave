@@ -519,6 +519,22 @@ def _err_402(reason: str) -> HTTPException:
     )
 
 
+def _err_400(reason: str) -> HTTPException:
+    """400 for a malformed/unservable request input (e.g. an invalid VSR pin)."""
+    return HTTPException(
+        status_code=400,
+        detail={"type": "invalid_request", "reason": reason},
+    )
+
+
+def _err_403(reason: str) -> HTTPException:
+    """403 for an authorization failure (e.g. a VSR pin outside the allowlist)."""
+    return HTTPException(
+        status_code=403,
+        detail={"type": "forbidden", "reason": reason},
+    )
+
+
 class QuotaExhausted(Exception):
     """A per-model quota condition failed during reserve — the caller's
     cascading fallback should try the next model. Carries which model's quota
@@ -542,6 +558,7 @@ def reserve_credit_for_model(
     effort_multiplier: int = 1,
     breaker_max_tier: Optional[int] = None,
     wire_protocol: Optional[str] = None,
+    vsr_hard_model: Optional[str] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -563,6 +580,16 @@ def reserve_credit_for_model(
 
     The chosen model is returned as `context.selected_model`; the handler
     re-resolves that to a Bedrock model id for the actual invoke.
+
+    **VSR hard pin (P0-15).** When `vsr_hard_model` is set, the request is pinned
+    to exactly that model: no cascade, no chain rewrite, no breaker downgrade, no
+    quota-exhaustion fallback. The pin is validated first — it must resolve in
+    the registry and (when `wire_protocol` is given) speak this route's protocol
+    (else `_err_400("invalid_model_pin")`), and it must be in the tenant allowlist
+    when one is configured (else `_err_403("model_pin_not_allowed")`). A pinned
+    model whose quota is exhausted 402s (`model_quota_exhausted`) rather than
+    falling back — that is what "hard" means. Pricing/quota apply at the pinned
+    model's own rate, exactly as if the cascade had landed on it.
     """
     from .models import resolve_model as _resolve_pricing
     from .pricing import estimate_cost_microusd
@@ -581,6 +608,18 @@ def reserve_credit_for_model(
         )
 
     tenant_cfg = get_tenant_routing_config(user.org_id)
+
+    # VSR hard pin (P0-15): validate, then force the candidate list to exactly
+    # [pin] and fall through to the same reserve loop (pricing + quota + atomic
+    # reserve) — so pinning reuses all the money machinery, only the candidate
+    # SELECTION changes. Handled before the no-config passthrough so a pin is
+    # honoured whether or not the tenant has routing config.
+    if vsr_hard_model:
+        _validate_model_pin(vsr_hard_model, tenant_cfg, wire_protocol)
+        return _reserve_over_candidates(
+            user, reservation_tokens, candidates=[vsr_hard_model],
+            tenant_cfg=tenant_cfg, price=_price,
+        )
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
     if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
@@ -599,12 +638,25 @@ def reserve_credit_for_model(
         breaker_max_tier=breaker_max_tier,
         wire_protocol=wire_protocol,
     )
+    return _reserve_over_candidates(
+        user, reservation_tokens, candidates=candidates,
+        tenant_cfg=tenant_cfg, price=_price,
+    )
 
+
+def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg, price):
+    """Walk an ordered candidate list, pricing + quota-reserving each atomically.
+
+    Shared by the P0-11 cascade and the P0-15 hard pin (a pin is just a
+    one-element candidate list). QuotaExhausted advances to the next candidate;
+    if every candidate's quota is exhausted, 402 `model_quota_exhausted` (for a
+    single-element pin list that means: the pinned model's quota is gone, no
+    fallback — the hard-pin contract)."""
     from .routing import quota as _quota
 
     period = current_period()
     for model in candidates:
-        pk, cost = _price(model)
+        pk, cost = price(model)
         q = tenant_cfg.quotas.get(model)
         tenant_limit = q.limit if q else None
         quota_lines = (
@@ -629,6 +681,55 @@ def reserve_credit_for_model(
             continue
     logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
     raise _err_402("model_quota_exhausted")
+
+
+def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> None:
+    """Validate a VSR hard pin (P0-15). Servability first (400), then policy (403).
+
+    A pin is NOT exempt from these checks — it's a model the route never
+    validated, so an unservable or disallowed pin is rejected loudly, never
+    silently substituted (the Fable F2/F3/F4 money-bug shape).
+
+    Spelling: the pin is used VERBATIM downstream (candidate list, quota lookup,
+    reserve/settle) — deliberately NOT canonicalized. The whole routing config
+    (chain/allowlist/quotas) is keyed on raw spellings and P0-11 requires request
+    and config to agree on spelling; canonicalizing ONLY the pin (Fable rev1 F1's
+    first attempt) steered the quota lookup away from the configured key and
+    bypassed the cap (Fable rev2 NEW-1). Treating the pin exactly like the
+    requested model keeps one consistent convention.
+
+    Policy boundary (Fable rev2 NEW-2): a pin must sit inside the tenant's
+    configured model set. That is the `allowlist` when one exists; for a
+    chain-only tenant (no allowlist) the `chain` IS the model policy, so the pin
+    must be one of the chain's models — otherwise a client header could escape
+    the tenant's routing policy entirely. Only a tenant with neither allowlist
+    nor chain (pure passthrough) accepts an arbitrary servable pin."""
+    from .models import resolve_model as _resolve_registry
+
+    try:
+        entry = _resolve_registry(pin)
+    except ValueError:
+        raise _err_400("invalid_model_pin")
+    if wire_protocol is not None and entry.wire_protocol != wire_protocol:
+        raise _err_400("invalid_model_pin")
+
+    # The pin must be in the tenant's configured model set (allowlist, else
+    # chain). Compare on the registry entry so different spellings of the same
+    # model match — WITHOUT changing the spelling used downstream.
+    policy_set = tenant_cfg.allowlist or tenant_cfg.chain
+    if policy_set:
+        allowed = False
+        for m in policy_set:
+            try:
+                if _resolve_registry(m) is entry:
+                    allowed = True
+                    break
+            except ValueError:
+                if m == pin:
+                    allowed = True
+                    break
+        if not allowed:
+            raise _err_403("model_pin_not_allowed")
 
 
 def _resolve_candidate_chain(

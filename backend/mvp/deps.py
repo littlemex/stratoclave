@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -477,3 +478,40 @@ def get_request_context(
             status_code=400,
             detail={"type": "invalid_correlation_header", "message": str(e)},
         )
+
+
+# ---------------------------------------------------------------
+# VSR hard model pin (P0-15)
+# ---------------------------------------------------------------
+# Model-id grammar for the pin: the usual id characters plus '/' (bedrock ARNs)
+# and ':' (versioned ids). Length-capped. Deliberately looser than the
+# correlation grammar (a model id is not a DynamoDB key), but still bounded and
+# newline-free so it can't be abused. Absent header -> no pin -> today's behavior.
+_MODEL_PIN_GRAMMAR = re.compile(r"\A[A-Za-z0-9._:/-]{1,128}\Z")
+HDR_MODEL_PIN = "x-sc-model-pin"
+
+
+def extract_model_pin(request: Request) -> Optional[str]:
+    """Return the VSR hard model pin from ``x-sc-model-pin``, or None if absent.
+
+    Grammar-validated at the edge (malformed -> 400). Allowlist + servability
+    enforcement happen downstream in reserve_credit_for_model (403 / 400) where
+    the tenant config is in scope. See P0-15.
+
+    NOTE (product decision, default A): ANY authenticated caller may pin, gated
+    by the tenant allowlist. If chains are ever used as a hard COST-CONTROL
+    mechanism (not just availability optimization), restrict this to a trusted
+    principal instead — the adapter is otherwise unchanged.
+    """
+    raw = request.headers.get(HDR_MODEL_PIN)
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if raw == "":
+        return None
+    if not _MODEL_PIN_GRAMMAR.match(raw):
+        raise HTTPException(
+            status_code=400,
+            detail={"type": "invalid_request", "reason": "invalid_model_pin"},
+        )
+    return raw

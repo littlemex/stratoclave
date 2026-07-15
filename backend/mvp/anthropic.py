@@ -60,7 +60,7 @@ from ._pipeline import (
     settle_reservation_and_log,
 )
 from .authz import require_permission
-from .deps import AuthenticatedUser, get_current_user, get_request_context
+from .deps import AuthenticatedUser, extract_model_pin, get_current_user, get_request_context
 from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 
@@ -519,6 +519,11 @@ def messages(
 
     fault_spec = request.headers.get("x-sc-fault")
 
+    # P0-15: optional VSR hard pin. Absent -> today's behavior; present -> the
+    # request is pinned to exactly that model (no cascade/fallback/downgrade),
+    # validated against the allowlist + servability downstream (403 / 400).
+    model_pin = extract_model_pin(request)
+
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit_for_model(
         user,
@@ -527,6 +532,7 @@ def messages(
         input_tokens_est=max(reservation - body.max_tokens, 0),
         max_output_tokens=body.max_tokens,
         wire_protocol="messages",
+        vsr_hard_model=model_pin,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the

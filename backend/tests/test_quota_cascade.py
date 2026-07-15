@@ -77,7 +77,8 @@ def _used(model, *, user=None):
     return int(resp.get("Item", {}).get("used", 0))
 
 
-def _reserve(model="claude-sonnet-4-6", tokens=1000, wire_protocol="messages"):
+def _reserve(model="claude-sonnet-4-6", tokens=1000, wire_protocol="messages",
+             vsr_hard_model=None):
     return _pipeline.reserve_credit_for_model(
         _User(user_id=USER, org_id=TENANT),
         tokens,
@@ -85,7 +86,105 @@ def _reserve(model="claude-sonnet-4-6", tokens=1000, wire_protocol="messages"):
         input_tokens_est=500,
         max_output_tokens=500,
         wire_protocol=wire_protocol,
+        vsr_hard_model=vsr_hard_model,
     )
+
+
+class TestVsrHardPin:
+    """P0-15: a hard model pin selects exactly that model — no cascade, no
+    fallback — validated against servability (400) and the allowlist (403)."""
+
+    def test_pin_selects_that_model_no_cascade(self, no_pool_env):
+        # chain would normally start at sonnet; pin forces haiku with no config
+        # fallback path taken.
+        _put_routing_config(
+            chain=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={}, fallback_default="on")
+        ctx = _reserve("claude-sonnet-4-6", vsr_hard_model="claude-haiku-4-5")
+        assert ctx.selected_model == "claude-haiku-4-5"
+
+    def test_pin_overrides_requested_even_with_no_config(self, no_pool_env):
+        # No routing config at all: without a pin this is passthrough on the
+        # requested model; the pin still forces a different model.
+        ctx = _reserve("claude-sonnet-4-6", vsr_hard_model="claude-haiku-4-5")
+        assert ctx.selected_model == "claude-haiku-4-5"
+
+    def test_pin_not_in_allowlist_is_403(self, no_pool_env):
+        _put_routing_config(
+            allowlist=["claude-sonnet-4-6"], quotas={}, fallback_default="off")
+        with pytest.raises(HTTPException) as e:
+            _reserve("claude-sonnet-4-6", vsr_hard_model="claude-haiku-4-5")
+        assert e.value.status_code == 403
+        assert e.value.detail["reason"] == "model_pin_not_allowed"
+
+    def test_pin_in_allowlist_is_allowed(self, no_pool_env):
+        _put_routing_config(
+            allowlist=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={}, fallback_default="off")
+        ctx = _reserve("claude-sonnet-4-6", vsr_hard_model="claude-haiku-4-5")
+        assert ctx.selected_model == "claude-haiku-4-5"
+
+    def test_unservable_pin_is_400_never_substituted(self, no_pool_env):
+        with pytest.raises(HTTPException) as e:
+            _reserve("claude-sonnet-4-6", vsr_hard_model="totally-not-a-model")
+        assert e.value.status_code == 400
+        assert e.value.detail["reason"] == "invalid_model_pin"
+
+    def test_wrong_protocol_pin_is_400(self, no_pool_env):
+        gpt = _first_responses_model()
+        if gpt is None:
+            pytest.skip("no responses-protocol model in the registry")
+        with pytest.raises(HTTPException) as e:
+            _reserve("claude-sonnet-4-6", wire_protocol="messages", vsr_hard_model=gpt)
+        assert e.value.status_code == 400
+
+    def test_pin_allowlist_matches_across_spellings(self, no_pool_env):
+        # Fable rev2 NEW-1/F1: the pin is used VERBATIM downstream (not
+        # canonicalized — that bypassed alias-keyed quotas), but the allowlist
+        # membership check compares on the registry ENTRY, so a pin spelled as
+        # the bedrock id still matches an allowlist entry spelled as the alias.
+        from mvp.models import resolve_model
+        entry = resolve_model("claude-haiku-4-5")
+        bedrock_id = entry.bedrock_model_id
+        if bedrock_id == entry.aliases[0]:
+            pytest.skip("model has no distinct bedrock-id spelling")
+        _put_routing_config(
+            allowlist=["claude-haiku-4-5"], quotas={}, fallback_default="off")
+        ctx = _reserve("claude-sonnet-4-6", vsr_hard_model=bedrock_id)
+        # served verbatim under the spelling the caller pinned (config/request
+        # spelling-agreement is the P0-11 convention; pin follows it)
+        assert ctx.selected_model == bedrock_id
+
+    def test_chain_only_tenant_rejects_pin_outside_chain(self, no_pool_env):
+        # Fable rev2 NEW-2: a chain-only tenant (no allowlist) must not let a
+        # client header pin a model OUTSIDE the chain — the chain is the policy.
+        _put_routing_config(
+            chain=["claude-sonnet-4-6"], quotas={}, fallback_default="off")
+        with pytest.raises(HTTPException) as e:
+            _reserve("claude-sonnet-4-6", vsr_hard_model="claude-haiku-4-5")
+        assert e.value.status_code == 403
+        assert e.value.detail["reason"] == "model_pin_not_allowed"
+
+    def test_chain_only_tenant_allows_pin_inside_chain(self, no_pool_env):
+        _put_routing_config(
+            chain=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={}, fallback_default="off")
+        ctx = _reserve("claude-sonnet-4-6", vsr_hard_model="claude-haiku-4-5")
+        assert ctx.selected_model == "claude-haiku-4-5"
+
+    def test_pinned_model_quota_exhausted_402_no_fallback(self, no_pool_env):
+        # pin haiku with a ~0 quota; chain has sonnet as a fallback, but a hard
+        # pin must NOT fall back — it 402s.
+        _put_routing_config(
+            chain=["claude-haiku-4-5", "claude-sonnet-4-6"],
+            quotas={"claude-haiku-4-5": {"limit": 1}},
+            fallback_default="on")
+        with pytest.raises(HTTPException) as e:
+            _reserve("claude-haiku-4-5", vsr_hard_model="claude-haiku-4-5")
+        assert e.value.status_code == 402
+        assert e.value.detail["reason"] == "model_quota_exhausted"
+        # sonnet (the chain fallback) was never charged
+        assert _used("claude-sonnet-4-6") == 0
 
 
 class TestPassthrough:

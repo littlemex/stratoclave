@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,7 +26,7 @@ from ._pipeline import (
     settle_reservation_and_log as _settle_reservation_and_log,
 )
 from .authz import require_permission
-from .deps import AuthenticatedUser, get_request_context
+from .deps import AuthenticatedUser, extract_model_pin, get_request_context
 from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import resolve_bedrock_model
 
@@ -223,6 +223,7 @@ def _map_finish_reason(bedrock_reason: Optional[str]) -> str:
 @router.post("/v1/chat/completions")
 def chat_completions(
     body: ChatCompletionsRequest,
+    request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(require_permission("messages:send")),
     ctx: RequestContext = Depends(get_request_context),
@@ -230,6 +231,9 @@ def chat_completions(
     # P0-12: echo the correlation ids so a client can stitch calls into a run.
     corr = _corr_headers(ctx)
     response.headers.update(corr)
+
+    # P0-15: optional VSR hard pin (see anthropic.messages). Absent -> unchanged.
+    model_pin = extract_model_pin(request)
 
     # Reject unsupported parameters explicitly (no silent drops)
     if body.n is not None and body.n > 1:
@@ -286,6 +290,7 @@ def chat_completions(
         input_tokens_est=input_est,
         max_output_tokens=max_out,
         wire_protocol="messages",
+        vsr_hard_model=model_pin,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point

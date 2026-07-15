@@ -229,6 +229,19 @@ resolves the requested model and, when a per-model quota is exhausted, cascades
 down the tenant/user fallback chain — reserving and settling each candidate at
 its own price and serving the model actually reserved.
 
+**Model pinning & passthrough.** Two escape hatches from routing policy:
+
+- **Hard pin** — send `x-sc-model-pin: <model>` and the request runs on exactly
+  that model: no cascade, no chain rewrite, no breaker downgrade, no
+  quota-exhaustion fallback. The pin is validated against the tenant allowlist
+  (`403` if not allowed) and the route's wire protocol (`400` if unservable) —
+  it is never silently substituted. Pricing and per-model quota apply at the
+  pinned model's own rate. Absent header ⇒ normal routing.
+- **Passthrough mode** — a tenant with no chain, no quotas, and fallback off is
+  served its requested model on every request, with no fallback or downgrade
+  (an allowlist may still be configured purely as a gate). This is the default
+  degenerate configuration; it needs no special setup and is locked by test.
+
 <p align="center">
   <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock, then settle once and return; DynamoDB holds budgets, quotas, usage log, and routing config." width="100%">
 </p>
@@ -598,9 +611,11 @@ routing evaluation — all three fire-and-forget, DynamoDB-only, and money-neutr
 
 - **Per-tenant reasoning-effort and tool caps.** App-layer policy hooks exist;
   enforcement is not wired.
-- **VSR (virtual service router) adapter.** The resolver already honours a
-  hard model pin (`vsr_hard_model`), but the request-side adapter that supplies
-  it — and the passthrough recipe — is not wired.
+- **VSR (virtual service router) service.** The per-request hard pin is shipped
+  (`x-sc-model-pin` header → exactly that model, no cascade/fallback/downgrade,
+  allowlist- and servability-enforced; see "Model pinning & passthrough" below).
+  What remains is an *external* VSR service that would set that header centrally
+  — the header is the forward-compatible seam for it.
 - **Offline routing evaluator.** The routing-signals table is written today but
   nothing consumes it yet; the evaluator that feeds routing policy back is a
   later increment (the schema is day-bucketed + sharded + TTL'd for it).
