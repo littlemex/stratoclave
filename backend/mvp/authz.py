@@ -51,41 +51,97 @@ def _split_resource(permission: str) -> str:
     return permission.split(":", 1)[0]
 
 
+# --- Read-breadth implication lattice (security-sensitive) ------------------
+# A broader read permission grants the narrower ones on the SAME resource, so a
+# caller who may read ALL usage can also read their OWN usage (previously
+# denied — a `usage:read-all` key 403'd on `usage:read-self`).
+#
+# DIRECTION IS LOAD-BEARING: KEY = permission HELD; VALUES = the strictly
+# narrower permissions it ALSO grants. A value must NEVER be broader than its
+# key — a reversed edge here is privilege escalation (e.g. read-self ⇒ read-all).
+# The set is transitively closed by hand (usage:read-all lists read-self
+# directly) and proved exhaustively in tests/test_authz_lattice.py. Only the
+# read breadth ladder — NO cross-action edges (update does NOT imply read).
+_HELD_IMPLIES: dict[str, frozenset[str]] = {
+    "tenants:read-all": frozenset({"tenants:read-own"}),
+    "usage:read-all": frozenset({"usage:read-own-tenant", "usage:read-self"}),
+    "usage:read-own-tenant": frozenset({"usage:read-self"}),
+}
+_EMPTY: frozenset[str] = frozenset()
+
+# Per-resource breadth RANK (higher = broader). Encoding DIRECTION explicitly
+# (not just edge shape) is what makes the import-time guard reject a *swapped*
+# edge — e.g. replacing `read-all: {read-own}` with `read-own: {read-all}` — and
+# any cycle, which a pairwise "is the reverse also present" check would miss.
+# NOTE the shared rank 2: no resource today has BOTH `read-own-tenant` and
+# `read-own`, so the tie never blocks a real edge. If one ever gains both
+# (tenant-wide is broader than own), split the ranks — until then the guard
+# would fail LOUDLY at import (fail-closed) on such an edge, which is safe.
+_BREADTH_RANK: dict[str, int] = {
+    "read-all": 3,
+    "read-own-tenant": 2,
+    "read-own": 2,
+    "read-self": 1,
+}
+
+
+def _action(permission: str) -> str:
+    return permission.split(":", 1)[1] if ":" in permission else permission
+
+
+# Import-time guards. Use `raise` (NOT `assert`, which `python -O` strips) so
+# these run in optimized deployments too: every edge must stay within one
+# resource, never target a wildcard or itself, and — the security property —
+# only ever point to a STRICTLY NARROWER permission (lower breadth rank).
+for _held, _implied in _HELD_IMPLIES.items():
+    for _n in _implied:
+        if _split_resource(_n) != _split_resource(_held):
+            raise ValueError(f"cross-resource implication edge: {_held} -> {_n}")
+        if _n.endswith(":*") or _n == _held:
+            raise ValueError(f"illegal implication edge (wildcard/self): {_held} -> {_n}")
+        _hr = _BREADTH_RANK.get(_action(_held))
+        _nr = _BREADTH_RANK.get(_action(_n))
+        if _hr is None or _nr is None:
+            raise ValueError(f"implication edge over unranked action: {_held} -> {_n}")
+        if _nr >= _hr:
+            raise ValueError(
+                f"broadening/level implication edge (rank {_hr} -> {_nr}): {_held} -> {_n}"
+            )
+
+
+def _grants(held: str, requested: str) -> bool:
+    """True iff holding permission `held` satisfies `requested`. The single
+    match rule shared by role checks and key-scope checks so they can never
+    diverge: exact match, same-resource `:*` wildcard, or a read-breadth
+    implication edge. Unknown/typo'd `held` falls through to exact-match only
+    (fail-safe: never broadens)."""
+    if held == requested:
+        return True
+    if held.endswith(":*") and _split_resource(held) == _split_resource(requested):
+        return True
+    return requested in _HELD_IMPLIES.get(held, _EMPTY)
+
+
 def has_permission(roles: Iterable[str], permission: str) -> bool:
     """Return True if any of the given roles grants the specified permission.
 
-    - Wildcards: "users:*" covers "users:create" and "users:read",
-      but only on an exact resource-name match (will not match "users-admin:*").
-    - Multiple roles (e.g. ["admin", "team_lead"]) are evaluated as a union.
+    - Exact match, or a same-resource `:*` wildcard (e.g. `users:*` covers
+      `users:create`/`users:read`, but not `users-admin:*`).
+    - Read-breadth implication (e.g. `usage:read-all` grants `usage:read-self`).
+    - Multiple roles are evaluated as a union.
     """
-    target_resource = _split_resource(permission)
-    for role in roles:
-        perms = _get_permissions_for_role(role)
-        for p in perms:
-            if p == permission:
-                return True
-            if p.endswith(":*"):
-                p_resource = _split_resource(p)
-                if p_resource == target_resource:
-                    return True
-    return False
+    return any(
+        _grants(p, permission)
+        for role in roles
+        for p in _get_permissions_for_role(role)
+    )
 
 
 def _permission_matches(perms: Iterable[str], permission: str) -> bool:
-    """Check a permission directly against a list of permission strings (no role resolution).
-
-    Unlike `has_permission(roles, ...)`, this bypasses the roles → Permissions table lookup
-    and evaluates against a raw permissions list. Used for API Key scope checks.
-    """
-    target_resource = _split_resource(permission)
-    for p in perms:
-        if p == permission:
-            return True
-        if p.endswith(":*"):
-            p_resource = _split_resource(p)
-            if p_resource == target_resource:
-                return True
-    return False
+    """Check a permission directly against a list of permission strings (no role
+    resolution). Used for API Key scope checks; shares `_grants` with
+    `has_permission` so scope semantics match role semantics exactly."""
+    return any(_grants(p, permission) for p in perms)
 
 
 def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
