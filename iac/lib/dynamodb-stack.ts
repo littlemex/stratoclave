@@ -52,6 +52,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly modelQuotasTable: dynamodb.Table;
   /** P0-13/14: dual-track observability (span records + workflow_run rollups), TTL-reaped */
   public readonly observabilityTable: dynamodb.Table;
+  /** P0-16: routing_signals — write-only append log (learning seam), TTL-reaped */
+  public readonly routingSignalsTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -394,6 +396,22 @@ export class DynamoDBStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // P0-16: routing_signals. Write-only seam for the FUTURE offline evaluator:
+    // one item per finalized request. The pk day-buckets and N-way shards each
+    // (tenant, category) (SC_SIGNAL_SHARDS, default 8) so a hot tenant never
+    // concentrates on one partition and aged day-partitions cool off.
+    // Deliberately NO GSI, NO PITR, NO DynamoDB Stream — the consumer is a later
+    // increment and both a Stream and a GSI are additive, non-breaking additions
+    // when it lands. Best-effort telemetry → TTL-reaped (`expires_at`).
+    this.routingSignalsTable = new dynamodb.Table(this, 'RoutingSignalsTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-routing-signals`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -416,6 +434,7 @@ export class DynamoDBStack extends cdk.Stack {
       this.modelQuotasTable.tableArn,
       this.observabilityTable.tableArn,
       `${this.observabilityTable.tableArn}/index/*`,
+      this.routingSignalsTable.tableArn,
     ];
 
     // Parameter Store exports
@@ -440,6 +459,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableRateLimitsParam', 'dynamodb/table-rate-limits', this.rateLimitsTable],
       ['TableModelQuotasParam', 'dynamodb/table-model-quotas', this.modelQuotasTable],
       ['TableObservabilityParam', 'dynamodb/table-observability', this.observabilityTable],
+      ['TableRoutingSignalsParam', 'dynamodb/table-routing-signals', this.routingSignalsTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

@@ -46,9 +46,12 @@ def _drain_obs_executor():
     """Block until every queued observability write has run (fire-and-forget
     writes hop onto a dedicated ThreadPoolExecutor)."""
     import mvp.observability.store as store
+    import mvp.learning.signals as signals
     # Submit sentinels equal to worker count and wait — by the time these run,
-    # all earlier-queued writes have completed (FIFO per worker).
+    # all earlier-queued writes have completed (FIFO per worker). Drain BOTH the
+    # observability executor (span/rollup) and the signals executor (P0-16).
     futs = [store._executor.submit(lambda: None) for _ in range(store._MAX_WORKERS)]
+    futs += [signals._executor.submit(lambda: None) for _ in range(signals._MAX_WORKERS)]
     for f in futs:
         f.result(timeout=10)
 
@@ -131,6 +134,32 @@ class TestSpanAndRollupWritten:
         assert len(spans) == 2
         assert int(rollup["span_count"]) == 2          # ADD accumulated
         assert int(rollup["output_tokens"]) == 6
+
+    def test_routing_signal_written_through_handler(self, api_client):
+        # P0-16: a completed request writes one routing_signals item.
+        resp = _stream(api_client, headers={HDR_WORKFLOW_RUN_ID: "run-sig-1"})
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+        _drain_obs_executor()
+
+        import mvp.learning.signals as signals
+        tbl = boto3.resource("dynamodb", region_name="us-east-1").Table(
+            "stratoclave-routing-signals")
+        items = tbl.scan()["Items"]
+        mine = [i for i in items if i.get("workflow_run_id") == "run-sig-1"]
+        assert len(mine) == 1, items
+        sig = mine[0]
+        # key scheme: pk day-bucketed + sharded, sk time-ordered
+        assert sig["pk"].startswith("TENANT#obs-org#CAT#")
+        assert "#D#" in sig["pk"] and "#S#" in sig["pk"]
+        assert sig["sk"].startswith("TS#")
+        assert sig["status"] == "completed"
+        assert sig["canceled_by_client"] is False
+        assert int(sig["output_tokens"]) == 3
+        assert sig["category"] in ("haiku", "sonnet", "opus", "other")
+        # shard recomputable from the span token in the sk
+        tok = sig["sk"].split("#")[2]
+        assert int(sig["pk"].rsplit("#", 1)[1]) == signals.shard_for(tok, signals._SHARDS)
 
     def test_no_run_header_uses_request_id_as_run(self, api_client):
         resp = _stream(api_client)

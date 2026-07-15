@@ -679,6 +679,10 @@ async def _stream_messages(
         # (invoke_error), committed_* stay empty and breaker_stage is "unknown".
         # Import here (not at the request-path top) so nothing observability-
         # related can raise into the request before the hook's own swallow (F1).
+        # The SIGNALS import is deliberately deferred into the P0-16 try block
+        # below (N1): it pulls a private cross-package symbol, and an ImportError
+        # here would take the AUTHORITATIVE span emit down with the best-effort
+        # signal — inverting the record hierarchy.
         from .observability.store import SpanDraft, emit_span_and_rollup
 
         routed = _routed_box.get("routed")
@@ -700,6 +704,70 @@ async def _stream_messages(
             started_at_ms=_started_at_ms,
         )
         emit_span_and_rollup(draft, status, acc)
+
+        # P0-16 (learning-signals seam): a write-only routing signal for the
+        # FUTURE offline evaluator. Rides the SAME at-most-once finalizer claim
+        # as the span (this closure runs once), takes no second claim, and is
+        # fire-and-forget (never raises/blocks; money path untouched). The
+        # partial/cancel classification is derived from the SAME acc snapshot
+        # semantics the store uses (saw_final_usage), NOT from acc attributes
+        # that don't exist. First-event latency comes from the committed
+        # attempt's record. `route_exhausted` refinement of `status` is deferred
+        # with the span-status rename (needs a run_stream money-path increment).
+        try:
+            from .learning.signals import category_for_model, emit_signal
+
+            saw_final = bool(getattr(acc, "saw_final_usage", False))
+            # N2: dedupe targets by (model_id, region) value, not object identity
+            # or hashability — always hashable, and value equality is what a
+            # "distinct chain hop" means (robust even if Target ever changes).
+            targets_distinct = len({
+                (getattr(a.target, "model_id", ""), getattr(a.target, "region", ""))
+                for a in attempts
+            })
+            # F3a: first-event latency belongs to the COMMITTED attempt only —
+            # attempts[-1] is the success record (route_stream measures t0->first
+            # peeked event = TTFB). Zero when routing never committed, so we never
+            # report a failed attempt's latency under this name.
+            committed_latency = (
+                int(getattr(attempts[-1], "latency_ms", 0) or 0)
+                if (target and attempts) else 0
+            )
+            # F2: chain position = number of DISTINCT chain hops ATTEMPTED before
+            # the committed one. Same-target retries append extra AttemptRecords,
+            # so len(attempts)-1 overcounts; targets_distinct-1 is the true hop
+            # index. N5 (semantics, documented for the consumer): this counts
+            # hops that produced an AttemptRecord — a breaker-open hop skipped
+            # WITHOUT an attempt is not counted, so this is "attempted-hop index",
+            # not "resolved-chain index". -1 == routing never committed.
+            chain_position = (targets_distinct - 1) if (target and routed) else -1
+            emit_signal(
+                tenant_id=user.org_id,      # auth-derived; NEVER a client header
+                group_id=(ctx.group_id if ctx else None) or "",
+                workflow_run_id=(ctx.workflow_run_id if ctx else None) or "",
+                span_id=(ctx.span_id if ctx else None) or request_id,
+                category=category_for_model(body.model, target.model_id if target else ""),
+                committed_model_id=(target.model_id if target else ""),
+                committed_region=(getattr(target, "region", "") if target else ""),
+                cost_tier=(getattr(target, "cost_tier", 0) if target else 0),
+                chain_position_served=chain_position,
+                status=status,
+                usage_is_partial=not saw_final,
+                canceled_by_client=(status == "client_disconnect" and not saw_final),
+                output_tokens=int(getattr(acc, "output_tokens", 0) or 0),
+                latency_first_event_ms=committed_latency,
+                attempts_total=len(attempts),
+                targets_distinct=targets_distinct,
+                breaker_stage=(routed.breaker_stage if routed else "unknown"),
+            )
+        except Exception as _sig_exc:  # noqa: BLE001 — F6: never-raises stays
+            # LOCAL to this block. N2a: log (guarded) so a SYSTEMATIC failure
+            # (kwargs drift, import error) isn't invisible — it fails 100% of the
+            # time otherwise, silently.
+            try:
+                logger.warning("routing_signal_block_failed", error=str(_sig_exc))
+            except Exception:
+                pass
 
     class _AnthropicAdapter:
         def __init__(self):

@@ -254,6 +254,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_MODEL_QUOTAS_TABLE: dynamoDBStack.modelQuotasTable.tableName,
     // P0-13/14: dual-track observability (span records + workflow_run rollups).
     DYNAMODB_OBSERVABILITY_TABLE: dynamoDBStack.observabilityTable.tableName,
+    // P0-16: routing-signals write-only seam (writer live; consumer stubbed).
+    DYNAMODB_ROUTING_SIGNALS_TABLE: dynamoDBStack.routingSignalsTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,

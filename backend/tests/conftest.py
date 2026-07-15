@@ -70,6 +70,7 @@ _TABLE_ENVS = {
     "DYNAMODB_RATE_LIMITS_TABLE": "stratoclave-rate-limits",
     "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
     "DYNAMODB_OBSERVABILITY_TABLE": "stratoclave-observability",
+    "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -247,6 +248,22 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
                     ],
                     "Projection": {"ProjectionType": "ALL"},
                 }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # RoutingSignals (P0-16): write-only append log. PK pk
+        # ("TENANT#<t>#CAT#<c>#D#<yyyymmdd>#S#<shard>"), SK sk ("TS#<ms>#<span>"),
+        # TTL expires_at. No GSI.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_ROUTING_SIGNALS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
             ],
             BillingMode="PAY_PER_REQUEST",
         )
