@@ -436,7 +436,24 @@
     "delete_confirm_label": "確認のために <1>{{email}}</1> を入力してください",
     "delete_submit": "削除を実行",
     "delete_submitting": "削除中…",
-    "delete_error_fallback": "削除に失敗しました"
+    "delete_error_fallback": "削除に失敗しました",
+    "api_keys": {
+      "title": "APIキー",
+      "description": "このユーザーに発行された長期キー。失効は即時かつ取り消し不可です。",
+      "loading": "APIキーを読み込み中…",
+      "load_error": "APIキーの読み込みに失敗しました。",
+      "empty": "APIキーはありません。",
+      "col_name": "名前",
+      "col_key_id": "キーID",
+      "col_scopes": "スコープ",
+      "col_created": "作成日",
+      "col_expires": "有効期限",
+      "revoked": "失効済み",
+      "revoke": "失効",
+      "revoke_confirm_title": "APIキーを失効させますか？",
+      "revoke_confirm_body": "キー <b>{{name}}</b> は直ちに無効になります。この操作は取り消せません。",
+      "revoke_confirm_action": "キーを失効"
+    }
   },
   "admin_users": {
     "title": "ユーザー管理",

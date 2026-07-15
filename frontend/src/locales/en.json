@@ -436,7 +436,24 @@
     "delete_confirm_label": "Type <1>{{email}}</1> to confirm.",
     "delete_submit": "Delete",
     "delete_submitting": "Deleting…",
-    "delete_error_fallback": "Deletion failed"
+    "delete_error_fallback": "Deletion failed",
+    "api_keys": {
+      "title": "API keys",
+      "description": "Long-lived keys issued to this user. Revocation is immediate and irreversible.",
+      "loading": "Loading API keys…",
+      "load_error": "Failed to load API keys.",
+      "empty": "No API keys.",
+      "col_name": "Name",
+      "col_key_id": "Key ID",
+      "col_scopes": "Scopes",
+      "col_created": "Created",
+      "col_expires": "Expires",
+      "revoked": "REVOKED",
+      "revoke": "Revoke",
+      "revoke_confirm_title": "Revoke API key?",
+      "revoke_confirm_body": "The key <b>{{name}}</b> will stop working immediately. This cannot be undone.",
+      "revoke_confirm_action": "Revoke key"
+    }
   },
   "admin_users": {
     "title": "User administration",

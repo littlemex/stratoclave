@@ -6,7 +6,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { Trans, useTranslation } from 'react-i18next'
-import { ArrowLeft, ArrowRight, Coins, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Coins, KeyRound, ShieldOff, Trash2 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -27,7 +27,16 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { api, type Role, type UserSummary } from '@/lib/api'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { useError } from '@/contexts/ErrorContext'
+import { api, type ApiKeySummary, type Role, type UserSummary } from '@/lib/api'
 
 function fmt(n: number): string {
   return n.toLocaleString()
@@ -272,6 +281,8 @@ function Content({ user, tenantOptions, onMutated, onDeleted }: ContentProps) {
         </Card>
       ) : null}
 
+      <ApiKeysCard userId={user.user_id} />
+
       <AssignTenantDialog
         open={assignOpen}
         user={user}
@@ -292,6 +303,162 @@ function Content({ user, tenantOptions, onMutated, onDeleted }: ContentProps) {
         onDeleted={onDeleted}
       />
     </>
+  )
+}
+
+// ------------------------------------------------------------------
+// API keys card: list a user's keys + revoke (admin). The CLI could already
+// do this after the contract fix; this gives operators a browser path so key
+// revocation (a security control) isn't CLI-only.
+// ------------------------------------------------------------------
+function fmtKeyDate(iso?: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return isNaN(d.getTime()) ? iso : d.toLocaleDateString()
+}
+
+function ApiKeysCard({ userId }: { userId: string }) {
+  const { t } = useTranslation()
+  const qc = useQueryClient()
+  const { showError } = useError()
+  const [revokeTarget, setRevokeTarget] = useState<ApiKeySummary | null>(null)
+
+  const keysQuery = useQuery({
+    queryKey: ['admin', 'users', userId, 'api-keys'],
+    queryFn: () => api.admin.userApiKeys(userId, true),
+    enabled: !!userId,
+  })
+
+  const revokeMutation = useMutation({
+    mutationFn: (keyId: string) => api.admin.revokeApiKey(keyId),
+    onSuccess: () => {
+      setRevokeTarget(null)
+      qc.invalidateQueries({ queryKey: ['admin', 'users', userId, 'api-keys'] })
+    },
+    onError: (e) => showError(e instanceof Error ? e.message : String(e)),
+  })
+
+  return (
+    <section>
+      <Card data-testid="admin-user-api-keys-card">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4" />
+            {t('admin_user_detail.api_keys.title')}
+          </CardTitle>
+          <CardDescription>
+            {t('admin_user_detail.api_keys.description')}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {keysQuery.isLoading ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              {t('admin_user_detail.api_keys.loading')}
+            </p>
+          ) : keysQuery.isError && !keysQuery.data ? (
+            // Only show the error state when we have NO data. A FAILED REFETCH
+            // (e.g. the post-revoke invalidation) sets isError while `data` is
+            // still populated — don't blank out a good table then (Fable review).
+            <p className="p-6 text-sm text-destructive">
+              {t('admin_user_detail.api_keys.load_error')}
+            </p>
+          ) : !keysQuery.data?.length ? (
+            <p
+              className="p-6 text-sm text-muted-foreground"
+              data-testid="api-keys-empty"
+            >
+              {t('admin_user_detail.api_keys.empty')}
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('admin_user_detail.api_keys.col_name')}</TableHead>
+                  <TableHead>{t('admin_user_detail.api_keys.col_key_id')}</TableHead>
+                  <TableHead>{t('admin_user_detail.api_keys.col_scopes')}</TableHead>
+                  <TableHead>{t('admin_user_detail.api_keys.col_created')}</TableHead>
+                  <TableHead>{t('admin_user_detail.api_keys.col_expires')}</TableHead>
+                  <TableHead />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {keysQuery.data.map((k) => {
+                  const revoked = !!k.revoked_at
+                  return (
+                    <TableRow key={k.key_id} data-testid={`api-key-row-${k.key_id}`}>
+                      <TableCell className="text-xs">{k.name || '—'}</TableCell>
+                      <TableCell className="font-mono text-xs">{k.key_id}</TableCell>
+                      <TableCell className="text-xs">
+                        {k.scopes.join(', ') || '—'}
+                      </TableCell>
+                      <TableCell className="text-xs">{fmtKeyDate(k.created_at)}</TableCell>
+                      <TableCell className="text-xs">{fmtKeyDate(k.expires_at)}</TableCell>
+                      <TableCell className="text-right">
+                        {revoked ? (
+                          <Badge
+                            variant="secondary"
+                            data-testid={`api-key-revoked-badge-${k.key_id}`}
+                          >
+                            {t('admin_user_detail.api_keys.revoked')}
+                          </Badge>
+                        ) : (
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => setRevokeTarget(k)}
+                            data-testid={`api-key-revoke-${k.key_id}`}
+                          >
+                            <ShieldOff className="h-3.5 w-3.5" />
+                            {t('admin_user_detail.api_keys.revoke')}
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog
+        open={!!revokeTarget}
+        onOpenChange={(open) => {
+          if (!open) setRevokeTarget(null)
+        }}
+      >
+        <DialogContent data-testid="api-key-revoke-dialog">
+          <DialogHeader>
+            <DialogTitle>
+              {t('admin_user_detail.api_keys.revoke_confirm_title')}
+            </DialogTitle>
+            <DialogDescription>
+              <Trans
+                i18nKey="admin_user_detail.api_keys.revoke_confirm_body"
+                values={{ name: revokeTarget?.name || revokeTarget?.key_id }}
+                components={{ b: <strong /> }}
+              />
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokeTarget(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={revokeMutation.isPending}
+              onClick={() =>
+                revokeTarget && revokeMutation.mutate(revokeTarget.key_id)
+              }
+              data-testid="api-key-revoke-confirm"
+            >
+              {t('admin_user_detail.api_keys.revoke_confirm_action')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
   )
 }
 

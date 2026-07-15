@@ -656,6 +656,25 @@ export const api = {
         `/api/mvp/admin/sso-invites/${encodeURIComponent(email)}`,
         { method: 'DELETE' },
       ),
+
+    // Admin: list a user's API keys. NOTE the admin per-user endpoint returns a
+    // BARE array (list[ApiKeySummary]), not the {keys,...} envelope the
+    // self-service `apiKeys.list` uses. include_revoked defaults true so an
+    // admin auditing a user sees revocation history (and the row stays visible
+    // after revoke).
+    userApiKeys: (user_id: string, includeRevoked = true) => {
+      const q = includeRevoked ? '?include_revoked=true' : ''
+      return jsonRequest<ApiKeySummary[]>(
+        `/api/mvp/admin/users/${encodeURIComponent(user_id)}/api-keys${q}`,
+      )
+    },
+    // Admin: revoke ANY key by its key_id. The bare /{key_hash} route is 410
+    // Gone; this by-key-id path is the live one.
+    revokeApiKey: (key_id: string) =>
+      jsonRequest<void>(
+        `/api/mvp/admin/api-keys/by-key-id/${encodeURIComponent(key_id)}`,
+        { method: 'DELETE' },
+      ),
   },
 
   apiKeys: {
