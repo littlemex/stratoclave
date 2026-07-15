@@ -1,4 +1,5 @@
-import { execFileSync } from 'child_process';
+import { spawnSync } from 'child_process';
+import * as fs from 'fs';
 import * as path from 'path';
 
 /**
@@ -15,7 +16,15 @@ interface SynthResult {
   code: number;
   stdout: string;
   stderr: string;
+  outDir: string;
 }
+
+// Monotonic counter so every synth() gets a UNIQUE output directory. jest runs
+// suites in parallel workers and each case synths the whole app; a shared
+// cdk.out would race (one case reads another's half-written templates). An
+// isolated --output per call removes that contention entirely — this was the
+// CI-only flake (locally the suite ran alone so nothing collided).
+let synthSeq = 0;
 
 // Region/residency vars whose undefined-vs-empty distinction matters
 // (e.g. STRATOCLAVE_RESIDENCY='' would flip residencyIntent on). We DELETE these
@@ -34,10 +43,11 @@ const HERMETIC_KEYS = [
 ];
 
 function synth(env: Record<string, string>): SynthResult {
-  // Capture stdout+stderr separately regardless of exit code. `cdk synth`
-  // writes CDK Annotation warnings to stderr on the SUCCESS path too, so we
-  // must not discard stderr when the command succeeds.
-  const { spawnSync } = require('child_process');
+  // Each call synths into its OWN output dir (see synthSeq) so parallel jest
+  // workers and repeated calls never share cdk.out. Capture stdout+stderr
+  // regardless of exit code — `cdk synth` writes CDK Annotation warnings to
+  // stderr on the SUCCESS path too, so we must not discard stderr on success.
+  const outDir = path.join(IAC_DIR, `cdk.out.test-${process.pid}-${++synthSeq}`);
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     CDK_NAG: 'off',
@@ -45,38 +55,38 @@ function synth(env: Record<string, string>): SynthResult {
   };
   for (const k of HERMETIC_KEYS) delete childEnv[k];
   Object.assign(childEnv, env); // apply only this case's overrides
-  const res = spawnSync('npx', ['cdk', 'synth', '--quiet'], {
-    cwd: IAC_DIR,
-    env: childEnv,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const res = spawnSync(
+    'npx',
+    ['cdk', 'synth', '--quiet', '--output', outDir],
+    {
+      cwd: IAC_DIR,
+      env: childEnv,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
   return {
     code: res.status ?? 1,
     stdout: res.stdout ?? '',
     stderr: res.stderr ?? '',
+    outDir,
   };
 }
-// Silence unused-import lint now that spawnSync is used instead.
-void execFileSync;
 
-function ecsTaskEnv(): Record<string, string> {
-  // Read the synthesized ECS task-def env for THIS test's stack. The tests set
-  // no STRATOCLAVE_PREFIX, so the entrypoint uses the default 'stratoclave'
-  // prefix → 'stratoclave-ecs'. Pin that exact file: cdk.out is shared and may
-  // also hold scverify-ecs / scveu-ecs templates from other synths, so picking
-  // the "first *-ecs file" would read a stale, wrong-prefix template.
-  const fs = require('fs');
+function ecsTaskEnv(r: SynthResult): Record<string, string> {
+  // Read the synthesized ECS task-def env from THIS call's isolated output dir.
+  // Tests set no STRATOCLAVE_PREFIX, so the entrypoint uses the default
+  // 'stratoclave' prefix -> 'stratoclave-ecs'.
   const tpl = JSON.parse(
     fs.readFileSync(
-      path.join(IAC_DIR, 'cdk.out', 'stratoclave-ecs.template.json'),
+      path.join(r.outDir, 'stratoclave-ecs.template.json'),
       'utf-8',
     ),
   );
   const out: Record<string, string> = {};
-  for (const r of Object.values<any>(tpl.Resources)) {
-    if (r.Type === 'AWS::ECS::TaskDefinition') {
-      for (const cd of r.Properties.ContainerDefinitions) {
+  for (const res of Object.values<any>(tpl.Resources)) {
+    if (res.Type === 'AWS::ECS::TaskDefinition') {
+      for (const cd of res.Properties.ContainerDefinitions) {
         for (const e of cd.Environment ?? []) {
           if (typeof e.Value === 'string') out[e.Name] = e.Value;
         }
@@ -89,6 +99,15 @@ function ecsTaskEnv(): Record<string, string> {
 describe('bin/iac.ts region decoupling + residency', () => {
   jest.setTimeout(180_000);
 
+  afterAll(() => {
+    // Remove the per-call isolated output dirs this suite created.
+    for (const name of fs.readdirSync(IAC_DIR)) {
+      if (name.startsWith('cdk.out.test-')) {
+        fs.rmSync(path.join(IAC_DIR, name), { recursive: true, force: true });
+      }
+    }
+  });
+
   test('us-east-1 default synths and is residency-silent', () => {
     const r = synth({ STRATOCLAVE_REGION: 'us-east-1' });
     expect(r.code).toBe(0);
@@ -100,19 +119,19 @@ describe('bin/iac.ts region decoupling + residency', () => {
     // must be the normalized boolean, not the raw operator string.
     const r = synth({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'false' });
     expect(r.code).toBe(0);
-    expect(ecsTaskEnv().CODEX_ENABLED).toBe('false');
+    expect(ecsTaskEnv(r).CODEX_ENABLED).toBe('false');
   });
 
   test('NEW-8: mixed-case CODEX_ENABLED=FALSE normalizes to "false" (analysis == container)', () => {
     const r = synth({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'FALSE' });
     expect(r.code).toBe(0);
-    expect(ecsTaskEnv().CODEX_ENABLED).toBe('false');
+    expect(ecsTaskEnv(r).CODEX_ENABLED).toBe('false');
   });
 
   test('CODEX_ENABLED unset defaults to "true" in the task-def', () => {
     const r = synth({ STRATOCLAVE_REGION: 'us-east-1' });
     expect(r.code).toBe(0);
-    expect(ecsTaskEnv().CODEX_ENABLED).toBe('true');
+    expect(ecsTaskEnv(r).CODEX_ENABLED).toBe('true');
   });
 
   test('BEDROCK_REGION is the model primary, independent of AWS_REGION', () => {
@@ -121,7 +140,7 @@ describe('bin/iac.ts region decoupling + residency', () => {
       BEDROCK_PRIMARY_REGION: 'us-east-1',
     });
     expect(r.code).toBe(0);
-    const envMap = ecsTaskEnv();
+    const envMap = ecsTaskEnv(r);
     expect(envMap.AWS_REGION).toBe('eu-west-1');
     expect(envMap.BEDROCK_REGION).toBe('us-east-1');
   });
