@@ -25,8 +25,43 @@ def _clean_env(monkeypatch):
     reset_catalog()
 
 
-def test_default_preserves_historical_regions(monkeypatch):
-    assert failover_regions() == ["us-west-2", "eu-west-1"]
+def test_default_filtered_to_primary_jurisdiction(monkeypatch):
+    # Primary is us-east-1 (fixture). The built-in defaults are
+    # (us-west-2, eu-west-1); eu-west-1 is a DIFFERENT jurisdiction than the
+    # us-* primary, so the unset-var default now keeps only us-west-2. This is
+    # the residency fix: a non-US primary must never inherit a US failover.
+    assert failover_regions() == ["us-west-2"]
+
+
+def test_default_eu_primary_never_leaks_to_us(monkeypatch):
+    # THE headline residency bug (Fable): BEDROCK_REGION=eu-west-1 with the var
+    # UNSET must NOT inherit us-west-2 from the built-in defaults. eu-west-1 is
+    # also the primary (stripped), so the default set collapses to empty.
+    monkeypatch.setenv("BEDROCK_REGION", "eu-west-1")
+    assert failover_regions() == []
+    reset_catalog()
+    catalog = get_catalog()
+    assert catalog, "catalog empty — residency assertion would be vacuous"
+    all_regions = {t.region for ts in catalog.values() for t in ts}
+    assert all_regions == {"eu-west-1"}, all_regions
+    assert not any(r.startswith("us-") for r in all_regions), all_regions
+
+
+def test_default_apac_primary_no_cross_jurisdiction(monkeypatch):
+    # An APAC primary with the var unset gets no default failover (neither
+    # built-in default is ap-*), so it stays single-region rather than leaking.
+    monkeypatch.setenv("BEDROCK_REGION", "ap-northeast-1")
+    assert failover_regions() == []
+
+
+def test_explicit_list_is_honored_verbatim_across_jurisdictions(monkeypatch):
+    # An EXPLICIT list is the operator's stated intent and is NOT
+    # jurisdiction-filtered (the CDK STRATOCLAVE_RESIDENCY check flags a
+    # cross-jurisdiction explicit list separately). EU primary + explicit
+    # us-west-2 keeps us-west-2.
+    monkeypatch.setenv("BEDROCK_REGION", "eu-west-1")
+    monkeypatch.setenv("STRATOCLAVE_FAILOVER_REGIONS", "us-west-2,eu-central-1")
+    assert failover_regions() == ["us-west-2", "eu-central-1"]
 
 
 def test_empty_disables_failover(monkeypatch):

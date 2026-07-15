@@ -2,6 +2,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
 import { getPrefix, stackName, paramPath, putStringParameter } from '../lib/_common';
+import { resolveRegionConfig } from '../lib/region-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
 import { AlbStack } from '../lib/alb-stack';
@@ -56,33 +57,17 @@ const prefix = getPrefix();
 // same-region (R) edge and needs no crossRegionReferences. Only the
 // WAF→Frontend edge crosses regions when R != us-east-1. See
 // docs/DEPLOYMENT.md ("Region decoupling") for the residency recipe.
-const DEFAULT_REGION = 'us-east-1'; // historical single-region default (body)
-const WAF_REGION = 'us-east-1'; // AWS hard requirement: CLOUDFRONT-scope WebACL
-
-// Reject non-region strings AND unsupported partitions. CloudFront (hence the
-// WAF stack) does not exist in the GovCloud / China partitions, and a single
-// app/credential set cannot span partitions, so a us-gov-/cn- body region would
-// fail confusingly mid-deploy. Fail loudly at synth instead. (Fable review M-2)
-function assertRegion(label: string, value: string): void {
-  if (!/^[a-z]{2}(-[a-z]+)+-\d$/.test(value)) {
-    throw new Error(
-      `Invalid ${label} "${value}" (expected an AWS region id like "us-east-1" / "eu-west-1").`
-    );
-  }
-  if (value.startsWith('us-gov-') || value.startsWith('cn-')) {
-    throw new Error(
-      `${label} "${value}": Stratoclave supports the "aws" partition only ` +
-        `(GovCloud / China partitions have no CloudFront for the WAF stack).`
-    );
-  }
-}
-
-// Body region R. STRATOCLAVE_REGION wins; else the CDK ambient region; else
-// us-east-1 (preserves the historical single-region default → zero diff on
-// existing deployments).
-const bodyRegion =
-  process.env.STRATOCLAVE_REGION || process.env.CDK_DEFAULT_REGION || DEFAULT_REGION;
-assertRegion('deploy region (STRATOCLAVE_REGION / CDK_DEFAULT_REGION)', bodyRegion);
+// Region / residency resolution lives in a pure, in-process-testable module
+// (lib/region-config.ts). It throws with an actionable message on any invalid
+// or residency-unsafe configuration, and returns the resolved regions + the
+// warnings to surface as CDK Annotations. See region-decoupling.test.ts.
+const regionCfg = resolveRegionConfig(process.env);
+const bodyRegion = regionCfg.bodyRegion;
+const bedrockPrimaryRegion = regionCfg.bedrockPrimaryRegion;
+const defaultBedrockModel = regionCfg.defaultBedrockModel;
+const failoverRegionsEnv = regionCfg.failoverRegionsEnv;
+const codexEnabled = regionCfg.codexEnabled;
+const residencyWarnings = regionCfg.residencyWarnings;
 
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -93,192 +78,9 @@ const env = {
 // bodyRegion — pinning WAF to R fails loudly at deploy (WAFv2 CLOUDFRONT scope
 // must be us-east-1), but keeping it a distinct literal makes the intent
 // unmistakable and immune to a copy-paste that reuses `env`.
-const wafEnv = { account: process.env.CDK_DEFAULT_ACCOUNT, region: WAF_REGION };
+const wafEnv = { account: process.env.CDK_DEFAULT_ACCOUNT, region: regionCfg.wafRegion };
 
 const cognitoEnv = env; // same region as the body: Cognito is region-agnostic
-
-// Bedrock model *primary* region — independent of the deploy region (Goal 2).
-// Mirrors the OPENAI_BEDROCK_REGIONS precedent (gateway region != model region).
-// When body != us-east-1 the operator MUST declare it: there is no correct
-// default when the regions diverge, and silently falling back to AWS_REGION (=R)
-// would call Bedrock in a region that may not host the model (silent 404 / wrong
-// variant under load). Refuse to guess.
-const bedrockPrimaryRegionRaw =
-  process.env.BEDROCK_PRIMARY_REGION ||
-  (bodyRegion === DEFAULT_REGION ? DEFAULT_REGION : undefined);
-if (!bedrockPrimaryRegionRaw) {
-  throw new Error(
-    `BEDROCK_PRIMARY_REGION must be set explicitly when the deploy region ` +
-      `(${bodyRegion}) != us-east-1. Refusing to guess the Bedrock model region. ` +
-      `NOTE: this is also required for \`cdk bootstrap\` (bootstrap synthesizes ` +
-      `this app); set BEDROCK_PRIMARY_REGION=<model-region> before bootstrapping, ` +
-      `or bootstrap without synth via \`cdk bootstrap --app "" aws://<acct>/${bodyRegion}\`.`
-  );
-}
-// Guaranteed-string binding: the narrowing above is lost inside the
-// BackendConfigStack class closure, so bind it here for use everywhere.
-const bedrockPrimaryRegion: string = bedrockPrimaryRegionRaw;
-// Validate the model region too — it flows to the ECS BEDROCK_REGION env and
-// the SSM param; a garbage value would fail only at runtime. (Fable review H-1)
-assertRegion('BEDROCK_PRIMARY_REGION', bedrockPrimaryRegion);
-
-// Default Bedrock model (Backend mapping fallback). Defined here (earlier than
-// its ECS use) so the residency analysis can inspect its inference-profile
-// prefix. (Fable review NEW-9)
-const defaultBedrockModel =
-  process.env.DEFAULT_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-7';
-
-// --- Residency leak analysis (Fable review C-1, corrected for NEW-1/NEW-3) --
-// The dangerous case is model == body == eu-west-1 while the operator FORGETS
-// the OTHER regions Bedrock is actually called in. We reconstruct the TRUE set
-// of runtime regions from the ACTUAL sources of truth, not from display hints:
-//
-//   * Claude failover  -> STRATOCLAVE_FAILOVER_REGIONS (default us-west-2 +
-//                         eu-west-1). Governs routing (mvp/routing/chains.py).
-//   * OpenAI/codex     -> HARDCODED per-model regions in the backend registry
-//                         (mvp/models.py: gpt-5.4=us-west-2, gpt-5.5=us-east-2).
-//                         NEW-1: OPENAI_BEDROCK_REGIONS is a DISPLAY-ONLY hint
-//                         (read only in well_known.py) — it does NOT move the
-//                         codex call region, so it must NOT feed this analysis.
-//                         The only residency lever for codex is CODEX_ENABLED.
-//
-// Residency here means STRICT SINGLE-REGION (exact-region equality), NOT a
-// jurisdiction/prefix heuristic — NEW-3: "eu"/"ap" prefixes span legal
-// boundaries (UK=eu-west-2, CH=eu-central-2; ap-southeast-2 AU vs ap-northeast-1
-// JP), so a prefix match cannot certify residency. Anything other than the exact
-// deploy region is treated as a leak.
-const DEFAULT_FAILOVER_REGIONS = ['us-west-2', 'eu-west-1']; // mirror mvp/routing/chains.py
-const FAILOVER_DISABLE_SENTINELS = new Set(['', 'none', 'disabled', 'off']);
-// Hardcoded in mvp/models.py — the codex path calls bedrock-mantle in these
-// regions regardless of OPENAI_BEDROCK_REGIONS. Update BOTH if the registry
-// changes (a cross-repo drift test guards this — see backend tests).
-const OPENAI_REGISTRY_REGIONS = ['us-west-2', 'us-east-2'];
-
-// Pass the failover knob through to the backend ONLY when the operator set it,
-// so unset preserves the backend's own historical default.
-const failoverRegionsEnv = process.env.STRATOCLAVE_FAILOVER_REGIONS;
-const codexEnabled = (process.env.CODEX_ENABLED || 'true').toLowerCase() !== 'false';
-
-function parseRegionList(raw: string): string[] {
-  return raw
-    .split(',')
-    .map((r) => r.trim())
-    .filter((r) => r.length > 0);
-}
-
-const effectiveFailover =
-  failoverRegionsEnv === undefined
-    ? DEFAULT_FAILOVER_REGIONS
-    : FAILOVER_DISABLE_SENTINELS.has(failoverRegionsEnv.trim().toLowerCase())
-      ? []
-      : parseRegionList(failoverRegionsEnv);
-
-// Validate every failover region token that reaches the backend (H-1 continued).
-for (const r of effectiveFailover) assertRegion('STRATOCLAVE_FAILOVER_REGIONS entry', r);
-
-// Every region a PROMPT can actually reach at runtime, tagged with its source.
-const bedrockCallRegions: { region: string; source: string }[] = [
-  { region: bedrockPrimaryRegion, source: 'model' },
-  ...effectiveFailover.map((r) => ({ region: r, source: 'failover' })),
-  ...(codexEnabled
-    ? OPENAI_REGISTRY_REGIONS.map((r) => ({ region: r, source: 'codex' }))
-    : []),
-];
-// STRICT single-region residency: any region != the deploy region is a leak.
-const residencyLeaks = Array.from(
-  new Set(bedrockCallRegions.filter((c) => c.region !== bodyRegion).map((c) => `${c.region}(${c.source})`))
-);
-
-const residencyRaw = (process.env.STRATOCLAVE_RESIDENCY || '').toLowerCase();
-if (residencyRaw && residencyRaw !== 'strict' && residencyRaw !== 'warn') {
-  // NEW-6: reject typos so 'strickt'/'off' can't silently downgrade the guard.
-  throw new Error(
-    `STRATOCLAVE_RESIDENCY must be "strict" or "warn" (got "${process.env.STRATOCLAVE_RESIDENCY}").`
-  );
-}
-const residencyStrict = residencyRaw === 'strict';
-
-// The leak analysis only runs when the operator has signaled residency intent —
-// either by deliberately choosing a non-default body region (nobody deploys to
-// eu-west-1 by accident) or by setting STRATOCLAVE_RESIDENCY. This keeps the
-// historical us-east-1 default deploy SILENT (its default failover reaches
-// eu-west-1 — benign for a US operator, never flagged before → backward
-// compatible), while still catching Fable's trap. (C-1, refined)
-const residencyIntent =
-  bodyRegion !== DEFAULT_REGION || process.env.STRATOCLAVE_RESIDENCY !== undefined;
-
-// Geo cross-region inference profiles (NEW-9): a model id prefixed `us.` / `eu.`
-// / `apac.` / `global.` is a GEOGRAPHY profile — AWS routes inference to any
-// region within that geography at its discretion, so the configured region can
-// NOT certify the actual inference region. `global.` is worst (any region on
-// Earth). Under strict residency we must refuse these; the exact-region check
-// alone would otherwise falsely certify (e.g. default model
-// `us.anthropic.claude-opus-4-7` in an eu-west-1 deploy). An explicit escape
-// hatch (STRATOCLAVE_ALLOW_GEO_INFERENCE=true) downgrades to a warning for
-// operators who accept geo-level (not region-level) residency.
-// Denylist of geo (cross-region) inference-profile prefixes. This is a denylist
-// and will rot silently as AWS ships new geographies — add prefixes as they
-// appear. `us-gov.` is included for completeness though the gov partition is
-// rejected earlier. (Fable review NEW-15)
-const GEO_PROFILE_RE = /^(us|eu|apac|global|us-gov)\./;
-const modelIsGeoProfile = GEO_PROFILE_RE.test(defaultBedrockModel);
-const allowGeoInference =
-  (process.env.STRATOCLAVE_ALLOW_GEO_INFERENCE || '').toLowerCase() === 'true';
-
-// Messages are surfaced as CDK Annotations on ecsStack (below) so they appear
-// in `cdk synth`/`cdk diff` output, not just a scrollable console line. (M-3)
-const residencyWarnings: string[] = [];
-// Model-region != deploy-region is always noteworthy (prompt bytes leave R),
-// independent of residency intent.
-if (bedrockPrimaryRegion !== bodyRegion) {
-  residencyWarnings.push(
-    `[residency] prompt data leaves the deploy region ${bodyRegion}: ` +
-      `Bedrock primary = ${bedrockPrimaryRegion}.`
-  );
-}
-// Geo-profile residency check: only meaningful under residency intent.
-if (residencyIntent && modelIsGeoProfile) {
-  const geoMsg =
-    `[residency] DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a geo cross-region ` +
-    `inference profile — AWS routes inference anywhere within its geography, so a ` +
-    `single-region residency guarantee for the deploy region ${bodyRegion} cannot ` +
-    `be made. Use a directly-hosted (region-specific, non-"us./eu./apac./global."-` +
-    `prefixed) model id, or set STRATOCLAVE_ALLOW_GEO_INFERENCE=true to accept ` +
-    `geography-level (not region-level) residency.`;
-  if (residencyStrict && !allowGeoInference) {
-    throw new Error(
-      `STRATOCLAVE_RESIDENCY=strict: refusing to synth — model is a geo inference ` +
-        `profile.\n${geoMsg}`
-    );
-  }
-  residencyWarnings.push(geoMsg);
-}
-if (residencyIntent && residencyLeaks.length > 0) {
-  const hints: string[] = [];
-  if (effectiveFailover.some((r) => r !== bodyRegion)) {
-    hints.push('set STRATOCLAVE_FAILOVER_REGIONS=disabled (or to same-region only)');
-  }
-  if (codexEnabled && OPENAI_REGISTRY_REGIONS.some((r) => r !== bodyRegion)) {
-    hints.push(
-      `set CODEX_ENABLED=false (the OpenAI/codex path is hardwired to ` +
-        `${OPENAI_REGISTRY_REGIONS.join(', ')} in the model registry and cannot be relocated)`
-    );
-  }
-  if (bedrockPrimaryRegion !== bodyRegion) {
-    hints.push(`set BEDROCK_PRIMARY_REGION=${bodyRegion}`);
-  }
-  const msg =
-    `[residency] prompts can reach region(s) other than the deploy region ` +
-    `${bodyRegion}: ${residencyLeaks.join(', ')}. ` +
-    `For strict single-region residency: ${hints.join('; ')}.`;
-  if (residencyStrict) {
-    throw new Error(
-      `STRATOCLAVE_RESIDENCY=strict: refusing to synth — Bedrock is reachable ` +
-        `outside the deploy region.\n${msg}`
-    );
-  }
-  residencyWarnings.push(msg);
-}
 
 // FUTURE GUARD: if a custom CloudFront domain + ACM certificate is ever added,
 // that certificate stack MUST also be pinned to us-east-1 (like wafEnv) — do
@@ -750,7 +552,7 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   }
 }
 
-console.error(`[stratoclave-iac] prefix=${prefix} bodyRegion=${env.region} wafRegion=${WAF_REGION} bedrockPrimary=${bedrockPrimaryRegion} bedrockModel=${defaultBedrockModel}`);
+console.error(`[stratoclave-iac] prefix=${prefix} bodyRegion=${env.region} wafRegion=${regionCfg.wafRegion} bedrockPrimary=${bedrockPrimaryRegion} bedrockModel=${defaultBedrockModel}`);
 console.error(`[stratoclave-iac] Parameter Store base: ${paramPath(prefix, '')}`);
 console.error(`[stratoclave-iac] ALLOW_ADMIN_CREATION=${allowAdminCreation}`);
 console.error(`[stratoclave-iac] enableWaf=${enableWaf} cdkNag=${process.env.CDK_NAG || 'on'}`);

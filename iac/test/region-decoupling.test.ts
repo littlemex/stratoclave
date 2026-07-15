@@ -1,217 +1,198 @@
-import { spawnSync } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
+import {
+  resolveRegionConfig,
+  effectiveFailoverRegions,
+  DEFAULT_REGION,
+  WAF_REGION,
+  type Env,
+} from '../lib/region-config';
 
 /**
- * App-level (bin/iac.ts) tests for region decoupling + residency (v2.2).
+ * In-process tests for the region / residency resolution (lib/region-config.ts),
+ * the pure logic extracted from bin/iac.ts. These run without spawning `cdk
+ * synth`, so they are fast and deterministic in CI (the earlier subprocess
+ * approach raced on a shared cdk.out under parallel jest workers).
  *
- * These synth the WHOLE app via `cdk synth` in a subprocess so they exercise the
- * real entrypoint logic (region resolution, residency analysis, the normalized
- * CODEX_ENABLED pass-through) — not a hand-constructed stack. Synth output is
- * observed from the emitted CloudFormation templates / stderr.
+ * A minimal env includes CDK_DEFAULT_ACCOUNT so the shape matches production;
+ * region logic ignores it. Each case passes a fresh env object (no process.env
+ * mutation), so cases are hermetic and order-independent.
  */
-const IAC_DIR = path.resolve(__dirname, '..');
-
-interface SynthResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-  outDir: string;
+function baseEnv(overrides: Env = {}): Env {
+  return { CDK_DEFAULT_ACCOUNT: '111122223333', ...overrides };
 }
 
-// Monotonic counter so every synth() gets a UNIQUE output directory. jest runs
-// suites in parallel workers and each case synths the whole app; a shared
-// cdk.out would race (one case reads another's half-written templates). An
-// isolated --output per call removes that contention entirely — this was the
-// CI-only flake (locally the suite ran alone so nothing collided).
-let synthSeq = 0;
+describe('resolveRegionConfig — region decoupling', () => {
+  test('us-east-1 default: WAF pinned, model region defaults, residency-silent', () => {
+    const cfg = resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' }));
+    expect(cfg.bodyRegion).toBe('us-east-1');
+    expect(cfg.wafRegion).toBe(WAF_REGION);
+    expect(cfg.bedrockPrimaryRegion).toBe('us-east-1');
+    expect(cfg.residencyWarnings).toEqual([]);
+  });
 
-// Region/residency vars whose undefined-vs-empty distinction matters
-// (e.g. STRATOCLAVE_RESIDENCY='' would flip residencyIntent on). We DELETE these
-// from the child env for hermetic cases, then apply only the case's overrides —
-// setting them to '' would wrongly count as "defined".
-const HERMETIC_KEYS = [
-  'STRATOCLAVE_REGION',
-  'CDK_DEFAULT_REGION',
-  'BEDROCK_PRIMARY_REGION',
-  'STRATOCLAVE_FAILOVER_REGIONS',
-  'STRATOCLAVE_RESIDENCY',
-  'CODEX_ENABLED',
-  'DEFAULT_BEDROCK_MODEL',
-  'OPENAI_BEDROCK_REGIONS',
-  'STRATOCLAVE_ALLOW_GEO_INFERENCE',
-];
+  test('unset region falls back to CDK_DEFAULT_REGION then us-east-1', () => {
+    expect(resolveRegionConfig(baseEnv()).bodyRegion).toBe(DEFAULT_REGION);
+    expect(
+      resolveRegionConfig(baseEnv({ CDK_DEFAULT_REGION: 'us-west-2', BEDROCK_PRIMARY_REGION: 'us-west-2' }))
+        .bodyRegion,
+    ).toBe('us-west-2');
+    // STRATOCLAVE_REGION wins over CDK_DEFAULT_REGION.
+    expect(
+      resolveRegionConfig(
+        baseEnv({ STRATOCLAVE_REGION: 'eu-west-1', CDK_DEFAULT_REGION: 'us-west-2', BEDROCK_PRIMARY_REGION: 'eu-west-1' }),
+      ).bodyRegion,
+    ).toBe('eu-west-1');
+  });
 
-function synth(env: Record<string, string>): SynthResult {
-  // Each call synths into its OWN output dir (see synthSeq) so parallel jest
-  // workers and repeated calls never share cdk.out. Capture stdout+stderr
-  // regardless of exit code — `cdk synth` writes CDK Annotation warnings to
-  // stderr on the SUCCESS path too, so we must not discard stderr on success.
-  const outDir = path.join(IAC_DIR, `cdk.out.test-${process.pid}-${++synthSeq}`);
-  const childEnv: Record<string, string | undefined> = {
-    ...process.env,
-    CDK_NAG: 'off',
-    CDK_DEFAULT_ACCOUNT: '111122223333',
-  };
-  for (const k of HERMETIC_KEYS) delete childEnv[k];
-  Object.assign(childEnv, env); // apply only this case's overrides
-  const res = spawnSync(
-    'npx',
-    ['cdk', 'synth', '--quiet', '--output', outDir],
-    {
-      cwd: IAC_DIR,
-      env: childEnv,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  return {
-    code: res.status ?? 1,
-    stdout: res.stdout ?? '',
-    stderr: res.stderr ?? '',
-    outDir,
-  };
-}
+  test('BEDROCK_PRIMARY_REGION is independent of the deploy region', () => {
+    const cfg = resolveRegionConfig(
+      baseEnv({ STRATOCLAVE_REGION: 'eu-west-1', BEDROCK_PRIMARY_REGION: 'us-east-1' }),
+    );
+    expect(cfg.bodyRegion).toBe('eu-west-1');
+    expect(cfg.bedrockPrimaryRegion).toBe('us-east-1');
+    // Model != body always warns (bytes leave the deploy region).
+    expect(cfg.residencyWarnings.join('\n')).toMatch(/prompt data leaves the deploy region eu-west-1/);
+  });
 
-function ecsTaskEnv(r: SynthResult): Record<string, string> {
-  // Read the synthesized ECS task-def env from THIS call's isolated output dir.
-  // Tests set no STRATOCLAVE_PREFIX, so the entrypoint uses the default
-  // 'stratoclave' prefix -> 'stratoclave-ecs'.
-  const tpl = JSON.parse(
-    fs.readFileSync(
-      path.join(r.outDir, 'stratoclave-ecs.template.json'),
-      'utf-8',
-    ),
-  );
-  const out: Record<string, string> = {};
-  for (const res of Object.values<any>(tpl.Resources)) {
-    if (res.Type === 'AWS::ECS::TaskDefinition') {
-      for (const cd of res.Properties.ContainerDefinitions) {
-        for (const e of cd.Environment ?? []) {
-          if (typeof e.Value === 'string') out[e.Name] = e.Value;
-        }
-      }
+  test('missing BEDROCK_PRIMARY_REGION when body != us-east-1 throws (actionable, mentions bootstrap)', () => {
+    expect(() => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'eu-west-1' }))).toThrow(
+      /BEDROCK_PRIMARY_REGION must be set/,
+    );
+    expect(() => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'eu-west-1' }))).toThrow(
+      /cdk bootstrap/,
+    );
+  });
+
+  test('malformed / partition-restricted regions throw', () => {
+    expect(() => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'US_EAST_1' }))).toThrow(
+      /Invalid deploy region/,
+    );
+    expect(() => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-gov-east-1', BEDROCK_PRIMARY_REGION: 'us-gov-east-1' }))).toThrow(
+      /aws.*partition only/,
+    );
+    expect(() => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'cn-north-1', BEDROCK_PRIMARY_REGION: 'cn-north-1' }))).toThrow(
+      /aws.*partition only/,
+    );
+    // A bad model region is validated too.
+    expect(() => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', BEDROCK_PRIMARY_REGION: 'US_EAST_1' }))).toThrow(
+      /Invalid BEDROCK_PRIMARY_REGION/,
+    );
+  });
+
+  test('CODEX_ENABLED normalizes to a boolean (matches container env)', () => {
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'false' })).codexEnabled).toBe(false);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'FALSE' })).codexEnabled).toBe(false);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).codexEnabled).toBe(true);
+  });
+});
+
+describe('effectiveFailoverRegions — residency-safe defaults', () => {
+  test('us-east-1 primary, unset: default filtered to the us jurisdiction (eu-west-1 dropped)', () => {
+    // Built-in defaults are (us-west-2, eu-west-1); eu-west-1 is a different
+    // jurisdiction than the us-* primary, so it is dropped.
+    expect(effectiveFailoverRegions({}, 'us-east-1')).toEqual(['us-west-2']);
+  });
+
+  test('THE residency bug: eu-west-1 primary, unset, never inherits a US failover', () => {
+    // eu-west-1 is also the primary (stripped) and us-west-2 is a different
+    // jurisdiction (dropped) -> empty. A US region must NOT appear.
+    const fo = effectiveFailoverRegions({}, 'eu-west-1');
+    expect(fo).toEqual([]);
+    expect(fo.some((r) => r.startsWith('us-'))).toBe(false);
+  });
+
+  test('apac primary, unset: no cross-jurisdiction default', () => {
+    expect(effectiveFailoverRegions({}, 'ap-northeast-1')).toEqual([]);
+  });
+
+  test('explicit list is honoured verbatim across jurisdictions', () => {
+    expect(
+      effectiveFailoverRegions({ STRATOCLAVE_FAILOVER_REGIONS: 'us-west-2,eu-central-1' }, 'eu-west-1'),
+    ).toEqual(['us-west-2', 'eu-central-1']);
+  });
+
+  test('disable sentinels and empty/comma-only yield no failover', () => {
+    for (const v of ['', 'none', 'disabled', 'off', '  Disabled  ', ',', ' , ']) {
+      expect(effectiveFailoverRegions({ STRATOCLAVE_FAILOVER_REGIONS: v }, 'us-east-1')).toEqual([]);
     }
-  }
-  return out;
-}
-
-describe('bin/iac.ts region decoupling + residency', () => {
-  jest.setTimeout(180_000);
-
-  afterAll(() => {
-    // Remove the per-call isolated output dirs this suite created.
-    for (const name of fs.readdirSync(IAC_DIR)) {
-      if (name.startsWith('cdk.out.test-')) {
-        fs.rmSync(path.join(IAC_DIR, name), { recursive: true, force: true });
-      }
-    }
   });
 
-  test('us-east-1 default synths and is residency-silent', () => {
-    const r = synth({ STRATOCLAVE_REGION: 'us-east-1' });
-    expect(r.code).toBe(0);
-    expect(r.stderr).not.toMatch(/\[residency\]/);
+  test('primary is always stripped and duplicates deduped', () => {
+    expect(
+      effectiveFailoverRegions({ STRATOCLAVE_FAILOVER_REGIONS: 'us-east-1,us-west-2,us-west-2' }, 'us-east-1'),
+    ).toEqual(['us-west-2']);
+  });
+});
+
+describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
+  test('strict + geo-profile default model throws (us.anthropic.* cannot certify a region)', () => {
+    expect(() =>
+      resolveRegionConfig(
+        baseEnv({
+          STRATOCLAVE_REGION: 'eu-west-1',
+          BEDROCK_PRIMARY_REGION: 'eu-west-1',
+          STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+          CODEX_ENABLED: 'false',
+          STRATOCLAVE_RESIDENCY: 'strict',
+        }),
+      ),
+    ).toThrow(/geo (cross-region )?inference profile/i);
   });
 
-  test('NEW-8: CODEX_ENABLED=false is normalized in the task-def to "false"', () => {
-    // The residency analysis and the container must agree. The task-def value
-    // must be the normalized boolean, not the raw operator string.
-    const r = synth({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'false' });
-    expect(r.code).toBe(0);
-    expect(ecsTaskEnv(r).CODEX_ENABLED).toBe('false');
-  });
-
-  test('NEW-8: mixed-case CODEX_ENABLED=FALSE normalizes to "false" (analysis == container)', () => {
-    const r = synth({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'FALSE' });
-    expect(r.code).toBe(0);
-    expect(ecsTaskEnv(r).CODEX_ENABLED).toBe('false');
-  });
-
-  test('CODEX_ENABLED unset defaults to "true" in the task-def', () => {
-    const r = synth({ STRATOCLAVE_REGION: 'us-east-1' });
-    expect(r.code).toBe(0);
-    expect(ecsTaskEnv(r).CODEX_ENABLED).toBe('true');
-  });
-
-  test('BEDROCK_REGION is the model primary, independent of AWS_REGION', () => {
-    const r = synth({
-      STRATOCLAVE_REGION: 'eu-west-1',
-      BEDROCK_PRIMARY_REGION: 'us-east-1',
-    });
-    expect(r.code).toBe(0);
-    const envMap = ecsTaskEnv(r);
-    expect(envMap.AWS_REGION).toBe('eu-west-1');
-    expect(envMap.BEDROCK_REGION).toBe('us-east-1');
-  });
-
-  test('missing BEDROCK_PRIMARY_REGION when body != us-east-1 throws', () => {
-    const r = synth({ STRATOCLAVE_REGION: 'eu-west-1' });
-    expect(r.code).not.toBe(0);
-    expect(r.stderr).toMatch(/BEDROCK_PRIMARY_REGION must be set/);
-  });
-
-  test('NEW-9: strict + geo-profile default model throws', () => {
-    // Default model us.anthropic.* is a US-geo profile; strict cannot certify
-    // eu-west-1 residency for it.
-    const r = synth({
-      STRATOCLAVE_REGION: 'eu-west-1',
-      BEDROCK_PRIMARY_REGION: 'eu-west-1',
-      STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-      CODEX_ENABLED: 'false',
-      STRATOCLAVE_RESIDENCY: 'strict',
-    });
-    expect(r.code).not.toBe(0);
-    expect(r.stderr).toMatch(/geo (cross-region )?inference profile/i);
-  });
-
-  test('NEW-9: geo-profile + escape hatch downgrades to warning (strict passes)', () => {
-    const r = synth({
-      STRATOCLAVE_REGION: 'eu-west-1',
-      BEDROCK_PRIMARY_REGION: 'eu-west-1',
-      STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-      CODEX_ENABLED: 'false',
-      STRATOCLAVE_RESIDENCY: 'strict',
-      STRATOCLAVE_ALLOW_GEO_INFERENCE: 'true',
-    });
-    expect(r.code).toBe(0);
-    expect(r.stderr).toMatch(/geo cross-region inference profile/i);
+  test('strict + geo-profile + escape hatch downgrades to a warning', () => {
+    const cfg = resolveRegionConfig(
+      baseEnv({
+        STRATOCLAVE_REGION: 'eu-west-1',
+        BEDROCK_PRIMARY_REGION: 'eu-west-1',
+        STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+        CODEX_ENABLED: 'false',
+        STRATOCLAVE_RESIDENCY: 'strict',
+        STRATOCLAVE_ALLOW_GEO_INFERENCE: 'true',
+      }),
+    );
+    expect(cfg.residencyWarnings.join('\n')).toMatch(/geo cross-region inference profile/i);
   });
 
   test('full EU residency with a directly-hosted model is strict-clean', () => {
-    // A region-specific (non-geo) model id + all knobs pinned → strict passes,
-    // no residency annotations.
-    const r = synth({
-      STRATOCLAVE_REGION: 'eu-west-1',
-      BEDROCK_PRIMARY_REGION: 'eu-west-1',
-      STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-      CODEX_ENABLED: 'false',
-      STRATOCLAVE_RESIDENCY: 'strict',
-      DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
-    });
-    expect(r.code).toBe(0);
-    expect(r.stderr).not.toMatch(/\[residency\]/);
+    const cfg = resolveRegionConfig(
+      baseEnv({
+        STRATOCLAVE_REGION: 'eu-west-1',
+        BEDROCK_PRIMARY_REGION: 'eu-west-1',
+        STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+        CODEX_ENABLED: 'false',
+        STRATOCLAVE_RESIDENCY: 'strict',
+        DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
+      }),
+    );
+    expect(cfg.residencyWarnings).toEqual([]);
   });
 
-  test('NEW-1: codex still enabled defeats residency even with everything else pinned', () => {
-    // The exact recipe that used to falsely pass: OPENAI_BEDROCK_REGIONS pinned
-    // to EU but codex enabled → strict must still throw (codex is registry-pinned
-    // to us-west-2/us-east-2).
-    const r = synth({
-      STRATOCLAVE_REGION: 'eu-west-1',
-      BEDROCK_PRIMARY_REGION: 'eu-west-1',
-      STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-      DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
-      STRATOCLAVE_RESIDENCY: 'strict',
-      // codex left enabled (default true), OPENAI_BEDROCK_REGIONS is a no-op hint
-    });
-    expect(r.code).not.toBe(0);
-    expect(r.stderr).toMatch(/us-west-2\(codex\)|us-east-2\(codex\)/);
+  test('NEW-1: codex enabled defeats residency even with everything else pinned', () => {
+    // OPENAI_BEDROCK_REGIONS is a no-op hint; codex is registry-pinned to
+    // us-west-2/us-east-2, so strict must still throw.
+    expect(() =>
+      resolveRegionConfig(
+        baseEnv({
+          STRATOCLAVE_REGION: 'eu-west-1',
+          BEDROCK_PRIMARY_REGION: 'eu-west-1',
+          STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+          DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
+          STRATOCLAVE_RESIDENCY: 'strict',
+          OPENAI_BEDROCK_REGIONS: 'eu-west-1',
+        }),
+      ),
+    ).toThrow(/us-west-2\(codex\)|us-east-2\(codex\)|Bedrock is reachable/);
   });
 
   test('NEW-6: invalid STRATOCLAVE_RESIDENCY value throws', () => {
-    const r = synth({ STRATOCLAVE_REGION: 'us-east-1', STRATOCLAVE_RESIDENCY: 'strickt' });
-    expect(r.code).not.toBe(0);
-    expect(r.stderr).toMatch(/STRATOCLAVE_RESIDENCY must be/);
+    expect(() =>
+      resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', STRATOCLAVE_RESIDENCY: 'strickt' })),
+    ).toThrow(/STRATOCLAVE_RESIDENCY must be/);
+  });
+
+  test('us-east-1 default deploy is residency-silent (backward compatible)', () => {
+    // No residency intent (default region, no STRATOCLAVE_RESIDENCY) -> the
+    // default us-west-2 failover + us codex do not produce warnings.
+    const cfg = resolveRegionConfig(baseEnv());
+    expect(cfg.residencyWarnings).toEqual([]);
   });
 });

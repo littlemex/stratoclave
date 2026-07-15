@@ -18,11 +18,21 @@ from .types import BreakerDecision, BreakerStage, Chain, Target
 _CATALOG: dict[str, list[Target]] = {}
 
 # Default cross-region failover targets when STRATOCLAVE_FAILOVER_REGIONS is
-# unset. Preserves the historical behavior.
+# unset. Historically this was the fixed pair below; it is now filtered to the
+# PRIMARY's geographic jurisdiction so a non-US primary never silently fails
+# over into another jurisdiction (see `failover_regions`).
 _DEFAULT_FAILOVER_REGIONS = ("us-west-2", "eu-west-1")
 
 # Explicit "single-region, no failover" sentinels for the config var.
 _DISABLE_SENTINELS = frozenset({"none", "disabled", "off"})
+
+
+def _jurisdiction(region: str) -> str:
+    """Geographic prefix of a region id ("us", "eu", "ap", ...). This is a
+    coarse residency proxy — it does NOT distinguish UK (eu-west-2) from EU, so
+    it is used ONLY to filter the built-in defaults, never to certify residency
+    (that is the CDK-side STRATOCLAVE_RESIDENCY check's job)."""
+    return region.split("-")[0]
 
 
 def failover_regions() -> list[str]:
@@ -31,13 +41,27 @@ def failover_regions() -> list[str]:
 
     Configured via `STRATOCLAVE_FAILOVER_REGIONS` (comma-separated). Data-
     residency control (README): set it to a same-jurisdiction region list, or
-    to an EMPTY string to DISABLE failover entirely (single-region — a streaming
-    request then never sends prompt bytes to another region). Whitespace and the
-    primary region are stripped; order and de-dup are preserved.
+    to an EMPTY string / a `none`/`disabled`/`off` sentinel to DISABLE failover
+    entirely (single-region — a streaming request then never sends prompt bytes
+    to another region). Whitespace and the primary region are stripped; order
+    and de-dup are preserved.
+
+    Residency safety for the DEFAULT set: when the var is UNSET, the built-in
+    defaults are filtered to the primary's jurisdiction, so e.g. a
+    `BEDROCK_REGION=eu-west-1` deploy does NOT inherit a us-west-2 failover and
+    silently leak EU prompts to the US. An EXPLICIT list is honoured verbatim
+    (the operator's stated intent; the CDK STRATOCLAVE_RESIDENCY check flags a
+    cross-jurisdiction explicit list separately).
     """
+    primary = default_region()
     raw = os.getenv("STRATOCLAVE_FAILOVER_REGIONS")
     if raw is None:
-        candidates = list(_DEFAULT_FAILOVER_REGIONS)
+        # Unset: use the built-ins, but keep only same-jurisdiction regions so a
+        # non-US primary can never back-door into another jurisdiction.
+        primary_juris = _jurisdiction(primary)
+        candidates = [
+            r for r in _DEFAULT_FAILOVER_REGIONS if _jurisdiction(r) == primary_juris
+        ]
     elif raw.strip().lower() in _DISABLE_SENTINELS:
         # Explicit disable sentinel (survives orchestration that strips empty env
         # vars — writing "none"/"disabled"/"off" is unambiguous single-region
@@ -45,8 +69,9 @@ def failover_regions() -> list[str]:
         candidates = []
     else:
         # Explicit empty string => no failover regions (single-region) too.
+        # An explicit non-empty list is honoured verbatim (no jurisdiction
+        # filter): the operator asked for exactly these regions.
         candidates = [r.strip() for r in raw.split(",") if r.strip()]
-    primary = default_region()
     seen: set[str] = {primary}
     out: list[str] = []
     for r in candidates:

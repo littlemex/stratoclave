@@ -152,8 +152,16 @@ class TestInfraRouterExecution:
             assert len(events) == 2
             assert result.attempt_facts[0].outcome == "success"
 
-    def test_failover_on_throttle(self):
+    def test_failover_on_throttle(self, monkeypatch):
+        from mvp.routing import chains
         from mvp.routing.infrarouter import route_stream
+
+        # Pin an explicit 3-target chain (primary us-east-1 + two failover
+        # regions) so the test does not depend on the built-in default set,
+        # which is now jurisdiction-filtered (a us-* primary would otherwise
+        # only get us-west-2 = 2 targets, one short of what this test needs).
+        monkeypatch.setenv("STRATOCLAVE_FAILOVER_REGIONS", "us-west-2,us-east-2")
+        chains.reset_catalog()
 
         call_count = {"n": 0}
 
@@ -192,6 +200,8 @@ class TestInfraRouterExecution:
             assert len(result.attempt_facts) >= 2
             assert any(a.outcome == "failover" for a in result.attempt_facts)
             assert result.attempt_facts[-1].outcome == "success"
+
+        chains.reset_catalog()
 
     def test_fatal_error_raises(self):
         from mvp.routing.infrarouter import route_stream
