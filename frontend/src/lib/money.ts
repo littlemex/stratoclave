@@ -7,13 +7,20 @@
 // component) so they can be unit-tested and so React Fast Refresh is not
 // disturbed by a component file exporting non-components.
 
-// Render integer micro-USD as a "$X.YY" string. cents = round(micro / 10_000).
+// Render integer micro-USD as a "$X.YY" string, rounded to whole cents.
+// Rounding is HALF-UP ON MAGNITUDE so it is symmetric across sign (-1.5c and
+// +1.5c both round away from zero) — Math.round rounds half toward +∞, which
+// would disagree with the backend on negative half-cents (Fable review M4).
+// All arithmetic is on the non-negative magnitude; division by the fixed
+// 10_000/100 constants is exact for any |micro| < 2^53 (~$9.007e9), beyond
+// which JSON numbers lose integer precision anyway.
 export function fmtMicroUsd(micro: number): string {
-  const cents = Math.round(micro / 10_000)
-  const neg = cents < 0
-  const abs = Math.abs(cents)
-  const sign = neg ? '-' : ''
-  return `${sign}$${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, '0')}`
+  const neg = micro < 0
+  const absMicro = Math.abs(Math.trunc(micro))
+  const cents = Math.floor((absMicro + 5_000) / 10_000) // half-up on magnitude
+  const sign = neg && cents !== 0 ? '-' : ''
+  const dollars = Math.floor(cents / 100).toLocaleString('en-US')
+  return `${sign}$${dollars}.${String(cents % 100).padStart(2, '0')}`
 }
 
 // Render integer micro-USD as a full-precision dollar rate, e.g. a per-MTok
@@ -50,7 +57,11 @@ export function parseUsdToCents(input: string): number | null {
   const dollars = dollarsStr === '' ? 0 : Number(dollarsStr)
   const cents = centsStr === '' ? 0 : Number(centsStr.padEnd(2, '0'))
   if (!Number.isSafeInteger(dollars) || !Number.isFinite(cents)) return null
-  return dollars * 100 + cents
+  const total = dollars * 100 + cents
+  // Guard the PRODUCT too (Fable review M5): a dollars value just under the
+  // safe-integer limit passes the check above but dollars*100 overflows.
+  if (!Number.isSafeInteger(total)) return null
+  return total
 }
 
 // Current billing period as YYYY-MM in UTC, matching the backend's

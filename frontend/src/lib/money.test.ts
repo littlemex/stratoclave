@@ -26,6 +26,12 @@ describe('parseUsdToCents', () => {
     expect(parseUsdToCents('500.5')).toBe(50_050)
   })
 
+  it('rejects an amount whose cents product overflows safe-integer (M5)', () => {
+    // dollars alone is a safe integer, but dollars*100 is not.
+    const bigDollars = String(Math.floor(Number.MAX_SAFE_INTEGER / 10))
+    expect(parseUsdToCents(bigDollars)).toBeNull()
+  })
+
   it('treats a leading decimal as zero dollars', () => {
     expect(parseUsdToCents('.50')).toBe(50)
     expect(parseUsdToCents('$.50')).toBe(50)
@@ -75,6 +81,17 @@ describe('fmtMicroUsd', () => {
 
   it('handles negatives with a leading sign', () => {
     expect(fmtMicroUsd(-500_000_000)).toBe('-$500.00')
+  })
+
+  it('rounds half-up on MAGNITUDE, symmetric across sign (M4)', () => {
+    // +1.5 cents (15_000 micro) and -1.5 cents both round away from zero.
+    expect(fmtMicroUsd(15_000)).toBe('$0.02')
+    expect(fmtMicroUsd(-15_000)).toBe('-$0.02')
+    // A negative half-cent must not round toward zero (the Math.round bug).
+    expect(fmtMicroUsd(-5_000)).toBe('-$0.01')
+    expect(fmtMicroUsd(5_000)).toBe('$0.01')
+    // A value that rounds to exactly 0 cents shows no negative sign.
+    expect(fmtMicroUsd(-4_999)).toBe('$0.00')
   })
 })
 

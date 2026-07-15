@@ -226,8 +226,13 @@ export default function MeUsage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {history.data!.history.map((row) => (
-                  <TableRow key={row.recorded_at + row.model_id}>
+                {history.data!.history.map((row, i) => (
+                  // Include the index: recorded_at+model_id collides when two
+                  // requests to the same model share a timestamp (plausible
+                  // under agent/batch traffic), which would drop or mis-reconcile
+                  // rows (Fable review M3). The list is read-only + newest-first,
+                  // so the index is a stable, collision-free key here.
+                  <TableRow key={`${row.recorded_at}#${row.model_id}#${i}`}>
                     <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                       {formatDate(row.recorded_at)}
                     </TableCell>
