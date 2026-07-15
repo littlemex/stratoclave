@@ -70,28 +70,35 @@ describe('fmtMicroUsd', () => {
     expect(fmtMicroUsd(1_000_000_000)).toBe('$1,000.00')
   })
 
-  it('rounds to the nearest cent (never sub-cent display)', () => {
-    // 4_999 micro-USD == 0.4999 cents -> rounds down to 0 cents.
+  it('TRUNCATES to whole cents, matching the backend micro//10_000 (never overstates)', () => {
+    // 4_999 micro == 0.4999 cents -> 0.
     expect(fmtMicroUsd(4_999)).toBe('$0.00')
-    // 5_000 micro-USD == 0.5 cents -> rounds up to 1 cent.
-    expect(fmtMicroUsd(5_000)).toBe('$0.01')
-    // 14_999 micro-USD == 1.4999 cents -> 1 cent.
+    // 5_000 micro == 0.5 cents -> truncates to 0 (backend floors; UI must not
+    // show a cent the backend didn't record).
+    expect(fmtMicroUsd(5_000)).toBe('$0.00')
+    // 9_999 micro -> still 0.
+    expect(fmtMicroUsd(9_999)).toBe('$0.00')
+    // 10_000 micro == exactly 1 cent.
+    expect(fmtMicroUsd(10_000)).toBe('$0.01')
+    // 14_999 micro == 1.4999 cents -> truncates to 1.
     expect(fmtMicroUsd(14_999)).toBe('$0.01')
+    // 19_999 micro -> 1 cent (not 2).
+    expect(fmtMicroUsd(19_999)).toBe('$0.01')
   })
 
   it('handles negatives with a leading sign', () => {
     expect(fmtMicroUsd(-500_000_000)).toBe('-$500.00')
   })
 
-  it('rounds half-up on MAGNITUDE, symmetric across sign (M4)', () => {
-    // +1.5 cents (15_000 micro) and -1.5 cents both round away from zero.
-    expect(fmtMicroUsd(15_000)).toBe('$0.02')
-    expect(fmtMicroUsd(-15_000)).toBe('-$0.02')
-    // A negative half-cent must not round toward zero (the Math.round bug).
-    expect(fmtMicroUsd(-5_000)).toBe('-$0.01')
-    expect(fmtMicroUsd(5_000)).toBe('$0.01')
-    // A value that rounds to exactly 0 cents shows no negative sign.
+  it('truncates symmetrically across sign, no negative-zero sign', () => {
+    // 15_000 micro == 1.5 cents -> truncates to 1 on both signs.
+    expect(fmtMicroUsd(15_000)).toBe('$0.01')
+    expect(fmtMicroUsd(-15_000)).toBe('-$0.01')
+    // Sub-cent negatives truncate to 0 and show NO minus sign.
+    expect(fmtMicroUsd(-5_000)).toBe('$0.00')
     expect(fmtMicroUsd(-4_999)).toBe('$0.00')
+    // A whole negative cent keeps its sign.
+    expect(fmtMicroUsd(-10_000)).toBe('-$0.01')
   })
 })
 

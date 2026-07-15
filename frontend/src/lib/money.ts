@@ -7,17 +7,19 @@
 // component) so they can be unit-tested and so React Fast Refresh is not
 // disturbed by a component file exporting non-components.
 
-// Render integer micro-USD as a "$X.YY" string, rounded to whole cents.
-// Rounding is HALF-UP ON MAGNITUDE so it is symmetric across sign (-1.5c and
-// +1.5c both round away from zero) — Math.round rounds half toward +∞, which
-// would disagree with the backend on negative half-cents (Fable review M4).
-// All arithmetic is on the non-negative magnitude; division by the fixed
-// 10_000/100 constants is exact for any |micro| < 2^53 (~$9.007e9), beyond
-// which JSON numbers lose integer precision anyway.
+// Render integer micro-USD as a "$X.YY" string, truncated to whole cents.
+// TRUNCATE TOWARD ZERO ON MAGNITUDE, matching the backend's cent convention
+// (`micro // 10_000`, floor of the magnitude — see admin_tenants
+// `_MICRO_USD_PER_CENT`): the UI must never display a cent MORE than the
+// backend recorded (Fable review round-2: a half-up UI vs a floor backend
+// disagrees by a cent on sub-cent spend like pool_settled_microusd). Symmetric
+// across sign (truncation on the magnitude, sign reapplied); integer-only; the
+// /10_000,/100 constants are exact for |micro| < 2^53 (~$9.007e9), beyond which
+// JSON numbers lose integer precision anyway.
 export function fmtMicroUsd(micro: number): string {
   const neg = micro < 0
   const absMicro = Math.abs(Math.trunc(micro))
-  const cents = Math.floor((absMicro + 5_000) / 10_000) // half-up on magnitude
+  const cents = Math.floor(absMicro / 10_000) // truncate toward zero (backend parity)
   const sign = neg && cents !== 0 ? '-' : ''
   const dollars = Math.floor(cents / 100).toLocaleString('en-US')
   return `${sign}$${dollars}.${String(cents % 100).padStart(2, '0')}`
