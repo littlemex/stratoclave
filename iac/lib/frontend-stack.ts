@@ -338,6 +338,13 @@ export class FrontendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'FrontendUrl', {
       value: `https://${this.cfnDistribution.attrDomainName}`,
     });
+    // Consumed by scripts/deploy-all.sh to target the CloudFront invalidation
+    // after syncing SPA assets. The distribution id is already built above; the
+    // script referenced this output before it existed, so its asset-upload step
+    // failed the stack-output precondition (fixed here).
+    new cdk.CfnOutput(this, 'CloudFrontDistributionId', {
+      value: this.cfnDistribution.ref,
+    });
 
     applyCommonTags(this, prefix, 'Frontend');
   }
