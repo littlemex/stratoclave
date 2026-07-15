@@ -27,10 +27,24 @@ pub async fn run(
                 .await
                 .map_err(|e| CliError::AuthExpired(format!("Authentication failed: {}", e)))?;
 
-            let api_client = ApiClient::new(app_config, token);
+            let api_client = ApiClient::new(app_config, token)?;
 
-            eprintln!("[INFO] Sending message to Bedrock API...");
+            eprintln!("[INFO] Sending message...");
             let response = api_client.converse(&message).await?;
+
+            // Pipe stdout is data a downstream consumer trusts: a partial /
+            // truncated response must NOT be emitted as if complete. Print the
+            // partial to stderr for the human and exit nonzero.
+            if !response.complete {
+                eprintln!(
+                    "[ERROR] Incomplete response ({}); received {} chars, not emitting to stdout.",
+                    response.reason.as_deref().unwrap_or("unknown"),
+                    response.message.chars().count()
+                );
+                eprintln!("--- partial response (stderr) ---");
+                eprintln!("{}", response.message);
+                return Ok(ExitCode::from(1));
+            }
 
             // Output response to stdout
             println!("{}", response.message);
