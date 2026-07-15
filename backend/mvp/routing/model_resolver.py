@@ -112,7 +112,9 @@ def resolve_model(
         chain = [requested_model]
 
     selected = chain[0]
-    fallback = selected != requested_model
+    # Compare canonically (Fable rev2 F3): serving the requested model under a
+    # different spelling is NOT a fallback.
+    fallback = _canonical_model_id(selected) != _canonical_model_id(requested_model)
 
     return ModelSelection(
         selected_model=selected,
@@ -136,10 +138,27 @@ def _resolve_chain(
     else:
         return [requested]
 
-    # Start from the requested model's position in the chain
+    # Start from the requested model's position in the chain. Match on the
+    # CANONICAL model id, not raw string equality (Fable rev2 F3): the admin
+    # write path stores chain entries canonicalized (aliases[0]), so a client
+    # requesting the same model under a different spelling (bedrock id, other
+    # alias) must still locate its start position — otherwise it silently falls
+    # back to the whole chain from the top.
     preferred = (user.preferred_model if user else None) or requested
-    if preferred in base_chain:
-        idx = base_chain.index(preferred)
-        return base_chain[idx:]
-    else:
-        return base_chain
+    pref_key = _canonical_model_id(preferred)
+    chain_keys = [_canonical_model_id(m) for m in base_chain]
+    if pref_key in chain_keys:
+        return base_chain[chain_keys.index(pref_key):]
+    return base_chain
+
+
+def _canonical_model_id(model_id: str) -> str:
+    """Canonical id (registry primary alias) for spelling-insensitive matching;
+    the raw id if it doesn't resolve (so an unknown id simply won't match)."""
+    from ..models import resolve_model
+
+    try:
+        entry = resolve_model(model_id)
+        return entry.aliases[0] if entry.aliases else entry.bedrock_model_id
+    except ValueError:
+        return model_id

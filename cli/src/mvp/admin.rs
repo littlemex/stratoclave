@@ -385,6 +385,57 @@ pub async fn tenant_pool_budget_show(tenant_id: &str, period: Option<&str>) -> R
 }
 
 // ============================================================
+// ROUTING CONFIG (admin) — P0-11 chain / quotas / allowlist
+// ============================================================
+
+/// Show the tenant routing config, or a per-user override when `user` is set.
+///
+/// This is the config that P0-11 enforcement (per-model quota + cascading
+/// fallback) reads on every request; before this command it could only be
+/// hand-edited in DynamoDB.
+pub async fn routing_config_get(tenant_id: &str, user: Option<&str>) -> Result<()> {
+    let client = ApiClient::new()?;
+    let path = match user {
+        Some(u) => format!("/api/mvp/admin/tenants/{tenant_id}/users/{u}/routing-config"),
+        None => format!("/api/mvp/admin/tenants/{tenant_id}/routing-config"),
+    };
+    let res: Value = client.get_json(&path).await?;
+    println!("{}", serde_json::to_string_pretty(&res)?);
+    Ok(())
+}
+
+/// Replace the routing config from a JSON file (or stdin with "-").
+///
+/// PUT semantics (full replace). The backend validates every model id against
+/// the registry, quota limits >= 0, and (for a user override) that the chain is
+/// an order-preserving subsequence of the tenant chain — a 400 names the
+/// offending field so a typo can never land an un-enforceable config.
+pub async fn routing_config_set(tenant_id: &str, file: &str, user: Option<&str>) -> Result<()> {
+    let raw = if file == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| anyhow!("failed to read stdin: {e}"))?;
+        buf
+    } else {
+        std::fs::read_to_string(file).map_err(|e| anyhow!("cannot read {file}: {e}"))?
+    };
+    let body: Value =
+        serde_json::from_str(&raw).map_err(|e| anyhow!("invalid JSON in {file}: {e}"))?;
+
+    let client = ApiClient::new()?;
+    let path = match user {
+        Some(u) => format!("/api/mvp/admin/tenants/{tenant_id}/users/{u}/routing-config"),
+        None => format!("/api/mvp/admin/tenants/{tenant_id}/routing-config"),
+    };
+    let res: Value = client.put_json(&path, &body).await?;
+    println!("[OK] Routing config set");
+    println!("{}", serde_json::to_string_pretty(&res)?);
+    Ok(())
+}
+
+// ============================================================
 // USAGE LOGS (admin)
 // ============================================================
 pub async fn usage_logs(

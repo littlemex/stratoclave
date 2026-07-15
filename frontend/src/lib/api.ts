@@ -201,6 +201,33 @@ export interface PoolBudget {
   remaining_usd_cents: number
 }
 
+// P0-11: tenant/user routing config (chain, quotas, allowlist). This is the
+// config the per-model-quota + cascading-fallback enforcement reads.
+export interface ModelQuota {
+  // Only usd_micro is accepted server-side (limit is monthly micro-USD).
+  unit?: 'usd_micro'
+  limit?: number | null
+  period?: 'monthly'
+}
+export interface TenantRoutingConfig {
+  tenant_id: string
+  configured: boolean
+  allowlist: string[]
+  chain: string[]
+  quotas: Record<string, ModelQuota>
+  fallback_mode: string
+  fallback_default: string
+  free_tier_model?: string | null
+}
+export interface UserRoutingConfig {
+  tenant_id: string
+  user_id: string
+  configured: boolean
+  preferred_model?: string | null
+  chain?: string[] | null
+  fallback?: string | null
+}
+
 export interface UsageLogEntry {
   tenant_id: string
   user_id: string
@@ -458,6 +485,42 @@ export const api = {
           headers: jsonHeaders,
           body: JSON.stringify(body),
         },
+      ),
+    // P0-11: tenant/user routing config (chain, quotas, allowlist). GET returns
+    // defaults (configured=false) when unset. PUT is a full replace; the backend
+    // validates model ids, quota limits, and user-chain subsequence (400 names
+    // the offending field).
+    getRoutingConfig: (tenant_id: string) =>
+      jsonRequest<TenantRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/routing-config`,
+      ),
+    setRoutingConfig: (
+      tenant_id: string,
+      body: {
+        allowlist?: string[]
+        chain?: string[]
+        quotas?: Record<string, ModelQuota>
+        fallback_mode?: string
+        fallback_default?: 'on' | 'off'
+        free_tier_model?: string | null
+      },
+    ) =>
+      jsonRequest<TenantRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/routing-config`,
+        { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
+    getUserRoutingConfig: (tenant_id: string, user_id: string) =>
+      jsonRequest<UserRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/users/${encodeURIComponent(user_id)}/routing-config`,
+      ),
+    setUserRoutingConfig: (
+      tenant_id: string,
+      user_id: string,
+      body: { preferred_model?: string | null; chain?: string[] | null; fallback?: 'on' | 'off' | null },
+    ) =>
+      jsonRequest<UserRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/users/${encodeURIComponent(user_id)}/routing-config`,
+        { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(body) },
       ),
     usageLogs: (opts?: {
       tenant_id?: string

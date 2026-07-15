@@ -31,7 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { api, type PoolBudget, type TenantItem } from '@/lib/api'
+import { api, type PoolBudget, type TenantItem, type TenantRoutingConfig } from '@/lib/api'
 import { currentPeriodUtc, fmtMicroUsd, parseUsdToCents } from '@/lib/money'
 import { cn } from '@/lib/utils'
 
@@ -72,6 +72,13 @@ export default function AdminTenantDetail() {
         throw err
       }
     },
+    enabled: !!tenantId,
+  })
+  // P0-11: tenant routing config (chain / quotas / allowlist). Always returns a
+  // config (configured=false when unset), so no 404 handling needed.
+  const routingQuery = useQuery({
+    queryKey: ['admin', 'tenants', 'routing', tenantId],
+    queryFn: () => api.admin.getRoutingConfig(tenantId),
     enabled: !!tenantId,
   })
 
@@ -182,6 +189,17 @@ export default function AdminTenantDetail() {
         onChanged={() =>
           void qc.invalidateQueries({
             queryKey: ['admin', 'tenants', 'pool', tenantId],
+          })
+        }
+      />
+
+      <RoutingConfigCard
+        tenantId={tenant.tenant_id}
+        config={routingQuery.data ?? null}
+        isLoading={routingQuery.isLoading}
+        onChanged={() =>
+          void qc.invalidateQueries({
+            queryKey: ['admin', 'tenants', 'routing', tenantId],
           })
         }
       />
@@ -900,6 +918,194 @@ function ArchiveDialog({
             {mutation.isPending
               ? t('admin_tenant_detail.archive_submitting')
               : t('admin_tenant_detail.archive_submit')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// P0-11: view + edit the tenant routing config (chain / quotas / allowlist) —
+// the config the per-model-quota + cascading-fallback enforcement reads. The
+// editor takes raw JSON: the shape is structured (ordered chain, per-model
+// quota map) so a JSON body is the honest input, and the backend validates it
+// (model ids, quota limits, coherence) returning a 400 that names the offending
+// field. This closes the P0 gap where routing was enforced but unconfigurable.
+function RoutingConfigCard({
+  tenantId,
+  config,
+  isLoading,
+  onChanged,
+}: {
+  tenantId: string
+  config: TenantRoutingConfig | null
+  isLoading: boolean
+  onChanged: () => void
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const configured = !!config?.configured
+  return (
+    <Card data-testid="routing-config-card">
+      <CardHeader>
+        <div className="flex items-start justify-between gap-2">
+          <div className="space-y-1.5">
+            <CardTitle className="font-sans text-base font-semibold">
+              Routing config
+            </CardTitle>
+            <CardDescription>
+              Per-model quota + cascading fallback (chain, quotas, allowlist).
+              Absent = passthrough on the requested model.
+            </CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDialogOpen(true)}
+            data-testid="routing-config-edit-button"
+          >
+            {configured ? 'Edit' : 'Set'}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : configured ? (
+          <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2" data-testid="routing-config-summary">
+            <RoutingStat label="Chain" value={config!.chain.join(' → ') || '(none)'} />
+            <RoutingStat label="Allowlist" value={config!.allowlist.join(', ') || '(unrestricted)'} />
+            <RoutingStat
+              label="Quotas"
+              value={
+                Object.keys(config!.quotas).length
+                  ? Object.entries(config!.quotas)
+                      .map(([m, q]) => `${m}: ${q.limit ?? '∞'}`)
+                      .join('; ')
+                  : '(none)'
+              }
+            />
+            <RoutingStat label="Fallback default" value={config!.fallback_default} />
+          </dl>
+        ) : (
+          <div className="space-y-1" data-testid="routing-config-empty">
+            <p className="text-sm font-medium">No routing config</p>
+            <p className="text-sm text-muted-foreground">
+              This tenant serves the requested model with no chain/quota/allowlist.
+            </p>
+          </div>
+        )}
+      </CardContent>
+      <RoutingConfigDialog
+        open={dialogOpen}
+        tenantId={tenantId}
+        current={config}
+        onOpenChange={setDialogOpen}
+        onDone={onChanged}
+      />
+    </Card>
+  )
+}
+
+function RoutingStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-border/40 pb-2">
+      <dt className="text-sm text-muted-foreground">{label}</dt>
+      <dd className="text-sm font-mono">{value}</dd>
+    </div>
+  )
+}
+
+function RoutingConfigDialog({
+  open,
+  tenantId,
+  current,
+  onOpenChange,
+  onDone,
+}: {
+  open: boolean
+  tenantId: string
+  current: TenantRoutingConfig | null
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const initial = () =>
+    JSON.stringify(
+      {
+        chain: current?.chain ?? [],
+        allowlist: current?.allowlist ?? [],
+        quotas: current?.quotas ?? {},
+        fallback_default: current?.fallback_default ?? 'off',
+        ...(current?.free_tier_model ? { free_tier_model: current.free_tier_model } : {}),
+      },
+      null,
+      2,
+    )
+  const [text, setText] = useState(initial)
+  const [error, setError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      let body: Record<string, unknown>
+      try {
+        body = JSON.parse(text)
+      } catch (e) {
+        throw new Error(`Invalid JSON: ${(e as Error).message}`)
+      }
+      return api.admin.setRoutingConfig(tenantId, body)
+    },
+    onSuccess: () => {
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (err: unknown) => {
+      const e = err as { detail?: string; message?: string } | null
+      setError(e?.detail ?? e?.message ?? 'Failed to save routing config')
+    },
+  })
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (v) {
+          setText(initial())
+          setError(null)
+        }
+        onOpenChange(v)
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Routing config</DialogTitle>
+          <DialogDescription>
+            Full replace. Every model id is validated against the registry;
+            quotas are monthly micro-USD caps. Errors name the offending field.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <textarea
+            data-testid="routing-config-json"
+            className="h-64 w-full rounded-md border border-input bg-background p-2 font-mono text-xs"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            spellCheck={false}
+          />
+          {error && (
+            <p className="text-sm text-destructive" data-testid="routing-config-error">
+              {error}
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => mutation.mutate()}
+            disabled={mutation.isPending}
+            data-testid="routing-config-save"
+          >
+            {mutation.isPending ? 'Saving…' : 'Save'}
           </Button>
         </DialogFooter>
       </DialogContent>

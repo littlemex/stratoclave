@@ -305,6 +305,33 @@ enum AdminTenantAction {
     /// Manage the tenant's dollar pool budget (A-1)
     #[command(name = "pool-budget", subcommand)]
     PoolBudget(AdminPoolBudgetAction),
+    /// Manage the tenant/user routing config (P0-11: chain, quotas, allowlist)
+    #[command(name = "routing-config", subcommand)]
+    RoutingConfig(AdminRoutingConfigAction),
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminRoutingConfigAction {
+    /// Show the current routing config (tenant, or a user override with --user)
+    Get {
+        tenant_id: String,
+        /// Show a per-user override instead of the tenant config
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Replace the routing config from a JSON file (or stdin with "-")
+    Set {
+        tenant_id: String,
+        /// Path to a JSON body, or "-" to read stdin. Tenant shape:
+        /// {"chain":[...],"allowlist":[...],"quotas":{model:{"limit":N}},
+        ///  "fallback_default":"on|off"}. User shape:
+        /// {"chain":[...],"preferred_model":...,"fallback":"on|off"}.
+        #[arg(long)]
+        file: String,
+        /// Write a per-user override instead of the tenant config
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -581,6 +608,18 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 ),
                 AdminPoolBudgetAction::Show { tenant_id, period } => wrap(
                     mvp::admin::tenant_pool_budget_show(&tenant_id, period.as_deref()).await,
+                ),
+            },
+            AdminTenantAction::RoutingConfig(action) => match action {
+                AdminRoutingConfigAction::Get { tenant_id, user } => wrap(
+                    mvp::admin::routing_config_get(&tenant_id, user.as_deref()).await,
+                ),
+                AdminRoutingConfigAction::Set {
+                    tenant_id,
+                    file,
+                    user,
+                } => wrap(
+                    mvp::admin::routing_config_set(&tenant_id, &file, user.as_deref()).await,
                 ),
             },
         },

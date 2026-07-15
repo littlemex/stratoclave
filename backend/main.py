@@ -38,6 +38,7 @@ from mvp.openai_responses import router as mvp_openai_responses_router
 from mvp.me import router as mvp_me_router
 from mvp.admin_users import router as mvp_admin_users_router
 from mvp.admin_tenants import router as mvp_admin_tenants_router
+from mvp.admin_routing import router as mvp_admin_routing_router
 from mvp.admin_usage import router as mvp_admin_usage_router
 from mvp.team_lead import router as mvp_team_lead_router
 from mvp.cognito_auth import router as mvp_cognito_auth_router
@@ -392,6 +393,7 @@ app.include_router(mvp_openai_responses_router)  # POST /openai/v1/responses, GE
 app.include_router(mvp_me_router)                # GET  /api/mvp/me + usage-summary / usage-history
 app.include_router(mvp_admin_users_router)       # /api/mvp/admin/users[*]
 app.include_router(mvp_admin_tenants_router)     # /api/mvp/admin/tenants[*]
+app.include_router(mvp_admin_routing_router)     # /api/mvp/admin/tenants/{id}[/users/{uid}]/routing-config
 app.include_router(mvp_admin_usage_router)       # /api/mvp/admin/usage-logs
 app.include_router(mvp_team_lead_router)         # /api/mvp/team-lead/tenants[*]
 app.include_router(mvp_cognito_auth_router)      # /api/mvp/auth/login, /respond
