@@ -8,6 +8,7 @@ Resolution pipeline:
 """
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from .clients import default_region
@@ -16,6 +17,44 @@ from .types import BreakerDecision, BreakerStage, Chain, Target
 
 _CATALOG: dict[str, list[Target]] = {}
 
+# Default cross-region failover targets when STRATOCLAVE_FAILOVER_REGIONS is
+# unset. Preserves the historical behavior.
+_DEFAULT_FAILOVER_REGIONS = ("us-west-2", "eu-west-1")
+
+# Explicit "single-region, no failover" sentinels for the config var.
+_DISABLE_SENTINELS = frozenset({"none", "disabled", "off"})
+
+
+def failover_regions() -> list[str]:
+    """Cross-region failover targets, in preference order, EXCLUDING the primary
+    (`default_region`) which is always the first target.
+
+    Configured via `STRATOCLAVE_FAILOVER_REGIONS` (comma-separated). Data-
+    residency control (README): set it to a same-jurisdiction region list, or
+    to an EMPTY string to DISABLE failover entirely (single-region — a streaming
+    request then never sends prompt bytes to another region). Whitespace and the
+    primary region are stripped; order and de-dup are preserved.
+    """
+    raw = os.getenv("STRATOCLAVE_FAILOVER_REGIONS")
+    if raw is None:
+        candidates = list(_DEFAULT_FAILOVER_REGIONS)
+    elif raw.strip().lower() in _DISABLE_SENTINELS:
+        # Explicit disable sentinel (survives orchestration that strips empty env
+        # vars — writing "none"/"disabled"/"off" is unambiguous single-region
+        # intent, unlike an empty string a template might drop). Fable review #1.
+        candidates = []
+    else:
+        # Explicit empty string => no failover regions (single-region) too.
+        candidates = [r.strip() for r in raw.split(",") if r.strip()]
+    primary = default_region()
+    seen: set[str] = {primary}
+    out: list[str] = []
+    for r in candidates:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
 
 def _build_catalog() -> dict[str, list[Target]]:
     """Build the static target catalog from the model registry."""
@@ -23,7 +62,18 @@ def _build_catalog() -> dict[str, list[Target]]:
 
     catalog: dict[str, list[Target]] = {}
     region = default_region()
-    alt_regions = ["us-west-2", "eu-west-1"]
+    alt_regions = failover_regions()
+
+    # Make the effective residency posture visible in logs at build time — an
+    # operator can confirm "disabled" actually took (Fable review #1).
+    from core.logging import get_logger
+
+    get_logger(__name__).info(
+        "failover_regions_effective",
+        primary_region=region,
+        failover_regions=alt_regions,
+        failover_enabled=bool(alt_regions),
+    )
 
     for entry in _REGISTRY:
         if entry.provider != "anthropic":
@@ -67,6 +117,13 @@ def get_catalog() -> dict[str, list[Target]]:
     return _CATALOG
 
 
+def reset_catalog() -> None:
+    """Drop the memoized catalog so the next get_catalog() rebuilds it. For
+    tests that vary STRATOCLAVE_FAILOVER_REGIONS / BEDROCK_REGION."""
+    global _CATALOG
+    _CATALOG = {}
+
+
 def resolve_chain(
     alias: str,
     *,
@@ -84,10 +141,14 @@ def resolve_chain(
         from mvp.models import resolve_bedrock_model
         model_id = resolve_bedrock_model(alias)
         region = default_region()
-        targets = [
-            Target(model_id=model_id, region=region, cost_tier=2, price_key="sonnet"),
-            Target(model_id=model_id, region="us-west-2", cost_tier=2, price_key="sonnet"),
-        ]
+        # Primary + the SAME configured failover regions as the catalog, so the
+        # residency setting applies to the unregistered-alias fallback too (an
+        # empty STRATOCLAVE_FAILOVER_REGIONS keeps this single-region).
+        targets = [Target(model_id=model_id, region=region, cost_tier=2, price_key="sonnet")]
+        for alt in failover_regions():
+            targets.append(
+                Target(model_id=model_id, region=alt, cost_tier=2, price_key="sonnet")
+            )
 
     filtered = [t for t in targets if t not in exclude]
 

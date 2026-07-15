@@ -149,11 +149,12 @@ for where a broker is the better choice.
   paths; the **non-streaming** requests (`/v1/messages`, `/v1/chat/completions`,
   `/openai/v1/responses` — all on the shared converse core) are a single Bedrock
   call with no region failover (an error refunds and surfaces the status). The
-  alternate-region set is **hardcoded today** (`us-west-2`, `eu-west-1` in
-  `routing/chains.py`), so a streaming failover **can send prompt bytes to
-  another region, including the EU** — changing or disabling that requires a
-  code change today, not a config toggle. Do not run it unmodified if you have
-  single-region data-residency requirements (see the residency row below).
+  failover region set is **operator-configured** via
+  `STRATOCLAVE_FAILOVER_REGIONS` (comma-separated; default `us-west-2,eu-west-1`).
+  For single-region **data residency**, set it to a same-jurisdiction list or to
+  **`none`** (or an empty string) **to disable failover entirely** — then a
+  streaming request never sends prompt bytes outside the primary region. The
+  effective set is logged at startup as `failover_regions_effective`.
 - **Staged budget breaker.** An advisory budget check shapes routing before
   the atomic reserve: at **≤25% remaining** it caps the model tier, at **≤5%**
   it rejects with `402` before any Bedrock call. This is live today.
@@ -495,7 +496,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | State / ops footprint | **DynamoDB only** (serverless, pay-per-request), multi-task Fargate across AZs, **no Postgres, no Redis** | **Postgres required**, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
 | Admin surface | **React web console** (tenants, users, credit, keys w/ revoke, routing config, read-only pricing) + CLI | Web UI + CLI | CLI (`ccwb`) |
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
-| Data residency / GovCloud | **us-east-1 only today.** ⚠️ the streaming failover set is hardcoded to `us-west-2` **and `eu-west-1`** — a failover can move prompt bytes cross-region (incl. the EU); narrowing/disabling it needs a code change today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
+| Data residency / GovCloud | **us-east-1 primary today.** Streaming failover regions are configurable (`STRATOCLAVE_FAILOVER_REGIONS`; default `us-west-2,eu-west-1`) — set a same-jurisdiction list, or empty to keep everything single-region. No GovCloud/EU-primary yet | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
 | Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover, **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock) |
 | License | **Apache 2.0 — all features OSS** (incl. Vouch-by-STS auth + JSON audit logging; note these are *identity attestation* + *logging*, not enterprise SAML SSO + an audit store) | MIT core **+ Commercial** (SSO/SAML, audit logs are Enterprise) | MIT (AWS Solutions sample) |
 
