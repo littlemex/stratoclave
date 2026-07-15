@@ -587,12 +587,23 @@ one atomic `TransactWriteItems`; per-model micro-USD pricing; **per-model quotas
 per candidate, across all three API surfaces); crash-safe hold sweep; staged
 budget breaker (tier cap at ≤25%, `402` at ≤5%); InfraRouter retry + cross-region
 failover with first-event commit; OpenAI Chat Completions and Responses (codex)
-surfaces; multi-task / multi-AZ ECS with DynamoDB-backed per-IP rate limiting.
+surfaces; multi-task / multi-AZ ECS with DynamoDB-backed per-IP rate limiting;
+**request correlation** (client-supplied `x-sc-group-id` / `x-sc-workflow-run-id`
+headers, server-minted span id, echoed on the response); **dual-track
+observability** (per-request span records + per-workflow-run rollups, with a
+`canceled_by_client` flag) and a **write-only routing-signals log** for offline
+routing evaluation — all three fire-and-forget, DynamoDB-only, and money-neutral.
 
 **On the roadmap (designed, not yet wired into the request path):**
 
 - **Per-tenant reasoning-effort and tool caps.** App-layer policy hooks exist;
   enforcement is not wired.
+- **VSR (virtual service router) adapter.** The resolver already honours a
+  hard model pin (`vsr_hard_model`), but the request-side adapter that supplies
+  it — and the passthrough recipe — is not wired.
+- **Offline routing evaluator.** The routing-signals table is written today but
+  nothing consumes it yet; the evaluator that feeds routing policy back is a
+  later increment (the schema is day-bucketed + sharded + TTL'd for it).
 - **Multi-region control plane, data-residency selection, external audit.**
   See [Non-goals and honest limitations](#non-goals-and-honest-limitations).
 
