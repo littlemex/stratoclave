@@ -33,7 +33,11 @@ set -euo pipefail
 #
 # Environment variables:
 #   AWS_PROFILE           AWS profile (optional)
-#   CDK_DEFAULT_REGION    AWS region (must be us-east-1; enforced in iac.ts)
+#   STRATOCLAVE_REGION    Body-stack deploy region R (default: us-east-1). The
+#                         WAF stack is always us-east-1 (CLOUDFRONT scope); when
+#                         R != us-east-1 you must `cdk bootstrap` BOTH regions.
+#   CDK_DEFAULT_REGION    Fallback for the body region if STRATOCLAVE_REGION unset
+#   BEDROCK_PRIMARY_REGION Bedrock model primary region (required when R != us-east-1)
 #   STRATOCLAVE_PREFIX    Resource prefix (default: stratoclave)
 ###############################################################################
 
@@ -41,7 +45,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IAC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$IAC_DIR/.." && pwd)"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
-REGION="${CDK_DEFAULT_REGION:-us-east-1}"
+# Body region R: the frontend S3 bucket and all queried stacks (network,
+# dynamodb, ecr, alb, frontend, cognito, ecs, config) live here. Only the WAF
+# stack lives in us-east-1; this script never queries it, so REGION == R.
+REGION="${STRATOCLAVE_REGION:-${CDK_DEFAULT_REGION:-us-east-1}}"
 PREFIX="${STRATOCLAVE_PREFIX:-stratoclave}"
 SKIP_BUILD=false
 DRY_RUN=false
@@ -135,6 +142,37 @@ log_info "Prefix:      $PREFIX"
 
 command -v node >/dev/null || { log_error "Node.js 20+ is required."; exit 1; }
 log_info "Node: $(node --version)"
+
+# Env preflight (Fable consult D3). When the body region != us-east-1, both the
+# deploy AND `cdk bootstrap` (which synthesizes bin/iac.ts) require an explicit
+# BEDROCK_PRIMARY_REGION — otherwise the app throws with a message that is easy
+# to misread as a code bug. Surface the requirement here, before anything runs.
+if [ "$REGION" != "us-east-1" ] && [ -z "$BEDROCK_PRIMARY_REGION" ]; then
+  log_error "BEDROCK_PRIMARY_REGION must be set when STRATOCLAVE_REGION ($REGION) != us-east-1."
+  log_error "  It is the Bedrock MODEL region (independent of the deploy region) and is"
+  log_error "  required both for this deploy and for 'cdk bootstrap' (bootstrap synths the app)."
+  log_error "  Example: export BEDROCK_PRIMARY_REGION=us-east-1   # or =$REGION for in-region models"
+  exit 1
+fi
+
+# Cross-region bootstrap check (Fable review M-1). When WAF is on and the body
+# region != us-east-1, the WAF stack lives in us-east-1 and its cross-region
+# export writer needs BOTH regions bootstrapped; a missing CDKToolkit surfaces
+# as an opaque custom-resource error mid-deploy. Fail fast with a clear message.
+WAF_REGION="us-east-1"
+ENABLE_WAF_EFFECTIVE="$(echo "${ENABLE_WAF:-true}" | tr '[:upper:]' '[:lower:]')"
+check_bootstrap() {
+  local r=$1
+  aws cloudformation describe-stacks --stack-name CDKToolkit --region "$r" &>/dev/null || {
+    log_error "Region $r is not cdk-bootstrapped. Run: npx cdk bootstrap aws://$ACCOUNT/$r"
+    exit 1
+  }
+}
+check_bootstrap "$REGION"
+if [ "$ENABLE_WAF_EFFECTIVE" != "false" ] && [ "$REGION" != "$WAF_REGION" ]; then
+  log_info "Body region $REGION != $WAF_REGION and WAF is on: checking us-east-1 bootstrap (cross-region WAF export)."
+  check_bootstrap "$WAF_REGION"
+fi
 
 if [ ! -d "$IAC_DIR/node_modules" ]; then
   log_info "Installing CDK dependencies..."

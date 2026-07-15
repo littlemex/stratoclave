@@ -49,6 +49,16 @@ def test_disable_sentinels(monkeypatch, sentinel):
     assert failover_regions() == []
 
 
+@pytest.mark.parametrize("raw", [",", " , ", ",,", " ,, "])
+def test_comma_only_yields_empty_no_default_fallback(monkeypatch, raw):
+    # A comma-only value must parse to [] (single-region), NOT fall back to the
+    # default us-west-2+eu-west-1 set. The IaC residency analysis relies on this
+    # exact behavior (Fable review NEW-12) — a fallback here would be a silent
+    # cross-region leak for an operator who thought they disabled failover.
+    monkeypatch.setenv("STRATOCLAVE_FAILOVER_REGIONS", raw)
+    assert failover_regions() == []
+
+
 def test_custom_list_parsed_trimmed_and_ordered(monkeypatch):
     monkeypatch.setenv("STRATOCLAVE_FAILOVER_REGIONS", " us-west-2 , us-east-2 ")
     assert failover_regions() == ["us-west-2", "us-east-2"]
