@@ -55,6 +55,18 @@ enum Commands {
         /// Override model ID (ANTHROPIC_MODEL)
         #[arg(long)]
         model: Option<String>,
+        /// Attribution group id (x-sc-group-id header), [A-Za-z0-9._:-]{1,64}.
+        /// Must appear BEFORE any args destined for claude itself.
+        #[arg(long)]
+        group_id: Option<String>,
+        /// Workflow run id (x-sc-workflow-run-id header), [A-Za-z0-9._:-]{1,64}.
+        /// If absent the backend generates a wr_* id. Must appear before child args.
+        #[arg(long)]
+        workflow_run_id: Option<String>,
+        /// VSR hard model pin (x-sc-model-pin header), [A-Za-z0-9._:/-]{1,128}.
+        /// Pins every request to exactly this model — no cascade. Before child args.
+        #[arg(long)]
+        model_pin: Option<String>,
         /// Extra args passed to claude
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -64,6 +76,18 @@ enum Commands {
         /// Override model ID (e.g. openai.gpt-5.4)
         #[arg(long)]
         model: Option<String>,
+        /// Attribution group id (x-sc-group-id header), [A-Za-z0-9._:-]{1,64}.
+        /// Must appear BEFORE any args destined for codex itself.
+        #[arg(long)]
+        group_id: Option<String>,
+        /// Workflow run id (x-sc-workflow-run-id header), [A-Za-z0-9._:-]{1,64}.
+        /// If absent the backend generates a wr_* id. Must appear before child args.
+        #[arg(long)]
+        workflow_run_id: Option<String>,
+        /// VSR hard model pin (x-sc-model-pin header), [A-Za-z0-9._:/-]{1,128}.
+        /// Pins every request to exactly this model — no cascade. Before child args.
+        #[arg(long)]
+        model_pin: Option<String>,
         /// Extra args passed to codex
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -449,8 +473,20 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Some(Commands::Auth { action }) => dispatch_auth(action).await,
-        Some(Commands::Claude { model, args }) => dispatch_claude(model, args).await,
-        Some(Commands::Codex { model, args }) => dispatch_codex(model, args).await,
+        Some(Commands::Claude {
+            model,
+            group_id,
+            workflow_run_id,
+            model_pin,
+            args,
+        }) => dispatch_claude(model, group_id, workflow_run_id, model_pin, args).await,
+        Some(Commands::Codex {
+            model,
+            group_id,
+            workflow_run_id,
+            model_pin,
+            args,
+        }) => dispatch_codex(model, group_id, workflow_run_id, model_pin, args).await,
         Some(Commands::Usage { action }) => dispatch_usage(action).await,
         Some(Commands::Admin { action }) => dispatch_admin(action).await,
         Some(Commands::TeamLead { action }) => dispatch_team_lead(action).await,
@@ -494,8 +530,24 @@ async fn dispatch_auth(action: AuthAction) -> ExitCode {
     }
 }
 
-async fn dispatch_claude(model: Option<String>, args: Vec<String>) -> ExitCode {
-    match mvp::claude_cmd::run(&args, model.as_deref()).await {
+async fn dispatch_claude(
+    model: Option<String>,
+    group_id: Option<String>,
+    workflow_run_id: Option<String>,
+    model_pin: Option<String>,
+    args: Vec<String>,
+) -> ExitCode {
+    // Validate the x-sc-* header flags BEFORE run() loads config or mints an
+    // ephemeral key, so a malformed value costs zero network calls. Exit code 2
+    // marks a usage/validation error, matching clap's own convention.
+    let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match mvp::claude_cmd::run(&args, model.as_deref(), &headers).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[ERROR] {e}");
@@ -504,8 +556,21 @@ async fn dispatch_claude(model: Option<String>, args: Vec<String>) -> ExitCode {
     }
 }
 
-async fn dispatch_codex(model: Option<String>, args: Vec<String>) -> ExitCode {
-    match mvp::codex_cmd::run(&args, model.as_deref()).await {
+async fn dispatch_codex(
+    model: Option<String>,
+    group_id: Option<String>,
+    workflow_run_id: Option<String>,
+    model_pin: Option<String>,
+    args: Vec<String>,
+) -> ExitCode {
+    let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match mvp::codex_cmd::run(&args, model.as_deref(), &headers).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[ERROR] {e}");

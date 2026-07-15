@@ -22,6 +22,45 @@ use std::process::{Command, ExitCode, Stdio};
 
 use super::ephemeral_key::revoke_ephemeral_key;
 
+/// Cognito bearer material stripped by `scrub_stratoclave_tokens`. Deliberately
+/// does NOT include `STRATOCLAVE_OPENAI_KEY` (the child's only credential) —
+/// see `scrub_never_removes_wrapper_overrides`.
+const SCRUB_STRATOCLAVE_TOKENS: &[&str] = &[
+    "STRATOCLAVE_ACCESS_TOKEN",
+    "STRATOCLAVE_ID_TOKEN",
+    "STRATOCLAVE_REFRESH_TOKEN",
+];
+
+/// AWS / direct-Bedrock escape hatches stripped by `scrub_aws_identity` so the
+/// child cannot bypass stratoclave with the user's own credentials.
+const SCRUB_AWS_IDENTITY: &[&str] = &[
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    // `claude` has a Bedrock-direct fallback path we never want active.
+    "CLAUDE_CODE_USE_BEDROCK",
+    // `codex` reads AWS_BEARER_TOKEN_BEDROCK; strip it so a leaked Bedrock API
+    // key cannot accidentally bypass stratoclave.
+    "AWS_BEARER_TOKEN_BEDROCK",
+];
+
+/// Env keys the wrappers set on the child via `.env()` and rely on surviving
+/// the scrub. If a scrub list ever names one of these, the scrub (which runs
+/// after the overrides and clears explicit values too) would silently break
+/// the child — this list is the tripwire, asserted in tests.
+#[cfg(test)]
+const WRAPPER_OVERRIDE_KEYS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CODEX_HOME",
+    "STRATOCLAVE_OPENAI_KEY",
+];
+
 /// Optional groups of env vars to remove from the child environment.
 #[derive(Default, Debug, Clone, Copy)]
 struct ScrubFlags {
@@ -34,6 +73,9 @@ pub struct ChildLauncher {
     binary: String,
     /// Additional `KEY=VALUE` pairs added to the child env.
     env_overrides: Vec<(String, OsString)>,
+    /// Explicit keys to clear from the inherited child env (caller intent, not
+    /// a scrub group). Applied AFTER overrides + scrub so it always wins.
+    env_removes: Vec<String>,
     scrub: ScrubFlags,
     /// Optional working directory for the child process. When set, the
     /// child is spawned with `Command::current_dir(...)` instead of
@@ -46,6 +88,7 @@ impl ChildLauncher {
         Self {
             binary: binary.to_string(),
             env_overrides: Vec::new(),
+            env_removes: Vec::new(),
             scrub: ScrubFlags::default(),
             cwd: None,
         }
@@ -54,6 +97,15 @@ impl ChildLauncher {
     pub fn env(mut self, key: &str, value: impl AsRef<OsStr>) -> Self {
         self.env_overrides
             .push((key.to_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Clear an inherited env var on the child (e.g. a pre-existing
+    /// ANTHROPIC_CUSTOM_HEADERS whose lines were all filtered out — the child
+    /// must not inherit the raw value). Applied last, so it overrides any prior
+    /// `.env()` of the same key.
+    pub fn env_remove(mut self, key: &str) -> Self {
+        self.env_removes.push(key.to_string());
         self
     }
 
@@ -108,25 +160,26 @@ impl ChildLauncher {
             cmd.env(k, v);
         }
 
+        // NOTE ordering: env_remove runs AFTER the .env() overrides above and
+        // clears explicitly-set values too, so a scrub name that collided with
+        // an override would silently nuke it. The lists below MUST never name a
+        // key the wrappers set (ANTHROPIC_*, STRATOCLAVE_OPENAI_KEY,
+        // CODEX_HOME, ...); `scrub_never_removes_wrapper_overrides` locks that in.
         if self.scrub.stratoclave_tokens {
-            cmd.env_remove("STRATOCLAVE_ACCESS_TOKEN");
-            cmd.env_remove("STRATOCLAVE_ID_TOKEN");
-            cmd.env_remove("STRATOCLAVE_REFRESH_TOKEN");
+            for k in SCRUB_STRATOCLAVE_TOKENS {
+                cmd.env_remove(k);
+            }
         }
         if self.scrub.aws_identity {
-            cmd.env_remove("AWS_PROFILE");
-            cmd.env_remove("AWS_REGION");
-            cmd.env_remove("AWS_DEFAULT_REGION");
-            cmd.env_remove("AWS_ACCESS_KEY_ID");
-            cmd.env_remove("AWS_SECRET_ACCESS_KEY");
-            cmd.env_remove("AWS_SESSION_TOKEN");
-            // `claude` has a Bedrock-direct fallback path that we never
-            // want active under the wrapper.
-            cmd.env_remove("CLAUDE_CODE_USE_BEDROCK");
-            // `codex` reads AWS_BEARER_TOKEN_BEDROCK; remove it so a
-            // user with a leaked Bedrock API key cannot accidentally
-            // bypass stratoclave.
-            cmd.env_remove("AWS_BEARER_TOKEN_BEDROCK");
+            for k in SCRUB_AWS_IDENTITY {
+                cmd.env_remove(k);
+            }
+        }
+
+        // Caller-requested removals last, so an explicit env_remove of a key
+        // always wins over a prior .env() of the same key.
+        for k in &self.env_removes {
+            cmd.env_remove(k);
         }
 
         cmd.stdin(Stdio::inherit());
@@ -186,4 +239,26 @@ fn find_binary(name: &str) -> Option<String> {
         }
     }
     Some(name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L3 (Fable #64 rev1): env_remove runs after the .env() overrides and
+    /// clears explicitly-set values, so a scrub list must never name a key the
+    /// wrappers rely on (or the child loses its credential / config silently).
+    #[test]
+    fn scrub_never_removes_wrapper_overrides() {
+        for key in WRAPPER_OVERRIDE_KEYS {
+            assert!(
+                !SCRUB_STRATOCLAVE_TOKENS.contains(key),
+                "scrub_stratoclave_tokens must not remove wrapper override {key}"
+            );
+            assert!(
+                !SCRUB_AWS_IDENTITY.contains(key),
+                "scrub_aws_identity must not remove wrapper override {key}"
+            );
+        }
+    }
 }

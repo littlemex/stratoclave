@@ -30,18 +30,23 @@
 //! sufficient: the user's `~/.codex/config.toml` is never visible
 //! because `~/.codex` is no longer the resolved home.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use tempfile::TempDir;
 
 use super::child_launcher::ChildLauncher;
 use super::config::MvpConfig;
 use super::ephemeral_key::mint_ephemeral_key_scoped;
+use super::sc_headers::ScHeaders;
 use super::tokens::load as load_tokens;
 
-pub async fn run(args: &[String], model_override: Option<&str>) -> Result<ExitCode> {
+pub async fn run(
+    args: &[String],
+    model_override: Option<&str>,
+    headers: &ScHeaders,
+) -> Result<ExitCode> {
     let config = MvpConfig::load()?;
     let tokens = load_tokens()?;
 
@@ -58,29 +63,35 @@ pub async fn run(args: &[String], model_override: Option<&str>) -> Result<ExitCo
             .unwrap_or("/openai/v1"),
     );
 
-    // Mint the scoped wrapper key first; on failure we never spawn the
-    // child and never need to revoke.
-    let key = mint_ephemeral_key_scoped(
-        &config.api_endpoint,
-        &tokens.access_token,
-        "stratoclave-codex-wrapper",
-        &["responses:send"],
-    )
-    .await
-    .context("Failed to mint ephemeral wrapper key for codex")?;
+    // The `http_headers` provider key that carries our x-sc-* headers is only
+    // honored by codex-cli >= 0.141. On an older codex the headers are silently
+    // dropped — a VSR pin would vanish with no error (Fable #64 rev1 H1). So
+    // when any x-sc flag is set, preflight the version and hard-error if the
+    // binary is too old rather than launch into a silent policy bypass.
+    if !headers.is_empty() {
+        preflight_codex_supports_http_headers()?;
+    }
 
-    let codex_home = build_temp_codex_home(&base_url, &model)
+    // Build the temp config + escape workspace BEFORE minting the key, so a
+    // filesystem failure here never leaves a live ephemeral key un-revoked
+    // (Fable #64 rev1 L1: nothing fallible must sit between mint and
+    // run_with_revoke).
+    let codex_home = build_temp_codex_home(&base_url, &model, headers)
         .context("Failed to write temporary codex config")?;
 
-    eprintln!(
-        "[INFO] Launching codex via Stratoclave proxy (base_url={}, model={}, key={})",
-        base_url, model, key.key_id
-    );
-    eprintln!(
-        "[INFO] Child process uses an ephemeral responses-only API key; \
-         the Cognito bearer is not exported and the user's ~/.codex/config.toml \
-         is untouched."
-    );
+    if !headers.is_empty() {
+        eprintln!(
+            "[INFO] Injecting x-sc-* headers: {}",
+            headers.iter().map(|(n, _)| n).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if headers.iter().any(|(n, _)| n == super::sc_headers::H_MODEL_PIN) {
+        eprintln!(
+            "[WARN] --model-pin is a hard, no-cascade pin applied to every request; \
+             codex's prompt-budget window is still derived from --model, so pin and \
+             model should refer to the same family."
+        );
+    }
 
     // codex 0.136 (verified against installed binary, 2026-06-04)
     // resolves a "project-local config" by walking the cwd's ancestors.
@@ -103,6 +114,9 @@ pub async fn run(args: &[String], model_override: Option<&str>) -> Result<ExitCo
     // `.codex/` to find. We only do this when the launcher's cwd would
     // otherwise be `$HOME`, so day-to-day `cd /path/to/your/repo &&
     // stratoclave codex …` keeps working with the user's real workspace.
+    //
+    // Created BEFORE the key mint (Fable #64 rev1 L1): it is fallible, and no
+    // fallible step may sit between mint and run_with_revoke.
     let escape_workspace = if cwd_is_home() {
         Some(
             tempfile::Builder::new()
@@ -113,6 +127,30 @@ pub async fn run(args: &[String], model_override: Option<&str>) -> Result<ExitCo
     } else {
         None
     };
+
+    // Mint the scoped wrapper key LAST among fallible setup steps. Only the
+    // two best-effort `eprintln!`s below sit between here and run_with_revoke;
+    // they can only fail if stderr is closed, in which case the process is
+    // already being torn down and the 30-min key TTL bounds the exposure
+    // (Fable #64 rev2 NEW-L3).
+    let key = mint_ephemeral_key_scoped(
+        &config.api_endpoint,
+        &tokens.access_token,
+        "stratoclave-codex-wrapper",
+        &["responses:send"],
+    )
+    .await
+    .context("Failed to mint ephemeral wrapper key for codex")?;
+
+    eprintln!(
+        "[INFO] Launching codex via Stratoclave proxy (base_url={}, model={}, key={})",
+        base_url, model, key.key_id
+    );
+    eprintln!(
+        "[INFO] Child process uses an ephemeral responses-only API key; \
+         the Cognito bearer is not exported and the user's ~/.codex/config.toml \
+         is untouched."
+    );
 
     let mut launcher = ChildLauncher::new("codex")
         .env("CODEX_HOME", codex_home.path())
@@ -132,12 +170,96 @@ pub async fn run(args: &[String], model_override: Option<&str>) -> Result<ExitCo
         )
         .await;
 
-    // Drop the temp dirs deterministically so they do not survive the
-    // wrapper exit. `TempDir` auto-deletes on Drop, but the explicit
-    // drop keeps the failure surface visible if the FS rejects it.
+    // Drop the temp dirs deterministically so they do not survive the wrapper
+    // exit. `TempDir::drop` auto-deletes and SWALLOWS any FS error (use
+    // `.close()` if surfacing that error ever matters); the explicit drops just
+    // pin the lifetime past `run_with_revoke` so the child could read them.
     drop(escape_workspace);
     drop(codex_home);
     result
+}
+
+/// Minimum codex-cli version whose `[model_providers.*].http_headers` key is
+/// honored. Below this, the key is silently ignored and our x-sc-* headers —
+/// including a VSR model pin — would vanish with no error.
+const CODEX_HTTP_HEADERS_MIN: (u32, u32, u32) = (0, 141, 0);
+
+/// Parse a `(major, minor, patch)` triple from a `codex --version` line such
+/// as `codex-cli 0.141.0`. Returns None if no dotted numeric version is found.
+fn parse_codex_version(output: &str) -> Option<(u32, u32, u32)> {
+    // Find the first whitespace-delimited token that looks like `N.N[.N...]`.
+    for tok in output.split_whitespace() {
+        let core = tok.trim_start_matches('v');
+        let mut it = core.split('.');
+        let (a, b) = (it.next(), it.next());
+        if let (Some(a), Some(b)) = (a, b) {
+            if let (Ok(major), Ok(minor)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                // Patch is optional; strip any trailing non-digits (pre-release).
+                let patch = it
+                    .next()
+                    .map(|p| {
+                        p.chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                return Some((major, minor, patch));
+            }
+        }
+    }
+    None
+}
+
+/// Hard-fail when the installed codex is too old to honor `http_headers`, so a
+/// requested x-sc-* header (esp. a VSR model pin) is never silently dropped
+/// (Fable #64 rev1 H1). If the version can't be determined, warn and proceed —
+/// the alternative (blocking on an unparseable `--version`) is more hostile
+/// than a warning, and the backend still validates whatever does arrive.
+fn preflight_codex_supports_http_headers() -> Result<()> {
+    let out = match Command::new("codex").arg("--version").output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!(
+                "[WARN] Could not run `codex --version` to verify x-sc-* header \
+                 support ({e}); proceeding, but headers require codex >= 0.141."
+            );
+            return Ok(());
+        }
+    };
+    // A non-zero exit means `--version` didn't do what we think; don't trust a
+    // version token scraped from an error/usage banner (Fable #64 rev2 NEW-L2).
+    if !out.status.success() {
+        eprintln!(
+            "[WARN] `codex --version` exited non-zero; cannot verify x-sc-* header \
+             support (requires codex >= 0.141). Proceeding."
+        );
+        return Ok(());
+    }
+    // Parse stdout FIRST (the real version line), only falling back to stderr,
+    // so a runtime/shim banner on stdout can't false-accept.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let parsed = parse_codex_version(&stdout).or_else(|| parse_codex_version(&stderr));
+    match parsed {
+        Some(v) if v >= CODEX_HTTP_HEADERS_MIN => Ok(()),
+        Some((a, b, c)) => bail!(
+            "codex {a}.{b}.{c} does not support the `http_headers` provider key \
+             (needs >= {}.{}.{}); the x-sc-* headers (incl. --model-pin) would be \
+             silently dropped. Upgrade codex, or drop the flags.",
+            CODEX_HTTP_HEADERS_MIN.0,
+            CODEX_HTTP_HEADERS_MIN.1,
+            CODEX_HTTP_HEADERS_MIN.2,
+        ),
+        None => {
+            eprintln!(
+                "[WARN] Could not parse codex version from `codex --version`; \
+                 x-sc-* headers require codex >= 0.141."
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Return `true` when the current process cwd resolves to `$HOME`. We
@@ -157,7 +279,36 @@ fn cwd_is_home() -> bool {
     h == c
 }
 
-pub(crate) fn build_temp_codex_home(base_url: &str, model: &str) -> Result<TempDir> {
+/// Render the optional `http_headers` inline table for the stratoclave
+/// provider block. Empty string when no headers are set, so the generated
+/// TOML is byte-identical to the pre-feature output in the common case.
+///
+/// TOML safety: values are emitted verbatim inside basic ("...") strings.
+/// Basic strings require escaping only for `"`, `\`, and control chars — all
+/// of which are excluded by the ScHeaders grammars ([A-Za-z0-9._:-] /
+/// [A-Za-z0-9._:/-]). The grammar therefore closes TOML injection entirely;
+/// no escaping pass is needed, and prop_codex_toml_roundtrip proves it with
+/// the `toml` crate as oracle. An inline table (rather than a
+/// `[model_providers.stratoclave.http_headers]` sub-table header) keeps this
+/// a plain key inside the provider table, avoiding TOML's "bare keys must
+/// precede sub-tables" ordering pitfall.
+pub(crate) fn sc_http_headers_toml(headers: &ScHeaders) -> String {
+    let pairs: Vec<String> = headers
+        .iter()
+        .map(|(name, value)| format!(r#""{name}" = "{value}""#))
+        .collect();
+    if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("http_headers           = {{ {} }}\n", pairs.join(", "))
+    }
+}
+
+pub(crate) fn build_temp_codex_home(
+    base_url: &str,
+    model: &str,
+    headers: &ScHeaders,
+) -> Result<TempDir> {
     let dir = TempDir::new().context("TempDir::new for CODEX_HOME")?;
     let body = format!(
         r#"# Auto-generated by `stratoclave codex` — do not edit.
@@ -198,8 +349,9 @@ env_key                = "STRATOCLAVE_OPENAI_KEY"
 request_max_retries    = 3
 stream_max_retries     = 5
 stream_idle_timeout_ms = 600000
-"#,
+{http_headers}"#,
         context_window = codex_context_window_for(model),
+        http_headers = sc_http_headers_toml(headers),
     );
     let cfg_path = dir.path().join("config.toml");
     fs::write(&cfg_path, body).with_context(|| {
@@ -244,12 +396,39 @@ mod tests {
     //! external codex binary. A behavioral test would need to spawn
     //! codex itself, which the test harness deliberately avoids.
     use super::*;
+    use super::super::sc_headers::ScHeaders;
     use std::fs;
+
+    // Dependency-free deterministic xorshift64* PRNG (see sc_headers tests).
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn range_incl(&mut self, lo: usize, hi: usize) -> usize {
+            lo + (self.next_u64() % (hi - lo + 1) as u64) as usize
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
 
     #[test]
     fn temp_config_disables_project_root_markers() {
-        let dir = build_temp_codex_home("https://example.test/openai/v1", "openai.gpt-5.4")
-            .expect("build_temp_codex_home");
+        let dir = build_temp_codex_home(
+            "https://example.test/openai/v1",
+            "openai.gpt-5.4",
+            &ScHeaders::none(),
+        )
+        .expect("build_temp_codex_home");
         let body = fs::read_to_string(dir.path().join("config.toml")).expect("read config");
         assert!(
             body.contains("project_root_markers = []"),
@@ -260,14 +439,83 @@ mod tests {
 
     #[test]
     fn temp_config_pins_model_context_window() {
-        let dir = build_temp_codex_home("https://example.test/openai/v1", "openai.gpt-5.5")
-            .expect("build_temp_codex_home");
+        let dir = build_temp_codex_home(
+            "https://example.test/openai/v1",
+            "openai.gpt-5.5",
+            &ScHeaders::none(),
+        )
+        .expect("build_temp_codex_home");
         let body = fs::read_to_string(dir.path().join("config.toml")).expect("read config");
         assert!(
             body.contains("model_context_window = 400000"),
             "expected model_context_window = 400000 for openai.gpt-5.5; got:\n{}",
             body
         );
+    }
+
+    // P4: for any validated ScHeaders, the generated config.toml parses and
+    // its http_headers table deserializes to exactly the input map. Uses the
+    // `toml` crate (already a dep) as an independent oracle — this proves the
+    // grammar closes TOML injection (no escaping needed).
+    #[test]
+    fn prop_codex_toml_roundtrip() {
+        const ID_SET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-";
+        let mut rng = Rng::new(0x70_11);
+        for _ in 0..200 {
+            let mut gen = |max: usize, slash: bool| -> String {
+                let len = rng.range_incl(1, max);
+                (0..len)
+                    .map(|_| {
+                        if slash && rng.below(8) == 0 {
+                            '/'
+                        } else {
+                            ID_SET[rng.below(ID_SET.len())] as char
+                        }
+                    })
+                    .collect()
+            };
+            let (g, w, p) = (gen(64, false), gen(64, false), gen(128, true));
+            let h = ScHeaders::validated(Some(g.clone()), Some(w.clone()), Some(p.clone()))
+                .expect("generated values must validate");
+            let dir = build_temp_codex_home("https://example.test/openai/v1", "openai.gpt-5.4", &h)
+                .expect("build_temp_codex_home");
+            let body = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+            let parsed: toml::Value = toml::from_str(&body).expect("generated TOML must parse");
+            let ht = parsed["model_providers"]["stratoclave"]["http_headers"]
+                .as_table()
+                .expect("http_headers table");
+            assert_eq!(ht["x-sc-group-id"].as_str(), Some(g.as_str()));
+            assert_eq!(ht["x-sc-workflow-run-id"].as_str(), Some(w.as_str()));
+            assert_eq!(ht["x-sc-model-pin"].as_str(), Some(p.as_str()));
+            assert_eq!(ht.len(), 3);
+        }
+    }
+
+    #[test]
+    fn version_parse_and_gate() {
+        assert_eq!(parse_codex_version("codex-cli 0.141.0"), Some((0, 141, 0)));
+        assert_eq!(parse_codex_version("codex-cli 0.136.2"), Some((0, 136, 2)));
+        assert_eq!(parse_codex_version("v1.2"), Some((1, 2, 0)));
+        assert_eq!(parse_codex_version("0.142.0-beta.1"), Some((0, 142, 0)));
+        assert_eq!(parse_codex_version("no version here"), None);
+        // Gate: 0.141.0 is the floor; 0.140.x is too old, 0.141+/1.x are fine.
+        assert!((0, 141, 0) >= CODEX_HTTP_HEADERS_MIN);
+        assert!((0, 142, 0) >= CODEX_HTTP_HEADERS_MIN);
+        assert!((1, 0, 0) >= CODEX_HTTP_HEADERS_MIN);
+        assert!(!((0, 140, 9) >= CODEX_HTTP_HEADERS_MIN));
+    }
+
+    #[test]
+    fn no_http_headers_table_when_no_flags() {
+        let dir = build_temp_codex_home(
+            "https://example.test/openai/v1",
+            "openai.gpt-5.4",
+            &ScHeaders::none(),
+        )
+        .unwrap();
+        let body = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!body.contains("http_headers"), "unexpected http_headers:\n{body}");
     }
 
     #[test]
