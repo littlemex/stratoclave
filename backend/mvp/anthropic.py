@@ -637,8 +637,15 @@ async def _stream_messages(
     Closures resolve module globals (`_bedrock_client`, `_settle_reservation_and_log`,
     `_release_pool`) AT CALL TIME so existing monkeypatches pass straight through.
     """
+    import time as _time
+
     from . import _budget_flow
     from ._wire import anthropic_wire as wire
+
+    # Resolve the request_id ONCE so RouteRequest and the span record agree.
+    request_id = ctx.request_id if ctx else f"msg_{uuid.uuid4().hex[:12]}"
+    _routed_box: dict = {}          # filled by _invoke once routing commits
+    _started_at_ms = int(_time.time() * 1000)
 
     async def _invoke(*, body, model_id):
         from .routing import route_stream as _route
@@ -648,13 +655,12 @@ async def _stream_messages(
         kwargs.pop("modelId", None)
 
         # P0-12: propagate the edge-minted correlation ids as opaque pass-through
-        # (the routing layer must NOT read them). Falls back to a locally-minted
-        # request_id when no ctx is threaded (e.g. a direct unit-test call).
+        # (the routing layer must NOT read them).
         req = RouteRequest(
             alias=model_id,
             payload=kwargs,
             tenant_id=user.org_id,
-            request_id=(ctx.request_id if ctx else f"msg_{uuid.uuid4().hex[:12]}"),
+            request_id=request_id,
             span_id=(ctx.span_id if ctx else None),
             group_id=(ctx.group_id if ctx else None),
             workflow_run_id=(ctx.workflow_run_id if ctx else None),
@@ -662,7 +668,38 @@ async def _stream_messages(
         )
 
         routed = await _route(req)
+        _routed_box["routed"] = routed  # commit-time routing facts for the span
         return {"stream": routed.events}
+
+    def _on_finalized(status: str, acc) -> None:
+        # P0-13/14: runs on the event loop right after the finalizer claim is
+        # won (money-neutral; see _budget_flow._notify + the Z3 emit proofs).
+        # Builds the frozen span draft from commit-time routing facts and hands
+        # off to the fire-and-forget writer. When routing never committed
+        # (invoke_error), committed_* stay empty and breaker_stage is "unknown".
+        # Import here (not at the request-path top) so nothing observability-
+        # related can raise into the request before the hook's own swallow (F1).
+        from .observability.store import SpanDraft, emit_span_and_rollup
+
+        routed = _routed_box.get("routed")
+        target = routed.target if routed else None
+        attempts = routed.attempt_facts if routed else []
+        draft = SpanDraft(
+            tenant_id=user.org_id,          # auth-derived; NEVER a client header
+            request_id=request_id,
+            span_id=(ctx.span_id if ctx else None) or request_id,
+            group_id=(ctx.group_id if ctx else None),
+            workflow_run_id=(ctx.workflow_run_id if ctx else None),
+            model_alias=body.model,
+            committed_model_id=(target.model_id if target else ""),
+            committed_region=(getattr(target, "region", "") if target else ""),
+            breaker_stage=(routed.breaker_stage if routed else "unknown"),
+            attempts_total=len(attempts),
+            targets_distinct=len({a.target for a in attempts}),
+            stream=True,
+            started_at_ms=_started_at_ms,
+        )
+        emit_span_and_rollup(draft, status, acc)
 
     class _AnthropicAdapter:
         def __init__(self):
@@ -695,6 +732,7 @@ async def _stream_messages(
         settle=lambda **kw: _settle_reservation_and_log(**kw),
         release=lambda ctx: _release_pool(ctx),
         adapter=_AnthropicAdapter(),
+        on_finalized=_on_finalized,
     ):
         yield frame
 

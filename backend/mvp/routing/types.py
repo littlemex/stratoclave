@@ -69,3 +69,7 @@ class RoutedStream:
     target: Target
     events: AsyncIterator[dict[str, Any]]
     attempt_facts: list[AttemptRecord] = field(default_factory=list)
+    # P0-14: breaker state of the COMMITTED target at commit time
+    # ('closed' | 'half_open' | ...). Observational only — routing behaviour
+    # must not read this back.
+    breaker_stage: str = "closed"

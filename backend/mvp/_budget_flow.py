@@ -10,7 +10,7 @@ Completions wire share this single settle-once machine.
 """
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Callable, Iterable, Protocol
+from typing import Any, AsyncGenerator, Callable, Iterable, Optional, Protocol
 
 from . import _converse_types as t
 
@@ -36,6 +36,7 @@ async def run_stream(
     settle: Callable[..., Any],
     release: Callable[..., Any],
     adapter: StreamAdapter,
+    on_finalized: Optional[Callable[[str, "t.UsageAccumulator"], None]] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Streaming budget flow — the settle-once invariant is explicit.
 
@@ -72,6 +73,32 @@ async def run_stream(
             finalized = True
             return True
 
+    def _notify(status: str) -> None:
+        # P0-13 observability hook. Money-neutral by construction: called ONLY
+        # after the finalizer claim is WON (so at most once per request — see
+        # tests/test_observability_emit_z3.py), swallowed on any exception,
+        # and synchronous-cheap (the real writer is fire-and-forget).
+        # CODE-SHAPE AXIOM (O2 in the Z3 module): there must be NO await
+        # between a winning _claim_finalize() and this call — that is why
+        # _notify is invoked BEFORE the shielded money await at every site.
+        # on_finalized=None is a strict no-op (backward compatible).
+        if on_finalized is None:
+            return
+        try:
+            on_finalized(status, acc)
+        except Exception:
+            # Observability must never affect the request, but a SYSTEMATIC hook
+            # failure (e.g. an unhashable field) would otherwise be invisible.
+            # Log at debug (contract-compatible: no raise, no request impact).
+            try:
+                import logging
+                logging.getLogger(__name__).debug(
+                    "on_finalized_hook_failed", exc_info=True,
+                    extra={"status": status},
+                )
+            except Exception:
+                pass
+
     def _do_settle():
         # settle does blocking boto3 (transact_write_items + jittered sleeps).
         settle(
@@ -105,6 +132,7 @@ async def run_stream(
             # cancel it before it starts (the finally must not then settle a
             # request we already refunded).
             if _claim_finalize():
+                _notify("invoke_error")
                 await asyncio.shield(asyncio.to_thread(_do_refund_release))
             for frame in adapter.error_event(sanitize_exception_message(str(e))):
                 yield frame
@@ -122,6 +150,7 @@ async def run_stream(
             # blocking settle; shield + once-guard make it exactly-once even on
             # a disconnect at the await.
             if _claim_finalize():
+                _notify("midstream_error")
                 await asyncio.shield(asyncio.to_thread(_do_settle))
             return
 
@@ -129,6 +158,7 @@ async def run_stream(
             yield frame
 
         if _claim_finalize():
+            _notify("completed")
             await asyncio.shield(asyncio.to_thread(_do_settle))
     finally:
         # Disconnect/GeneratorExit before any finalizer claimed: settle once for
@@ -137,6 +167,7 @@ async def run_stream(
         # teardown; process death is covered by the hold reaper) — never block
         # the SHARED event loop with settle's boto3 + sleeps here.
         if _claim_finalize():
+            _notify("client_disconnect")
             def _do_settle_logged():
                 # This is the MOST COMMON finalizer (clients close on [DONE]),
                 # and its future is discarded — so a raised settle here would be

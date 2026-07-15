@@ -252,6 +252,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_RATE_LIMITS_TABLE: dynamoDBStack.rateLimitsTable.tableName,
     // P0-11: per-model quota counters (charged atomically with the budget pool).
     DYNAMODB_MODEL_QUOTAS_TABLE: dynamoDBStack.modelQuotasTable.tableName,
+    // P0-13/14: dual-track observability (span records + workflow_run rollups).
+    DYNAMODB_OBSERVABILITY_TABLE: dynamoDBStack.observabilityTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,

@@ -256,10 +256,18 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                     async for ev in rest_iter:
                         yield ev
 
+                # P0-14: commit-time breaker snapshot (observational only).
+                # This router uses an in-process per-target cooldown map rather
+                # than a breaker object, so we report the committed target's
+                # cooldown-derived state: "half_open" when the commit required
+                # failing over past >=1 earlier attempt (the chain was degraded),
+                # else "closed". Routing never reads this back.
+                breaker_stage = "half_open" if len(attempts) > 1 else "closed"
                 return RoutedStream(
                     target=target,
                     events=_prepend(first_event, rest, fault_spec),
                     attempt_facts=attempts,
+                    breaker_stage=breaker_stage,
                 )
 
     if last_exc:

@@ -69,6 +69,7 @@ _TABLE_ENVS = {
     "DYNAMODB_PRICING_CONFIG_TABLE": "stratoclave-pricing-config",
     "DYNAMODB_RATE_LIMITS_TABLE": "stratoclave-rate-limits",
     "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
+    "DYNAMODB_OBSERVABILITY_TABLE": "stratoclave-observability",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -218,6 +219,34 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             AttributeDefinitions=[
                 {"AttributeName": "pk", "AttributeType": "S"},
                 {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # Observability (P0-13/14): span records + workflow_run rollups. PK pk
+        # ("TENANT#<t>#RUN#<run>"), SK sk ("SPAN#..." | "ROLLUP"), TTL expires_at,
+        # GSI1 (sparse, rollups only) on gsi1pk/gsi1sk.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_OBSERVABILITY_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "gsi1pk", "AttributeType": "S"},
+                {"AttributeName": "gsi1sk", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "GSI1",
+                    "KeySchema": [
+                        {"AttributeName": "gsi1pk", "KeyType": "HASH"},
+                        {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
             ],
             BillingMode="PAY_PER_REQUEST",
         )

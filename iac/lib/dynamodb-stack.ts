@@ -50,6 +50,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly rateLimitsTable: dynamodb.Table;
   /** P0-11: per-model quota counters (one `used` counter per scope/model/period), TTL-reaped */
   public readonly modelQuotasTable: dynamodb.Table;
+  /** P0-13/14: dual-track observability (span records + workflow_run rollups), TTL-reaped */
+  public readonly observabilityTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -371,6 +373,27 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'expires_at',
     });
 
+    // P0-13/14: dual-track observability. One item collection per workflow run:
+    //   PK "TENANT#<id>#RUN#<run>", SK "SPAN#<ts>#<span>" (immutable span record)
+    //   or "ROLLUP" (commutative ADD counters for the whole run).
+    // GSI1 is SPARSE — only ROLLUP items carry gsi1pk/gsi1sk (per tenant-per-day
+    // discovery), span items never do, so there is no per-span GSI write.
+    // Derived telemetry, never money state → TTL-reaped (`expires_at`), no PITR.
+    this.observabilityTable = new dynamodb.Table(this, 'ObservabilityTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-observability`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+    this.observabilityTable.addGlobalSecondaryIndex({
+      indexName: 'GSI1',
+      partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -391,6 +414,8 @@ export class DynamoDBStack extends cdk.Stack {
       this.pricingConfigTable.tableArn,
       this.rateLimitsTable.tableArn,
       this.modelQuotasTable.tableArn,
+      this.observabilityTable.tableArn,
+      `${this.observabilityTable.tableArn}/index/*`,
     ];
 
     // Parameter Store exports
@@ -414,6 +439,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TablePricingConfigParam', 'dynamodb/table-pricing-config', this.pricingConfigTable],
       ['TableRateLimitsParam', 'dynamodb/table-rate-limits', this.rateLimitsTable],
       ['TableModelQuotasParam', 'dynamodb/table-model-quotas', this.modelQuotasTable],
+      ['TableObservabilityParam', 'dynamodb/table-observability', this.observabilityTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {
