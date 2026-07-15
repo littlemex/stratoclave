@@ -38,6 +38,12 @@ pub const H_GROUP_ID: &str = "x-sc-group-id";
 pub const H_WORKFLOW_RUN_ID: &str = "x-sc-workflow-run-id";
 pub const H_MODEL_PIN: &str = "x-sc-model-pin";
 
+// Env-var fallback for the pipe/chat inference paths, which have no flag
+// surface. Same values, same grammar, same validation as the wrapper flags.
+pub const ENV_GROUP_ID: &str = "STRATOCLAVE_GROUP_ID";
+pub const ENV_WORKFLOW_RUN_ID: &str = "STRATOCLAVE_WORKFLOW_RUN_ID";
+pub const ENV_MODEL_PIN: &str = "STRATOCLAVE_MODEL_PIN";
+
 const ID_MAX: usize = 64;
 const PIN_MAX: usize = 128;
 
@@ -134,6 +140,51 @@ impl ScHeaders {
         })
     }
 
+    /// Read the STRATOCLAVE_* attribution env vars through the SAME validating
+    /// constructor the `claude`/`codex` wrapper flags use, so pipe/chat and the
+    /// wrappers can't disagree on grammar. Used by pipe/chat, which have no
+    /// argv surface for flags (bare `echo | stratoclave`). Unset = absent;
+    /// set-but-empty = error (mirrors the empty-flag deviation: an unset shell
+    /// variable, e.g. STRATOCLAVE_GROUP_ID="$UNSET", must fail loudly rather
+    /// than silently drop attribution).
+    pub fn from_env() -> Result<Self> {
+        // Read via var_os and reject a SET-but-non-UTF-8 value rather than
+        // silently dropping it (Fable review): `std::env::var(..).ok()` collapses
+        // both NotPresent and NotUnicode to None, so a set-but-invalid-UTF-8
+        // value would vanish — the exact silent-drop the fail-loud contract
+        // forbids. A truly UTF-8 value flows through; a non-UTF-8 one fails
+        // validation below (it can't match the ASCII grammar anyway).
+        let get = |k: &str| -> Result<Option<String>> {
+            match std::env::var_os(k) {
+                None => Ok(None),
+                Some(os) => os
+                    .into_string()
+                    .map(Some)
+                    .map_err(|_| anyhow::anyhow!("env var {}: value is not valid UTF-8", k)),
+            }
+        };
+        // Resolve each var to Option<String> (propagating a non-UTF-8 error),
+        // then hand to the shared validating constructor.
+        Self::validated(
+            get(ENV_GROUP_ID)?,
+            get(ENV_WORKFLOW_RUN_ID)?,
+            get(ENV_MODEL_PIN)?,
+        )
+    }
+
+    /// `from_env` with an injectable lookup — pure and unit-testable without
+    /// mutating process-global env. (Tests use this; the real env path is
+    /// `from_env`, which additionally rejects a set-but-non-UTF-8 value.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        // validated() already rejects Some("") — no extra empty handling here.
+        Self::validated(
+            get(ENV_GROUP_ID),
+            get(ENV_WORKFLOW_RUN_ID),
+            get(ENV_MODEL_PIN),
+        )
+    }
+
     /// All-absent instance (tests, callers with no flags).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn none() -> Self {
@@ -142,6 +193,12 @@ impl ScHeaders {
 
     pub fn is_empty(&self) -> bool {
         self.group_id.is_none() && self.workflow_run_id.is_none() && self.model_pin.is_none()
+    }
+
+    /// The validated model pin, if set (for the pipe/chat INFO line noting a
+    /// server-side pin overrides the configured model).
+    pub fn model_pin(&self) -> Option<&str> {
+        self.model_pin.as_deref()
     }
 
     /// `(header-name, validated-value)` pairs for the present headers, in a
@@ -332,5 +389,35 @@ mod tests {
         let h = ScHeaders::validated(Some("g".into()), None, Some("p".into())).unwrap();
         let got: Vec<_> = h.iter().collect();
         assert_eq!(got, vec![(H_GROUP_ID, "g"), (H_MODEL_PIN, "p")]);
+    }
+
+    #[test]
+    fn from_lookup_env_mapping() {
+        // Unset -> absent.
+        assert!(ScHeaders::from_lookup(|_| None).unwrap().is_empty());
+        // Set-but-empty -> error (an unset shell var must fail loudly).
+        assert!(ScHeaders::from_lookup(|k| (k == ENV_GROUP_ID).then(String::new)).is_err());
+        // Malformed -> error (fails the shared grammar, before any network).
+        assert!(
+            ScHeaders::from_lookup(|k| (k == ENV_GROUP_ID).then(|| "has space".to_string()))
+                .is_err()
+        );
+        // A full valid set maps to the right headers via the env-var names.
+        let h = ScHeaders::from_lookup(|k| match k {
+            ENV_GROUP_ID => Some("team-a".to_string()),
+            ENV_WORKFLOW_RUN_ID => Some("wr-1".to_string()),
+            ENV_MODEL_PIN => Some("claude-sonnet-4-6".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            h.iter().collect::<Vec<_>>(),
+            vec![
+                (H_GROUP_ID, "team-a"),
+                (H_WORKFLOW_RUN_ID, "wr-1"),
+                (H_MODEL_PIN, "claude-sonnet-4-6"),
+            ]
+        );
+        assert_eq!(h.model_pin(), Some("claude-sonnet-4-6"));
     }
 }

@@ -19,12 +19,23 @@ pub async fn run(
     let app_config = config::AppConfig::load(config_path)
         .map_err(|e| CliError::ConfigError(format!("Failed to load config: {}", e)))?;
 
+    // Read x-sc-* attribution/pin env vars ONCE per session through the shared
+    // validated ScHeaders (so, when set, one chat session maps to one
+    // workflow-run-id — the sane attribution unit; unset = no ids). Fail fast
+    // before auth.
+    let sc_headers = crate::mvp::sc_headers::ScHeaders::from_env().map_err(|e| {
+        CliError::General(format!("Invalid STRATOCLAVE_* attribution env var: {e}"))
+    })?;
+    if let Some(pin) = sc_headers.model_pin() {
+        eprintln!("[INFO] x-sc-model-pin={pin} — server-side pin overrides the configured model.");
+    }
+
     // Authenticate once
     let token = auth::authenticate(&app_config)
         .await
         .map_err(|e| CliError::AuthExpired(format!("Authentication failed: {}", e)))?;
 
-    let api_client = ApiClient::new(app_config, token)?;
+    let api_client = ApiClient::new(app_config, token, sc_headers)?;
 
     // Cap on retained turns (user+assistant entries). The whole history is
     // re-sent every turn (the Messages API is stateless), so without a bound a

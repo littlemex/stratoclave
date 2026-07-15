@@ -82,10 +82,20 @@ pub struct ApiClient {
     /// backend accepts both spellings under `Authorization: Bearer`.
     bearer_token: String,
     model_id: Option<String>,
+    /// Validated x-sc-* attribution/pin headers (group-id / workflow-run-id /
+    /// model-pin). `ScHeaders::none()` for callers with no attribution context.
+    /// Private fields + single validating constructor mean only grammar-valid
+    /// values exist here, so attaching them to a request can never poison the
+    /// builder (the grammar excludes every control char).
+    sc_headers: crate::mvp::sc_headers::ScHeaders,
 }
 
 impl ApiClient {
-    pub fn new(config: AppConfig, bearer_token: String) -> Result<Self, CliError> {
+    pub fn new(
+        config: AppConfig,
+        bearer_token: String,
+        sc_headers: crate::mvp::sc_headers::ScHeaders,
+    ) -> Result<Self, CliError> {
         let model_id = config.resolve_model();
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(config.timeouts.connection_secs()))
@@ -94,7 +104,26 @@ impl ApiClient {
             .map_err(|e| {
                 CliError::General(format!("Failed to build HTTP client: {}", e))
             })?;
-        Ok(Self { config, http, bearer_token, model_id })
+        Ok(Self { config, http, bearer_token, model_id, sc_headers })
+    }
+
+    /// SINGLE choke point that assembles a `/v1/messages` POST. Every inference
+    /// request goes through here so the x-sc-* attribution headers can't be
+    /// forgotten on one path and set on another. Do NOT build `/v1/messages`
+    /// requests via a bare `self.http.post` elsewhere.
+    fn inference_request(&self, url: &str, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        let mut req = self
+            .http
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Content-Type", "application/json")
+            .json(body);
+        // Attach only the PRESENT (name, value) pairs; values are grammar-valid
+        // by ScHeaders' construction, so they are always legal header values.
+        for (name, value) in self.sc_headers.iter() {
+            req = req.header(name, value);
+        }
+        req
     }
 
     /// Extract the backend error code (`detail.type` / `detail.reason` /
@@ -216,12 +245,10 @@ impl ApiClient {
         // is no overall client timeout, so a server that accepts the connection
         // but never sends headers would otherwise hang forever. Bound
         // time-to-first-byte with the same per-chunk budget.
+        // Assemble via the single choke point so x-sc-* attribution headers are
+        // attached uniformly (see inference_request).
         let send_fut = self
-            .http
-            .post(format!("{}/v1/messages", base_url))
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
-            .header("Content-Type", "application/json")
-            .json(&body)
+            .inference_request(&format!("{}/v1/messages", base_url), &body)
             .send();
         let mut response = match timeout(Duration::from_secs(sse_timeout_secs), send_fut).await {
             Ok(Ok(resp)) => resp,
@@ -513,10 +540,56 @@ mod tests {
 
     // --- Test: ApiClient construction ---
 
+    use crate::mvp::sc_headers::ScHeaders;
+
+    fn test_client(sc: ScHeaders) -> ApiClient {
+        ApiClient::new(test_config(), "test-token".to_string(), sc).unwrap()
+    }
+
     #[test]
     fn test_api_client_new() {
-        let client = ApiClient::new(test_config(), "test-token".to_string());
+        let client = ApiClient::new(test_config(), "test-token".to_string(), ScHeaders::none());
         assert!(client.is_ok());
+    }
+
+    /// The x-sc-* attach choke point sets exactly the present headers.
+    fn built_sc_headers(sc: ScHeaders) -> reqwest::header::HeaderMap {
+        let client = test_client(sc);
+        client
+            .inference_request("http://localhost/v1/messages", &serde_json::json!({}))
+            .build()
+            .unwrap()
+            .headers()
+            .clone()
+    }
+
+    #[test]
+    fn attaches_full_sc_header_set() {
+        let sc = ScHeaders::validated(
+            Some("team-a".into()),
+            Some("wr-1".into()),
+            Some("claude-sonnet-4-6".into()),
+        )
+        .unwrap();
+        let h = built_sc_headers(sc);
+        assert_eq!(h.get("x-sc-group-id").unwrap(), "team-a");
+        assert_eq!(h.get("x-sc-workflow-run-id").unwrap(), "wr-1");
+        assert_eq!(h.get("x-sc-model-pin").unwrap(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn attaches_only_present_sc_headers() {
+        let sc = ScHeaders::validated(Some("team-a".into()), None, None).unwrap();
+        let h = built_sc_headers(sc);
+        assert!(h.contains_key("x-sc-group-id"));
+        assert!(!h.contains_key("x-sc-workflow-run-id"));
+        assert!(!h.contains_key("x-sc-model-pin"));
+    }
+
+    #[test]
+    fn attaches_no_sc_headers_when_none() {
+        let h = built_sc_headers(ScHeaders::none());
+        assert!(!h.keys().any(|k| k.as_str().starts_with("x-sc-")));
     }
 
     // --- Test: ChatTurn constructors ---

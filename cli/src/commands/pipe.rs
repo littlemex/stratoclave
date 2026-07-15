@@ -22,12 +22,26 @@ pub async fn run(
 
     match stdin_message {
         Some(message) => {
+            // Read the x-sc-* attribution/pin env vars (STRATOCLAVE_GROUP_ID /
+            // _WORKFLOW_RUN_ID / _MODEL_PIN) through the shared validated
+            // ScHeaders — pipe has no flag surface. Fail FAST here, before auth
+            // and the network, so a malformed id can't be mistaken for a
+            // network/stream failure later.
+            let sc_headers = crate::mvp::sc_headers::ScHeaders::from_env().map_err(|e| {
+                CliError::General(format!("Invalid STRATOCLAVE_* attribution env var: {e}"))
+            })?;
+            if let Some(pin) = sc_headers.model_pin() {
+                eprintln!(
+                    "[INFO] x-sc-model-pin={pin} — server-side pin overrides the configured model."
+                );
+            }
+
             // Pipe mode: authenticate and send message
             let token = auth::authenticate(&app_config)
                 .await
                 .map_err(|e| CliError::AuthExpired(format!("Authentication failed: {}", e)))?;
 
-            let api_client = ApiClient::new(app_config, token)?;
+            let api_client = ApiClient::new(app_config, token, sc_headers)?;
 
             eprintln!("[INFO] Sending message...");
             let response = api_client.converse(&message).await?;
