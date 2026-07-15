@@ -254,6 +254,22 @@ export interface UsageLogsResponse {
   next_cursor?: string | null
 }
 
+// #66: read-only effective pricing table (built-in defaults <- overrides).
+export interface PricingRateEntry {
+  pricing_key: string
+  input_per_mtok_microusd: number
+  output_per_mtok_microusd: number
+  cache_read_per_mtok_microusd: number
+  cache_write_per_mtok_microusd: number
+  source: 'default' | 'override'
+  models: string[]
+}
+
+export interface PricingConfigResponse {
+  version: string | null // null = pure built-in defaults
+  rates: PricingRateEntry[]
+}
+
 // --- Phase S: Trusted Accounts / SSO Invites ---
 export type ProvisioningPolicy = 'invite_only' | 'auto_provision'
 
@@ -551,6 +567,10 @@ export const api = {
         `/api/mvp/admin/usage-logs${q ? `?${q}` : ''}`,
       )
     },
+
+    // Read-only effective pricing table (#66).
+    pricingConfig: () =>
+      jsonRequest<PricingConfigResponse>('/api/mvp/admin/pricing-config'),
 
     // --- Phase S: Trusted Accounts ---
     listTrustedAccounts: (opts?: { cursor?: string; limit?: number }) => {

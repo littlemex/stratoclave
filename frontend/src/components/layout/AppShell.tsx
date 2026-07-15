@@ -23,6 +23,7 @@ const NAV: NavItem[] = [
   { to: '/admin/users', labelKey: 'nav.admin_users', when: 'admin' },
   { to: '/admin/tenants', labelKey: 'nav.admin_tenants', when: 'admin' },
   { to: '/admin/usage', labelKey: 'nav.admin_usage', when: 'admin' },
+  { to: '/admin/pricing', labelKey: 'nav.admin_pricing', when: 'admin' },
   { to: '/admin/trusted-accounts', labelKey: 'nav.admin_trusted_accounts', when: 'admin' },
   { to: '/team-lead/tenants', labelKey: 'nav.team_lead_tenants', when: 'team_lead' },
 ]

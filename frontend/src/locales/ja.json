@@ -21,7 +21,8 @@
     "language": "言語",
     "language_switch_aria": "表示言語を切り替える",
     "language_en": "English",
-    "language_ja": "日本語"
+    "language_ja": "日本語",
+    "admin_pricing": "料金"
   },
   "login": {
     "title": "Stratoclave",
@@ -608,5 +609,22 @@
     "edit_title": "テナント編集",
     "edit_desc": "名前と default_credit を変更できます。",
     "edit_error_fallback": "更新に失敗しました"
+  },
+  "admin_pricing": {
+    "title": "料金",
+    "intro": "ゲートウェイが課金する実効的なモデル別ドル単価(組み込みデフォルトにオーバーライドを重ねたもの)。参照専用。",
+    "card_title": "実効レート",
+    "version": "オーバーライド版: {{version}}",
+    "version_defaults": "組み込みデフォルト(オーバーライドなし)",
+    "load_error": "料金設定の読み込みに失敗しました。",
+    "col_key": "料金キー",
+    "col_models": "モデル",
+    "col_input": "入力 $/MTok",
+    "col_output": "出力 $/MTok",
+    "col_cache_read": "キャッシュ読取 $/MTok",
+    "col_cache_write": "キャッシュ書込 $/MTok",
+    "col_source": "種別",
+    "source_default": "デフォルト",
+    "source_override": "オーバーライド"
   }
 }

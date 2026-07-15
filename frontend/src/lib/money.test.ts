@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { fmtMicroUsd, parseUsdToCents } from './money'
+import { fmtMicroUsd, fmtMicroUsdRate, parseUsdToCents } from './money'
 
 describe('parseUsdToCents', () => {
   it('parses a plain integer dollar amount', () => {
@@ -75,5 +75,29 @@ describe('fmtMicroUsd', () => {
 
   it('handles negatives with a leading sign', () => {
     expect(fmtMicroUsd(-500_000_000)).toBe('-$500.00')
+  })
+})
+
+describe('fmtMicroUsdRate', () => {
+  it('shows full precision, trimming trailing zeros', () => {
+    // per-MTok rates: $5.00 -> "$5", $25 -> "$25"
+    expect(fmtMicroUsdRate(5_000_000)).toBe('$5')
+    expect(fmtMicroUsdRate(25_000_000)).toBe('$25')
+    // sub-dollar rates keep their significant digits
+    expect(fmtMicroUsdRate(500_000)).toBe('$0.5')
+    expect(fmtMicroUsdRate(100_000)).toBe('$0.1')
+  })
+
+  it('does NOT round a real sub-cent rate to $0.00 (the BUG3 case)', () => {
+    // 75_000 micro = $0.075 — fmtMicroUsd would show $0.08; the rate formatter
+    // must preserve it.
+    expect(fmtMicroUsdRate(75_000)).toBe('$0.075')
+    // 1 micro-USD = $0.000001, the smallest representable rate, not $0.00.
+    expect(fmtMicroUsdRate(1)).toBe('$0.000001')
+  })
+
+  it('groups thousands and signs negatives', () => {
+    expect(fmtMicroUsdRate(1_000_000_000)).toBe('$1,000')
+    expect(fmtMicroUsdRate(-2_500_000)).toBe('-$2.5')
   })
 })

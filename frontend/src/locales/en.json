@@ -21,7 +21,8 @@
     "language": "Language",
     "language_switch_aria": "Switch display language",
     "language_en": "English",
-    "language_ja": "日本語"
+    "language_ja": "日本語",
+    "admin_pricing": "Pricing"
   },
   "login": {
     "title": "Stratoclave",
@@ -608,5 +609,22 @@
     "edit_title": "Edit tenant",
     "edit_desc": "Change the name and default_credit.",
     "edit_error_fallback": "Update failed"
+  },
+  "admin_pricing": {
+    "title": "Pricing",
+    "intro": "The effective per-model dollar rates the gateway charges (built-in defaults overlaid with any overrides). Read-only.",
+    "card_title": "Effective rates",
+    "version": "Override version: {{version}}",
+    "version_defaults": "Built-in defaults (no overrides)",
+    "load_error": "Failed to load pricing config.",
+    "col_key": "Pricing key",
+    "col_models": "Models",
+    "col_input": "Input $/MTok",
+    "col_output": "Output $/MTok",
+    "col_cache_read": "Cache read $/MTok",
+    "col_cache_write": "Cache write $/MTok",
+    "col_source": "Source",
+    "source_default": "default",
+    "source_override": "override"
   }
 }

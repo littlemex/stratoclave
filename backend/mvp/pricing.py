@@ -77,6 +77,10 @@ class _RateCache:
     def __init__(self) -> None:
         self._rates: dict[str, Rate] = dict(_DEFAULT_RATES)
         self._version: Optional[str] = None
+        # Which keys in `_rates` came from the DynamoDB override set (vs a
+        # built-in default). Kept so the read-only pricing view (#66) can tell
+        # an operator what's customized without re-reading the table.
+        self._override_keys: frozenset[str] = frozenset()
         self._loaded_at: float = 0.0
         # Serializes refreshes so concurrent requests don't stampede the table
         # or interleave a half-swapped rate map. The method really is locked now
@@ -84,46 +88,66 @@ class _RateCache:
         self._lock = threading.Lock()
 
     def _refresh_locked(self, repo: PricingConfigRepository) -> None:
+        # Fail-static across the ENTIRE refresh (Fable #66 rev1 BUG1): a throw
+        # from EITHER current_version() OR load_rates() (throttle, transient
+        # Dynamo error, malformed item) must keep the previous map and bump
+        # _loaded_at — otherwise a table blip both breaks the live charging path
+        # (get() would raise) AND stampedes the failing read on every call.
         try:
             version = repo.current_version()
-        except Exception:  # noqa: BLE001 — table missing / transient: keep defaults.
+            if version is None:
+                # Overrides removed (CURRENT pointer gone). Fall back to built-in
+                # defaults rather than keeping the last-loaded set alive forever.
+                self._rates = dict(_DEFAULT_RATES)
+                self._version = None
+                self._override_keys = frozenset()
+            elif version != self._version:
+                overrides = repo.load_rates(version)
+                merged = dict(_DEFAULT_RATES)
+                merged.update(overrides)
+                self._rates = merged
+                self._version = version
+                self._override_keys = frozenset(overrides)
+        except Exception:  # noqa: BLE001 — table missing / transient: keep last-good map.
+            pass
+        finally:
             self._loaded_at = time.time()
-            return
-        if version is None:
-            # Pricing overrides were removed (CURRENT pointer gone). Fall back to
-            # built-in defaults rather than keeping the last-loaded override set
-            # alive forever — otherwise a deleted override would never die.
-            self._rates = dict(_DEFAULT_RATES)
-            self._version = None
-            self._loaded_at = time.time()
-            return
-        if version == self._version:
-            self._loaded_at = time.time()
-            return
-        overrides = repo.load_rates(version)
-        merged = dict(_DEFAULT_RATES)
-        for key, rate in overrides.items():
-            merged[key] = rate
-        self._rates = merged
-        self._version = version
-        self._loaded_at = time.time()
 
-    def get(self, pricing_key: str, repo: Optional[PricingConfigRepository] = None) -> Rate:
-        now = time.time()
-        if now - self._loaded_at >= _CACHE_TTL_SECONDS:
-            # Double-checked under the lock: only one thread refreshes; the rest
-            # either wait briefly and see the fresh map, or skip if it was just
-            # loaded. A refresh failure keeps the previous map (fail-static).
+    def _ensure_fresh(self, repo: Optional[PricingConfigRepository]) -> None:
+        # Double-checked under the lock: only one thread refreshes; the rest
+        # either wait briefly and see the fresh map, or skip if it was just
+        # loaded. A refresh failure keeps the previous map (fail-static).
+        if time.time() - self._loaded_at >= _CACHE_TTL_SECONDS:
             with self._lock:
                 if time.time() - self._loaded_at >= _CACHE_TTL_SECONDS:
                     self._refresh_locked(repo or PricingConfigRepository())
+
+    def get(self, pricing_key: str, repo: Optional[PricingConfigRepository] = None) -> Rate:
+        self._ensure_fresh(repo)
         rates = self._rates
         return rates.get(pricing_key) or rates.get("default") or _DEFAULT_RATES["default"]
 
+    def effective_rates(
+        self, repo: Optional[PricingConfigRepository] = None
+    ) -> tuple[Optional[str], dict[str, Rate], set[str]]:
+        """One-shot snapshot: (version, merged rate map, keys that are overrides).
+
+        Rides the SAME refresh path as get() so the read-only view can never
+        diverge from what pricing actually charges."""
+        self._ensure_fresh(repo)
+        # Read the three fields UNDER THE LOCK (Fable #66 rev1 BUG2): a
+        # concurrent refresh assigns them on separate lines, so an unlocked read
+        # could mix generations (rates from vN+1 with override_keys from vN ->
+        # mislabeled source). Snapshotting under the lock keeps them consistent.
+        with self._lock:
+            return self._version, dict(self._rates), set(self._override_keys)
+
     def reset(self) -> None:
-        """Test hook: drop cached state so the next get() reloads."""
+        """Test hook: drop cached state so the next get() reloads. Not locked —
+        call only from single-threaded tests."""
         self._rates = dict(_DEFAULT_RATES)
         self._version = None
+        self._override_keys = frozenset()
         self._loaded_at = 0.0
 
 
@@ -133,6 +157,12 @@ _cache = _RateCache()
 def reset_cache() -> None:
     """Reset the module-level rate cache (used by tests)."""
     _cache.reset()
+
+
+def effective_rates() -> tuple[Optional[str], dict[str, Rate], set[str]]:
+    """Effective rate snapshot for the read-only admin pricing view (#66):
+    (override version or None, merged defaults<-overrides map, override keys)."""
+    return _cache.effective_rates()
 
 
 def _mtok_cost(tokens: int, per_mtok_microusd: int) -> int:
