@@ -44,7 +44,20 @@ impl AuthProvider for Saml2AwsProvider {
 }
 
 impl Saml2AwsProvider {
+    #[allow(unreachable_code, unused_variables)]
     async fn authenticate_impl(&self, config: &AppConfig) -> Result<AuthToken> {
+        // FAIL FAST (Fable contract audit A1): this provider's final step posts
+        // to POST /api/auth/token to exchange STS creds for a JWT, but the
+        // backend serves NO such endpoint (its auth surface is
+        // /api/mvp/auth/{login,respond,sso-exchange,ui-ticket}). Running the
+        // whole saml2aws / MFA dance and only THEN 404ing is hostile — surface
+        // an honest, actionable error before any IdP interaction. Remove this
+        // guard once a real STS-exchange endpoint exists on the backend.
+        bail!(
+            "saml2aws (STS) authentication is not supported by this backend: it has \
+             no STS→JWT exchange endpoint. Use `stratoclave auth login` (Cognito) or \
+             `stratoclave auth sso` instead."
+        );
         // Use default config if not specified
         let default_config = crate::config::Saml2AwsConfig::default();
         let saml_config = config.saml2aws.as_ref().unwrap_or(&default_config);

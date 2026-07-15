@@ -97,8 +97,25 @@ impl ApiClient {
         Ok(Self { config, http, bearer_token, model_id })
     }
 
+    /// Extract the backend error code (`detail.type` / `detail.reason` /
+    /// `detail.code`) from a JSON error body, if present. The backend returns
+    /// `{"detail": {"type": "...", "reason": "...", "message": "..."}}` on the
+    /// inference path; this lets the CLI branch on the specific failure instead
+    /// of a generic HTTP-status message (Fable contract audit B4).
+    fn error_code(body: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        let detail = v.get("detail").unwrap_or(&v);
+        for key in ["type", "reason", "code"] {
+            if let Some(s) = detail.get(key).and_then(|x| x.as_str()) {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
     /// Map an initial HTTP response status to a CliError.
     fn map_status_error(status: reqwest::StatusCode, body: &str) -> CliError {
+        let code = Self::error_code(body);
         match status.as_u16() {
             401 => CliError::AuthExpired(format!(
                 "Authentication failed (HTTP 401: {}). \
@@ -107,12 +124,37 @@ impl ApiClient {
                  Run `stratoclave auth login` to re-authenticate and obtain a valid ID token.",
                 body
             )),
+            // 402: budget / pool / per-model quota exhausted (Fable audit B3) —
+            // a distinct, actionable class, not a random failure.
+            402 => CliError::BudgetExceeded(format!(
+                "Budget exhausted (HTTP 402{}). Check `stratoclave usage` or ask your \
+                 tenant owner to raise the limit.",
+                code.as_deref().map(|c| format!(", {c}")).unwrap_or_default()
+            )),
+            // 403: distinguish a VSR model-pin rejection from a real
+            // access-denied (Fable audit B4) — the user's access is fine, their
+            // --model-pin isn't allowed for the tenant.
+            403 if code.as_deref() == Some("model_pin_not_allowed") => {
+                CliError::PermissionDenied(format!(
+                    "The pinned model is not allowed for your tenant (HTTP 403: \
+                     model_pin_not_allowed). Remove --model-pin or ask an admin to \
+                     allowlist it. ({})",
+                    body
+                ))
+            }
             403 => CliError::PermissionDenied(format!(
                 "Permission denied. You do not have access to this resource. (HTTP 403: {})",
                 body
             )),
             404 => CliError::NotFound(format!(
                 "Resource not found. (HTTP 404: {})",
+                body
+            )),
+            // 400 invalid_model: an unknown model alias, not a generic bad
+            // request — point the user at the model list (Fable audit B4).
+            400 if code.as_deref() == Some("invalid_model") => CliError::General(format!(
+                "Unknown model (HTTP 400: invalid_model). Check the alias against the \
+                 gateway's supported models. ({})",
                 body
             )),
             // 422 = request schema violation on /v1/messages (unprocessable),
@@ -546,6 +588,65 @@ mod tests {
             CliError::ServerError(msg) => assert!(msg.contains("500")),
             other => panic!("Expected ServerError, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_map_status_error_402_budget() {
+        let err = ApiClient::map_status_error(
+            reqwest::StatusCode::PAYMENT_REQUIRED,
+            r#"{"detail":{"type":"tenant_pool_exhausted"}}"#,
+        );
+        match err {
+            CliError::BudgetExceeded(msg) => {
+                assert!(msg.contains("402"));
+                assert!(msg.contains("tenant_pool_exhausted"));
+            }
+            other => panic!("Expected BudgetExceeded, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_map_status_error_403_model_pin_vs_generic() {
+        // A model-pin rejection must NOT read as generic permission-denied.
+        let pin = ApiClient::map_status_error(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"detail":{"reason":"model_pin_not_allowed"}}"#,
+        );
+        match pin {
+            CliError::PermissionDenied(msg) => assert!(msg.contains("pinned model")),
+            other => panic!("Expected pin-specific PermissionDenied, got: {:?}", other),
+        }
+        // A real access-denied still gets the generic message.
+        let denied = ApiClient::map_status_error(reqwest::StatusCode::FORBIDDEN, "nope");
+        match denied {
+            CliError::PermissionDenied(msg) => assert!(msg.contains("do not have access")),
+            other => panic!("Expected generic PermissionDenied, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_map_status_error_400_invalid_model() {
+        let err = ApiClient::map_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"detail":{"type":"invalid_model","message":"unknown"}}"#,
+        );
+        match err {
+            CliError::General(msg) => assert!(msg.contains("Unknown model")),
+            other => panic!("Expected General(invalid_model), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_code_extracts_nested_and_flat() {
+        assert_eq!(
+            ApiClient::error_code(r#"{"detail":{"type":"x"}}"#).as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            ApiClient::error_code(r#"{"reason":"y"}"#).as_deref(),
+            Some("y")
+        );
+        assert_eq!(ApiClient::error_code("not json").as_deref(), None);
     }
 
     // --- Test: Anthropic SSE parser ---

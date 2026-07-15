@@ -80,6 +80,10 @@ const WRAPPER_OVERRIDE_KEYS: &[&str] = &[
     "ANTHROPIC_CUSTOM_HEADERS",
     "CODEX_HOME",
     "STRATOCLAVE_OPENAI_KEY",
+    // We SET this on the child under aws_identity scrub; it must never appear in
+    // a scrub list (Fable round-2 #5: the set currently survives only by
+    // ordering accident — this tripwire makes the invariant explicit).
+    "AWS_EC2_METADATA_DISABLED",
 ];
 
 /// Optional groups of env vars to remove from the child environment.

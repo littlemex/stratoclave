@@ -125,15 +125,18 @@ pub async fn list(include_revoked: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn revoke(key_hash: String) -> Result<()> {
+/// Revoke one of the caller's own keys by its `key_id` (the value shown by
+/// `api-key list`). The bare `/api/mvp/me/api-keys/{key_hash}` route was removed
+/// (returns 410 Gone) for log-hygiene + ownership-race reasons, so this MUST
+/// target `/by-key-id/{key_id}` — the previous path silently 410'd, leaving a
+/// "revoked" key live (Fable contract audit A2b). The backend declares the
+/// segment as `{key_id:path}`, so a key_id is passed verbatim.
+pub async fn revoke(key_id: String) -> Result<()> {
     let client = ApiClient::new()?;
     client
-        .delete(&format!(
-            "/api/mvp/me/api-keys/{}",
-            key_hash
-        ))
+        .delete(&format!("/api/mvp/me/api-keys/by-key-id/{}", key_id))
         .await?;
-    println!("[OK] revoked {key_hash}");
+    println!("[OK] revoked {key_id}");
     Ok(())
 }
 
@@ -166,14 +169,16 @@ pub async fn admin_list_all(include_revoked: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn admin_revoke(key_hash: String) -> Result<()> {
+/// Admin-revoke ANY key by its `key_id`. The admin bare-`{key_hash}` route is
+/// 410 Gone (there was never a working fallback), so this targets
+/// `/by-key-id/{key_id}` — the only live admin revoke route (Fable contract
+/// audit A2a: the previous path was a guaranteed 404/410, so admin revoke never
+/// worked at all).
+pub async fn admin_revoke(key_id: String) -> Result<()> {
     let client = ApiClient::new()?;
     client
-        .delete(&format!(
-            "/api/mvp/admin/api-keys/{}",
-            key_hash
-        ))
+        .delete(&format!("/api/mvp/admin/api-keys/by-key-id/{}", key_id))
         .await?;
-    println!("[OK] admin-revoked {key_hash}");
+    println!("[OK] admin-revoked {key_id}");
     Ok(())
 }

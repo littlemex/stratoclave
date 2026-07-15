@@ -161,17 +161,17 @@ enum ApiKeyAction {
         #[arg(long)]
         include_revoked: bool,
     },
-    /// Revoke an API key by its key_hash (see the list command)
-    Revoke { key_hash: String },
+    /// Revoke an API key by its key_id (see the list command)
+    Revoke { key_id: String },
     /// Admin-only: list every API key in the system
     #[command(name = "admin-list")]
     AdminList {
         #[arg(long)]
         include_revoked: bool,
     },
-    /// Admin-only: revoke any API key by key_hash
+    /// Admin-only: revoke any API key by key_id
     #[command(name = "admin-revoke")]
-    AdminRevoke { key_hash: String },
+    AdminRevoke { key_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -766,12 +766,12 @@ async fn dispatch_api_key(action: ApiKeyAction) -> ExitCode {
         ApiKeyAction::List { include_revoked } => {
             wrap(mvp::api_keys::list(include_revoked).await)
         }
-        ApiKeyAction::Revoke { key_hash } => wrap(mvp::api_keys::revoke(key_hash).await),
+        ApiKeyAction::Revoke { key_id } => wrap(mvp::api_keys::revoke(key_id).await),
         ApiKeyAction::AdminList { include_revoked } => {
             wrap(mvp::api_keys::admin_list_all(include_revoked).await)
         }
-        ApiKeyAction::AdminRevoke { key_hash } => {
-            wrap(mvp::api_keys::admin_revoke(key_hash).await)
+        ApiKeyAction::AdminRevoke { key_id } => {
+            wrap(mvp::api_keys::admin_revoke(key_id).await)
         }
     }
 }
@@ -815,6 +815,8 @@ pub enum CliError {
     ServerError(String),
     NetworkError(String),
     ConfigError(String),
+    /// HTTP 402: personal or tenant-pool budget / per-model quota exhausted.
+    BudgetExceeded(String),
     General(String),
 }
 
@@ -828,6 +830,7 @@ impl std::fmt::Display for CliError {
             CliError::ServerError(s) => write!(f, "{s}"),
             CliError::NetworkError(s) => write!(f, "{s}"),
             CliError::ConfigError(s) => write!(f, "{s}"),
+            CliError::BudgetExceeded(s) => write!(f, "{s}"),
             CliError::General(s) => write!(f, "{s}"),
         }
     }
