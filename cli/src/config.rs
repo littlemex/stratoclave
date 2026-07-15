@@ -420,6 +420,21 @@ impl AppConfig {
         }
         if let Ok(url) = env::var("ANTHROPIC_BASE_URL") {
             if POLICY.is_env_var_allowed("ANTHROPIC_BASE_URL") && !url.is_empty() {
+                // The Cognito bearer + ephemeral key + prompts are sent here, so
+                // an env-overridden endpoint is a credential-exfiltration vector
+                // if something malicious sets it (.envrc, CI, compromised
+                // profile). Warn loudly so an override is never silent, and flag
+                // a non-TLS target (localhost excepted for dev) — Fable security
+                // review H4. We warn rather than hard-reject: release builds
+                // should pin via POLICY.fixed_api_endpoint instead.
+                let is_local = url.contains("localhost") || url.contains("127.0.0.1");
+                if !url.starts_with("https://") && !is_local {
+                    eprintln!(
+                        "[WARN] ANTHROPIC_BASE_URL is not https:// ({url}); credentials \
+                         and prompts would be sent in cleartext."
+                    );
+                }
+                eprintln!("[WARN] Endpoint overridden by ANTHROPIC_BASE_URL: {url}");
                 return url;
             }
         }

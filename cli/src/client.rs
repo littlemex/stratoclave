@@ -213,6 +213,7 @@ impl ApiClient {
         let mut content = String::new();
         let mut buffer: Vec<u8> = Vec::new();
         let mut stream_error: Option<String> = None;
+        let mut stop_reason: Option<String> = None;
         let mut saw_message_stop = false;
         let end: StreamEnd;
 
@@ -229,6 +230,7 @@ impl ApiClient {
                             line,
                             &mut content,
                             &mut stream_error,
+                            &mut stop_reason,
                             &mut saw_message_stop,
                         );
                     }
@@ -250,6 +252,7 @@ impl ApiClient {
                             line,
                             &mut content,
                             &mut stream_error,
+                            &mut stop_reason,
                             &mut saw_message_stop,
                         );
                     }
@@ -279,11 +282,29 @@ impl ApiClient {
         // complete=false, so the caller decides: pipe mode rejects it (stdout
         // must be trustworthy), interactive chat can show it with a warning.
         match end {
-            StreamEnd::Complete => Ok(ConverseResponse {
-                message: content,
-                complete: true,
-                reason: None,
-            }),
+            StreamEnd::Complete => {
+                // A clean `message_stop` still isn't a COMPLETE answer if the
+                // generation was cut by the token cap (stop_reason=max_tokens)
+                // or any terminal reason other than end_turn/stop_sequence
+                // (Fable review Finding 2). Pipe stdout must be trustworthy, so
+                // flag it incomplete and let pipe mode reject / chat mode warn.
+                let clean = matches!(
+                    stop_reason.as_deref(),
+                    None | Some("end_turn") | Some("stop_sequence")
+                );
+                Ok(ConverseResponse {
+                    message: content,
+                    complete: clean,
+                    reason: if clean {
+                        None
+                    } else {
+                        Some(format!(
+                            "stopped early: {}",
+                            stop_reason.as_deref().unwrap_or("unknown")
+                        ))
+                    },
+                })
+            }
             StreamEnd::Errored(msg) => {
                 if content.is_empty() {
                     Err(CliError::ServerError(format!(
@@ -325,6 +346,7 @@ impl ApiClient {
         line: &str,
         content: &mut String,
         error: &mut Option<String>,
+        stop_reason: &mut Option<String>,
         saw_stop: &mut bool,
     ) {
         let Some(data) = line.strip_prefix("data:") else {
@@ -346,6 +368,20 @@ impl ApiClient {
                     }
                 }
             }
+            Some("message_delta") => {
+                // The final `message_delta` carries the terminal stop_reason
+                // (end_turn / stop_sequence / max_tokens / tool_use). We capture
+                // it so the completeness check can flag a cap-truncated answer
+                // (max_tokens) as NOT a clean completion, even though a valid
+                // message_stop follows (Fable review Finding 2).
+                if let Some(sr) = json
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(|s| s.as_str())
+                {
+                    *stop_reason = Some(sr.to_string());
+                }
+            }
             Some("error") => {
                 // Anthropic wire: {"type":"error","error":{"type":..,"message":..}}
                 let msg = json
@@ -356,7 +392,7 @@ impl ApiClient {
                 *error = Some(msg.to_string());
             }
             Some("message_stop") => *saw_stop = true,
-            _ => {} // message_start, content_block_start/stop, message_delta, ping
+            _ => {} // message_start, content_block_start/stop, ping
         }
     }
 }
@@ -516,13 +552,53 @@ mod tests {
 
     /// Feed lines through the parser and return (content, error, saw_stop).
     fn feed(lines: &[&str]) -> (String, Option<String>, bool) {
+        let (c, e, _sr, s) = feed_full(lines);
+        (c, e, s)
+    }
+
+    /// Full parser output incl. the captured stop_reason.
+    fn feed_full(lines: &[&str]) -> (String, Option<String>, Option<String>, bool) {
         let mut content = String::new();
         let mut error = None;
+        let mut stop_reason = None;
         let mut saw_stop = false;
         for line in lines {
-            ApiClient::process_anthropic_sse_line(line, &mut content, &mut error, &mut saw_stop);
+            ApiClient::process_anthropic_sse_line(
+                line,
+                &mut content,
+                &mut error,
+                &mut stop_reason,
+                &mut saw_stop,
+            );
         }
-        (content, error, saw_stop)
+        (content, error, stop_reason, saw_stop)
+    }
+
+    #[test]
+    fn captures_max_tokens_stop_reason() {
+        // A cap-truncated generation: text deltas, then message_delta with
+        // stop_reason=max_tokens, then a clean message_stop. The parser must
+        // surface the stop_reason so the caller flags it incomplete.
+        let (content, error, stop_reason, saw_stop) = feed_full(&[
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4096}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(content, "partial");
+        assert!(error.is_none());
+        assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
+        assert!(saw_stop);
+    }
+
+    #[test]
+    fn captures_end_turn_stop_reason() {
+        let (_c, _e, stop_reason, saw_stop) = feed_full(&[
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+        assert!(saw_stop);
     }
 
     #[test]

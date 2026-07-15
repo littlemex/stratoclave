@@ -25,10 +25,21 @@ use super::ephemeral_key::revoke_ephemeral_key;
 /// Cognito bearer material stripped by `scrub_stratoclave_tokens`. Deliberately
 /// does NOT include `STRATOCLAVE_OPENAI_KEY` (the child's only credential) —
 /// see `scrub_never_removes_wrapper_overrides`.
+///
+/// `STRATOCLAVE_AUTH_TOKEN` is the env short-circuit bearer read by
+/// `auth::authenticate` — it MUST be scrubbed or a child inherits the full
+/// Cognito bearer via /proc/<pid>/environ (Fable security review H1).
+/// `ANTHROPIC_AUTH_TOKEN` is honored by Claude Code as a direct Anthropic
+/// bearer; scrubbing it stops a child bypassing the gateway with a parent's
+/// real Anthropic credential (review M3). Note these are distinct from
+/// `ANTHROPIC_API_KEY`, which the wrapper sets to the ephemeral key AFTER this
+/// strip, so it survives (asserted by scrub_never_removes_wrapper_overrides).
 const SCRUB_STRATOCLAVE_TOKENS: &[&str] = &[
     "STRATOCLAVE_ACCESS_TOKEN",
     "STRATOCLAVE_ID_TOKEN",
     "STRATOCLAVE_REFRESH_TOKEN",
+    "STRATOCLAVE_AUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
 ];
 
 /// AWS / direct-Bedrock escape hatches stripped by `scrub_aws_identity` so the
@@ -40,6 +51,16 @@ const SCRUB_AWS_IDENTITY: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+    // Off-env credential sources the AWS SDK chain would otherwise pick up
+    // (Fable security review H2): profile/config files, STS web-identity, and
+    // the ECS/EKS container-credential endpoints.
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
     // `claude` has a Bedrock-direct fallback path we never want active.
     "CLAUDE_CODE_USE_BEDROCK",
     // `codex` reads AWS_BEARER_TOKEN_BEDROCK; strip it so a leaked Bedrock API
@@ -174,6 +195,13 @@ impl ChildLauncher {
             for k in SCRUB_AWS_IDENTITY {
                 cmd.env_remove(k);
             }
+            // Actively disable IMDS so a child on EC2 cannot obtain instance-role
+            // credentials off-env (Fable security review H2). Env-scrub only
+            // removes explicit creds; this closes the metadata-service fallback.
+            // NOTE: this is hardening against accidental gateway bypass, not a
+            // hard boundary — a malicious child can still read ~/.aws from disk;
+            // true enforcement is network/IAM-side.
+            cmd.env("AWS_EC2_METADATA_DISABLED", "true");
         }
 
         // Caller-requested removals last, so an explicit env_remove of a key

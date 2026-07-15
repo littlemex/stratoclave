@@ -33,7 +33,7 @@ struct CreateKeyRequest<'a> {
     expires_in_minutes: u32,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct CreateKeyResponse {
     pub key_id: String,
     pub plaintext_key: String,
@@ -41,6 +41,20 @@ pub struct CreateKeyResponse {
     pub scopes: Vec<String>,
     #[allow(dead_code)]
     pub expires_at: Option<String>,
+}
+
+// Manual Debug that REDACTS the plaintext key (Fable security review M2): the
+// derived Debug would print the live key on any stray `{:?}` in error/tracing
+// paths. Everything else is safe to show.
+impl std::fmt::Debug for CreateKeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateKeyResponse")
+            .field("key_id", &self.key_id)
+            .field("plaintext_key", &"<redacted>")
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 const DEFAULT_TTL_MINUTES: u32 = 30;

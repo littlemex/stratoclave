@@ -89,12 +89,31 @@ pub async fn run(
                             );
                         }
                         println!();
-                        history.push(ChatTurn::assistant(response.message));
-                        // Trim oldest pairs so history can't grow without bound.
+                        // Never commit an EMPTY assistant turn (Fable review
+                        // Finding 3): the Messages API rejects a message with
+                        // empty content, so an empty turn would 400 EVERY
+                        // subsequent request — and the error handler's pop only
+                        // removes the new user turn, leaving the poison in place
+                        // forever. Drop the just-added user turn instead so the
+                        // history stays a clean, even, alternating sequence.
+                        if response.message.is_empty() {
+                            history.pop();
+                            eprintln!("[WARN] Empty response; turn not added to history.");
+                        } else {
+                            history.push(ChatTurn::assistant(response.message));
+                        }
+                        // Trim oldest PAIRS so history can't grow without bound
+                        // and always stays even/alternating (a user-first,
+                        // assistant-rejecting API needs whole-pair drops).
                         if history.len() > MAX_HISTORY_TURNS {
-                            let drop = history.len() - MAX_HISTORY_TURNS;
+                            let mut drop = history.len() - MAX_HISTORY_TURNS;
+                            if drop % 2 != 0 {
+                                drop += 1; // round up to a whole pair
+                            }
+                            drop = drop.min(history.len());
                             history.drain(0..drop);
                         }
+                        debug_assert!(history.len() % 2 == 0, "history must stay pairwise");
                     }
                     Err(CliError::AuthExpired(msg)) => {
                         eprintln!("[ERROR] {}", msg);

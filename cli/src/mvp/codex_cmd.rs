@@ -186,30 +186,46 @@ const CODEX_HTTP_HEADERS_MIN: (u32, u32, u32) = (0, 141, 0);
 
 /// Parse a `(major, minor, patch)` triple from a `codex --version` line such
 /// as `codex-cli 0.141.0`. Returns None if no dotted numeric version is found.
+fn parse_dotted_version(tok: &str) -> Option<(u32, u32, u32)> {
+    let core = tok.trim_start_matches('v');
+    let mut it = core.split('.');
+    let (a, b) = (it.next()?, it.next()?);
+    let (major, minor) = (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?);
+    // Patch is optional; strip any trailing non-digits (pre-release suffix).
+    let patch = it
+        .next()
+        .map(|p| {
+            p.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u32>()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Parse codex's OWN version from `codex --version` output. ANCHORED to the
+/// `codex`/`codex-cli` token (Fable review): a bare "first dotted token
+/// anywhere" scan false-accepts a shim/runtime banner (e.g. `node v20.5.1`
+/// printed before `codex-cli 0.136.2`), which would pass the >=0.141 gate and
+/// silently launch an old codex that drops the x-sc-* headers — exactly the
+/// H1 failure the gate exists to prevent. We take the dotted version token
+/// immediately following a `codex`/`codex-cli` token; only if no such anchor
+/// exists do we fall back to the first dotted token (best-effort, still
+/// followed by warn-and-proceed at the call site on ambiguity).
 fn parse_codex_version(output: &str) -> Option<(u32, u32, u32)> {
-    // Find the first whitespace-delimited token that looks like `N.N[.N...]`.
-    for tok in output.split_whitespace() {
-        let core = tok.trim_start_matches('v');
-        let mut it = core.split('.');
-        let (a, b) = (it.next(), it.next());
-        if let (Some(a), Some(b)) = (a, b) {
-            if let (Ok(major), Ok(minor)) = (a.parse::<u32>(), b.parse::<u32>()) {
-                // Patch is optional; strip any trailing non-digits (pre-release).
-                let patch = it
-                    .next()
-                    .map(|p| {
-                        p.chars()
-                            .take_while(|c| c.is_ascii_digit())
-                            .collect::<String>()
-                            .parse::<u32>()
-                            .unwrap_or(0)
-                    })
-                    .unwrap_or(0);
-                return Some((major, minor, patch));
+    let toks: Vec<&str> = output.split_whitespace().collect();
+    for w in toks.windows(2) {
+        let name = w[0].trim_end_matches(':').to_ascii_lowercase();
+        if name == "codex" || name == "codex-cli" {
+            if let Some(v) = parse_dotted_version(w[1]) {
+                return Some(v);
             }
         }
     }
-    None
+    // No anchored `codex <version>` found — fall back to the first dotted token.
+    toks.iter().find_map(|t| parse_dotted_version(t))
 }
 
 /// Hard-fail when the installed codex is too old to honor `http_headers`, so a
@@ -496,14 +512,30 @@ mod tests {
     fn version_parse_and_gate() {
         assert_eq!(parse_codex_version("codex-cli 0.141.0"), Some((0, 141, 0)));
         assert_eq!(parse_codex_version("codex-cli 0.136.2"), Some((0, 136, 2)));
-        assert_eq!(parse_codex_version("v1.2"), Some((1, 2, 0)));
-        assert_eq!(parse_codex_version("0.142.0-beta.1"), Some((0, 142, 0)));
+        assert_eq!(parse_codex_version("codex 1.2"), Some((1, 2, 0)));
+        assert_eq!(parse_codex_version("codex-cli 0.142.0-beta.1"), Some((0, 142, 0)));
         assert_eq!(parse_codex_version("no version here"), None);
         // Gate: 0.141.0 is the floor; 0.140.x is too old, 0.141+/1.x are fine.
         assert!((0, 141, 0) >= CODEX_HTTP_HEADERS_MIN);
         assert!((0, 142, 0) >= CODEX_HTTP_HEADERS_MIN);
         assert!((1, 0, 0) >= CODEX_HTTP_HEADERS_MIN);
         assert!(!((0, 140, 9) >= CODEX_HTTP_HEADERS_MIN));
+    }
+
+    #[test]
+    fn version_parse_anchors_to_codex_token_not_banner() {
+        // Fable review: a shim/runtime banner printed before the real line must
+        // NOT false-accept. The parse must return codex's OWN version, so an old
+        // codex is correctly gated out even when a newer-looking token precedes.
+        assert_eq!(
+            parse_codex_version("Now using node v20.5.1\ncodex-cli 0.136.2"),
+            Some((0, 136, 2)),
+        );
+        // Property this pins: banner tokens before the codex anchor are ignored.
+        let old = parse_codex_version("node v22.1.0\ncodex-cli 0.140.0").unwrap();
+        assert!(!(old >= CODEX_HTTP_HEADERS_MIN), "old codex must fail the gate despite the node banner");
+        // A colon after the name is tolerated.
+        assert_eq!(parse_codex_version("codex: 0.141.0"), Some((0, 141, 0)));
     }
 
     #[test]
