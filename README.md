@@ -33,10 +33,13 @@ backend), and an OpenAI Responses API-compatible endpoint at
 `/openai/v1/responses` (for the `codex` CLI, backed by GPT-5.x on Amazon
 Bedrock via the bedrock-mantle service). Every route enforces per-user token
 quotas and optional per-tenant **dollar pool** and **per-model** budgets with
-atomic DynamoDB reservations, wraps each Bedrock call in retry + cross-region
-failover, records every call in an audit log, and accepts three orthogonal
-identity paths (Amazon Cognito password, AWS SSO via a Vault-style STS vouch,
-and long-lived `sk-stratoclave-*` keys).
+atomic DynamoDB reservations; **streaming** Bedrock calls additionally get
+retry + cross-region failover with quota-driven per-model fallback (the
+non-streaming Anthropic path is single-region — see the comparison table).
+Every call is recorded as a structured JSON log to CloudWatch, and three
+orthogonal identity paths are accepted: Amazon Cognito password, AWS identity
+attestation via a Vault-style STS vouch (aws sso / saml2aws / IAM user — **not**
+SAML/OIDC SSO to Stratoclave itself), and long-lived `sk-stratoclave-*` keys.
 
 Stratoclave is deliberately AWS-native and small: a single region in your own
 account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito
@@ -133,16 +136,24 @@ for where a broker is the better choice.
   spend are counted differently — all in integer micro-USD, never floating
   point. A tenant with no pool row keeps the token-only behaviour unchanged
   (pools are opt-in per tenant/period).
-- **Infrastructure resilience — retry, cross-region failover.** Every request
-  flows through an **InfraRouter** that wraps the Bedrock call: a
-  `ThrottlingException` (429), `ServiceUnavailableException`, timeout, or empty
-  stream **fails over to the same model in another region** (e.g.
+- **Infrastructure resilience — retry, cross-region failover (streaming path).**
+  Streaming requests flow through an **InfraRouter** that wraps the Bedrock
+  call: a `ThrottlingException` (429), `ServiceUnavailableException`, timeout,
+  or empty stream **fails over to the same model in another region** (e.g.
   `us-east-1 → us-west-2`), which is a fresh throttle bucket. A **first-event
   commit** rule guarantees that once the first stream byte is sent, the target
   is locked — a mid-stream failure never silently re-runs the model or
   double-bills. `ValidationException`/`AccessDenied` are fatal and fail fast.
   Retries are invisible to the client: same SSE shape, one settle, actual
-  tokens only.
+  tokens only. **Scope, stated honestly:** failover applies to the *streaming*
+  paths; the **non-streaming** requests (`/v1/messages`, `/v1/chat/completions`,
+  `/openai/v1/responses` — all on the shared converse core) are a single Bedrock
+  call with no region failover (an error refunds and surfaces the status). The
+  alternate-region set is **hardcoded today** (`us-west-2`, `eu-west-1` in
+  `routing/chains.py`), so a streaming failover **can send prompt bytes to
+  another region, including the EU** — changing or disabling that requires a
+  code change today, not a config toggle. Do not run it unmodified if you have
+  single-region data-residency requirements (see the residency row below).
 - **Staged budget breaker.** An advisory budget check shapes routing before
   the atomic reserve: at **≤25% remaining** it caps the model tier, at **≤5%**
   it rejects with `402` before any Bedrock call. This is live today.
@@ -223,7 +234,8 @@ us-east-1; no second control-plane region is deployed.
 Every call passes through the same money-and-routing pipeline: **budget
 authorize → staged breaker → model selection → infrastructure retry/failover →
 settle**, wrapped around exactly one Bedrock invocation. Retries and
-cross-region failover are invisible to the client; the reservation settles once
+cross-region failover (on the streaming path; the non-streaming Anthropic call
+is single-region) are invisible to the client; the reservation settles once
 against actual usage, even on mid-stream disconnect. The *model selection* stage
 resolves the requested model and, when a per-model quota is exhausted, cascades
 down the tenant/user fallback chain — reserving and settling each candidate at
@@ -468,31 +480,43 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
-| Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
+| Providers | Amazon Bedrock only (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
-| Tenants as a managed object | **Yes** — create / assign / atomically reassign | Teams (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget model | **Dollar pool + per-user tokens + per-model quotas, all reserved *pre-flight* in one atomic write; priced per model in micro-USD** | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter checked at **credential refresh** (~1 h) |
-| Can a user race/bypass the budget? | No (single `TransactWriteItems` over both ceilings) | No (server-side) | Yes — usage is client-emitted telemetry; stop it and the counter stalls |
-| Resilience / routing | **Retry + cross-region failover, first-event commit, staged breaker, quota-driven cascading per-model fallback** | Retries, fallbacks, load-balancing across deployments | None (client calls Bedrock; Bedrock CRIS only) |
-| Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via a bounded sweep; no leak, no reaper process | Relies on the proxy + its Postgres/Redis | N/A (no server-side reservation) |
-| OpenAI codex on Bedrock | **Yes** (`stratoclave codex`, `responses:send` scope) | Via generic OpenAI routing | **No** |
+| Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
+| Budget: bypass-proof? | **No client bypass** *and* **no transient overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`) | **No client bypass**; spend tracked server-side but historically async/post-hoc, so small burst-overspend windows are possible | **Bypassable** — usage is client-emitted telemetry checked at credential refresh (~1 h); stop sending it and the counter stalls |
+| Budget granularity | Dollar pool **+** per-user token **+** per-model micro-USD quota, priced per model | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter |
+| Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via an *inline lazy* sweep on the reserve path (no separate reaper). Not instant: reclaim happens on the next reserve (≥ a 1800s TTL floor before a hold is sweep-eligible), so an idle tenant with no further traffic reclaims late, and a burst of crashes drains a few holds per reserve | Durable via its Postgres/Redis (more ops, but a real datastore) | N/A (no server-side reservation) |
+| Resilience / routing | **Streaming:** retry + cross-region failover, first-event commit, staged breaker, and per-model fallback driven by the *same atomic budget reservation* (LiteLLM has budget-aware routing too; the distinctive part is the cascade being inside the pre-flight reserve). **Non-streaming: single-region, no failover** | Retries, fallbacks, latency/usage load-balancing, cooldowns — on **all** paths, across deployments *and* providers; battle-tested | None (client calls Bedrock; Bedrock CRIS only) |
+| OpenAI codex on Bedrock | **Yes** — `stratoclave codex`, under the *same* budget/quota transaction (`responses:send` scope) | Via generic OpenAI routing (not budget-integrated the same way) | **No** |
+| Per-request attribution / model pin | **Yes** — `x-sc-group-id` / `x-sc-workflow-run-id` correlation + hard `x-sc-model-pin` (VSR), on wrappers *and* pipe/chat; surfaced in usage as requested-vs-effective model | Tags/metadata + routing model choice | No (no request-time hook) |
 | Model / capability policy | App-layer allowlist + per-tenant/user fallback chains (+ effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
-| Identity | Cognito password, **Vouch-by-STS** (aws sso / saml2aws / IAM user), `sk-stratoclave-*` keys | Enterprise tier (Okta/Entra/OIDC/SAML) | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
-| State / ops footprint | DynamoDB only (serverless), multi-task Fargate across AZs, no Redis | Postgres required, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
-| Admin surface | **React web console** + CLI | Web UI + CLI | CLI (`ccwb`) |
+| Identity | Cognito email/password, **Vouch-by-STS** (aws sso / saml2aws / IAM user — AWS *identity attestation*, **not** SAML/OIDC SSO into Stratoclave), `sk-stratoclave-*` keys | Enterprise tier: real Okta/Entra/OIDC/**SAML SSO** | **Native OIDC federation** (Okta/Entra/Auth0/Google/Cognito/IDC) |
+| Audit | **Structured JSON to CloudWatch** (correlation-id keyed, PII-hashed; queryable via Logs Insights) — not yet an immutable, purpose-built audit store (dedicated table on the roadmap) | Commercial tier: dedicated audit logs | CloudTrail + Bedrock invocation logging (post-hoc, external) |
+| State / ops footprint | **DynamoDB only** (serverless, pay-per-request), multi-task Fargate across AZs, **no Postgres, no Redis** | **Postgres required**, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
+| Admin surface | **React web console** (tenants, users, credit, keys w/ revoke, routing config, read-only pricing) + CLI | Web UI + CLI | CLI (`ccwb`) |
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
-| Data residency / GovCloud | us-east-1 today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
-| Availability of inference | **Multi-task, multi-AZ** gateway (single region) **+ cross-region Bedrock failover**; no single-task/single-AZ SPOF, but still in-path in one region | Depends on the proxy | **No added SPOF** (direct to Bedrock) |
-| License | Apache 2.0 (all features OSS) | MIT + Commercial (SSO/audit are commercial) | MIT (AWS Solutions sample) |
+| Data residency / GovCloud | **us-east-1 only today.** ⚠️ the streaming failover set is hardcoded to `us-west-2` **and `eu-west-1`** — a failover can move prompt bytes cross-region (incl. the EU); narrowing/disabling it needs a code change today | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
+| Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover, **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock) |
+| License | **Apache 2.0 — all features OSS** (incl. Vouch-by-STS auth + JSON audit logging; note these are *identity attestation* + *logging*, not enterprise SAML SSO + an audit store) | MIT core **+ Commercial** (SSO/SAML, audit logs are Enterprise) | MIT (AWS Solutions sample) |
 
-**Pick Stratoclave** when you need tenant-scoped, pre-flight, per-request
-budget enforcement that a user cannot bypass; when you want Claude *and* codex
-under one control plane; or when you want a web console to run tenants and
-keys. **Pick a credential broker** when you must distribute to a large fleet
-via MDM, need GovCloud / EU data residency, or cannot accept any new component
-on the inference availability path — and post-hoc audit (Bedrock invocation
-logging + CloudTrail) is sufficient. **Pick LiteLLM** when you need one proxy
-across many non-Bedrock providers or already operate Postgres.
+The single thing neither competitor can easily replicate is the **atomic
+pre-flight reserve/settle with crash-safe HOLD rows and a quota-driven model
+cascade wired into it**: a broker cannot do it (it is not in the data path),
+and LiteLLM would have to re-architect its async post-hoc spend pipeline into a
+transactional pre-flight reservation across its 100-provider abstraction.
+
+**Pick Stratoclave** for an AWS-committed, Bedrock-only, single-US-region,
+streaming-first shop that needs hard per-tenant dollar caps enforced pre-flight
+so a user cannot exceed them, and — unlike a post-hoc counter — cannot even
+transiently overspend under concurrency (an application-level invariant: an
+atomic snapshot-locked reservation, not a database `ConditionExpression`) —
+e.g. an internal platform team reselling Claude/codex with chargeback, without
+running Postgres or paying for LiteLLM Enterprise. **Pick a credential broker** when you must distribute to a large
+fleet via MDM, need GovCloud / EU or multi-region data residency, or cannot
+accept any new component on the inference availability path — and post-hoc
+audit (Bedrock invocation logging + CloudTrail) is sufficient. **Pick LiteLLM**
+when you need one proxy across many non-Bedrock providers, real SAML/OIDC SSO
+and an audit store today, path-agnostic failover, or already operate Postgres.
 
 ## Documentation
 
