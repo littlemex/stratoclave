@@ -131,3 +131,55 @@ def test_universe_is_complete():
     assert len(found) >= 10, f"universe scan found only {len(found)} literals — grep likely broke"
     missing = found - set(CONCRETE)
     assert not missing, f"permissions used but absent from the lattice universe: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed hardening (Fable capability audit) — an API key with a MISSING
+# scope list must NEVER fall through to the owner's full role grants.
+# ---------------------------------------------------------------------------
+def test_api_key_with_none_scopes_fails_closed():
+    from mvp.authz import user_has_permission
+    from mvp.deps import AuthenticatedUser
+
+    # An api_key subject whose scope list is None (malformed record / future
+    # code path that forgets to populate it) must be denied EVERYTHING — not
+    # granted the owner's role permissions.
+    admin_owner_key_no_scopes = AuthenticatedUser(
+        user_id="u1",
+        email="u1@example.com",
+        roles=["admin"],  # owner is an admin
+        org_id="default-org",
+        auth_kind="api_key",
+        key_scopes=None,  # scopes missing
+    )
+    for perm in ("messages:send", "users:create", "tenants:read-all", "apikeys:revoke"):
+        assert user_has_permission(admin_owner_key_no_scopes, perm) is False, perm
+
+
+def test_api_key_empty_scopes_grants_nothing():
+    from mvp.authz import user_has_permission
+    from mvp.deps import AuthenticatedUser
+
+    key = AuthenticatedUser(
+        user_id="u1", email="u1@example.com", roles=["admin"],
+        org_id="default-org", auth_kind="api_key", key_scopes=[],
+    )
+    assert user_has_permission(key, "messages:send") is False
+
+
+def test_api_key_none_scopes_short_circuits_before_role_lookup(monkeypatch):
+    # The fail-closed denial happens WITHOUT consulting the owner's roles (no
+    # DynamoDB round-trip): a None-scope key is denied purely structurally.
+    import mvp.authz as authz
+    from mvp.authz import user_has_permission
+    from mvp.deps import AuthenticatedUser
+
+    def _boom(*a, **k):
+        raise AssertionError("has_permission must not be reached for a None-scope key")
+
+    monkeypatch.setattr(authz, "has_permission", _boom)
+    key = AuthenticatedUser(
+        user_id="u1", email="u1@example.com", roles=["admin"],
+        org_id="default-org", auth_kind="api_key", key_scopes=None,
+    )
+    assert user_has_permission(key, "users:create") is False

@@ -151,10 +151,18 @@ def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
     - API Key auth: requires **both** user.roles and user.key_scopes to grant the permission
       (API Key scopes are effective only as a subset of the owner's role grants).
     """
-    if user.auth_kind == "api_key" and user.key_scopes is not None:
-        if not _permission_matches(user.key_scopes, permission):
+    if user.auth_kind == "api_key":
+        # An API key is ONLY ever a subset of its owner's roles. If the scope
+        # list is missing (None) — a malformed record, a deserialize failure, or
+        # a future code path that forgets to populate it — fail CLOSED rather
+        # than fall through to the owner's full role grants. Treating None as an
+        # empty scope set denies everything, the safe default for a bearer
+        # credential whose capabilities we cannot determine. (Fable capability
+        # audit: fail-open hardening)
+        key_scopes = user.key_scopes or []
+        if not _permission_matches(key_scopes, permission):
             return False
-        # Also verify the owner's roles include the permission.
+        # Also verify the owner's roles include the permission (AND semantics).
         return has_permission(user.roles, permission)
     return has_permission(user.roles, permission)
 
@@ -204,7 +212,16 @@ def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., Au
             if not tenant:
                 raise HTTPException(status_code=404, detail="Tenant not found")
             return user
-        if not tenant or tenant.get("team_lead_user_id") != user.user_id:
+        # Ownership requires BOTH the tenant pointer AND the team_lead role. A
+        # user demoted out of team_lead must lose owner power even if a stale
+        # `team_lead_user_id` still points at them (defense-in-depth: the role-
+        # change path also clears the pointer, but this makes the demotion
+        # effective immediately regardless). (Fable capability audit)
+        if (
+            not tenant
+            or tenant.get("team_lead_user_id") != user.user_id
+            or "team_lead" not in user.roles
+        ):
             raise HTTPException(status_code=404, detail="Tenant not found")
         return user
 
