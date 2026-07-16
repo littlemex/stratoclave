@@ -172,6 +172,25 @@ enum ApiKeyAction {
     /// Admin-only: revoke any API key by key_id
     #[command(name = "admin-revoke")]
     AdminRevoke { key_id: String },
+    /// Admin-only: list the API keys owned by one user
+    #[command(name = "admin-list-user")]
+    AdminListUser {
+        user_id: String,
+        #[arg(long)]
+        include_revoked: bool,
+    },
+    /// Admin-only: issue an API key on behalf of a user (scopes clipped to the
+    /// user's role grants). Requires an interactive Cognito session.
+    #[command(name = "admin-create")]
+    AdminCreate {
+        user_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        #[arg(long = "expires-days")]
+        expires_days: Option<u32>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -784,6 +803,18 @@ async fn dispatch_api_key(action: ApiKeyAction) -> ExitCode {
         ApiKeyAction::AdminRevoke { key_id } => {
             wrap(mvp::api_keys::admin_revoke(key_id).await)
         }
+        ApiKeyAction::AdminListUser {
+            user_id,
+            include_revoked,
+        } => wrap(mvp::api_keys::admin_list_user(&user_id, include_revoked).await),
+        ApiKeyAction::AdminCreate {
+            user_id,
+            name,
+            scopes,
+            expires_days,
+        } => wrap(
+            mvp::api_keys::admin_create_on_behalf(&user_id, name, scopes, expires_days).await,
+        ),
     }
 }
 
