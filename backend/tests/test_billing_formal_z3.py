@@ -531,3 +531,93 @@ def test_strict_ceiling_is_false_under_reaper_fallback_race():
     assert_counterexample_exists(
         s, "R + S <= L violated by metered overshoot + reaper fallback charge"
     )
+
+
+# ===========================================================================
+# 5. LAYER 5 RATING — rate_usage ARITHMETIC (ceil rounding, monotone, subadditive)
+# ===========================================================================
+#
+# rate_usage rates real usage against a FROZEN snapshot with per-component
+# ceil division: cost_c = ceildiv(tokens_c * rate_c, 10^6). These prove the
+# money-integrity properties of that pure function, independent of any race
+# (the freeze design removed rating's concurrency — see test_rating_properties
+# for the flip-race replay). Model ONE component; the total is their sum, so
+# each property lifts componentwise.
+
+_MTOK = 1_000_000
+# Bounds used across the rating proofs (also the documented overflow envelope):
+# tokens <= 10^10 (10 GT), rate <= 10^9 microUSD/MTok ($1000/MTok).
+_MAX_TOKENS = 10**10
+_MAX_RATE = 10**9
+
+
+def _ceildiv(num, den):
+    # z3 integer ceil division for non-negative num, positive den.
+    return (num + den - 1) / den
+
+
+def test_rating_ceil_never_undercharges_and_is_tightly_bounded():
+    """For one component: exact <= cost < exact + 1 microUSD-worth of rounding,
+    i.e. 0 <= cost*10^6 - tokens*rate < 10^6. Never under-charges (cost*10^6 >=
+    tokens*rate), never over by a full microUSD."""
+    tokens, rate = z3.Ints("tokens rate")
+    s = _solver()
+    s.add(tokens >= 0, tokens <= _MAX_TOKENS, rate >= 0, rate <= _MAX_RATE)
+    cost = _ceildiv(tokens * rate, _MTOK)
+    # negation: either under-charge, or rounded up by >= a full microUSD.
+    s.add(z3.Or(cost * _MTOK < tokens * rate,
+                cost * _MTOK >= tokens * rate + _MTOK))
+    assert_proved(s, "ceil rating: 0 <= cost*10^6 - tokens*rate < 10^6")
+
+
+def test_rating_total_rounding_bound_four_components():
+    """The 4-component total rounds up by strictly less than 4 microUSD vs the
+    exact real-valued sum (each component < 1 microUSD of rounding)."""
+    ti, to, tr, tw = z3.Ints("ti to tr tw")
+    ri, ro, rr, rw = z3.Ints("ri ro rr rw")
+    s = _solver()
+    for t in (ti, to, tr, tw):
+        s.add(t >= 0, t <= _MAX_TOKENS)
+    for r in (ri, ro, rr, rw):
+        s.add(r >= 0, r <= _MAX_RATE)
+    total = (_ceildiv(ti * ri, _MTOK) + _ceildiv(to * ro, _MTOK)
+             + _ceildiv(tr * rr, _MTOK) + _ceildiv(tw * rw, _MTOK))
+    exact_x = ti * ri + to * ro + tr * rr + tw * rw  # = exact_total * 10^6
+    s.add(z3.Or(total * _MTOK < exact_x,              # under-charge
+                total * _MTOK >= exact_x + 4 * _MTOK))  # over by >= 4 microUSD
+    assert_proved(s, "4-component total rounds up by < 4 microUSD, never under")
+
+
+def test_rating_monotone_in_tokens():
+    """More tokens never charges less (a component's cost is non-decreasing)."""
+    t1, t2, rate = z3.Ints("t1 t2 rate")
+    s = _solver()
+    s.add(t1 >= 0, t2 >= 0, rate >= 0, rate <= _MAX_RATE, t1 <= t2)
+    s.add(_ceildiv(t1 * rate, _MTOK) > _ceildiv(t2 * rate, _MTOK))  # negation
+    assert_proved(s, "rating monotone non-decreasing in tokens")
+
+
+def test_rating_subadditive_over_split_settle():
+    """ceil(a) + ceil(b) >= ceil(a+b): splitting usage into two settles can only
+    over-charge, never under — so a future partial/split settle is safe against
+    the budget (no under-billing by fragmentation)."""
+    ta, tb, rate = z3.Ints("ta tb rate")
+    s = _solver()
+    s.add(ta >= 0, tb >= 0, rate >= 0, rate <= _MAX_RATE,
+          ta <= _MAX_TOKENS, tb <= _MAX_TOKENS)
+    split = _ceildiv(ta * rate, _MTOK) + _ceildiv(tb * rate, _MTOK)
+    whole = _ceildiv((ta + tb) * rate, _MTOK)
+    s.add(split < whole)  # negation of subadditivity
+    assert_proved(s, "ceil rating subadditive: split settle never under-charges")
+
+
+def test_sanity_floor_rounding_would_undercharge():
+    """Model validation: FLOOR division (the wrong rounding) admits a strict
+    under-charge — Z3 finds tokens*rate not divisible by 10^6 charged as less
+    than the exact cost. This is why rating pins ceil."""
+    tokens, rate = z3.Ints("f_tokens f_rate")
+    s = _solver()
+    s.add(tokens >= 1, tokens <= _MAX_TOKENS, rate >= 1, rate <= _MAX_RATE)
+    floor_cost = (tokens * rate) / _MTOK  # z3 int division = floor for >=0
+    s.add(floor_cost * _MTOK < tokens * rate)  # a real under-charge exists
+    assert_counterexample_exists(s, "floor rounding under-charges the budget")

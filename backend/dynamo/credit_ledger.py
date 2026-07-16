@@ -50,6 +50,14 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _json_compact(obj: Any) -> str:
+    """Deterministic compact JSON for frozen rating attributes (sorted keys, no
+    spaces) — stable bytes so a replay recompute compares exactly."""
+    import json
+
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
 def ledger_pk(tenant_id: str, period: str) -> str:
     """Partition = tenant × period (balance derivation + billing-line queries)."""
     return f"TENANT#{tenant_id}#P#{period}"
@@ -112,6 +120,8 @@ class CreditLedgerRepository:
         group_id: Optional[str] = None,
         model_id: Optional[str] = None,
         pricing_version: Optional[str] = None,
+        pricing_key: Optional[str] = None,
+        rating: Optional[dict] = None,
         tokens_in: Optional[int] = None,
         tokens_out: Optional[int] = None,
         settle_reason: Optional[str] = None,
@@ -127,6 +137,12 @@ class CreditLedgerRepository:
         the caller maps to "already finalized" (an idempotent success). The GSI1
         keys (run-index) are set so a whole workflow run's money moves are
         queryable for audit.
+
+        Layer 5: `rating` (a RatingRecord.to_ledger_dict()) is frozen onto the
+        item as a JSON string at creation time — self-contained dispute evidence
+        (`recompute(rating) == settled_delta`). `pricing_version` is the frozen
+        rate VERSION (not the pricing_key). Append-only: these are set once at
+        creation, never updated.
         """
         if event_type not in _TERMINAL_TYPES:
             raise ValueError(f"terminal_event_txn_item: {event_type} is not a terminal type")
@@ -158,10 +174,13 @@ class CreditLedgerRepository:
             ("group_id", group_id),
             ("model_id", model_id),
             ("pricing_version", pricing_version),
+            ("pricing_key", pricing_key),
             ("settle_reason", settle_reason),
         ):
             if val:
                 item[key] = {"S": str(val)}
+        if rating is not None:
+            item["rating"] = {"S": _json_compact(rating)}
         # Mark when run_id is a hold_id fallback (no real workflow run), so a
         # future run-level rollup can exclude these synthetic single-hold "runs"
         # rather than mistaking them for real workflow runs (Fable impl review
@@ -193,6 +212,8 @@ class CreditLedgerRepository:
         group_id: Optional[str] = None,
         model_id: Optional[str] = None,
         pricing_version: Optional[str] = None,
+        pricing_key: Optional[str] = None,
+        rating: Optional[dict] = None,
         tokens_in: Optional[int] = None,
         tokens_out: Optional[int] = None,
         actor: str = "caller",
@@ -235,9 +256,12 @@ class CreditLedgerRepository:
             ("group_id", group_id),
             ("model_id", model_id),
             ("pricing_version", pricing_version),
+            ("pricing_key", pricing_key),
         ):
             if val:
                 item[key] = {"S": str(val)}
+        if rating is not None:
+            item["rating"] = {"S": _json_compact(rating)}
         if run_id_is_fallback:
             item["run_id_source"] = {"S": "hold_id_fallback"}
         for key, num in (("tokens_in", tokens_in), ("tokens_out", tokens_out)):
@@ -284,6 +308,7 @@ class CreditLedgerRepository:
         group_id: Optional[str] = None,
         model_id: Optional[str] = None,
         pricing_version: Optional[str] = None,
+        rate_snapshot: Optional[dict] = None,
         actor: str = "caller",
         ts_ms: Optional[int] = None,
     ) -> dict[str, Any]:
@@ -291,6 +316,13 @@ class CreditLedgerRepository:
         `reserve_sk` with `attribute_not_exists` (one RESERVE per hold). Carries
         the positive reserved_delta so the reserved side (I2) is ledger-derivable:
         pool_reserved == Σ RESERVE.reserved_delta − Σ terminal reserved returned.
+
+        Layer 5: `rate_snapshot` (a RateSnapshot.to_ledger_dict()) is frozen here
+        as a JSON string, so the exact rate a reservation was admitted at is
+        durable independent of the in-memory ctx. A future cross-process recovery
+        can restore it via RateSnapshot.from_ledger_dict() and rate the charge
+        identically (INV-R6), without depending on the live (flippable) rate
+        table. Frozen at creation — append-only, never updated.
         """
         ts = ts_ms if ts_ms is not None else _now_ms()
         event_id = reserve_sk(hold_id)[len("EV#"):]  # HOLD#<id>#RESERVE
@@ -320,6 +352,8 @@ class CreditLedgerRepository:
         ):
             if val:
                 item[key] = {"S": str(val)}
+        if rate_snapshot is not None:
+            item["rate_snapshot"] = {"S": _json_compact(rate_snapshot)}
         if run_id_is_fallback:
             item["run_id_source"] = {"S": "hold_id_fallback"}
         return {
@@ -465,6 +499,112 @@ class CreditLedgerRepository:
                 1 for hid in terminal_delta if hid not in has_reserve
             ),
         }
+
+    def rating_replay_mismatches(
+        self, *, tenant_id: str, period: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Layer 5 audit: TRULY replay every frozen rating in the partition and
+        return the events whose rating does NOT reproduce (INV-R2/R3 violated).
+
+        For each component this RE-COMPUTES the cost from its stored tokens × rate
+        under the frozen rounding policy (`mtok_cost_for_rounding`) and checks:
+          - recomputed component cost == the stored component cost_microusd, AND
+          - Σ recomputed == rating.total_cost_microusd, AND
+          - rating.total_cost_microusd == the event's settled_delta_microusd.
+
+        This catches a mis-computed component that still internally sums to its
+        (also-wrong) total (Fable review M2 — a plain sum could not). A healthy
+        ledger returns []. Events without a `rating` attribute (pre-L5) are
+        skipped. Bounded to `limit` findings (a report, not a full dump).
+        """
+        import json
+
+        from mvp.pricing import mtok_cost_for_rounding
+
+        out: list[dict[str, Any]] = []
+        # hold_id -> RESERVE event's frozen snapshot version (for the INV-R6
+        # cross-check: the terminal must charge at the version reserve admitted).
+        reserve_version: dict[str, str] = {}
+        # buffered terminal/late events with a rating, checked after the full scan
+        # (so reserve_version is complete regardless of sk ordering).
+        rated_events: list[dict[str, Any]] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(ledger_pk(tenant_id, period)),
+            "ConsistentRead": True,
+            "ProjectionExpression": (
+                "sk, hold_id, event_type, settled_delta_microusd, rating, "
+                "pricing_version, rate_snapshot"
+            ),
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            for it in resp.get("Items", []):
+                if it.get("event_type") == EV_RESERVE:
+                    snap_raw = it.get("rate_snapshot")
+                    if snap_raw:
+                        try:
+                            reserve_version[str(it.get("hold_id"))] = str(
+                                json.loads(snap_raw).get("version")
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                    continue
+                if it.get("rating"):
+                    rated_events.append(it)
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+
+        for it in rated_events:
+            try:
+                rating = json.loads(it["rating"])
+                rounding = str(rating.get("rounding", "ceil"))
+                total = int(rating["total_cost_microusd"])
+                settled = int(it.get("settled_delta_microusd", 0))
+                recomputed = 0
+                bad_component = None
+                for name, c in rating["components"].items():
+                    want = mtok_cost_for_rounding(
+                        int(c["tokens"]), int(c["rate_microusd_per_mtok"]), rounding
+                    )
+                    if want != int(c["cost_microusd"]):
+                        bad_component = name
+                    recomputed += want
+            except (ValueError, KeyError, TypeError):
+                out.append({"hold_id": it.get("hold_id"), "sk": it.get("sk"),
+                            "error": "unparseable_rating"})
+                if len(out) >= limit:
+                    return out
+                continue
+            # INV-R6 cross-check (Fable review-2 H1-residual): the charge's version
+            # must equal the version the RESERVE froze — otherwise the freeze was
+            # bypassed (charged at a since-flipped rate). Only when a RESERVE
+            # snapshot exists for the hold (Phase-2-era, snapshot-backed).
+            hid = str(it.get("hold_id"))
+            version_mismatch = None
+            rv = reserve_version.get(hid)
+            if rv is not None and rv != rating.get("pricing_version"):
+                version_mismatch = {"reserve": rv, "charged": rating.get("pricing_version")}
+            if (
+                bad_component is not None
+                or recomputed != total
+                or total != settled
+                or version_mismatch is not None
+            ):
+                out.append({
+                    "hold_id": hid,
+                    "sk": it.get("sk"),
+                    "event_type": it.get("event_type"),
+                    "bad_component": bad_component,
+                    "recomputed": recomputed,
+                    "rating_total": total,
+                    "settled_delta": settled,
+                    "version_mismatch": version_mismatch,
+                })
+                if len(out) >= limit:
+                    return out
+        return out
 
     def events_for_run(self, *, tenant_id: str, run_id: str) -> list[dict[str, Any]]:
         """All money-move events for one workflow run (audit), via run-index.

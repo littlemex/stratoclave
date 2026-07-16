@@ -177,6 +177,11 @@ class PoolReconciliationResponse(BaseModel):
     # so the reserved/reclaimed axes are migration artifacts, not yet derivable.
     migrating: bool = False
     pre_p2_terminals: int = 0
+    # Layer 5 replay audit: every frozen rating in the period recomputes to its
+    # own total AND to the settled_delta (INV-R2/R3). False + a sample of the
+    # offending holds when any rating fails to reproduce.
+    rating_replay_ok: bool = True
+    rating_replay_mismatches: list = Field(default_factory=list)
 
 
 _MICRO_USD_PER_CENT = 10_000  # 1 cent = 10_000 micro-USD
@@ -579,6 +584,9 @@ def get_pool_reconciliation(
     led_repo = CreditLedgerRepository()
     c1 = _read_counters(repo, tenant_id, resolved_period)
     ledger = led_repo.derived_totals(tenant_id=tenant_id, period=resolved_period)
+    replay_mismatches = led_repo.rating_replay_mismatches(
+        tenant_id=tenant_id, period=resolved_period
+    )
     c2 = _read_counters(repo, tenant_id, resolved_period)
     stable = (
         c1["settled"] == c2["settled"]
@@ -619,8 +627,8 @@ def get_pool_reconciliation(
             stable = False
 
     # in_sync: settled is always meaningful; reserved/reclaimed only once the
-    # migration tail has drained.
-    in_sync = stable and settled_drift == 0
+    # migration tail has drained; and every frozen rating must replay (L5).
+    in_sync = stable and settled_drift == 0 and not replay_mismatches
     if not migrating:
         in_sync = in_sync and reserved_drift == 0 and reclaimed_drift == 0
 
@@ -658,4 +666,6 @@ def get_pool_reconciliation(
         in_sync=in_sync,
         migrating=migrating,
         pre_p2_terminals=int(ledger.get("pre_p2_terminals", 0)),
+        rating_replay_ok=not replay_mismatches,
+        rating_replay_mismatches=replay_mismatches,
     )

@@ -78,6 +78,16 @@ def test_settle_writes_one_settle_event_with_signed_deltas(seed_tenant_with_pool
     assert ev["hold_id"] == ctx.hold_id
     assert ev["model_id"] == "us.anthropic.claude-opus-4-7"
     assert ev["settle_reason"] == "completion"
+    # Layer 5: the terminal carries the frozen rate VERSION (not the pricing_key)
+    # and a self-contained rating breakdown whose total == settled_delta.
+    assert ev["pricing_version"] == "builtin"  # no admin override in this test
+    assert ev["pricing_key"] == "opus"
+    import json
+    rating = json.loads(ev["rating"])
+    assert rating["pricing_version"] == "builtin"
+    assert rating["total_cost_microusd"] == int(ev["settled_delta_microusd"])
+    recomputed = sum(c["cost_microusd"] for c in rating["components"].values())
+    assert recomputed == rating["total_cost_microusd"]
 
 
 def test_ledger_settled_total_matches_counter(seed_tenant_with_pool, _stub_usage):

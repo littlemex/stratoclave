@@ -37,11 +37,14 @@ import random
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import HTTPException
+
+if TYPE_CHECKING:
+    from .pricing import RateSnapshot
 
 from core.logging import get_logger
 from dynamo import UsageLogsRepository, UserTenantsRepository
@@ -193,6 +196,16 @@ class ReservationContext:
     pool_reserved_microusd: int = 0
     period: Optional[str] = None
     pricing_key: Optional[str] = None
+    # Layer 5: the exact rate this reservation was admitted at, frozen at reserve
+    # time. settle/late-settle rate the charge from THIS snapshot (a pure fn, no
+    # live-table re-read), so a rate flip between reserve and settle cannot change
+    # the price. Serialized onto the RESERVE ledger event; None only for
+    # non-priced/legacy reservations.
+    rate_snapshot: Optional["RateSnapshot"] = None
+    # True when a rate snapshot was attempted at reserve but the rate-table read
+    # failed — settle then charges via the live-rate fallback and labels the
+    # terminal with the snapshot-failed sentinel (distinct from legacy).
+    rate_snapshot_failed: bool = False
     tenant_id: str = ""
     pool_active: bool = False
     quota_lines: list = None  # list[dict] of per-model quota txn items (None = no quota)
@@ -903,6 +916,31 @@ def reserve_credit(
     repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
 
     period = current_period()
+    # Layer 5: freeze the rate NOW (reserve time) so settle rates the charge at
+    # the admitted version even if the live table is flipped later. Only when a
+    # pricing_key is known (priced reservation); a rate-table blip must never fail
+    # the reserve, so a snapshot failure degrades to None (settle then falls back
+    # to the legacy live-rate path). Shared across every context return below.
+    from .pricing import (
+        SNAPSHOT_FAILED_SENTINEL as _SNAP_FAILED,
+        UNVERSIONED_SENTINEL as _UNVERSIONED,
+    )
+
+    _rate_snap = None
+    _snap_failed = False
+    if pricing_key:
+        try:
+            from .pricing import snapshot_rates
+            _rate_snap = snapshot_rates(pricing_key)
+        except Exception:  # noqa: BLE001 — pricing must never break admission
+            # DEGRADED PATH (Fable review-2 N3): the rate table read failed, so
+            # settle will charge via the live-rate fallback and the terminal is
+            # labeled `snapshot-failed` (a DISTINCT sentinel from legacy). error
+            # level (not warning) so a CloudWatch metric filter can alarm — a
+            # persistent rate-table outage silently degrading all charging is the
+            # exact failure mode Layer 5 must not hide.
+            _snap_failed = True
+            logger.error("RateSnapshotFailed", pricing_key=pricing_key)
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
@@ -931,6 +969,8 @@ def reserve_credit(
             reservation_tokens=reservation_tokens,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=_rate_snap,
+            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
@@ -1083,7 +1123,17 @@ def reserve_credit(
                     run_id=hold_id,
                     run_id_is_fallback=True,
                     model_id=selected_model,
-                    pricing_version=pricing_key,
+                    # Layer 5: the frozen VERSION (bug#1 fix), and the full rate
+                    # snapshot serialized so a cross-process recovery can restore
+                    # it (Fable review H1). Distinct sentinel per cause when no
+                    # snapshot was frozen (review-2 N2/N3).
+                    pricing_version=(
+                        _rate_snap.version if _rate_snap is not None
+                        else (_SNAP_FAILED if _snap_failed else _UNVERSIONED)
+                    ),
+                    rate_snapshot=(
+                        _rate_snap.to_ledger_dict() if _rate_snap is not None else None
+                    ),
                 )
             )
         try:
@@ -1139,6 +1189,8 @@ def reserve_credit(
             pool_reserved_microusd=cost,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=_rate_snap,
+            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=True,
             hold_id=hold_id,
@@ -1175,6 +1227,8 @@ def reserve_credit(
             reservation_tokens=reservation_tokens,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=_rate_snap,
+            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
@@ -1450,6 +1504,11 @@ def _recover_spend_via_late_settle(
             group_id=facts.get("group_id"),
             model_id=facts.get("model_id"),
             pricing_version=facts.get("pricing_version"),
+            pricing_key=facts.get("pricing_key"),
+            # INV-R6: the SAME frozen rating the SETTLE path would have written
+            # (computed from ctx.rate_snapshot), so SETTLE and this reaper-race
+            # LATE_SETTLE record identical money.
+            rating=facts.get("rating"),
             tokens_in=facts.get("tokens_in"),
             tokens_out=facts.get("tokens_out"),
         ),
@@ -1672,23 +1731,42 @@ def settle_reservation_and_log(
 
     # ----- pool side (only when the reservation was pooled) -----
     # When the caller didn't pass an explicit actual cost, derive it from the
-    # real usage and the reservation's pricing key. This lets route handlers
-    # settle a pooled request by passing only `context=ctx`.
+    # real usage. Layer 5: rate against the rate FROZEN at reserve time (a pure
+    # function, no live-table read) so a rate flip between reserve and settle
+    # cannot change the price. `_rating` is the frozen breakdown embedded on the
+    # ledger terminal; its total IS the settled amount (single source of truth).
+    from .pricing import SNAPSHOT_FAILED_SENTINEL, UNVERSIONED_SENTINEL
+
+    _rating = None
     if (
         actual_cost_microusd is None
         and context is not None
         and context.pool_active
         and context.pricing_key
     ):
-        from .pricing import actual_cost_microusd as _price_actual
+        if context.rate_snapshot is not None:
+            from .pricing import rate_usage
 
-        actual_cost_microusd = _price_actual(
-            pricing_key=context.pricing_key,
-            input_tokens=actual_input_tokens,
-            output_tokens=actual_output_tokens,
-            cache_read_tokens=max(actual_cache_read_tokens, 0),
-            cache_write_tokens=max(actual_cache_write_tokens, 0),
-        )
+            _rating = rate_usage(
+                context.rate_snapshot,
+                input_tokens=actual_input_tokens,
+                output_tokens=actual_output_tokens,
+                cache_read_tokens=max(actual_cache_read_tokens, 0),
+                cache_write_tokens=max(actual_cache_write_tokens, 0),
+            )
+            actual_cost_microusd = _rating.total_cost_microusd
+        else:
+            # Legacy / snapshot-less reservation: fall back to the live-rate path
+            # (pre-Layer-5 behaviour). No frozen rating record is produced.
+            from .pricing import actual_cost_microusd as _price_actual
+
+            actual_cost_microusd = _price_actual(
+                pricing_key=context.pricing_key,
+                input_tokens=actual_input_tokens,
+                output_tokens=actual_output_tokens,
+                cache_read_tokens=max(actual_cache_read_tokens, 0),
+                cache_write_tokens=max(actual_cache_write_tokens, 0),
+            )
 
     if (
         context is not None
@@ -1711,7 +1789,27 @@ def settle_reservation_and_log(
                     "tokens_in": int(actual_input_tokens),
                     "tokens_out": int(actual_output_tokens),
                     "model_id": model_id,
-                    "pricing_version": context.pricing_key,
+                    # BUG #1 FIX + Fable review H3/M1: pricing_version labels the
+                    # terminal with the VERSION the charge was actually computed
+                    # at. It is set ONLY when we produced a frozen-snapshot rating
+                    # for THIS settle (`_rating is not None`). When the charge did
+                    # NOT go through the snapshot — an explicit caller-supplied
+                    # cost, or a snapshot-less legacy reservation — we must NOT
+                    # stamp a version the amount was not derived from (that would
+                    # be a false dispute label AND relapse bug#1 by writing the
+                    # pricing_key). Use a DISTINCT sentinel per cause instead
+                    # (Fable review-2 N2/N3): snapshot-failed vs unversioned-legacy.
+                    "pricing_version": (
+                        _rating.pricing_version
+                        if _rating is not None
+                        else (
+                            SNAPSHOT_FAILED_SENTINEL
+                            if context.rate_snapshot_failed
+                            else UNVERSIONED_SENTINEL
+                        )
+                    ),
+                    "pricing_key": context.pricing_key,
+                    "rating": _rating.to_ledger_dict() if _rating is not None else None,
                     "settle_reason": "completion",
                 },
             )
@@ -1868,6 +1966,8 @@ def _settle_pool_side(
                 group_id=facts.get("group_id"),
                 model_id=context.selected_model or facts.get("model_id"),
                 pricing_version=facts.get("pricing_version"),
+                pricing_key=facts.get("pricing_key"),
+                rating=facts.get("rating"),
                 tokens_in=facts.get("tokens_in"),
                 tokens_out=facts.get("tokens_out"),
                 settle_reason=reason,

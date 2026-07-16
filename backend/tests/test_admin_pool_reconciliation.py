@@ -184,6 +184,44 @@ def test_reconciliation_migrating_suppresses_reserved_drift(monkeypatch, dynamod
     assert body["ledger_reserved_microusd"] == 0
 
 
+def test_reconciliation_detects_rating_replay_mismatch(monkeypatch, dynamodb_mock):
+    """L5: a frozen rating whose components don't sum to its total (a corrupted /
+    tampered rating) is caught by the replay check → rating_replay_ok=False and
+    the offending hold is reported, in_sync=False."""
+    import json
+
+    from dynamo import CreditLedgerRepository
+    from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+
+    tid = _seed_tenant()
+    period = current_period()
+    TenantBudgetsRepository().set_pool_limit(
+        tenant_id=tid, period=period, pool_limit_microusd=10_000_000_000,
+    )
+    # Write a SETTLE terminal whose rating.total disagrees with its components.
+    bad_rating = {
+        "pricing_version": "v1", "pricing_key": "opus", "rounding": "ceil",
+        "components": {"input": {"tokens": 1, "rate_microusd_per_mtok": 1, "cost_microusd": 1}},
+        "total_cost_microusd": 999,  # LIE: components sum to 1, not 999
+    }
+    led = CreditLedgerRepository()
+    led._table.put_item(Item={
+        "pk": f"TENANT#{tid}#P#{period}",
+        "sk": "EV#HOLD#tampered#TERMINAL",
+        "event_type": "SETTLE", "hold_id": "tampered",
+        "reserved_delta_microusd": 0, "settled_delta_microusd": 999,
+        "rating": json.dumps(bad_rating),
+    })
+    client = _make_app(monkeypatch, allow=ADMIN_SCOPES)
+
+    resp = client.get(f"/api/mvp/admin/tenants/{tid}/pool-reconciliation?period={period}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rating_replay_ok"] is False, body
+    assert any(m["hold_id"] == "tampered" for m in body["rating_replay_mismatches"])
+    assert body["in_sync"] is False
+
+
 def test_reconciliation_requires_read_all(monkeypatch, dynamodb_mock):
     tid = _seed_tenant()
     _reserve_and_settle(tid, PERIOD, cost=1_000_000, actual=1_000_000)
