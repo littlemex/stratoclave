@@ -197,6 +197,21 @@ pub async fn user_set_credit(user_id: &str, total_credit: u64, reset_used: bool)
     Ok(())
 }
 
+/// `stratoclave admin user set-role <user_id> --role <admin|team_lead|user>`
+///
+/// Promote/demote a user. Role is REPLACED (single-role model). The backend
+/// enforces last-admin protection and refuses to strip team_lead from a user
+/// who still owns a tenant (transfer ownership first).
+pub async fn user_set_role(user_id: &str, role: &str) -> Result<()> {
+    let client = ApiClient::new()?;
+    let body = json!({ "role": role });
+    let path = format!("/api/mvp/admin/users/{user_id}/role");
+    let res: Value = client.patch_json(&path, &body).await?;
+    println!("[OK] Role updated for user {user_id} -> {role}");
+    print_kv(&res, &["email", "org_id", "roles"]);
+    Ok(())
+}
+
 // ============================================================
 // TENANT
 // ============================================================

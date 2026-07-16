@@ -6,7 +6,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { Trans, useTranslation } from 'react-i18next'
-import { ArrowLeft, ArrowRight, Coins, KeyRound, ShieldOff, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Coins, KeyRound, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -104,6 +104,7 @@ function Content({ user, tenantOptions, onMutated, onDeleted }: ContentProps) {
   const { t } = useTranslation()
   const [assignOpen, setAssignOpen] = useState(false)
   const [creditOpen, setCreditOpen] = useState(false)
+  const [roleOpen, setRoleOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
 
   return (
@@ -222,6 +223,22 @@ function Content({ user, tenantOptions, onMutated, onDeleted }: ContentProps) {
         </Card>
         <Card>
           <CardHeader>
+            <CardTitle className="font-sans text-base font-semibold">
+              {t('admin_user_detail.action_role_title')}
+            </CardTitle>
+            <CardDescription>
+              {t('admin_user_detail.action_role_desc')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button variant="outline" size="sm" onClick={() => setRoleOpen(true)}>
+              <ShieldCheck className="h-4 w-4" />
+              {t('admin_user_detail.action_role_button')}
+            </Button>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
             <CardTitle className="font-sans text-base font-semibold text-destructive">
               {t('admin_user_detail.action_delete_title')}
             </CardTitle>
@@ -294,6 +311,12 @@ function Content({ user, tenantOptions, onMutated, onDeleted }: ContentProps) {
         open={creditOpen}
         user={user}
         onOpenChange={setCreditOpen}
+        onDone={onMutated}
+      />
+      <ChangeRoleDialog
+        open={roleOpen}
+        user={user}
+        onOpenChange={setRoleOpen}
         onDone={onMutated}
       />
       <DeleteUserDialog
@@ -760,6 +783,98 @@ function SetCreditDialog({
             {mutation.isPending
               ? t('admin_user_detail.credit_submitting')
               : t('admin_user_detail.credit_submit')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ------------------------------------------------------------------
+// Change role dialog (promote / demote — replaces the role)
+// ------------------------------------------------------------------
+function ChangeRoleDialog({
+  open,
+  user,
+  onOpenChange,
+  onDone,
+}: {
+  open: boolean
+  user: UserSummary
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const { t } = useTranslation()
+  const initial: Role = (user.roles[0] as Role) ?? 'user'
+  const [role, setRole] = useState<Role>(initial)
+  const [error, setError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: () => api.admin.setRole(user.user_id, role),
+    onSuccess: () => {
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (err: unknown) => {
+      // The backend returns actionable 409s (last-admin, team_lead owns a
+      // tenant) — surface the server detail verbatim so the admin knows why.
+      const e = err as { detail?: string; message?: string } | null
+      setError(e?.detail ?? e?.message ?? t('admin_user_detail.role_error_fallback'))
+    },
+  })
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) {
+          setError(null)
+          setRole(initial)
+        }
+        onOpenChange(v)
+      }}
+    >
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t('admin_user_detail.role_title')}</DialogTitle>
+          <DialogDescription>
+            {t('admin_user_detail.role_desc', { email: user.email })}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="change-role">
+              {t('admin_user_detail.role_new_label')}
+            </Label>
+            <select
+              id="change-role"
+              value={role}
+              onChange={(e) => setRole(e.target.value as Role)}
+              className="flex h-10 w-full rounded-md border border-input bg-input px-3 py-2 text-sm text-foreground"
+            >
+              <option value="user">{t('role.user')}</option>
+              <option value="team_lead">{t('role.team_lead')}</option>
+              <option value="admin">{t('role.admin')}</option>
+            </select>
+            <p className="text-xs text-muted-foreground">
+              {t('admin_user_detail.role_current_line', {
+                roles: user.roles.join(', ') || 'user',
+              })}
+            </p>
+          </div>
+        </div>
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            disabled={mutation.isPending || role === initial}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending
+              ? t('admin_user_detail.role_submitting')
+              : t('admin_user_detail.role_submit')}
           </Button>
         </DialogFooter>
       </DialogContent>

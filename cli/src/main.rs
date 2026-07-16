@@ -283,6 +283,14 @@ enum AdminUserAction {
         #[arg(long, default_value_t = false)]
         reset_used: bool,
     },
+    /// Promote/demote a user (replaces role). Backend enforces last-admin
+    /// protection and blocks demoting a team_lead who still owns a tenant.
+    #[command(name = "set-role")]
+    SetRole {
+        user_id: String,
+        #[arg(long, value_parser = ["admin", "team_lead", "user"])]
+        role: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -616,6 +624,9 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 total,
                 reset_used,
             } => wrap(mvp::admin::user_set_credit(&user_id, total, reset_used).await),
+            AdminUserAction::SetRole { user_id, role } => {
+                wrap(mvp::admin::user_set_role(&user_id, &role).await)
+            }
         },
         AdminAction::Tenant { action } => match action {
             AdminTenantAction::Create {

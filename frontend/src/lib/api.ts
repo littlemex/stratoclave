@@ -77,6 +77,14 @@ export interface UpdateMeResponse {
   locale: Locale
 }
 
+export interface MePermissionsResponse {
+  user_id: string
+  auth_kind: string
+  roles: Role[]
+  key_scopes: string[] | null
+  permissions: string[]
+}
+
 export interface UsageSummary {
   tenant_id: string
   total_credit: number
@@ -360,6 +368,10 @@ export interface TeamLeadMembersResponse {
 export const api = {
   me: () => jsonRequest<MeResponse>('/api/mvp/me'),
 
+  // The caller's own effective capabilities — server-computed via the same
+  // evaluation the request path enforces (no client-side re-derivation).
+  myPermissions: () => jsonRequest<MePermissionsResponse>('/api/mvp/me/permissions'),
+
   updateMe: (body: { locale: Locale }) =>
     jsonRequest<UpdateMeResponse>('/api/mvp/me', {
       method: 'PATCH',
@@ -436,6 +448,15 @@ export const api = {
           method: 'PATCH',
           headers: jsonHeaders,
           body: JSON.stringify(body),
+        },
+      ),
+    setRole: (user_id: string, role: Role) =>
+      jsonRequest<UserSummary>(
+        `/api/mvp/admin/users/${encodeURIComponent(user_id)}/role`,
+        {
+          method: 'PATCH',
+          headers: jsonHeaders,
+          body: JSON.stringify({ role }),
         },
       ),
 

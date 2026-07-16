@@ -453,7 +453,17 @@
       "revoke_confirm_title": "Revoke API key?",
       "revoke_confirm_body": "The key <b>{{name}}</b> will stop working immediately. This cannot be undone.",
       "revoke_confirm_action": "Revoke key"
-    }
+    },
+    "action_role_title": "Role",
+    "action_role_desc": "Promote or demote this user. The role is replaced.",
+    "action_role_button": "Change role",
+    "role_title": "Change role",
+    "role_desc": "Change the role for {{email}}. This replaces their current role and takes effect immediately.",
+    "role_new_label": "New role",
+    "role_current_line": "Current: {{roles}}",
+    "role_submit": "Change role",
+    "role_submitting": "Changing…",
+    "role_error_fallback": "Could not change the role."
   },
   "admin_users": {
     "title": "User administration",

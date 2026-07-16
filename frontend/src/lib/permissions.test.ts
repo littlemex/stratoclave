@@ -6,15 +6,36 @@
 // `backend/permissions.json`, so these tests also document the mirrored
 // expectation on the frontend.
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import {
+  ROLE_PERMISSIONS,
   hasAnyRole,
   hasPermission,
   isAdmin,
   isAdminOrTeamLead,
   isTeamLead,
 } from './permissions'
+
+describe('ROLE_PERMISSIONS stays in sync with backend/permissions.json', () => {
+  it('matches the backend source of truth byte-for-byte (per role, as a set)', () => {
+    // The frontend copy is display-only, but drift hides/shows the wrong UI
+    // controls. Read the canonical file and assert equality so the two cannot
+    // diverge silently (the exact bug the capability audit found: admin was
+    // missing accounts:* and apikeys:*).
+    // vitest runs with cwd = frontend/; the backend file is a sibling package.
+    const jsonPath = resolve(process.cwd(), '..', 'backend', 'permissions.json')
+    const backend = JSON.parse(readFileSync(jsonPath, 'utf-8'))
+    for (const role of ['admin', 'team_lead', 'user'] as const) {
+      const backendPerms = new Set<string>(backend.roles[role].permissions)
+      const frontendPerms = new Set<string>(ROLE_PERMISSIONS[role])
+      expect(frontendPerms, `role ${role} drifted from backend`).toEqual(backendPerms)
+    }
+  })
+})
 
 describe('hasPermission', () => {
   it('matches an exact permission string on admin', () => {
