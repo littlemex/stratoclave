@@ -150,11 +150,16 @@ for where a broker is the better choice.
   `/openai/v1/responses` — all on the shared converse core) are a single Bedrock
   call with no region failover (an error refunds and surfaces the status). The
   failover region set is **operator-configured** via
-  `STRATOCLAVE_FAILOVER_REGIONS` (comma-separated; default `us-west-2,eu-west-1`).
-  For single-region **data residency**, set it to a same-jurisdiction list or to
-  **`none`** (or an empty string) **to disable failover entirely** — then a
-  streaming request never sends prompt bytes outside the primary region. The
-  effective set is logged at startup as `failover_regions_effective`.
+  `STRATOCLAVE_FAILOVER_REGIONS` (comma-separated). When unset, the built-in
+  defaults are **filtered to the model primary region's jurisdiction**, so a
+  non-US primary (e.g. `eu-west-1`) never silently fails over into another
+  jurisdiction. An explicit list is honoured verbatim. For single-region **data
+  residency**, set it to a same-jurisdiction list or to **`none`** (or an empty
+  string) **to disable failover entirely** — then a streaming request never
+  sends prompt bytes outside the primary region. The effective set is logged at
+  startup as `failover_regions_effective`. See
+  [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md#regional-constraints) for the full
+  residency recipe.
 - **Staged budget breaker.** An advisory budget check shapes routing before
   the atomic reserve: at **≤25% remaining** it caps the model tier, at **≤5%**
   it rejects with `402` before any Bedrock call. This is live today.
@@ -212,23 +217,28 @@ for where a broker is the better choice.
   <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus bedrock-mantle." width="100%">
 </p>
 
-The Stratoclave control plane lives inside a single AWS region (us-east-1)
-in your own account. Clients reach CloudFront for TLS termination; static
-paths hit S3, API paths hit an internal ALB fronting a Fargate service that
-runs at least two tasks spread across availability zones. The backend is
-stateless — all mutable state lives in DynamoDB,
-authenticated by either a Cognito `access_token` or a `sk-stratoclave-*` API
-key.
+The Stratoclave control plane lives inside a **single AWS region of your
+choice** (`STRATOCLAVE_REGION`, default `us-east-1`) in your own account. Only
+the WAF stack is pinned to `us-east-1`, because AWS requires CLOUDFRONT-scope
+WebACLs to live there; every other stack deploys to your chosen region. Clients
+reach CloudFront for TLS termination; static paths hit S3, API paths hit an
+internal ALB fronting a Fargate service that runs at least two tasks spread
+across availability zones. The backend is stateless — all mutable state lives in
+DynamoDB, authenticated by either a Cognito `access_token` or a
+`sk-stratoclave-*` API key.
 
-Inference fans out to two Bedrock surfaces. Anthropic Messages
+Inference fans out to two Bedrock surfaces, and the **Bedrock model region is
+independent of the deploy region** (`BEDROCK_PRIMARY_REGION`). Anthropic Messages
 (`/v1/messages`) and OpenAI Chat Completions (`/v1/chat/completions`) share a
-single Bedrock `converse` / `converseStream` backend in us-east-1 against an
+single Bedrock `converse` / `converseStream` backend against an
 inference-profile allowlist — different wire shapes, one control core. OpenAI
 Responses calls (`/openai/v1/responses`) are forwarded by httpx to the
 bedrock-mantle service at `bedrock-mantle.{region}.api.aws/openai/v1`, where the
-region is per-model (GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). The
-cross-region bedrock-mantle calls originate from the single Fargate task in
-us-east-1; no second control-plane region is deployed.
+region is per-model (GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). All Bedrock calls
+originate from the single Fargate task; no second control-plane region is
+deployed. When the deploy region differs from `us-east-1`, the WAF WebACL is
+consumed cross-region by the CloudFront distribution via CDK
+`crossRegionReferences` (a no-op when they coincide).
 
 ### One request, end to end
 
@@ -274,10 +284,12 @@ and Bedrock model access enabled for the Claude family in your region.
 git clone https://github.com/littlemex/stratoclave.git
 cd stratoclave
 
-# Set your profile / region / deployment prefix. us-east-1 is enforced today
-# (see "Regional constraints" in docs/DEPLOYMENT.md).
+# Set your profile / region / deployment prefix. The body stacks deploy to
+# STRATOCLAVE_REGION (default us-east-1); the WAF stack is always us-east-1.
+# For a non-us-east-1 deploy you must also set BEDROCK_PRIMARY_REGION and
+# `cdk bootstrap` both regions — see "Regional constraints" in docs/DEPLOYMENT.md.
 export AWS_PROFILE=your-admin-profile
-export AWS_REGION=us-east-1
+export STRATOCLAVE_REGION=us-east-1
 export AWS_DEFAULT_REGION=us-east-1
 export CDK_DEFAULT_REGION=us-east-1
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -496,8 +508,8 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | State / ops footprint | **DynamoDB only** (serverless, pay-per-request), multi-task Fargate across AZs, **no Postgres, no Redis** | **Postgres required**, Redis recommended | No data-path infra (just optional OTEL + quota Lambda) |
 | Admin surface | **React web console** (tenants, users, credit, keys w/ revoke, routing config, read-only pricing) + CLI | Web UI + CLI | CLI (`ccwb`) |
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
-| Data residency / GovCloud | **us-east-1 primary today.** Streaming failover regions are configurable (`STRATOCLAVE_FAILOVER_REGIONS`; default `us-west-2,eu-west-1`) — set a same-jurisdiction list, or empty to keep everything single-region. No GovCloud/EU-primary yet | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
-| Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover, **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock) |
+| Data residency / GovCloud | **Deploy region is operator-chosen** (`STRATOCLAVE_REGION`; only the CLOUDFRONT-scope WAF is pinned to us-east-1). **Bedrock model region is independent** (`BEDROCK_PRIMARY_REGION`). Streaming failover is configurable (`STRATOCLAVE_FAILOVER_REGIONS`), and the default set is jurisdiction-filtered so a non-US primary never back-doors to the US. `STRATOCLAVE_RESIDENCY=strict` fails the synth if any Bedrock call region (model + failover + codex) leaves the deploy region, or if the model is a geo inference profile. **aws partition only** (GovCloud/China rejected) | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
+| Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover (verified end-to-end on real Bedrock: a throttled primary commits to a healthy failover region), **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock) |
 | License | **Apache 2.0 — all features OSS** (incl. Vouch-by-STS auth + JSON audit logging; note these are *identity attestation* + *logging*, not enterprise SAML SSO + an audit store) | MIT core **+ Commercial** (SSO/SAML, audit logs are Enterprise) | MIT (AWS Solutions sample) |
 
 The single thing neither competitor can easily replicate is the **atomic
