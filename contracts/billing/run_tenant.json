@@ -1,0 +1,38 @@
+{
+  "events": [
+    {
+      "components": {
+        "cache_read": {
+          "cost_microusd": 0,
+          "rate_microusd_per_mtok": 0,
+          "tokens": 0
+        },
+        "cache_write": {
+          "cost_microusd": 0,
+          "rate_microusd_per_mtok": 0,
+          "tokens": 0
+        },
+        "input": {
+          "cost_microusd": 5000000,
+          "rate_microusd_per_mtok": 5000000,
+          "tokens": 1000000
+        },
+        "output": {
+          "cost_microusd": 25000000,
+          "rate_microusd_per_mtok": 25000000,
+          "tokens": 1000000
+        }
+      },
+      "event_type": "SETTLE",
+      "model_id": "us.anthropic.claude-opus-4-7",
+      "pricing_key": "opus",
+      "pricing_version": "v-billing-cost",
+      "settle_reason": "completion",
+      "settled_microusd": 30000000,
+      "ts_ms": 0
+    }
+  ],
+  "run_id": "RUN",
+  "tenant_id": "acme-billing",
+  "total_settled_microusd": 30000000
+}

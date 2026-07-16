@@ -11,6 +11,7 @@
     "primary": "Primary navigation",
     "dashboard": "Dashboard",
     "my_usage": "My usage",
+    "my_billing": "Billing",
     "my_api_keys": "API keys",
     "admin_users": "Users",
     "admin_tenants": "Tenants",

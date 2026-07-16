@@ -229,6 +229,14 @@ class ReservationContext:
     quota_period: Optional[str] = None
     quota_tenant_limit: Optional[int] = None
     quota_user_limit: Optional[int] = None
+    # Attribution carried from the request headers (x-sc-*), stamped at the
+    # reserve chokepoint. NOT money — used so settle can key the ledger event's
+    # run-index (gsi1pk) on the client's workflow_run_id, making per-run billing
+    # (GET /billing/runs/<workflow_run_id>) queryable. Absent → the ledger falls
+    # back to the hold_id (run_id_is_fallback=True) as before.
+    workflow_run_id: Optional[str] = None
+    group_id: Optional[str] = None
+    request_id: Optional[str] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -630,6 +638,9 @@ def reserve_credit_for_model(
     breaker_max_tier: Optional[int] = None,
     wire_protocol: Optional[str] = None,
     vsr_hard_model: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -690,6 +701,11 @@ def reserve_credit_for_model(
         # settle can log P0-11 fallback visibility. Single chokepoint => every
         # handler gets it without threading through each reserve return path.
         ctx.requested_model = model_name
+        # Same chokepoint stamps the request attribution so settle keys the
+        # ledger run-index on the client's workflow_run_id (per-run billing).
+        ctx.workflow_run_id = workflow_run_id
+        ctx.group_id = group_id
+        ctx.request_id = request_id
         return ctx
 
     if vsr_hard_model:
@@ -704,6 +720,9 @@ def reserve_credit_for_model(
         # or shows a spurious fallback badge — the two events are semantically
         # different and the derived bool must not conflate them.
         ctx.requested_model = ctx.selected_model or vsr_hard_model
+        ctx.workflow_run_id = workflow_run_id
+        ctx.group_id = group_id
+        ctx.request_id = request_id
         return ctx
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
@@ -1811,6 +1830,22 @@ def settle_reservation_and_log(
                     "pricing_key": context.pricing_key,
                     "rating": _rating.to_ledger_dict() if _rating is not None else None,
                     "settle_reason": "completion",
+                    # Attribution → the ledger event's run-index key. When the
+                    # client supplied a workflow_run_id, the terminal's gsi1pk is
+                    # TENANT#<id>#RUN#<workflow_run_id>, so per-run billing
+                    # (GET /billing/runs/<workflow_run_id>) finds it. Absent →
+                    # _settle_pool_side falls back to hold_id (run_id_is_fallback).
+                    #
+                    # NOTE (Fable L5d-e review F1): deliberately NOT passing
+                    # request_id here. _settle_pool_side's run_id chain is
+                    # `run_id or request_id or hold_id`, so a request_id in facts
+                    # would (a) key a per-request singleton "run" whenever
+                    # workflow_run_id is absent (the edge always mints a
+                    # request_id), and (b) flip run_id_is_fallback to False,
+                    # breaking the "synthetic run" audit filter. group_id is pure
+                    # attribution (not in the run_id chain), so it is safe.
+                    "run_id": context.workflow_run_id,
+                    "group_id": context.group_id,
                 },
             )
         except Exception:  # noqa: BLE001

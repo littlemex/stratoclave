@@ -19,6 +19,7 @@ import Callback from '@/pages/Callback'
 import Login from '@/pages/Login'
 import Dashboard from '@/pages/Dashboard'
 import MeUsage from '@/pages/MeUsage'
+import MeBilling from '@/pages/MeBilling'
 import MeApiKeys from '@/pages/MeApiKeys'
 import AdminUsers from '@/pages/admin/AdminUsers'
 import AdminUserNew from '@/pages/admin/AdminUserNew'
@@ -70,6 +71,7 @@ export default function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<Dashboard />} />
               <Route path="/me/usage" element={<MeUsage />} />
+              <Route path="/me/billing" element={<MeBilling />} />
               <Route path="/me/api-keys" element={<MeApiKeys />} />
               <Route element={<ProtectedRoute requiredRoles={['admin']} />}>
                 <Route path="/admin/users" element={<AdminUsers />} />

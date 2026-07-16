@@ -292,3 +292,112 @@ def test_rate_usage_cost_passthrough_when_present(dynamodb_mock):
     assert rec.total_cost_microusd == 30_000_000
     assert rec.provider_cost_microusd == 12_000_000
     assert rec.margin_microusd == 18_000_000
+
+
+# ---------------------------------------------------------------------------
+# L5-d: cost passthrough (record-only) — set_rates costs, freeze, invariants
+# ---------------------------------------------------------------------------
+
+
+def test_set_rates_costs_are_recorded_and_snapshotted(dynamodb_mock):
+    """set_rates(costs=...) writes cost_* columns; snapshot_rates picks them up
+    and rate_usage produces provider_cost + margin."""
+    from dynamo.pricing_config import PricingConfigRepository
+
+    repo = PricingConfigRepository()
+    repo.set_rates(
+        version="v-cost",
+        rates={"opus": pricing.Rate(5_000_000, 25_000_000, 0, 0)},
+        costs={"opus": pricing.Rate(2_000_000, 10_000_000, 0, 0)},
+    )
+    pricing.reset_cache()
+    pricing.reset_version_cache()
+    snap = pricing.snapshot_rates("opus")
+    assert snap.version == "v-cost"
+    assert snap.cost_input_per_mtok_microusd == 2_000_000
+    rec = pricing.rate_usage(snap, input_tokens=1_000_000, output_tokens=1_000_000)
+    assert rec.total_cost_microusd == 30_000_000
+    assert rec.provider_cost_microusd == 12_000_000
+    assert rec.margin_microusd == 18_000_000  # may be negative (loss-leader); not here
+
+
+def test_cost_columns_are_immutable_under_same_version(dynamodb_mock):
+    """H1 (Fable L5-d review): the cost_* columns must be immutable under a fixed
+    version — re-set with the SAME rates but DIFFERENT or DROPPED costs must be
+    rejected, else a frozen pricing_version's provider_cost could silently change.
+    Identical re-write (crash-retry) is still allowed."""
+    from dynamo.pricing_config import PricingConfigRepository
+
+    repo = PricingConfigRepository()
+    rates = {"opus": pricing.Rate(5_000_000, 25_000_000, 0, 0)}
+    repo.set_rates(version="v-immcost", rates=rates,
+                   costs={"opus": pricing.Rate(2_000_000, 10_000_000, 0, 0)})
+    # Identical re-write: OK (idempotent retry).
+    repo.set_rates(version="v-immcost", rates=rates,
+                   costs={"opus": pricing.Rate(2_000_000, 10_000_000, 0, 0)})
+    # DIFFERENT cost under the same version → rejected.
+    with pytest.raises(ValueError, match="already exists"):
+        repo.set_rates(version="v-immcost", rates=rates,
+                       costs={"opus": pricing.Rate(9_000_000, 0, 0, 0)})
+    # DROPPING cost (costs omitted) under the same version → rejected (would flip
+    # the frozen cost to "unknown").
+    with pytest.raises(ValueError, match="already exists"):
+        repo.set_rates(version="v-immcost", rates=rates)
+
+
+def test_set_rates_rejects_negative_cost(dynamodb_mock):
+    from dynamo.pricing_config import PricingConfigRepository
+
+    repo = PricingConfigRepository()
+    with pytest.raises(ValueError, match="non-negative"):
+        repo.set_rates(
+            version="v-negcost",
+            rates={"opus": pricing.Rate(5_000_000, 25_000_000, 0, 0)},
+            costs={"opus": pricing.Rate(-1, 0, 0, 0)},
+        )
+
+
+def test_cost_passthrough_is_record_only_charge_unchanged(dynamodb_mock):
+    """P2 metamorphic: adding provider costs to a version must NOT change the
+    charged/settled amount by a single micro-USD (record-only invariant)."""
+    tin, tout = 123_456, 654_321
+    charge_rate = pricing.Rate(5_000_000, 25_000_000, 300_000, 400_000)
+    # No cost.
+    snap_nocost = pricing.RateSnapshot(
+        version="a", pricing_key="opus",
+        input_per_mtok_microusd=charge_rate.input_per_mtok_microusd,
+        output_per_mtok_microusd=charge_rate.output_per_mtok_microusd,
+        cache_read_per_mtok_microusd=charge_rate.cache_read_per_mtok_microusd,
+        cache_write_per_mtok_microusd=charge_rate.cache_write_per_mtok_microusd,
+    )
+    # Same charge rate, WITH provider cost.
+    snap_cost = pricing.RateSnapshot(
+        version="b", pricing_key="opus",
+        input_per_mtok_microusd=charge_rate.input_per_mtok_microusd,
+        output_per_mtok_microusd=charge_rate.output_per_mtok_microusd,
+        cache_read_per_mtok_microusd=charge_rate.cache_read_per_mtok_microusd,
+        cache_write_per_mtok_microusd=charge_rate.cache_write_per_mtok_microusd,
+        cost_input_per_mtok_microusd=1_000_000,
+        cost_output_per_mtok_microusd=9_999_999,
+    )
+    r0 = pricing.rate_usage(snap_nocost, input_tokens=tin, output_tokens=tout)
+    r1 = pricing.rate_usage(snap_cost, input_tokens=tin, output_tokens=tout)
+    # The CHARGE is identical to the last micro-USD; only cost/margin differ.
+    assert r0.total_cost_microusd == r1.total_cost_microusd
+    assert r0.provider_cost_microusd is None and r0.margin_microusd is None
+    assert r1.provider_cost_microusd is not None
+    # margin == total - provider_cost (P3), may be negative if cost > charge.
+    assert r1.margin_microusd == r1.total_cost_microusd - r1.provider_cost_microusd
+
+
+def test_margin_may_be_negative_loss_leader(dynamodb_mock):
+    snap = pricing.RateSnapshot(
+        version="c", pricing_key="opus",
+        input_per_mtok_microusd=1_000_000, output_per_mtok_microusd=0,
+        cache_read_per_mtok_microusd=0, cache_write_per_mtok_microusd=0,
+        cost_input_per_mtok_microusd=5_000_000,  # cost > charge → negative margin
+    )
+    rec = pricing.rate_usage(snap, input_tokens=1_000_000, output_tokens=0)
+    assert rec.total_cost_microusd == 1_000_000
+    assert rec.provider_cost_microusd == 5_000_000
+    assert rec.margin_microusd == -4_000_000

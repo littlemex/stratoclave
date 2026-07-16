@@ -93,6 +93,16 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     # Fresh in-process fallback counter per test (degraded-mode limiter state
     # must not leak across tests).
     _rl._local_fallback = _rl._LocalWindows()
+    # Pricing caches are process-global (the 60s effective-rate cache AND the
+    # immutable per-version snapshot cache). Moto tables reset per test but these
+    # do not, so a version set in one test would leak into the next (a settle
+    # would freeze a stale version). Reset both before every test.
+    try:
+        from mvp import pricing as _pricing
+        _pricing.reset_cache()
+        _pricing.reset_version_cache()
+    except Exception:  # noqa: BLE001 — pricing import optional in some minimal test envs
+        pass
 
 
 @pytest.fixture

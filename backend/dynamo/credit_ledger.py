@@ -557,13 +557,17 @@ class CreditLedgerRepository:
             kwargs["ExclusiveStartKey"] = lek
 
         for it in rated_events:
+            # Hoisted out of the try so a value/parse error can never leave these
+            # unbound for the mismatch test below (defensive — the except also
+            # `continue`s, Fable L5-d review M3).
+            margin_bad = False
+            bad_component = None
+            recomputed = 0
             try:
                 rating = json.loads(it["rating"])
                 rounding = str(rating.get("rounding", "ceil"))
                 total = int(rating["total_cost_microusd"])
                 settled = int(it.get("settled_delta_microusd", 0))
-                recomputed = 0
-                bad_component = None
                 for name, c in rating["components"].items():
                     want = mtok_cost_for_rounding(
                         int(c["tokens"]), int(c["rate_microusd_per_mtok"]), rounding
@@ -571,6 +575,13 @@ class CreditLedgerRepository:
                     if want != int(c["cost_microusd"]):
                         bad_component = name
                     recomputed += want
+                # L5-d: for a cost-bearing terminal, the frozen margin must equal
+                # total - provider_cost (catches a sign/compute error at freeze).
+                pc = rating.get("provider_cost_microusd")
+                mg = rating.get("margin_microusd")
+                if pc is not None or mg is not None:
+                    if pc is None or mg is None or int(mg) != total - int(pc):
+                        margin_bad = True
             except (ValueError, KeyError, TypeError):
                 out.append({"hold_id": it.get("hold_id"), "sk": it.get("sk"),
                             "error": "unparseable_rating"})
@@ -591,6 +602,7 @@ class CreditLedgerRepository:
                 or recomputed != total
                 or total != settled
                 or version_mismatch is not None
+                or margin_bad
             ):
                 out.append({
                     "hold_id": hid,
@@ -601,6 +613,7 @@ class CreditLedgerRepository:
                     "rating_total": total,
                     "settled_delta": settled,
                     "version_mismatch": version_mismatch,
+                    "margin_bad": margin_bad,
                 })
                 if len(out) >= limit:
                     return out

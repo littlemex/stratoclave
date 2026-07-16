@@ -278,6 +278,72 @@ export interface PricingConfigResponse {
   rates: PricingRateEntry[]
 }
 
+// --- L5-d: per-run billing breakdown (frozen ledger rating) ---
+export interface RatingComponentView {
+  tokens: number
+  rate_microusd_per_mtok: number
+  cost_microusd: number
+}
+
+// TENANT view: NO provider_cost / margin fields — redaction is enforced by the
+// backend (separate response model). The UI type omits them too, and
+// `assertNoCostLeak` below is a runtime backstop that fails loudly if a drifted
+// API ever returns them to a tenant.
+export interface RunEventTenant {
+  event_type: string
+  settle_reason?: string | null
+  model_id?: string | null
+  pricing_version?: string | null
+  pricing_key?: string | null
+  settled_microusd: number
+  components: Record<string, RatingComponentView>
+  ts_ms: number
+}
+
+export interface RunBreakdownTenant {
+  tenant_id: string
+  run_id: string
+  total_settled_microusd: number
+  events: RunEventTenant[]
+}
+
+// ADMIN view: adds provider cost + margin (may be negative).
+export interface RunEventAdmin extends RunEventTenant {
+  provider_cost_microusd?: number | null
+  margin_microusd?: number | null
+}
+
+export interface RunBreakdownAdmin {
+  tenant_id: string
+  run_id: string
+  total_settled_microusd: number
+  total_provider_cost_microusd?: number | null
+  total_margin_microusd?: number | null
+  events: RunEventAdmin[]
+}
+
+// Keys that MUST NEVER appear in a tenant-facing billing payload. Runtime
+// backstop to the backend's type-level redaction (contract-drift gate).
+const COST_MARGIN_KEYS = [
+  'provider_cost_microusd',
+  'margin_microusd',
+  'total_provider_cost_microusd',
+  'total_margin_microusd',
+]
+
+export function assertNoCostLeak(obj: unknown, path = '$'): void {
+  if (Array.isArray(obj)) {
+    obj.forEach((v, i) => assertNoCostLeak(v, `${path}[${i}]`))
+  } else if (obj && typeof obj === 'object') {
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (COST_MARGIN_KEYS.includes(k)) {
+        throw new Error(`billing redaction violated: '${k}' present at ${path}`)
+      }
+      assertNoCostLeak(v, `${path}.${k}`)
+    }
+  }
+}
+
 // --- Phase S: Trusted Accounts / SSO Invites ---
 export type ProvisioningPolicy = 'invite_only' | 'auto_provision'
 
@@ -393,6 +459,17 @@ export const api = {
     return jsonRequest<UsageHistoryResponse>(
       `/api/mvp/me/usage-history${q ? `?${q}` : ''}`,
     )
+  },
+
+  // L5-d: the caller's own per-run charge breakdown (redacted — no cost/margin).
+  // The runtime `assertNoCostLeak` backstop turns a redaction regression into a
+  // loud client error instead of a silent leak into the DOM.
+  runBilling: async (runId: string): Promise<RunBreakdownTenant> => {
+    const body = await jsonRequest<RunBreakdownTenant>(
+      `/api/mvp/me/billing/runs/${encodeURIComponent(runId)}`,
+    )
+    assertNoCostLeak(body)
+    return body
   },
 
   admin: {
@@ -511,6 +588,11 @@ export const api = {
         `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/usage${q}`,
       )
     },
+    // L5-d: admin per-run billing incl. provider cost + margin.
+    runBilling: (tenant_id: string, runId: string) =>
+      jsonRequest<RunBreakdownAdmin>(
+        `/api/mvp/admin/billing/runs/${encodeURIComponent(runId)}?tenant_id=${encodeURIComponent(tenant_id)}`,
+      ),
     // A-1: get the tenant's dollar pool budget for a period. Throws a 404
     // (err.status === 404) when the tenant has no pool for the period — the
     // caller treats that as "no pool set" rather than an error.

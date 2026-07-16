@@ -109,7 +109,7 @@ class PricingConfigRepository:
     # change a price, write a NEW version and flip CURRENT. Immutability is
     # enforced at the DB layer below by `attribute_not_exists(sk)` on each row
     # Put — NOT by IAM (IAM cannot express "create-only PutItem", Fable review M3).
-    def set_rates(self, *, version: str, rates: dict) -> None:
+    def set_rates(self, *, version: str, rates: dict, costs: Optional[dict] = None) -> None:
         """Write a full rate set under a NEW `version` and flip CURRENT to it.
 
         `rates` maps pricing_key -> object exposing the four per-MTok integer
@@ -118,6 +118,14 @@ class PricingConfigRepository:
         existing version can NEVER be silently overwritten — the immutable
         contract is DB-enforced), then the pointer, so a reader never sees
         CURRENT pointing at a half-written version.
+
+        `costs` (Layer 5-d, optional) maps pricing_key -> object with the same
+        four per-MTok fields expressing the PROVIDER COST (Bedrock's price to us).
+        When present for a key, its four values are written as `cost_*` columns on
+        that key's row (record-only — they never affect the charged amount, only
+        the frozen provider_cost/margin on the ledger). A key absent from `costs`
+        keeps null cost columns ("unknown", distinct from zero). Costs may exceed
+        the charged rate (loss-leader) — no margin>=0 constraint.
 
         `version` MUST be fresh and well-formed: reusing an existing version, or
         using the reserved `builtin` sentinel, or a string containing the `__`
@@ -142,48 +150,88 @@ class PricingConfigRepository:
         for key in rates:
             if "__" in str(key):
                 raise ValueError(f"malformed pricing_key (contains '__'): {key!r}")
+        # A cost for a key not in `rates` is almost certainly a typo. Since the
+        # version is immutable it could never be corrected, so reject it up front
+        # (Fable L5-d review-2 L-1) rather than freeze an orphaned/unknown cost.
+        if costs:
+            orphan = set(costs) - set(rates)
+            if orphan:
+                raise ValueError(f"costs for keys not in rates: {sorted(orphan)}")
 
         from botocore.exceptions import ClientError
 
+        costs = costs or {}
         for key, rate in rates.items():
             vin = int(rate.input_per_mtok_microusd)
             vout = int(rate.output_per_mtok_microusd)
             vcr = int(rate.cache_read_per_mtok_microusd)
             vcw = int(rate.cache_write_per_mtok_microusd)
+            item = {
+                "pk": _PK,
+                "sk": f"__ratever__{version}__{key}",
+                "pricing_key": key,
+                "version": version,
+                "input_per_mtok_microusd": vin,
+                "output_per_mtok_microusd": vout,
+                "cache_read_per_mtok_microusd": vcr,
+                "cache_write_per_mtok_microusd": vcw,
+            }
+            # Optional record-only provider-cost columns (L5-d). Non-negative int.
+            _cost_cols = (
+                ("cost_input_per_mtok_microusd", ":ci"),
+                ("cost_output_per_mtok_microusd", ":co"),
+                ("cost_cache_read_per_mtok_microusd", ":ccr"),
+                ("cost_cache_write_per_mtok_microusd", ":ccw"),
+            )
+            cost = costs.get(key)
+            cost_vals: dict[str, int] = {}
+            if cost is not None:
+                for (col, ph), val in zip(
+                    _cost_cols,
+                    (cost.input_per_mtok_microusd, cost.output_per_mtok_microusd,
+                     cost.cache_read_per_mtok_microusd, cost.cache_write_per_mtok_microusd),
+                ):
+                    iv = int(val)
+                    if iv < 0:
+                        raise ValueError(f"provider cost must be non-negative: {col}={iv}")
+                    item[col] = iv
+                    cost_vals[ph] = iv
             try:
-                # IDEMPOTENT immutability (Fable review-2 N1): allow the row to be
-                # (re)written iff it does not exist OR already holds the SAME
-                # values. This keeps the immutable contract (a VALUE change is
-                # rejected) while letting a partially-written version be completed
-                # on retry after a crash — the previous plain attribute_not_exists
-                # made a half-written version permanently unrecoverable (no delete,
-                # no flip-only API).
+                # IDEMPOTENT immutability (Fable review-2 N1 + L5-d H1): allow the
+                # row to be (re)written iff it does not exist OR already holds the
+                # SAME values — for the four CHARGE rates AND the four cost_*
+                # columns. Guarding ONLY the charge rates (the earlier version)
+                # let a re-`set_rates` with the same rates but different/absent
+                # costs silently mutate the record-only cost, breaking the "one
+                # pricing_version → one provider_cost" audit guarantee. Each cost
+                # column is matched as "absent-on-both OR equal", so costs-present
+                # and costs-absent are each immutable, and crash-retry with the
+                # SAME payload still succeeds.
+                _cost_clause = " AND ".join(
+                    (
+                        f"{col} = {ph}" if ph in cost_vals
+                        else f"attribute_not_exists({col})"
+                    )
+                    for col, ph in _cost_cols
+                )
+                _values = {":i": vin, ":o": vout, ":cr": vcr, ":cw": vcw}
+                _values.update(cost_vals)
                 self._table.put_item(
-                    Item={
-                        "pk": _PK,
-                        "sk": f"__ratever__{version}__{key}",
-                        "pricing_key": key,
-                        "version": version,
-                        "input_per_mtok_microusd": vin,
-                        "output_per_mtok_microusd": vout,
-                        "cache_read_per_mtok_microusd": vcr,
-                        "cache_write_per_mtok_microusd": vcw,
-                    },
+                    Item=item,
                     ConditionExpression=(
                         "attribute_not_exists(sk) OR "
                         "(input_per_mtok_microusd = :i AND output_per_mtok_microusd = :o "
                         "AND cache_read_per_mtok_microusd = :cr "
-                        "AND cache_write_per_mtok_microusd = :cw)"
+                        "AND cache_write_per_mtok_microusd = :cw "
+                        f"AND {_cost_clause})"
                     ),
-                    ExpressionAttributeValues={
-                        ":i": vin, ":o": vout, ":cr": vcr, ":cw": vcw,
-                    },
+                    ExpressionAttributeValues=_values,
                 )
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                     raise ValueError(
                         f"pricing version {version!r} already exists with DIFFERENT "
-                        f"rates for {key!r} (immutable) — use a fresh version string"
+                        f"rates or costs for {key!r} (immutable) — use a fresh version"
                     ) from e
                 raise
         # Flip CURRENT last. Written unconditionally so a crash AFTER the rows but

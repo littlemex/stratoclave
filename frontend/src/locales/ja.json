@@ -11,6 +11,7 @@
     "primary": "主ナビゲーション",
     "dashboard": "ダッシュボード",
     "my_usage": "使用履歴",
+    "my_billing": "課金",
     "my_api_keys": "API キー",
     "admin_users": "ユーザー管理",
     "admin_tenants": "テナント管理",

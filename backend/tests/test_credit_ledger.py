@@ -90,6 +90,51 @@ def test_settle_writes_one_settle_event_with_signed_deltas(seed_tenant_with_pool
     assert recomputed == rating["total_cost_microusd"]
 
 
+def test_settle_keys_run_index_on_workflow_run_id(seed_tenant_with_pool, _stub_usage):
+    """L5d-e: when the reservation carries a workflow_run_id, the SETTLE terminal's
+    run-index is keyed on THAT (not the hold_id fallback), so per-run billing can
+    query it by the client's x-sc-workflow-run-id."""
+    seed = seed_tenant_with_pool
+    user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
+    ctx = reserve_credit(user, 4000, pricing_key="opus", cost_microusd=2_000_000)
+    # Stamp the workflow_run_id (in production reserve_credit_for_model does this
+    # before the RESERVE event; here we set it post-reserve, so only the SETTLE
+    # terminal picks it up — which is exactly what the read API queries).
+    ctx.workflow_run_id = "wf-run-123"
+    _settle(user, ctx, model_id="us.anthropic.claude-opus-4-7", tok_in=1000, tok_out=500)
+
+    # events_for_run keyed on the workflow_run_id finds the SETTLE terminal.
+    events = _ledger().events_for_run(tenant_id=seed["tenant_id"], run_id="wf-run-123")
+    settle_events = [e for e in events if e["event_type"] == "SETTLE"]
+    assert len(settle_events) == 1
+    assert settle_events[0]["hold_id"] == ctx.hold_id
+
+
+def test_settle_without_workflow_run_id_falls_back_to_hold_not_request_id(
+    seed_tenant_with_pool, _stub_usage
+):
+    """F1 (Fable L5d-e review): when no workflow_run_id is set, the terminal must
+    key on the hold_id fallback — NOT on request_id (which the edge always mints).
+    A request_id-keyed run would create per-request singletons and wrongly clear
+    run_id_is_fallback."""
+    seed = seed_tenant_with_pool
+    user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
+    ctx = reserve_credit(user, 4000, pricing_key="opus", cost_microusd=2_000_000)
+    ctx.workflow_run_id = None
+    ctx.request_id = "req-should-not-key-the-run"
+    _settle(user, ctx, model_id="us.anthropic.claude-opus-4-7", tok_in=1000, tok_out=500)
+
+    # NOT keyed on request_id.
+    assert not _ledger().events_for_run(
+        tenant_id=seed["tenant_id"], run_id="req-should-not-key-the-run"
+    )
+    # Keyed on the hold_id fallback, and marked as a fallback run.
+    ev = _ledger().events_for_run(tenant_id=seed["tenant_id"], run_id=ctx.hold_id)
+    settles = [e for e in ev if e["event_type"] == "SETTLE"]
+    assert len(settles) == 1
+    assert settles[0].get("run_id_source") == "hold_id_fallback"
+
+
 def test_ledger_settled_total_matches_counter(seed_tenant_with_pool, _stub_usage):
     seed = seed_tenant_with_pool
     user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
