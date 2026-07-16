@@ -280,13 +280,58 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         )
         assert ev[0].get("settle_reason") == "reaper_race"
 
+    @rule(tok=consumes(holds), frac=ACTUAL_FRACTION)
+    def expire_then_settle_then_sweep(self, tok, frac):
+        """The hold's lease expires, but the (merely slow) owner settles it BEFORE
+        the lazy sweep runs; then the sweep runs. The reaper must be a NO-OP on an
+        already-settled hold: the settle recorded the spend and returned reserved,
+        and the later sweep must neither charge again nor return reserved twice.
+        This is a real Phase-1 transition no other rule covers — settle wins the
+        race, reaper finds nothing (Fable review round-2, gap A). True concurrent
+        TOCTOU (reaper delete vs settle commit interleaved) is out of reach for a
+        sequential state machine and is covered by the runtime's conditional
+        delete + code review, not here."""
+        from mvp._pipeline import _sweep_expired_holds, settle_reservation_and_log
+        from dynamo.tenant_budgets import TenantBudgetsRepository
+
+        ctx = self._ctxs.pop(tok)
+        self._expire_hold_row(ctx)  # past-date the lease, but DO NOT sweep yet
+        actual = int((ctx.pool_reserved_microusd * frac) // 100)
+        settle_reservation_and_log(
+            user=self.user, tenants_repo=ctx,
+            reservation=ctx.reservation_tokens,
+            actual_input_tokens=10, actual_output_tokens=5,
+            model_id="us.anthropic.claude-opus-4-7",
+            context=ctx, actual_cost_microusd=actual,
+        )
+        self.ref_settled += actual
+        self._live_reserved.pop(tok)  # settle returned reserved
+        # Normal settle path (hold still present at settle time) → completion.
+        self._expected_terminal[ctx.hold_id] = (actual, "completion")
+        # Now the reaper runs on an already-settled (row-gone) hold: must be no-op.
+        settled_before = self._pool_settled()
+        reserved_before = self._pool_reserved()
+        budgets = TenantBudgetsRepository()
+        _sweep_expired_holds(budgets, self.tenant_id, self.period)
+        assert self._pool_settled() == settled_before, (
+            "sweep after settle changed settled — reaper double-charged"
+        )
+        assert self._pool_reserved() == reserved_before, (
+            "sweep after settle changed reserved — reaper double-returned"
+        )
+
     # -- shared reap mechanism ----------------------------------------------
 
-    def _force_reap(self, ctx):
-        """Rewrite the hold row's embedded expiry into the past and run the sweep,
-        so the reaper reclaims it. Asserts the row existed and is gone afterwards
-        — a schema drift that made this a no-op would otherwise pass vacuously
-        (Fable review high)."""
+    def _expire_hold_row(self, ctx):
+        """Rewrite the hold row's embedded expiry into the past WITHOUT sweeping,
+        so a subsequent settle sees a live-but-expired hold. Keeps ctx.hold_sk
+        pointing at the re-keyed row. Returns the new sk.
+
+        On why ctx.hold_sk is updated: a genuinely slow owner holds a ctx whose sk
+        embeds an expiry that is now in the past (time simply passed). Re-keying to
+        the past-dated sk reproduces that exact state; leaving the future-dated sk
+        would instead fabricate an "expiry in the future but the row is gone"
+        state that never occurs in production."""
         from dynamo.tenant_budgets import TenantBudgetsRepository, hold_sk as _hsk
 
         budgets = TenantBudgetsRepository()
@@ -304,11 +349,18 @@ class CreditLedgerMachine(RuleBasedStateMachine):
             Key={"tenant_id": self.tenant_id, "sk": ctx.hold_sk}
         )
         budgets._table.put_item(Item=item)
-        # keep the context's view of where the (now past-dated) row lives.
         ctx.hold_sk = new_sk
+        return new_sk
 
+    def _force_reap(self, ctx):
+        """Expire the hold and immediately run the sweep, so the reaper reclaims
+        it. Asserts the row existed and is gone afterwards — a schema drift that
+        made this a no-op would otherwise pass vacuously (Fable review high)."""
+        from dynamo.tenant_budgets import TenantBudgetsRepository
         from mvp._pipeline import _sweep_expired_holds
 
+        new_sk = self._expire_hold_row(ctx)
+        budgets = TenantBudgetsRepository()
         _sweep_expired_holds(budgets, self.tenant_id, self.period)
         gone = budgets._table.get_item(
             Key={"tenant_id": self.tenant_id, "sk": new_sk}
@@ -326,8 +378,15 @@ class CreditLedgerMachine(RuleBasedStateMachine):
 
     @invariant()
     def ref_matches_ledger(self):
-        assert self.ref_settled == self._ledger_settled(), (
-            f"reference settled={self.ref_settled} != ledger={self._ledger_settled()}"
+        # Triangulate: the reference total must equal BOTH the SUT's own
+        # aggregation (sum_settled_microusd) AND an independent re-sum over the
+        # raw events. Comparing only against the SUT method would trust that
+        # method's own correctness (e.g. its pagination) — the independent sum
+        # keeps the check from being partly circular (Fable review round-2 high-4).
+        indep = sum(int(e.get("settled_delta_microusd", 0)) for e in self._all_events())
+        assert self.ref_settled == self._ledger_settled() == indep, (
+            f"reference settled={self.ref_settled} != "
+            f"sum_settled={self._ledger_settled()} != independent_sum={indep}"
         )
 
     @invariant()
@@ -372,6 +431,29 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         # Every hold we terminated must have produced its event.
         missing = set(self._expected_terminal) - set(by_hold)
         assert not missing, f"expected terminal events missing for holds {missing}"
+
+    @invariant()
+    def only_settle_terminal_events_exist(self):
+        # Phase-1 spec: the ledger contains ONLY SETTLE terminal events — the
+        # reaper and release write NO ledger event, and RESERVE/RECLAIM are
+        # Phase 2. The TERM invariant filters on '#TERMINAL', so a stray
+        # NON-terminal event (e.g. a premature Phase-2 RECLAIM/RESERVE leaking in,
+        # or a settled_delta=0 ghost) would slip past it AND past I1/ref (which
+        # only sum settled). Assert the whole partition is exactly the terminal
+        # events we expect — nothing else exists (Fable review round-2, 2-3).
+        all_events = self._all_events()
+        terminal = [e for e in all_events if e["sk"].endswith("#TERMINAL")]
+        assert len(all_events) == len(terminal) == len(self._expected_terminal), (
+            f"unexpected ledger events: total={len(all_events)} "
+            f"terminal={len(terminal)} expected={len(self._expected_terminal)} "
+            f"(Phase 1 must hold only SETTLE terminal events)"
+        )
+        # Every terminal event must be an actual SETTLE (event_type), not some
+        # other terminal type sneaking onto the shared terminal sk.
+        for e in terminal:
+            assert e.get("event_type") == "SETTLE", (
+                f"non-SETTLE terminal event {e.get('event_type')} in Phase 1"
+            )
 
 
 TestCreditLedgerStateful = CreditLedgerMachine.TestCase
