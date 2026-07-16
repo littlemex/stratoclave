@@ -388,6 +388,118 @@ def test_sanity_without_delete_condition_double_reclaim_is_found():
 # COUNTEREXAMPLE: THE STRICT CEILING IS *NOT* AN INVARIANT
 # ===========================================================================
 
+# ===========================================================================
+# 4. LEDGER PHASE 2 — RECLAIM + LATE_SETTLE: NO DOUBLE-RETURN, SPEND EXACTLY-ONCE
+# ===========================================================================
+#
+# Phase 2 closes the revenue leak: when the reaper reclaims a hold FIRST
+# (writing a RECLAIM terminal that returns `reserved`), a late settle must
+# still record the spend — via a LATE_SETTLE on a DISTINCT sk with
+# reserved_delta == 0 — instead of blind-returning (Phase 1's leak).
+#
+# The terminal money moves SETTLE / RELEASE / RECLAIM share ONE sk under
+# attribute_not_exists, so AT MOST ONE terminal commits per hold (the reserved
+# return happens exactly once).  LATE_SETTLE is a separate sk, also under
+# attribute_not_exists (at most one), and its own txn carries a ConditionCheck
+# that the terminal IS a RECLAIM.
+#
+# We model, for one hold, the boolean commit of each of the four writers, with
+# the storage guards encoded exactly:
+#   * terminal cell: at most one of {settle, release, reclaim} commits
+#   * late cell:     at most one late_settle commits
+#   * late ⇒ reclaim committed  (the ConditionCheck: terminal.event_type=RECLAIM)
+# and prove:  reserved returned ∈ {0, R} (never 2R), settled ∈ {0, actual}
+# (never 2·actual), and — the liveness-flavoured safety the leak was about —
+# IF the reaper reclaimed AND a late settle committed, THEN settled == actual
+# (the spend is NOT lost).
+
+
+def _phase2_ledger_model(*, late_requires_reclaim: bool):
+    R, actual = z3.Ints("p2_R p2_actual")
+    settle = z3.Bool("p2_settle")
+    release = z3.Bool("p2_release")
+    reclaim = z3.Bool("p2_reclaim")
+    late = z3.Bool("p2_late")
+    cons = [R >= 1, actual >= 0, actual <= R]
+
+    # Terminal cell exclusion (attribute_not_exists on the shared TERMINAL sk):
+    # at most ONE of the three terminal money moves commits.
+    cons.append(
+        z3.AtMost(settle, release, reclaim, 1)
+    )
+    # LATE_SETTLE lives on its own sk; its guard is the terminal-is-RECLAIM
+    # ConditionCheck. With the guard, late ⇒ reclaim. The broken variant drops
+    # that link (models a mis-route that writes LATE without a RECLAIM).
+    if late_requires_reclaim:
+        cons.append(z3.Implies(late, reclaim))
+
+    # reserved returned: each terminal returns exactly R; LATE returns 0.
+    reserved_returned = z3.Sum([
+        z3.If(settle, R, z3.IntVal(0)),
+        z3.If(release, R, z3.IntVal(0)),
+        z3.If(reclaim, R, z3.IntVal(0)),
+        # late: reserved_delta == 0 by construction (no term here)
+    ])
+    # settled recorded: SETTLE records actual; RECLAIM records 0; LATE records
+    # actual; RELEASE records 0.
+    settled_recorded = z3.Sum([
+        z3.If(settle, actual, z3.IntVal(0)),
+        z3.If(late, actual, z3.IntVal(0)),
+    ])
+    return cons, R, actual, settle, release, reclaim, late, reserved_returned, settled_recorded
+
+
+def test_phase2_no_double_return_and_spend_exactly_once():
+    """With the terminal-cell exclusion + late⇒reclaim guard: reserved is
+    returned at most once (∈{0,R}), settled is recorded at most once
+    (∈{0,actual}), and a reaped-then-late-settled hold records the spend
+    (reclaim ∧ late ⇒ settled == actual) — the revenue leak cannot recur."""
+    (cons, R, actual, settle, release, reclaim, late,
+     reserved_returned, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=True)
+    s = _solver()
+    s.add(*cons)
+    prop = z3.And(
+        z3.Or(reserved_returned == 0, reserved_returned == R),      # never 2R
+        z3.Or(settled_recorded == 0, settled_recorded == actual),   # never 2·actual
+        # the leak-closure property: reaped AND late-settled ⇒ spend recorded.
+        z3.Implies(z3.And(reclaim, late), settled_recorded == actual),
+        # RECLAIM alone (no late settle) records no spend but DID return reserved.
+        z3.Implies(z3.And(reclaim, z3.Not(late)),
+                   z3.And(settled_recorded == 0, reserved_returned == R)),
+    )
+    s.add(z3.Not(prop))
+    assert_proved(s, "Phase 2: no double-return, spend exactly-once, leak closed")
+
+
+def test_phase2_late_settle_cannot_double_count_with_settle():
+    """A LATE_SETTLE and a SETTLE terminal cannot both record the same spend:
+    late⇒reclaim and terminal exclusion make settle∧late unsatisfiable, so
+    settled is never 2·actual."""
+    (cons, R, actual, settle, release, reclaim, late,
+     _rr, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=True)
+    s = _solver()
+    s.add(*cons)
+    s.add(actual >= 1)
+    s.add(settle, late)  # try to force the double-count
+    assert_proved(s, "settle ∧ late is impossible (no double-count of spend)")
+
+
+def test_sanity_phase2_without_late_guard_double_count_is_found():
+    """Model validation: drop the late⇒reclaim ConditionCheck and Z3 finds a
+    run where a SETTLE terminal AND a LATE_SETTLE both record the spend —
+    settled == 2·actual (the bug the ConditionCheck prevents)."""
+    (cons, R, actual, settle, release, reclaim, late,
+     _rr, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=False)
+    s = _solver()
+    s.add(*cons)
+    s.add(actual >= 1)
+    s.add(settle, late)                      # both writers land
+    s.add(settled_recorded > actual)         # double-counted spend
+    assert_counterexample_exists(
+        s, "double-counted spend when LATE_SETTLE is not gated on RECLAIM"
+    )
+
+
 def test_strict_ceiling_is_false_under_reaper_fallback_race():
     """CE: R + S <= L is NOT invariant, and we prove it with a witness.
 

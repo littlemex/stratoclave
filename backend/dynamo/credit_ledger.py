@@ -69,6 +69,23 @@ def reserve_sk(hold_id: str) -> str:
     return f"EV#HOLD#{hold_id}#RESERVE"
 
 
+def late_settle_sk(hold_id: str) -> str:
+    """Sort key for the LATE_SETTLE (spend recovered after a RECLAIM) event.
+
+    A DISTINCT sk namespace from `terminal_sk`, on purpose: LATE_SETTLE has
+    reserved_delta ≡ 0 (it does NOT participate in the once-per-hold reserved
+    return), so it lives OUTSIDE the TERMINAL mutual-exclusion cell. It is the
+    settled-side correction that recovers the spend a settle would otherwise
+    lose when the reaper reclaimed the hold first (Phase 2 revenue-leak fix).
+    """
+    return f"EV#HOLD#{hold_id}#LATE_SETTLE"
+
+
+# LATE_SETTLE is a non-terminal settled-side correction; kept separate from the
+# terminal types so it never enters the reserved-return exclusion.
+EV_LATE_SETTLE = "LATE_SETTLE"
+
+
 class CreditLedgerRepository:
     def __init__(self) -> None:
         self._name = credit_ledger_table_name()
@@ -162,7 +179,189 @@ class CreditLedgerRepository:
             }
         }
 
+    def late_settle_txn_item(
+        self,
+        *,
+        tenant_id: str,
+        period: str,
+        hold_id: str,
+        settled_delta_microusd: int,
+        run_id: str,
+        run_id_is_fallback: bool = False,
+        span_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        pricing_version: Optional[str] = None,
+        tokens_in: Optional[int] = None,
+        tokens_out: Optional[int] = None,
+        actor: str = "caller",
+        ts_ms: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Build the ledger Put for a LATE_SETTLE (spend recovered after RECLAIM).
+
+        Written on a DISTINCT sk (`late_settle_sk`) with `attribute_not_exists`,
+        so a late-settle retry storm still lands exactly one event. reserved_delta
+        is fixed at 0: the reaper already returned `reserved` in its RECLAIM txn,
+        so this event moves the settled side ONLY. Must be composed in the SAME
+        TransactWriteItems as `terminal_conditioncheck_is_reclaim` so it cannot
+        commit unless the terminal really is a RECLAIM (defence-in-depth against a
+        mis-route; the terminal is immutable+append-only, so a read that saw
+        RECLAIM cannot flip, but the ConditionCheck makes it a storage guarantee).
+        """
+        ts = ts_ms if ts_ms is not None else _now_ms()
+        event_id = late_settle_sk(hold_id)[len("EV#"):]  # HOLD#<id>#LATE_SETTLE
+        item: dict[str, Any] = {
+            "pk": {"S": ledger_pk(tenant_id, period)},
+            "sk": {"S": late_settle_sk(hold_id)},
+            "event_id": {"S": event_id},
+            "event_type": {"S": EV_LATE_SETTLE},
+            "schema_version": {"S": SCHEMA_VERSION},
+            "tenant_id": {"S": tenant_id},
+            "period": {"S": period},
+            "hold_id": {"S": hold_id},
+            "run_id": {"S": run_id},
+            "reserved_delta_microusd": {"N": "0"},
+            "settled_delta_microusd": {"N": str(int(settled_delta_microusd))},
+            "ts_ms": {"N": str(ts)},
+            "actor": {"S": actor},
+            "settle_reason": {"S": "late_settle"},
+            "gsi1pk": {"S": f"TENANT#{tenant_id}#RUN#{run_id}"},
+            "gsi1sk": {"S": f"{ts:013d}#{event_id}"},
+        }
+        for key, val in (
+            ("span_id", span_id),
+            ("request_id", request_id),
+            ("group_id", group_id),
+            ("model_id", model_id),
+            ("pricing_version", pricing_version),
+        ):
+            if val:
+                item[key] = {"S": str(val)}
+        if run_id_is_fallback:
+            item["run_id_source"] = {"S": "hold_id_fallback"}
+        for key, num in (("tokens_in", tokens_in), ("tokens_out", tokens_out)):
+            if num is not None:
+                item[key] = {"N": str(int(num))}
+        return {
+            "Put": {
+                "TableName": self._name,
+                "Item": item,
+                "ConditionExpression": "attribute_not_exists(pk)",
+            }
+        }
+
+    def terminal_conditioncheck_is_reclaim(
+        self, *, tenant_id: str, period: str, hold_id: str
+    ) -> dict[str, Any]:
+        """A ConditionCheck txn item asserting the hold's terminal exists AND is a
+        RECLAIM. Composed into the LATE_SETTLE transaction so the spend-recovery
+        can only commit when the reaper truly reclaimed this hold — never when the
+        terminal is a SETTLE (already settled) or RELEASE (client abandoned)."""
+        return {
+            "ConditionCheck": {
+                "TableName": self._name,
+                "Key": {
+                    "pk": {"S": ledger_pk(tenant_id, period)},
+                    "sk": {"S": terminal_sk(hold_id)},
+                },
+                "ConditionExpression": "attribute_exists(pk) AND event_type = :reclaim",
+                "ExpressionAttributeValues": {":reclaim": {"S": EV_RECLAIM}},
+            }
+        }
+
+    def reserve_event_txn_item(
+        self,
+        *,
+        tenant_id: str,
+        period: str,
+        hold_id: str,
+        reserved_delta_microusd: int,
+        run_id: str,
+        run_id_is_fallback: bool = False,
+        span_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        pricing_version: Optional[str] = None,
+        actor: str = "caller",
+        ts_ms: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Build the ledger Put for a RESERVE (credit granted) event, on its own
+        `reserve_sk` with `attribute_not_exists` (one RESERVE per hold). Carries
+        the positive reserved_delta so the reserved side (I2) is ledger-derivable:
+        pool_reserved == Σ RESERVE.reserved_delta − Σ terminal reserved returned.
+        """
+        ts = ts_ms if ts_ms is not None else _now_ms()
+        event_id = reserve_sk(hold_id)[len("EV#"):]  # HOLD#<id>#RESERVE
+        item: dict[str, Any] = {
+            "pk": {"S": ledger_pk(tenant_id, period)},
+            "sk": {"S": reserve_sk(hold_id)},
+            "event_id": {"S": event_id},
+            "event_type": {"S": EV_RESERVE},
+            "schema_version": {"S": SCHEMA_VERSION},
+            "tenant_id": {"S": tenant_id},
+            "period": {"S": period},
+            "hold_id": {"S": hold_id},
+            "run_id": {"S": run_id},
+            "reserved_delta_microusd": {"N": str(int(reserved_delta_microusd))},
+            "settled_delta_microusd": {"N": "0"},
+            "ts_ms": {"N": str(ts)},
+            "actor": {"S": actor},
+            "gsi1pk": {"S": f"TENANT#{tenant_id}#RUN#{run_id}"},
+            "gsi1sk": {"S": f"{ts:013d}#{event_id}"},
+        }
+        for key, val in (
+            ("span_id", span_id),
+            ("request_id", request_id),
+            ("group_id", group_id),
+            ("model_id", model_id),
+            ("pricing_version", pricing_version),
+        ):
+            if val:
+                item[key] = {"S": str(val)}
+        if run_id_is_fallback:
+            item["run_id_source"] = {"S": "hold_id_fallback"}
+        return {
+            "Put": {
+                "TableName": self._name,
+                "Item": item,
+                "ConditionExpression": "attribute_not_exists(pk)",
+            }
+        }
+
     # ---- read side: balance derivation + audit ----
+
+    def get_terminal(
+        self, *, tenant_id: str, period: str, hold_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Strongly-consistent read of a hold's terminal event (or None).
+
+        Used by the settle routing: on a terminal `attribute_not_exists` clash it
+        reads WHY — SETTLE/RELEASE (idempotent / already-released) vs RECLAIM
+        (recover the spend via LATE_SETTLE). ConsistentRead so the routing does
+        not loop on a stale miss (safety never depends on it — the LATE_SETTLE
+        txn's ConditionCheck is the final arbiter — but it makes convergence
+        immediate)."""
+        resp = self._table.get_item(
+            Key={"pk": ledger_pk(tenant_id, period), "sk": terminal_sk(hold_id)},
+            ConsistentRead=True,
+        )
+        return resp.get("Item")
+
+    def get_late_settle(
+        self, *, tenant_id: str, period: str, hold_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Strongly-consistent read of a hold's LATE_SETTLE event (or None).
+
+        Used by the late-settle recovery to compare a retry's actual against the
+        already-recorded one (first-writer-wins). Goes through the key helpers so
+        a pk/sk format change cannot silently drift the recovery path."""
+        resp = self._table.get_item(
+            Key={"pk": ledger_pk(tenant_id, period), "sk": late_settle_sk(hold_id)},
+            ConsistentRead=True,
+        )
+        return resp.get("Item")
 
     def sum_settled_microusd(self, *, tenant_id: str, period: str) -> int:
         """Σ settled_delta over the (tenant, period) partition — the ledger's
@@ -184,6 +383,88 @@ class CreditLedgerRepository:
             if not lek:
                 return total
             kwargs["ExclusiveStartKey"] = lek
+
+    def derived_totals(self, *, tenant_id: str, period: str) -> dict[str, Any]:
+        """Fold the (tenant, period) partition into the counters the budget row
+        caches, so a reconciliation batch can compare them:
+
+            settled   = Σ settled_delta over ALL events (SETTLE + LATE_SETTLE).
+                        Valid across the Phase-1→2 boundary: SETTLE terminals
+                        always carried settled_delta.
+            reserved  = Σ reserved_delta but ONLY over holds that HAVE a RESERVE
+                        event, i.e. Phase-2-era holds. A hold whose RESERVE is
+                        absent (settled/reclaimed under Phase 1, before RESERVE
+                        events existed) contributes a bare terminal `-R` with no
+                        matching `+R`, which would sink the derived reserved
+                        spuriously negative and make every migrated tenant alarm
+                        forever (Fable P2 review-2 R2-6). Excluding those holds
+                        makes I2 well-defined exactly where BOTH sides of the
+                        reserved lifecycle are recorded.
+            reclaimed = Σ (-reserved_delta) over RECLAIM terminals whose hold also
+                        has a RESERVE event (same reasoning — the Phase-1 reaper
+                        wrote no RECLAIM ledger event, so pre-P2 reclaims have no
+                        ledger counterpart and must not count as drift).
+
+        `pre_p2_terminals` reports how many terminals were excluded for lacking a
+        RESERVE event, so the caller can tell "reserved/reclaimed reconciliation
+        is not yet meaningful for this period" (a migrating tenant) apart from a
+        real zero-drift. One paginated, strongly-consistent Query. Integer
+        micro-USD throughout — never a float.
+        """
+        settled = 0
+        # Per-hold accumulation so reserved/reclaimed can be gated on "has RESERVE".
+        has_reserve: set[str] = set()
+        reserve_delta: dict[str, int] = {}   # hold_id -> RESERVE +R
+        terminal_delta: dict[str, int] = {}  # hold_id -> terminal reserved_delta (-R)
+        reclaim_returned: dict[str, int] = {}  # hold_id -> reserved returned by RECLAIM
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(ledger_pk(tenant_id, period)),
+            "ConsistentRead": True,
+            "ProjectionExpression": (
+                "settled_delta_microusd, reserved_delta_microusd, event_type, hold_id"
+            ),
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            for it in resp.get("Items", []):
+                settled += int(it.get("settled_delta_microusd", 0))
+                rd = int(it.get("reserved_delta_microusd", 0))
+                hid = str(it.get("hold_id", ""))
+                et = it.get("event_type")
+                if et == EV_RESERVE:
+                    has_reserve.add(hid)
+                    reserve_delta[hid] = reserve_delta.get(hid, 0) + rd
+                elif et in (EV_SETTLE, EV_RELEASE, EV_RECLAIM):
+                    terminal_delta[hid] = terminal_delta.get(hid, 0) + rd
+                    if et == EV_RECLAIM:
+                        reclaim_returned[hid] = reclaim_returned.get(hid, 0) + (-rd)
+                # LATE_SETTLE has reserved_delta 0; contributes to settled only.
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+
+        # Reserved (I2): per Phase-2-era hold, RESERVE(+R) plus its terminal(-R).
+        # An open hold contributes +R (no terminal yet); a finalized one nets 0.
+        # ONLY holds with a RESERVE event count — a bare pre-P2 terminal is skipped.
+        reserved = sum(
+            reserve_delta[hid] + terminal_delta.get(hid, 0) for hid in has_reserve
+        )
+        # Reclaimed (I3): reserved returned by RECLAIM, gated the same way.
+        reclaimed = sum(
+            amt for hid, amt in reclaim_returned.items() if hid in has_reserve
+        )
+        return {
+            "settled_microusd": settled,
+            "reserved_microusd": reserved,
+            "reclaimed_microusd": reclaimed,
+            # Terminals with no RESERVE event = pre-Phase-2 holds. While > 0, the
+            # reserved/reclaimed axes are NOT yet fully ledger-derivable for this
+            # period (the caller must not alarm on their drift).
+            "pre_p2_terminals": sum(
+                1 for hid in terminal_delta if hid not in has_reserve
+            ),
+        }
 
     def events_for_run(self, *, tenant_id: str, run_id: str) -> list[dict[str, Any]]:
         """All money-move events for one workflow run (audit), via run-index.

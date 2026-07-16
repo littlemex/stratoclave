@@ -33,6 +33,10 @@ os.environ["DYNAMODB_USER_TENANTS_TABLE"] = f"{_PREFIX}-user-tenants"
 os.environ["DYNAMODB_TENANT_BUDGETS_TABLE"] = f"{_PREFIX}-tenant-budgets"
 os.environ["DYNAMODB_USAGE_LOGS_TABLE"] = f"{_PREFIX}-usage-logs"
 os.environ["DYNAMODB_PRICING_CONFIG_TABLE"] = f"{_PREFIX}-pricing-config"
+# Ledger Phase 2: reserve/settle/release now co-write ledger events, so the
+# reserve txn references the credit-ledger table — the harness must provision it
+# or every reserve ResourceNotFounds.
+os.environ["DYNAMODB_CREDIT_LEDGER_TABLE"] = f"{_PREFIX}-credit-ledger"
 
 import boto3  # noqa: E402
 from botocore.exceptions import ClientError  # noqa: E402
@@ -104,14 +108,37 @@ def _setup_tables():
         [{"AttributeName": "tenant_id", "AttributeType": "S"},
          {"AttributeName": "timestamp_log_id", "AttributeType": "S"}],
     )
+    # Credit ledger (Phase 2): pk/sk + the run-index GSI the event writers set.
+    try:
+        _client.create_table(
+            TableName=os.environ["DYNAMODB_CREDIT_LEDGER_TABLE"],
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"},
+                       {"AttributeName": "sk", "KeyType": "RANGE"}],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "gsi1pk", "AttributeType": "S"},
+                {"AttributeName": "gsi1sk", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "run-index",
+                "KeySchema": [{"AttributeName": "gsi1pk", "KeyType": "HASH"},
+                              {"AttributeName": "gsi1sk", "KeyType": "RANGE"}],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            BillingMode="PAY_PER_REQUEST",
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceInUseException":
+            raise
     for k in ("DYNAMODB_USER_TENANTS_TABLE", "DYNAMODB_TENANT_BUDGETS_TABLE",
-              "DYNAMODB_USAGE_LOGS_TABLE"):
+              "DYNAMODB_USAGE_LOGS_TABLE", "DYNAMODB_CREDIT_LEDGER_TABLE"):
         _client.get_waiter("table_exists").wait(TableName=os.environ[k])
 
 
 def _teardown_tables():
     for k in ("DYNAMODB_USER_TENANTS_TABLE", "DYNAMODB_TENANT_BUDGETS_TABLE",
-              "DYNAMODB_USAGE_LOGS_TABLE"):
+              "DYNAMODB_USAGE_LOGS_TABLE", "DYNAMODB_CREDIT_LEDGER_TABLE"):
         name = os.environ[k]
         assert name.startswith(_PREFIX), f"refusing to delete {name}"
         try:

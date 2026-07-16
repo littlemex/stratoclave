@@ -57,6 +57,14 @@ ALLOWED_SITES = {
         ("backend/mvp/_pipeline.py", "_settle_pool_side", "transact_write_items"),        # settle (stable token)
         ("backend/mvp/_pipeline.py", "ReservationContext.release_pool", "transact_write_items"),  # release
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "transact_write_items"),        # reaper reclaim
+        # Ledger P2: recovers spend after the reaper reclaimed the hold first
+        # (RECLAIM terminal). Writes [settled-only counter (+actual, reserved
+        # untouched — reaper already returned it), LATE_SETTLE ledger Put (distinct
+        # sk, attribute_not_exists), ConditionCheck terminal-is-RECLAIM]. A2: the
+        # counter only advances settled by `actual`, never re-touches reserved, so
+        # no double-return. A5: STABLE token (_derived_token(token,"late-settle"))
+        # so a lost-ack retry of the recovery dedupes to the same write. Reviewed OK.
+        ("backend/mvp/_pipeline.py", "_recover_spend_via_late_settle", "transact_write_items"),
         # A non-counter delete: removes an amount<=0 HOLD row only; does NOT
         # touch the BUDGET row / counters (reviewed — see _sweep_one_period).
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "delete_item"),
@@ -138,6 +146,11 @@ EXPECTED_TOKEN_KIND = {
         # (_derived_token(token,...) = deterministic/stable so a lost-ack
         # dedupes). Both kinds are allowed here.
         "_settle_pool_side": ("fresh", "stable"),
+        # Ledger P2 late-settle recovery: FRESH token. Idempotency is the
+        # LATE_SETTLE sk's attribute_not_exists (exactly one per hold), NOT the
+        # token — a derived/stable token would need byte-identical payloads across
+        # retries, which the ledger Put's per-attempt ts_ms breaks (A5 review).
+        "_recover_spend_via_late_settle": "fresh",
     },
     "backend/dynamo/user_tenants.py": {
         # tenant reassignment: idempotent SET (attribute_exists-guarded), not a

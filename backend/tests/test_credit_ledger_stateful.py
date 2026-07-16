@@ -1,32 +1,33 @@
-"""Stateful property test for the credit ledger (Fable formal design, main axis).
+"""Stateful property test for the credit ledger — Phase 2 (Fable formal design).
 
 Drives the REAL moto-backed money path — reserve / settle / defensive re-settle /
-release / crash+reap / reap-then-settle — in random interleavings, and checks the
-ledger invariants against an independent in-memory reference model AND the live
-budget counter after every step. This is the invariant coverage the example-based
-test_credit_ledger.py could not give (interleaving of retries, reaper races, and
-multiple concurrent holds).
+release / crash+reap / reap-then-late-settle / late-settle retry / release-then-
+settle — in random interleavings, and checks the Phase-2 ledger invariants against
+an independent in-memory reference model AND the live budget counters after every
+step.
 
-Invariants checked (Phase 1 scope — SETTLE events only; RESERVE/RECLAIM are
-Phase 2, so the ledger records ONLY settled-side value today):
+Phase 2 ledger model (vs Phase 1's SETTLE-only ledger):
+  - RESERVE event (own sk, positive reserved_delta) on every pooled reserve.
+  - ONE terminal per hold on the shared sk EV#HOLD#<id>#TERMINAL, event_type in
+    {SETTLE, RELEASE, RECLAIM}, reserved_delta = -reserved (returns the reserve).
+  - LATE_SETTLE event (DISTINCT sk, reserved_delta ≡ 0) recovers the spend when a
+    settle loses the terminal race to the reaper's RECLAIM — the revenue-leak fix.
 
-  I1  pool_settled_microusd (counter) == Σ settled_delta (ledger)
-  RES pool_reserved_microusd (counter) == Σ reserved of live (un-terminated) holds
-      — makes release / reap non-vacuous: a reaper that fails to return reserved,
-        or a double-return, breaks this.
-  TERM each hold that reached a terminal money move has EXACTLY ONE terminal
-      ledger event whose settled_delta and settle_reason match what the money
-      path was asked to record; a hold that only reserved/released/was-reaped has
-      NO terminal event. This replaces a storage-tautology sk-uniqueness check
-      with a real detection of sk-overwrite double-counting and wrong values.
-  I6  every SETTLE event has settled_delta >= 0
-  ref settled total (independent model) == ledger settled total
+Invariants (Fable design C, Phase-2 forms):
+  I1'  pool_settled  == Σ SETTLE.settled_delta + Σ LATE_SETTLE.settled_delta
+  I2   pool_reserved == Σ RESERVE.reserved_delta + Σ terminal.reserved_delta
+                     (= Σ reserved of live holds)
+  I3   pool_reclaimed == Σ RECLAIM.reserved returned (= -Σ RECLAIM.reserved_delta)
+  TERM' each hold: ≤1 terminal (type∈{SETTLE,RELEASE,RECLAIM}); ≤1 LATE_SETTLE;
+                   LATE_SETTLE exists ⇒ terminal is RECLAIM; per-event values match
+                   the recorded expectation; no ghost / missing events.
+  NONNEG all three counters ≥ 0.
+  EXACTLY-ONCE-SPEND  the model of "settles that returned success" equals the
+                   ledger's derived settled total (the direct detector of the
+                   Phase-1 revenue-leak this phase closes).
 
-Phase-1 facts encoded here (Fable review): a crashed+reaped hold writes NO ledger
-event and charges NO spend (RECLAIM is Phase 2), so it contributes 0 to settled on
-both sides AND returns its reserved. The settle-after-reap race takes the
-settled-only txn (reserved_delta=0, settle_reason="reaper_race") because the reaper
-already returned the reserved share.
+Out of scope, deliberately NOT asserted (documented): overshoot (actual >
+reserved) semantics; token→price derivation (settle is priced directly).
 """
 from __future__ import annotations
 
@@ -47,9 +48,6 @@ from hypothesis.stateful import (
 )
 
 COST = st.integers(min_value=1, max_value=500_000)   # micro-USD reserved per hold
-# actual settle usage as a fraction of the reserved amount; may be 0 (cache-only).
-# Kept <= reserved so Phase-1 I1 (no overshoot) holds exactly; overshoot semantics
-# are out of Phase-1 scope and deliberately not asserted here.
 ACTUAL_FRACTION = st.integers(min_value=0, max_value=100)
 
 
@@ -70,10 +68,8 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         from dynamo.user_tenants import UserTenantsRepository
 
         # Hypothesis runs many examples inside ONE moto mock (function-scoped
-        # fixture), so the DynamoDB tables persist across examples. Isolate each
-        # example on its OWN tenant partition (uuid — robust even if the suite is
-        # ever run under pytest-xdist) so the ledger/counter start empty and the
-        # reference model (ref_settled=0) is valid.
+        # fixture), so tables persist across examples. Isolate each example on its
+        # OWN tenant partition (uuid) so counters/ledger start empty.
         suffix = uuid.uuid4().hex[:12]
         self.tenant_id = f"acme-{suffix}"
         self.user = _User(f"user-{suffix}", self.tenant_id)
@@ -82,7 +78,6 @@ class CreditLedgerMachine(RuleBasedStateMachine):
             user_id=self.user.user_id, tenant_id=self.tenant_id,
             role="user", total_credit=1_000_000_000,
         )
-        # A generous pool so the ceiling is not the thing under test here.
         TenantBudgetsRepository().set_pool_limit(
             tenant_id=self.tenant_id, period=self.period,
             pool_limit_microusd=10_000_000_000,
@@ -90,10 +85,13 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         # Independent reference model.
         self.ref_settled = 0                 # micro-USD we EXPECT recorded settled
         self._ctxs = {}                      # bundle token -> pipeline context
-        self._live_reserved = {}             # bundle token -> reserved micro-USD (un-terminated)
-        # hold_id -> (expected_settled_delta, expected_settle_reason); one entry
-        # per hold that reached a terminal money move (settle / reaper_race).
+        self._live_reserved = {}             # bundle token -> reserved (un-terminated)
+        # hold_id -> (terminal_type, reserved_returned, settled_on_terminal)
         self._expected_terminal = {}
+        # hold_id -> expected LATE_SETTLE settled amount
+        self._expected_late = {}
+        # every reserved hold_id (RESERVE event must exist for each) -> reserved
+        self._reserved_events = {}
         self._seq = 0
 
     # -- helpers -------------------------------------------------------------
@@ -114,17 +112,17 @@ class CreditLedgerMachine(RuleBasedStateMachine):
     def _pool_reserved(self) -> int:
         return int(self._pool_summary()["pool_reserved_microusd"])
 
-    def _ledger_settled(self) -> int:
-        return self._ledger().sum_settled_microusd(
-            tenant_id=self.tenant_id, period=self.period
-        )
+    def _pool_reclaimed(self) -> int:
+        # pool_summary does not surface reclaimed; read the row directly.
+        from dynamo.tenant_budgets import TenantBudgetsRepository, budget_sk
+
+        row = TenantBudgetsRepository()._table.get_item(
+            Key={"tenant_id": self.tenant_id, "sk": budget_sk(self.period)}
+        ).get("Item") or {}
+        return int(row.get("pool_reclaimed_microusd", 0))
 
     def _all_events(self) -> list[dict]:
-        """Every ledger event in this tenant/period partition, pagination-safe.
-
-        (A verification helper that silently truncated at the 1MB page would let
-        invariants pass on a partial view — the invariant code itself must not
-        have that bug.)"""
+        """Every ledger event in this tenant/period partition, pagination-safe."""
         out: list[dict] = []
         led = self._ledger()
         kwargs = {
@@ -140,6 +138,26 @@ class CreditLedgerMachine(RuleBasedStateMachine):
                 return out
             kwargs["ExclusiveStartKey"] = lek
 
+    def _events_by_kind(self):
+        """Split the partition into (reserve, terminal, late) dicts keyed by
+        hold_id, asserting sk-namespace uniqueness within each kind."""
+        reserve, terminal, late = {}, {}, {}
+        for e in self._all_events():
+            hid = e["hold_id"]
+            sk = e["sk"]
+            if sk.endswith("#RESERVE"):
+                assert hid not in reserve, f"duplicate RESERVE for {hid}"
+                reserve[hid] = e
+            elif sk.endswith("#TERMINAL"):
+                assert hid not in terminal, f"duplicate TERMINAL for {hid}"
+                terminal[hid] = e
+            elif sk.endswith("#LATE_SETTLE"):
+                assert hid not in late, f"duplicate LATE_SETTLE for {hid}"
+                late[hid] = e
+            else:
+                raise AssertionError(f"unknown ledger event sk {sk}")
+        return reserve, terminal, late
+
     # -- rules ---------------------------------------------------------------
 
     @rule(target=holds, cost=COST)
@@ -147,14 +165,9 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         from mvp._pipeline import reserve_credit
 
         ctx = reserve_credit(self.user, 4000, pricing_key="opus", cost_microusd=cost)
-        # setup guarantees a pool, so the pool path MUST engage — a silent skip
-        # here would let the whole machine pass without touching the money path
-        # (Fable review critical-1). Assert instead of dropping from the bundle.
         assert ctx.pool_active and ctx.hold_id, (
             "pool path did not engage despite a configured pool — regression"
         )
-        # Independent check: the reserved amount recorded IS the cost we asked for
-        # (so the reference model does not inherit a reserve-side unit bug).
         assert int(ctx.pool_reserved_microusd) == int(cost), (
             f"reserved {ctx.pool_reserved_microusd} != requested cost {cost}"
         )
@@ -162,6 +175,7 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         tok = f"h{self._seq}"
         self._ctxs[tok] = ctx
         self._live_reserved[tok] = int(ctx.pool_reserved_microusd)
+        self._reserved_events[ctx.hold_id] = int(ctx.pool_reserved_microusd)
         return tok
 
     @rule(tok=consumes(holds), frac=ACTUAL_FRACTION)
@@ -169,28 +183,24 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         from mvp._pipeline import settle_reservation_and_log
 
         ctx = self._ctxs.pop(tok)
-        # actual cost <= reserved (frac% of reserved), so Phase-1 I1 (no overshoot)
-        # holds exactly. Priced directly via actual_cost_microusd.
         actual = int((ctx.pool_reserved_microusd * frac) // 100)
         settle_reservation_and_log(
-            user=self.user,
-            tenants_repo=ctx,
+            user=self.user, tenants_repo=ctx,
             reservation=ctx.reservation_tokens,
-            actual_input_tokens=10,
-            actual_output_tokens=5,
+            actual_input_tokens=10, actual_output_tokens=5,
             model_id="us.anthropic.claude-opus-4-7",
-            context=ctx,
-            actual_cost_microusd=actual,
+            context=ctx, actual_cost_microusd=actual,
         )
         self.ref_settled += actual
-        self._live_reserved.pop(tok)  # reserved returned by the settle txn
-        self._expected_terminal[ctx.hold_id] = (actual, "completion")
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "SETTLE", int(ctx.pool_reserved_microusd), actual
+        )
 
     @rule(tok=consumes(holds))
     def resettle_defensively(self, tok):
-        """A defensive double-settle (error handler + finally, OR a retry worker)
-        must be a no-op: the terminal ledger sk dedupes it, so neither counter nor
-        ledger moves the second time."""
+        """Defensive double-settle (error handler + finally / retry) is a no-op:
+        the terminal sk dedupes it — counter and ledger move once."""
         from mvp._pipeline import settle_reservation_and_log
 
         ctx = self._ctxs.pop(tok)
@@ -207,61 +217,62 @@ class CreditLedgerMachine(RuleBasedStateMachine):
 
         _do_settle()
         settled_after_first = self._pool_settled()
-        # Defeat the in-process once-guard so the SECOND call actually re-runs the
-        # transaction and the DB-level attribute_not_exists is what must dedupe.
-        # Assert the guard attr exists first: a rename must FAIL loudly here rather
-        # than silently create a new attribute and leave the guard alive, which
-        # would turn "DB dedup verified" into "in-process guard verified" (Fable
-        # review high — whitebox fragility).
         assert hasattr(ctx, "_pool_finalized"), (
-            "once-guard attribute renamed — this test must be updated so it still "
-            "exercises the DB-level dedup, not the in-process guard"
+            "once-guard attribute renamed — update this test so it still exercises "
+            "the DB-level dedup, not the in-process guard"
         )
         ctx._pool_finalized = False
         _do_settle()
-
-        # DB dedup effect: exactly one terminal event, counter did not advance.
         assert self._pool_settled() == settled_after_first, (
             "re-settle advanced the counter — DB dedup failed"
         )
-        self.ref_settled += actual  # counted ONCE despite two settle calls
+        self.ref_settled += actual
         self._live_reserved.pop(tok)
-        self._expected_terminal[ctx.hold_id] = (actual, "completion")
+        self._expected_terminal[ctx.hold_id] = (
+            "SETTLE", int(ctx.pool_reserved_microusd), actual
+        )
 
     @rule(tok=consumes(holds))
     def release(self, tok):
-        """Invoke-time failure: release, never settle → no settled value, reserved
-        returned, no terminal ledger event in Phase 1."""
+        """Invoke-time failure: release, never settle → reserved returned, a
+        RELEASE terminal recorded (Phase 2), no settled value."""
         from mvp._pipeline import release_pool
 
         ctx = self._ctxs.pop(tok)
         release_pool(ctx)
-        self._live_reserved.pop(tok)  # reserved returned; RES invariant checks it
-        # no terminal event expected.
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "RELEASE", int(ctx.pool_reserved_microusd), 0
+        )
 
     @rule(tok=consumes(holds))
     def crash_then_reap(self, tok):
         """Owner crashes between reserve and settle; the lazy sweep reclaims the
-        hold. Phase-1 reaper writes NO ledger event and charges NO spend, so the
-        reaped hold contributes 0 to settled AND returns its reserved."""
+        hold. Phase 2: the reaper writes a RECLAIM terminal (reserved returned,
+        settled 0) in the same txn as the counter move."""
         ctx = self._ctxs.pop(tok)
         self._force_reap(ctx)
-        self._live_reserved.pop(tok)  # reaper returned reserved; no terminal event.
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "RECLAIM", int(ctx.pool_reserved_microusd), 0
+        )
 
     @rule(tok=consumes(holds), frac=ACTUAL_FRACTION)
-    def reap_then_settle(self, tok, frac):
-        """The reaper reclaims the hold, THEN a late settle arrives (the owner was
-        merely slow, not dead). settle finds the hold gone and must take the
-        settled-only txn: record the spend with reserved_delta=0 /
-        settle_reason='reaper_race', because the reaper already returned reserved
-        (Fable review critical-2 — this branch was previously uncovered by the
-        stateful machine)."""
+    def reap_then_late_settle(self, tok, frac):
+        """The reaper reclaims the hold (RECLAIM terminal, reserved returned), THEN
+        a late settle arrives. settle finds the terminal is a RECLAIM and records
+        the spend via a LATE_SETTLE on a DISTINCT sk (reserved_delta=0) — the
+        Phase-2 revenue-leak fix. The RECLAIM terminal stays; a LATE_SETTLE is
+        added."""
         from mvp._pipeline import settle_reservation_and_log
 
         ctx = self._ctxs.pop(tok)
         actual = int((ctx.pool_reserved_microusd * frac) // 100)
-        self._force_reap(ctx)               # reserved returned by the reaper
+        self._force_reap(ctx)               # RECLAIM terminal, reserved returned
         self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "RECLAIM", int(ctx.pool_reserved_microusd), 0
+        )
         settle_reservation_and_log(
             user=self.user, tenants_repo=ctx,
             reservation=ctx.reservation_tokens,
@@ -270,32 +281,91 @@ class CreditLedgerMachine(RuleBasedStateMachine):
             context=ctx, actual_cost_microusd=actual,
         )
         self.ref_settled += actual
-        self._expected_terminal[ctx.hold_id] = (actual, "reaper_race")
-        # Assert the settled-only shape directly on the written event.
-        ev = [e for e in self._all_events()
-              if e.get("hold_id") == ctx.hold_id and e["sk"].endswith("#TERMINAL")]
-        assert len(ev) == 1, f"expected one terminal event, got {len(ev)}"
-        assert int(ev[0]["reserved_delta_microusd"]) == 0, (
-            "settled-only txn must NOT re-release reserved (reaper already did)"
+        self._expected_late[ctx.hold_id] = actual
+        # Assert the LATE_SETTLE shape directly.
+        _, terminal, late = self._events_by_kind()
+        assert terminal[ctx.hold_id]["event_type"] == "RECLAIM"
+        assert ctx.hold_id in late, "LATE_SETTLE not written after reaper race"
+        lev = late[ctx.hold_id]
+        assert int(lev["reserved_delta_microusd"]) == 0, (
+            "LATE_SETTLE must not touch reserved (reaper already returned it)"
         )
-        assert ev[0].get("settle_reason") == "reaper_race"
+        assert int(lev["settled_delta_microusd"]) == actual
+
+    @rule(tok=consumes(holds), frac=ACTUAL_FRACTION)
+    def reap_then_late_settle_retry(self, tok, frac):
+        """A late settle after a RECLAIM, invoked TWICE (retry worker): exactly one
+        LATE_SETTLE, settled counted once. Proves the LATE_SETTLE sk dedup."""
+        from mvp._pipeline import settle_reservation_and_log
+
+        ctx = self._ctxs.pop(tok)
+        actual = int((ctx.pool_reserved_microusd * frac) // 100)
+        self._force_reap(ctx)
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "RECLAIM", int(ctx.pool_reserved_microusd), 0
+        )
+
+        def _do_settle():
+            settle_reservation_and_log(
+                user=self.user, tenants_repo=ctx,
+                reservation=ctx.reservation_tokens,
+                actual_input_tokens=10, actual_output_tokens=5,
+                model_id="us.anthropic.claude-opus-4-7",
+                context=ctx, actual_cost_microusd=actual,
+            )
+
+        _do_settle()
+        settled_after_first = self._pool_settled()
+        ctx._pool_finalized = False   # force the second invocation to re-run
+        _do_settle()
+        assert self._pool_settled() == settled_after_first, (
+            "LATE_SETTLE retry advanced the counter — sk dedup failed"
+        )
+        self.ref_settled += actual
+        self._expected_late[ctx.hold_id] = actual
+
+    @rule(tok=consumes(holds), frac=ACTUAL_FRACTION)
+    def release_then_settle(self, tok, frac):
+        """A settle after an explicit RELEASE is a protocol violation: it must NOT
+        be billed. The terminal is RELEASE, so no LATE_SETTLE is written and the
+        counter does not move."""
+        from mvp._pipeline import release_pool, settle_reservation_and_log
+
+        ctx = self._ctxs.pop(tok)
+        release_pool(ctx)
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "RELEASE", int(ctx.pool_reserved_microusd), 0
+        )
+        settled_before = self._pool_settled()
+        ctx._pool_finalized = False   # force the late settle to attempt
+        actual = int((ctx.pool_reserved_microusd * frac) // 100)
+        settle_reservation_and_log(
+            user=self.user, tenants_repo=ctx,
+            reservation=ctx.reservation_tokens,
+            actual_input_tokens=10, actual_output_tokens=5,
+            model_id="us.anthropic.claude-opus-4-7",
+            context=ctx, actual_cost_microusd=actual,
+        )
+        # No billing after release.
+        assert self._pool_settled() == settled_before, (
+            "settle after release charged spend — protocol violation"
+        )
+        _, _, late = self._events_by_kind()
+        assert ctx.hold_id not in late, "LATE_SETTLE written after a RELEASE"
 
     @rule(tok=consumes(holds), frac=ACTUAL_FRACTION)
     def expire_then_settle_then_sweep(self, tok, frac):
-        """The hold's lease expires, but the (merely slow) owner settles it BEFORE
-        the lazy sweep runs; then the sweep runs. The reaper must be a NO-OP on an
-        already-settled hold: the settle recorded the spend and returned reserved,
-        and the later sweep must neither charge again nor return reserved twice.
-        This is a real Phase-1 transition no other rule covers — settle wins the
-        race, reaper finds nothing (Fable review round-2, gap A). True concurrent
-        TOCTOU (reaper delete vs settle commit interleaved) is out of reach for a
-        sequential state machine and is covered by the runtime's conditional
-        delete + code review, not here."""
+        """The hold expires but the (slow) owner settles BEFORE the sweep runs;
+        then the sweep runs. settle wins the terminal race → SETTLE terminal; the
+        later reaper finds the terminal taken → its RECLAIM Put CCFs → no-op (no
+        double-charge, no double-return, no RECLAIM terminal)."""
         from mvp._pipeline import _sweep_expired_holds, settle_reservation_and_log
         from dynamo.tenant_budgets import TenantBudgetsRepository
 
         ctx = self._ctxs.pop(tok)
-        self._expire_hold_row(ctx)  # past-date the lease, but DO NOT sweep yet
+        self._expire_hold_row(ctx)  # past-date the lease, DO NOT sweep yet
         actual = int((ctx.pool_reserved_microusd * frac) // 100)
         settle_reservation_and_log(
             user=self.user, tenants_repo=ctx,
@@ -305,33 +375,56 @@ class CreditLedgerMachine(RuleBasedStateMachine):
             context=ctx, actual_cost_microusd=actual,
         )
         self.ref_settled += actual
-        self._live_reserved.pop(tok)  # settle returned reserved
-        # Normal settle path (hold still present at settle time) → completion.
-        self._expected_terminal[ctx.hold_id] = (actual, "completion")
-        # Now the reaper runs on an already-settled (row-gone) hold: must be no-op.
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "SETTLE", int(ctx.pool_reserved_microusd), actual
+        )
         settled_before = self._pool_settled()
         reserved_before = self._pool_reserved()
+        reclaimed_before = self._pool_reclaimed()
         budgets = TenantBudgetsRepository()
         _sweep_expired_holds(budgets, self.tenant_id, self.period)
-        assert self._pool_settled() == settled_before, (
-            "sweep after settle changed settled — reaper double-charged"
+        assert self._pool_settled() == settled_before, "sweep double-charged"
+        assert self._pool_reserved() == reserved_before, "sweep double-returned reserved"
+        assert self._pool_reclaimed() == reclaimed_before, (
+            "sweep reclaimed an already-settled hold"
         )
-        assert self._pool_reserved() == reserved_before, (
-            "sweep after settle changed reserved — reaper double-returned"
+        _, terminal, _ = self._events_by_kind()
+        assert terminal[ctx.hold_id]["event_type"] == "SETTLE", (
+            "reaper overwrote the SETTLE terminal"
         )
 
-    # -- shared reap mechanism ----------------------------------------------
+    @rule(tok=consumes(holds))
+    def double_reap(self, tok):
+        """The sweep runs twice on the same expired hold: reclaimed increments
+        once, one RECLAIM terminal (the second sweep's Put CCFs / hold is gone)."""
+        from mvp._pipeline import _sweep_expired_holds
+        from dynamo.tenant_budgets import TenantBudgetsRepository
+
+        ctx = self._ctxs.pop(tok)
+        self._expire_hold_row(ctx)
+        budgets = TenantBudgetsRepository()
+        reclaimed_before = self._pool_reclaimed()
+        _sweep_expired_holds(budgets, self.tenant_id, self.period)
+        after_first = self._pool_reclaimed()
+        _sweep_expired_holds(budgets, self.tenant_id, self.period)
+        assert self._pool_reclaimed() == after_first, "second sweep reclaimed again"
+        assert after_first == reclaimed_before + int(ctx.pool_reserved_microusd)
+        self._live_reserved.pop(tok)
+        self._expected_terminal[ctx.hold_id] = (
+            "RECLAIM", int(ctx.pool_reserved_microusd), 0
+        )
+
+    # -- shared hold-expiry mechanism ---------------------------------------
 
     def _expire_hold_row(self, ctx):
-        """Rewrite the hold row's embedded expiry into the past WITHOUT sweeping,
-        so a subsequent settle sees a live-but-expired hold. Keeps ctx.hold_sk
-        pointing at the re-keyed row. Returns the new sk.
+        """Past-date the hold row's embedded expiry WITHOUT sweeping, so a
+        subsequent settle/sweep sees a live-but-expired hold. Keeps ctx.hold_sk
+        pointing at the re-keyed row.
 
         On why ctx.hold_sk is updated: a genuinely slow owner holds a ctx whose sk
-        embeds an expiry that is now in the past (time simply passed). Re-keying to
-        the past-dated sk reproduces that exact state; leaving the future-dated sk
-        would instead fabricate an "expiry in the future but the row is gone"
-        state that never occurs in production."""
+        embeds an expiry that has simply passed; re-keying to the past-dated sk
+        reproduces that exact state."""
         from dynamo.tenant_budgets import TenantBudgetsRepository, hold_sk as _hsk
 
         budgets = TenantBudgetsRepository()
@@ -353,9 +446,9 @@ class CreditLedgerMachine(RuleBasedStateMachine):
         return new_sk
 
     def _force_reap(self, ctx):
-        """Expire the hold and immediately run the sweep, so the reaper reclaims
-        it. Asserts the row existed and is gone afterwards — a schema drift that
-        made this a no-op would otherwise pass vacuously (Fable review high)."""
+        """Expire the hold and immediately sweep, so the reaper reclaims it and
+        writes a RECLAIM terminal. Asserts the row existed and is gone afterwards
+        (a schema drift that made this a no-op would otherwise pass vacuously)."""
         from dynamo.tenant_budgets import TenantBudgetsRepository
         from mvp._pipeline import _sweep_expired_holds
 
@@ -370,96 +463,113 @@ class CreditLedgerMachine(RuleBasedStateMachine):
     # -- invariants ----------------------------------------------------------
 
     @invariant()
-    def i1_counter_equals_ledger(self):
-        assert self._pool_settled() == self._ledger_settled(), (
-            f"I1 broken: counter={self._pool_settled()} "
-            f"ledger={self._ledger_settled()}"
+    def i1_settled_counter_equals_ledger(self):
+        # I1': settled counter == Σ SETTLE.settled + Σ LATE_SETTLE.settled.
+        _, terminal, late = self._events_by_kind()
+        ledger_settled = sum(
+            int(e["settled_delta_microusd"]) for e in terminal.values()
+        ) + sum(int(e["settled_delta_microusd"]) for e in late.values())
+        assert self._pool_settled() == ledger_settled, (
+            f"I1' broken: counter={self._pool_settled()} ledger={ledger_settled}"
         )
 
     @invariant()
-    def ref_matches_ledger(self):
-        # Triangulate: the reference total must equal BOTH the SUT's own
-        # aggregation (sum_settled_microusd) AND an independent re-sum over the
-        # raw events. Comparing only against the SUT method would trust that
-        # method's own correctness (e.g. its pagination) — the independent sum
-        # keeps the check from being partly circular (Fable review round-2 high-4).
-        indep = sum(int(e.get("settled_delta_microusd", 0)) for e in self._all_events())
-        assert self.ref_settled == self._ledger_settled() == indep, (
-            f"reference settled={self.ref_settled} != "
-            f"sum_settled={self._ledger_settled()} != independent_sum={indep}"
+    def i2_reserved_derivation(self):
+        # I2: reserved counter == Σ RESERVE.reserved_delta + Σ terminal.reserved_delta
+        # (RESERVE is +R, each terminal returns -R; open holds have no terminal).
+        reserve, terminal, _ = self._events_by_kind()
+        derived = sum(int(e["reserved_delta_microusd"]) for e in reserve.values())
+        derived += sum(int(e["reserved_delta_microusd"]) for e in terminal.values())
+        assert self._pool_reserved() == derived, (
+            f"I2 broken: counter={self._pool_reserved()} ledger-derived={derived}"
+        )
+        # Cross-check against the live-hold bookkeeping.
+        assert self._pool_reserved() == sum(self._live_reserved.values()), (
+            "I2 cross-check: reserved counter != Σ live reserved"
         )
 
     @invariant()
-    def reserved_counter_matches_live_holds(self):
-        # RES: the reserved counter equals the sum of reserved over holds that
-        # have NOT yet reached a terminal move. Catches a reaper/release that
-        # fails to return reserved, or returns it twice.
-        expected = sum(self._live_reserved.values())
-        assert self._pool_reserved() == expected, (
-            f"RES broken: pool_reserved={self._pool_reserved()} "
-            f"!= Σ live reserved={expected}"
+    def i3_reclaimed_derivation(self):
+        # I3: reclaimed counter == Σ over RECLAIM terminals of (reserved returned).
+        _, terminal, _ = self._events_by_kind()
+        reclaimed = sum(
+            -int(e["reserved_delta_microusd"])
+            for e in terminal.values()
+            if e["event_type"] == "RECLAIM"
+        )
+        assert self._pool_reclaimed() == reclaimed, (
+            f"I3 broken: counter={self._pool_reclaimed()} ledger={reclaimed}"
         )
 
     @invariant()
-    def terminal_events_complete_and_correct(self):
-        # TERM + I6: each hold that reached a terminal move has exactly one
-        # terminal event with the expected settled_delta and settle_reason; no
-        # extra/ghost terminal events; every SETTLE settled_delta >= 0. This is
-        # the real replacement for the storage-tautology sk-uniqueness check.
-        by_hold: dict[str, list[dict]] = {}
-        for it in self._all_events():
-            if not it["sk"].endswith("#TERMINAL"):
-                continue
-            by_hold.setdefault(it["hold_id"], []).append(it)
+    def nonneg_counters(self):
+        assert self._pool_settled() >= 0
+        assert self._pool_reserved() >= 0
+        assert self._pool_reclaimed() >= 0
 
-        for hold_id, evs in by_hold.items():
-            assert len(evs) == 1, (
-                f"TERM broken: hold {hold_id} has {len(evs)} terminal events"
+    @invariant()
+    def exactly_once_spend(self):
+        # The direct detector of the Phase-1 revenue leak: every settle that
+        # returned success must have its spend in the ledger exactly once.
+        _, terminal, late = self._events_by_kind()
+        ledger_settled = sum(
+            int(e["settled_delta_microusd"]) for e in terminal.values()
+        ) + sum(int(e["settled_delta_microusd"]) for e in late.values())
+        assert self.ref_settled == ledger_settled, (
+            f"EXACTLY-ONCE-SPEND broken: expected={self.ref_settled} "
+            f"ledger={ledger_settled}"
+        )
+
+    @invariant()
+    def term_prime(self):
+        # TERM': structure + per-event value correctness + no ghost/missing.
+        reserve, terminal, late = self._events_by_kind()
+        # RESERVE completeness: every reserved hold has exactly its RESERVE event.
+        assert set(reserve) == set(self._reserved_events), (
+            f"RESERVE set mismatch: ledger={set(reserve)} "
+            f"expected={set(self._reserved_events)}"
+        )
+        for hid, exp_reserved in self._reserved_events.items():
+            assert int(reserve[hid]["reserved_delta_microusd"]) == exp_reserved, (
+                f"RESERVE reserved_delta for {hid} != {exp_reserved}"
             )
-            ev = evs[0]
-            assert int(ev["settled_delta_microusd"]) >= 0, "I6 broken: negative settled"
-            assert hold_id in self._expected_terminal, (
-                f"ghost terminal event for un-terminated hold {hold_id}"
+        # Terminal completeness + correctness.
+        assert set(terminal) == set(self._expected_terminal), (
+            f"terminal set mismatch: ledger={set(terminal)} "
+            f"expected={set(self._expected_terminal)}"
+        )
+        for hid, (exp_type, exp_returned, exp_settled) in self._expected_terminal.items():
+            ev = terminal[hid]
+            assert ev["event_type"] == exp_type, (
+                f"terminal type for {hid}: {ev['event_type']} != {exp_type}"
             )
-            exp_settled, exp_reason = self._expected_terminal[hold_id]
+            assert int(ev["reserved_delta_microusd"]) == -exp_returned, (
+                f"terminal reserved_delta for {hid} != -{exp_returned}"
+            )
             assert int(ev["settled_delta_microusd"]) == exp_settled, (
-                f"terminal settled {ev['settled_delta_microusd']} != expected {exp_settled}"
+                f"terminal settled_delta for {hid} != {exp_settled}"
             )
-            assert ev.get("settle_reason") == exp_reason, (
-                f"settle_reason {ev.get('settle_reason')} != expected {exp_reason}"
-            )
-        # Every hold we terminated must have produced its event.
-        missing = set(self._expected_terminal) - set(by_hold)
-        assert not missing, f"expected terminal events missing for holds {missing}"
-
-    @invariant()
-    def only_settle_terminal_events_exist(self):
-        # Phase-1 spec: the ledger contains ONLY SETTLE terminal events — the
-        # reaper and release write NO ledger event, and RESERVE/RECLAIM are
-        # Phase 2. The TERM invariant filters on '#TERMINAL', so a stray
-        # NON-terminal event (e.g. a premature Phase-2 RECLAIM/RESERVE leaking in,
-        # or a settled_delta=0 ghost) would slip past it AND past I1/ref (which
-        # only sum settled). Assert the whole partition is exactly the terminal
-        # events we expect — nothing else exists (Fable review round-2, 2-3).
-        all_events = self._all_events()
-        terminal = [e for e in all_events if e["sk"].endswith("#TERMINAL")]
-        assert len(all_events) == len(terminal) == len(self._expected_terminal), (
-            f"unexpected ledger events: total={len(all_events)} "
-            f"terminal={len(terminal)} expected={len(self._expected_terminal)} "
-            f"(Phase 1 must hold only SETTLE terminal events)"
+            assert int(ev["settled_delta_microusd"]) >= 0, "negative settled"
+        # LATE_SETTLE completeness + the LATE ⇒ terminal=RECLAIM dependency.
+        assert set(late) == set(self._expected_late), (
+            f"LATE set mismatch: ledger={set(late)} expected={set(self._expected_late)}"
         )
-        # Every terminal event must be an actual SETTLE (event_type), not some
-        # other terminal type sneaking onto the shared terminal sk.
-        for e in terminal:
-            assert e.get("event_type") == "SETTLE", (
-                f"non-SETTLE terminal event {e.get('event_type')} in Phase 1"
+        for hid, exp_settled in self._expected_late.items():
+            assert terminal[hid]["event_type"] == "RECLAIM", (
+                f"LATE_SETTLE for {hid} but terminal is {terminal[hid]['event_type']}"
             )
+            lev = late[hid]
+            assert int(lev["reserved_delta_microusd"]) == 0
+            assert int(lev["settled_delta_microusd"]) == exp_settled
 
 
 TestCreditLedgerStateful = CreditLedgerMachine.TestCase
+# 20×25 keeps the whole 10-rule Phase-2 protocol deeply interleaved while staying
+# CI-reasonable (~4-5 min); the money invariants make every step do several
+# consistent-read Queries, so this is I/O-bound, not shallow. Raise for nightly.
 TestCreditLedgerStateful.settings = settings(
-    max_examples=25,
-    stateful_step_count=30,
+    max_examples=20,
+    stateful_step_count=25,
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
