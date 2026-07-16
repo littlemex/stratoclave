@@ -149,6 +149,50 @@ class TestFailover:
         assert routed.attempt_facts[-1].outcome == "success"
         assert len(events) == 2
 
+    def test_fail_region_spec_targets_only_that_region(self, monkeypatch):
+        """The `fail-region-<R>` fault fails ONLY region R, so a real failover to
+        a healthy region succeeds — the mechanism the live E2E uses to prove a
+        successful cross-region commit (region-agnostic specs can only show
+        exhaustion). Here fault injection IS enabled (autouse fixture)."""
+        from unittest.mock import MagicMock, patch
+
+        from mvp.routing import chains
+
+        monkeypatch.setenv("BEDROCK_REGION", "us-east-1")
+        monkeypatch.setenv("STRATOCLAVE_FAILOVER_REGIONS", "us-west-2")
+        chains.reset_catalog()
+
+        seen: list[str] = []
+
+        def mock_client(region):
+            seen.append(region)
+            c = MagicMock()
+            c.converse_stream.return_value = {"stream": _mock_stream()}
+            return c
+
+        with patch("mvp.routing.infrarouter.bedrock_client", side_effect=mock_client):
+            async def run():
+                routed = await route_stream(_req(fault_spec="fail-region-us-east-1", rid="rfr"))
+                events = [e async for e in routed.events]
+                return routed, events
+
+            routed, events = asyncio.run(run())
+
+        chains.reset_catalog()
+
+        # us-east-1 is synthetically unavailable → committed on us-west-2.
+        # NOTE: the fault raises BEFORE _attempt_invoke builds the client, so
+        # `seen` (populated inside the client factory) only records the region
+        # that actually got a client (us-west-2). The us-east-1 attempt is
+        # visible in attempt_facts, which is the authoritative record.
+        assert routed.target.region == "us-west-2"
+        assert seen == ["us-west-2"]
+        assert any(
+            a.outcome == "failover" and a.target.region == "us-east-1"
+            for a in routed.attempt_facts
+        )
+        assert len(events) == 2
+
     def test_all_regions_throttle_raises_after_exhausting_chain(self, monkeypatch):
         """If every region fails over, the chain exhausts and the last error is
         raised (fail-closed) rather than committing to nothing."""

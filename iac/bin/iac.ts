@@ -339,6 +339,16 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
       ? { STRATOCLAVE_FAILOVER_REGIONS: failoverRegionsEnv }
       : {}),
 
+    // Fault injection for live failover verification (mvp/routing/fault.py).
+    // Passed through ONLY when explicitly set to "1", so it is ABSENT by default
+    // and MUST never be set on a production task. When present it lets an
+    // operator-issued request carry an `x-sc-fault` header to trigger synthetic
+    // Bedrock errors (throttle/unavailable/timeout) and exercise the real
+    // cross-region failover path on a staging deploy.
+    ...(process.env.SC_FAULT_INJECTION === '1'
+      ? { SC_FAULT_INJECTION: '1' }
+      : {}),
+
     // OpenAI (codex / GPT-5.x) on Amazon Bedrock — bedrock-mantle endpoint.
     // GPT-5.4 / GPT-5.5 are GA only in us-east-2 / us-west-2; the route handler
     // in mvp/openai_responses.py picks the per-model region out of the model
