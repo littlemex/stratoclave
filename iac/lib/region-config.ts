@@ -21,8 +21,10 @@ export const DEFAULT_REGION = 'us-east-1'; // historical single-region default (
 export const WAF_REGION = 'us-east-1'; // AWS hard requirement: CLOUDFRONT-scope WebACL
 
 // Default cross-region failover targets when STRATOCLAVE_FAILOVER_REGIONS is
-// unset. Mirrors mvp/routing/chains.py::_DEFAULT_FAILOVER_REGIONS. Filtered to
-// the primary's jurisdiction below (residency safety).
+// unset. Mirrors mvp/routing/chains.py::_DEFAULT_FAILOVER_REGIONS — if you
+// change this, update BOTH (a py<->ts drift test,
+// test_default_failover_regions_match_iac_constant, guards it). Filtered to the
+// primary's jurisdiction below (residency safety).
 const DEFAULT_FAILOVER_REGIONS = ['us-west-2', 'eu-west-1'];
 const FAILOVER_DISABLE_SENTINELS = new Set(['', 'none', 'disabled', 'off']);
 // Hardcoded in mvp/models.py — the codex path calls bedrock-mantle in these
@@ -137,13 +139,16 @@ export function resolveRegionConfig(env: Env): RegionConfig {
     env.DEFAULT_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-7';
 
   const failoverRegionsEnv = env.STRATOCLAVE_FAILOVER_REGIONS;
-  // Match the backend EXACTLY: mvp/openai_responses.py treats codex as enabled
-  // iff `CODEX_ENABLED.lower() == "true"`. Using `!== 'false'` here would flip
-  // an existing `CODEX_ENABLED=0`/`no`/`off` deployment to enabled on the next
-  // synth — silently re-enabling codex (and, off us-east-1, leaking prompts to
-  // the US registry regions). The IaC default is 'true' to preserve the
-  // ECS-injected default (backend's own bare default is 'false', but CDK always
-  // sets it explicitly). (Fable final review B-1)
+  // Match the backend for every EXPLICIT value: mvp/openai_responses.py treats
+  // codex as enabled iff `CODEX_ENABLED.lower() == "true"`. Using `!== 'false'`
+  // here would flip an existing `CODEX_ENABLED=0`/`no`/`off` deployment to
+  // enabled on the next synth — silently re-enabling codex (and, off us-east-1,
+  // leaking prompts to the US registry regions). One deliberate divergence:
+  // empty string is falsy in JS `||`, so `''` takes the IaC default ('true')
+  // rather than the backend's bare-getenv 'false' — harmless because CDK always
+  // injects the normalized String(codexEnabled) into the task, so the container
+  // and this analysis always agree. Operators disable codex with 'false', not
+  // ''. (Fable final review B-1)
   const codexEnabled = (env.CODEX_ENABLED || 'true').toLowerCase() === 'true';
 
   const effectiveFailover = effectiveFailoverRegions(env, bedrockPrimaryRegion);
