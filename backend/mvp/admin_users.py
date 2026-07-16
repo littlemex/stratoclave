@@ -725,7 +725,22 @@ def assign_tenant(
 
     user_tenants_repo = UserTenantsRepository()
 
-    # (1) DynamoDB TransactWriteItems
+    # (0) Apply the role change FIRST, through the single chokepoint. This runs
+    # BEFORE any tenant-state mutation so its guards (last-admin, and crucially
+    # "team_lead must not still own a tenant") fire before we move anything —
+    # otherwise a demote-and-move would orphan the old tenant's owner pointer
+    # (Fable capability review C1). _set_user_role is idempotent (no-op + no
+    # sign-out when the role is unchanged), audits the change, and signs the
+    # user out. BUG FIX: switch_tenant's `new_role` only ever wrote the
+    # per-tenant UserTenants row + Users.org_id, never Users.roles (the
+    # authorization SoT), so promotion/demotion here was a silent no-op —
+    # privilege retention on demote. Routing through the chokepoint fixes that
+    # and keeps role mutation in exactly one place.
+    _set_user_role(user_id=user_id, new_role=body.new_role, actor=actor)
+
+    # (1) DynamoDB TransactWriteItems. new_role is still passed so the per-tenant
+    # UserTenants row (used only for the admin tenant-members display) stays
+    # consistent with Users.roles; authorization is driven by Users.roles above.
     try:
         user_tenants_repo.switch_tenant(
             user_id=user_id,
@@ -736,20 +751,6 @@ def assign_tenant(
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=f"Tenant switch conflict: {e}")
-
-    # (1b) Apply the role to Users.roles — the authorization source of truth.
-    # BUG FIX (capability audit): switch_tenant writes new_role only into the
-    # per-tenant UserTenants row and Users.org_id, NOT Users.roles, which is
-    # what deps.py enforces. So `new_role` was a silent no-op for authorization
-    # — a demotion left admin power intact (privilege retention). Route the role
-    # change through the same last-admin-guarded update as PATCH /role.
-    roles_raw = user_item.get("roles") or []
-    old_roles = [roles_raw] if isinstance(roles_raw, str) else [str(r) for r in roles_raw]
-    if old_roles != [body.new_role]:
-        if "admin" in old_roles and body.new_role != "admin" and _count_active_admins() <= 1:
-            raise HTTPException(status_code=409, detail="Cannot demote the last admin user")
-        if users_repo.update_roles(user_id, [body.new_role], expected_roles=old_roles) is None:
-            raise HTTPException(status_code=409, detail="Role changed concurrently; retry")
 
     # (2) Cognito saga: update attribute then global sign out.
     update_org_id(user_id, new_tenant_id)

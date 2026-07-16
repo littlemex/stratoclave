@@ -147,6 +147,58 @@ def test_missing_user_404(repos, monkeypatch):
     assert ei.value.status_code == 404
 
 
+def test_assign_tenant_routes_role_change_through_chokepoint(repos, monkeypatch):
+    """C1 fix (Fable): assign_tenant must apply the role via _set_user_role so
+    its guards run — not inline a subset. We assert it CALLS the chokepoint
+    (which owns the last-admin / owns-tenant / audit / sign-out behaviour),
+    proving role mutation lives in exactly one place."""
+    from mvp import admin_users
+
+    calls = {"n": 0, "args": None}
+
+    def _spy(*, user_id, new_role, actor):
+        calls["n"] += 1
+        calls["args"] = (user_id, new_role)
+        # Return a minimal Users row shape.
+        return {"user_id": user_id, "roles": [new_role], "org_id": "default-org"}
+
+    monkeypatch.setattr(admin_users, "_set_user_role", _spy)
+    monkeypatch.setattr(admin_users, "update_org_id", lambda *a, **k: None)
+    monkeypatch.setattr(admin_users, "global_sign_out", lambda *a, **k: None)
+
+    users = repos["users"]
+    _mk(users, "u1", ["user"])
+
+    # Stub the tenant existence + switch so we exercise only the role routing.
+    class _FakeTenants:
+        def get(self, tid):
+            return {"tenant_id": tid}
+
+    class _FakeUserTenants:
+        def switch_tenant(self, **k):
+            return {}
+
+        def credit_summary(self, *a, **k):
+            return {"total_credit": 0, "credit_used": 0, "remaining_credit": 0}
+
+        def ensure(self, *a, **k):
+            return None
+
+    monkeypatch.setattr(admin_users, "TenantsRepository", lambda: _FakeTenants())
+    monkeypatch.setattr(admin_users, "UserTenantsRepository", lambda: _FakeUserTenants())
+    # revoke_all_for_user path
+    import dynamo
+    monkeypatch.setattr(dynamo, "ApiKeysRepository", lambda: type("R", (), {"revoke_all_for_user": lambda self, *a, **k: 0})())
+
+    admin_users.assign_tenant(
+        user_id="u1",
+        body=admin_users.AssignTenantRequest(tenant_id="t2", new_role="team_lead"),
+        actor=_actor(),
+    )
+    assert calls["n"] == 1
+    assert calls["args"] == ("u1", "team_lead")
+
+
 def test_api_key_actor_cannot_change_role(repos):
     """A bearer key must never change roles (self-escalation path). The endpoint
     rejects api_key actors before any mutation."""
