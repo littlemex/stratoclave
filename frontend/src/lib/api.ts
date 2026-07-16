@@ -77,6 +77,14 @@ export interface UpdateMeResponse {
   locale: Locale
 }
 
+export interface MePermissionsResponse {
+  user_id: string
+  auth_kind: string
+  roles: Role[]
+  key_scopes: string[] | null
+  permissions: string[]
+}
+
 export interface UsageSummary {
   tenant_id: string
   total_credit: number
@@ -86,16 +94,22 @@ export interface UsageSummary {
   by_tenant: Record<string, number>
   sample_size: number
   since_days: number
+  // P0-11: count of sampled requests served by a fallback model.
+  fallback_count?: number
 }
 
 export interface UsageHistoryEntry {
   tenant_id: string
   tenant_name?: string | null
-  model_id: string
+  model_id: string // the EFFECTIVE model the request was served by
   input_tokens: number
   output_tokens: number
   total_tokens: number
   recorded_at: string
+  // P0-11 fallback visibility. null = legacy row (unknown), never rendered as
+  // a fallback.
+  requested_model_id?: string | null
+  fallback_occurred?: boolean | null
 }
 
 export interface UsageHistoryResponse {
@@ -201,21 +215,67 @@ export interface PoolBudget {
   remaining_usd_cents: number
 }
 
+// P0-11: tenant/user routing config (chain, quotas, allowlist). This is the
+// config the per-model-quota + cascading-fallback enforcement reads.
+export interface ModelQuota {
+  // Only usd_micro is accepted server-side (limit is monthly micro-USD).
+  unit?: 'usd_micro'
+  limit?: number | null
+  period?: 'monthly'
+}
+export interface TenantRoutingConfig {
+  tenant_id: string
+  configured: boolean
+  allowlist: string[]
+  chain: string[]
+  quotas: Record<string, ModelQuota>
+  fallback_mode: string
+  fallback_default: string
+  free_tier_model?: string | null
+}
+export interface UserRoutingConfig {
+  tenant_id: string
+  user_id: string
+  configured: boolean
+  preferred_model?: string | null
+  chain?: string[] | null
+  fallback?: string | null
+}
+
 export interface UsageLogEntry {
   tenant_id: string
   user_id: string
   user_email?: string | null
-  model_id: string
+  model_id: string // the EFFECTIVE model the request was served by
   input_tokens: number
   output_tokens: number
   total_tokens: number
   recorded_at: string
   timestamp_log_id: string
+  // P0-11 fallback visibility. null = legacy row (unknown), never a fallback.
+  requested_model_id?: string | null
+  fallback_occurred?: boolean | null
 }
 
 export interface UsageLogsResponse {
   logs: UsageLogEntry[]
   next_cursor?: string | null
+}
+
+// #66: read-only effective pricing table (built-in defaults <- overrides).
+export interface PricingRateEntry {
+  pricing_key: string
+  input_per_mtok_microusd: number
+  output_per_mtok_microusd: number
+  cache_read_per_mtok_microusd: number
+  cache_write_per_mtok_microusd: number
+  source: 'default' | 'override'
+  models: string[]
+}
+
+export interface PricingConfigResponse {
+  version: string | null // null = pure built-in defaults
+  rates: PricingRateEntry[]
 }
 
 // --- Phase S: Trusted Accounts / SSO Invites ---
@@ -308,6 +368,10 @@ export interface TeamLeadMembersResponse {
 export const api = {
   me: () => jsonRequest<MeResponse>('/api/mvp/me'),
 
+  // The caller's own effective capabilities — server-computed via the same
+  // evaluation the request path enforces (no client-side re-derivation).
+  myPermissions: () => jsonRequest<MePermissionsResponse>('/api/mvp/me/permissions'),
+
   updateMe: (body: { locale: Locale }) =>
     jsonRequest<UpdateMeResponse>('/api/mvp/me', {
       method: 'PATCH',
@@ -386,6 +450,15 @@ export const api = {
           body: JSON.stringify(body),
         },
       ),
+    setRole: (user_id: string, role: Role) =>
+      jsonRequest<UserSummary>(
+        `/api/mvp/admin/users/${encodeURIComponent(user_id)}/role`,
+        {
+          method: 'PATCH',
+          headers: jsonHeaders,
+          body: JSON.stringify({ role }),
+        },
+      ),
 
     listTenants: (opts?: { cursor?: string; limit?: number }) => {
       const params = new URLSearchParams()
@@ -459,6 +532,42 @@ export const api = {
           body: JSON.stringify(body),
         },
       ),
+    // P0-11: tenant/user routing config (chain, quotas, allowlist). GET returns
+    // defaults (configured=false) when unset. PUT is a full replace; the backend
+    // validates model ids, quota limits, and user-chain subsequence (400 names
+    // the offending field).
+    getRoutingConfig: (tenant_id: string) =>
+      jsonRequest<TenantRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/routing-config`,
+      ),
+    setRoutingConfig: (
+      tenant_id: string,
+      body: {
+        allowlist?: string[]
+        chain?: string[]
+        quotas?: Record<string, ModelQuota>
+        fallback_mode?: string
+        fallback_default?: 'on' | 'off'
+        free_tier_model?: string | null
+      },
+    ) =>
+      jsonRequest<TenantRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/routing-config`,
+        { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
+    getUserRoutingConfig: (tenant_id: string, user_id: string) =>
+      jsonRequest<UserRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/users/${encodeURIComponent(user_id)}/routing-config`,
+      ),
+    setUserRoutingConfig: (
+      tenant_id: string,
+      user_id: string,
+      body: { preferred_model?: string | null; chain?: string[] | null; fallback?: 'on' | 'off' | null },
+    ) =>
+      jsonRequest<UserRoutingConfig>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/users/${encodeURIComponent(user_id)}/routing-config`,
+        { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
     usageLogs: (opts?: {
       tenant_id?: string
       user_id?: string
@@ -479,6 +588,10 @@ export const api = {
         `/api/mvp/admin/usage-logs${q ? `?${q}` : ''}`,
       )
     },
+
+    // Read-only effective pricing table (#66).
+    pricingConfig: () =>
+      jsonRequest<PricingConfigResponse>('/api/mvp/admin/pricing-config'),
 
     // --- Phase S: Trusted Accounts ---
     listTrustedAccounts: (opts?: { cursor?: string; limit?: number }) => {
@@ -562,6 +675,25 @@ export const api = {
     deleteSsoInvite: (email: string) =>
       jsonRequest<void>(
         `/api/mvp/admin/sso-invites/${encodeURIComponent(email)}`,
+        { method: 'DELETE' },
+      ),
+
+    // Admin: list a user's API keys. NOTE the admin per-user endpoint returns a
+    // BARE array (list[ApiKeySummary]), not the {keys,...} envelope the
+    // self-service `apiKeys.list` uses. include_revoked defaults true so an
+    // admin auditing a user sees revocation history (and the row stays visible
+    // after revoke).
+    userApiKeys: (user_id: string, includeRevoked = true) => {
+      const q = includeRevoked ? '?include_revoked=true' : ''
+      return jsonRequest<ApiKeySummary[]>(
+        `/api/mvp/admin/users/${encodeURIComponent(user_id)}/api-keys${q}`,
+      )
+    },
+    // Admin: revoke ANY key by its key_id. The bare /{key_hash} route is 410
+    // Gone; this by-key-id path is the live one.
+    revokeApiKey: (key_id: string) =>
+      jsonRequest<void>(
+        `/api/mvp/admin/api-keys/by-key-id/${encodeURIComponent(key_id)}`,
         { method: 'DELETE' },
       ),
   },

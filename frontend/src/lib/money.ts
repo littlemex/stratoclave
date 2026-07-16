@@ -7,13 +7,40 @@
 // component) so they can be unit-tested and so React Fast Refresh is not
 // disturbed by a component file exporting non-components.
 
-// Render integer micro-USD as a "$X.YY" string. cents = round(micro / 10_000).
+// Render integer micro-USD as a "$X.YY" string, truncated to whole cents.
+// TRUNCATE TOWARD ZERO ON MAGNITUDE, matching the backend's cent convention
+// (`micro // 10_000`, floor of the magnitude — see admin_tenants
+// `_MICRO_USD_PER_CENT`): the UI must never display a cent MORE than the
+// backend recorded (Fable review round-2: a half-up UI vs a floor backend
+// disagrees by a cent on sub-cent spend like pool_settled_microusd). Symmetric
+// across sign (truncation on the magnitude, sign reapplied); integer-only; the
+// /10_000,/100 constants are exact for |micro| < 2^53 (~$9.007e9), beyond which
+// JSON numbers lose integer precision anyway.
 export function fmtMicroUsd(micro: number): string {
-  const cents = Math.round(micro / 10_000)
-  const neg = cents < 0
-  const abs = Math.abs(cents)
+  const neg = micro < 0
+  const absMicro = Math.abs(Math.trunc(micro))
+  const cents = Math.floor(absMicro / 10_000) // truncate toward zero (backend parity)
+  const sign = neg && cents !== 0 ? '-' : ''
+  const dollars = Math.floor(cents / 100).toLocaleString('en-US')
+  return `${sign}$${dollars}.${String(cents % 100).padStart(2, '0')}`
+}
+
+// Render integer micro-USD as a full-precision dollar rate, e.g. a per-MTok
+// price. Unlike fmtMicroUsd (which rounds to whole cents and would show a real
+// sub-cent rate as $0.00), this keeps up to 6 decimals — 1 micro-USD = $0.000001
+// — trimming trailing zeros so $5.00/MTok reads "$5", $0.075 reads "$0.075".
+// Integer math only (no float on the money value): split micro into whole
+// dollars and a 6-digit fractional micro remainder.
+export function fmtMicroUsdRate(micro: number): string {
+  const neg = micro < 0
+  const abs = Math.abs(Math.trunc(micro))
+  const dollars = Math.floor(abs / 1_000_000)
+  const frac6 = String(abs % 1_000_000).padStart(6, '0').replace(/0+$/, '')
   const sign = neg ? '-' : ''
-  return `${sign}$${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, '0')}`
+  // Pin en-US grouping so the thousands separator is always ',' and never
+  // collides with the fixed '.' decimal point on a non-US runtime locale.
+  const whole = dollars.toLocaleString('en-US')
+  return frac6 ? `${sign}$${whole}.${frac6}` : `${sign}$${whole}`
 }
 
 // Parse a user-typed dollar string ("500", "$500", "1,000", "500.50") into
@@ -32,7 +59,11 @@ export function parseUsdToCents(input: string): number | null {
   const dollars = dollarsStr === '' ? 0 : Number(dollarsStr)
   const cents = centsStr === '' ? 0 : Number(centsStr.padEnd(2, '0'))
   if (!Number.isSafeInteger(dollars) || !Number.isFinite(cents)) return null
-  return dollars * 100 + cents
+  const total = dollars * 100 + cents
+  // Guard the PRODUCT too (Fable review M5): a dollars value just under the
+  // safe-integer limit passes the check above but dollars*100 overflows.
+  if (!Number.isSafeInteger(total)) return null
+  return total
 }
 
 // Current billing period as YYYY-MM in UTC, matching the backend's

@@ -202,7 +202,40 @@ pub async fn whoami() -> Result<()> {
         "remaining_credit: {}",
         body.get("remaining_credit").and_then(|v| v.as_u64()).unwrap_or(0)
     );
+
+    // Effective capabilities (server-side expansion via /me/permissions). This
+    // is the SAME set the request path enforces — the authoritative answer to
+    // "what can I do", not a client-side re-derivation. Best-effort: an older
+    // backend without the endpoint simply omits the line.
+    if let Some(perms) = fetch_permissions(&client, &config, &tokens.access_token).await {
+        println!("permissions: {}", perms.join(", "));
+    }
     Ok(())
+}
+
+/// Fetch the caller's effective scope list from `/me/permissions`. Returns None
+/// on any error (endpoint absent / network / auth) so `whoami` degrades cleanly.
+async fn fetch_permissions(
+    client: &reqwest::Client,
+    config: &MvpConfig,
+    access_token: &str,
+) -> Option<Vec<String>> {
+    let resp = client
+        .get(config.me_permissions_url())
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let perms = json
+        .get("permissions")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    Some(perms)
 }
 
 pub fn logout() -> Result<()> {

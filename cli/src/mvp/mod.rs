@@ -17,6 +17,7 @@ pub mod claude_cmd;
 pub mod codex_cmd;
 pub mod config;
 pub mod ephemeral_key;   // Scope-parameterized ephemeral sk-stratoclave-* mint/revoke.
+pub mod sc_headers;      // Validation + carrier for x-sc-* attribution/pin headers.
 pub mod sso;
 pub mod team_lead;
 pub mod tokens;

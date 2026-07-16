@@ -49,6 +49,11 @@ ALLOWED_SITES = {
     "backend/mvp/_pipeline.py": {
         # The pool money mutations. All transactional, all tokened.
         ("backend/mvp/_pipeline.py", "reserve_credit", "transact_write_items"),          # CAS reserve
+        # Pool-less per-model quota reserve (P0-11 / Fable F-3). Same CAS-reserve
+        # shape as reserve_credit: [user_txn, *quota_lines], fresh token per
+        # attempt, cancelled transaction writes nothing. No pool counter touched
+        # (quota counters only) — A2/A5 reviewed OK.
+        ("backend/mvp/_pipeline.py", "_reserve_quota_without_pool", "transact_write_items"),
         ("backend/mvp/_pipeline.py", "_settle_pool_side", "transact_write_items"),        # settle (stable token)
         ("backend/mvp/_pipeline.py", "ReservationContext.release_pool", "transact_write_items"),  # release
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "transact_write_items"),        # reaper reclaim
@@ -125,6 +130,7 @@ EXPECTED_TOKEN_KIND = {
         # here we assert the token is at least freshly-minted per settle (never
         # a hard-coded constant, which the classifier WOULD flag).
         "reserve_credit": "fresh",
+        "_reserve_quota_without_pool": "fresh",
         "ReservationContext.release_pool": "fresh",
         "_sweep_one_period": "fresh",
         # settle has TWO transact sites: the main settle (fresh-minted `token`,

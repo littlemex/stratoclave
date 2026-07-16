@@ -19,6 +19,27 @@ from mvp.chat_completions import (
 )
 
 
+def _dummy_request(headers: dict | None = None):
+    """A bare FastAPI Request for direct handler calls (P0-15 pin extraction)."""
+    from fastapi import Request
+    hdrs = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    return Request({"type": "http", "headers": hdrs})
+
+
+def _dummy_response():
+    """A bare FastAPI Response for direct handler calls (headers land here)."""
+    from fastapi import Response
+    return Response()
+
+
+def _dummy_ctx():
+    """A minimal RequestContext for direct handler calls (correlation echo)."""
+    from mvp.observability.context import build_request_context
+    return build_request_context(
+        tenant_id="test-org", group_id_header=None, workflow_run_id_header=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Unit: message conversion
 # ---------------------------------------------------------------------------
@@ -112,7 +133,7 @@ class TestParameterRejection:
             "n": 2,
         })
         with pytest.raises(HTTPException) as exc:
-            chat_completions(body, user=None)
+            chat_completions(body, _dummy_request(), _dummy_response(), user=None, ctx=_dummy_ctx())
         assert exc.value.status_code == 400
         assert "n > 1" in exc.value.detail["error"]["message"]
 
@@ -126,7 +147,7 @@ class TestParameterRejection:
             "logprobs": True,
         })
         with pytest.raises(HTTPException) as exc:
-            chat_completions(body, user=None)
+            chat_completions(body, _dummy_request(), _dummy_response(), user=None, ctx=_dummy_ctx())
         assert exc.value.status_code == 400
 
     def test_response_format_rejected(self):
@@ -139,7 +160,7 @@ class TestParameterRejection:
             "response_format": {"type": "json_object"},
         })
         with pytest.raises(HTTPException) as exc:
-            chat_completions(body, user=None)
+            chat_completions(body, _dummy_request(), _dummy_response(), user=None, ctx=_dummy_ctx())
         assert exc.value.status_code == 400
 
     def test_image_url_content_part_rejected_pre_reservation(self):
@@ -158,7 +179,7 @@ class TestParameterRejection:
             }],
         })
         with pytest.raises(HTTPException) as exc:
-            chat_completions(body, user=None)
+            chat_completions(body, _dummy_request(), _dummy_response(), user=None, ctx=_dummy_ctx())
         assert exc.value.status_code == 400
         assert exc.value.detail["error"]["code"] == "unsupported_content"
 

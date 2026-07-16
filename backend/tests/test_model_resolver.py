@@ -43,6 +43,23 @@ class TestBasicResolution:
         )
         assert r.selected_model == "claude-sonnet-4-6"
 
+    def test_chain_start_matches_across_spellings(self):
+        # Fable rev2 F3: the chain is stored canonicalized (aliases[0]); a client
+        # requesting the same model under its bedrock-id spelling must still
+        # locate its start position, not silently fall back to the chain top.
+        from mvp.models import resolve_model as _rm
+        entry = _rm("claude-sonnet-4-6")
+        bedrock = entry.bedrock_model_id
+        if bedrock == entry.aliases[0]:
+            pytest.skip("model has no distinct bedrock-id spelling")
+        r = resolve_model(
+            requested_model=bedrock,          # non-canonical spelling
+            tenant_config=_tenant_config(),   # chain stores the alias
+        )
+        # starts at sonnet's position (not opus, the chain head)
+        assert r.selected_model == "claude-sonnet-4-6"
+        assert not r.fallback_occurred
+
 
 class TestFallbackChain:
     def test_fallback_disabled_returns_only_requested(self):

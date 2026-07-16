@@ -195,7 +195,27 @@ class ReservationContext:
     pricing_key: Optional[str] = None
     tenant_id: str = ""
     pool_active: bool = False
-    quota_lines: list = None  # list[dict] of per-model quota txn items (Phase 0: always None)
+    quota_lines: list = None  # list[dict] of per-model quota txn items (None = no quota)
+    # Per-model quota bookkeeping (set when a quota reservation was committed),
+    # so settle/release can move the same model's `used` counter. `selected_model`
+    # is the model the cascade actually landed on (may differ from requested).
+    selected_model: Optional[str] = None
+    # `requested_model` is what the client asked for (body.model, pre-cascade),
+    # kept so settle can record P0-11 fallback visibility. Stamped for EVERY
+    # request by `reserve_credit_for_model` (the single reserve chokepoint all
+    # three handlers go through — verified: no handler calls bare
+    # `reserve_credit`), so a live row never has this None. It defaults None
+    # only for defensively-constructed contexts / tests.
+    requested_model: Optional[str] = None
+    quota_reserved_amount: int = 0
+    quota_user_id: Optional[str] = None
+    # The period the quota `used` counter was reserved against. settle/release
+    # MUST key off this, never a fresh current_period() — a long request (or a
+    # stream) that crosses a month boundary would otherwise settle the wrong
+    # period's row (leaking the reserved period, negative-seeding the new one).
+    quota_period: Optional[str] = None
+    quota_tenant_limit: Optional[int] = None
+    quota_user_limit: Optional[int] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -506,6 +526,35 @@ def _err_402(reason: str) -> HTTPException:
     )
 
 
+def _err_400(reason: str) -> HTTPException:
+    """400 for a malformed/unservable request input (e.g. an invalid VSR pin)."""
+    return HTTPException(
+        status_code=400,
+        detail={"type": "invalid_request", "reason": reason},
+    )
+
+
+def _err_403(reason: str) -> HTTPException:
+    """403 for an authorization failure (e.g. a VSR pin outside the allowlist)."""
+    return HTTPException(
+        status_code=403,
+        detail={"type": "forbidden", "reason": reason},
+    )
+
+
+class QuotaExhausted(Exception):
+    """A per-model quota condition failed during reserve — the caller's
+    cascading fallback should try the next model. Carries which model's quota
+    was exhausted so the caller can advance the chain. NOT an HTTP error: it is
+    caught by `reserve_with_model_cascade` and only surfaces as 402 if EVERY
+    candidate is exhausted.
+    """
+
+    def __init__(self, model: str):
+        super().__init__(f"quota exhausted for model {model}")
+        self.model = model
+
+
 def reserve_credit_for_model(
     user,
     reservation_tokens: int,
@@ -514,34 +563,269 @@ def reserve_credit_for_model(
     input_tokens_est: int,
     max_output_tokens: int,
     effort_multiplier: int = 1,
+    breaker_max_tier: Optional[int] = None,
+    wire_protocol: Optional[str] = None,
+    vsr_hard_model: Optional[str] = None,
 ) -> ReservationContext:
-    """Reserve credit for a request, pricing the pool debit from the model.
+    """Reserve credit for a request, with per-model quota + cascading fallback.
 
-    Thin wrapper the route handlers call: resolves the model's `pricing_key`,
-    estimates the dollar cost of the reservation, and delegates to
-    `reserve_credit`. When the tenant has no pool budget this is exactly the
-    per-user token reservation as before; the pricing work is cheap and only
-    matters when a pool is present.
+    The single chokepoint every route handler calls. Two regimes:
+
+    - **No routing config** (the common case): prices the pool debit from the
+      requested model and delegates to `reserve_credit` — exactly the per-user
+      token reservation as before, plus the pool debit when a pool is present.
+      `context.selected_model` is the requested model so the handler invokes it.
+
+    - **Routing config present** (P0-11): resolves the ordered candidate chain
+      (allowlist ∩ chain ∩ breaker tier, honouring the fallback toggle) and
+      tries each candidate in turn. Each candidate is priced from ITS OWN
+      `pricing_key` — a cheaper fallback is reserved AND later settled at the
+      cheaper rate — and reserved against its per-model quota inside the same
+      atomic transaction as the pool debit. A `QuotaExhausted` on one candidate
+      advances to the next; a budget 402 (no money at all) surfaces immediately.
+      If every candidate's quota is exhausted, 402 `model_quota_exhausted`.
+
+    The chosen model is returned as `context.selected_model`; the handler
+    re-resolves that to a Bedrock model id for the actual invoke.
+
+    **VSR hard pin (P0-15).** When `vsr_hard_model` is set, the request is pinned
+    to exactly that model: no cascade, no chain rewrite, no breaker downgrade, no
+    quota-exhaustion fallback. The pin is validated first — it must resolve in
+    the registry and (when `wire_protocol` is given) speak this route's protocol
+    (else `_err_400("invalid_model_pin")`), and it must be in the tenant allowlist
+    when one is configured (else `_err_403("model_pin_not_allowed")`). A pinned
+    model whose quota is exhausted 402s (`model_quota_exhausted`) rather than
+    falling back — that is what "hard" means. Pricing/quota apply at the pinned
+    model's own rate, exactly as if the cascade had landed on it.
     """
-    from .models import resolve_model
+    from .models import resolve_model as _resolve_pricing
     from .pricing import estimate_cost_microusd
+    from .routing.config import get_tenant_routing_config, get_user_routing_config
+
+    def _price(model: str) -> tuple[str, int]:
+        try:
+            pk = _resolve_pricing(model).pricing_key
+        except ValueError:
+            pk = "default"
+        return pk, estimate_cost_microusd(
+            pricing_key=pk,
+            input_tokens_est=input_tokens_est,
+            max_output_tokens=max_output_tokens,
+            effort_multiplier=effort_multiplier,
+        )
+
+    tenant_cfg = get_tenant_routing_config(user.org_id)
+
+    # VSR hard pin (P0-15): validate, then force the candidate list to exactly
+    # [pin] and fall through to the same reserve loop (pricing + quota + atomic
+    # reserve) — so pinning reuses all the money machinery, only the candidate
+    # SELECTION changes. Handled before the no-config passthrough so a pin is
+    # honoured whether or not the tenant has routing config.
+    def _stamp_requested(ctx: ReservationContext) -> ReservationContext:
+        # Record the client-requested model (pre-cascade) on the context so
+        # settle can log P0-11 fallback visibility. Single chokepoint => every
+        # handler gets it without threading through each reserve return path.
+        ctx.requested_model = model_name
+        return ctx
+
+    if vsr_hard_model:
+        _validate_model_pin(vsr_hard_model, tenant_cfg, wire_protocol)
+        ctx = _reserve_over_candidates(
+            user, reservation_tokens, candidates=[vsr_hard_model],
+            tenant_cfg=tenant_cfg, price=_price,
+        )
+        # A VSR hard pin is a deliberate policy override, NOT a P0-11 quota
+        # cascade fallback (Fable #65 rev1 BUG 2). Record the effective (pinned)
+        # model as the "requested" one so the pin never inflates fallback_count
+        # or shows a spurious fallback badge — the two events are semantically
+        # different and the derived bool must not conflate them.
+        ctx.requested_model = ctx.selected_model or vsr_hard_model
+        return ctx
+    # No routing config at all → passthrough on the requested model (fully
+    # backward compatible: same reservation as before, no quota lines).
+    if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
+        pk, cost = _price(model_name)
+        return _stamp_requested(reserve_credit(
+            user, reservation_tokens,
+            pricing_key=pk, cost_microusd=cost,
+            selected_model=model_name,
+        ))
+
+    user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    candidates = _resolve_candidate_chain(
+        requested_model=model_name,
+        tenant_cfg=tenant_cfg,
+        user_cfg=user_cfg,
+        breaker_max_tier=breaker_max_tier,
+        wire_protocol=wire_protocol,
+    )
+    return _stamp_requested(_reserve_over_candidates(
+        user, reservation_tokens, candidates=candidates,
+        tenant_cfg=tenant_cfg, price=_price,
+    ))
+
+
+def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg, price):
+    """Walk an ordered candidate list, pricing + quota-reserving each atomically.
+
+    Shared by the P0-11 cascade and the P0-15 hard pin (a pin is just a
+    one-element candidate list). QuotaExhausted advances to the next candidate;
+    if every candidate's quota is exhausted, 402 `model_quota_exhausted` (for a
+    single-element pin list that means: the pinned model's quota is gone, no
+    fallback — the hard-pin contract)."""
+    from .routing import quota as _quota
+
+    period = current_period()
+    for model in candidates:
+        pk, cost = price(model)
+        q = tenant_cfg.quotas.get(model)
+        tenant_limit = q.limit if q else None
+        quota_lines = (
+            _quota.build_reserve_txn_items(
+                tenant_id=user.org_id, user_id=user.user_id, model=model,
+                period=period, amount=cost, tenant_limit=tenant_limit,
+            )
+            if (cost and tenant_limit is not None)
+            else None
+        )
+        try:
+            return reserve_credit(
+                user, reservation_tokens,
+                pricing_key=pk, cost_microusd=cost,
+                quota_lines=quota_lines,
+                quota_model=model if quota_lines else None,
+                selected_model=model,
+            )
+        except QuotaExhausted as e:
+            logger.info("quota_cascade_advance", tenant_id=user.org_id,
+                        exhausted_model=e.model, period=period)
+            continue
+    logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
+    raise _err_402("model_quota_exhausted")
+
+
+def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> None:
+    """Validate a VSR hard pin (P0-15). Servability first (400), then policy (403).
+
+    A pin is NOT exempt from these checks — it's a model the route never
+    validated, so an unservable or disallowed pin is rejected loudly, never
+    silently substituted (the Fable F2/F3/F4 money-bug shape).
+
+    Spelling: the pin is used VERBATIM downstream (candidate list, quota lookup,
+    reserve/settle) — deliberately NOT canonicalized. The whole routing config
+    (chain/allowlist/quotas) is keyed on raw spellings and P0-11 requires request
+    and config to agree on spelling; canonicalizing ONLY the pin (Fable rev1 F1's
+    first attempt) steered the quota lookup away from the configured key and
+    bypassed the cap (Fable rev2 NEW-1). Treating the pin exactly like the
+    requested model keeps one consistent convention.
+
+    Policy boundary (Fable rev2 NEW-2): a pin must sit inside the tenant's
+    configured model set. That is the `allowlist` when one exists; for a
+    chain-only tenant (no allowlist) the `chain` IS the model policy, so the pin
+    must be one of the chain's models — otherwise a client header could escape
+    the tenant's routing policy entirely. Only a tenant with neither allowlist
+    nor chain (pure passthrough) accepts an arbitrary servable pin."""
+    from .models import resolve_model as _resolve_registry
 
     try:
-        pricing_key = resolve_model(model_name).pricing_key
+        entry = _resolve_registry(pin)
     except ValueError:
-        pricing_key = "default"
-    cost = estimate_cost_microusd(
-        pricing_key=pricing_key,
-        input_tokens_est=input_tokens_est,
-        max_output_tokens=max_output_tokens,
-        effort_multiplier=effort_multiplier,
+        raise _err_400("invalid_model_pin")
+    if wire_protocol is not None and entry.wire_protocol != wire_protocol:
+        raise _err_400("invalid_model_pin")
+
+    # The pin must be in the tenant's configured model set (allowlist, else
+    # chain). Compare on the registry entry so different spellings of the same
+    # model match — WITHOUT changing the spelling used downstream.
+    policy_set = tenant_cfg.allowlist or tenant_cfg.chain
+    if policy_set:
+        allowed = False
+        for m in policy_set:
+            try:
+                if _resolve_registry(m) is entry:
+                    allowed = True
+                    break
+            except ValueError:
+                if m == pin:
+                    allowed = True
+                    break
+        if not allowed:
+            raise _err_403("model_pin_not_allowed")
+
+
+def _resolve_candidate_chain(
+    *,
+    requested_model: str,
+    tenant_cfg,
+    user_cfg,
+    breaker_max_tier: Optional[int],
+    wire_protocol: Optional[str] = None,
+) -> list:
+    """Ordered list of models to attempt for a request (P0-11 cascade).
+
+    Mirrors `model_resolver.resolve_model`'s filtering but returns the FULL
+    ordered list rather than just the head, so the caller can walk it on quota
+    exhaustion. Honours: chain start position, allowlist intersection, breaker
+    tier cap, and the tenant/user fallback toggle (which truncates to the head).
+    Always returns at least the requested model.
+
+    SERVABILITY FILTER (Fable F2/F3/F4 root fix): the handler invokes whatever
+    the cascade selects, so a candidate that can't actually be served on this
+    route is a money bug waiting to happen — if it won the cascade, the handler
+    would silently invoke the *requested* model instead, PAST its exhausted
+    quota and mispriced. So we drop any candidate that (a) doesn't resolve in the
+    model registry, or (b) — when `wire_protocol` is given — doesn't speak this
+    route's wire protocol. The requested model is exempt from the protocol drop
+    (it was already validated by the route) so a bad chain entry never fails an
+    otherwise-valid direct request. If filtering empties the chain, we keep the
+    requested model as the sole candidate.
+    """
+    from .models import resolve_model as _resolve_registry
+    from .routing.model_resolver import _resolve_chain, resolve_model
+
+    fallback_allowed = (tenant_cfg.fallback_default == "on")
+    if user_cfg and user_cfg.fallback is not None:
+        fallback_allowed = (user_cfg.fallback == "on")
+
+    selection = resolve_model(
+        requested_model=requested_model,
+        tenant_config=tenant_cfg,
+        user_config=user_cfg,
+        breaker_max_tier=breaker_max_tier,
+        fallback_allowed=fallback_allowed,
     )
-    return reserve_credit(
-        user,
-        reservation_tokens,
-        pricing_key=pricing_key,
-        cost_microusd=cost,
-    )
+
+    candidates = _resolve_chain(requested_model, tenant_cfg, user_cfg)
+    if tenant_cfg.allowlist:
+        candidates = [m for m in candidates if m in tenant_cfg.allowlist] or [selection.selected_model]
+    if breaker_max_tier is not None:
+        from .routing.chains import _tier_for
+        capped = [m for m in candidates if _tier_for(m) <= breaker_max_tier]
+        candidates = capped or candidates
+    if not fallback_allowed:
+        candidates = candidates[:1]
+    candidates = candidates or [selection.selected_model]
+
+    def _servable(model: str) -> bool:
+        # The requested model is exempt: the route already validated it.
+        if model == requested_model:
+            return True
+        try:
+            entry = _resolve_registry(model)
+        except ValueError:
+            logger.warning("cascade_candidate_unresolvable",
+                           tenant_id=tenant_cfg and getattr(tenant_cfg, "tenant_id", None),
+                           candidate=model)
+            return False
+        if wire_protocol is not None and entry.wire_protocol != wire_protocol:
+            logger.warning("cascade_candidate_wrong_protocol",
+                           candidate=model, wire_protocol=entry.wire_protocol,
+                           route_protocol=wire_protocol)
+            return False
+        return True
+
+    servable = [m for m in candidates if _servable(m)]
+    return servable or [requested_model]
 
 
 def reserve_credit(
@@ -551,6 +835,8 @@ def reserve_credit(
     pricing_key: Optional[str] = None,
     cost_microusd: Optional[int] = None,
     quota_lines: Optional[list] = None,
+    quota_model: Optional[str] = None,
+    selected_model: Optional[str] = None,
 ) -> ReservationContext:
     """Atomically reserve budget before invoking Bedrock.
 
@@ -569,8 +855,9 @@ def reserve_credit(
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
-    # No pool budget → original single-table fast path (fully backward compat).
-    if pool is None or cost_microusd is None:
+    # No pool budget AND no per-model quota to enforce → original single-table
+    # fast path (fully backward compat).
+    if (pool is None or cost_microusd is None) and not quota_lines:
         try:
             repo.reserve(
                 user_id=user.user_id,
@@ -595,6 +882,19 @@ def reserve_credit(
             pricing_key=pricing_key,
             tenant_id=user.org_id,
             pool_active=False,
+            selected_model=selected_model,
+        )
+
+    # No pool budget but a per-model quota IS configured → enforce the quota
+    # atomically alongside the per-user token reserve, WITHOUT a pool debit.
+    # (Fable F-3: quota enforcement must not be coupled to having a pool — a
+    # pool-less tenant with a per-model quota was previously served unmetered.)
+    if pool is None or cost_microusd is None:
+        return _reserve_quota_without_pool(
+            user, reservation_tokens, repo=repo, period=period,
+            pricing_key=pricing_key, quota_lines=quota_lines,
+            quota_model=quota_model, selected_model=selected_model,
+            quota_reserved_amount=int(cost_microusd or 0),
         )
 
     # Pool budget present → atomic two-table reservation. Both the per-user
@@ -734,6 +1034,20 @@ def reserve_credit(
             # rather than a misleading 402 "out of budget".
             reasons = e.response.get("CancellationReasons", []) or []
             codes = {r.get("Code", "") for r in reasons}
+            # txn_items order is [user_txn(0), pool_txn(1), hold_txn(2),
+            # *quota_lines(3..)]. A ConditionalCheckFailed at a QUOTA index means
+            # the per-model quota is exhausted — NOT a snapshot race — so retrying
+            # would fail forever. Surface QuotaExhausted so the caller's cascade
+            # advances to the next model. (The pool/user snapshot indices 0-1 are
+            # the retryable race; index 2 is the hold_id collision guard.)
+            if quota_model is not None and len(reasons) > 3:
+                for r in reasons[3:]:
+                    if r.get("Code", "") == "ConditionalCheckFailed":
+                        logger.info(
+                            "model_quota_exhausted",
+                            tenant_id=user.org_id, model=quota_model, period=period,
+                        )
+                        raise QuotaExhausted(quota_model)
             if codes & {
                 "ThrottlingError",
                 "ProvisionedThroughputExceeded",
@@ -754,10 +1068,24 @@ def reserve_credit(
             hold_id=hold_id,
             hold_sk=hold_sk,
             quota_lines=quota_lines,
+            selected_model=selected_model,
+            quota_reserved_amount=cost if quota_lines else 0,
+            quota_user_id=user.user_id,
+            quota_period=period if quota_lines else None,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
     if pool_vanished:
+        # Pool disappeared mid-flight → no pool ceiling, but a configured
+        # per-model quota still applies. Route through the same quota-only path
+        # so quota is enforced and `selected_model` is set (Fable F-3).
+        if quota_lines:
+            return _reserve_quota_without_pool(
+                user, reservation_tokens, repo=repo, period=period,
+                pricing_key=pricing_key, quota_lines=quota_lines,
+                quota_model=quota_model, selected_model=selected_model,
+                quota_reserved_amount=int(cost_microusd or 0),
+            )
         try:
             repo.reserve(
                 user_id=user.user_id,
@@ -773,6 +1101,7 @@ def reserve_credit(
             pricing_key=pricing_key,
             tenant_id=user.org_id,
             pool_active=False,
+            selected_model=selected_model,
         )
 
     # Retries exhausted under contention while the pool was still present. We
@@ -804,6 +1133,95 @@ def reserve_credit(
     raise _err_402("tenant_pool_exhausted")
 
 
+def _reserve_quota_without_pool(
+    user,
+    reservation_tokens: int,
+    *,
+    repo,
+    period: str,
+    pricing_key: Optional[str],
+    quota_lines: list,
+    quota_model: Optional[str],
+    selected_model: Optional[str],
+    quota_reserved_amount: int,
+) -> ReservationContext:
+    """Reserve per-user tokens AND a per-model quota atomically, with NO pool.
+
+    For tenants that configure a per-model quota but no dollar pool. Same
+    snapshot-optimistic retry as the pooled path, but the transaction is just
+    [user_txn, *quota_lines] — no pool debit, no HOLD row. A quota
+    ConditionalCheckFailed (index >= 1) means the quota is exhausted → raise
+    QuotaExhausted so the caller's cascade advances; a user-row CCF (index 0) is
+    the retryable snapshot race. Fails closed: a quota-configured request must
+    never slip through unmetered (the Fable F-3 hole).
+    """
+    client = _low_level_client()
+    saw_throttle = False
+    for _attempt in range(_RESERVE_MAX_RETRIES):
+        if _attempt:
+            time.sleep(_contention_backoff(_attempt))
+        item = repo.get(user.user_id, user.org_id, consistent_read=True)
+        if not item:
+            raise _err_402("personal_budget_exhausted")
+        total = int(item.get("total_credit", 0))
+        used = int(item.get("credit_used", 0))
+        if used + reservation_tokens > total:
+            logger.info("credit_exhausted_402", user_id=user.user_id,
+                        tenant_id=user.org_id, reason="personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted")
+
+        user_txn = repo.reserve_txn_item(
+            user_id=user.user_id, tenant_id=user.org_id,
+            tokens=reservation_tokens, expected_total=total,
+        )
+        txn_items = [user_txn, *quota_lines]
+        try:
+            client.transact_write_items(
+                TransactItems=txn_items,
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "TransactionCanceledException":
+                raise
+            reasons = e.response.get("CancellationReasons", []) or []
+            # Quota lines start at index 1 here (index 0 is the user row). A
+            # ConditionalCheckFailed on any quota line = quota exhausted.
+            if quota_model is not None and len(reasons) > 1:
+                for r in reasons[1:]:
+                    if r.get("Code", "") == "ConditionalCheckFailed":
+                        logger.info("model_quota_exhausted", tenant_id=user.org_id,
+                                    model=quota_model, period=period)
+                        raise QuotaExhausted(quota_model)
+            codes = {r.get("Code", "") for r in reasons}
+            if codes & {"ThrottlingError", "ProvisionedThroughputExceeded",
+                        "TransactionConflict", "RequestLimitExceeded"}:
+                saw_throttle = True
+            continue
+
+        return ReservationContext(
+            tenants_repo=repo,
+            reservation_tokens=reservation_tokens,
+            period=period,
+            pricing_key=pricing_key,
+            tenant_id=user.org_id,
+            pool_active=False,
+            quota_lines=quota_lines,
+            selected_model=selected_model,
+            quota_reserved_amount=quota_reserved_amount,
+            quota_user_id=user.user_id,
+            quota_period=period,
+        )
+
+    logger.warning("quota_reserve_retries_exhausted", user_id=user.user_id,
+                   tenant_id=user.org_id, period=period, throttled=saw_throttle)
+    if saw_throttle:
+        raise HTTPException(status_code=503, detail={
+            "type": "budget_unavailable", "reason": "quota_reservation_contended",
+            "message": "Quota reservation is temporarily unavailable. Retry shortly."})
+    # Lost every snapshot race for the user row — treat as personal budget.
+    raise _err_402("personal_budget_exhausted")
+
+
 def release_pool(context) -> None:
     """Release a pooled reservation on an error path (no billable usage).
 
@@ -815,6 +1233,67 @@ def release_pool(context) -> None:
     releaser = getattr(context, "release_pool", None)
     if callable(releaser):
         releaser()
+    # Release the per-model quota reservation too (invoke failed, no spend), so
+    # a failed attempt doesn't leak `used` until period rollover.
+    _release_quota_for(context)
+
+
+def _quota_period(context) -> Optional[str]:
+    """The period the quota was RESERVED against — never a fresh current_period().
+
+    Settling/releasing against `current_period()` at settle time (Fable F-1)
+    would hit the WRONG month's row for any request that crossed midnight
+    between reserve and settle: the reserved period leaks (never released) and
+    the new period is negative-seeded (over-admits). A missing value is treated
+    as "no known reserved period" → the caller no-ops rather than guessing.
+    """
+    return getattr(context, "quota_period", None)
+
+
+def _release_quota_for(context) -> None:
+    model = getattr(context, "selected_model", None)
+    amt = int(getattr(context, "quota_reserved_amount", 0) or 0)
+    period = _quota_period(context)
+    if not model or amt <= 0 or not period:
+        return
+    try:
+        from .routing import quota as _quota
+        _quota.release_quota(
+            tenant_id=getattr(context, "tenant_id", ""),
+            user_id=getattr(context, "quota_user_id", None),
+            model=model,
+            period=period,
+            reserved_amount=amt,
+        )
+    except Exception:  # noqa: BLE001 — quota release must never fail the request
+        logger.warning("quota_release_failed", model=model, exc_info=True)
+    finally:
+        # Idempotent: a second release/settle on the same context is a no-op
+        # (Fable F-6), so no double -reserved can drive `used` negative.
+        context.quota_reserved_amount = 0
+
+
+def _settle_quota_for(context, actual_microusd: int) -> None:
+    model = getattr(context, "selected_model", None)
+    reserved = int(getattr(context, "quota_reserved_amount", 0) or 0)
+    period = _quota_period(context)
+    if not model or reserved <= 0 or not period:
+        return
+    try:
+        from .routing import quota as _quota
+        _quota.settle_quota(
+            tenant_id=getattr(context, "tenant_id", ""),
+            user_id=getattr(context, "quota_user_id", None),
+            model=model,
+            period=period,
+            reserved_amount=reserved,
+            actual_amount=int(actual_microusd),
+        )
+    except Exception:  # noqa: BLE001 — quota settle must never fail the request
+        logger.warning("quota_settle_failed", model=model, exc_info=True)
+    finally:
+        # Idempotent (Fable F-6): clear so a later release/double-settle no-ops.
+        context.quota_reserved_amount = 0
 
 
 def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actual_microusd: int):
@@ -856,6 +1335,7 @@ def settle_reservation_and_log(
     actual_cost_microusd: Optional[int] = None,
     actual_cache_read_tokens: int = 0,
     actual_cache_write_tokens: int = 0,
+    requested_model: Optional[str] = None,
 ) -> None:
     """Settle the reservation against actual usage and write a UsageLogs row.
 
@@ -967,10 +1447,38 @@ def settle_reservation_and_log(
                 actual_microusd=actual_cost_microusd,
                 error_code="non_client_error",
             )
+        # Settle the per-model quota too: move `used` from the reserved estimate
+        # to the actual spend (actual<=reserved so used only ever decreases here).
+        _settle_quota_for(context, int(actual_cost_microusd))
 
     # ALWAYS record usage, even if the pool settle above failed: the Bedrock
     # call happened and its cost must be auditable. This is deliberately outside
     # any pool try/except so a settle fault cannot swallow the ledger entry.
+    # P0-11 visibility: store the client-requested model in the SAME spelling
+    # space as the effective `model_id` (its bedrock id), so the read layer can
+    # decide fallback with a plain string compare — no read-time canonicalization,
+    # hence immune to registry drift/retirement (Fable #65 rev1 BUG 1: an
+    # asymmetric canonical-vs-bedrock compare false-positived once a model left
+    # the registry). resolve_bedrock_model is total-ish: it raises only for a
+    # never-registered id, in which case we fall back to the raw string (a
+    # non-empty requested must never fail the ALWAYS-record invariant).
+    requested = requested_model or (context.requested_model if context else None)
+    requested_stored = None
+    if requested:
+        try:
+            # General registry resolve (handles Claude AND OpenAI families) so
+            # the stored requested id matches how the effective `model_id` is
+            # spelled (bedrock id). resolve_bedrock_model is Claude-only and
+            # would leave OpenAI ids un-normalized -> spurious fallback.
+            from .models import resolve_model as _resolve
+            requested_stored = _resolve(requested).bedrock_model_id
+        except Exception:
+            # Residual (Fable #65 rev2): if `requested` is not in the registry
+            # (retirement race / out-of-registry chain entry), we store the raw
+            # string, which won't equal the bedrock effective id -> that single
+            # row reads as a fallback. Window-scoped and non-retroactive
+            # (stored bytes are stable); acceptable for P1 visibility.
+            requested_stored = requested
     UsageLogsRepository().record(
         tenant_id=user.org_id,
         user_id=user.user_id,
@@ -979,6 +1487,7 @@ def settle_reservation_and_log(
         input_tokens=actual_input_tokens,
         output_tokens=actual_output_tokens,
         cost_microusd=actual_cost_microusd,
+        requested_model_id=requested_stored,
     )
 
 

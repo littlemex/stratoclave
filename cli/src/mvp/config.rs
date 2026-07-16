@@ -98,6 +98,10 @@ impl MvpConfig {
         format!("{}/api/mvp/me", self.api_endpoint)
     }
 
+    pub fn me_permissions_url(&self) -> String {
+        format!("{}/api/mvp/me/permissions", self.api_endpoint)
+    }
+
     pub fn admin_users_url(&self) -> String {
         format!("{}/api/mvp/admin/users", self.api_endpoint)
     }

@@ -190,7 +190,9 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                 if req.fault_spec:
                     from . import fault
                     fault_attempt = fault.next_attempt(req.request_id)
-                    fault.maybe_raise_pre_stream(req.fault_spec, req.request_id, fault_attempt)
+                    fault.maybe_raise_pre_stream(
+                        req.fault_spec, req.request_id, fault_attempt, region=target.region
+                    )
                     if fault.maybe_hang(req.fault_spec):
                         # Feed _peek_first_event a stream that never yields a
                         # first event, so the real first-event wait_for guard
@@ -256,10 +258,18 @@ async def route_stream(req: RouteRequest) -> RoutedStream:
                     async for ev in rest_iter:
                         yield ev
 
+                # P0-14: commit-time breaker snapshot (observational only).
+                # This router uses an in-process per-target cooldown map rather
+                # than a breaker object, so we report the committed target's
+                # cooldown-derived state: "half_open" when the commit required
+                # failing over past >=1 earlier attempt (the chain was degraded),
+                # else "closed". Routing never reads this back.
+                breaker_stage = "half_open" if len(attempts) > 1 else "closed"
                 return RoutedStream(
                     target=target,
                     events=_prepend(first_event, rest, fault_spec),
                     attempt_facts=attempts,
+                    breaker_stage=breaker_stage,
                 )
 
     if last_exc:

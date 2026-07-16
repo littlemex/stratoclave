@@ -1,35 +1,56 @@
 """Per-model quota counter operations.
 
-DynamoDB schema:
+DynamoDB schema (one item per (scope, model, period)):
   PK = TENANT#{tenant_id}              SK = MQ#{model}#{period}
   PK = TENANT#{tenant_id}#USER#{user}  SK = MQ#{model}#{period}
-  Attributes: reserved (int), settled (int), ttl (epoch)
+  Attributes:
+    used         (int)  — reserved-but-not-yet-settled + settled, in one number
+    expires_at   (int)  — TTL epoch (period end + grace); DynamoDB reaps it
 
-Quota counters track reservation and settlement per model per period.
-The limit is NOT stored on the counter — it comes from routing config
-and is passed as a condition expression parameter at reserve time.
+Design note (why ONE `used` counter, not reserved+settled):
+  A DynamoDB ConditionExpression CANNOT do arithmetic across attributes —
+  `reserved + settled <= :headroom` raises ValidationException on every call
+  (verified against real DynamoDB; moto silently accepts it). So we keep a
+  single monotonic `used = reserved_in_flight + settled` and gate with the
+  no-arithmetic condition `attribute_not_exists(used) OR used <= :headroom`,
+  where `:headroom = limit - amount` is computed client-side.
+
+  reserve : ADD used += amount   (cond: used <= limit - amount)  → cancels if over
+  settle  : ADD used += (actual - reserved)   (unconditional; actual<=reserved so
+            this is <= 0 — releases the over-reservation, leaves settled recorded)
+  release : ADD used += (-reserved)           (unconditional; invoke failed, no spend)
+
+  Net: after settle, `used` == sum of settled actuals; after release, the
+  reservation is fully removed. `used` never needs a separate reserved field.
 """
 from __future__ import annotations
 
+import calendar
+import datetime
 import os
-import time
 from typing import Any, Optional
 
 from dynamo.client import get_dynamodb_resource
 
 _TABLE = os.getenv("DYNAMODB_MODEL_QUOTAS_TABLE", "stratoclave-model-quotas")
-
-_ensured: set[str] = set()
+_TTL_GRACE_SECONDS = 3 * 24 * 3600  # keep a period's counters 3 days past its end
 
 
 def _table():
     return get_dynamodb_resource().Table(_TABLE)
 
 
-def _period_now(timezone: str = "UTC") -> str:
-    """Current period key (monthly). Always YYYY-MM."""
-    import datetime
+def _period_now() -> str:
+    """Current monthly period key, YYYY-MM (UTC)."""
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
+
+
+def _period_expiry(period: str) -> int:
+    """TTL epoch for a YYYY-MM period: end of that month + grace."""
+    year, month = (int(x) for x in period.split("-"))
+    last_day = calendar.monthrange(year, month)[1]
+    end = datetime.datetime(year, month, last_day, 23, 59, 59, tzinfo=datetime.timezone.utc)
+    return int(end.timestamp()) + _TTL_GRACE_SECONDS
 
 
 def _pk_tenant(tenant_id: str) -> str:
@@ -44,19 +65,6 @@ def _sk(model: str, period: str) -> str:
     return f"MQ#{model}#{period}"
 
 
-def ensure_counter(pk: str, sk: str) -> None:
-    """Idempotently initialize a counter item if it doesn't exist yet."""
-    key = f"{pk}|{sk}"
-    if key in _ensured:
-        return
-    _table().update_item(
-        Key={"pk": pk, "sk": sk},
-        UpdateExpression="SET reserved = if_not_exists(reserved, :zero), settled = if_not_exists(settled, :zero)",
-        ExpressionAttributeValues={":zero": 0},
-    )
-    _ensured.add(key)
-
-
 def soft_check_exhausted(
     tenant_id: str,
     user_id: Optional[str],
@@ -66,32 +74,62 @@ def soft_check_exhausted(
     tenant_limit: Optional[int],
     user_limit: Optional[int] = None,
 ) -> Optional[str]:
-    """Eventually-consistent soft check. Returns blocked_by or None.
+    """Eventually-consistent soft check. Returns the blocking scope or None.
 
-    This is an optimization — not a correctness mechanism. The atomic
-    reserve transaction is the ground truth.
+    An optimization only — the atomic reserve transaction is ground truth. A
+    missing item reads as used=0, so no initialization is needed here.
     """
-    if tenant_limit is not None:
-        pk = _pk_tenant(tenant_id)
-        sk = _sk(model, period)
-        ensure_counter(pk, sk)
-        resp = _table().get_item(Key={"pk": pk, "sk": sk}, ConsistentRead=False)
-        item = resp.get("Item", {})
-        current = int(item.get("reserved", 0)) + int(item.get("settled", 0))
-        if current + amount > tenant_limit:
-            return "tenant_quota"
-
-    if user_id and user_limit is not None:
-        pk = _pk_user(tenant_id, user_id)
-        sk = _sk(model, period)
-        ensure_counter(pk, sk)
-        resp = _table().get_item(Key={"pk": pk, "sk": sk}, ConsistentRead=False)
-        item = resp.get("Item", {})
-        current = int(item.get("reserved", 0)) + int(item.get("settled", 0))
-        if current + amount > user_limit:
-            return "user_quota"
-
+    tbl = _table()
+    for scope, pk, limit in (
+        ("tenant_quota", _pk_tenant(tenant_id), tenant_limit),
+        ("user_quota", _pk_user(tenant_id, user_id) if user_id else None, user_limit),
+    ):
+        if pk is None or limit is None:
+            continue
+        resp = tbl.get_item(Key={"pk": pk, "sk": _sk(model, period)}, ConsistentRead=False)
+        used = int(resp.get("Item", {}).get("used", 0))
+        if used + amount > limit:
+            return scope
     return None
+
+
+def _reserve_item(pk: str, sk: str, amount: int, limit: int, expires_at: int) -> dict[str, Any]:
+    """One TransactWriteItems Update that reserves `amount` against `limit`.
+
+    No cross-attribute arithmetic (DynamoDB forbids it): we gate on the
+    client-computed `:headroom = limit - amount` with a plain `ADD used :amt`.
+
+    The condition has TWO cases because a missing `used` reads as 0:
+      - amount <= limit (headroom >= 0): a first reservation (no `used` yet) is
+        fine, and an existing one is fine iff `used <= headroom`. Condition:
+        `attribute_not_exists(used) OR used <= :headroom`.
+      - amount  > limit (headroom  < 0): the request alone exceeds the whole
+        limit; it must NEVER be admitted, not even as the first reservation. We
+        DROP the `attribute_not_exists` branch so the condition is just
+        `used <= :headroom` — false on a missing attribute AND on any real value
+        (headroom is negative), so it always cancels. (Without this, the
+        `attribute_not_exists` branch would short-circuit TRUE and over-admit a
+        single oversized request past the limit.)
+    Also sets the TTL on first touch via if_not_exists so counters self-expire.
+    """
+    headroom = limit - amount
+    if headroom >= 0:
+        condition = "attribute_not_exists(used) OR used <= :headroom"
+    else:
+        condition = "used <= :headroom"
+    return {
+        "Update": {
+            "TableName": _TABLE,
+            "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
+            "UpdateExpression": "ADD used :amt SET expires_at = if_not_exists(expires_at, :ttl)",
+            "ConditionExpression": condition,
+            "ExpressionAttributeValues": {
+                ":amt": {"N": str(int(amount))},
+                ":headroom": {"N": str(int(headroom))},
+                ":ttl": {"N": str(int(expires_at))},
+            },
+        }
+    }
 
 
 def build_reserve_txn_items(
@@ -103,51 +141,19 @@ def build_reserve_txn_items(
     tenant_limit: Optional[int],
     user_limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    """Build TransactWriteItems entries for quota reservation.
+    """Build the TransactWriteItems entries for a per-model quota reservation.
 
-    Returns a list of transaction items to append to the existing
-    reserve transaction. Each item conditionally adds to `reserved`
-    only if (reserved + settled + amount) <= limit.
+    Pure builder (no I/O / no side effects). Appended to the pooled-budget
+    reserve transaction so quota + budget commit atomically. A model with no
+    configured limit contributes no item (unlimited).
     """
-    table_name = _TABLE
-    items = []
-
+    sk = _sk(model, period)
+    expires_at = _period_expiry(period)
+    items: list[dict[str, Any]] = []
     if tenant_limit is not None:
-        pk = _pk_tenant(tenant_id)
-        sk = _sk(model, period)
-        ensure_counter(pk, sk)
-        headroom = max(tenant_limit - amount, 0)
-        items.append({
-            "Update": {
-                "TableName": table_name,
-                "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
-                "UpdateExpression": "SET reserved = reserved + :amt",
-                "ConditionExpression": "reserved + settled <= :headroom",
-                "ExpressionAttributeValues": {
-                    ":amt": {"N": str(amount)},
-                    ":headroom": {"N": str(headroom)},
-                },
-            }
-        })
-
+        items.append(_reserve_item(_pk_tenant(tenant_id), sk, amount, tenant_limit, expires_at))
     if user_id and user_limit is not None:
-        pk = _pk_user(tenant_id, user_id)
-        sk = _sk(model, period)
-        ensure_counter(pk, sk)
-        headroom = max(user_limit - amount, 0)
-        items.append({
-            "Update": {
-                "TableName": table_name,
-                "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
-                "UpdateExpression": "SET reserved = reserved + :amt",
-                "ConditionExpression": "reserved + settled <= :headroom",
-                "ExpressionAttributeValues": {
-                    ":amt": {"N": str(amount)},
-                    ":headroom": {"N": str(headroom)},
-                },
-            }
-        })
-
+        items.append(_reserve_item(_pk_user(tenant_id, user_id), sk, amount, user_limit, expires_at))
     return items
 
 
@@ -159,33 +165,16 @@ def settle_quota(
     reserved_amount: int,
     actual_amount: int,
 ) -> None:
-    """Settle quota counters: move from reserved to settled (unconditional).
+    """Settle: adjust `used` from the reserved estimate to the actual spend.
 
-    Called after the request completes. Never fails on quota grounds.
+    `used` already includes `reserved_amount` from the reserve. actual<=reserved
+    by construction, so we ADD (actual - reserved) (<= 0), leaving `used` equal
+    to settled actuals. Unconditional; never fails on quota grounds.
     """
-    table = _table()
-
-    pk = _pk_tenant(tenant_id)
-    sk = _sk(model, period)
-    table.update_item(
-        Key={"pk": pk, "sk": sk},
-        UpdateExpression="SET reserved = reserved - :res, settled = settled + :actual",
-        ExpressionAttributeValues={
-            ":res": reserved_amount,
-            ":actual": actual_amount,
-        },
-    )
-
-    if user_id:
-        pk = _pk_user(tenant_id, user_id)
-        table.update_item(
-            Key={"pk": pk, "sk": sk},
-            UpdateExpression="SET reserved = reserved - :res, settled = settled + :actual",
-            ExpressionAttributeValues={
-                ":res": reserved_amount,
-                ":actual": actual_amount,
-            },
-        )
+    delta = int(actual_amount) - int(reserved_amount)
+    if delta == 0:
+        return
+    _adjust_used(tenant_id, user_id, model, period, delta)
 
 
 def release_quota(
@@ -195,25 +184,36 @@ def release_quota(
     period: str,
     reserved_amount: int,
 ) -> None:
-    """Release quota reservation without settling (invoke-time failure).
+    """Release a reservation without settling (invoke-time failure): used -= reserved."""
+    _adjust_used(tenant_id, user_id, model, period, -int(reserved_amount))
 
-    Decrements reserved without adding to settled — the request never
-    consumed any tokens on this model.
+
+def _adjust_used(tenant_id, user_id, model, period, delta: int) -> None:
+    """Adjust `used` on the reserved rows only (settle/release).
+
+    Gated on `attribute_exists(used)`: a scope is only ever reserved when it had
+    a configured limit (see `build_reserve_txn_items`), so its row already
+    carries `used`. A scope that was NOT reserved (e.g. tenant limit set but no
+    per-user limit) has no row — adjusting it unconditionally would CREATE a
+    phantom row with a negative `used`, which later (if a limit is added) would
+    let that scope over-spend by |delta|. The condition makes the missing-row
+    case a clean no-op instead. `ConditionalCheckFailed` is that no-op, so it is
+    swallowed; any other error propagates to the caller's guard.
     """
-    table = _table()
+    from botocore.exceptions import ClientError
 
-    pk = _pk_tenant(tenant_id)
+    tbl = _table()
     sk = _sk(model, period)
-    table.update_item(
-        Key={"pk": pk, "sk": sk},
-        UpdateExpression="SET reserved = reserved - :res",
-        ExpressionAttributeValues={":res": reserved_amount},
-    )
-
-    if user_id:
-        pk = _pk_user(tenant_id, user_id)
-        table.update_item(
-            Key={"pk": pk, "sk": sk},
-            UpdateExpression="SET reserved = reserved - :res",
-            ExpressionAttributeValues={":res": reserved_amount},
-        )
+    for pk in (_pk_tenant(tenant_id), _pk_user(tenant_id, user_id) if user_id else None):
+        if pk is None:
+            continue
+        try:
+            tbl.update_item(
+                Key={"pk": pk, "sk": sk},
+                UpdateExpression="ADD used :d",
+                ConditionExpression="attribute_exists(used)",
+                ExpressionAttributeValues={":d": delta},
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise

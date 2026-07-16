@@ -51,41 +51,97 @@ def _split_resource(permission: str) -> str:
     return permission.split(":", 1)[0]
 
 
+# --- Read-breadth implication lattice (security-sensitive) ------------------
+# A broader read permission grants the narrower ones on the SAME resource, so a
+# caller who may read ALL usage can also read their OWN usage (previously
+# denied — a `usage:read-all` key 403'd on `usage:read-self`).
+#
+# DIRECTION IS LOAD-BEARING: KEY = permission HELD; VALUES = the strictly
+# narrower permissions it ALSO grants. A value must NEVER be broader than its
+# key — a reversed edge here is privilege escalation (e.g. read-self ⇒ read-all).
+# The set is transitively closed by hand (usage:read-all lists read-self
+# directly) and proved exhaustively in tests/test_authz_lattice.py. Only the
+# read breadth ladder — NO cross-action edges (update does NOT imply read).
+_HELD_IMPLIES: dict[str, frozenset[str]] = {
+    "tenants:read-all": frozenset({"tenants:read-own"}),
+    "usage:read-all": frozenset({"usage:read-own-tenant", "usage:read-self"}),
+    "usage:read-own-tenant": frozenset({"usage:read-self"}),
+}
+_EMPTY: frozenset[str] = frozenset()
+
+# Per-resource breadth RANK (higher = broader). Encoding DIRECTION explicitly
+# (not just edge shape) is what makes the import-time guard reject a *swapped*
+# edge — e.g. replacing `read-all: {read-own}` with `read-own: {read-all}` — and
+# any cycle, which a pairwise "is the reverse also present" check would miss.
+# NOTE the shared rank 2: no resource today has BOTH `read-own-tenant` and
+# `read-own`, so the tie never blocks a real edge. If one ever gains both
+# (tenant-wide is broader than own), split the ranks — until then the guard
+# would fail LOUDLY at import (fail-closed) on such an edge, which is safe.
+_BREADTH_RANK: dict[str, int] = {
+    "read-all": 3,
+    "read-own-tenant": 2,
+    "read-own": 2,
+    "read-self": 1,
+}
+
+
+def _action(permission: str) -> str:
+    return permission.split(":", 1)[1] if ":" in permission else permission
+
+
+# Import-time guards. Use `raise` (NOT `assert`, which `python -O` strips) so
+# these run in optimized deployments too: every edge must stay within one
+# resource, never target a wildcard or itself, and — the security property —
+# only ever point to a STRICTLY NARROWER permission (lower breadth rank).
+for _held, _implied in _HELD_IMPLIES.items():
+    for _n in _implied:
+        if _split_resource(_n) != _split_resource(_held):
+            raise ValueError(f"cross-resource implication edge: {_held} -> {_n}")
+        if _n.endswith(":*") or _n == _held:
+            raise ValueError(f"illegal implication edge (wildcard/self): {_held} -> {_n}")
+        _hr = _BREADTH_RANK.get(_action(_held))
+        _nr = _BREADTH_RANK.get(_action(_n))
+        if _hr is None or _nr is None:
+            raise ValueError(f"implication edge over unranked action: {_held} -> {_n}")
+        if _nr >= _hr:
+            raise ValueError(
+                f"broadening/level implication edge (rank {_hr} -> {_nr}): {_held} -> {_n}"
+            )
+
+
+def _grants(held: str, requested: str) -> bool:
+    """True iff holding permission `held` satisfies `requested`. The single
+    match rule shared by role checks and key-scope checks so they can never
+    diverge: exact match, same-resource `:*` wildcard, or a read-breadth
+    implication edge. Unknown/typo'd `held` falls through to exact-match only
+    (fail-safe: never broadens)."""
+    if held == requested:
+        return True
+    if held.endswith(":*") and _split_resource(held) == _split_resource(requested):
+        return True
+    return requested in _HELD_IMPLIES.get(held, _EMPTY)
+
+
 def has_permission(roles: Iterable[str], permission: str) -> bool:
     """Return True if any of the given roles grants the specified permission.
 
-    - Wildcards: "users:*" covers "users:create" and "users:read",
-      but only on an exact resource-name match (will not match "users-admin:*").
-    - Multiple roles (e.g. ["admin", "team_lead"]) are evaluated as a union.
+    - Exact match, or a same-resource `:*` wildcard (e.g. `users:*` covers
+      `users:create`/`users:read`, but not `users-admin:*`).
+    - Read-breadth implication (e.g. `usage:read-all` grants `usage:read-self`).
+    - Multiple roles are evaluated as a union.
     """
-    target_resource = _split_resource(permission)
-    for role in roles:
-        perms = _get_permissions_for_role(role)
-        for p in perms:
-            if p == permission:
-                return True
-            if p.endswith(":*"):
-                p_resource = _split_resource(p)
-                if p_resource == target_resource:
-                    return True
-    return False
+    return any(
+        _grants(p, permission)
+        for role in roles
+        for p in _get_permissions_for_role(role)
+    )
 
 
 def _permission_matches(perms: Iterable[str], permission: str) -> bool:
-    """Check a permission directly against a list of permission strings (no role resolution).
-
-    Unlike `has_permission(roles, ...)`, this bypasses the roles → Permissions table lookup
-    and evaluates against a raw permissions list. Used for API Key scope checks.
-    """
-    target_resource = _split_resource(permission)
-    for p in perms:
-        if p == permission:
-            return True
-        if p.endswith(":*"):
-            p_resource = _split_resource(p)
-            if p_resource == target_resource:
-                return True
-    return False
+    """Check a permission directly against a list of permission strings (no role
+    resolution). Used for API Key scope checks; shares `_grants` with
+    `has_permission` so scope semantics match role semantics exactly."""
+    return any(_grants(p, permission) for p in perms)
 
 
 def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
@@ -95,12 +151,52 @@ def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
     - API Key auth: requires **both** user.roles and user.key_scopes to grant the permission
       (API Key scopes are effective only as a subset of the owner's role grants).
     """
-    if user.auth_kind == "api_key" and user.key_scopes is not None:
-        if not _permission_matches(user.key_scopes, permission):
+    if user.auth_kind == "api_key":
+        # An API key is ONLY ever a subset of its owner's roles. If the scope
+        # list is missing (None) — a malformed record, a deserialize failure, or
+        # a future code path that forgets to populate it — fail CLOSED rather
+        # than fall through to the owner's full role grants. Treating None as an
+        # empty scope set denies everything, the safe default for a bearer
+        # credential whose capabilities we cannot determine. (Fable capability
+        # audit: fail-open hardening)
+        key_scopes = user.key_scopes or []
+        if not _permission_matches(key_scopes, permission):
             return False
-        # Also verify the owner's roles include the permission.
+        # Also verify the owner's roles include the permission (AND semantics).
         return has_permission(user.roles, permission)
     return has_permission(user.roles, permission)
+
+
+# The canonical concrete-scope universe (no wildcards): every scope a request
+# can be gated on. This is the authoritative list — test_authz_lattice.py's
+# `test_universe_is_complete` greps every require_permission literal in mvp/ and
+# asserts it is a subset of this set, so a new gated endpoint that forgets to
+# add its scope here fails CI. effective_permissions() projects onto this set.
+ALL_SCOPES: tuple[str, ...] = (
+    "accounts:create", "accounts:delete", "accounts:read", "accounts:update",
+    "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
+    "apikeys:revoke", "apikeys:revoke-self",
+    "messages:send", "responses:send",
+    "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
+    "tenants:update",
+    "usage:read-all", "usage:read-own-tenant", "usage:read-self",
+    "users:assign-tenant", "users:create", "users:delete", "users:read",
+    "users:update",
+)
+
+
+def effective_permissions(user: AuthenticatedUser) -> list[str]:
+    """The complete, sorted list of concrete scopes `user` can actually exercise.
+
+    Computed by projecting `user_has_permission` over ALL_SCOPES — it is BY
+    CONSTRUCTION identical to what the request path enforces (same function,
+    same AND-semantics for API keys, same lattice/wildcard expansion). This is
+    the ONLY correct way to answer "what can this subject do"; re-deriving it
+    from roles/scopes independently would drift from enforcement. The result is
+    a projection onto the known-scope universe (wildcards a role holds are
+    reflected via the scopes they cover, not as `*` entries).
+    """
+    return [s for s in ALL_SCOPES if user_has_permission(user, s)]
 
 
 # -----------------------------------------------------------------
@@ -148,7 +244,16 @@ def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., Au
             if not tenant:
                 raise HTTPException(status_code=404, detail="Tenant not found")
             return user
-        if not tenant or tenant.get("team_lead_user_id") != user.user_id:
+        # Ownership requires BOTH the tenant pointer AND the team_lead role. A
+        # user demoted out of team_lead must lose owner power even if a stale
+        # `team_lead_user_id` still points at them (defense-in-depth: the role-
+        # change path also clears the pointer, but this makes the demotion
+        # effective immediately regardless). (Fable capability audit)
+        if (
+            not tenant
+            or tenant.get("team_lead_user_id") != user.user_id
+            or "team_lead" not in user.roles
+        ):
             raise HTTPException(status_code=404, detail="Tenant not found")
         return user
 

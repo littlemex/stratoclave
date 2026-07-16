@@ -173,6 +173,10 @@ class UsageAccumulator:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     stop_reason: Optional[str] = None
+    # P0-14: True once a terminal Usage event has landed. Bedrock emits usage
+    # exactly once (metadata, ahead of MessageStop), so any Usage marks the
+    # totals final; usage_is_partial = not saw_final_usage on disconnect.
+    saw_final_usage: bool = False
 
     def absorb(self, event: StreamEvent) -> None:
         if isinstance(event, Usage):
@@ -181,5 +185,6 @@ class UsageAccumulator:
             self.output_tokens = event.output or self.output_tokens
             self.cache_read_tokens = event.cache_read or self.cache_read_tokens
             self.cache_write_tokens = event.cache_write or self.cache_write_tokens
+            self.saw_final_usage = True
         elif isinstance(event, MessageStop):
             self.stop_reason = event.stop_reason

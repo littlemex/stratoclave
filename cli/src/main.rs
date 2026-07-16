@@ -55,6 +55,18 @@ enum Commands {
         /// Override model ID (ANTHROPIC_MODEL)
         #[arg(long)]
         model: Option<String>,
+        /// Attribution group id (x-sc-group-id header), [A-Za-z0-9._:-]{1,64}.
+        /// Must appear BEFORE any args destined for claude itself.
+        #[arg(long)]
+        group_id: Option<String>,
+        /// Workflow run id (x-sc-workflow-run-id header), [A-Za-z0-9._:-]{1,64}.
+        /// If absent the backend generates a wr_* id. Must appear before child args.
+        #[arg(long)]
+        workflow_run_id: Option<String>,
+        /// VSR hard model pin (x-sc-model-pin header), [A-Za-z0-9._:/-]{1,128}.
+        /// Pins every request to exactly this model — no cascade. Before child args.
+        #[arg(long)]
+        model_pin: Option<String>,
         /// Extra args passed to claude
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -64,6 +76,18 @@ enum Commands {
         /// Override model ID (e.g. openai.gpt-5.4)
         #[arg(long)]
         model: Option<String>,
+        /// Attribution group id (x-sc-group-id header), [A-Za-z0-9._:-]{1,64}.
+        /// Must appear BEFORE any args destined for codex itself.
+        #[arg(long)]
+        group_id: Option<String>,
+        /// Workflow run id (x-sc-workflow-run-id header), [A-Za-z0-9._:-]{1,64}.
+        /// If absent the backend generates a wr_* id. Must appear before child args.
+        #[arg(long)]
+        workflow_run_id: Option<String>,
+        /// VSR hard model pin (x-sc-model-pin header), [A-Za-z0-9._:/-]{1,128}.
+        /// Pins every request to exactly this model — no cascade. Before child args.
+        #[arg(long)]
+        model_pin: Option<String>,
         /// Extra args passed to codex
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -137,17 +161,36 @@ enum ApiKeyAction {
         #[arg(long)]
         include_revoked: bool,
     },
-    /// Revoke an API key by its key_hash (see the list command)
-    Revoke { key_hash: String },
+    /// Revoke an API key by its key_id (see the list command)
+    Revoke { key_id: String },
     /// Admin-only: list every API key in the system
     #[command(name = "admin-list")]
     AdminList {
         #[arg(long)]
         include_revoked: bool,
     },
-    /// Admin-only: revoke any API key by key_hash
+    /// Admin-only: revoke any API key by key_id
     #[command(name = "admin-revoke")]
-    AdminRevoke { key_hash: String },
+    AdminRevoke { key_id: String },
+    /// Admin-only: list the API keys owned by one user
+    #[command(name = "admin-list-user")]
+    AdminListUser {
+        user_id: String,
+        #[arg(long)]
+        include_revoked: bool,
+    },
+    /// Admin-only: issue an API key on behalf of a user (scopes clipped to the
+    /// user's role grants). Requires an interactive Cognito session.
+    #[command(name = "admin-create")]
+    AdminCreate {
+        user_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        #[arg(long = "expires-days")]
+        expires_days: Option<u32>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -259,6 +302,14 @@ enum AdminUserAction {
         #[arg(long, default_value_t = false)]
         reset_used: bool,
     },
+    /// Promote/demote a user (replaces role). Backend enforces last-admin
+    /// protection and blocks demoting a team_lead who still owns a tenant.
+    #[command(name = "set-role")]
+    SetRole {
+        user_id: String,
+        #[arg(long, value_parser = ["admin", "team_lead", "user"])]
+        role: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -305,6 +356,33 @@ enum AdminTenantAction {
     /// Manage the tenant's dollar pool budget (A-1)
     #[command(name = "pool-budget", subcommand)]
     PoolBudget(AdminPoolBudgetAction),
+    /// Manage the tenant/user routing config (P0-11: chain, quotas, allowlist)
+    #[command(name = "routing-config", subcommand)]
+    RoutingConfig(AdminRoutingConfigAction),
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminRoutingConfigAction {
+    /// Show the current routing config (tenant, or a user override with --user)
+    Get {
+        tenant_id: String,
+        /// Show a per-user override instead of the tenant config
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Replace the routing config from a JSON file (or stdin with "-")
+    Set {
+        tenant_id: String,
+        /// Path to a JSON body, or "-" to read stdin. Tenant shape:
+        /// {"chain":[...],"allowlist":[...],"quotas":{model:{"limit":N}},
+        ///  "fallback_default":"on|off"}. User shape:
+        /// {"chain":[...],"preferred_model":...,"fallback":"on|off"}.
+        #[arg(long)]
+        file: String,
+        /// Write a per-user override instead of the tenant config
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -422,8 +500,20 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Some(Commands::Auth { action }) => dispatch_auth(action).await,
-        Some(Commands::Claude { model, args }) => dispatch_claude(model, args).await,
-        Some(Commands::Codex { model, args }) => dispatch_codex(model, args).await,
+        Some(Commands::Claude {
+            model,
+            group_id,
+            workflow_run_id,
+            model_pin,
+            args,
+        }) => dispatch_claude(model, group_id, workflow_run_id, model_pin, args).await,
+        Some(Commands::Codex {
+            model,
+            group_id,
+            workflow_run_id,
+            model_pin,
+            args,
+        }) => dispatch_codex(model, group_id, workflow_run_id, model_pin, args).await,
         Some(Commands::Usage { action }) => dispatch_usage(action).await,
         Some(Commands::Admin { action }) => dispatch_admin(action).await,
         Some(Commands::TeamLead { action }) => dispatch_team_lead(action).await,
@@ -467,8 +557,24 @@ async fn dispatch_auth(action: AuthAction) -> ExitCode {
     }
 }
 
-async fn dispatch_claude(model: Option<String>, args: Vec<String>) -> ExitCode {
-    match mvp::claude_cmd::run(&args, model.as_deref()).await {
+async fn dispatch_claude(
+    model: Option<String>,
+    group_id: Option<String>,
+    workflow_run_id: Option<String>,
+    model_pin: Option<String>,
+    args: Vec<String>,
+) -> ExitCode {
+    // Validate the x-sc-* header flags BEFORE run() loads config or mints an
+    // ephemeral key, so a malformed value costs zero network calls. Exit code 2
+    // marks a usage/validation error, matching clap's own convention.
+    let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match mvp::claude_cmd::run(&args, model.as_deref(), &headers).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[ERROR] {e}");
@@ -477,8 +583,21 @@ async fn dispatch_claude(model: Option<String>, args: Vec<String>) -> ExitCode {
     }
 }
 
-async fn dispatch_codex(model: Option<String>, args: Vec<String>) -> ExitCode {
-    match mvp::codex_cmd::run(&args, model.as_deref()).await {
+async fn dispatch_codex(
+    model: Option<String>,
+    group_id: Option<String>,
+    workflow_run_id: Option<String>,
+    model_pin: Option<String>,
+    args: Vec<String>,
+) -> ExitCode {
+    let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match mvp::codex_cmd::run(&args, model.as_deref(), &headers).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[ERROR] {e}");
@@ -524,6 +643,9 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 total,
                 reset_used,
             } => wrap(mvp::admin::user_set_credit(&user_id, total, reset_used).await),
+            AdminUserAction::SetRole { user_id, role } => {
+                wrap(mvp::admin::user_set_role(&user_id, &role).await)
+            }
         },
         AdminAction::Tenant { action } => match action {
             AdminTenantAction::Create {
@@ -581,6 +703,18 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 ),
                 AdminPoolBudgetAction::Show { tenant_id, period } => wrap(
                     mvp::admin::tenant_pool_budget_show(&tenant_id, period.as_deref()).await,
+                ),
+            },
+            AdminTenantAction::RoutingConfig(action) => match action {
+                AdminRoutingConfigAction::Get { tenant_id, user } => wrap(
+                    mvp::admin::routing_config_get(&tenant_id, user.as_deref()).await,
+                ),
+                AdminRoutingConfigAction::Set {
+                    tenant_id,
+                    file,
+                    user,
+                } => wrap(
+                    mvp::admin::routing_config_set(&tenant_id, &file, user.as_deref()).await,
                 ),
             },
         },
@@ -662,13 +796,25 @@ async fn dispatch_api_key(action: ApiKeyAction) -> ExitCode {
         ApiKeyAction::List { include_revoked } => {
             wrap(mvp::api_keys::list(include_revoked).await)
         }
-        ApiKeyAction::Revoke { key_hash } => wrap(mvp::api_keys::revoke(key_hash).await),
+        ApiKeyAction::Revoke { key_id } => wrap(mvp::api_keys::revoke(key_id).await),
         ApiKeyAction::AdminList { include_revoked } => {
             wrap(mvp::api_keys::admin_list_all(include_revoked).await)
         }
-        ApiKeyAction::AdminRevoke { key_hash } => {
-            wrap(mvp::api_keys::admin_revoke(key_hash).await)
+        ApiKeyAction::AdminRevoke { key_id } => {
+            wrap(mvp::api_keys::admin_revoke(key_id).await)
         }
+        ApiKeyAction::AdminListUser {
+            user_id,
+            include_revoked,
+        } => wrap(mvp::api_keys::admin_list_user(&user_id, include_revoked).await),
+        ApiKeyAction::AdminCreate {
+            user_id,
+            name,
+            scopes,
+            expires_days,
+        } => wrap(
+            mvp::api_keys::admin_create_on_behalf(&user_id, name, scopes, expires_days).await,
+        ),
     }
 }
 
@@ -711,6 +857,8 @@ pub enum CliError {
     ServerError(String),
     NetworkError(String),
     ConfigError(String),
+    /// HTTP 402: personal or tenant-pool budget / per-model quota exhausted.
+    BudgetExceeded(String),
     General(String),
 }
 
@@ -724,6 +872,7 @@ impl std::fmt::Display for CliError {
             CliError::ServerError(s) => write!(f, "{s}"),
             CliError::NetworkError(s) => write!(f, "{s}"),
             CliError::ConfigError(s) => write!(f, "{s}"),
+            CliError::BudgetExceeded(s) => write!(f, "{s}"),
             CliError::General(s) => write!(f, "{s}"),
         }
     }

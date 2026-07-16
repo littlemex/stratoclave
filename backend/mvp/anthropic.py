@@ -44,7 +44,7 @@ import uuid
 from typing import Any, AsyncGenerator, Iterator, Optional
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -60,7 +60,8 @@ from ._pipeline import (
     settle_reservation_and_log,
 )
 from .authz import require_permission
-from .deps import AuthenticatedUser, get_current_user
+from .deps import AuthenticatedUser, extract_model_pin, get_current_user, get_request_context
+from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 
 # Backward-compatible aliases for tests that import the underscore-prefixed
@@ -72,6 +73,26 @@ _settle_reservation_and_log = settle_reservation_and_log
 
 
 logger = get_logger(__name__)
+
+
+def _selected_bedrock_model(context, default_model_id: str) -> str:
+    """Bedrock model id the reservation actually chose (P0-11 cascade).
+
+    The reservation carries `selected_model` (a client-facing name); when the
+    cascade fell back to a different model we must invoke THAT one so the
+    Bedrock call matches the pool debit and quota charge. Falls back to the
+    already-resolved default id when there's no selection or it can't be
+    resolved (e.g. an out-of-allowlist chain entry) — safer to invoke the model
+    we validated up front than to fail the request.
+    """
+    selected = getattr(context, "selected_model", None)
+    if not selected:
+        return default_model_id
+    try:
+        return resolve_bedrock_model(selected)
+    except ValueError:
+        logger.warning("cascade_model_unresolvable", selected_model=selected)
+        return default_model_id
 router = APIRouter(tags=["mvp-anthropic"])
 
 
@@ -474,11 +495,19 @@ def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
 def messages(
     body: AnthropicMessagesRequest,
     request: Request,
+    response: Response,
     # X-2 (2026-04 critical-sweep follow-up): enforce the scope layer
     # on the Bedrock invocation path. See list_models() for the full
     # rationale.
     user: AuthenticatedUser = Depends(require_permission("messages:send")),
+    ctx: RequestContext = Depends(get_request_context),
 ):
+    # Echo the correlation ids (server-assigned span, workflow run) so a client
+    # can stitch its calls into one run. Set on `response`; StreamingResponse
+    # below copies them into its own header block (P0-12).
+    corr = _corr_headers(ctx)
+    response.headers.update(corr)
+
     # Allowlist check first; reject with 400 before reserving credit.
     try:
         model_id = resolve_bedrock_model(body.model)
@@ -490,6 +519,11 @@ def messages(
 
     fault_spec = request.headers.get("x-sc-fault")
 
+    # P0-15: optional VSR hard pin. Absent -> today's behavior; present -> the
+    # request is pinned to exactly that model (no cascade/fallback/downgrade),
+    # validated against the allowlist + servability downstream (403 / 400).
+    model_pin = extract_model_pin(request)
+
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit_for_model(
         user,
@@ -497,16 +531,26 @@ def messages(
         model_name=body.model,
         input_tokens_est=max(reservation - body.max_tokens, 0),
         max_output_tokens=body.max_tokens,
+        wire_protocol="messages",
+        vsr_hard_model=model_pin,
     )
+
+    # The reservation may have cascaded to a fallback model (P0-11). Invoke the
+    # model the reservation actually priced/quota-charged, not the requested one,
+    # so the Bedrock call, the pool debit, and the per-model quota all agree. The
+    # cascade only ever selects a registry-resolvable `messages`-protocol model
+    # (servability filter), so this re-resolve cannot land on the wrong model.
+    model_id = _selected_bedrock_model(tenants_repo, model_id)
 
     if body.stream:
         return StreamingResponse(
-            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec),
+            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec, ctx=ctx),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                **corr,
             },
         )
 
@@ -592,14 +636,22 @@ async def _stream_messages(
     tenants_repo: UserTenantsRepository,
     reservation: int,
     fault_spec: Optional[str] = None,
+    ctx: Optional[RequestContext] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Delegation shim — forwards to `_budget_flow.run_stream`.
 
     Closures resolve module globals (`_bedrock_client`, `_settle_reservation_and_log`,
     `_release_pool`) AT CALL TIME so existing monkeypatches pass straight through.
     """
+    import time as _time
+
     from . import _budget_flow
     from ._wire import anthropic_wire as wire
+
+    # Resolve the request_id ONCE so RouteRequest and the span record agree.
+    request_id = ctx.request_id if ctx else f"msg_{uuid.uuid4().hex[:12]}"
+    _routed_box: dict = {}          # filled by _invoke once routing commits
+    _started_at_ms = int(_time.time() * 1000)
 
     async def _invoke(*, body, model_id):
         from .routing import route_stream as _route
@@ -608,16 +660,120 @@ async def _stream_messages(
         kwargs = _build_bedrock_kwargs(body, model_id)
         kwargs.pop("modelId", None)
 
+        # P0-12: propagate the edge-minted correlation ids as opaque pass-through
+        # (the routing layer must NOT read them).
         req = RouteRequest(
             alias=model_id,
             payload=kwargs,
             tenant_id=user.org_id,
-            request_id=f"msg_{uuid.uuid4().hex[:12]}",
+            request_id=request_id,
+            span_id=(ctx.span_id if ctx else None),
+            group_id=(ctx.group_id if ctx else None),
+            workflow_run_id=(ctx.workflow_run_id if ctx else None),
             fault_spec=fault_spec,
         )
 
         routed = await _route(req)
+        _routed_box["routed"] = routed  # commit-time routing facts for the span
         return {"stream": routed.events}
+
+    def _on_finalized(status: str, acc) -> None:
+        # P0-13/14: runs on the event loop right after the finalizer claim is
+        # won (money-neutral; see _budget_flow._notify + the Z3 emit proofs).
+        # Builds the frozen span draft from commit-time routing facts and hands
+        # off to the fire-and-forget writer. When routing never committed
+        # (invoke_error), committed_* stay empty and breaker_stage is "unknown".
+        # Import here (not at the request-path top) so nothing observability-
+        # related can raise into the request before the hook's own swallow (F1).
+        # The SIGNALS import is deliberately deferred into the P0-16 try block
+        # below (N1): it pulls a private cross-package symbol, and an ImportError
+        # here would take the AUTHORITATIVE span emit down with the best-effort
+        # signal — inverting the record hierarchy.
+        from .observability.store import SpanDraft, emit_span_and_rollup
+
+        routed = _routed_box.get("routed")
+        target = routed.target if routed else None
+        attempts = routed.attempt_facts if routed else []
+        draft = SpanDraft(
+            tenant_id=user.org_id,          # auth-derived; NEVER a client header
+            request_id=request_id,
+            span_id=(ctx.span_id if ctx else None) or request_id,
+            group_id=(ctx.group_id if ctx else None),
+            workflow_run_id=(ctx.workflow_run_id if ctx else None),
+            model_alias=body.model,
+            committed_model_id=(target.model_id if target else ""),
+            committed_region=(getattr(target, "region", "") if target else ""),
+            breaker_stage=(routed.breaker_stage if routed else "unknown"),
+            attempts_total=len(attempts),
+            targets_distinct=len({a.target for a in attempts}),
+            stream=True,
+            started_at_ms=_started_at_ms,
+        )
+        emit_span_and_rollup(draft, status, acc)
+
+        # P0-16 (learning-signals seam): a write-only routing signal for the
+        # FUTURE offline evaluator. Rides the SAME at-most-once finalizer claim
+        # as the span (this closure runs once), takes no second claim, and is
+        # fire-and-forget (never raises/blocks; money path untouched). The
+        # partial/cancel classification is derived from the SAME acc snapshot
+        # semantics the store uses (saw_final_usage), NOT from acc attributes
+        # that don't exist. First-event latency comes from the committed
+        # attempt's record. `route_exhausted` refinement of `status` is deferred
+        # with the span-status rename (needs a run_stream money-path increment).
+        try:
+            from .learning.signals import category_for_model, emit_signal
+
+            saw_final = bool(getattr(acc, "saw_final_usage", False))
+            # N2: dedupe targets by (model_id, region) value, not object identity
+            # or hashability — always hashable, and value equality is what a
+            # "distinct chain hop" means (robust even if Target ever changes).
+            targets_distinct = len({
+                (getattr(a.target, "model_id", ""), getattr(a.target, "region", ""))
+                for a in attempts
+            })
+            # F3a: first-event latency belongs to the COMMITTED attempt only —
+            # attempts[-1] is the success record (route_stream measures t0->first
+            # peeked event = TTFB). Zero when routing never committed, so we never
+            # report a failed attempt's latency under this name.
+            committed_latency = (
+                int(getattr(attempts[-1], "latency_ms", 0) or 0)
+                if (target and attempts) else 0
+            )
+            # F2: chain position = number of DISTINCT chain hops ATTEMPTED before
+            # the committed one. Same-target retries append extra AttemptRecords,
+            # so len(attempts)-1 overcounts; targets_distinct-1 is the true hop
+            # index. N5 (semantics, documented for the consumer): this counts
+            # hops that produced an AttemptRecord — a breaker-open hop skipped
+            # WITHOUT an attempt is not counted, so this is "attempted-hop index",
+            # not "resolved-chain index". -1 == routing never committed.
+            chain_position = (targets_distinct - 1) if (target and routed) else -1
+            emit_signal(
+                tenant_id=user.org_id,      # auth-derived; NEVER a client header
+                group_id=(ctx.group_id if ctx else None) or "",
+                workflow_run_id=(ctx.workflow_run_id if ctx else None) or "",
+                span_id=(ctx.span_id if ctx else None) or request_id,
+                category=category_for_model(body.model, target.model_id if target else ""),
+                committed_model_id=(target.model_id if target else ""),
+                committed_region=(getattr(target, "region", "") if target else ""),
+                cost_tier=(getattr(target, "cost_tier", 0) if target else 0),
+                chain_position_served=chain_position,
+                status=status,
+                usage_is_partial=not saw_final,
+                canceled_by_client=(status == "client_disconnect" and not saw_final),
+                output_tokens=int(getattr(acc, "output_tokens", 0) or 0),
+                latency_first_event_ms=committed_latency,
+                attempts_total=len(attempts),
+                targets_distinct=targets_distinct,
+                breaker_stage=(routed.breaker_stage if routed else "unknown"),
+            )
+        except Exception as _sig_exc:  # noqa: BLE001 — F6: never-raises stays
+            # LOCAL to this block. N2a: log (guarded) so a SYSTEMATIC failure
+            # (kwargs drift, import error) isn't invisible — it fails 100% of the
+            # time otherwise, silently.
+            try:
+                logger.warning("routing_signal_block_failed", error=str(_sig_exc))
+            except Exception:
+                pass
 
     class _AnthropicAdapter:
         def __init__(self):
@@ -650,6 +806,7 @@ async def _stream_messages(
         settle=lambda **kw: _settle_reservation_and_log(**kw),
         release=lambda ctx: _release_pool(ctx),
         adapter=_AnthropicAdapter(),
+        on_finalized=_on_finalized,
     ):
         yield frame
 

@@ -21,7 +21,8 @@
     "language": "言語",
     "language_switch_aria": "表示言語を切り替える",
     "language_en": "English",
-    "language_ja": "日本語"
+    "language_ja": "日本語",
+    "admin_pricing": "料金"
   },
   "login": {
     "title": "Stratoclave",
@@ -347,7 +348,9 @@
     "col_total": "Total",
     "row_empty": "該当するログがありません。",
     "count_showing": "{{shown}} 件表示",
-    "count_more": " / 次ページあり"
+    "count_more": " / 次ページあり",
+    "fallback_badge": "フォールバック",
+    "fallback_from": "要求モデル {{requested}} からフォールバック"
   },
   "admin_tenants": {
     "title": "テナント管理",
@@ -433,7 +436,34 @@
     "delete_confirm_label": "確認のために <1>{{email}}</1> を入力してください",
     "delete_submit": "削除を実行",
     "delete_submitting": "削除中…",
-    "delete_error_fallback": "削除に失敗しました"
+    "delete_error_fallback": "削除に失敗しました",
+    "api_keys": {
+      "title": "APIキー",
+      "description": "このユーザーに発行された長期キー。失効は即時かつ取り消し不可です。",
+      "loading": "APIキーを読み込み中…",
+      "load_error": "APIキーの読み込みに失敗しました。",
+      "empty": "APIキーはありません。",
+      "col_name": "名前",
+      "col_key_id": "キーID",
+      "col_scopes": "スコープ",
+      "col_created": "作成日",
+      "col_expires": "有効期限",
+      "revoked": "失効済み",
+      "revoke": "失効",
+      "revoke_confirm_title": "APIキーを失効させますか？",
+      "revoke_confirm_body": "キー <b>{{name}}</b> は直ちに無効になります。この操作は取り消せません。",
+      "revoke_confirm_action": "キーを失効"
+    },
+    "action_role_title": "ロール",
+    "action_role_desc": "このユーザーを昇格/降格します。ロールは置き換えられます。",
+    "action_role_button": "ロールを変更",
+    "role_title": "ロールを変更",
+    "role_desc": "{{email}} のロールを変更します。現在のロールを置き換え、即時反映されます。",
+    "role_new_label": "新しいロール",
+    "role_current_line": "現在: {{roles}}",
+    "role_submit": "ロールを変更",
+    "role_submitting": "変更中…",
+    "role_error_fallback": "ロールを変更できませんでした。"
   },
   "admin_users": {
     "title": "ユーザー管理",
@@ -499,7 +529,10 @@
     "col_tenant": "テナント",
     "col_input": "Input",
     "col_output": "Output",
-    "col_total": "Total"
+    "col_total": "Total",
+    "fallback_badge": "フォールバック",
+    "fallback_from": "要求モデル {{requested}} からフォールバック",
+    "fallback_count": "フォールバックで別モデルが使われたリクエスト: {{count}} 件"
   },
   "me_api_keys": {
     "label": "API Keys",
@@ -603,5 +636,22 @@
     "edit_title": "テナント編集",
     "edit_desc": "名前と default_credit を変更できます。",
     "edit_error_fallback": "更新に失敗しました"
+  },
+  "admin_pricing": {
+    "title": "料金",
+    "intro": "ゲートウェイが課金する実効的なモデル別ドル単価(組み込みデフォルトにオーバーライドを重ねたもの)。参照専用。",
+    "card_title": "実効レート",
+    "version": "オーバーライド版: {{version}}",
+    "version_defaults": "組み込みデフォルト(オーバーライドなし)",
+    "load_error": "料金設定の読み込みに失敗しました。",
+    "col_key": "料金キー",
+    "col_models": "モデル",
+    "col_input": "入力 $/MTok",
+    "col_output": "出力 $/MTok",
+    "col_cache_read": "キャッシュ読取 $/MTok",
+    "col_cache_write": "キャッシュ書込 $/MTok",
+    "col_source": "種別",
+    "source_default": "デフォルト",
+    "source_override": "オーバーライド"
   }
 }

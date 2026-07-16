@@ -557,6 +557,140 @@ def admin_update_user(
 
 
 # -----------------------------------------------------------------------
+# Role change (the SINGLE role-mutation chokepoint)
+# -----------------------------------------------------------------------
+def _set_user_role(
+    *,
+    user_id: str,
+    new_role: str,
+    actor: AuthenticatedUser,
+) -> dict[str, Any]:
+    """The one place a user's authorization role changes.
+
+    `Users.roles` is the sole source of truth resolved by deps.py, so this is
+    the ONLY correct way to promote/demote. It:
+
+    - replaces `Users.roles` with exactly `[new_role]` (single-role model),
+    - refuses to remove the last admin (last-admin protection), on EVERY path
+      that changes a role — not just delete,
+    - refuses to strip team_lead from a user who still owns a tenant (409:
+      transfer ownership first — no silent owner-less tenants),
+    - is idempotent (same role → no-op, but still audited),
+    - signs the user out + stamps the session watermark so a cached JWT cannot
+      keep acting with the old role (deps resolves roles live, so enforcement is
+      immediate; this is defence-in-depth for any future claim cache). API keys
+      read `Users.roles` live per request, so no key sweep is needed.
+
+    Returns the refreshed Users row. Raises HTTPException on any guard.
+    """
+    users_repo = UsersRepository()
+    existing = users_repo.get_by_user_id(user_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    roles_raw = existing.get("roles") or []
+    old_roles = [roles_raw] if isinstance(roles_raw, str) else [str(r) for r in roles_raw]
+    was_admin = "admin" in old_roles
+
+    # Idempotent no-op (still audited below so the intent is recorded).
+    if old_roles == [new_role]:
+        log_audit_event(
+            event="user_role_unchanged",
+            actor_id=actor.user_id,
+            actor_email=actor.email,
+            target_id=user_id,
+            target_type="user",
+            before={"roles": old_roles},
+            after={"roles": [new_role]},
+        )
+        return existing
+
+    # Last-admin protection: a demotion (admin -> non-admin) must not drop the
+    # active admin count to zero. NOTE: _count_active_admins() is a scan, so
+    # there is a TOCTOU window under concurrent demotions — accepted and made
+    # visible here (a stricter atomic counter is a follow-up). The optimistic
+    # lock below still prevents THIS row being lost-updated.
+    if was_admin and new_role != "admin" and _count_active_admins() <= 1:
+        raise HTTPException(status_code=409, detail="Cannot demote the last admin user")
+
+    # Demoting out of team_lead: refuse while the user still owns any tenant, so
+    # a tenant is never left owner-less by a silent pointer clear.
+    if "team_lead" in old_roles and new_role != "team_lead":
+        owned = _tenants_owned_by(user_id)
+        if owned:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Transfer tenant ownership before demoting this team_lead "
+                    f"(still owns: {', '.join(owned)})"
+                ),
+            )
+
+    updated = users_repo.update_roles(user_id, [new_role], expected_roles=old_roles)
+    if updated is None:
+        # Either the row vanished or a concurrent role change beat us (optimistic
+        # lock). Surface a conflict so the caller re-reads rather than silently
+        # racing the audit log against stored state.
+        raise HTTPException(status_code=409, detail="Role changed concurrently; retry")
+
+    log_audit_event(
+        event="user_role_changed",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=user_id,
+        target_type="user",
+        before={"roles": old_roles},
+        after={"roles": [new_role]},
+    )
+
+    # Defence-in-depth immediate revocation of stale JWTs (deps enforces the new
+    # role live regardless).
+    try:
+        global_sign_out(user_id)
+    except Exception as e:  # pragma: no cover — Cognito hiccup
+        _log.warning("global_sign_out_failed_on_role_change", extra={"user_id": user_id, "error": str(e)})
+    users_repo.revoke_all_sessions(user_id)
+
+    return users_repo.get_by_user_id(user_id) or updated
+
+
+def _tenants_owned_by(user_id: str) -> list[str]:
+    """Active tenant ids owned by `user_id` (team_lead_user_id pointer).
+
+    Uses the team-lead-index (not a full scan) and excludes archived tenants.
+    """
+    return [
+        str(t.get("tenant_id"))
+        for t in TenantsRepository().list_by_owner(user_id)
+    ]
+
+
+class AdminSetRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Role = Field(..., description="The single role to assign (replaces current roles)")
+
+
+@router.patch("/users/{user_id}/role", response_model=UserSummary)
+def admin_set_user_role(
+    user_id: str,
+    body: AdminSetRoleRequest,
+    actor: AuthenticatedUser = Depends(require_permission("users:update")),
+) -> UserSummary:
+    """Promote/demote a user by replacing their role (the authorization SoT).
+
+    Guards (see `_set_user_role`): last-admin protection, team_lead-owns-tenant
+    block, optimistic lock, audit, immediate sign-out. Role changes are refused
+    for API-key auth so a key can never escalate its own owner (a key that holds
+    `users:update` is still blocked here)."""
+    if actor.auth_kind == "api_key":
+        # A bearer key must NEVER be able to change roles — that is a direct
+        # path to escalating its own owner to admin. Human (JWT) actor only.
+        raise HTTPException(status_code=403, detail="Role changes require an interactive session, not an API key")
+    refreshed = _set_user_role(user_id=user_id, new_role=body.role, actor=actor)
+    return _enrich_user_with_credit(refreshed, UserTenantsRepository())
+
+
+# -----------------------------------------------------------------------
 # Tenant assignment (switch)
 # -----------------------------------------------------------------------
 class AssignTenantRequest(BaseModel):
@@ -591,7 +725,22 @@ def assign_tenant(
 
     user_tenants_repo = UserTenantsRepository()
 
-    # (1) DynamoDB TransactWriteItems
+    # (0) Apply the role change FIRST, through the single chokepoint. This runs
+    # BEFORE any tenant-state mutation so its guards (last-admin, and crucially
+    # "team_lead must not still own a tenant") fire before we move anything —
+    # otherwise a demote-and-move would orphan the old tenant's owner pointer
+    # (Fable capability review C1). _set_user_role is idempotent (no-op + no
+    # sign-out when the role is unchanged), audits the change, and signs the
+    # user out. BUG FIX: switch_tenant's `new_role` only ever wrote the
+    # per-tenant UserTenants row + Users.org_id, never Users.roles (the
+    # authorization SoT), so promotion/demotion here was a silent no-op —
+    # privilege retention on demote. Routing through the chokepoint fixes that
+    # and keeps role mutation in exactly one place.
+    _set_user_role(user_id=user_id, new_role=body.new_role, actor=actor)
+
+    # (1) DynamoDB TransactWriteItems. new_role is still passed so the per-tenant
+    # UserTenants row (used only for the admin tenant-members display) stays
+    # consistent with Users.roles; authorization is driven by Users.roles above.
     try:
         user_tenants_repo.switch_tenant(
             user_id=user_id,

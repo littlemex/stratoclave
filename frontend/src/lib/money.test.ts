@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { fmtMicroUsd, parseUsdToCents } from './money'
+import { fmtMicroUsd, fmtMicroUsdRate, parseUsdToCents } from './money'
 
 describe('parseUsdToCents', () => {
   it('parses a plain integer dollar amount', () => {
@@ -24,6 +24,12 @@ describe('parseUsdToCents', () => {
   it('treats one decimal as tenths of a dollar', () => {
     // "500.5" is $500.50 == 50_050 cents, not 505.
     expect(parseUsdToCents('500.5')).toBe(50_050)
+  })
+
+  it('rejects an amount whose cents product overflows safe-integer (M5)', () => {
+    // dollars alone is a safe integer, but dollars*100 is not.
+    const bigDollars = String(Math.floor(Number.MAX_SAFE_INTEGER / 10))
+    expect(parseUsdToCents(bigDollars)).toBeNull()
   })
 
   it('treats a leading decimal as zero dollars', () => {
@@ -64,16 +70,58 @@ describe('fmtMicroUsd', () => {
     expect(fmtMicroUsd(1_000_000_000)).toBe('$1,000.00')
   })
 
-  it('rounds to the nearest cent (never sub-cent display)', () => {
-    // 4_999 micro-USD == 0.4999 cents -> rounds down to 0 cents.
+  it('TRUNCATES to whole cents, matching the backend micro//10_000 (never overstates)', () => {
+    // 4_999 micro == 0.4999 cents -> 0.
     expect(fmtMicroUsd(4_999)).toBe('$0.00')
-    // 5_000 micro-USD == 0.5 cents -> rounds up to 1 cent.
-    expect(fmtMicroUsd(5_000)).toBe('$0.01')
-    // 14_999 micro-USD == 1.4999 cents -> 1 cent.
+    // 5_000 micro == 0.5 cents -> truncates to 0 (backend floors; UI must not
+    // show a cent the backend didn't record).
+    expect(fmtMicroUsd(5_000)).toBe('$0.00')
+    // 9_999 micro -> still 0.
+    expect(fmtMicroUsd(9_999)).toBe('$0.00')
+    // 10_000 micro == exactly 1 cent.
+    expect(fmtMicroUsd(10_000)).toBe('$0.01')
+    // 14_999 micro == 1.4999 cents -> truncates to 1.
     expect(fmtMicroUsd(14_999)).toBe('$0.01')
+    // 19_999 micro -> 1 cent (not 2).
+    expect(fmtMicroUsd(19_999)).toBe('$0.01')
   })
 
   it('handles negatives with a leading sign', () => {
     expect(fmtMicroUsd(-500_000_000)).toBe('-$500.00')
+  })
+
+  it('truncates symmetrically across sign, no negative-zero sign', () => {
+    // 15_000 micro == 1.5 cents -> truncates to 1 on both signs.
+    expect(fmtMicroUsd(15_000)).toBe('$0.01')
+    expect(fmtMicroUsd(-15_000)).toBe('-$0.01')
+    // Sub-cent negatives truncate to 0 and show NO minus sign.
+    expect(fmtMicroUsd(-5_000)).toBe('$0.00')
+    expect(fmtMicroUsd(-4_999)).toBe('$0.00')
+    // A whole negative cent keeps its sign.
+    expect(fmtMicroUsd(-10_000)).toBe('-$0.01')
+  })
+})
+
+describe('fmtMicroUsdRate', () => {
+  it('shows full precision, trimming trailing zeros', () => {
+    // per-MTok rates: $5.00 -> "$5", $25 -> "$25"
+    expect(fmtMicroUsdRate(5_000_000)).toBe('$5')
+    expect(fmtMicroUsdRate(25_000_000)).toBe('$25')
+    // sub-dollar rates keep their significant digits
+    expect(fmtMicroUsdRate(500_000)).toBe('$0.5')
+    expect(fmtMicroUsdRate(100_000)).toBe('$0.1')
+  })
+
+  it('does NOT round a real sub-cent rate to $0.00 (the BUG3 case)', () => {
+    // 75_000 micro = $0.075 — fmtMicroUsd would show $0.08; the rate formatter
+    // must preserve it.
+    expect(fmtMicroUsdRate(75_000)).toBe('$0.075')
+    // 1 micro-USD = $0.000001, the smallest representable rate, not $0.00.
+    expect(fmtMicroUsdRate(1)).toBe('$0.000001')
+  })
+
+  it('groups thousands and signs negatives', () => {
+    expect(fmtMicroUsdRate(1_000_000_000)).toBe('$1,000')
+    expect(fmtMicroUsdRate(-2_500_000)).toBe('-$2.5')
   })
 })

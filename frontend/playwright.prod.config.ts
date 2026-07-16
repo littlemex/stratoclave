@@ -11,6 +11,7 @@ export default defineConfig({
   testMatch: [
     'prod-deploy-2026-06-11.spec.ts',
     'prod-authenticated-shell.spec.ts',
+    'prod-p0-ui.spec.ts',
   ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

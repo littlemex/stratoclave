@@ -201,6 +201,11 @@ export default function MeUsage() {
           </CardTitle>
           <CardDescription>
             {t('me_usage.recent_desc')}
+            {(summary.data?.fallback_count ?? 0) > 0 && (
+              <span className="ml-2 text-amber-700">
+                {t('me_usage.fallback_count', { count: summary.data!.fallback_count })}
+              </span>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
@@ -221,13 +226,28 @@ export default function MeUsage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {history.data!.history.map((row) => (
-                  <TableRow key={row.recorded_at + row.model_id}>
+                {history.data!.history.map((row, i) => (
+                  // Include the index: recorded_at+model_id collides when two
+                  // requests to the same model share a timestamp (plausible
+                  // under agent/batch traffic), which would drop or mis-reconcile
+                  // rows (Fable review M3). The list is read-only + newest-first,
+                  // so the index is a stable, collision-free key here.
+                  <TableRow key={`${row.recorded_at}#${row.model_id}#${i}`}>
                     <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                       {formatDate(row.recorded_at)}
                     </TableCell>
                     <TableCell className="font-mono text-xs">
                       {row.model_id}
+                      {row.fallback_occurred === true && (
+                        <span
+                          className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800"
+                          title={t('me_usage.fallback_from', {
+                            requested: row.requested_model_id ?? '?',
+                          })}
+                        >
+                          {t('me_usage.fallback_badge')}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {row.tenant_name ?? row.tenant_id}

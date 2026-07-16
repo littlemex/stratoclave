@@ -20,7 +20,7 @@ import {
   type ReactNode,
 } from 'react'
 
-import { api } from '@/lib/api'
+import { api, queryClient } from '@/lib/api'
 import {
   DEFAULT_LOCALE,
   isSupportedLocale,
@@ -147,6 +147,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     dispatch({ type: 'AUTH_LOGOUT' })
+    // Drop all cached /me, usage, admin data so a subsequent login on the same
+    // tab can never be served the previous user's cached responses (Fable
+    // review H1: react-query staleTime would otherwise bleed data across users
+    // on a shared machine).
+    queryClient.clear()
     broadcast('logout')
     logoutRedirect()
   }, [broadcast])
@@ -154,6 +159,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const softLogout = useCallback(() => {
     clearTokens()
     dispatch({ type: 'AUTH_LOGOUT' })
+    queryClient.clear()
     broadcast('logout')
   }, [broadcast])
 
@@ -362,6 +368,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const handler = (e: MessageEvent) => {
       if (e.data?.type === 'logout') {
         dispatch({ type: 'AUTH_LOGOUT' })
+        // Also purge this tab's cache on a cross-tab logout (Fable review H1).
+        queryClient.clear()
       } else if (e.data?.type === 'login') {
         void reloadUser()
       }

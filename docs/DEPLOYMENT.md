@@ -255,15 +255,86 @@ aws ecs update-service \
 
 ## Regional constraints
 
-Stratoclave currently requires **`us-east-1`**. This is enforced at the top of `iac/bin/iac.ts`:
+Stratoclave deploys to an operator-chosen **body region** `R`. Only one piece is
+pinned: the **WAF stack** must live in `us-east-1`, because AWS requires
+CLOUDFRONT-scope WAFv2 WebACLs to be created there. Everything else — Network,
+DynamoDB, ECR, ALB, Frontend (S3 + the global CloudFront distribution), Cognito,
+ECS, and BackendConfig — deploys to `R`. CloudFront itself is global and uses the
+default `*.cloudfront.net` certificate (no custom ACM), so WAF is the *only*
+genuine `us-east-1` dependency.
 
-```ts
-if (cdkRegion !== 'us-east-1') {
-  throw new Error('CDK_DEFAULT_REGION must be "us-east-1" for Stratoclave ...');
-}
+Set the body region with `STRATOCLAVE_REGION` (falls back to `CDK_DEFAULT_REGION`,
+then `us-east-1`):
+
+```bash
+export STRATOCLAVE_REGION=eu-west-1          # body region R
+export BEDROCK_PRIMARY_REGION=us-east-1      # required when R != us-east-1 (see below)
 ```
 
-The primary reason is that Cognito hosted UI, Bedrock model inference profiles, and the cross-stack reference between the Frontend CloudFront distribution and the Cognito User Pool all have to live in the same region. Support for additional regions (for example `ap-northeast-1`, `eu-west-1`) is on the roadmap; contributions welcome.
+- **When `R == us-east-1`** (the default) nothing changes: all stacks live in one
+  region, no cross-region references are created, and existing deployments see no
+  functional diff. (One benign exception: the SPA's CSP `form-action` header now
+  lists only `*.auth.<R>.amazoncognito.com` instead of the old hardcoded
+  us-east-1/us-west-2 pair — a ResponseHeadersPolicy update with no behavior
+  change for a us-east-1 Cognito.)
+- **When `R != us-east-1`** the WAF stack stays in `us-east-1` and its WebACL ARN
+  is consumed by the CloudFront distribution via CDK `crossRegionReferences`. You
+  must `cdk bootstrap` **both** `R` and `us-east-1` (the deploy script checks this
+  and fails fast otherwise). GovCloud (`us-gov-*`) and China (`cn-*`) partitions
+  are rejected at synth — CloudFront does not exist there.
+
+### Bedrock model region is independent of the deploy region
+
+The region Stratoclave *runs in* (`R`) is decoupled from the region it *calls
+Bedrock in*. The Claude model primary region is `BEDROCK_PRIMARY_REGION`; when `R
+!= us-east-1` it must be set explicitly (Stratoclave refuses to guess — an unset
+value would otherwise silently fall back to the task's `AWS_REGION` = `R`, which
+may not host the model). Cross-region streaming failover is
+`STRATOCLAVE_FAILOVER_REGIONS` (comma-separated; `disabled`/`none`/`off`/empty =
+single-region).
+
+The **OpenAI/codex path is different**: its call region is hardwired per-model in
+the backend registry (`backend/mvp/models.py` — currently `us-west-2` /
+`us-east-2`) and **cannot be relocated by an environment variable**.
+`OPENAI_BEDROCK_REGIONS` is only a display hint surfaced to the CLI; it does not
+move the actual call. The only residency lever for codex is therefore
+`CODEX_ENABLED=false`.
+
+### Data-residency recipe (e.g. EU-only prompts)
+
+Residency here means **strict single-region** (exact region equality — a region
+prefix like `eu` is *not* treated as one jurisdiction, since `eu-west-2` is the
+UK and `eu-central-2` is Switzerland). To keep every prompt byte in one region,
+**all** of the following must line up — pinning only the deploy region is *not*
+sufficient, because failover and the codex path otherwise reach US regions:
+
+```bash
+export STRATOCLAVE_REGION=eu-west-1            # gateway + state in the EU
+export BEDROCK_PRIMARY_REGION=eu-west-1        # Claude calls stay in eu-west-1
+export STRATOCLAVE_FAILOVER_REGIONS=disabled   # no cross-region failover (default reaches us-west-2)
+export CODEX_ENABLED=false                     # OpenAI/codex is hardwired to us-west-2/us-east-2 — disable it
+export DEFAULT_BEDROCK_MODEL=anthropic.claude-…  # a DIRECTLY-HOSTED (non-geo) model id — see below
+export STRATOCLAVE_RESIDENCY=strict            # hard-fail synth if ANY Bedrock region != the deploy region
+```
+
+`STRATOCLAVE_RESIDENCY=strict` turns the residency check into a synth error;
+`warn` (or leaving it unset) only emits a `cdk synth` warning — and the warning
+fires only when `R` is non-default or `STRATOCLAVE_RESIDENCY` is set, so the plain
+us-east-1 default stays quiet (backward compatible). Note that
+`STRATOCLAVE_RESIDENCY=strict` on a **us-east-1** deploy will itself fail, because
+the default failover set reaches `eu-west-1` — that is intended (strict means
+strict); set `STRATOCLAVE_FAILOVER_REGIONS=disabled` too.
+
+**Geo inference profiles break single-region residency.** A model id prefixed
+`us.` / `eu.` / `apac.` / `global.` (e.g. the default `us.anthropic.claude-opus-4-7`)
+is a *geography* cross-region inference profile — AWS routes inference to any
+region within that geography at its discretion, so no single-region guarantee is
+possible. Under `STRATOCLAVE_RESIDENCY=strict` a geo-profile model is **refused at
+synth**; you must set `DEFAULT_BEDROCK_MODEL` to a directly-hosted, region-specific
+model id (no geo prefix). If geography-level residency (rather than single-region)
+is acceptable, set `STRATOCLAVE_ALLOW_GEO_INFERENCE=true` to downgrade the refusal
+to a warning. Also verify the model is actually available in the target region:
+`aws bedrock list-foundation-models --region eu-west-1`.
 
 ---
 
@@ -382,7 +453,7 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `COGNITO_REGION`                         | yes                     | yes         | |
 | `OIDC_ISSUER_URL`                        | yes                     | yes         | |
 | `OIDC_AUDIENCE`                          | yes                     | yes (equals client ID) | |
-| `BEDROCK_REGION`                         | yes                     | yes         | |
+| `BEDROCK_REGION`                         | yes                     | yes (= `BEDROCK_PRIMARY_REGION`) | Region Claude models are invoked in — the **model** primary region, independent of the deploy region. Always set explicitly by CDK. See `STRATOCLAVE_REGION` / `BEDROCK_PRIMARY_REGION`. |
 | `DEFAULT_BEDROCK_MODEL`                  | yes                     | yes         | |
 | `STRATOCLAVE_API_ENDPOINT`               | yes                     | yes         | Published in `/.well-known/stratoclave-config`. |
 | `STRATOCLAVE_PREFIX`                     | yes                     | yes (`stratoclave`) | DynamoDB, Secrets, and SSM key prefix. |
@@ -399,6 +470,11 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `ENABLE_WAF`                             | IaC-only                | n/a         | CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. |
 | `WAF_RATE_LIMIT_PER_5MIN`                | IaC-only                | n/a         | Per-IP request cap in the rate-based rule. Default: `300`. |
 | `WAF_IP_ALLOWLIST_ENABLED`               | IaC-only                | n/a         | Enable SSM-parameter-backed IPSet allowlist. Default: `false`. |
+| `STRATOCLAVE_REGION`                      | IaC-only                | n/a         | Body-stack deploy region `R` (Network/DynamoDB/ECR/ALB/Frontend/Cognito/ECS/Config). Falls back to `CDK_DEFAULT_REGION`, then `us-east-1`. The WAF stack always stays in `us-east-1`. GovCloud/China partitions are rejected. When `R != us-east-1` you must `cdk bootstrap` both `R` and `us-east-1`. See [Regional constraints](#regional-constraints). |
+| `BEDROCK_PRIMARY_REGION`                 | IaC-only                | n/a         | Bedrock **model** primary region, independent of `R`. Becomes the task's `BEDROCK_REGION`. **Required at synth when `STRATOCLAVE_REGION != us-east-1`** (Stratoclave refuses to guess). Defaults to `us-east-1` when `R == us-east-1`. |
+| `STRATOCLAVE_RESIDENCY`                   | IaC-only                | n/a         | `strict` \| `warn` (any other value is rejected at synth). `strict` makes `cdk synth` **hard-fail** if any region Bedrock is actually called in (model + failover + codex) differs from the exact deploy region, or if the default model is a geo inference profile. `warn` (or unset) only warns, and only when `R` is non-default or this var is set. See the data-residency recipe under [Regional constraints](#regional-constraints). |
+| `STRATOCLAVE_ALLOW_GEO_INFERENCE`        | IaC-only                | n/a         | `true` downgrades the strict-mode refusal of a geo inference-profile model (`us./eu./apac./global.`-prefixed) to a warning — i.e. accept geography-level residency instead of single-region. Default: unset (strict refuses geo profiles). |
+| `OPENAI_BEDROCK_REGIONS`                 | IaC-only                | yes (default `us-east-2,us-west-2`) | **Display-only hint** surfaced to the CLI via `/.well-known/stratoclave-config`. It does **not** change the codex call region — that is hardwired per-model in `backend/mvp/models.py`. For residency, disable codex with `CODEX_ENABLED=false`; setting this var does not keep codex prompts in-region. |
 | `CDK_NAG`                                | IaC-only                | n/a         | Set to `off` to skip the cdk-nag synth-time aspect. Default: `on`. |
 | `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`      | optional                | no          | If set, the backend auto-provisions this email as admin on first startup when no admin exists. Idempotent. |
 | `ALLOW_ADMIN_CREATION`                   | bootstrap only          | yes (default `false`) | See [Locking down after bootstrap](#locking-down-after-bootstrap). |
@@ -406,6 +482,7 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `DYNAMODB_RATE_LIMITS_TABLE`             | optional                | yes (default `stratoclave-rate-limits`) | DynamoDB table backing the per-IP auth rate limiter (`backend/core/rate_limit_ddb.py`). Fixed-window counters with a TTL attribute (`expires_at`) are **shared across every ECS task**, so caps hold under multi-task / multi-AZ scale-out with no Redis. Failure policy: a **misconfiguration** (missing/mis-named table, missing IAM grant → `ResourceNotFound`/`AccessDenied`/`Validation`) fails **CLOSED** — auth endpoints return `429` — so a broken limiter can't silently run unlimited. **⚠️ If every login/SSO returns 429 right after a deploy, check this table name + the task role's DynamoDB grant first.** A **transient outage** (connectivity/timeout) degrades to an in-process per-task limiter (not fully open). Wire a CloudWatch metric filter + alarm on the log line `rate_limit_degrade_to_local` to detect degraded mode. |
 | `RATE_LIMIT_TRUSTED_HOPS`                | optional                | no          | Number of right-side `X-Forwarded-For` entries written by your own proxy chain (not counting the viewer IP CloudFront appends). Default `1` matches CloudFront → ALB → ECS. Use `0` for CloudFront-only and `2` for custom WAF → CloudFront → ALB → ECS. See `backend/core/rate_limit.py`. |
 | `EXPOSE_TEMPORARY_PASSWORD`              | optional                | no          | If `true`, `admin user create` returns the one-time password in the response. Default `false` (response field is `null`). Not recommended for production. |
+| `STRATOCLAVE_FAILOVER_REGIONS`           | optional                | no          | Comma-separated cross-region Bedrock failover targets for the **streaming** path, in preference order (the primary `BEDROCK_REGION` is always tried first and is stripped if listed). Default `us-west-2,eu-west-1`. **Data residency:** set a same-jurisdiction list, or **`none`/`disabled`/`off`** (or an empty string) **to disable failover entirely** — single-region, streaming requests never send prompt bytes to another region. Prefer the `none` sentinel over `""` if your deploy tooling strips empty env vars. Non-streaming requests are single-region regardless. The effective set is logged at startup (`failover_regions_effective`). See `backend/mvp/routing/chains.py`. |
 
 If the backend refuses to start and the CloudWatch log says `environment variable X is required`, compare the task definition's `environment` array against this list.
 

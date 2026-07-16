@@ -32,6 +32,11 @@ pub async fn show(since_days: u32, history_limit: u32) -> Result<()> {
         "  sample_size:     {}",
         summary.get("sample_size").and_then(|v| v.as_i64()).unwrap_or(0)
     );
+    // P0-11: only surface the fallback line when there's something to report.
+    let fallback_count = summary.get("fallback_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    if fallback_count > 0 {
+        println!("  fallbacks:       {fallback_count} request(s) served by a fallback model");
+    }
     if let Some(map) = summary.get("by_model").and_then(|v| v.as_object()) {
         println!("  by_model:");
         for (k, v) in map {
@@ -54,14 +59,25 @@ pub async fn show(since_days: u32, history_limit: u32) -> Result<()> {
     println!("\n=== Recent {} entries ===", entries.len());
     println!(
         "{:<28} {:<35} {:<40} {:>8} {:>8}",
-        "recorded_at", "tenant_name", "model_id", "input", "output"
+        "recorded_at", "tenant_name", "model (effective)", "input", "output"
     );
     for e in &entries {
+        // P0-11: when the request cascaded to a fallback, show the effective
+        // model with a "⇐ requested" suffix so the substitution is visible.
+        // fallback_occurred is three-valued: Some(true)=fallback, Some(false)/
+        // null(legacy)=render plainly.
+        let effective = e.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
+        let model_col = if e.get("fallback_occurred").and_then(|v| v.as_bool()) == Some(true) {
+            let requested = e.get("requested_model_id").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("{effective} ⇐ {requested}")
+        } else {
+            effective.to_string()
+        };
         println!(
             "{:<28} {:<35} {:<40} {:>8} {:>8}",
             e.get("recorded_at").and_then(|v| v.as_str()).unwrap_or(""),
             e.get("tenant_name").and_then(|v| v.as_str()).unwrap_or(""),
-            e.get("model_id").and_then(|v| v.as_str()).unwrap_or(""),
+            model_col,
             e.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
             e.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
         );

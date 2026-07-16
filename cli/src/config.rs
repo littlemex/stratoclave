@@ -163,6 +163,40 @@ impl Default for AppConfig {
     }
 }
 
+/// True when `url`'s HOST is a loopback address (proper parse, not a substring
+/// match — `http://evil.localhost.attacker.com` must NOT count as local). Used
+/// only to decide whether to ALSO warn about cleartext; the override warn fires
+/// regardless.
+fn is_loopback_url(url: &str) -> bool {
+    match url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)) {
+        Some(h) => {
+            h == "localhost"
+                || h == "127.0.0.1"
+                || h == "[::1]"
+                || h == "::1"
+                || h.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+/// Warn ONCE per process that ANTHROPIC_BASE_URL overrode the endpoint (and, if
+/// non-TLS + non-loopback, that traffic would be cleartext). Warn-once avoids
+/// per-request spam / warning fatigue (Fable review H4 + round-2).
+fn warn_base_url_override_once(url: &str) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if !url.starts_with("https://") && !is_loopback_url(url) {
+            eprintln!(
+                "[WARN] ANTHROPIC_BASE_URL is not https:// ({url}); credentials \
+                 and prompts would be sent in cleartext."
+            );
+        }
+        eprintln!("[WARN] Endpoint overridden by ANTHROPIC_BASE_URL: {url}");
+    });
+}
+
 impl AppConfig {
     /// Load configuration from file, with environment variable overrides
     pub fn load(config_path: Option<PathBuf>) -> Result<Self> {
@@ -420,6 +454,18 @@ impl AppConfig {
         }
         if let Ok(url) = env::var("ANTHROPIC_BASE_URL") {
             if POLICY.is_env_var_allowed("ANTHROPIC_BASE_URL") && !url.is_empty() {
+                // The Cognito bearer + ephemeral key + prompts are sent here, so
+                // an env-overridden endpoint is a credential-exfiltration vector
+                // if something malicious sets it (.envrc, CI, compromised
+                // profile). Warn loudly so an override is never silent, and flag
+                // a non-TLS target — Fable security review H4. We warn rather
+                // than hard-reject: release builds should pin via
+                // POLICY.fixed_api_endpoint instead.
+                //
+                // Warn ONCE per process (Fable round-2): resolve_base_url runs
+                // per request, and per-turn spam trains users to ignore [WARN]
+                // lines — warning fatigue that defeats the control itself.
+                warn_base_url_override_once(&url);
                 return url;
             }
         }

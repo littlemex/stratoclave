@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from dynamo import UsageLogsRepository
 
 from .authz import require_permission
+from .me import _derive_fallback  # single source of truth for P0-11 fallback derivation
 from .deps import AuthenticatedUser
 
 
@@ -37,12 +38,16 @@ class UsageLogEntry(BaseModel):
     # Operators correlate via user_id; UI lookups resolve display names
     # against the Users table on demand.
     user_email_hash: Optional[str] = None
-    model_id: str
+    model_id: str  # the EFFECTIVE model the request was served by
     input_tokens: int
     output_tokens: int
     total_tokens: int
     recorded_at: str
     timestamp_log_id: str
+    # P0-11 fallback visibility (see mvp.me._derive_fallback). None on legacy
+    # rows = unknown, never True.
+    requested_model_id: Optional[str] = None
+    fallback_occurred: Optional[bool] = None
 
 
 class UsageLogsResponse(BaseModel):
@@ -85,6 +90,12 @@ def _to_entry(item: dict[str, Any]) -> UsageLogEntry:
         total_tokens=int(item.get("total_tokens", 0)),
         recorded_at=str(item.get("recorded_at") or ""),
         timestamp_log_id=str(item.get("timestamp_log_id") or ""),
+        requested_model_id=(
+            str(item["requested_model_id"]) if item.get("requested_model_id") else None
+        ),
+        fallback_occurred=_derive_fallback(
+            item.get("requested_model_id"), str(item.get("model_id") or "")
+        ),
     )
 
 

@@ -21,7 +21,8 @@
     "language": "Language",
     "language_switch_aria": "Switch display language",
     "language_en": "English",
-    "language_ja": "日本語"
+    "language_ja": "日本語",
+    "admin_pricing": "Pricing"
   },
   "login": {
     "title": "Stratoclave",
@@ -347,7 +348,9 @@
     "col_total": "Total",
     "row_empty": "No logs match.",
     "count_showing": "{{shown}} results",
-    "count_more": " / more pages"
+    "count_more": " / more pages",
+    "fallback_badge": "fallback",
+    "fallback_from": "Fell back from requested {{requested}}"
   },
   "admin_tenants": {
     "title": "Tenant administration",
@@ -433,7 +436,34 @@
     "delete_confirm_label": "Type <1>{{email}}</1> to confirm.",
     "delete_submit": "Delete",
     "delete_submitting": "Deleting…",
-    "delete_error_fallback": "Deletion failed"
+    "delete_error_fallback": "Deletion failed",
+    "api_keys": {
+      "title": "API keys",
+      "description": "Long-lived keys issued to this user. Revocation is immediate and irreversible.",
+      "loading": "Loading API keys…",
+      "load_error": "Failed to load API keys.",
+      "empty": "No API keys.",
+      "col_name": "Name",
+      "col_key_id": "Key ID",
+      "col_scopes": "Scopes",
+      "col_created": "Created",
+      "col_expires": "Expires",
+      "revoked": "REVOKED",
+      "revoke": "Revoke",
+      "revoke_confirm_title": "Revoke API key?",
+      "revoke_confirm_body": "The key <b>{{name}}</b> will stop working immediately. This cannot be undone.",
+      "revoke_confirm_action": "Revoke key"
+    },
+    "action_role_title": "Role",
+    "action_role_desc": "Promote or demote this user. The role is replaced.",
+    "action_role_button": "Change role",
+    "role_title": "Change role",
+    "role_desc": "Change the role for {{email}}. This replaces their current role and takes effect immediately.",
+    "role_new_label": "New role",
+    "role_current_line": "Current: {{roles}}",
+    "role_submit": "Change role",
+    "role_submitting": "Changing…",
+    "role_error_fallback": "Could not change the role."
   },
   "admin_users": {
     "title": "User administration",
@@ -499,7 +529,10 @@
     "col_tenant": "Tenant",
     "col_input": "Input",
     "col_output": "Output",
-    "col_total": "Total"
+    "col_total": "Total",
+    "fallback_badge": "fallback",
+    "fallback_from": "Fell back from requested {{requested}}",
+    "fallback_count": "{{count}} request(s) served by a fallback model"
   },
   "me_api_keys": {
     "label": "API Keys",
@@ -603,5 +636,22 @@
     "edit_title": "Edit tenant",
     "edit_desc": "Change the name and default_credit.",
     "edit_error_fallback": "Update failed"
+  },
+  "admin_pricing": {
+    "title": "Pricing",
+    "intro": "The effective per-model dollar rates the gateway charges (built-in defaults overlaid with any overrides). Read-only.",
+    "card_title": "Effective rates",
+    "version": "Override version: {{version}}",
+    "version_defaults": "Built-in defaults (no overrides)",
+    "load_error": "Failed to load pricing config.",
+    "col_key": "Pricing key",
+    "col_models": "Models",
+    "col_input": "Input $/MTok",
+    "col_output": "Output $/MTok",
+    "col_cache_read": "Cache read $/MTok",
+    "col_cache_write": "Cache write $/MTok",
+    "col_source": "Source",
+    "source_default": "default",
+    "source_override": "override"
   }
 }

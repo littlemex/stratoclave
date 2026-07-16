@@ -2,6 +2,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
 import { getPrefix, stackName, paramPath, putStringParameter } from '../lib/_common';
+import { resolveRegionConfig } from '../lib/region-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
 import { AlbStack } from '../lib/alb-stack';
@@ -29,8 +30,14 @@ import { Construct } from 'constructs';
  *
  * Dependency order (v2.1): network → dynamodb → ecr → alb → frontend
  *   → cognito → ecs → config. Cognito reads the CloudFront domain via
- *   a cross-stack reference, hence the Frontend dependency. All stacks
- *   live in us-east-1, so crossRegionReferences is not needed.
+ *   a cross-stack reference, hence the Frontend dependency.
+ *
+ * Region layout (v2.2): the body stacks deploy to an operator-chosen region R
+ *   (STRATOCLAVE_REGION, default us-east-1); only WafStack is pinned to
+ *   us-east-1 (CLOUDFRONT-scope WebACL requirement). When R != us-east-1 the
+ *   WAF→Frontend edge crosses regions (crossRegionReferences); everything else,
+ *   including Cognito↔Frontend, is same-region. The Bedrock model primary
+ *   region (BEDROCK_PRIMARY_REGION) is independent of R.
  *
  * Retired stacks (kept under iac/lib/_archived/): RdsStack, RedisStack,
  *   WafStack (now re-introduced under a different layout), CodeBuildStack,
@@ -40,32 +47,46 @@ import { Construct } from 'constructs';
 const app = new cdk.App();
 const prefix = getPrefix();
 
-const DEFAULT_REGION = 'us-east-1';
-
-// Blocker B2 (v2.1): CDK_DEFAULT_REGION must be us-east-1.
-// All stacks live in one region so crossRegionReferences is not needed
-// for the Cognito Hosted UI ↔ Frontend cross-stack reference.
-const cdkRegion = process.env.CDK_DEFAULT_REGION || DEFAULT_REGION;
-if (cdkRegion !== DEFAULT_REGION) {
-  throw new Error(
-    `CDK_DEFAULT_REGION must be "${DEFAULT_REGION}" for Stratoclave (got "${cdkRegion}"). ` +
-      `Cognito Hosted UI / cross-stack references require all stacks to live in one region.`
-  );
-}
+// v2.2 region decoupling: the *body* stacks (Network/DynamoDB/Ecr/Alb/
+// Frontend/Cognito/Ecs/Config) deploy to an operator-chosen region R; only
+// WafStack is pinned to us-east-1 because AWS requires CLOUDFRONT-scope
+// WAFv2 WebACLs to live there. CloudFront itself is global and uses the
+// default *.cloudfront.net certificate (no custom ACM), so WAF is the ONLY
+// genuine us-east-1 dependency. Cognito is region-agnostic (it builds its
+// Hosted UI / issuer URLs from `this.region`), so Cognito↔Frontend stays a
+// same-region (R) edge and needs no crossRegionReferences. Only the
+// WAF→Frontend edge crosses regions when R != us-east-1. See
+// docs/DEPLOYMENT.md ("Region decoupling") for the residency recipe.
+// Region / residency resolution lives in a pure, in-process-testable module
+// (lib/region-config.ts). It throws with an actionable message on any invalid
+// or residency-unsafe configuration, and returns the resolved regions + the
+// warnings to surface as CDK Annotations. See region-decoupling.test.ts.
+const regionCfg = resolveRegionConfig(process.env);
+const bodyRegion = regionCfg.bodyRegion;
+const bedrockPrimaryRegion = regionCfg.bedrockPrimaryRegion;
+const defaultBedrockModel = regionCfg.defaultBedrockModel;
+const failoverRegionsEnv = regionCfg.failoverRegionsEnv;
+const codexEnabled = regionCfg.codexEnabled;
+const residencyWarnings = regionCfg.residencyWarnings;
 
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
-  region: cdkRegion,
+  region: bodyRegion,
 };
 
-const cognitoEnv = env; // Unified to the same region (v2.1)
+// WAF lives in us-east-1 regardless of the body region. NEVER derive this from
+// bodyRegion — pinning WAF to R fails loudly at deploy (WAFv2 CLOUDFRONT scope
+// must be us-east-1), but keeping it a distinct literal makes the intent
+// unmistakable and immune to a copy-paste that reuses `env`.
+const wafEnv = { account: process.env.CDK_DEFAULT_ACCOUNT, region: regionCfg.wafRegion };
+
+const cognitoEnv = env; // same region as the body: Cognito is region-agnostic
+
+// FUTURE GUARD: if a custom CloudFront domain + ACM certificate is ever added,
+// that certificate stack MUST also be pinned to us-east-1 (like wafEnv) — do
+// NOT attach it to a body-region stack, or CloudFront will reject it at deploy.
 
 const cognitoDomainPrefix = process.env.COGNITO_DOMAIN_PREFIX; // optional (auto-generated if not specified)
-
-// Default Bedrock model (Backend mapping fallback)
-const defaultBedrockModel =
-  process.env.DEFAULT_BEDROCK_MODEL ||
-  'us.anthropic.claude-opus-4-7';
 
 // Admin creation gate (Critical C-D): unset after bootstrap in production
 const allowAdminCreation = process.env.ALLOW_ADMIN_CREATION || 'false';
@@ -93,6 +114,14 @@ const enableEcsExec = ecsExecExplicit !== undefined
 // without WAF, /api/* is exposed with no rate limit or managed-rule coverage.
 const enableWaf = (process.env.ENABLE_WAF || 'true').toLowerCase() !== 'false';
 const wafRateLimit = Number(process.env.WAF_RATE_LIMIT_PER_5MIN || 300);
+// AWS WAF rate-based rule minimum is 100 req / 5 min; a typo like "3oo" yields
+// NaN and fails at CFN deploy with an unhelpful message. Fail at synth instead.
+// (Fable review L-3)
+if (!Number.isInteger(wafRateLimit) || wafRateLimit < 100) {
+  throw new Error(
+    `WAF_RATE_LIMIT_PER_5MIN must be an integer >= 100 (got "${process.env.WAF_RATE_LIMIT_PER_5MIN}").`
+  );
+}
 const wafIpAllowlistEnabled =
   (process.env.WAF_IP_ALLOWLIST_ENABLED || 'false').toLowerCase() === 'true';
 
@@ -133,14 +162,20 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
 });
 albStack.addDependency(networkStack);
 
-// --- 5a. WAF (CLOUDFRONT scope, fixed to us-east-1).
-// We already enforce env.region === 'us-east-1' above, so the WAF stack sits
-// in the same region as everything else and no cross-region reference is
-// needed. The WebACL ARN is passed to FrontendStack via props.
+// --- 5a. WAF (CLOUDFRONT scope, pinned to us-east-1 via `wafEnv`).
+// The WebACL ARN is consumed by FrontendStack (below). When the body region
+// R != us-east-1 this becomes a cross-region reference, so both producer and
+// consumer set `crossRegionReferences: true`. When R == us-east-1 the flag is
+// a no-op — CDK emits an ordinary Export/Fn::ImportValue — so existing
+// single-region deployments see zero template diff. Passing the ARN as a plain
+// string instead was rejected: a WebACL replacement would leave a stale ARN and
+// silently disable WAF (the token-based reference makes that structurally
+// impossible and also enforces deploy ordering).
 let wafStack: WafStack | undefined;
 if (enableWaf) {
   wafStack = new WafStack(app, stackName(prefix, 'waf'), {
-    env,
+    env: wafEnv,
+    crossRegionReferences: true,
     prefix,
     rateLimitPer5Min: wafRateLimit,
     ipAllowlistEnabled: wafIpAllowlistEnabled,
@@ -151,6 +186,11 @@ if (enableWaf) {
 // --- 5. Frontend (S3 + CloudFront + SPA fallback Function) ---
 const frontendStack = new FrontendStack(app, stackName(prefix, 'frontend'), {
   env,
+  // Consumes the us-east-1 WebACL ARN. crossRegionReferences must match the
+  // producer (wafStack); only relevant when the body region != us-east-1
+  // (no-op otherwise). Enabled only when WAF is on, so there is no reference to
+  // resolve when ENABLE_WAF=false.
+  crossRegionReferences: enableWaf ? true : undefined,
   prefix,
   albDnsName: albStack.alb.loadBalancerDnsName,
   webAclArn: wafStack?.webAclArn,
@@ -162,7 +202,8 @@ if (wafStack) {
 }
 
 // --- 6. Cognito (cross-stack reference to the Frontend CloudFront domain) ---
-// Blocker B2 (v2.1): crossRegionReferences removed (same us-east-1 region)
+// Same region as Frontend (both in R): a plain same-region cross-stack export,
+// no crossRegionReferences needed. Cognito is region-agnostic.
 const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
   env: cognitoEnv,
   prefix,
@@ -178,8 +219,7 @@ const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
 });
 cognitoStack.addDependency(frontendStack);
 
-// --- 7. ECS (placed directly in the Public Subnet) ---
-// Blocker B2 (v2.1): crossRegionReferences removed
+// --- 7. ECS (placed directly in the Public Subnet, region R) ---
 const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   env,
   prefix,
@@ -250,6 +290,12 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_PRICING_CONFIG_TABLE: dynamoDBStack.pricingConfigTable.tableName,
     // Per-IP rate-limit counters, shared across ECS tasks (multi-task/AZ safe).
     DYNAMODB_RATE_LIMITS_TABLE: dynamoDBStack.rateLimitsTable.tableName,
+    // P0-11: per-model quota counters (charged atomically with the budget pool).
+    DYNAMODB_MODEL_QUOTAS_TABLE: dynamoDBStack.modelQuotasTable.tableName,
+    // P0-13/14: dual-track observability (span records + workflow_run rollups).
+    DYNAMODB_OBSERVABILITY_TABLE: dynamoDBStack.observabilityTable.tableName,
+    // P0-16: routing-signals write-only seam (writer live; consumer stubbed).
+    DYNAMODB_ROUTING_SIGNALS_TABLE: dynamoDBStack.routingSignalsTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,
@@ -277,16 +323,47 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DEFAULT_ORG_ID: 'default-org',
     DEFAULT_TENANT_CREDIT: '100000',
 
-    // Bedrock (Anthropic / Claude)
-    BEDROCK_REGION: env.region,
+    // Bedrock (Anthropic / Claude). BEDROCK_REGION is ALWAYS set explicitly to
+    // the model primary region (which is independent of the deploy region) — it
+    // is NEVER omitted and NEVER derived from env.region. If it were unset, the
+    // backend's default_region() would fall back to AWS_REGION (= the deploy
+    // region R), silently calling Bedrock in R even when R does not host the
+    // model. See bin/iac.ts::bedrockPrimaryRegion.
+    BEDROCK_REGION: bedrockPrimaryRegion,
     DEFAULT_BEDROCK_MODEL: defaultBedrockModel,
+    // Cross-region streaming failover set (mvp/routing/chains.py). Passed
+    // through ONLY when the operator set it, so unset preserves the backend
+    // default (us-west-2 + eu-west-1). Set to "disabled"/empty for single-
+    // region residency.
+    ...(failoverRegionsEnv !== undefined
+      ? { STRATOCLAVE_FAILOVER_REGIONS: failoverRegionsEnv }
+      : {}),
+
+    // Fault injection for live failover verification (mvp/routing/fault.py).
+    // Passed through ONLY when explicitly set to "1", so it is ABSENT by default
+    // and MUST never be set on a production task. When present it lets an
+    // operator-issued request carry an `x-sc-fault` header to trigger synthetic
+    // Bedrock errors (throttle/unavailable/timeout) and exercise the real
+    // cross-region failover path on a staging deploy.
+    ...(process.env.SC_FAULT_INJECTION === '1'
+      ? { SC_FAULT_INJECTION: '1' }
+      : {}),
 
     // OpenAI (codex / GPT-5.x) on Amazon Bedrock — bedrock-mantle endpoint.
-    // GPT-5.4 / GPT-5.5 are GA only in us-east-2 and us-west-2 today; the
-    // route handler in mvp/openai_responses.py picks the per-model region
-    // out of the model registry, so this list is purely a hint surfaced
-    // to the CLI through /.well-known/stratoclave-config.
-    CODEX_ENABLED: process.env.CODEX_ENABLED || 'true',
+    // GPT-5.4 / GPT-5.5 are GA only in us-east-2 / us-west-2; the route handler
+    // in mvp/openai_responses.py picks the per-model region out of the model
+    // REGISTRY (mvp/models.py), NOT from OPENAI_BEDROCK_REGIONS — that var is a
+    // DISPLAY-ONLY hint surfaced to the CLI via /.well-known/stratoclave-config
+    // (read only in well_known.py). RESIDENCY NOTE: the codex path is therefore
+    // hardwired to us-east-2/us-west-2 and cannot be relocated by an env var —
+    // the only residency lever for codex is CODEX_ENABLED=false (see the
+    // residency analysis above).
+    // Pass the SAME normalized boolean the residency analysis used (`codexEnabled`),
+    // not the raw operator string. This makes the task-def value provably equal to
+    // what STRATOCLAVE_RESIDENCY=strict assumed — otherwise strict could pass with
+    // codex "off" at synth while the container runs it "on" (NEW-8). The backend
+    // parses it as `.lower() == "true"`, so 'true'/'false' are exact. (NEW-8/NEW-11)
+    CODEX_ENABLED: String(codexEnabled),
     DEFAULT_CODEX_MODEL: process.env.DEFAULT_CODEX_MODEL || 'openai.gpt-5.4',
     OPENAI_BEDROCK_REGIONS:
       process.env.OPENAI_BEDROCK_REGIONS || 'us-east-2,us-west-2',
@@ -303,6 +380,13 @@ ecsStack.addDependency(albStack);
 ecsStack.addDependency(dynamoDBStack);
 ecsStack.addDependency(cognitoStack);
 ecsStack.addDependency(frontendStack);
+
+// Surface residency warnings as CDK Annotations (not just console.warn) so they
+// appear in `cdk synth`/`cdk diff` and can be escalated via aspects. Attached to
+// ecsStack because that is where the Bedrock-call env vars live. (Fable M-3/C-1)
+for (const w of residencyWarnings) {
+  cdk.Annotations.of(ecsStack).addWarning(w);
+}
 
 // --- 8. Backend Config (static Parameter Store values) ---
 class BackendConfigStack extends Stack {
@@ -336,8 +420,10 @@ class BackendConfigStack extends Stack {
     putStringParameter(this, 'BedrockRegionParam', {
       prefix,
       relativePath: 'bedrock/region',
-      value: env.region,
-      description: 'Bedrock region',
+      // Model primary region, independent of the deploy region (matches the
+      // BEDROCK_REGION task env). NOT env.region.
+      value: bedrockPrimaryRegion,
+      description: 'Bedrock model primary region',
     });
     putStringParameter(this, 'DefaultBedrockModelParam', {
       prefix,
@@ -476,7 +562,7 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   }
 }
 
-console.error(`[stratoclave-iac] prefix=${prefix} region=${env.region} bedrockModel=${defaultBedrockModel}`);
+console.error(`[stratoclave-iac] prefix=${prefix} bodyRegion=${env.region} wafRegion=${regionCfg.wafRegion} bedrockPrimary=${bedrockPrimaryRegion} bedrockModel=${defaultBedrockModel}`);
 console.error(`[stratoclave-iac] Parameter Store base: ${paramPath(prefix, '')}`);
 console.error(`[stratoclave-iac] ALLOW_ADMIN_CREATION=${allowAdminCreation}`);
 console.error(`[stratoclave-iac] enableWaf=${enableWaf} cdkNag=${process.env.CDK_NAG || 'on'}`);

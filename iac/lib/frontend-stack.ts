@@ -37,6 +37,17 @@ export class FrontendStack extends cdk.Stack {
     if (!albDnsName) {
       throw new Error('albDnsName is required for FrontendStack');
     }
+    // The CSP form-action below interpolates this.region into a literal header
+    // string. That is only safe when the region is concrete at synth (env is
+    // explicit). If it were ever an unresolved token, the CSP would contain a
+    // literal "${Token[...]}" and silently break Hosted UI login in the browser.
+    // Convert that latent footgun into a synth failure. (Fable review L-2)
+    if (cdk.Token.isUnresolved(this.region)) {
+      throw new Error(
+        'FrontendStack requires an explicit region (env.region) so the CSP ' +
+          'form-action Cognito domain resolves to a concrete region at synth.'
+      );
+    }
 
     // ResponseHeadersPolicy (P1-2): consistent security headers in front
     // of the SPA. Applied to the default (S3) behavior only; API and
@@ -85,7 +96,13 @@ export class FrontendStack extends cdk.Stack {
               "font-src 'self' data: https://fonts.gstatic.com",
               "frame-ancestors 'none'",
               "base-uri 'self'",
-              "form-action 'self' https://*.auth.us-east-1.amazoncognito.com https://*.auth.us-west-2.amazoncognito.com",
+              // Cognito Hosted UI lives in the same region as this stack (R):
+              // the login form POSTs to *.auth.<region>.amazoncognito.com.
+              // `this.region` is a concrete string at synth (env is explicit),
+              // so it interpolates safely into the header. A wrong region here
+              // blocks login in the BROWSER only (CSP violation), invisible to
+              // backend tests — keep it region-accurate.
+              `form-action 'self' https://*.auth.${cdk.Stack.of(this).region}.amazoncognito.com`,
               'upgrade-insecure-requests',
             ].join('; '),
             override: true,
@@ -320,6 +337,13 @@ export class FrontendStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'FrontendUrl', {
       value: `https://${this.cfnDistribution.attrDomainName}`,
+    });
+    // Consumed by scripts/deploy-all.sh to target the CloudFront invalidation
+    // after syncing SPA assets. The distribution id is already built above; the
+    // script referenced this output before it existed, so its asset-upload step
+    // failed the stack-output precondition (fixed here).
+    new cdk.CfnOutput(this, 'CloudFrontDistributionId', {
+      value: this.cfnDistribution.ref,
     });
 
     applyCommonTags(this, prefix, 'Frontend');

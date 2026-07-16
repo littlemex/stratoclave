@@ -116,3 +116,16 @@ def _parse_user_config(item: dict) -> UserRoutingConfig:
         chain=tuple(chain) if chain else None,
         fallback=item.get("fallback"),
     )
+
+def invalidate_routing_cache(tenant_id: str, user_id: Optional[str] = None) -> None:
+    """Drop the cached routing config for a tenant (or one of its users).
+
+    Called by the admin write path so THIS process immediately reads its own
+    writes. Scope caveat: the cache is per-process; other ECS tasks keep
+    their entry until the 60s TTL expires, so the fleet converges within one
+    TTL of a write. (See admin_api.py callouts before tightening this.)
+    """
+    if user_id is None:
+        _cache.pop(f"tenant:{tenant_id}", None)
+    else:
+        _cache.pop(f"user:{tenant_id}:{user_id}", None)

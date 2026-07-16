@@ -8,15 +8,41 @@
 
 import type { UserRole } from '@/types/auth'
 
+// Kept BYTE-FOR-BYTE in sync with backend/permissions.json (the source of
+// truth). Drift here only mis-renders UI affordances — the backend still
+// enforces via 403/404 — but a stale copy hides/shows the wrong controls. A
+// vitest (permissions.test.ts) asserts this map equals permissions.json so the
+// two cannot silently diverge.
 export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
-  admin: ['users:*', 'tenants:*', 'usage:*', 'permissions:*', 'messages:send'],
+  admin: [
+    'users:*',
+    'tenants:*',
+    'usage:*',
+    'permissions:*',
+    'accounts:*',
+    'apikeys:*',
+    'messages:send',
+    'responses:send',
+  ],
   team_lead: [
     'tenants:create',
     'tenants:read-own',
     'usage:read-own-tenant',
+    'usage:read-self',
+    'apikeys:read-self',
+    'apikeys:create-self',
+    'apikeys:revoke-self',
     'messages:send',
+    'responses:send',
   ],
-  user: ['messages:send', 'usage:read-self'],
+  user: [
+    'messages:send',
+    'responses:send',
+    'usage:read-self',
+    'apikeys:read-self',
+    'apikeys:create-self',
+    'apikeys:revoke-self',
+  ],
 }
 
 export function hasPermission(

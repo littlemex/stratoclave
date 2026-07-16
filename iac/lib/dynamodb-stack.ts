@@ -48,6 +48,12 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly pricingConfigTable: dynamodb.Table;
   /** Per-IP fixed-window rate-limit counters, shared across ECS tasks (TTL-reaped) */
   public readonly rateLimitsTable: dynamodb.Table;
+  /** P0-11: per-model quota counters (one `used` counter per scope/model/period), TTL-reaped */
+  public readonly modelQuotasTable: dynamodb.Table;
+  /** P0-13/14: dual-track observability (span records + workflow_run rollups), TTL-reaped */
+  public readonly observabilityTable: dynamodb.Table;
+  /** P0-16: routing_signals — write-only append log (learning seam), TTL-reaped */
+  public readonly routingSignalsTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -350,6 +356,62 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'expires_at',
     });
 
+    // P0-11: per-model quota counters. One item per (scope, model, period):
+    //   PK "TENANT#<id>" | "TENANT#<id>#USER#<uid>", SK "MQ#<model>#<period>".
+    // A single monotonic `used` counter (reserved-in-flight + settled) is
+    // charged inside the SAME TransactWriteItems as the pooled-budget debit, so
+    // budget + quota commit atomically. `expires_at` TTL reaps a period's rows a
+    // few days after month-end. No new infra class — DynamoDB only.
+    //
+    // Audit note: unlike the budget pool this is a soft policy limit, not a
+    // spend record, so it does not need PITR/RETAIN — the tenant-budgets table
+    // remains the source of truth for money. Ephemeral → no PITR.
+    this.modelQuotasTable = new dynamodb.Table(this, 'ModelQuotasTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-model-quotas`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
+    // P0-13/14: dual-track observability. One item collection per workflow run:
+    //   PK "TENANT#<id>#RUN#<run>", SK "SPAN#<ts>#<span>" (immutable span record)
+    //   or "ROLLUP" (commutative ADD counters for the whole run).
+    // GSI1 is SPARSE — only ROLLUP items carry gsi1pk/gsi1sk (per tenant-per-day
+    // discovery), span items never do, so there is no per-span GSI write.
+    // Derived telemetry, never money state → TTL-reaped (`expires_at`), no PITR.
+    this.observabilityTable = new dynamodb.Table(this, 'ObservabilityTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-observability`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+    this.observabilityTable.addGlobalSecondaryIndex({
+      indexName: 'GSI1',
+      partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // P0-16: routing_signals. Write-only seam for the FUTURE offline evaluator:
+    // one item per finalized request. The pk day-buckets and N-way shards each
+    // (tenant, category) (SC_SIGNAL_SHARDS, default 8) so a hot tenant never
+    // concentrates on one partition and aged day-partitions cool off.
+    // Deliberately NO GSI, NO PITR, NO DynamoDB Stream — the consumer is a later
+    // increment and both a Stream and a GSI are additive, non-breaking additions
+    // when it lands. Best-effort telemetry → TTL-reaped (`expires_at`).
+    this.routingSignalsTable = new dynamodb.Table(this, 'RoutingSignalsTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-routing-signals`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expires_at',
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -369,6 +431,10 @@ export class DynamoDBStack extends cdk.Stack {
       this.tenantBudgetsTable.tableArn,
       this.pricingConfigTable.tableArn,
       this.rateLimitsTable.tableArn,
+      this.modelQuotasTable.tableArn,
+      this.observabilityTable.tableArn,
+      `${this.observabilityTable.tableArn}/index/*`,
+      this.routingSignalsTable.tableArn,
     ];
 
     // Parameter Store exports
@@ -391,6 +457,9 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableTenantBudgetsParam', 'dynamodb/table-tenant-budgets', this.tenantBudgetsTable],
       ['TablePricingConfigParam', 'dynamodb/table-pricing-config', this.pricingConfigTable],
       ['TableRateLimitsParam', 'dynamodb/table-rate-limits', this.rateLimitsTable],
+      ['TableModelQuotasParam', 'dynamodb/table-model-quotas', this.modelQuotasTable],
+      ['TableObservabilityParam', 'dynamodb/table-observability', this.observabilityTable],
+      ['TableRoutingSignalsParam', 'dynamodb/table-routing-signals', this.routingSignalsTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

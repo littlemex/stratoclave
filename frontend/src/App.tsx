@@ -26,6 +26,7 @@ import AdminUserDetail from '@/pages/admin/AdminUserDetail'
 import AdminTenants from '@/pages/admin/AdminTenants'
 import AdminTenantDetail from '@/pages/admin/AdminTenantDetail'
 import AdminUsageLogs from '@/pages/admin/AdminUsageLogs'
+import AdminPricing from '@/pages/admin/AdminPricing'
 import AdminTrustedAccounts from '@/pages/admin/AdminTrustedAccounts'
 import AdminTrustedAccountDetail from '@/pages/admin/AdminTrustedAccountDetail'
 import TeamLeadTenants from '@/pages/team-lead/TeamLeadTenants'
@@ -77,6 +78,7 @@ export default function App() {
                 <Route path="/admin/tenants" element={<AdminTenants />} />
                 <Route path="/admin/tenants/:tenantId" element={<AdminTenantDetail />} />
                 <Route path="/admin/usage" element={<AdminUsageLogs />} />
+                <Route path="/admin/pricing" element={<AdminPricing />} />
                 <Route path="/admin/trusted-accounts" element={<AdminTrustedAccounts />} />
                 <Route
                   path="/admin/trusted-accounts/:accountId"

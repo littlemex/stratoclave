@@ -61,6 +61,7 @@ class UsageLogsRepository:
         output_tokens: int,
         request_id: Optional[str] = None,
         cost_microusd: Optional[int] = None,
+        requested_model_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Insert a UsageLog record.
 
@@ -68,6 +69,14 @@ class UsageLogsRepository:
         is persisted so the pool's `pool_settled` counter can be independently
         re-derived from the audit log — i.e. spend is auditable, not just
         asserted. Legacy callers that omit it write no cost field.
+
+        `model_id` is the EFFECTIVE model the request was served by (after any
+        P0-11 cascade). `requested_model_id` (P0-11 visibility) is the
+        client-requested model, canonicalized by the caller; absent on legacy
+        rows, so readers MUST treat a missing value as "unknown", never as
+        "no fallback". The fallback bool is derived at read from the two ids —
+        it is deliberately not persisted (no second source of truth to backfill
+        or let go stale vs the ids).
         """
         now = _now_iso()
         log_id = request_id or str(uuid4())
@@ -89,5 +98,7 @@ class UsageLogsRepository:
         }
         if cost_microusd is not None:
             item["cost_microusd"] = Decimal(int(cost_microusd))
+        if requested_model_id is not None:
+            item["requested_model_id"] = requested_model_id
         self._table.put_item(Item=item)
         return item

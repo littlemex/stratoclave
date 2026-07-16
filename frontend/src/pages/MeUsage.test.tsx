@@ -130,4 +130,45 @@ describe('MeUsage', () => {
     expect(mockUsageSummary).toHaveBeenCalledWith(30)
     expect(mockUsageHistory).toHaveBeenCalled()
   })
+
+  it('shows a fallback badge + summary count when a request cascaded (P0-11)', async () => {
+    mockUsageSummary.mockResolvedValue({ ...FIXTURE_SUMMARY, fallback_count: 1 })
+    mockUsageHistory.mockResolvedValue({
+      history: [
+        {
+          tenant_id: 'default-org',
+          tenant_name: 'Default Organization',
+          model_id: 'us.anthropic.claude-haiku-4-5',
+          input_tokens: 10,
+          output_tokens: 5,
+          total_tokens: 15,
+          recorded_at: '2026-04-20T12:00:00Z',
+          requested_model_id: 'claude-opus-4-7',
+          fallback_occurred: true,
+        },
+      ],
+      next_cursor: null,
+    })
+
+    render(withClient(<MeUsage />))
+
+    // The badge renders (default en copy: "fallback").
+    await waitFor(() =>
+      expect(screen.getAllByText(/fallback/i).length).toBeGreaterThan(0),
+    )
+    // Effective model shown; requested surfaced via the badge title.
+    expect(screen.getAllByText(/claude-haiku-4-5/).length).toBeGreaterThan(0)
+  })
+
+  it('renders no fallback badge for a legacy row (fallback_occurred null)', async () => {
+    mockUsageSummary.mockResolvedValue(FIXTURE_SUMMARY) // no fallback_count
+    mockUsageHistory.mockResolvedValue(FIXTURE_HISTORY) // no fallback_occurred
+
+    render(withClient(<MeUsage />))
+    await waitFor(() =>
+      expect(screen.getAllByText(/claude-opus-4-7/).length).toBeGreaterThan(0),
+    )
+    // Legacy row: badge text must NOT appear.
+    expect(screen.queryByText(/^fallback$/i)).toBeNull()
+  })
 })

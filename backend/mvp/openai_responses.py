@@ -34,7 +34,7 @@ from datetime import timedelta
 from typing import Any, AsyncGenerator, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -49,8 +49,9 @@ from ._pipeline import (
     settle_reservation_and_log,
 )
 from .authz import require_permission
-from .deps import AuthenticatedUser
+from .deps import AuthenticatedUser, extract_model_pin, get_request_context
 from .models import ModelEntry, _REGISTRY, resolve_model
+from .observability.context import RequestContext, response_headers as _corr_headers
 
 
 logger = get_logger(__name__)
@@ -388,8 +389,19 @@ def list_openai_models(
 @router.post("/openai/v1/responses")
 async def create_response(
     body: OpenAIResponsesRequest,
+    request: Request,
+    response: Response,
     user: AuthenticatedUser = Depends(require_permission("responses:send")),
+    ctx: RequestContext = Depends(get_request_context),
 ):
+    # P0-12: echo the correlation ids so a client can stitch calls into a run.
+    corr = _corr_headers(ctx)
+    response.headers.update(corr)
+
+    # P0-15: optional VSR hard pin. wire_protocol="responses" so a pin that
+    # resolves to a non-responses model is rejected (400), never misrouted.
+    model_pin = extract_model_pin(request)
+
     if not _codex_enabled():
         raise HTTPException(
             status_code=503,
@@ -428,7 +440,27 @@ async def create_response(
         input_tokens_est=max(reservation - body.max_output_tokens * _multiplier, 0),
         max_output_tokens=body.max_output_tokens,
         effort_multiplier=_multiplier,
+        wire_protocol="responses",
+        vsr_hard_model=model_pin,
     )
+
+    # The reservation may have cascaded to a fallback model (P0-11). Invoke the
+    # model actually priced/quota-charged. The cascade's servability filter only
+    # ever selects a registry-resolvable `responses`-protocol model, so the
+    # selection is always servable on this route (a cross-protocol / typo'd chain
+    # entry is dropped before it can win). Re-resolve defensively all the same.
+    _selected = getattr(tenants_repo, "selected_model", None)
+    if _selected and _selected != body.model:
+        try:
+            _sel_entry = resolve_model(_selected)
+            if _sel_entry.wire_protocol == "responses":
+                entry = _sel_entry
+            else:  # pragma: no cover — filtered out upstream
+                logger.warning("cascade_model_wrong_protocol",
+                               selected_model=_selected,
+                               wire_protocol=_sel_entry.wire_protocol)
+        except ValueError:  # pragma: no cover — filtered out upstream
+            logger.warning("cascade_model_unresolvable", selected_model=_selected)
 
     if body.stream:
         return StreamingResponse(
@@ -438,6 +470,7 @@ async def create_response(
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                **corr,
             },
         )
 
