@@ -167,6 +167,38 @@ def user_has_permission(user: AuthenticatedUser, permission: str) -> bool:
     return has_permission(user.roles, permission)
 
 
+# The canonical concrete-scope universe (no wildcards): every scope a request
+# can be gated on. This is the authoritative list — test_authz_lattice.py's
+# `test_universe_is_complete` greps every require_permission literal in mvp/ and
+# asserts it is a subset of this set, so a new gated endpoint that forgets to
+# add its scope here fails CI. effective_permissions() projects onto this set.
+ALL_SCOPES: tuple[str, ...] = (
+    "accounts:create", "accounts:delete", "accounts:read", "accounts:update",
+    "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
+    "apikeys:revoke", "apikeys:revoke-self",
+    "messages:send", "responses:send",
+    "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
+    "tenants:update",
+    "usage:read-all", "usage:read-own-tenant", "usage:read-self",
+    "users:assign-tenant", "users:create", "users:delete", "users:read",
+    "users:update",
+)
+
+
+def effective_permissions(user: AuthenticatedUser) -> list[str]:
+    """The complete, sorted list of concrete scopes `user` can actually exercise.
+
+    Computed by projecting `user_has_permission` over ALL_SCOPES — it is BY
+    CONSTRUCTION identical to what the request path enforces (same function,
+    same AND-semantics for API keys, same lattice/wildcard expansion). This is
+    the ONLY correct way to answer "what can this subject do"; re-deriving it
+    from roles/scopes independently would drift from enforcement. The result is
+    a projection onto the known-scope universe (wildcards a role holds are
+    reflected via the scopes they cover, not as `*` entries).
+    """
+    return [s for s in ALL_SCOPES if user_has_permission(user, s)]
+
+
 # -----------------------------------------------------------------
 # FastAPI dependency helpers
 # -----------------------------------------------------------------

@@ -227,6 +227,45 @@ class UsersRepository:
             raise
         return resp.get("Attributes")
 
+    def update_roles(
+        self,
+        user_id: str,
+        new_roles: list[str],
+        *,
+        expected_roles: Optional[list[str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Replace the user's `roles` list (the authorization source of truth).
+
+        `Users.roles` is what `deps.py` resolves and `require_permission`
+        enforces, so this is the ONLY place a user's effective role changes.
+        Returns the new attributes (``ALL_NEW``) or ``None`` when the user does
+        not exist OR when `expected_roles` was supplied and no longer matches
+        (optimistic lock — a lost update would otherwise desync the audit log
+        from the stored state). The caller must whitelist role values.
+
+        `roles` is a DynamoDB reserved word, so it is aliased.
+        """
+        names = {"#r": "roles"}
+        values: dict[str, Any] = {":r": list(new_roles), ":now": _now_iso()}
+        condition = "attribute_exists(user_id)"
+        if expected_roles is not None:
+            condition += " AND #r = :expected"
+            values[":expected"] = list(expected_roles)
+        try:
+            resp = self._table.update_item(
+                Key={"user_id": user_id, "sk": self.SK_PROFILE},
+                UpdateExpression="SET #r = :r, updated_at = :now",
+                ConditionExpression=condition,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return None
+            raise
+        return resp.get("Attributes")
+
     def get_by_user_id(self, user_id: str) -> Optional[dict[str, Any]]:
         resp = self._table.get_item(Key={"user_id": user_id, "sk": self.SK_PROFILE})
         return resp.get("Item")

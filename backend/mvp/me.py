@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo import TenantsRepository, UsageLogsRepository, UsersRepository, UserTenantsRepository
 
-from .authz import log_audit_event, require_permission
+from .authz import effective_permissions, log_audit_event, require_permission
 from .deps import AuthenticatedUser, get_current_user
 
 
@@ -115,6 +115,46 @@ def me(user: AuthenticatedUser = Depends(get_current_user)) -> MeResponse:
         remaining_credit=summary["remaining_credit"],
         tenant=tenant,
         locale=_resolve_locale(row.get("locale") if row else None),
+    )
+
+
+class MePermissionsResponse(BaseModel):
+    """The caller's OWN effective capabilities — the answer to 'what can I do?'.
+
+    `auth_kind` distinguishes the two subject types: for an API key the
+    permissions are the key's scopes intersected with the owner's roles (so a
+    key never shows more than it can actually use), for a JWT they are the
+    role-derived set. `key_scopes` is populated only for API-key auth so a
+    client can see the raw grant vs the effective intersection.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    user_id: str
+    auth_kind: str
+    roles: list[str]
+    key_scopes: Optional[list[str]] = None
+    permissions: list[str]
+
+
+@router.get("/me/permissions", response_model=MePermissionsResponse)
+def me_permissions(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> MePermissionsResponse:
+    """Return the caller's own effective capabilities.
+
+    Self-only (no target parameter), so no enumeration surface. The permission
+    list is computed by `effective_permissions` — the SAME evaluation the
+    request path enforces — so it can never claim a capability the caller would
+    actually be denied. When called with an API key, it reflects the key's
+    scopes ∩ owner roles (not the owner's full role set), which is the correct
+    'what can THIS credential do' answer.
+    """
+    return MePermissionsResponse(
+        user_id=user.user_id,
+        auth_kind=user.auth_kind,
+        roles=list(user.roles),
+        key_scopes=(list(user.key_scopes) if user.auth_kind == "api_key" else None),
+        permissions=effective_permissions(user),
     )
 
 
