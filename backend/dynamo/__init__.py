@@ -53,8 +53,10 @@ from .tenant_budgets import (
     TenantBudgetsRepository,
     current_period,
 )
+from .credit_ledger import CreditLedgerRepository
 
 __all__ = [
+    "CreditLedgerRepository",
     "get_dynamodb_resource",
     "UsersRepository",
     "UserTenantsRepository",

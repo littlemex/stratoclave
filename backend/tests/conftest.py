@@ -71,6 +71,7 @@ _TABLE_ENVS = {
     "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
     "DYNAMODB_OBSERVABILITY_TABLE": "stratoclave-observability",
     "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
+    "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -183,6 +184,33 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             AttributeDefinitions=[
                 {"AttributeName": "tenant_id", "AttributeType": "S"},
                 {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # CreditLedger: PK pk ("TENANT#<id>#P#<period>"), SK sk ("EV#..."),
+        # GSI run-index (gsi1pk/gsi1sk) for per-run money-move audit.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_CREDIT_LEDGER_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "gsi1pk", "AttributeType": "S"},
+                {"AttributeName": "gsi1sk", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "run-index",
+                    "KeySchema": [
+                        {"AttributeName": "gsi1pk", "KeyType": "HASH"},
+                        {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
             ],
             BillingMode="PAY_PER_REQUEST",
         )

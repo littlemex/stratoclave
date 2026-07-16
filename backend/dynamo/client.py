@@ -75,3 +75,16 @@ def pricing_config_table_name() -> str:
     version change.
     """
     return table_name("DYNAMODB_PRICING_CONFIG_TABLE", "stratoclave-pricing-config")
+
+
+def credit_ledger_table_name() -> str:
+    """Append-only, event-sourced credit ledger — the money source of truth.
+
+    PK `TENANT#<id>#P#<period>`, SK `EV#HOLD#<hold_id>#TERMINAL` (and, later,
+    `#RESERVE` etc.). Each item is an immutable money-move event written in the
+    SAME TransactWriteItems as the budget counter move, so spend cannot be
+    recorded without the counter changing or vice versa. The SK is the
+    idempotency key: `attribute_not_exists` on insert dedupes retries and makes
+    the terminal event (SETTLE/RELEASE/RECLAIM) mutually exclusive per hold.
+    """
+    return table_name("DYNAMODB_CREDIT_LEDGER_TABLE", "stratoclave-credit-ledger")

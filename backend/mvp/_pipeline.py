@@ -1434,7 +1434,18 @@ def settle_reservation_and_log(
         # streaming `finally`) must not double-subtract pool_reserved.
         context._pool_finalized = True
         try:
-            _settle_pool_side(user, context, int(actual_cost_microusd))
+            _settle_pool_side(
+                user,
+                context,
+                int(actual_cost_microusd),
+                ledger_facts={
+                    "tokens_in": int(actual_input_tokens),
+                    "tokens_out": int(actual_output_tokens),
+                    "model_id": model_id,
+                    "pricing_version": context.pricing_key,
+                    "settle_reason": "completion",
+                },
+            )
         except Exception:  # noqa: BLE001
             # The pool settle must never prevent the UsageLogs write below: a
             # non-ClientError (e.g. ReadTimeoutError) here would otherwise lose
@@ -1491,26 +1502,49 @@ def settle_reservation_and_log(
     )
 
 
-def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
+def _settle_pool_side(
+    user,
+    context,
+    actual_cost_microusd: int,
+    *,
+    ledger_facts: Optional[dict] = None,
+) -> None:
     """Move this reservation's `reserved` into `settled` and delete its hold in
     one transaction, with the double-subtract and vanished-row races handled.
 
-    The transaction is [aggregate settle, conditional hold delete]. Three cancel
-    outcomes are reconciled by inspecting the per-item CancellationReasons:
+    The transaction is [aggregate settle, conditional hold delete, ledger SETTLE
+    event]. Cancel outcomes are reconciled by inspecting per-item
+    CancellationReasons:
       - hold-delete (index 1) failed ConditionalCheckFailed → the reaper already
         reclaimed this hold AND already returned its reserved share, so we must
         NOT subtract reserved again; record settled-only instead;
       - aggregate (index 0) failed ConditionalCheckFailed → the pool row was
         deleted mid-flight (pool_vanished) → nothing to reconcile, no-op;
+      - ledger (index 2) failed ConditionalCheckFailed → a terminal event for
+        this hold already exists (retried settle, or a reaper reclaim beat us) →
+        already finalized, treat as idempotent success;
       - anything else → transient, retry with the same idempotency token.
+
+    The ledger SETTLE event (P0-1) is written in the SAME transaction as the
+    counter move, so spend is recorded iff `pool_settled` advances. Its sk
+    (`EV#HOLD#<hold_id>#TERMINAL`) with `attribute_not_exists` is the app-level
+    idempotency guard — the ClientRequestToken only dedupes botocore's transparent
+    retries, not an application re-invocation. Ledger emission is best-effort in
+    the sense that a missing `hold_id` (should not happen for a pooled reserve)
+    skips it rather than blocking the settle.
     """
     budgets = TenantBudgetsRepository()
     # TransactItems ORDER IS A CONTRACT: index 0 = pool-row settle, index 1 =
-    # hold delete. The cancellation-reason parsing below reads reasons[_POOL_IDX]
-    # / reasons[_HOLD_IDX] by position, so these must stay in sync with the order
-    # items are appended here. Do not reorder without updating both.
+    # hold delete, index 2 = ledger SETTLE. The cancellation-reason parsing below
+    # reads reasons[_POOL_IDX] / reasons[_HOLD_IDX] / reasons[_LEDGER_IDX] by
+    # position, so these must stay in sync with the order items are appended.
+    # Indices are assigned as items are appended (the hold-delete item is
+    # conditional), NOT statically — a static _HOLD_IDX=1 would alias the ledger
+    # item when the hold item is absent (Fable impl review Bug 3). None means
+    # "this item is not in the transaction".
     _POOL_IDX = 0
-    _HOLD_IDX = 1
+    _HOLD_IDX: Optional[int] = None
+    _LEDGER_IDX: Optional[int] = None
     items = [
         _pool_settle_items(
             table_name=budgets.table_name,
@@ -1521,9 +1555,62 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
         )
     ]
     if context.hold_sk:
+        _HOLD_IDX = len(items)
         items.append(
             budgets.hold_delete_txn_item(tenant_id=user.org_id, sk=context.hold_sk)
         )
+
+    # Resolve the hold_id: prefer the explicit one, else parse it from the hold
+    # sk (`HOLD#<period>#<expires>#<hold_id>`). The ledger must not be silently
+    # skipped when the pool counter moves, or I1 (Σsettled == pool_settled)
+    # breaks for a legitimate settle (Fable impl review Bug 4).
+    _hold_id = context.hold_id
+    if not _hold_id and context.hold_sk:
+        _hold_id = context.hold_sk.rsplit("#", 1)[-1] or None
+
+    _ledger_item = None
+    # A separate ledger item for the reaper-race (settled-only) path: there the
+    # reaper already returned `reserved`, so the counter moves settled-ONLY —
+    # the ledger event must mirror that with reserved_delta=0, not -reserved
+    # (Fable impl review Bug 1). Both are terminal SETTLEs on the same sk, so
+    # attribute_not_exists still makes them mutually exclusive / idempotent.
+    _ledger_item_settled_only = None
+    if _hold_id:
+        from dynamo import CreditLedgerRepository
+
+        facts = ledger_facts or {}
+        _real_run = facts.get("run_id") or facts.get("request_id")
+        _run_id = _real_run or _hold_id
+        _run_is_fallback = _real_run is None
+        _ledger = CreditLedgerRepository()
+
+        def _mk_settle_event(reserved_delta: int, reason: str):
+            return _ledger.terminal_event_txn_item(
+                tenant_id=user.org_id,
+                period=context.period,
+                hold_id=_hold_id,
+                event_type="SETTLE",
+                reserved_delta_microusd=reserved_delta,
+                settled_delta_microusd=int(actual_cost_microusd),
+                run_id=_run_id,
+                run_id_is_fallback=_run_is_fallback,
+                span_id=facts.get("span_id"),
+                request_id=facts.get("request_id"),
+                group_id=facts.get("group_id"),
+                model_id=context.selected_model or facts.get("model_id"),
+                pricing_version=facts.get("pricing_version"),
+                tokens_in=facts.get("tokens_in"),
+                tokens_out=facts.get("tokens_out"),
+                settle_reason=reason,
+            )
+
+        _ledger_item = _mk_settle_event(
+            -int(context.pool_reserved_microusd),
+            facts.get("settle_reason") or "completion",
+        )
+        _ledger_item_settled_only = _mk_settle_event(0, "reaper_race")
+        _LEDGER_IDX = len(items)
+        items.append(_ledger_item)
     # One fresh token, generated ONCE and reused across our explicit retries: the
     # settle params are timestamp-free, so a retry after a lost ack carries the
     # same token+params and DynamoDB dedupes it to success instead of double-
@@ -1552,8 +1639,38 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                 # contention/underflow guard. If either condition ever becomes
                 # compound, disambiguate via ReturnValuesOnConditionCheckFailure
                 # instead of trusting the reason index.
+                # Ledger idempotency: a ConditionalCheckFailed on the ledger item
+                # means a TERMINAL event for this hold already exists — this
+                # reservation was already finalized (a retried settle, or the
+                # reaper reclaimed+recorded first). The whole transaction was
+                # cancelled, so the counters were NOT double-moved; treat it as an
+                # idempotent success and stop. Checked FIRST because it subsumes
+                # the settle having already happened.
+                ledger_dup = (
+                    _LEDGER_IDX is not None
+                    and len(reasons) > _LEDGER_IDX
+                    and reasons[_LEDGER_IDX] == "ConditionalCheckFailed"
+                )
+                if ledger_dup:
+                    # PHASE 1: the only other writer of a TERMINAL event is a
+                    # retried settle, so this is genuinely "already settled" —
+                    # idempotent success. PHASE 2 CAVEAT (design-debt ticket): once
+                    # the reaper writes a RECLAIM terminal on this same sk, a blind
+                    # return here would drop the spend (counter+ledger both miss
+                    # it) — a revenue leak. Phase 2 must GetItem the existing
+                    # terminal and, if it is a RECLAIM, record a LATE_SETTLE on a
+                    # distinct sk instead of returning. See ledger Phase 2 task.
+                    logger.info(
+                        "pool_settle_already_finalized_in_ledger",
+                        tenant_id=user.org_id,
+                        period=context.period,
+                        hold_id=_hold_id,
+                    )
+                    return
                 hold_gone = (
-                    len(reasons) > _HOLD_IDX and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
+                    _HOLD_IDX is not None
+                    and len(reasons) > _HOLD_IDX
+                    and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
                 )
                 row_gone = (
                     len(reasons) > _POOL_IDX and reasons[_POOL_IDX] == "ConditionalCheckFailed"
@@ -1567,16 +1684,26 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                         reserved_microusd=context.pool_reserved_microusd,
                         actual_microusd=actual_cost_microusd,
                     )
+                    _so_items = [
+                        _settled_only_txn_item(
+                            table_name=budgets.table_name,
+                            tenant_id=user.org_id,
+                            period=context.period,
+                            actual_microusd=actual_cost_microusd,
+                        )
+                    ]
+                    # Record the SETTLE in the ledger on this reaper-race path too,
+                    # so a settlement that lost the hold-delete race is not
+                    # ledger-invisible. Use the reserved_delta=0 variant: the
+                    # reaper already returned `reserved`, so THIS txn moves the
+                    # counter settled-ONLY — the event must mirror that, not claim
+                    # to also release reserved (Fable impl review Bug 1).
+                    # attribute_not_exists keeps it idempotent.
+                    if _ledger_item_settled_only is not None:
+                        _so_items.append(_ledger_item_settled_only)
                     try:
                         client.transact_write_items(
-                            TransactItems=[
-                                _settled_only_txn_item(
-                                    table_name=budgets.table_name,
-                                    tenant_id=user.org_id,
-                                    period=context.period,
-                                    actual_microusd=actual_cost_microusd,
-                                )
-                            ],
+                            TransactItems=_so_items,
                             # Derive from the primary settle token (not a fresh
                             # UUID) so a lost-ack here that gets retried dedupes
                             # to the same write instead of double-recording spend.
@@ -1591,7 +1718,8 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                             != "TransactionCanceledException"
                         ):
                             raise
-                        # settled-only cancelled → pool row also gone; nothing to do.
+                        # Cancelled → pool row also gone, or a terminal ledger event
+                        # already exists (already finalized) → nothing to do.
                     return
                 if row_gone:
                     # Pool row deleted mid-flight (pool_vanished): no reservation
