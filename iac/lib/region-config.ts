@@ -137,7 +137,14 @@ export function resolveRegionConfig(env: Env): RegionConfig {
     env.DEFAULT_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-7';
 
   const failoverRegionsEnv = env.STRATOCLAVE_FAILOVER_REGIONS;
-  const codexEnabled = (env.CODEX_ENABLED || 'true').toLowerCase() !== 'false';
+  // Match the backend EXACTLY: mvp/openai_responses.py treats codex as enabled
+  // iff `CODEX_ENABLED.lower() == "true"`. Using `!== 'false'` here would flip
+  // an existing `CODEX_ENABLED=0`/`no`/`off` deployment to enabled on the next
+  // synth — silently re-enabling codex (and, off us-east-1, leaking prompts to
+  // the US registry regions). The IaC default is 'true' to preserve the
+  // ECS-injected default (backend's own bare default is 'false', but CDK always
+  // sets it explicitly). (Fable final review B-1)
+  const codexEnabled = (env.CODEX_ENABLED || 'true').toLowerCase() === 'true';
 
   const effectiveFailover = effectiveFailoverRegions(env, bedrockPrimaryRegion);
   for (const r of effectiveFailover) {

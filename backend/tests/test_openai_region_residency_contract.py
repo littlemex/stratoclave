@@ -36,6 +36,19 @@ def test_openai_registry_regions_match_iac_constant():
     )
 
 
+def test_default_failover_regions_match_iac_constant():
+    # _DEFAULT_FAILOVER_REGIONS is duplicated in the IaC residency analysis
+    # (iac/lib/region-config.ts::DEFAULT_FAILOVER_REGIONS). Drift would make the
+    # CDK residency warnings/strict-mode reason about a different default set than
+    # the backend actually uses. Keep them in sync (Fable final review Q1).
+    from mvp.routing.chains import _DEFAULT_FAILOVER_REGIONS
+
+    assert set(_DEFAULT_FAILOVER_REGIONS) == {"us-west-2", "eu-west-1"}, (
+        f"Backend _DEFAULT_FAILOVER_REGIONS changed to {_DEFAULT_FAILOVER_REGIONS}. "
+        f"Update DEFAULT_FAILOVER_REGIONS in iac/lib/region-config.ts to match."
+    )
+
+
 def test_openai_region_is_not_driven_by_env_hint(monkeypatch):
     # OPENAI_BEDROCK_REGIONS must NOT change any registry entry's region — it is
     # a display-only hint. A same-process re-read of the already-imported module

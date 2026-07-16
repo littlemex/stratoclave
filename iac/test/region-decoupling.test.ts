@@ -78,10 +78,23 @@ describe('resolveRegionConfig — region decoupling', () => {
     );
   });
 
-  test('CODEX_ENABLED normalizes to a boolean (matches container env)', () => {
-    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'false' })).codexEnabled).toBe(false);
-    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'FALSE' })).codexEnabled).toBe(false);
+  test('CODEX_ENABLED matches the backend exactly: enabled IFF "true"', () => {
+    // Backend (mvp/openai_responses.py) is `.lower() == "true"`. We must match:
+    // only "true"/"TRUE" enable; everything else (including 0/no/off) disables.
+    // Using `!== 'false'` would flip an existing CODEX_ENABLED=0 deployment to
+    // enabled on the next synth and silently leak codex prompts. (Fable B-1)
     expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).codexEnabled).toBe(true);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'true' })).codexEnabled).toBe(true);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'TRUE' })).codexEnabled).toBe(true);
+    // Any explicit non-"true" value disables codex (backend parity). NOTE:
+    // empty string is falsy in JS `||`, so it takes the IaC default ('true') —
+    // the container then receives 'true' too (String(codexEnabled)), so IaC and
+    // the task agree. An operator disabling codex uses 'false', not ''.
+    const disabledValues = ['false', 'FALSE', '0', 'no', 'off'];
+    const computed = disabledValues.map(
+      (v) => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: v })).codexEnabled,
+    );
+    expect(computed).toEqual(disabledValues.map(() => false));
   });
 });
 

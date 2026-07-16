@@ -147,7 +147,10 @@ log_info "Node: $(node --version)"
 # deploy AND `cdk bootstrap` (which synthesizes bin/iac.ts) require an explicit
 # BEDROCK_PRIMARY_REGION — otherwise the app throws with a message that is easy
 # to misread as a code bug. Surface the requirement here, before anything runs.
-if [ "$REGION" != "us-east-1" ] && [ -z "$BEDROCK_PRIMARY_REGION" ]; then
+# Use ${VAR:-} so an UNSET var does not abort under `set -u` — this preflight
+# exists precisely for the unset case, so referencing it unguarded would crash
+# before the helpful message ever prints. (Fable final review B-2)
+if [ "$REGION" != "us-east-1" ] && [ -z "${BEDROCK_PRIMARY_REGION:-}" ]; then
   log_error "BEDROCK_PRIMARY_REGION must be set when STRATOCLAVE_REGION ($REGION) != us-east-1."
   log_error "  It is the Bedrock MODEL region (independent of the deploy region) and is"
   log_error "  required both for this deploy and for 'cdk bootstrap' (bootstrap synths the app)."
@@ -159,6 +162,8 @@ fi
 # region != us-east-1, the WAF stack lives in us-east-1 and its cross-region
 # export writer needs BOTH regions bootstrapped; a missing CDKToolkit surfaces
 # as an opaque custom-resource error mid-deploy. Fail fast with a clear message.
+# Skipped under --dry-run (no AWS mutation, and dry-run should not require creds
+# beyond the identity check already done). (Fable final review B-2)
 WAF_REGION="us-east-1"
 ENABLE_WAF_EFFECTIVE="$(echo "${ENABLE_WAF:-true}" | tr '[:upper:]' '[:lower:]')"
 check_bootstrap() {
@@ -168,10 +173,12 @@ check_bootstrap() {
     exit 1
   }
 }
-check_bootstrap "$REGION"
-if [ "$ENABLE_WAF_EFFECTIVE" != "false" ] && [ "$REGION" != "$WAF_REGION" ]; then
-  log_info "Body region $REGION != $WAF_REGION and WAF is on: checking us-east-1 bootstrap (cross-region WAF export)."
-  check_bootstrap "$WAF_REGION"
+if [ "$DRY_RUN" != true ]; then
+  check_bootstrap "$REGION"
+  if [ "$ENABLE_WAF_EFFECTIVE" != "false" ] && [ "$REGION" != "$WAF_REGION" ]; then
+    log_info "Body region $REGION != $WAF_REGION and WAF is on: checking us-east-1 bootstrap (cross-region WAF export)."
+    check_bootstrap "$WAF_REGION"
+  fi
 fi
 
 if [ ! -d "$IAC_DIR/node_modules" ]; then
