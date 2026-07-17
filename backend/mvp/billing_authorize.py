@@ -75,7 +75,16 @@ def encode_authorization_id(*, hold_id: str, period: str, hold_sk: str) -> str:
     Self-contained addressing so no GSI / reverse index is needed. Not a secret
     — the tenant is always taken from the auth context, so the token only
     addresses the caller's own partition. Padding is stripped so the whole token
-    is in the URL-path-safe alphabet [A-Za-z0-9_-] (no `=` to percent-encode)."""
+    is in the URL-path-safe alphabet [A-Za-z0-9_-] (no `=` to percent-encode).
+
+    Precondition (Fable authcap review-1 codec / review-3 H): the three fields
+    must not contain the `|` separator, or decode would mis-split. hold_id is a
+    uuid4 and period is YYYY-MM (neither can contain `|`), and hold_sk is
+    HOLD#<period>#<expiry>#<hold_id> — none contain `|`. We assert it anyway so a
+    future caller with a laxer id cannot silently corrupt addressing."""
+    for field in (hold_id, period, hold_sk):
+        if _TOKEN_SEP in field:
+            raise ValueError(f"authorization token field must not contain {_TOKEN_SEP!r}")
     raw = _TOKEN_SEP.join((hold_id, period, hold_sk)).encode("utf-8")
     b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return _TOKEN_PREFIX + b64
@@ -84,7 +93,18 @@ def encode_authorization_id(*, hold_id: str, period: str, hold_sk: str) -> str:
 def decode_authorization_id(token: str) -> tuple[str, str, str]:
     """Decode → (hold_id, period, hold_sk). Raises 404 on any malformed token
     (never 400 — a bad token is indistinguishable from a non-existent
-    authorization, and we do not want a decoding oracle)."""
+    authorization, and we do not want a decoding oracle).
+
+    SECURITY — cross-field binding (Fable authcap review-3 High + codec gap #1):
+    the three fields are decoded from ONE token but are used against DIFFERENT
+    rows downstream — the C-1 gate reads the RESERVE event by hold_id, while
+    rehydrate reads the HOLD row by hold_sk. If they were not bound, a MIXED
+    token (hold_id of my legit external hold + hold_sk of a *different* hold)
+    would build a context from mismatched rows and drift pool_reserved. We bind
+    them here at the single entry point: hold_sk MUST be exactly
+    `HOLD#<period>#<something>#<hold_id>`, so all three fields describe the same
+    hold. A mismatch is a 404 (a forged/mixed token is not a real authorization).
+    """
     if not token or not token.startswith(_TOKEN_PREFIX):
         raise HTTPException(status_code=404, detail="authorization not found")
     try:
@@ -97,7 +117,25 @@ def decode_authorization_id(token: str) -> tuple[str, str, str]:
         raise HTTPException(status_code=404, detail="authorization not found")
     if not hold_id or not period or not hold_sk:
         raise HTTPException(status_code=404, detail="authorization not found")
+    # Cross-field binding: hold_sk must be the sk for THIS (period, hold_id).
+    if hold_sk != _expected_hold_sk_shape(period, hold_id, hold_sk):
+        raise HTTPException(status_code=404, detail="authorization not found")
     return hold_id, period, hold_sk
+
+
+def _expected_hold_sk_shape(period: str, hold_id: str, hold_sk: str) -> str:
+    """Return `hold_sk` iff it is a well-formed sk binding (period, hold_id):
+    `HOLD#<period>#<expiry>#<hold_id>` with a numeric expiry. Otherwise return a
+    sentinel that cannot equal hold_sk, so the caller's equality check fails
+    (→404). Binding both the prefix (period) and the suffix (hold_id) is what
+    defeats the mixed-token attack; the middle segment is the reaper's expiry."""
+    prefix = f"HOLD#{period}#"
+    suffix = f"#{hold_id}"
+    if hold_sk.startswith(prefix) and hold_sk.endswith(suffix):
+        middle = hold_sk[len(prefix):len(hold_sk) - len(suffix)]
+        if middle.isdigit():
+            return hold_sk
+    return "\x00invalid-hold-sk-binding"
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +210,10 @@ def _request_fingerprint(body: "AuthorizeRequest") -> str:
 
     payload = _json.dumps(
         {
+            # capture_mode is pinned so a future units-mode request cannot replay
+            # onto an amount-mode authorization that happens to share amount/desc
+            # (Fable authcap review-4 L-A). Today it is always "amount".
+            "capture_mode": "amount",
             "amount_microusd": int(body.amount_microusd),
             "description": body.description or "",
             "workflow_run_id": body.workflow_run_id or "",
@@ -267,9 +309,19 @@ def capture(
     # ANY terminal read or state change — an inline LLM hold's (forgeable) token
     # must 404 on every path, never be captured or have its state mapped.
     _require_external(tenant_id, period, hold_id)
-    ctx = _pipeline.rehydrate_reservation_context(
-        tenant_id=tenant_id, period=period, hold_id=hold_id, hold_sk=hold_sk
-    )
+    try:
+        ctx = _pipeline.rehydrate_reservation_context(
+            tenant_id=tenant_id, period=period, hold_id=hold_id, hold_sk=hold_sk
+        )
+    except _pipeline.ExternalHoldInconsistent:
+        # H-A: the hold's two durable amounts disagree — refuse to settle an
+        # inconsistent hold (an alarm is logged in the pipeline). 409, not 500,
+        # so a client sees a definitive "this authorization is unsettleable".
+        raise HTTPException(
+            status_code=409,
+            detail={"type": "authorization_inconsistent",
+                    "message": "Authorization amounts are inconsistent; contact support."},
+        )
     if ctx is None:
         # Hold gone → already captured/voided/reclaimed. Read the terminal to map
         # a deterministic response (200 replay / 409 / 410).
@@ -299,9 +351,15 @@ def capture(
         raise HTTPException(status_code=410, detail="authorization expired")
     except HTTPException:
         raise
-    except _pipeline.ClientError:
-        # A terminal clash surfaced as a settle abort we did not classify inline
-        # (e.g. a concurrent void). Fall back to the terminal mapping.
+    except Exception:  # noqa: BLE001
+        # H-B (Fable authcap review-4): ANY settle failure — a ClientError from a
+        # terminal clash (concurrent void), OR a non-ClientError like a
+        # ReadTimeout on a settle that may ALREADY have committed — falls back to
+        # reading the terminal. If the settle actually landed, the terminal is a
+        # SETTLE and the client gets a truthful 200 replay / 409; if it truly
+        # failed and the hold is still live, _no_terminal_error returns 503
+        # (retryable). This closes the "bare 500 after a committed settle" hole:
+        # the client never sees an opaque 500 that hides a real charge.
         return _capture_terminal_response(
             tenant_id, period, hold_id, hold_sk, authorization_id, actual
         )
@@ -326,6 +384,17 @@ def _settle_external(ctx, actual_microusd: int) -> None:
     not derived from)."""
     from .pricing import EXTERNAL_AMOUNT_SENTINEL
 
+    # Defense-in-depth for captured ≤ authorized (Fable authcap review-4 money
+    # Gap 2): the endpoint already 422s an over-capture, but that guard is a
+    # single Python `if` at one call site. Re-assert the bound HERE, at the money
+    # entry point every external capture funnels through, so a future second
+    # caller or a refactor that bypasses the endpoint can never push pool_settled
+    # past what was authorized. This is a hard invariant, not a user error, so it
+    # raises (mapped to 409 by the endpoint) rather than silently clamping.
+    actual = int(actual_microusd)
+    if actual > int(ctx.pool_reserved_microusd):
+        raise _pipeline.ExternalHoldInconsistent(ctx.hold_id or "")
+
     facts = {
         "model_id": None,
         "pricing_version": EXTERNAL_AMOUNT_SENTINEL,
@@ -336,7 +405,7 @@ def _settle_external(ctx, actual_microusd: int) -> None:
         "source": "external",
     }
     _pipeline._settle_pool_side(
-        _ExternalUser(ctx.tenant_id), ctx, int(actual_microusd), ledger_facts=facts
+        _ExternalUser(ctx.tenant_id), ctx, actual, ledger_facts=facts
     )
 
 
@@ -370,9 +439,18 @@ def void(
     hold_id, period, hold_sk = decode_authorization_id(authorization_id)
     tenant_id = user.org_id
     _require_external(tenant_id, period, hold_id)  # C-1: external-only
-    ctx = _pipeline.rehydrate_reservation_context(
-        tenant_id=tenant_id, period=period, hold_id=hold_id, hold_sk=hold_sk
-    )
+    try:
+        ctx = _pipeline.rehydrate_reservation_context(
+            tenant_id=tenant_id, period=period, hold_id=hold_id, hold_sk=hold_sk
+        )
+    except _pipeline.ExternalHoldInconsistent:
+        # H-A: releasing an inconsistent hold by HOLD.amount would drift the
+        # ledger's +reserved just as a capture would — refuse (409), don't move it.
+        raise HTTPException(
+            status_code=409,
+            detail={"type": "authorization_inconsistent",
+                    "message": "Authorization amounts are inconsistent; contact support."},
+        )
     if ctx is None:
         return _void_terminal_response(tenant_id, period, hold_id, hold_sk, authorization_id)
     # release_pool is idempotent + best-effort; it flips the terminal to RELEASE

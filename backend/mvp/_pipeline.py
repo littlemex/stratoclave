@@ -653,6 +653,18 @@ class ExternalHoldReclaimed(Exception):
         self.hold_id = hold_id
 
 
+class ExternalHoldInconsistent(Exception):
+    """An external hold's two durable amount sources disagree (HOLD row amount vs
+    RESERVE event reserved_delta) — a repair/adjust/corruption edited only one.
+    Settling would break ledger-derivability (I2), so we refuse and surface it
+    (the capture endpoint maps this to 409/500) rather than move money on an
+    inconsistent hold (Fable authcap review-4 H-A)."""
+
+    def __init__(self, hold_id: str):
+        super().__init__(f"external hold {hold_id} has inconsistent amounts")
+        self.hold_id = hold_id
+
+
 def reserve_credit_for_model(
     user,
     reservation_tokens: int,
@@ -1664,9 +1676,13 @@ def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthoriz
 
     First it verifies the incoming request's fingerprint matches the stored one:
     a mismatch means the key was reused for a different request (or a sanitize
-    collision), which must be a 422, never a wrong-authorization replay (H-1)."""
+    collision), which must be a 422, never a wrong-authorization replay (H-1).
+    A MISSING stored fingerprint is also a mismatch (Fable authcap review-4 M-C):
+    every IDEMP row this code writes carries one, so an absent fingerprint means
+    a partial write / hand-inserted / foreign row — replaying it could hand back
+    an authorization for a different body, so reject rather than skip the check."""
     stored_fp = str(idemp_row.get("request_fingerprint", ""))
-    if stored_fp and stored_fp != request_fingerprint:
+    if stored_fp != request_fingerprint:
         raise IdempotencyKeyReuse(
             "Idempotency-Key reused for a different request"
         )
@@ -1727,6 +1743,25 @@ def rehydrate_reservation_context(
         return None
     pool_reserved = int(hold.get("amount_microusd", 0))
 
+    # H-A (Fable authcap review-4): the authorized amount has two durable sources
+    # — the HOLD row's amount_microusd (which settle SUBTRACTS from pool_reserved
+    # and the capture 422 guard compares against) and the RESERVE event's
+    # reserved_delta_microusd (what the +reserved side recorded, and what GET
+    # displays). In the normal single-txn reserve they are equal. If they DIVERGE
+    # (a repair script, a future amount-adjust feature, or corruption edited only
+    # one), settling would move pool_reserved by an amount the ledger's +reserved
+    # never recorded — breaking I2 (ledger-derivability) silently. Refuse to
+    # settle a hold whose two amounts disagree: raise (the endpoint's outer
+    # handling surfaces it) rather than move money on an inconsistent hold.
+    reserve_delta = int(reserve_evt.get("reserved_delta_microusd", 0))
+    if pool_reserved != reserve_delta:
+        logger.error(
+            "external_hold_amount_mismatch",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            hold_amount=pool_reserved, reserve_delta=reserve_delta,
+        )
+        raise ExternalHoldInconsistent(hold_id)
+
     rate_snap = None
     pricing_key = None
     raw = reserve_evt.get("rate_snapshot")
@@ -1740,6 +1775,17 @@ def rehydrate_reservation_context(
             pricing_key = rate_snap.pricing_key
         except Exception:  # noqa: BLE001 — a corrupt snapshot degrades to amount-mode.
             rate_snap = None
+    # M-A (Fable authcap review-4): restore the run attribution from the RESERVE
+    # event so the SETTLE keys the run-index the SAME way. Honour the fallback
+    # marker: a hold reserved WITHOUT a real workflow_run_id stored run_id=hold_id
+    # with run_id_source="hold_id_fallback" — feeding that hold_id back as
+    # workflow_run_id would make settle write run_id_is_fallback=False and surface
+    # a synthetic hold_id as a real run (the external analog of F1). So restore
+    # workflow_run_id ONLY when the RESERVE was NOT a fallback.
+    restored_run_id = None
+    if reserve_evt.get("run_id_source") != "hold_id_fallback":
+        _rid = reserve_evt.get("run_id")
+        restored_run_id = str(_rid) if _rid else None
     return ReservationContext(
         tenants_repo=UserTenantsRepository(),
         reservation_tokens=0,
@@ -1751,6 +1797,7 @@ def rehydrate_reservation_context(
         pool_active=True,
         hold_id=hold_id,
         hold_sk=hold_sk,
+        workflow_run_id=restored_run_id,
         source="external",
     )
 

@@ -737,3 +737,246 @@ def test_cross_tenant_token_cannot_reach_another_orgs_authorization(dynamodb_moc
     assert CreditLedgerRepository().get_terminal(
         tenant_id="org-a", period=current_period(), hold_id=ra.hold_id
     ) is None
+
+
+# --------------------------------------------------------------------------- M-1/M-2 no-terminal branch
+
+
+def test_no_terminal_with_live_hold_is_503(dynamodb_mock):
+    """M-1 (Fable review-1): if a capture/void finds NO terminal but the HOLD row
+    is STILL present (a preceding settle/release silently failed), the money is
+    still frozen — return 503 retryable, NOT a misleading 404 that would make the
+    client abandon a live hold."""
+    import fastapi
+    from mvp.billing_authorize import _capture_terminal_response, _void_terminal_response
+
+    tenant, period = _seed(tenant_id="acme-noterm")
+    r = _authorize(tenant, 500_000, "noterm")
+    # The hold row exists (authorized), and NO terminal has been written.
+    with pytest.raises(fastapi.HTTPException) as ei:
+        _capture_terminal_response(tenant, period, r.hold_id, r.hold_sk, r.authorization_id, 100_000)
+    assert ei.value.status_code == 503
+    assert ei.value.detail["type"] == "authorization_action_unavailable"
+    with pytest.raises(fastapi.HTTPException) as ev:
+        _void_terminal_response(tenant, period, r.hold_id, r.hold_sk, r.authorization_id)
+    assert ev.value.status_code == 503
+
+
+def test_no_terminal_with_hold_gone_is_404(dynamodb_mock):
+    """M-2: hold row GONE and no terminal — should be unreachable (reaper writes
+    hold-delete + RECLAIM in one txn), so it is logged as an invariant violation
+    and returns 404 (nothing left to act on)."""
+    import fastapi
+    from mvp.billing_authorize import _capture_terminal_response
+
+    tenant, period = _seed(tenant_id="acme-noterm2")
+    r = _authorize(tenant, 500_000, "gone")
+    # Delete the hold row WITHOUT writing any terminal (the pathological state).
+    TenantBudgetsRepository()._table.delete_item(
+        Key={"tenant_id": tenant, "sk": r.hold_sk}
+    )
+    with pytest.raises(fastapi.HTTPException) as ei:
+        _capture_terminal_response(tenant, period, r.hold_id, r.hold_sk, r.authorization_id, 100_000)
+    assert ei.value.status_code == 404
+
+
+# --------------------------------------------------------------------------- mixed-token binding (r3/codec HIGH)
+
+
+def test_mixed_token_hold_id_x_other_hold_sk_is_404(dynamodb_mock, monkeypatch):
+    """Fable review-3 High + codec #1: the token carries hold_id|period|hold_sk as
+    three independent fields. A MIXED token — the hold_id of my legit external
+    hold (passes the C-1 source gate) + the hold_sk of a DIFFERENT hold — must be
+    rejected, or rehydrate could build a ctx from mismatched rows and drift
+    pool_reserved. decode_authorization_id binds hold_sk to (period, hold_id)."""
+    import fastapi
+
+    tenant, period = _seed(tenant_id="acme-mix")
+    a = _authorize(tenant, 500_000, "mixA")
+    b = _authorize(tenant, 300_000, "mixB")
+    # Forge: A's hold_id, but B's hold_sk (different expiry + different hold_id suffix).
+    forged = encode_authorization_id(hold_id=a.hold_id, period=period, hold_sk=b.hold_sk)
+    with pytest.raises(fastapi.HTTPException) as ei:
+        decode_authorization_id(forged)
+    assert ei.value.status_code == 404
+    # And end-to-end through the endpoints: 404, both holds untouched.
+    c = _client(monkeypatch)
+    assert c.post(f"/api/mvp/billing/authorizations/{forged}/capture",
+                  json={"actual_amount_microusd": 1}).status_code == 404
+    assert _pool(tenant, period)["pool_reserved_microusd"] == 800_000  # both intact
+
+
+def test_token_field_with_separator_rejected_at_encode():
+    """codec #1: encode refuses a field containing the '|' separator (a future
+    caller with a laxer id cannot silently corrupt addressing)."""
+    with pytest.raises(ValueError):
+        encode_authorization_id(hold_id="a|b", period="2026-07", hold_sk="HOLD#2026-07#0#a")
+
+
+def test_token_roundtrip_binds_period_and_hold_id():
+    """A well-formed token whose hold_sk matches (period, hold_id) round-trips."""
+    sk = "HOLD#2026-07#1784000000#hh"
+    tok = encode_authorization_id(hold_id="hh", period="2026-07", hold_sk=sk)
+    assert decode_authorization_id(tok) == ("hh", "2026-07", sk)
+
+
+def test_token_hold_sk_wrong_period_is_404():
+    import fastapi
+    # hold_sk embeds a DIFFERENT period than the token's period field.
+    tok = encode_authorization_id(
+        hold_id="hh", period="2026-07", hold_sk="HOLD#2026-06#1784000000#hh")
+    with pytest.raises(fastapi.HTTPException) as ei:
+        decode_authorization_id(tok)
+    assert ei.value.status_code == 404
+
+
+# --------------------------------------------------------------------------- H-A amount consistency
+
+
+def test_rehydrate_refuses_amount_mismatch(dynamodb_mock):
+    """H-A (Fable review-4): if the HOLD row amount and the RESERVE event
+    reserved_delta disagree (repair/adjust/corruption edited one), rehydrate
+    refuses to settle — raises ExternalHoldInconsistent rather than move money on
+    an inconsistent hold (which would break ledger-derivability I2)."""
+    tenant, period = _seed(tenant_id="acme-mismatch")
+    r = _authorize(tenant, 500_000, "mm")
+    # Corrupt ONLY the HOLD row's amount (leave the RESERVE event's delta at 500k).
+    budgets = TenantBudgetsRepository()
+    item = budgets._table.get_item(Key={"tenant_id": tenant, "sk": r.hold_sk})["Item"]
+    item["amount_microusd"] = 600_000
+    budgets._table.put_item(Item=item)
+    with pytest.raises(_pipeline.ExternalHoldInconsistent):
+        _pipeline.rehydrate_reservation_context(
+            tenant_id=tenant, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
+
+
+def test_http_capture_inconsistent_hold_409(dynamodb_mock, monkeypatch):
+    """The inconsistency surfaces to the client as 409, not a 500 or a wrong charge."""
+    tenant, period = _seed(tenant_id="acme-http")
+    c = _client(monkeypatch)
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "mm2"},
+               json={"amount_microusd": 500_000}).json()["authorization_id"]
+    hold_id, per, hold_sk = decode_authorization_id(a)
+    budgets = TenantBudgetsRepository()
+    it = budgets._table.get_item(Key={"tenant_id": tenant, "sk": hold_sk})["Item"]
+    it["amount_microusd"] = 700_000
+    budgets._table.put_item(Item=it)
+    r = c.post(f"/api/mvp/billing/authorizations/{a}/capture",
+               json={"actual_amount_microusd": 100_000})
+    assert r.status_code == 409
+    assert r.json()["detail"]["type"] == "authorization_inconsistent"
+
+
+# --------------------------------------------------------------------------- M-A run attribution
+
+
+def test_rehydrate_does_not_promote_fallback_run_id(dynamodb_mock):
+    """M-A (Fable review-4): a hold reserved WITHOUT a workflow_run_id stored
+    run_id=hold_id + run_id_source=hold_id_fallback. Rehydrate must NOT feed that
+    hold_id back as workflow_run_id (which would make settle write
+    run_id_is_fallback=False and surface a synthetic hold as a real run — the
+    external F1). So restored workflow_run_id is None for a fallback reserve."""
+    tenant, period = _seed(tenant_id="acme-runid")
+    r = _authorize(tenant, 400_000, "norun")  # no run_id → fallback
+    ctx = _pipeline.rehydrate_reservation_context(
+        tenant_id=tenant, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
+    assert ctx.workflow_run_id is None
+
+
+def test_rehydrate_restores_real_run_id(dynamodb_mock):
+    """A hold reserved WITH a workflow_run_id restores it, so the SETTLE keys the
+    run-index the same way the RESERVE did (per-run billing stays joined)."""
+    tenant, period = _seed(tenant_id="acme-runid2")
+    r = _authorize(tenant, 400_000, "withrun", run_id="wr-authcap-1")
+    ctx = _pipeline.rehydrate_reservation_context(
+        tenant_id=tenant, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
+    assert ctx.workflow_run_id == "wr-authcap-1"
+
+
+# --------------------------------------------------------------------------- M-C empty fingerprint
+
+
+def test_idemp_replay_rejects_missing_fingerprint(dynamodb_mock):
+    """M-C (Fable review-4): an IDEMP row with NO stored fingerprint (partial
+    write / foreign row) must NOT replay silently — it is treated as a mismatch."""
+    row = {"authorization_id": "auth_x", "hold_id": "h", "hold_sk": "HOLD#p#0#h",
+           "period": "2026-07", "amount_microusd": 1, "expires_at": 1, "capture_mode": "amount"}
+    with pytest.raises(_pipeline.IdempotencyKeyReuse):
+        _pipeline._idemp_replay(row, "some-fingerprint")
+
+
+# --------------------------------------------------------------------------- GAP 2: idempotency-CCF concurrency race
+
+
+def test_authorize_idemp_ccf_race_loser_replays_winner(dynamodb_mock, monkeypatch):
+    """Concurrency GAP 2 (Fable formal review): the SEQUENTIAL idempotency tests
+    only exercise the fast-path (second call reads the committed IDEMP row before
+    the txn). This forces the REAL concurrency guard: a genuine two-writer race
+    where our txn's IDEMP Put CCFs because a concurrent authorize with the same
+    key won. The loser must read the winner's IDEMP row and replay ITS
+    authorization — not double-reserve, not 402."""
+    tenant, period = _seed(tenant_id="acme-ccfrace")
+    # Winner commits first (a real authorize), establishing the IDEMP row.
+    winner = _authorize(tenant, 500_000, "raced", fp="fp-raced")
+    reserved_after_winner = _pool(tenant, period)["pool_reserved_microusd"]
+
+    # Now simulate OUR request racing: force get_idemp to miss on the fast-path
+    # (as if the winner hadn't committed when we first looked), so we proceed into
+    # the txn — where the winner's IDEMP row makes our Put CCF at index 3.
+    from botocore.exceptions import ClientError as _CE
+
+    class _CCFOnIdemp:
+        def transact_write_items(self, **kwargs):
+            raise _CE(
+                {"Error": {"Code": "TransactionCanceledException"},
+                 "CancellationReasons": [
+                     {"Code": "None"}, {"Code": "None"}, {"Code": "None"},
+                     {"Code": "ConditionalCheckFailed"},  # IDEMP idx 3
+                 ]},
+                "TransactWriteItems",
+            )
+
+    monkeypatch.setattr(_pipeline, "_low_level_client", lambda: _CCFOnIdemp())
+    monkeypatch.setattr(_pipeline.time, "sleep", lambda *_: None)
+    # Make the fast-path read miss so we actually reach the txn (then the CCF-path
+    # get_idemp reads the real winner). Patch get_idemp to return None ONCE.
+    real_ledger = _pipeline._reaper_ledger()
+    reads = {"n": 0}
+    orig_get_idemp = real_ledger.__class__.get_idemp
+
+    def _flaky_get_idemp(self, **kw):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return None  # fast-path miss → proceed to txn
+        return orig_get_idemp(self, **kw)  # CCF-path read → find the winner
+
+    monkeypatch.setattr(_pipeline._reaper_ledger().__class__, "get_idemp", _flaky_get_idemp)
+
+    res = _pipeline.reserve_external_authorization(
+        tenant_id=tenant, amount_microusd=500_000, idempotency_key="raced",
+        request_fingerprint="fp-raced", authorization_id_factory=_mk_id,
+        ttl_seconds=3600,
+    )
+    assert res.replayed is True
+    assert res.authorization_id == winner.authorization_id
+    assert res.hold_id == winner.hold_id
+    # Crucially: the pool was NOT reserved a second time.
+    assert _pool(tenant, period)["pool_reserved_microusd"] == reserved_after_winner
+
+
+def test_settle_external_rejects_over_capture_below_endpoint(dynamodb_mock):
+    """Money Gap 2 (Fable review-4): captured ≤ authorized is enforced not only at
+    the endpoint 422 but ALSO at the money entry point _settle_external, so a
+    caller that bypasses the endpoint cannot push pool_settled past authorized."""
+    tenant, period = _seed(tenant_id="acme-overcap")
+    r = _authorize(tenant, 500_000, "oc")
+    ctx = _pipeline.rehydrate_reservation_context(
+        tenant_id=tenant, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
+    from mvp.billing_authorize import _settle_external
+    before = _pool(tenant, period)
+    with pytest.raises(_pipeline.ExternalHoldInconsistent):
+        _settle_external(ctx, 600_000)  # > 500_000 authorized
+    after = _pool(tenant, period)
+    # No money moved: reserved still held, nothing settled.
+    assert after["pool_reserved_microusd"] == before["pool_reserved_microusd"]
+    assert after["pool_settled_microusd"] == before["pool_settled_microusd"]
