@@ -309,6 +309,34 @@ def test_response_has_tool_use():
     assert saar.response_has_tool_use("nope") is False
 
 
+def test_tool_result_works_on_pydantic_message_objects():
+    # SAAR live-verify finding: the handler passes body.messages, which is a
+    # list[AnthropicMessage] (pydantic objects), NOT dicts. A dict-only .get()
+    # silently never fired the tool-loop lock. Prove object messages work — with
+    # a tiny object that has .role/.content attributes like the real model.
+    class _Msg:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+
+    class _Block:
+        def __init__(self, type_):
+            self.type = type_
+
+    msgs = [
+        _Msg("assistant", [_Block("tool_use")]),
+        _Msg("user", [_Block("tool_result")]),
+    ]
+    assert saar.request_has_tool_result(msgs) is True
+    # last user message is a plain text turn → not a tool return
+    msgs2 = [
+        _Msg("user", [_Block("tool_result")]),      # historical
+        _Msg("assistant", [_Block("text")]),
+        _Msg("user", "now a plain question"),        # current turn
+    ]
+    assert saar.request_has_tool_result(msgs2) is False
+
+
 def test_tool_result_only_last_user_message_counts():
     # H2 (Fable review-1): a HISTORICAL tool_result must NOT trigger the lock —
     # only the current turn's (last user message) does. Converse re-sends history

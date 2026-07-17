@@ -505,23 +505,30 @@ def request_has_tool_result(messages: object) -> bool:
     question would STILL match the historical tool_result and stay wrongly locked,
     forbidding a legitimate reselection. Only the newest user turn tells us
     whether THIS request is a tool return. Defensive against the forward-compatible
-    ``content: Any`` shape (a string / non-list ⇒ no tool result)."""
+    ``content: Any`` shape (a string / non-list ⇒ no tool result), AND against the
+    message being either a plain dict OR a pydantic model — the handler passes
+    ``body.messages`` which is a ``list[AnthropicMessage]`` (objects with .role/
+    .content attributes), not dicts, so a dict-only ``.get`` would silently never
+    fire the lock (SAAR live-verify finding)."""
     if not isinstance(messages, (list, tuple)):
         return False
+
+    def _field(obj, name):
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
     # Find the last user message (the current turn's input).
     last_user = None
     for m in messages:
-        if isinstance(m, dict) and m.get("role") == "user":
+        if _field(m, "role") == "user":
             last_user = m
     if last_user is None:
         return False
-    content = last_user.get("content")
+    content = _field(last_user, "content")
     if not isinstance(content, (list, tuple)):
         return False
-    return any(
-        isinstance(block, dict) and block.get("type") == "tool_result"
-        for block in content
-    )
+    return any(_field(block, "type") == "tool_result" for block in content)
 
 
 def response_has_tool_use(content_blocks: object) -> bool:
