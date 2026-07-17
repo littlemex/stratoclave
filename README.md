@@ -529,6 +529,15 @@ code is one idempotency record and the rehydrate.
   (reaper-reclaimed) hold returns `410` and is deliberately **not** late-billed
   — an external capture window is unbounded, so late-billing a reclaimed hold
   could break the budget invariant.
+- **The write verbs are rate-limited per source IP** (`authorize` / `capture` /
+  `void`; `BILLING_WRITE_RATE_LIMIT`, default `60/minute`, backed by the same
+  DynamoDB fixed-window limiter as the auth endpoints). Unlike an inline request
+  these calls do no Bedrock work, so an un-capped `authorize → void` loop — even
+  an accidental one from a buggy client that re-mints its `Idempotency-Key` each
+  time — could saturate the single tenant-budget row's optimistic-concurrency
+  retries and starve other users' inference in the same tenant. The cap bounds
+  that contention while staying generous for legitimate programmatic use; the
+  read-only `GET` is not capped.
 
 The web console surfaces authorization status read-only (an `external` badge);
 issuing authorize/capture stays programmatic (API/CLI:
@@ -729,11 +738,13 @@ deliberately does **not** do today:
   workloads. (Note: full-fidelity *audit* does not require a proxy — Bedrock
   model invocation logging + CloudTrail give you that with a broker too. A
   proxy is for *intervention before the call*, not merely observation.)
-- **Rate limiting is coarse.** Auth-endpoint caps are per-IP fixed-window
-  counters in DynamoDB (shared across all tasks, no Redis), which is enough to
-  blunt credential stuffing but is not a token-bucket or a per-tenant inference
-  quota. Credit reservation is the real spend ceiling and is always atomic in
-  DynamoDB.
+- **Rate limiting is coarse.** The auth endpoints and the external billing
+  write verbs (`authorize` / `capture` / `void`) carry per-IP fixed-window
+  counters in DynamoDB (shared across all tasks, no Redis) — enough to blunt
+  credential stuffing and budget-row contention, but not a token-bucket or a
+  per-tenant inference quota, and the inline LLM endpoints themselves are not
+  IP-capped. Credit reservation is the real spend ceiling and is always atomic
+  in DynamoDB.
 - **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
   commit, run it in an account you control, and read the threat model in
   [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.
