@@ -37,6 +37,7 @@ from mvp.chat_completions import router as mvp_chat_completions_router
 from mvp.openai_responses import router as mvp_openai_responses_router
 from mvp.me import router as mvp_me_router
 from mvp.billing_read import router as mvp_billing_read_router
+from mvp.billing_authorize import router as mvp_billing_authorize_router
 from mvp.admin_users import router as mvp_admin_users_router
 from mvp.admin_tenants import router as mvp_admin_tenants_router
 from mvp.admin_pricing import router as mvp_admin_pricing_router
@@ -394,6 +395,7 @@ app.include_router(mvp_chat_completions_router)  # POST /v1/chat/completions
 app.include_router(mvp_openai_responses_router)  # POST /openai/v1/responses, GET /openai/v1/models
 app.include_router(mvp_me_router)                # GET  /api/mvp/me + usage-summary / usage-history
 app.include_router(mvp_billing_read_router)      # GET  /api/mvp/{me,admin}/billing/runs/{run_id} (L5-d)
+app.include_router(mvp_billing_authorize_router)  # POST /api/mvp/billing/authorize + /authorizations/{id}/{capture,void}, GET (authcap)
 app.include_router(mvp_admin_users_router)       # /api/mvp/admin/users[*]
 app.include_router(mvp_admin_tenants_router)     # /api/mvp/admin/tenants[*]
 app.include_router(mvp_admin_routing_router)     # /api/mvp/admin/tenants/{id}[/users/{uid}]/routing-config

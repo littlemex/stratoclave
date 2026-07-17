@@ -7,8 +7,10 @@ import { describe, expect, it } from 'vitest'
 
 import tenantFixture from '../../../contracts/billing/run_tenant.json'
 import adminFixture from '../../../contracts/billing/run_admin.json'
+import authStatusFixture from '../../../contracts/billing/authorization_status.json'
 import {
   assertNoCostLeak,
+  type AuthorizationStatus,
   type RunBreakdownAdmin,
   type RunBreakdownTenant,
 } from './api'
@@ -27,6 +29,18 @@ describe('billing contract fixtures', () => {
     expect(b.total_provider_cost_microusd).not.toBeNull()
     expect(b.total_margin_microusd).not.toBeNull()
     expect(b.events[0].provider_cost_microusd).not.toBeNull()
+  })
+})
+
+describe('authcap authorization status fixture', () => {
+  it('matches the AuthorizationStatus shape (read-only, no cost)', () => {
+    const s = authStatusFixture as AuthorizationStatus
+    expect(s.authorization_id.startsWith('auth_')).toBe(true)
+    expect(s.status).toBe('captured')
+    expect(s.terminal).toBe('SETTLE')
+    expect(s.captured_microusd).toBe(700000)
+    // The cost-leak backstop must not throw on a clean status payload.
+    expect(() => assertNoCostLeak(s)).not.toThrow()
   })
 })
 

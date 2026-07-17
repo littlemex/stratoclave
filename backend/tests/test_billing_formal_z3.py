@@ -484,6 +484,60 @@ def test_phase2_late_settle_cannot_double_count_with_settle():
     assert_proved(s, "settle ∧ late is impossible (no double-count of spend)")
 
 
+def _external_capture_model(*, external_forbids_late: bool):
+    """Phase-2 terminal model + a `source=external` flag. The external
+    authorize/capture contract (Fable authcap D-2) adds ONE rule to the base
+    model: an external hold never takes LATE_SETTLE (its capture window is
+    unbounded, so late-billing a reclaimed hold could break the budget
+    invariant). We model that as `external ⇒ ¬late`. The broken variant drops
+    the rule to prove the harness bites."""
+    (cons, R, actual, settle, release, reclaim, late,
+     reserved_returned, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=True)
+    external = z3.Bool("ext_source")
+    if external_forbids_late:
+        cons.append(z3.Implies(external, z3.Not(late)))
+    return (cons, R, actual, settle, release, reclaim, late, external,
+            reserved_returned, settled_recorded)
+
+
+def test_external_reclaimed_hold_records_no_spend():
+    """authcap D-2 (safety): an EXTERNAL hold the reaper reclaimed records NO
+    spend — no LATE_SETTLE recovery — so its reserved is returned exactly once
+    and settled stays 0. The terminal set for an external hold is closed to
+    {SETTLE, RELEASE, RECLAIM}; late is unreachable when source=external."""
+    (cons, R, actual, settle, release, reclaim, late, external,
+     reserved_returned, settled_recorded) = _external_capture_model(external_forbids_late=True)
+    s = _solver()
+    s.add(*cons)
+    s.add(external)  # the hold is external
+    prop = z3.And(
+        z3.Not(late),  # external ⇒ never late-settled
+        # a reclaimed external hold: reserved returned once, NO spend recorded.
+        z3.Implies(reclaim, z3.And(settled_recorded == 0, reserved_returned == R)),
+        # settled is still at-most-once (never 2·actual) and reserved never 2R.
+        z3.Or(settled_recorded == 0, settled_recorded == actual),
+        z3.Or(reserved_returned == 0, reserved_returned == R),
+    )
+    s.add(z3.Not(prop))
+    assert_proved(s, "external reclaimed hold records no spend (D-2)")
+
+
+def test_sanity_external_without_late_ban_allows_late_bill():
+    """Model validation: drop the external⇒¬late rule and Z3 finds a run where an
+    external hold IS late-settled after reclaim (settled == actual) — the exact
+    unbounded-window billing D-2 forbids."""
+    (cons, R, actual, settle, release, reclaim, late, external,
+     _rr, settled_recorded) = _external_capture_model(external_forbids_late=False)
+    s = _solver()
+    s.add(*cons)
+    s.add(actual >= 1)
+    s.add(external, reclaim, late)          # external hold, reaped, then late-billed
+    s.add(settled_recorded == actual)       # spend recorded on a reclaimed external hold
+    assert_counterexample_exists(
+        s, "external hold late-billed after reclaim when the ban is removed"
+    )
+
+
 def test_sanity_phase2_without_late_guard_double_count_is_found():
     """Model validation: drop the late⇒reclaim ConditionCheck and Z3 finds a
     run where a SETTLE terminal AND a LATE_SETTLE both record the spend —

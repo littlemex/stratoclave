@@ -29,11 +29,23 @@ import { fmtMicroUsd } from '@/lib/money'
 export default function MeBilling() {
   const [runId, setRunId] = useState('')
   const [submitted, setSubmitted] = useState('')
+  const [authId, setAuthId] = useState('')
+  const [authSubmitted, setAuthSubmitted] = useState('')
 
   const q = useQuery({
     queryKey: ['me', 'billing', 'run', submitted],
     queryFn: () => api.runBilling(submitted),
     enabled: submitted.length > 0,
+    retry: false,
+  })
+
+  // Read-only external authorization status (authcap). The UI never issues
+  // authorize/capture — it only looks up the state of one the tenant created
+  // via API/CLI.
+  const authQ = useQuery({
+    queryKey: ['me', 'billing', 'authorization', authSubmitted],
+    queryFn: () => api.getAuthorization(authSubmitted),
+    enabled: authSubmitted.length > 0,
     retry: false,
   })
 
@@ -116,6 +128,81 @@ export default function MeBilling() {
                 ))}
               </TableBody>
             </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      <header className="pt-4">
+        <h2 className="font-display text-xl font-semibold tracking-tight">
+          External authorization
+        </h2>
+        <p className="mt-2 max-w-xl text-sm text-muted-foreground">
+          Look up the status of an external authorization created via the API or
+          CLI. This view is read-only — authorize, capture, and void are
+          programmatic actions (<code>stratoclave billing …</code>).
+        </p>
+      </header>
+
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault()
+          setAuthSubmitted(authId.trim())
+        }}
+      >
+        <input
+          aria-label="authorization id"
+          className="flex-1 border border-border bg-card px-3 py-2 text-sm"
+          placeholder="auth_…"
+          value={authId}
+          onChange={(e) => setAuthId(e.target.value)}
+        />
+        <button
+          type="submit"
+          className="border border-border bg-primary px-4 py-2 text-sm text-primary-foreground"
+        >
+          Look up
+        </button>
+      </form>
+
+      {authQ.isError && (
+        <p className="text-sm text-destructive" data-testid="authorization-error">
+          Authorization not found.
+        </p>
+      )}
+
+      {authQ.data && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Receipt className="h-4 w-4" /> Authorization
+              <span
+                className="ml-1 rounded border border-border bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+                data-testid="external-badge"
+              >
+                external
+              </span>
+            </CardTitle>
+            <CardDescription data-testid="authorization-status">
+              Status: {authQ.data.status}
+              {authQ.data.terminal ? ` (${authQ.data.terminal})` : ''}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-1 text-sm">
+            <div>
+              Authorized:{' '}
+              <span data-testid="authorization-amount">
+                {fmtMicroUsd(authQ.data.amount_microusd)}
+              </span>
+            </div>
+            {authQ.data.captured_microusd != null && (
+              <div>
+                Captured:{' '}
+                <span data-testid="authorization-captured">
+                  {fmtMicroUsd(authQ.data.captured_microusd)}
+                </span>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

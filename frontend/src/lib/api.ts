@@ -322,6 +322,18 @@ export interface RunBreakdownAdmin {
   events: RunEventAdmin[]
 }
 
+// External authorize/capture (P0 authcap) — READ-ONLY in the UI. The UI never
+// issues authorize/capture (money typo risk); it only surfaces the status of an
+// external authorization the tenant created via API/CLI.
+export interface AuthorizationStatus {
+  authorization_id: string
+  tenant_id: string
+  amount_microusd: number
+  status: string // authorized | captured | voided | expired
+  terminal?: string | null
+  captured_microusd?: number | null
+}
+
 // Keys that MUST NEVER appear in a tenant-facing billing payload. Runtime
 // backstop to the backend's type-level redaction (contract-drift gate).
 const COST_MARGIN_KEYS = [
@@ -467,6 +479,19 @@ export const api = {
   runBilling: async (runId: string): Promise<RunBreakdownTenant> => {
     const body = await jsonRequest<RunBreakdownTenant>(
       `/api/mvp/me/billing/runs/${encodeURIComponent(runId)}`,
+    )
+    assertNoCostLeak(body)
+    return body
+  },
+
+  // Authcap: READ-ONLY status of an external authorization (created via API/CLI).
+  // The UI deliberately has NO authorize/capture/void methods — issuing money
+  // actions from a human form is a typo risk; those stay programmatic. The
+  // cost-leak backstop runs here too (the status shape carries no cost, but the
+  // guard is cheap insurance against a drifted API).
+  getAuthorization: async (authorizationId: string): Promise<AuthorizationStatus> => {
+    const body = await jsonRequest<AuthorizationStatus>(
+      `/api/mvp/billing/authorizations/${encodeURIComponent(authorizationId)}`,
     )
     assertNoCostLeak(body)
     return body

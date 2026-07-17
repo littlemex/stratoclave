@@ -66,6 +66,22 @@ impl ApiClient {
         handle_response(resp).await
     }
 
+    /// POST with extra request headers (e.g. `Idempotency-Key` for external
+    /// authorize). Same auth injection + response handling as `post_json`.
+    pub async fn post_json_with_headers<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Value,
+        headers: &[(&str, &str)],
+    ) -> Result<T> {
+        let mut req = self.http.post(self.api_url(path)).json(body);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = self.send(req).await?;
+        handle_response(resp).await
+    }
+
     pub async fn put_json<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
         let resp = self
             .send(self.http.put(self.api_url(path)).json(body))

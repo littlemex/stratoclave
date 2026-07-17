@@ -60,11 +60,17 @@ BUILTIN_VERSION = "builtin"
 #     degraded path that MUST be alarmed, so it gets its own label.
 UNVERSIONED_SENTINEL = "unversioned-legacy"
 SNAPSHOT_FAILED_SENTINEL = "snapshot-failed"
+# External authorize/capture in AMOUNT mode: the settled figure is a
+# client-declared fixed amount, NOT derived from any rate version. A DISTINCT
+# sentinel per cause (Fable N2/N3, authcap review-1 M-4) — a dispute must tell an
+# external fixed-amount charge apart from a legacy snapshot-less inline one.
+EXTERNAL_AMOUNT_SENTINEL = "external-fixed-amount"
 
 # Version strings admins may never create (they collide with the sentinels /
 # built-in tag and would make dispute labels ambiguous).
 RESERVED_VERSIONS = frozenset(
-    {BUILTIN_VERSION, UNVERSIONED_SENTINEL, SNAPSHOT_FAILED_SENTINEL}
+    {BUILTIN_VERSION, UNVERSIONED_SENTINEL, SNAPSHOT_FAILED_SENTINEL,
+     EXTERNAL_AMOUNT_SENTINEL}
 )
 
 

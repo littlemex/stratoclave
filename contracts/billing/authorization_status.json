@@ -1,0 +1,8 @@
+{
+  "amount_microusd": 1000000,
+  "authorization_id": "auth_aG9sZC0xfDIwMjYtMDd8SE9MRCMyMDI2LTA3IzAwMDAwMDAwMDAjaG9sZC0x",
+  "captured_microusd": 700000,
+  "status": "captured",
+  "tenant_id": "acme-billing",
+  "terminal": "SETTLE"
+}

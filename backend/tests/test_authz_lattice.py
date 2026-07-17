@@ -26,6 +26,7 @@ CONCRETE = [
     "accounts:create", "accounts:delete", "accounts:read", "accounts:update",
     "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
     "apikeys:revoke", "apikeys:revoke-self",
+    "billing:read", "billing:write",
     "messages:send", "responses:send",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
     "tenants:update",

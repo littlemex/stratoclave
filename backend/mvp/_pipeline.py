@@ -237,6 +237,15 @@ class ReservationContext:
     workflow_run_id: Optional[str] = None
     group_id: Optional[str] = None
     request_id: Optional[str] = None
+    # Reservation origin. "external" marks a hold created by the external
+    # authorize/capture API (not an inline LLM request). It changes exactly ONE
+    # money behaviour: on a settle that loses the terminal race to a reaper
+    # RECLAIM, an external hold must NOT be recovered via LATE_SETTLE (an
+    # external capture window is tenant-controlled and unbounded, so late-billing
+    # a reclaimed hold could break the budget invariant — Fable authcap D-2).
+    # Instead the settle signals `ExternalHoldReclaimed` so the capture endpoint
+    # returns 410. None/"" = an ordinary inline reservation (unchanged behaviour).
+    source: Optional[str] = None
     # Routing decision facts captured at reserve (P0 decision log): the chosen
     # candidate + the rejected candidates with per-candidate estimate + reason.
     # Pure attribution — the handler emits it fire-and-forget; None when routing
@@ -630,6 +639,18 @@ class QuotaExhausted(Exception):
     def __init__(self, model: str):
         super().__init__(f"quota exhausted for model {model}")
         self.model = model
+
+
+class ExternalHoldReclaimed(Exception):
+    """An external-authorize capture lost the terminal race to the reaper's
+    RECLAIM. The hold's reserved was already returned to the pool; per the
+    external-capture contract (Fable authcap D-2) we do NOT late-settle it —
+    the capture endpoint maps this to HTTP 410 (expired). The counters are
+    untouched (the settle txn cancelled), so no spend and no leak."""
+
+    def __init__(self, hold_id: str):
+        super().__init__(f"external hold {hold_id} was reclaimed before capture")
+        self.hold_id = hold_id
 
 
 def reserve_credit_for_model(
@@ -1372,6 +1393,366 @@ def reserve_credit(
             },
         )
     raise _err_402("tenant_pool_exhausted")
+
+
+def reserve_external_authorization(
+    *,
+    tenant_id: str,
+    amount_microusd: int,
+    idempotency_key: str,
+    request_fingerprint: str,
+    authorization_id_factory,
+    ttl_seconds: int,
+    pricing_key: Optional[str] = None,
+    rate_snapshot: Optional["RateSnapshot"] = None,
+    description: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
+) -> "ExternalAuthorizeResult":
+    """Reserve `amount_microusd` from a tenant's pool for an EXTERNAL authorize
+    (Fable authcap). Pool-only: unlike an inline request there is no per-user
+    token debit and no per-model quota — an external action is not token-metered,
+    it is a flat dollar hold the tenant will later `capture` (settle) or `void`
+    (release) from a SEPARATE HTTP call.
+
+    The transaction is [pool reserve (CAS), HOLD put, RESERVE ledger event
+    (source=external, carries the frozen rate_snapshot + description), IDEMP
+    record]. Every item is an EXISTING, reviewed primitive — the only new money
+    behaviour is the IDEMP Put, which rides `attribute_not_exists(pk)` so
+    "IDEMP row exists ⟺ this reserve committed" is atomic. A duplicate
+    Idempotency-Key CCFs the whole txn → we read the prior IDEMP row and REPLAY
+    its authorization (idempotent authorize, Fable authcap A/C).
+
+    Same snapshot-optimistic CAS + full-jitter retry as `reserve_credit`'s pooled
+    path, and it FAILS CLOSED the same way (a pooled tenant must never get an
+    unpriced hold). Raises HTTP 402 `tenant_pool_exhausted` (no room / suspended),
+    404-mapped `no_pool` (the tenant has no pool for the period — external
+    authorize requires one), or 503 on sustained contention.
+
+    `authorization_id_factory(hold_id, period, hold_sk) -> str` mints the opaque
+    authorization id from the hold identity (all known BEFORE the txn), so the
+    real id is stored in the IDEMP row at write time — no placeholder + rewrite,
+    and a duplicate-key replay recomputes the SAME id deterministically.
+    """
+    period = current_period()
+    budgets = TenantBudgetsRepository()
+    amount = int(amount_microusd)
+    if amount <= 0:
+        raise _err_400("amount_must_be_positive")
+
+    ledger = _reaper_ledger()
+    # A retried authorize with the SAME Idempotency-Key that already committed is
+    # the common duplicate — detect it up front with a consistent read so we
+    # replay without even attempting a reserve. (The txn's IDEMP
+    # attribute_not_exists is still the AUTHORITATIVE guard against a
+    # read-then-write race; this is just a fast path.)
+    #
+    # PERIOD BOUNDARY (Fable authcap review-1 H-2): the IDEMP row's pk embeds the
+    # period the authorize committed in. A retry that crosses a month boundary
+    # (authorize at 23:59, retry at 00:01) computes a NEW period, so a
+    # current-period-only lookup would miss the prior row and mint a SECOND hold
+    # for the same key. Since ttl_max is 24h, the original can be at most one
+    # period back, so we also check the previous period. A hit there replays the
+    # ORIGINAL (correctly settling against the period it reserved in).
+    prior = _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key)
+    if prior is not None:
+        return _idemp_replay(prior, request_fingerprint)
+
+    client = _low_level_client()
+    _sweep_expired_holds(budgets, tenant_id, period)
+    saw_throttle = False
+    hold_id = _fresh_idempotency_token()
+    hold_expires_at = int(time.time()) + max(int(ttl_seconds), 0)
+    hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+    authorization_id = authorization_id_factory(hold_id, period, hold_sk)
+    rate_snapshot_dict = rate_snapshot.to_ledger_dict() if rate_snapshot is not None else None
+    capture_mode = "amount" if pricing_key is None else "units"
+    for _attempt in range(_RESERVE_MAX_RETRIES):
+        if _attempt:
+            time.sleep(_contention_backoff(_attempt))
+        pool_row = budgets.get(tenant_id, period, consistent_read=True)
+        if pool_row is None:
+            # External authorize requires a pool to reserve against — there is no
+            # per-user token fallback for a non-request charge. Surface a distinct
+            # reason the endpoint maps to 404 (no pool configured).
+            raise ExternalAuthorizeNoPool(tenant_id, period)
+        if str(pool_row.get("status", "active")) != "active":
+            raise _err_402("tenant_pool_exhausted")
+        p_limit = int(pool_row.get("pool_limit_microusd", 0))
+        p_reserved = int(pool_row.get("pool_reserved_microusd", 0))
+        p_settled = int(pool_row.get("pool_settled_microusd", 0))
+        if p_reserved + p_settled + amount > p_limit:
+            raise _err_402("tenant_pool_exhausted")
+
+        pool_txn = budgets.reserve_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            amount_microusd=amount,
+            expected_reserved=p_reserved,
+            expected_settled=p_settled,
+        )
+        hold_txn = budgets.hold_put_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            hold_id=hold_id,
+            amount_microusd=amount,
+            expires_at_epoch=hold_expires_at,
+        )
+        # TransactItems ORDER: [pool(0), hold(1), RESERVE(2), IDEMP(3)]. Only the
+        # IDEMP item's CCF is interpreted specially (duplicate key); a pool(0) CCF
+        # is the retryable snapshot race; a hold(1) CCF is the uuid-collision guard
+        # (never in practice).
+        reserve_evt = ledger.reserve_event_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            hold_id=hold_id,
+            reserved_delta_microusd=amount,
+            run_id=workflow_run_id or hold_id,
+            run_id_is_fallback=workflow_run_id is None,
+            pricing_version=(rate_snapshot.version if rate_snapshot is not None else None),
+            rate_snapshot=rate_snapshot_dict,
+            source="external",
+            description=description,
+        )
+        idemp_txn = ledger.idemp_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            idempotency_key=idempotency_key,
+            hold_id=hold_id,
+            hold_sk=hold_sk,
+            authorization_id=authorization_id,
+            amount_microusd=amount,
+            expires_at_epoch=hold_expires_at,
+            capture_mode=capture_mode,
+            request_fingerprint=request_fingerprint,
+            pricing_key=pricing_key,
+        )
+        _IDEMP_IDX = 3
+        try:
+            client.transact_write_items(
+                TransactItems=[pool_txn, hold_txn, reserve_evt, idemp_txn],
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code != "TransactionCanceledException":
+                raise
+            reasons = _cancellation_codes(e)
+            # A duplicate Idempotency-Key: the IDEMP Put CCF'd. A concurrent
+            # authorize with the same key beat us (or a prior commit did) → read
+            # the winning IDEMP row and REPLAY its authorization. This is the
+            # read-then-write race the txn-level guard closes: whoever won wrote
+            # exactly one hold, and every racer returns that same authorization_id.
+            if (
+                len(reasons) > _IDEMP_IDX
+                and reasons[_IDEMP_IDX] == "ConditionalCheckFailed"
+            ):
+                winner = _read_idemp_with_prev_period(
+                    ledger, tenant_id, period, idempotency_key
+                )
+                if winner is not None:
+                    return _idemp_replay(winner, request_fingerprint)
+                # CCF but no readable row: get_idemp is ConsistentRead, so a CCF
+                # with no readable winner is a genuine transient (throttle) → retry
+                # (and count it as a throttle so exhaustion surfaces 503, not a
+                # misleading 402 — Fable review-1 M-3).
+                saw_throttle = True
+            # hold(1) CCF = a uuid collision (astronomically rare). Retrying with
+            # the SAME hold_id would CCF forever → re-mint the hold identity so the
+            # next attempt uses a fresh one (Fable review-1 Low). The
+            # authorization_id is derived from hold_id, so re-derive it too.
+            if (
+                len(reasons) > 1
+                and reasons[1] == "ConditionalCheckFailed"
+                and (len(reasons) <= _IDEMP_IDX or reasons[_IDEMP_IDX] != "ConditionalCheckFailed")
+            ):
+                hold_id = _fresh_idempotency_token()
+                hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+                authorization_id = authorization_id_factory(hold_id, period, hold_sk)
+            if {
+                "ThrottlingError",
+                "ProvisionedThroughputExceeded",
+                "TransactionConflict",
+                "RequestLimitExceeded",
+            } & set(reasons):
+                saw_throttle = True
+            continue
+        return ExternalAuthorizeResult(
+            authorization_id=authorization_id,
+            hold_id=hold_id,
+            hold_sk=hold_sk,
+            period=period,
+            amount_microusd=amount,
+            expires_at_epoch=hold_expires_at,
+            capture_mode=capture_mode,
+            replayed=False,
+        )
+
+    logger.warning(
+        "external_authorize_retries_exhausted",
+        tenant_id=tenant_id, period=period,
+        attempts=_RESERVE_MAX_RETRIES, throttled=saw_throttle,
+    )
+    if saw_throttle:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "type": "budget_unavailable",
+                "reason": "pool_reservation_contended",
+                "message": "Budget reservation is temporarily unavailable. Retry shortly.",
+            },
+        )
+    raise _err_402("tenant_pool_exhausted")
+
+
+@dataclass
+class ExternalAuthorizeResult:
+    """Outcome of `reserve_external_authorization` — the addressing + amounts the
+    authorize endpoint needs for its response. `replayed=True` when a duplicate
+    Idempotency-Key returned the ORIGINAL authorization (endpoint answers 200,
+    not 201)."""
+
+    authorization_id: str
+    hold_id: str
+    hold_sk: str
+    period: str
+    amount_microusd: int
+    expires_at_epoch: int
+    capture_mode: str
+    replayed: bool
+
+
+class ExternalAuthorizeNoPool(Exception):
+    """The tenant has no pool budget for the period, so an external authorize has
+    nothing to reserve against. The endpoint maps this to 404 (a tenant without a
+    pool is indistinguishable, to an external caller, from an unconfigured one)."""
+
+    def __init__(self, tenant_id: str, period: str):
+        super().__init__(f"tenant {tenant_id} has no pool for {period}")
+        self.tenant_id = tenant_id
+        self.period = period
+
+
+def _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key):
+    """Read the IDEMP row for a key in `period`, falling back to the previous
+    period (Fable authcap review-1 H-2: a retry crossing a month boundary must
+    still find the original). Both reads are ConsistentRead. Returns the row or
+    None. ttl_max is 24h so the original can only be one period back."""
+    row = ledger.get_idemp(
+        tenant_id=tenant_id, period=period, idempotency_key=idempotency_key
+    )
+    if row is not None:
+        return row
+    return ledger.get_idemp(
+        tenant_id=tenant_id,
+        period=_previous_period(period),
+        idempotency_key=idempotency_key,
+    )
+
+
+class IdempotencyKeyReuse(Exception):
+    """The same Idempotency-Key was reused for a DIFFERENT request body (or two
+    distinct keys collided under sanitization). The endpoint maps this to 422 —
+    it must NEVER silently replay a mismatched authorization (Fable authcap
+    review-1 H-1). Guards against both a client mixing up two requests and the
+    _safe_idemp_token collision handing back the wrong hold."""
+
+
+def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthorizeResult:
+    """Reconstruct an ExternalAuthorizeResult from a stored IDEMP row (a
+    duplicate-key replay). The row froze everything the authorize response needs,
+    so a replay is a pure read — no rehydrate, no second reserve.
+
+    First it verifies the incoming request's fingerprint matches the stored one:
+    a mismatch means the key was reused for a different request (or a sanitize
+    collision), which must be a 422, never a wrong-authorization replay (H-1)."""
+    stored_fp = str(idemp_row.get("request_fingerprint", ""))
+    if stored_fp and stored_fp != request_fingerprint:
+        raise IdempotencyKeyReuse(
+            "Idempotency-Key reused for a different request"
+        )
+    return ExternalAuthorizeResult(
+        authorization_id=str(idemp_row["authorization_id"]),
+        hold_id=str(idemp_row["hold_id"]),
+        hold_sk=str(idemp_row["hold_sk"]),
+        period=str(idemp_row["period"]),
+        amount_microusd=int(idemp_row["amount_microusd"]),
+        expires_at_epoch=int(idemp_row["expires_at"]),
+        capture_mode=str(idemp_row.get("capture_mode", "amount")),
+        replayed=True,
+    )
+
+
+def rehydrate_reservation_context(
+    *,
+    tenant_id: str,
+    period: str,
+    hold_id: str,
+    hold_sk: str,
+) -> Optional[ReservationContext]:
+    """Rebuild the ReservationContext for an external hold from the ledger, so a
+    capture/void in a SEPARATE HTTP call runs `_settle_pool_side`/`release_pool`
+    BYTE-IDENTICALLY to the in-memory path (Fable authcap B — money logic is not
+    forked; only the ctx's construction is).
+
+    Source of truth is the RESERVE ledger event (durable, carries the frozen
+    rate_snapshot + source) plus the HOLD row (existence + amount). Returns None
+    when the hold row is gone — the caller then reads the terminal to answer
+    captured/voided/expired (it must NOT fabricate a context and settle a
+    non-existent hold). The returned context has `pool_active=True`,
+    `source="external"`, and the SAME field shape a fresh reserve produced, so
+    the F-1 equivalence property can assert the two produce identical txn items.
+
+    SECURITY (Fable authcap review-1 C-1): the RESERVE event's `source` MUST be
+    "external". The authorization token is not tamper-proof (by design — the PK
+    is always the authed tenant), and an inline LLM hold shares the SAME table +
+    sk shape, with hold_id/period/expiry all discoverable from the tenant's own
+    billing:read surface. So without this gate a tenant could forge a token
+    pointing at its OWN inline hold and void/capture it — erasing real spend
+    (a reserved-return with no charge) or pre-empting the inline settle. Gating
+    rehydrate on source=="external" makes external capture/void reach ONLY holds
+    that the external authorize API itself created. A non-external (or absent)
+    RESERVE → None → the endpoint answers 404, exactly as for a bogus token.
+    """
+    ledger = _reaper_ledger()
+    reserve_evt = ledger.get_reserve(
+        tenant_id=tenant_id, period=period, hold_id=hold_id
+    )
+    # C-1 gate: only holds minted by the external authorize API are rehydratable.
+    if reserve_evt is None or reserve_evt.get("source") != "external":
+        return None
+
+    budgets = TenantBudgetsRepository()
+    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
+    if hold is None:
+        return None
+    pool_reserved = int(hold.get("amount_microusd", 0))
+
+    rate_snap = None
+    pricing_key = None
+    raw = reserve_evt.get("rate_snapshot")
+    if raw:
+        try:
+            import json as _json
+
+            from .pricing import RateSnapshot as _RS
+
+            rate_snap = _RS.from_ledger_dict(_json.loads(raw))
+            pricing_key = rate_snap.pricing_key
+        except Exception:  # noqa: BLE001 — a corrupt snapshot degrades to amount-mode.
+            rate_snap = None
+    return ReservationContext(
+        tenants_repo=UserTenantsRepository(),
+        reservation_tokens=0,
+        pool_reserved_microusd=pool_reserved,
+        period=period,
+        pricing_key=pricing_key,
+        rate_snapshot=rate_snap,
+        tenant_id=tenant_id,
+        pool_active=True,
+        hold_id=hold_id,
+        hold_sk=hold_sk,
+        source="external",
+    )
 
 
 def _reserve_quota_without_pool(
@@ -2182,6 +2563,25 @@ def _settle_pool_side(
                     )
                     _ev_type = (existing or {}).get("event_type")
                     if _ev_type == "RECLAIM":
+                        # External authorize/capture (Fable authcap D-2): an
+                        # external hold that the reaper already reclaimed must NOT
+                        # be recovered via LATE_SETTLE. Unlike an inline request
+                        # (whose reserve→settle window is seconds, so the reclaimed
+                        # reserved has almost certainly not been re-lent), an
+                        # external capture window is tenant-controlled and
+                        # unbounded — the returned reserved may already back a
+                        # different authorize, so late-billing here could push
+                        # spent past limit. Signal the capture endpoint to return
+                        # 410 (expired) instead; the counters are untouched (the
+                        # whole txn cancelled), so no spend and no leak.
+                        if (getattr(context, "source", None) or "") == "external":
+                            logger.info(
+                                "external_capture_hold_reclaimed_410",
+                                tenant_id=user.org_id,
+                                period=context.period,
+                                hold_id=_hold_id,
+                            )
+                            raise ExternalHoldReclaimed(_hold_id)
                         logger.info(
                             "pool_settle_hold_reclaimed_recovering_spend",
                             tenant_id=user.org_id,

@@ -89,6 +89,37 @@ def late_settle_sk(hold_id: str) -> str:
     return f"EV#HOLD#{hold_id}#LATE_SETTLE"
 
 
+def _safe_idemp_token(idempotency_key: str) -> str:
+    """Sanitize a client-supplied Idempotency-Key for use in a sort key.
+
+    The key is only ever used INSIDE the caller's own tenant partition (the pk
+    embeds the authenticated tenant_id), so it cannot address another tenant's
+    data whatever it contains. We still restrict the alphabet so a `#` in the
+    key cannot forge a different sk namespace: keep [A-Za-z0-9._-], replace the
+    rest with `_`, and bound the length (a pathological key must not blow the
+    2KB sort-key limit). Distinct chars collapsing to the same token is safe —
+    it can only make two DIFFERENT keys collide into ONE idempotency cell, i.e.
+    dedupe MORE aggressively (fail-safe: never a double-authorize), never less.
+    """
+    import re
+
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", str(idempotency_key))
+    return cleaned[:512]
+
+
+def idemp_sk(idempotency_key: str) -> str:
+    """Sort key for an external-authorize idempotency record.
+
+    A DISTINCT `EV#IDEMP#` namespace so a client key can never alias a
+    `EV#HOLD#…` money event. Lives on the append-only ledger (no TTL): a
+    permanent idempotency-key → authorization mapping is itself an audit fact —
+    "this key minted this hold" — so it belongs with the money events, and one
+    row per external authorize is negligible against the RESERVE/terminal rows
+    already in the partition. No cleanup path is needed or wanted.
+    """
+    return f"EV#IDEMP#{_safe_idemp_token(idempotency_key)}"
+
+
 # LATE_SETTLE is a non-terminal settled-side correction; kept separate from the
 # terminal types so it never enters the reserved-return exclusion.
 EV_LATE_SETTLE = "LATE_SETTLE"
@@ -309,6 +340,8 @@ class CreditLedgerRepository:
         model_id: Optional[str] = None,
         pricing_version: Optional[str] = None,
         rate_snapshot: Optional[dict] = None,
+        source: Optional[str] = None,
+        description: Optional[str] = None,
         actor: str = "caller",
         ts_ms: Optional[int] = None,
     ) -> dict[str, Any]:
@@ -323,6 +356,14 @@ class CreditLedgerRepository:
         can restore it via RateSnapshot.from_ledger_dict() and rate the charge
         identically (INV-R6), without depending on the live (flippable) rate
         table. Frozen at creation — append-only, never updated.
+
+        External authorize (P0 authorize/capture): `source` ("external") and
+        `description` are frozen here so a capture in a SEPARATE HTTP call can
+        rehydrate the reservation context from THIS event alone — the RESERVE
+        event is the durable record of "what was authorized", the HOLD row stays
+        thin. `source` is also what the settle-side Z3 constraint keys on
+        (external holds never take LATE_SETTLE). run_id already carries the
+        workflow_run_id (the caller passes it), so it is not duplicated here.
         """
         ts = ts_ms if ts_ms is not None else _now_ms()
         event_id = reserve_sk(hold_id)[len("EV#"):]  # HOLD#<id>#RESERVE
@@ -349,6 +390,8 @@ class CreditLedgerRepository:
             ("group_id", group_id),
             ("model_id", model_id),
             ("pricing_version", pricing_version),
+            ("source", source),
+            ("description", description),
         ):
             if val:
                 item[key] = {"S": str(val)}
@@ -364,7 +407,98 @@ class CreditLedgerRepository:
             }
         }
 
+    def idemp_txn_item(
+        self,
+        *,
+        tenant_id: str,
+        period: str,
+        idempotency_key: str,
+        hold_id: str,
+        hold_sk: str,
+        authorization_id: str,
+        amount_microusd: int,
+        expires_at_epoch: int,
+        capture_mode: str,
+        request_fingerprint: str,
+        pricing_key: Optional[str] = None,
+        ts_ms: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Build the idempotency-record Put for an external authorize, composed
+        into the SAME reserve TransactWriteItems as the HOLD + RESERVE event.
+
+        `attribute_not_exists(pk)` makes "IDEMP row exists ⟺ this reserve
+        committed" atomic: a duplicate Idempotency-Key CCFs the whole
+        transaction (no second HOLD), and the handler reads THIS row to replay
+        the original `authorization_id` (201→200). It captures everything the
+        authorize RESPONSE needs — authorization_id, amount, expiry, mode — so a
+        replay is a pure read with no rehydrate. Immutable / append-only; it
+        lives on the ledger permanently (see `idemp_sk`), no TTL.
+
+        `request_fingerprint` is a hash of the authorize request body. On a
+        duplicate key the caller compares the incoming request's fingerprint to
+        this stored one and rejects a MISMATCH with 422 (Fable authcap review-1
+        H-1): reusing a key for a DIFFERENT request — or a sanitize collision
+        between two distinct keys — must never silently hand back the wrong
+        authorization; it is a client error, not a replay."""
+        ts = ts_ms if ts_ms is not None else _now_ms()
+        item: dict[str, Any] = {
+            "pk": {"S": ledger_pk(tenant_id, period)},
+            "sk": {"S": idemp_sk(idempotency_key)},
+            "event_type": {"S": "IDEMP"},
+            "schema_version": {"S": SCHEMA_VERSION},
+            "tenant_id": {"S": tenant_id},
+            "period": {"S": period},
+            "idempotency_key": {"S": str(idempotency_key)},
+            "hold_id": {"S": hold_id},
+            "hold_sk": {"S": hold_sk},
+            "authorization_id": {"S": authorization_id},
+            "amount_microusd": {"N": str(int(amount_microusd))},
+            "expires_at": {"N": str(int(expires_at_epoch))},
+            "capture_mode": {"S": capture_mode},
+            "request_fingerprint": {"S": str(request_fingerprint)},
+            "ts_ms": {"N": str(ts)},
+        }
+        if pricing_key:
+            item["pricing_key"] = {"S": str(pricing_key)}
+        return {
+            "Put": {
+                "TableName": self._name,
+                "Item": item,
+                "ConditionExpression": "attribute_not_exists(pk)",
+            }
+        }
+
     # ---- read side: balance derivation + audit ----
+
+    def get_reserve(
+        self, *, tenant_id: str, period: str, hold_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Strongly-consistent read of a hold's RESERVE event (or None).
+
+        The rehydrate path (external capture/void in a separate HTTP call) reads
+        this to restore the frozen rate_snapshot + external metadata into a fresh
+        ReservationContext, so settle/release run byte-identically to the
+        in-memory path. ConsistentRead so a capture immediately after authorize
+        never misses its own just-written RESERVE."""
+        resp = self._table.get_item(
+            Key={"pk": ledger_pk(tenant_id, period), "sk": reserve_sk(hold_id)},
+            ConsistentRead=True,
+        )
+        return resp.get("Item")
+
+    def get_idemp(
+        self, *, tenant_id: str, period: str, idempotency_key: str
+    ) -> Optional[dict[str, Any]]:
+        """Strongly-consistent read of an authorize idempotency record (or None).
+
+        Read on a duplicate Idempotency-Key (the reserve txn CCF'd) to replay the
+        original authorization_id + amount + expiry, so a retried authorize is a
+        deterministic 200 rather than a new hold."""
+        resp = self._table.get_item(
+            Key={"pk": ledger_pk(tenant_id, period), "sk": idemp_sk(idempotency_key)},
+            ConsistentRead=True,
+        )
+        return resp.get("Item")
 
     def get_terminal(
         self, *, tenant_id: str, period: str, hold_id: str

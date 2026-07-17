@@ -175,8 +175,178 @@ pub async fn admin_run_show(tenant: &str, run_id: &str, json: bool) -> Result<()
     Ok(())
 }
 
+// ===========================================================================
+// External authorize / capture / void / get (P0 authcap)
+// ===========================================================================
+//
+// A reference client for the external billing API AND our own E2E test tool.
+// The typed structs (deny_unknown_fields) are the CLI half of the authcap
+// contract: a shape change on the backend breaks these deserializes.
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizeResponse {
+    pub authorization_id: String,
+    pub amount_microusd: i64,
+    pub expires_at_epoch: i64,
+    pub status: String,
+    /// True when a duplicate Idempotency-Key replayed the original (no new hold).
+    #[serde(default)]
+    pub replayed: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureResponse {
+    pub authorization_id: String,
+    pub captured_microusd: i64,
+    pub terminal: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoidResponse {
+    pub authorization_id: String,
+    pub terminal: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationStatus {
+    pub authorization_id: String,
+    pub tenant_id: String,
+    pub amount_microusd: i64,
+    pub status: String,
+    #[serde(default)]
+    pub terminal: Option<String>,
+    #[serde(default)]
+    pub captured_microusd: Option<i64>,
+}
+
+/// A random Idempotency-Key when the caller does not supply one, so a naive
+/// `billing authorize` still gets exactly-once semantics per invocation. A
+/// caller that wants a retry to dedupe passes `--idempotency-key`.
+fn random_idempotency_key() -> String {
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    let hex: String = (0..32)
+        .map(|_| format!("{:x}", rng.random_range(0..16)))
+        .collect();
+    format!("cli-{hex}")
+}
+
+/// `stratoclave billing authorize --amount <microusd> [--ttl] [--desc] [--idempotency-key]`
+pub async fn authorize(
+    amount_microusd: i64,
+    ttl_seconds: Option<i64>,
+    description: Option<String>,
+    idempotency_key: Option<String>,
+    workflow_run_id: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let client = ApiClient::new()?;
+    let key = idempotency_key.unwrap_or_else(random_idempotency_key);
+    let mut body = serde_json::json!({ "amount_microusd": amount_microusd });
+    if let Some(t) = ttl_seconds {
+        body["ttl_seconds"] = t.into();
+    }
+    if let Some(d) = description {
+        body["description"] = d.into();
+    }
+    if let Some(w) = workflow_run_id {
+        body["workflow_run_id"] = w.into();
+    }
+    let r: AuthorizeResponse = client
+        .post_json_with_headers(
+            "/api/mvp/billing/authorize",
+            &body,
+            &[("Idempotency-Key", &key)],
+        )
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        return Ok(());
+    }
+    println!("=== Authorization {} ===", r.authorization_id);
+    println!("  status:     {}", r.status);
+    if r.replayed {
+        println!("  (replayed — duplicate Idempotency-Key, no new hold)");
+    }
+    println!("  amount:     {}", fmt_usd(r.amount_microusd));
+    println!("  expires_at: {} (epoch)", r.expires_at_epoch);
+    println!("  idempotency-key: {key}");
+    Ok(())
+}
+
+/// `stratoclave billing capture <authorization_id> --actual <microusd>`
+pub async fn capture(authorization_id: &str, actual_microusd: i64, json: bool) -> Result<()> {
+    let client = ApiClient::new()?;
+    let path = format!(
+        "/api/mvp/billing/authorizations/{}/capture",
+        urlencode(authorization_id)
+    );
+    let body = serde_json::json!({ "actual_amount_microusd": actual_microusd });
+    let r: CaptureResponse = client.post_json(&path, &body).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        return Ok(());
+    }
+    println!("=== Captured {} ===", r.authorization_id);
+    println!("  captured: {}", fmt_usd(r.captured_microusd));
+    println!("  terminal: {}", r.terminal);
+    Ok(())
+}
+
+/// `stratoclave billing void <authorization_id>`
+pub async fn void(authorization_id: &str, json: bool) -> Result<()> {
+    let client = ApiClient::new()?;
+    let path = format!(
+        "/api/mvp/billing/authorizations/{}/void",
+        urlencode(authorization_id)
+    );
+    let r: VoidResponse = client.post_json(&path, &serde_json::json!({})).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        return Ok(());
+    }
+    println!(
+        "=== Voided {} (terminal {}) ===",
+        r.authorization_id, r.terminal
+    );
+    Ok(())
+}
+
+/// `stratoclave billing get <authorization_id>`
+pub async fn get(authorization_id: &str, json: bool) -> Result<()> {
+    let client = ApiClient::new()?;
+    let path = format!(
+        "/api/mvp/billing/authorizations/{}",
+        urlencode(authorization_id)
+    );
+    let r: AuthorizationStatus = client.get_json(&path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        return Ok(());
+    }
+    println!(
+        "=== Authorization {} (tenant {}) ===",
+        r.authorization_id, r.tenant_id
+    );
+    println!("  status:  {}", r.status);
+    println!("  amount:  {}", fmt_usd(r.amount_microusd));
+    if let Some(t) = &r.terminal {
+        println!("  terminal: {t}");
+    }
+    if let Some(c) = r.captured_microusd {
+        println!("  captured: {}", fmt_usd(c));
+    }
+    Ok(())
+}
+
 /// Minimal path-segment encoding for the ids we allow ([A-Za-z0-9._:-]); anything
 /// else is percent-encoded so a crafted run_id can't inject query/path syntax.
+/// The `auth_...` token uses urlsafe-base64 (`A-Za-z0-9-_` + `=`), all allowed
+/// here except `=` which base64url of our payload never emits at the tail we use.
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -235,5 +405,49 @@ mod tests {
     fn fmt_usd_handles_negative_margin() {
         assert_eq!(fmt_usd(1_500_000), "$1.500000");
         assert_eq!(fmt_usd(-4_000_000), "-$4.000000");
+    }
+
+    // ---- authcap contract gate ----
+
+    const AUTHZ_STATUS_FIXTURE: &str =
+        include_str!("../../../contracts/billing/authorization_status.json");
+
+    #[test]
+    fn authorization_status_fixture_deserializes() {
+        let s: AuthorizationStatus = serde_json::from_str(AUTHZ_STATUS_FIXTURE).unwrap();
+        assert_eq!(s.status, "captured");
+        assert_eq!(s.terminal.as_deref(), Some("SETTLE"));
+        assert_eq!(s.captured_microusd, Some(700_000));
+        assert!(s.authorization_id.starts_with("auth_"));
+    }
+
+    #[test]
+    fn authorize_response_shape() {
+        let r: AuthorizeResponse = serde_json::from_str(
+            r#"{"authorization_id":"auth_x","amount_microusd":500000,"expires_at_epoch":123,"status":"authorized"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.status, "authorized");
+        assert_eq!(r.amount_microusd, 500_000);
+    }
+
+    #[test]
+    fn capture_response_shape() {
+        let r: CaptureResponse = serde_json::from_str(
+            r#"{"authorization_id":"auth_x","captured_microusd":700000,"terminal":"SETTLE"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.terminal, "SETTLE");
+        assert_eq!(r.captured_microusd, 700_000);
+    }
+
+    #[test]
+    fn authorization_status_rejects_unknown_field() {
+        // deny_unknown_fields: an unexpected key (e.g. a leaked cost) fails the
+        // deserialize at the client boundary, same drift gate as the run views.
+        let leaked = r#"{"authorization_id":"auth_x","tenant_id":"t","amount_microusd":1,
+            "status":"authorized","provider_cost_microusd":9}"#;
+        let res: Result<AuthorizationStatus, _> = serde_json::from_str(leaked);
+        assert!(res.is_err());
     }
 }

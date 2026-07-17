@@ -369,20 +369,76 @@ def _run_differential():
             f"ValidationException → silent revenue leak)")
         assert r1 == r0, f"reserved not restored: r0={r0} r1={r1}"
 
+    def deterministic_external_authorize_capture():
+        """Exercise the NEW external authcap money path on REAL DynamoDB (P0):
+        authorize (pool CAS + HOLD + RESERVE(source=external) + IDEMP, one txn) →
+        idempotent replay (same key, no second hold) → rehydrate → capture
+        (unmodified _settle_pool_side). Asserts the pool math and that a duplicate
+        key reserves exactly once — the IDEMP row + external settle are the only
+        new money writes, so they get live differential coverage too."""
+        from mvp.billing_authorize import (
+            decode_authorization_id, encode_authorization_id, _settle_external,
+        )
+
+        tenant = TENANT
+        budgets.set_pool_limit(tenant_id=tenant, period=PERIOD,
+                               pool_limit_microusd=5_000_000)
+        # clean counters for this check
+        budgets._table.put_item(Item={
+            "tenant_id": tenant, "sk": f"BUDGET#{PERIOD}",
+            "pool_limit_microusd": 5_000_000,
+            "pool_reserved_microusd": 0, "pool_settled_microusd": 0,
+            "status": "active", "version": "1",
+        })
+        r0, s0 = real_pool()
+        key = f"diff-authcap-{uuid.uuid4()}"
+        mk = lambda h, p, sk: encode_authorization_id(hold_id=h, period=p, hold_sk=sk)
+        res = _pipeline.reserve_external_authorization(
+            tenant_id=tenant, amount_microusd=80_000, idempotency_key=key,
+            request_fingerprint="fp", authorization_id_factory=mk, ttl_seconds=3600,
+        )
+        r1, _ = real_pool()
+        assert r1 - r0 == 80_000, f"authorize did not reserve 80000: {r1 - r0}"
+        # idempotent replay: same key → same id, no second reserve.
+        res2 = _pipeline.reserve_external_authorization(
+            tenant_id=tenant, amount_microusd=80_000, idempotency_key=key,
+            request_fingerprint="fp", authorization_id_factory=mk, ttl_seconds=3600,
+        )
+        assert res2.authorization_id == res.authorization_id and res2.replayed
+        r2, _ = real_pool()
+        assert r2 == r1, f"duplicate key double-reserved: r1={r1} r2={r2}"
+        # capture 50000 via the unmodified settle.
+        hold_id, per, hold_sk = decode_authorization_id(res.authorization_id)
+        ctx = _pipeline.rehydrate_reservation_context(
+            tenant_id=tenant, period=per, hold_id=hold_id, hold_sk=hold_sk)
+        assert ctx is not None, "rehydrate returned None for a live external hold"
+        _settle_external(ctx, 50_000)
+        r3, s3 = real_pool()
+        assert r3 == r0 and s3 - s0 == 50_000, (
+            f"external capture math wrong: reserved back to {r3} (want {r0}), "
+            f"settled +{s3 - s0} (want 50000)")
+
     import unittest
     print(f"account/region: us-east-1, prefix: {_PREFIX}-*  period={PERIOD}")
     print("setting up throwaway tables...")
     _setup_tables()
     ok = True
     try:
-        print("\n[1/2] deterministic reaper-race (F1 guard)...")
+        print("\n[1/3] deterministic reaper-race (F1 guard)...")
         try:
             deterministic_reaper_race()
             print("  reaper-race PASS: settled-only recorded spend, token <=36 ok")
         except Exception as e:
             ok = False
             print(f"  reaper-race FAIL: {type(e).__name__}: {e}")
-        print("\n[2/2] randomized differential state machine...")
+        print("\n[2/3] deterministic external authorize/capture (authcap money path)...")
+        try:
+            deterministic_external_authorize_capture()
+            print("  authcap PASS: reserve+IDEMP idempotent, external capture math ok")
+        except Exception as e:
+            ok = False
+            print(f"  authcap FAIL: {type(e).__name__}: {e}")
+        print("\n[3/3] randomized differential state machine...")
         suite = unittest.TestLoader().loadTestsFromTestCase(DiffMachine.TestCase)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         ok = ok and result.wasSuccessful()

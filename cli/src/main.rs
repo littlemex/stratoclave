@@ -250,6 +250,48 @@ enum BillingAction {
         #[command(subcommand)]
         action: BillingRunAction,
     },
+    /// Reserve a dollar amount for an external action (authorize/capture/void)
+    Authorize {
+        /// Amount to hold, in micro-USD (1 USD = 1_000_000)
+        #[arg(long)]
+        amount: i64,
+        /// Time-to-live in seconds before the hold may expire (clamped 30s..24h)
+        #[arg(long)]
+        ttl: Option<i64>,
+        /// Free-text description recorded on the authorization
+        #[arg(long)]
+        desc: Option<String>,
+        /// Idempotency-Key (a retry with the same key replays the original;
+        /// omitted → a fresh key is generated per invocation)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Optional workflow run id for per-run billing attribution
+        #[arg(long)]
+        workflow_run_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Settle an open authorization for the actual amount (≤ authorized)
+    Capture {
+        authorization_id: String,
+        /// Actual amount to capture, in micro-USD
+        #[arg(long)]
+        actual: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Release an open authorization without charge
+    Void {
+        authorization_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the status of one authorization
+    Get {
+        authorization_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -673,6 +715,29 @@ async fn dispatch_billing(action: BillingAction) -> ExitCode {
                 wrap(mvp::billing::run_show(&run_id, json).await)
             }
         },
+        BillingAction::Authorize {
+            amount,
+            ttl,
+            desc,
+            idempotency_key,
+            workflow_run_id,
+            json,
+        } => wrap(
+            mvp::billing::authorize(amount, ttl, desc, idempotency_key, workflow_run_id, json).await,
+        ),
+        BillingAction::Capture {
+            authorization_id,
+            actual,
+            json,
+        } => wrap(mvp::billing::capture(&authorization_id, actual, json).await),
+        BillingAction::Void {
+            authorization_id,
+            json,
+        } => wrap(mvp::billing::void(&authorization_id, json).await),
+        BillingAction::Get {
+            authorization_id,
+            json,
+        } => wrap(mvp::billing::get(&authorization_id, json).await),
     }
 }
 

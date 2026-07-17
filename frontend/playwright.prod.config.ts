@@ -13,6 +13,7 @@ export default defineConfig({
     'prod-authenticated-shell.spec.ts',
     'prod-p0-ui.spec.ts',
     'prod-billing-redaction.spec.ts',
+    'prod-authcap-badge.spec.ts',
   ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
