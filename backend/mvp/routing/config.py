@@ -106,6 +106,7 @@ def _parse_tenant_config(item: dict) -> RoutingConfig:
         fallback_mode=item.get("fallback_mode", "loud"),
         fallback_default=item.get("fallback_default", "off"),
         free_tier_model=item.get("free_tier", {}).get("model") if isinstance(item.get("free_tier"), dict) else None,
+        saar_user_scoped=bool(item.get("saar_user_scoped", False)),
     )
 
 

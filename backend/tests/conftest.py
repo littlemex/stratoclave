@@ -71,6 +71,7 @@ _TABLE_ENVS = {
     "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
     "DYNAMODB_OBSERVABILITY_TABLE": "stratoclave-observability",
     "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
+    "DYNAMODB_SAAR_MEMORY_TABLE": "stratoclave-saar-memory",
     "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
 }
 for k, v in _TABLE_ENVS.items():
@@ -93,6 +94,13 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     # Fresh in-process fallback counter per test (degraded-mode limiter state
     # must not leak across tests).
     _rl._local_fallback = _rl._LocalWindows()
+    # SAAR's hot-read client is a lazily-built module global with the same
+    # leak-across-moto-mocks hazard; reset it per test.
+    try:
+        from mvp.routing import saar as _saar
+        _saar.reset_read_client()
+    except Exception:  # noqa: BLE001 — routing import optional in minimal envs
+        pass
     # Pricing caches are process-global (the 60s effective-rate cache AND the
     # immutable per-version snapshot cache). Moto tables reset per test but these
     # do not, so a version set in one test would leak into the next (a settle
@@ -295,6 +303,21 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
         # TTL expires_at. No GSI.
         dynamodb.create_table(
             TableName=_TABLE_ENVS["DYNAMODB_ROUTING_SIGNALS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # SAAR memory: PK pk ("SAARMEM#<tenant>"), SK sk ("SESSION#<...>"),
+        # TTL ttl. One small item per (tenant, session). No GSI.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_SAAR_MEMORY_TABLE"],
             KeySchema=[
                 {"AttributeName": "pk", "KeyType": "HASH"},
                 {"AttributeName": "sk", "KeyType": "RANGE"},

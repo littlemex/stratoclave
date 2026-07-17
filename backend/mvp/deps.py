@@ -462,6 +462,7 @@ def get_request_context(
     """
     from .observability.context import (
         HDR_GROUP_ID,
+        HDR_SESSION_ID,
         HDR_WORKFLOW_RUN_ID,
         InvalidCorrelationHeader,
         build_request_context,
@@ -472,6 +473,7 @@ def get_request_context(
             tenant_id=user.org_id,
             group_id_header=request.headers.get(HDR_GROUP_ID),
             workflow_run_id_header=request.headers.get(HDR_WORKFLOW_RUN_ID),
+            session_id_header=request.headers.get(HDR_SESSION_ID),
         )
     except InvalidCorrelationHeader as e:
         raise HTTPException(

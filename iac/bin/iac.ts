@@ -296,6 +296,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_OBSERVABILITY_TABLE: dynamoDBStack.observabilityTable.tableName,
     // P0-16: routing-signals write-only seam (writer live; consumer stubbed).
     DYNAMODB_ROUTING_SIGNALS_TABLE: dynamoDBStack.routingSignalsTable.tableName,
+    // SAAR: session-aware routing memory (read/written only when SAAR_ENABLED).
+    DYNAMODB_SAAR_MEMORY_TABLE: dynamoDBStack.saarMemoryTable.tableName,
     // Ledger P0-1: event-sourced credit ledger (money source of truth).
     DYNAMODB_CREDIT_LEDGER_TABLE: dynamoDBStack.creditLedgerTable.tableName,
 
@@ -310,6 +312,11 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // Feature flags (MVP)
     VERIFIED_PERMISSIONS_ENABLED: 'false',
     TENANT_ISOLATION_ENABLED: 'false',
+    // SAAR (session-aware routing) master switch. Ships DARK: when 'false' the
+    // backend never reads or writes the SAAR memory table and routing is
+    // byte-identical to pre-SAAR. Flip to 'true' to enable session-aware sticky
+    // routing + switch-cost budget gating. Per-tenant opt-in still applies on top.
+    SAAR_ENABLED: process.env.SAAR_ENABLED || 'false',
     RATE_LIMIT_ENABLED: 'true',
     ADMIN_API_RATE_LIMIT: '60/minute',
     TEAM_API_RATE_LIMIT: '30/minute',

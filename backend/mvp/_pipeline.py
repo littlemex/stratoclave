@@ -679,6 +679,8 @@ def reserve_credit_for_model(
     workflow_run_id: Optional[str] = None,
     group_id: Optional[str] = None,
     request_id: Optional[str] = None,
+    saar_warm_prefix_tokens: int = 0,
+    saar_prefer_model: Optional[str] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -720,11 +722,22 @@ def reserve_credit_for_model(
             pk = _resolve_pricing(model).pricing_key
         except ValueError:
             pk = "default"
+        # SAAR: when this request is served by the session's warm model,
+        # `saar_warm_prefix_tokens` of the input estimate re-bill at the cheaper
+        # cache-read rate — so staying warm reserves LESS than switching cold, and
+        # a switch that would breach the pool while a stay would fit is naturally
+        # gated at the 402. In P0 this is always 0 (cache evidence lands in P1), so
+        # the estimate is byte-identical to pre-SAAR. The discount applies ONLY to
+        # the warm model itself — the tool-loop hard pin (`vsr_hard_model`) or the
+        # sticky soft preference (`saar_prefer_model`) — never to a cold candidate.
+        warm_model = vsr_hard_model or saar_prefer_model
+        warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
         return pk, estimate_cost_microusd(
             pricing_key=pk,
             input_tokens_est=input_tokens_est,
             max_output_tokens=max_output_tokens,
             effort_multiplier=effort_multiplier,
+            warm_prefix_tokens=warm,
         )
 
     tenant_cfg = get_tenant_routing_config(user.org_id)
@@ -796,6 +809,15 @@ def reserve_credit_for_model(
         breaker_max_tier=breaker_max_tier,
         wire_protocol=wire_protocol,
     )
+    # SAAR soft preference (Fable review-1 C2): move the session's warm model to
+    # the HEAD of the already-resolved candidate list so it is tried first (prefix-
+    # cache locality), but keep the rest of the chain intact as fallback. This is a
+    # pure REORDER of models the cascade already validated (allowlist ∩ chain ∩
+    # breaker tier) — it never injects a new model and never disables fallback, so
+    # a warm model that is disallowed/quota-exhausted simply isn't in the list and
+    # the request still cascades exactly as pre-SAAR (cannot reduce availability).
+    if saar_prefer_model and saar_prefer_model in candidates:
+        candidates = [saar_prefer_model] + [m for m in candidates if m != saar_prefer_model]
     return _stamp_requested(_reserve_over_candidates(
         user, reservation_tokens, candidates=candidates,
         tenant_cfg=tenant_cfg, price=_price,

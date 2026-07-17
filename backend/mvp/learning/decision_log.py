@@ -29,6 +29,7 @@ excluded), never as a complete figure.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Optional
 
@@ -208,6 +209,95 @@ def record_decision_from_context(context) -> None:
         emit_decision(item)
     except Exception:  # noqa: BLE001 — decision logging must never break a request.
         pass
+
+
+def saar_eval_sk(run_id: str, span_id: str) -> str:
+    return f"saar#{_safe_key_token(run_id)}#{_safe_key_token(span_id)}"
+
+
+def _hash_session_key(session_key: str) -> str:
+    """One-way HMAC of a client-chosen session id for the audit record. Unlike
+    ``_safe_key_token`` (which passes a short grammar-clean value through
+    verbatim), this ALWAYS hashes: a tenant may embed meaningful/sensitive text
+    in its session ids, and the decision log is a durable audit store, so the raw
+    value must never be persisted. Correlation across records is preserved
+    because the same session id maps to the same marker.
+
+    Keyed with a server secret (``SAAR_SESSION_HASH_SECRET``, else the deploy
+    prefix as a weak default) so a plain SHA-256 dictionary/rainbow reversal of a
+    low-entropy client session id ("chat-1") is not trivially possible (Fable SAAR
+    review-1 M4). The secret need not be high-entropy to defeat precomputation;
+    it only has to be non-public and stable per deployment."""
+    import hashlib
+    import hmac
+
+    secret = (
+        os.getenv("SAAR_SESSION_HASH_SECRET")
+        or os.getenv("STRATOCLAVE_PREFIX")
+        or "stratoclave-saar"
+    ).encode("utf-8")
+    digest = hmac.new(secret, (session_key or "").encode("utf-8"), hashlib.sha256)
+    return "s_" + digest.hexdigest()[:24]
+
+
+def build_saar_eval_item(
+    *,
+    tenant_id: str,
+    run_id: str,
+    span_id: str,
+    session_key: str,
+    replay_id: str,
+    reason: str,
+    phase: str,
+    prev_model: Optional[str],
+    chosen_model: str,
+    switched: bool,
+    warm_prefix_tokens_claimed: int,
+    checkout_delta_microusd: int,
+    rating_version: Optional[str],
+    created_at_ms: int,
+) -> dict[str, Any]:
+    """PURE builder for the SAAR routing claim (Fable SAAR design §4/§5).
+
+    This is the *provable* half of session-aware routing: it records, per turn,
+    what SAAR decided and — crucially — the micro-USD ``checkout_delta`` it
+    claimed a switch would have cost, pinned to ``rating_version``. An offline
+    reconciliation (P2) recomputes that delta from the same versioned rate table
+    and reconciles the claimed prefix-cache saving against the ledger's actual
+    ``cache_read`` charge for the same ``replay_id`` — so the saving a
+    session-aware router reports is not a black box.
+
+    The session key is stored HASHED (not raw) so this audit record can never
+    leak a client-chosen session identifier. No TTL (audit)."""
+    return {
+        "pk": _decision_pk(tenant_id, _day(created_at_ms)),
+        "sk": saar_eval_sk(run_id, span_id),
+        "record_type": "saar_switch_eval",
+        "schema_version": SCHEMA_VERSION,
+        "tenant_id": tenant_id,
+        "workflow_run_id": run_id,
+        "span_id": span_id,
+        "session_key_hash": _hash_session_key(session_key),
+        "replay_id": replay_id,
+        "reason": reason,
+        "phase": phase,
+        "prev_model": prev_model or "",
+        "chosen_model": chosen_model,
+        "switched": bool(switched),
+        "warm_prefix_tokens_claimed": int(warm_prefix_tokens_claimed),
+        "checkout_delta_microusd": int(checkout_delta_microusd),
+        "rating_version": rating_version or "",
+        "decided_at_ms": int(created_at_ms),
+    }
+
+
+def emit_saar_eval(item: dict) -> None:
+    """Fire-and-forget write of a pre-built SAAR eval item. Same contract as
+    emit_decision — never raises, never blocks, a drop is caught by
+    reconciliation rather than by failing the request."""
+    from . import signals
+
+    signals._submit(lambda: _put(item))
 
 
 def _now_ms() -> int:
