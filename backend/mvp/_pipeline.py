@@ -237,6 +237,11 @@ class ReservationContext:
     workflow_run_id: Optional[str] = None
     group_id: Optional[str] = None
     request_id: Optional[str] = None
+    # Routing decision facts captured at reserve (P0 decision log): the chosen
+    # candidate + the rejected candidates with per-candidate estimate + reason.
+    # Pure attribution — the handler emits it fire-and-forget; None when routing
+    # had no real choice (single-candidate / no-config passthrough).
+    decision_facts: Optional[dict] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -706,6 +711,22 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Complete the decision facts with the estimate inputs the candidates
+        # were priced against (P0 decision log), then fire-and-forget the
+        # reserve-time decision record. The WHOLE block is fenced: this runs after
+        # the reserve committed, so int(None)/any error must not fail the request
+        # (Fable RDL review High). Attribution is best-effort.
+        if ctx.decision_facts is not None:
+            try:
+                ctx.decision_facts["estimate_inputs"] = {
+                    "input_est": int(input_tokens_est),
+                    "max_out": int(max_output_tokens),
+                    "effort": int(effort_multiplier),
+                }
+                from .learning.decision_log import record_decision_from_context
+                record_decision_from_context(ctx)
+            except Exception:  # noqa: BLE001 — decision logging never breaks reserve.
+                pass
         return ctx
 
     if vsr_hard_model:
@@ -759,8 +780,18 @@ def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg
     from .routing import quota as _quota
 
     period = current_period()
-    for model in candidates:
+    # Price candidates LAZILY inside the loop, exactly as the money path did
+    # before the decision log existed: candidate N is only priced when 1..N-1
+    # were exhausted. This keeps `price()` failures from affecting reserve
+    # availability (Fable RDL review-2 H1 — pricing the whole list up front added
+    # a failure mode that didn't exist). `priced_tried` accumulates the
+    # actually-tried candidates for the decision facts; the untried tail is priced
+    # LATER, inside the best-effort fence.
+    priced_tried: list = []  # (model, pricing_key, est_cost) for tried candidates
+    exhausted: set[str] = set()
+    for idx, model in enumerate(candidates):
         pk, cost = price(model)
+        priced_tried.append((model, pk, cost))
         q = tenant_cfg.quotas.get(model)
         tenant_limit = q.limit if q else None
         quota_lines = (
@@ -772,19 +803,80 @@ def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg
             else None
         )
         try:
-            return reserve_credit(
+            ctx = reserve_credit(
                 user, reservation_tokens,
                 pricing_key=pk, cost_microusd=cost,
                 quota_lines=quota_lines,
                 quota_model=model if quota_lines else None,
                 selected_model=model,
             )
+            # Decision-facts construction must NEVER fail the reserve: the hold is
+            # already committed here, so any exception (incl. pricing the untried
+            # tail) would leak it to the reaper. Fence it — attribution is
+            # best-effort (Fable RDL review High + review-2 H1).
+            try:
+                ctx.decision_facts = _build_decision_facts(
+                    priced_tried, candidates[idx + 1:], price, exhausted
+                )
+                if ctx.rate_snapshot is not None:
+                    ctx.decision_facts["chosen"]["pricing_version_at_decision"] = (
+                        ctx.rate_snapshot.version
+                    )
+            except Exception:  # noqa: BLE001 — decision log never breaks reserve.
+                ctx.decision_facts = None
+            return ctx
         except QuotaExhausted as e:
             logger.info("quota_cascade_advance", tenant_id=user.org_id,
                         exhausted_model=e.model, period=period)
+            exhausted.add(model)
             continue
     logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
     raise _err_402("model_quota_exhausted")
+
+
+def _build_decision_facts(priced_tried, untried_models, price, exhausted) -> dict:
+    """Assemble the routing decision facts (P0 decision log).
+
+    `priced_tried` = [(model, pricing_key, est_cost)] for the candidates actually
+    tried (the LAST is the chosen one that committed); `untried_models` = the
+    servable tail ranked below the chosen (never tried — priced HERE, inside the
+    caller's best-effort fence, so a tail pricing failure cannot affect reserve);
+    `exhausted` = models whose quota was gone. Tried-but-not-chosen →
+    quota-exhausted; untried tail → fallback-order. All are servable (the chain
+    was servability-filtered upstream)."""
+    chosen_model, chosen_pk, chosen_cost = priced_tried[-1]
+    chosen_idx = len(priced_tried) - 1
+    # Price the untried tail now (inside the fence).
+    priced = list(priced_tried) + [(m, *price(m)) for m in untried_models]
+    rejected = []
+    for i, (model, pk, cost) in enumerate(priced):
+        if i == chosen_idx:
+            continue
+        reason = "quota-exhausted" if model in exhausted else "fallback-order"
+        rejected.append({
+            "model": model, "pricing_key": pk, "cost_tier": _tier_or_zero(pk),
+            "reject_reason": reason, "servable": True,
+            "est_cost_microusd": int(cost),
+        })
+    return {
+        "chosen": {
+            "model": chosen_model, "pricing_key": chosen_pk,
+            "cost_tier": _tier_or_zero(chosen_pk),
+            "est_cost_microusd": int(chosen_cost),
+            # The live pricing version at decision time (best-effort; the frozen
+            # snapshot on the ctx carries the authoritative one for settle).
+            "pricing_version_at_decision": None,
+        },
+        "rejected": rejected,
+    }
+
+
+def _tier_or_zero(pricing_key: str) -> int:
+    try:
+        from .routing.chains import _tier_for
+        return int(_tier_for(pricing_key))
+    except Exception:  # noqa: BLE001 — cost_tier is informational, never critical.
+        return 0
 
 
 def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> None:
@@ -1863,6 +1955,23 @@ def settle_reservation_and_log(
         # Settle the per-model quota too: move `used` from the reserved estimate
         # to the actual spend (actual<=reserved so used only ever decreases here).
         _settle_quota_for(context, int(actual_cost_microusd))
+        # P0 decision log: fire-and-forget the OUTCOME record — the measured
+        # charge (from the frozen rating we just wrote) plus the counterfactual
+        # savings against the requested / max-servable baselines at THIS request's
+        # actual tokens. Never blocks or fails settle.
+        try:
+            from .learning.decision_log import record_outcome_from_context
+            record_outcome_from_context(
+                context,
+                actual_total_cost_microusd=int(actual_cost_microusd),
+                actual_input_tokens=int(actual_input_tokens),
+                actual_output_tokens=int(actual_output_tokens),
+                ledger_pricing_version=(
+                    _rating.pricing_version if _rating is not None else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 — decision logging never breaks settle.
+            pass
 
     # ALWAYS record usage, even if the pool settle above failed: the Bedrock
     # call happened and its cost must be auditable. This is deliberately outside
