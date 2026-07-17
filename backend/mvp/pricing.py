@@ -45,6 +45,145 @@ class Rate:
     cache_write_per_mtok_microusd: int
 
 
+# Sentinel version used when NO admin override is active and charging falls back
+# to the built-in `_DEFAULT_RATES`. Frozen onto the ledger so a dispute can tell
+# "this was charged at the built-in defaults" apart from a real admin version.
+BUILTIN_VERSION = "builtin"
+
+# Sentinels stamped as `pricing_version` on a terminal when the charge did NOT go
+# through a frozen snapshot. Each names a DISTINCT cause so a dispute / an alarm
+# can tell them apart (Fable review-2 N2/N3) — never the pricing_key (bug#1).
+#   UNVERSIONED_SENTINEL: an explicit caller-supplied cost, or a legacy
+#     reservation that predates snapshotting — no version was in play.
+#   SNAPSHOT_FAILED_SENTINEL: reserve tried to freeze a rate but the rate table
+#     read failed; the settle then charged via the live-rate fallback. This is a
+#     degraded path that MUST be alarmed, so it gets its own label.
+UNVERSIONED_SENTINEL = "unversioned-legacy"
+SNAPSHOT_FAILED_SENTINEL = "snapshot-failed"
+# External authorize/capture in AMOUNT mode: the settled figure is a
+# client-declared fixed amount, NOT derived from any rate version. A DISTINCT
+# sentinel per cause (Fable N2/N3, authcap review-1 M-4) — a dispute must tell an
+# external fixed-amount charge apart from a legacy snapshot-less inline one.
+EXTERNAL_AMOUNT_SENTINEL = "external-fixed-amount"
+
+# Version strings admins may never create (they collide with the sentinels /
+# built-in tag and would make dispute labels ambiguous).
+RESERVED_VERSIONS = frozenset(
+    {BUILTIN_VERSION, UNVERSIONED_SENTINEL, SNAPSHOT_FAILED_SENTINEL,
+     EXTERNAL_AMOUNT_SENTINEL}
+)
+
+
+@dataclass(frozen=True)
+class RateSnapshot:
+    """The exact rate a reservation was admitted at, frozen at reserve time
+    (Layer 5). Carried on the ReservationContext and serialized onto the RESERVE
+    ledger event, so settle/late-settle rate the request WITHOUT re-reading the
+    (possibly since-flipped) live rate table — "which price, when" is pinned.
+
+    `rounding` is recorded so a future rounding-policy change (introduced with a
+    new pricing version) never breaks the replay of a past charge.
+
+    `cost_*` are the optional provider-cost rates (Layer 5 cost passthrough). They
+    are nullable and RECORD-ONLY — they never affect the charged amount — but the
+    columns exist in the snapshot from day one because ledger terminals are
+    append-only and a cost field cannot be backfilled later.
+    """
+
+    version: str
+    pricing_key: str
+    input_per_mtok_microusd: int
+    output_per_mtok_microusd: int
+    cache_read_per_mtok_microusd: int
+    cache_write_per_mtok_microusd: int
+    rounding: str = "ceil"
+    cost_input_per_mtok_microusd: Optional[int] = None
+    cost_output_per_mtok_microusd: Optional[int] = None
+    cost_cache_read_per_mtok_microusd: Optional[int] = None
+    cost_cache_write_per_mtok_microusd: Optional[int] = None
+
+    def to_ledger_dict(self) -> dict:
+        """Compact, self-describing serialization for the RESERVE ledger event.
+
+        Only non-null fields are emitted (DynamoDB forbids null attribute
+        values); `from_ledger_dict` restores the same snapshot."""
+        d = {
+            "version": self.version,
+            "pricing_key": self.pricing_key,
+            "input": self.input_per_mtok_microusd,
+            "output": self.output_per_mtok_microusd,
+            "cache_read": self.cache_read_per_mtok_microusd,
+            "cache_write": self.cache_write_per_mtok_microusd,
+            "rounding": self.rounding,
+        }
+        for k, v in (
+            ("cost_input", self.cost_input_per_mtok_microusd),
+            ("cost_output", self.cost_output_per_mtok_microusd),
+            ("cost_cache_read", self.cost_cache_read_per_mtok_microusd),
+            ("cost_cache_write", self.cost_cache_write_per_mtok_microusd),
+        ):
+            if v is not None:
+                d[k] = int(v)
+        return d
+
+    @classmethod
+    def from_ledger_dict(cls, d: dict) -> "RateSnapshot":
+        def _opt(key):
+            v = d.get(key)
+            return int(v) if v is not None else None
+
+        return cls(
+            version=str(d["version"]),
+            pricing_key=str(d["pricing_key"]),
+            input_per_mtok_microusd=int(d["input"]),
+            output_per_mtok_microusd=int(d["output"]),
+            cache_read_per_mtok_microusd=int(d["cache_read"]),
+            cache_write_per_mtok_microusd=int(d["cache_write"]),
+            rounding=str(d.get("rounding", "ceil")),
+            cost_input_per_mtok_microusd=_opt("cost_input"),
+            cost_output_per_mtok_microusd=_opt("cost_output"),
+            cost_cache_read_per_mtok_microusd=_opt("cost_cache_read"),
+            cost_cache_write_per_mtok_microusd=_opt("cost_cache_write"),
+        )
+
+
+@dataclass(frozen=True)
+class RatingRecord:
+    """The frozen money breakdown for one settle, embedded on the ledger terminal.
+
+    Self-contained (INV-R2): `recompute(tokens × rate) == total` is verifiable
+    from this record alone, with no external table read. `total_cost_microusd` is
+    the SINGLE source of the settled amount — settle uses THIS value, so the
+    ledger's settled_delta and this record can never disagree.
+
+    `provider_cost_microusd` / `margin_microusd` are populated only when the
+    snapshot carried cost rates; they are record-only and never affect `total`.
+    """
+
+    pricing_version: str
+    pricing_key: str
+    rounding: str
+    # per-component: (tokens, rate_per_mtok_microusd, cost_microusd)
+    components: dict
+    total_cost_microusd: int
+    provider_cost_microusd: Optional[int] = None
+    margin_microusd: Optional[int] = None
+
+    def to_ledger_dict(self) -> dict:
+        d = {
+            "pricing_version": self.pricing_version,
+            "pricing_key": self.pricing_key,
+            "rounding": self.rounding,
+            "components": self.components,
+            "total_cost_microusd": int(self.total_cost_microusd),
+        }
+        if self.provider_cost_microusd is not None:
+            d["provider_cost_microusd"] = int(self.provider_cost_microusd)
+        if self.margin_microusd is not None:
+            d["margin_microusd"] = int(self.margin_microusd)
+        return d
+
+
 # Built-in list prices (micro-USD per MTok). Sourced from published on-demand
 # Bedrock/Anthropic rates. `default` is a conservative fallback (Opus-priced)
 # so an unpriced model never under-charges a budget.
@@ -178,6 +317,17 @@ def _mtok_cost(tokens: int, per_mtok_microusd: int) -> int:
     return -(-numerator // _TOKENS_PER_MTOK)  # ceil division
 
 
+def mtok_cost_for_rounding(tokens: int, per_mtok_microusd: int, rounding: str) -> int:
+    """Public rounding-aware component cost, used by the ledger's rating replay
+    audit to RE-COMPUTE (not just re-sum) a frozen rating under its own frozen
+    rounding policy. Only `ceil` is defined today; an unknown policy raises so a
+    replay can never silently 'pass' a rating written under a policy this code
+    does not understand."""
+    if rounding != "ceil":
+        raise ValueError(f"unsupported rating rounding policy: {rounding!r}")
+    return _mtok_cost(tokens, per_mtok_microusd)
+
+
 def estimate_cost_microusd(
     *,
     pricing_key: str,
@@ -213,8 +363,11 @@ def actual_cost_microusd(
 ) -> int:
     """Settled cost in micro-USD from a response's real usage block.
 
-    Priced per token type so an Opus batch and a Sonnet batch in the same
-    tenant settle at their own rates — no blended assumption.
+    DEPRECATED for the charging path (Layer 5): re-reads the live rate table, so
+    a rate flip between reserve and settle would charge at the wrong price. Use
+    `snapshot_rates()` at reserve + `rate_usage(snapshot, usage)` at settle so the
+    charge is pinned to the admitted version. Kept for callers that only need a
+    quick estimate and do not span a reserve→settle boundary.
     """
     rate = _cache.get(pricing_key, repo)
     return (
@@ -223,3 +376,176 @@ def actual_cost_microusd(
         + _mtok_cost(max(cache_read_tokens, 0), rate.cache_read_per_mtok_microusd)
         + _mtok_cost(max(cache_write_tokens, 0), rate.cache_write_per_mtok_microusd)
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer 5 rating: freeze at reserve, charge from the frozen snapshot
+# ---------------------------------------------------------------------------
+
+# Immutable per-(version, pricing_key) cache. Version rows never change after
+# `set_rates` flips CURRENT, so once read a row is cached forever (no TTL). This
+# keeps settle's rating a pure function with no live-table dependency.
+_version_rate_cache: dict[tuple, RateSnapshot] = {}
+_version_cache_lock = threading.Lock()
+
+
+def snapshot_rates(
+    pricing_key: str, repo: Optional[PricingConfigRepository] = None
+) -> RateSnapshot:
+    """Freeze the effective rate for `pricing_key` at THIS moment (reserve time).
+
+    Reads the active version (via the existing 60s CURRENT cache) and the exact
+    rate row for that version, and returns an immutable RateSnapshot to carry
+    through to settle. When no admin override is active for the key, the snapshot
+    is the built-in default tagged `BUILTIN_VERSION`.
+
+    INV-R4 (version internal consistency): `set_rates` writes all of a version's
+    rows BEFORE flipping CURRENT, and rows are immutable after — so reading
+    CURRENT then the row can never mix two versions, even if a flip races in
+    between (we read the row for the version CURRENT named, which is fully
+    written and frozen).
+    """
+    version, merged, override_keys = _cache.effective_rates(repo)
+    if version is not None and pricing_key in override_keys:
+        # An admin override is active for this key: freeze the versioned row's
+        # exact values (+ any cost_* fields) from the immutable per-version cache.
+        ck = (version, pricing_key)
+        cached = _version_rate_cache.get(ck)
+        if cached is not None:
+            return cached
+        row = (repo or PricingConfigRepository()).get_rates_for_version(
+            version, pricing_key
+        )
+        if row is not None:
+            # Defensive cross-check (Fable review-2 N4): the composite sort key
+            # `__ratever__<version>__<key>` could in principle be reached by a
+            # different (version, key) split. set_rates forbids the delimiters
+            # that allow it, but confirm the row's own fields match what we asked
+            # for so a mis-keyed row can never be silently rated.
+            if str(row.get("version")) != version or str(row.get("pricing_key")) != pricing_key:
+                raise RuntimeError(
+                    f"pricing row key mismatch: asked ({version!r},{pricing_key!r}) "
+                    f"got ({row.get('version')!r},{row.get('pricing_key')!r})"
+                )
+            snap = RateSnapshot(
+                version=version,
+                pricing_key=pricing_key,
+                input_per_mtok_microusd=int(row.get("input_per_mtok_microusd", 0)),
+                output_per_mtok_microusd=int(row.get("output_per_mtok_microusd", 0)),
+                cache_read_per_mtok_microusd=int(
+                    row.get("cache_read_per_mtok_microusd", 0)
+                ),
+                cache_write_per_mtok_microusd=int(
+                    row.get("cache_write_per_mtok_microusd", 0)
+                ),
+                cost_input_per_mtok_microusd=_opt_int(row.get("cost_input_per_mtok_microusd")),
+                cost_output_per_mtok_microusd=_opt_int(row.get("cost_output_per_mtok_microusd")),
+                cost_cache_read_per_mtok_microusd=_opt_int(
+                    row.get("cost_cache_read_per_mtok_microusd")
+                ),
+                cost_cache_write_per_mtok_microusd=_opt_int(
+                    row.get("cost_cache_write_per_mtok_microusd")
+                ),
+            )
+            with _version_cache_lock:
+                _version_rate_cache[ck] = snap
+            return snap
+        # Row missing for an ACTIVE override under a strongly-consistent read is
+        # a real inconsistency, not a normal case. Do NOT tag a fallback rate with
+        # the real version (that would be a false dispute label — Fable review-2
+        # N5, the M1 class again). Raise: the reserve caller catches it, marks the
+        # reservation `snapshot-failed`, and the honest sentinel is stamped.
+        raise RuntimeError(
+            f"pricing version {version!r} is active but its {pricing_key!r} row "
+            f"is missing (consistency violation)"
+        )
+    # No override: built-in default, tagged BUILTIN_VERSION.
+    rate = (merged.get(pricing_key) if version else None) or _DEFAULT_RATES.get(
+        pricing_key
+    ) or _DEFAULT_RATES["default"]
+    return _snapshot_from_rate(BUILTIN_VERSION, pricing_key, rate)
+
+
+def _opt_int(v):
+    return int(v) if v is not None else None
+
+
+def _snapshot_from_rate(version: str, pricing_key: str, rate: Rate) -> RateSnapshot:
+    return RateSnapshot(
+        version=version,
+        pricing_key=pricing_key,
+        input_per_mtok_microusd=rate.input_per_mtok_microusd,
+        output_per_mtok_microusd=rate.output_per_mtok_microusd,
+        cache_read_per_mtok_microusd=rate.cache_read_per_mtok_microusd,
+        cache_write_per_mtok_microusd=rate.cache_write_per_mtok_microusd,
+    )
+
+
+def rate_usage(
+    snapshot: RateSnapshot,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> RatingRecord:
+    """PURE function: rate real usage against a FROZEN snapshot (no table read).
+
+    This is the single money computation for settle/late-settle. Same snapshot +
+    same usage → same RatingRecord, so SETTLE and a reaper-race LATE_SETTLE that
+    restore the same snapshot charge identically (INV-R6). ceil rounding per
+    component (never under-charge by truncation).
+    """
+    # The snapshot froze a rounding policy; refuse to silently charge under an
+    # unknown one (Fable review M4). Only ceil is implemented today — a future
+    # policy would ship with its own branch AND a new pricing version.
+    if snapshot.rounding != "ceil":
+        raise ValueError(f"unsupported rating rounding policy: {snapshot.rounding!r}")
+    comp = {}
+    total = 0
+    for name, tokens, rate in (
+        ("input", input_tokens, snapshot.input_per_mtok_microusd),
+        ("output", output_tokens, snapshot.output_per_mtok_microusd),
+        ("cache_read", cache_read_tokens, snapshot.cache_read_per_mtok_microusd),
+        ("cache_write", cache_write_tokens, snapshot.cache_write_per_mtok_microusd),
+    ):
+        t = max(int(tokens), 0)
+        cost = _mtok_cost(t, int(rate))
+        comp[name] = {"tokens": t, "rate_microusd_per_mtok": int(rate), "cost_microusd": cost}
+        total += cost
+
+    provider_cost = None
+    margin = None
+    cost_rates = (
+        snapshot.cost_input_per_mtok_microusd,
+        snapshot.cost_output_per_mtok_microusd,
+        snapshot.cost_cache_read_per_mtok_microusd,
+        snapshot.cost_cache_write_per_mtok_microusd,
+    )
+    if any(r is not None for r in cost_rates):
+        pc = 0
+        for tokens, rate in (
+            (input_tokens, snapshot.cost_input_per_mtok_microusd),
+            (output_tokens, snapshot.cost_output_per_mtok_microusd),
+            (cache_read_tokens, snapshot.cost_cache_read_per_mtok_microusd),
+            (cache_write_tokens, snapshot.cost_cache_write_per_mtok_microusd),
+        ):
+            pc += _mtok_cost(max(int(tokens), 0), int(rate or 0))
+        provider_cost = pc
+        margin = total - pc
+
+    return RatingRecord(
+        pricing_version=snapshot.version,
+        pricing_key=snapshot.pricing_key,
+        rounding=snapshot.rounding,
+        components=comp,
+        total_cost_microusd=total,
+        provider_cost_microusd=provider_cost,
+        margin_microusd=margin,
+    )
+
+
+def reset_version_cache() -> None:
+    """Test hook: clear the immutable per-version snapshot cache."""
+    with _version_cache_lock:
+        _version_rate_cache.clear()

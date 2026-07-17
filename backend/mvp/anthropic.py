@@ -533,6 +533,11 @@ def messages(
         max_output_tokens=body.max_tokens,
         wire_protocol="messages",
         vsr_hard_model=model_pin,
+        # L5-d: carry request attribution so settle keys the ledger run-index on
+        # the client's workflow_run_id (per-run billing).
+        workflow_run_id=ctx.workflow_run_id if ctx else None,
+        group_id=ctx.group_id if ctx else None,
+        request_id=ctx.request_id if ctx else None,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the

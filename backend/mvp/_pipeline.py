@@ -37,11 +37,14 @@ import random
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import HTTPException
+
+if TYPE_CHECKING:
+    from .pricing import RateSnapshot
 
 from core.logging import get_logger
 from dynamo import UsageLogsRepository, UserTenantsRepository
@@ -193,6 +196,16 @@ class ReservationContext:
     pool_reserved_microusd: int = 0
     period: Optional[str] = None
     pricing_key: Optional[str] = None
+    # Layer 5: the exact rate this reservation was admitted at, frozen at reserve
+    # time. settle/late-settle rate the charge from THIS snapshot (a pure fn, no
+    # live-table re-read), so a rate flip between reserve and settle cannot change
+    # the price. Serialized onto the RESERVE ledger event; None only for
+    # non-priced/legacy reservations.
+    rate_snapshot: Optional["RateSnapshot"] = None
+    # True when a rate snapshot was attempted at reserve but the rate-table read
+    # failed — settle then charges via the live-rate fallback and labels the
+    # terminal with the snapshot-failed sentinel (distinct from legacy).
+    rate_snapshot_failed: bool = False
     tenant_id: str = ""
     pool_active: bool = False
     quota_lines: list = None  # list[dict] of per-model quota txn items (None = no quota)
@@ -216,6 +229,28 @@ class ReservationContext:
     quota_period: Optional[str] = None
     quota_tenant_limit: Optional[int] = None
     quota_user_limit: Optional[int] = None
+    # Attribution carried from the request headers (x-sc-*), stamped at the
+    # reserve chokepoint. NOT money — used so settle can key the ledger event's
+    # run-index (gsi1pk) on the client's workflow_run_id, making per-run billing
+    # (GET /billing/runs/<workflow_run_id>) queryable. Absent → the ledger falls
+    # back to the hold_id (run_id_is_fallback=True) as before.
+    workflow_run_id: Optional[str] = None
+    group_id: Optional[str] = None
+    request_id: Optional[str] = None
+    # Reservation origin. "external" marks a hold created by the external
+    # authorize/capture API (not an inline LLM request). It changes exactly ONE
+    # money behaviour: on a settle that loses the terminal race to a reaper
+    # RECLAIM, an external hold must NOT be recovered via LATE_SETTLE (an
+    # external capture window is tenant-controlled and unbounded, so late-billing
+    # a reclaimed hold could break the budget invariant — Fable authcap D-2).
+    # Instead the settle signals `ExternalHoldReclaimed` so the capture endpoint
+    # returns 410. None/"" = an ordinary inline reservation (unchanged behaviour).
+    source: Optional[str] = None
+    # Routing decision facts captured at reserve (P0 decision log): the chosen
+    # candidate + the rejected candidates with per-candidate estimate + reason.
+    # Pure attribution — the handler emits it fire-and-forget; None when routing
+    # had no real choice (single-candidate / no-config passthrough).
+    decision_facts: Optional[dict] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -267,6 +302,30 @@ class ReservationContext:
             items.append(
                 budgets.hold_delete_txn_item(
                     tenant_id=self.tenant_id, sk=self.hold_sk
+                )
+            )
+        # Phase 2: record a RELEASE terminal in the SAME txn as the reserved
+        # return, so the reserved side is ledger-derivable (I2) and RELEASE shares
+        # the single TERMINAL sk with SETTLE/RECLAIM. attribute_not_exists makes
+        # release mutually exclusive with a racing reaper RECLAIM: if the reaper
+        # already wrote RECLAIM (and already returned reserved), this txn CCFs and
+        # cancels — correctly leaving the counter untouched (the existing
+        # TransactionCanceled handler treats it as already-reconciled).
+        _rel_hold_id = self.hold_id
+        if not _rel_hold_id and self.hold_sk:
+            _rel_hold_id = self.hold_sk.rsplit("#", 1)[-1] or None
+        if _rel_hold_id:
+            items.append(
+                _reaper_ledger().terminal_event_txn_item(
+                    tenant_id=self.tenant_id,
+                    period=self.period,
+                    hold_id=_rel_hold_id,
+                    event_type="RELEASE",
+                    reserved_delta_microusd=-int(self.pool_reserved_microusd),
+                    settled_delta_microusd=0,
+                    run_id=_rel_hold_id,
+                    run_id_is_fallback=True,
+                    settle_reason="release",
                 )
             )
         try:
@@ -459,19 +518,46 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
             except Exception:  # noqa: BLE001
                 pass
             continue
+        hold_id = str(hold.get("hold_id", ""))
         try:
-            client.transact_write_items(
-                TransactItems=[
-                    _pool_settle_items(
-                        table_name=budgets.table_name,
+            _reaper_items = [
+                _pool_settle_items(
+                    table_name=budgets.table_name,
+                    tenant_id=tenant_id,
+                    period=period,
+                    reserved_microusd=amount,
+                    actual_microusd=0,
+                    reclaimed_microusd=amount,
+                ),
+                budgets.reclaim_hold_txn_item(tenant_id=tenant_id, sk=sk),
+            ]
+            # Phase 2: write a RECLAIM terminal in the SAME txn as the counter
+            # move + hold delete, so the ledger records the reserved return and a
+            # racing settle that loses the terminal cell routes to LATE_SETTLE
+            # (recovering the spend) instead of blind-returning it. The RECLAIM
+            # shares the single TERMINAL sk with SETTLE/RELEASE, so
+            # attribute_not_exists makes reaper-vs-settle mutually exclusive: if a
+            # settle already wrote a terminal, the reaper's Put CCFs and the whole
+            # reclaim txn cancels (no double return). hold_id is required; a legacy
+            # hold row written before this deploy may lack it — skip the ledger
+            # event (not the reclaim) so the counter is still healed.
+            if hold_id:
+                _reaper_items.append(
+                    _reaper_ledger().terminal_event_txn_item(
                         tenant_id=tenant_id,
                         period=period,
-                        reserved_microusd=amount,
-                        actual_microusd=0,
-                        reclaimed_microusd=amount,
-                    ),
-                    budgets.reclaim_hold_txn_item(tenant_id=tenant_id, sk=sk),
-                ],
+                        hold_id=hold_id,
+                        event_type="RECLAIM",
+                        reserved_delta_microusd=-int(amount),
+                        settled_delta_microusd=0,
+                        run_id=hold_id,
+                        run_id_is_fallback=True,
+                        settle_reason="reaper_reclaim",
+                        actor="reaper",
+                    )
+                )
+            client.transact_write_items(
+                TransactItems=_reaper_items,
                 ClientRequestToken=_fresh_idempotency_token(),
             )
             reclaimed += 1
@@ -483,7 +569,7 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                 "pool_hold_reclaimed",
                 tenant_id=tenant_id,
                 period=period,
-                hold_id=str(hold.get("hold_id", "")),
+                hold_id=hold_id,
                 amount_microusd=amount,
             )
         except ClientError as e:
@@ -555,6 +641,30 @@ class QuotaExhausted(Exception):
         self.model = model
 
 
+class ExternalHoldReclaimed(Exception):
+    """An external-authorize capture lost the terminal race to the reaper's
+    RECLAIM. The hold's reserved was already returned to the pool; per the
+    external-capture contract (Fable authcap D-2) we do NOT late-settle it —
+    the capture endpoint maps this to HTTP 410 (expired). The counters are
+    untouched (the settle txn cancelled), so no spend and no leak."""
+
+    def __init__(self, hold_id: str):
+        super().__init__(f"external hold {hold_id} was reclaimed before capture")
+        self.hold_id = hold_id
+
+
+class ExternalHoldInconsistent(Exception):
+    """An external hold's two durable amount sources disagree (HOLD row amount vs
+    RESERVE event reserved_delta) — a repair/adjust/corruption edited only one.
+    Settling would break ledger-derivability (I2), so we refuse and surface it
+    (the capture endpoint maps this to 409/500) rather than move money on an
+    inconsistent hold (Fable authcap review-4 H-A)."""
+
+    def __init__(self, hold_id: str):
+        super().__init__(f"external hold {hold_id} has inconsistent amounts")
+        self.hold_id = hold_id
+
+
 def reserve_credit_for_model(
     user,
     reservation_tokens: int,
@@ -566,6 +676,9 @@ def reserve_credit_for_model(
     breaker_max_tier: Optional[int] = None,
     wire_protocol: Optional[str] = None,
     vsr_hard_model: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -626,6 +739,27 @@ def reserve_credit_for_model(
         # settle can log P0-11 fallback visibility. Single chokepoint => every
         # handler gets it without threading through each reserve return path.
         ctx.requested_model = model_name
+        # Same chokepoint stamps the request attribution so settle keys the
+        # ledger run-index on the client's workflow_run_id (per-run billing).
+        ctx.workflow_run_id = workflow_run_id
+        ctx.group_id = group_id
+        ctx.request_id = request_id
+        # Complete the decision facts with the estimate inputs the candidates
+        # were priced against (P0 decision log), then fire-and-forget the
+        # reserve-time decision record. The WHOLE block is fenced: this runs after
+        # the reserve committed, so int(None)/any error must not fail the request
+        # (Fable RDL review High). Attribution is best-effort.
+        if ctx.decision_facts is not None:
+            try:
+                ctx.decision_facts["estimate_inputs"] = {
+                    "input_est": int(input_tokens_est),
+                    "max_out": int(max_output_tokens),
+                    "effort": int(effort_multiplier),
+                }
+                from .learning.decision_log import record_decision_from_context
+                record_decision_from_context(ctx)
+            except Exception:  # noqa: BLE001 — decision logging never breaks reserve.
+                pass
         return ctx
 
     if vsr_hard_model:
@@ -640,6 +774,9 @@ def reserve_credit_for_model(
         # or shows a spurious fallback badge — the two events are semantically
         # different and the derived bool must not conflate them.
         ctx.requested_model = ctx.selected_model or vsr_hard_model
+        ctx.workflow_run_id = workflow_run_id
+        ctx.group_id = group_id
+        ctx.request_id = request_id
         return ctx
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
@@ -676,8 +813,18 @@ def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg
     from .routing import quota as _quota
 
     period = current_period()
-    for model in candidates:
+    # Price candidates LAZILY inside the loop, exactly as the money path did
+    # before the decision log existed: candidate N is only priced when 1..N-1
+    # were exhausted. This keeps `price()` failures from affecting reserve
+    # availability (Fable RDL review-2 H1 — pricing the whole list up front added
+    # a failure mode that didn't exist). `priced_tried` accumulates the
+    # actually-tried candidates for the decision facts; the untried tail is priced
+    # LATER, inside the best-effort fence.
+    priced_tried: list = []  # (model, pricing_key, est_cost) for tried candidates
+    exhausted: set[str] = set()
+    for idx, model in enumerate(candidates):
         pk, cost = price(model)
+        priced_tried.append((model, pk, cost))
         q = tenant_cfg.quotas.get(model)
         tenant_limit = q.limit if q else None
         quota_lines = (
@@ -689,19 +836,80 @@ def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg
             else None
         )
         try:
-            return reserve_credit(
+            ctx = reserve_credit(
                 user, reservation_tokens,
                 pricing_key=pk, cost_microusd=cost,
                 quota_lines=quota_lines,
                 quota_model=model if quota_lines else None,
                 selected_model=model,
             )
+            # Decision-facts construction must NEVER fail the reserve: the hold is
+            # already committed here, so any exception (incl. pricing the untried
+            # tail) would leak it to the reaper. Fence it — attribution is
+            # best-effort (Fable RDL review High + review-2 H1).
+            try:
+                ctx.decision_facts = _build_decision_facts(
+                    priced_tried, candidates[idx + 1:], price, exhausted
+                )
+                if ctx.rate_snapshot is not None:
+                    ctx.decision_facts["chosen"]["pricing_version_at_decision"] = (
+                        ctx.rate_snapshot.version
+                    )
+            except Exception:  # noqa: BLE001 — decision log never breaks reserve.
+                ctx.decision_facts = None
+            return ctx
         except QuotaExhausted as e:
             logger.info("quota_cascade_advance", tenant_id=user.org_id,
                         exhausted_model=e.model, period=period)
+            exhausted.add(model)
             continue
     logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
     raise _err_402("model_quota_exhausted")
+
+
+def _build_decision_facts(priced_tried, untried_models, price, exhausted) -> dict:
+    """Assemble the routing decision facts (P0 decision log).
+
+    `priced_tried` = [(model, pricing_key, est_cost)] for the candidates actually
+    tried (the LAST is the chosen one that committed); `untried_models` = the
+    servable tail ranked below the chosen (never tried — priced HERE, inside the
+    caller's best-effort fence, so a tail pricing failure cannot affect reserve);
+    `exhausted` = models whose quota was gone. Tried-but-not-chosen →
+    quota-exhausted; untried tail → fallback-order. All are servable (the chain
+    was servability-filtered upstream)."""
+    chosen_model, chosen_pk, chosen_cost = priced_tried[-1]
+    chosen_idx = len(priced_tried) - 1
+    # Price the untried tail now (inside the fence).
+    priced = list(priced_tried) + [(m, *price(m)) for m in untried_models]
+    rejected = []
+    for i, (model, pk, cost) in enumerate(priced):
+        if i == chosen_idx:
+            continue
+        reason = "quota-exhausted" if model in exhausted else "fallback-order"
+        rejected.append({
+            "model": model, "pricing_key": pk, "cost_tier": _tier_or_zero(pk),
+            "reject_reason": reason, "servable": True,
+            "est_cost_microusd": int(cost),
+        })
+    return {
+        "chosen": {
+            "model": chosen_model, "pricing_key": chosen_pk,
+            "cost_tier": _tier_or_zero(chosen_pk),
+            "est_cost_microusd": int(chosen_cost),
+            # The live pricing version at decision time (best-effort; the frozen
+            # snapshot on the ctx carries the authoritative one for settle).
+            "pricing_version_at_decision": None,
+        },
+        "rejected": rejected,
+    }
+
+
+def _tier_or_zero(pricing_key: str) -> int:
+    try:
+        from .routing.chains import _tier_for
+        return int(_tier_for(pricing_key))
+    except Exception:  # noqa: BLE001 — cost_tier is informational, never critical.
+        return 0
 
 
 def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> None:
@@ -852,6 +1060,31 @@ def reserve_credit(
     repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
 
     period = current_period()
+    # Layer 5: freeze the rate NOW (reserve time) so settle rates the charge at
+    # the admitted version even if the live table is flipped later. Only when a
+    # pricing_key is known (priced reservation); a rate-table blip must never fail
+    # the reserve, so a snapshot failure degrades to None (settle then falls back
+    # to the legacy live-rate path). Shared across every context return below.
+    from .pricing import (
+        SNAPSHOT_FAILED_SENTINEL as _SNAP_FAILED,
+        UNVERSIONED_SENTINEL as _UNVERSIONED,
+    )
+
+    _rate_snap = None
+    _snap_failed = False
+    if pricing_key:
+        try:
+            from .pricing import snapshot_rates
+            _rate_snap = snapshot_rates(pricing_key)
+        except Exception:  # noqa: BLE001 — pricing must never break admission
+            # DEGRADED PATH (Fable review-2 N3): the rate table read failed, so
+            # settle will charge via the live-rate fallback and the terminal is
+            # labeled `snapshot-failed` (a DISTINCT sentinel from legacy). error
+            # level (not warning) so a CloudWatch metric filter can alarm — a
+            # persistent rate-table outage silently degrading all charging is the
+            # exact failure mode Layer 5 must not hide.
+            _snap_failed = True
+            logger.error("RateSnapshotFailed", pricing_key=pricing_key)
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
@@ -880,6 +1113,8 @@ def reserve_credit(
             reservation_tokens=reservation_tokens,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=_rate_snap,
+            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
@@ -1011,8 +1246,40 @@ def reserve_credit(
             expires_at_epoch=hold_expires_at,
         )
         txn_items = [user_txn, pool_txn, hold_txn]
+        _quota_start = len(txn_items)
+        _quota_count = 0
         if quota_lines:
             txn_items.extend(quota_lines)
+            _quota_count = len(quota_lines)
+        # RESERVE ledger event LAST, so the fixed pool/user/hold/quota indices the
+        # cancellation parsing relies on are unchanged. Its attribute_not_exists
+        # can only CCF on a hold_id collision (uuid → never in practice), and the
+        # quota scan is bounded to the quota slice so a ledger CCF is never
+        # misread as quota-exhausted. Positive reserved_delta makes the reserved
+        # side ledger-derivable (I2).
+        if hold_id:
+            txn_items.append(
+                _reaper_ledger().reserve_event_txn_item(
+                    tenant_id=user.org_id,
+                    period=period,
+                    hold_id=hold_id,
+                    reserved_delta_microusd=int(cost),
+                    run_id=hold_id,
+                    run_id_is_fallback=True,
+                    model_id=selected_model,
+                    # Layer 5: the frozen VERSION (bug#1 fix), and the full rate
+                    # snapshot serialized so a cross-process recovery can restore
+                    # it (Fable review H1). Distinct sentinel per cause when no
+                    # snapshot was frozen (review-2 N2/N3).
+                    pricing_version=(
+                        _rate_snap.version if _rate_snap is not None
+                        else (_SNAP_FAILED if _snap_failed else _UNVERSIONED)
+                    ),
+                    rate_snapshot=(
+                        _rate_snap.to_ledger_dict() if _rate_snap is not None else None
+                    ),
+                )
+            )
         try:
             client.transact_write_items(
                 TransactItems=txn_items,
@@ -1035,13 +1302,16 @@ def reserve_credit(
             reasons = e.response.get("CancellationReasons", []) or []
             codes = {r.get("Code", "") for r in reasons}
             # txn_items order is [user_txn(0), pool_txn(1), hold_txn(2),
-            # *quota_lines(3..)]. A ConditionalCheckFailed at a QUOTA index means
-            # the per-model quota is exhausted — NOT a snapshot race — so retrying
-            # would fail forever. Surface QuotaExhausted so the caller's cascade
-            # advances to the next model. (The pool/user snapshot indices 0-1 are
-            # the retryable race; index 2 is the hold_id collision guard.)
-            if quota_model is not None and len(reasons) > 3:
-                for r in reasons[3:]:
+            # *quota_lines(_quota_start..), RESERVE ledger(last)]. A
+            # ConditionalCheckFailed at a QUOTA index means the per-model quota is
+            # exhausted — NOT a snapshot race — so retrying would fail forever.
+            # Surface QuotaExhausted so the caller's cascade advances to the next
+            # model. (pool/user indices 0-1 are the retryable race; index 2 is the
+            # hold_id collision guard; the trailing RESERVE ledger item is scanned
+            # separately below.) The quota scan is bounded to EXACTLY the quota
+            # slice so the appended ledger item's index is never misread as quota.
+            if quota_model is not None and _quota_count:
+                for r in reasons[_quota_start:_quota_start + _quota_count]:
                     if r.get("Code", "") == "ConditionalCheckFailed":
                         logger.info(
                             "model_quota_exhausted",
@@ -1063,6 +1333,8 @@ def reserve_credit(
             pool_reserved_microusd=cost,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=_rate_snap,
+            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=True,
             hold_id=hold_id,
@@ -1099,6 +1371,8 @@ def reserve_credit(
             reservation_tokens=reservation_tokens,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=_rate_snap,
+            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
@@ -1131,6 +1405,401 @@ def reserve_credit(
             },
         )
     raise _err_402("tenant_pool_exhausted")
+
+
+def reserve_external_authorization(
+    *,
+    tenant_id: str,
+    amount_microusd: int,
+    idempotency_key: str,
+    request_fingerprint: str,
+    authorization_id_factory,
+    ttl_seconds: int,
+    pricing_key: Optional[str] = None,
+    rate_snapshot: Optional["RateSnapshot"] = None,
+    description: Optional[str] = None,
+    workflow_run_id: Optional[str] = None,
+) -> "ExternalAuthorizeResult":
+    """Reserve `amount_microusd` from a tenant's pool for an EXTERNAL authorize
+    (Fable authcap). Pool-only: unlike an inline request there is no per-user
+    token debit and no per-model quota — an external action is not token-metered,
+    it is a flat dollar hold the tenant will later `capture` (settle) or `void`
+    (release) from a SEPARATE HTTP call.
+
+    The transaction is [pool reserve (CAS), HOLD put, RESERVE ledger event
+    (source=external, carries the frozen rate_snapshot + description), IDEMP
+    record]. Every item is an EXISTING, reviewed primitive — the only new money
+    behaviour is the IDEMP Put, which rides `attribute_not_exists(pk)` so
+    "IDEMP row exists ⟺ this reserve committed" is atomic. A duplicate
+    Idempotency-Key CCFs the whole txn → we read the prior IDEMP row and REPLAY
+    its authorization (idempotent authorize, Fable authcap A/C).
+
+    Same snapshot-optimistic CAS + full-jitter retry as `reserve_credit`'s pooled
+    path, and it FAILS CLOSED the same way (a pooled tenant must never get an
+    unpriced hold). Raises HTTP 402 `tenant_pool_exhausted` (no room / suspended),
+    404-mapped `no_pool` (the tenant has no pool for the period — external
+    authorize requires one), or 503 on sustained contention.
+
+    `authorization_id_factory(hold_id, period, hold_sk) -> str` mints the opaque
+    authorization id from the hold identity (all known BEFORE the txn), so the
+    real id is stored in the IDEMP row at write time — no placeholder + rewrite,
+    and a duplicate-key replay recomputes the SAME id deterministically.
+    """
+    period = current_period()
+    budgets = TenantBudgetsRepository()
+    amount = int(amount_microusd)
+    if amount <= 0:
+        raise _err_400("amount_must_be_positive")
+
+    ledger = _reaper_ledger()
+    # A retried authorize with the SAME Idempotency-Key that already committed is
+    # the common duplicate — detect it up front with a consistent read so we
+    # replay without even attempting a reserve. (The txn's IDEMP
+    # attribute_not_exists is still the AUTHORITATIVE guard against a
+    # read-then-write race; this is just a fast path.)
+    #
+    # PERIOD BOUNDARY (Fable authcap review-1 H-2): the IDEMP row's pk embeds the
+    # period the authorize committed in. A retry that crosses a month boundary
+    # (authorize at 23:59, retry at 00:01) computes a NEW period, so a
+    # current-period-only lookup would miss the prior row and mint a SECOND hold
+    # for the same key. Since ttl_max is 24h, the original can be at most one
+    # period back, so we also check the previous period. A hit there replays the
+    # ORIGINAL (correctly settling against the period it reserved in).
+    prior = _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key)
+    if prior is not None:
+        return _idemp_replay(prior, request_fingerprint)
+
+    client = _low_level_client()
+    _sweep_expired_holds(budgets, tenant_id, period)
+    saw_throttle = False
+    hold_id = _fresh_idempotency_token()
+    hold_expires_at = int(time.time()) + max(int(ttl_seconds), 0)
+    hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+    authorization_id = authorization_id_factory(hold_id, period, hold_sk)
+    rate_snapshot_dict = rate_snapshot.to_ledger_dict() if rate_snapshot is not None else None
+    capture_mode = "amount" if pricing_key is None else "units"
+    for _attempt in range(_RESERVE_MAX_RETRIES):
+        if _attempt:
+            time.sleep(_contention_backoff(_attempt))
+        pool_row = budgets.get(tenant_id, period, consistent_read=True)
+        if pool_row is None:
+            # External authorize requires a pool to reserve against — there is no
+            # per-user token fallback for a non-request charge. Surface a distinct
+            # reason the endpoint maps to 404 (no pool configured).
+            raise ExternalAuthorizeNoPool(tenant_id, period)
+        if str(pool_row.get("status", "active")) != "active":
+            raise _err_402("tenant_pool_exhausted")
+        p_limit = int(pool_row.get("pool_limit_microusd", 0))
+        p_reserved = int(pool_row.get("pool_reserved_microusd", 0))
+        p_settled = int(pool_row.get("pool_settled_microusd", 0))
+        if p_reserved + p_settled + amount > p_limit:
+            raise _err_402("tenant_pool_exhausted")
+
+        pool_txn = budgets.reserve_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            amount_microusd=amount,
+            expected_reserved=p_reserved,
+            expected_settled=p_settled,
+        )
+        hold_txn = budgets.hold_put_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            hold_id=hold_id,
+            amount_microusd=amount,
+            expires_at_epoch=hold_expires_at,
+        )
+        # TransactItems ORDER: [pool(0), hold(1), RESERVE(2), IDEMP(3)]. Only the
+        # IDEMP item's CCF is interpreted specially (duplicate key); a pool(0) CCF
+        # is the retryable snapshot race; a hold(1) CCF is the uuid-collision guard
+        # (never in practice).
+        reserve_evt = ledger.reserve_event_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            hold_id=hold_id,
+            reserved_delta_microusd=amount,
+            run_id=workflow_run_id or hold_id,
+            run_id_is_fallback=workflow_run_id is None,
+            pricing_version=(rate_snapshot.version if rate_snapshot is not None else None),
+            rate_snapshot=rate_snapshot_dict,
+            source="external",
+            description=description,
+        )
+        idemp_txn = ledger.idemp_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            idempotency_key=idempotency_key,
+            hold_id=hold_id,
+            hold_sk=hold_sk,
+            authorization_id=authorization_id,
+            amount_microusd=amount,
+            expires_at_epoch=hold_expires_at,
+            capture_mode=capture_mode,
+            request_fingerprint=request_fingerprint,
+            pricing_key=pricing_key,
+        )
+        _IDEMP_IDX = 3
+        try:
+            client.transact_write_items(
+                TransactItems=[pool_txn, hold_txn, reserve_evt, idemp_txn],
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code != "TransactionCanceledException":
+                raise
+            reasons = _cancellation_codes(e)
+            # A duplicate Idempotency-Key: the IDEMP Put CCF'd. A concurrent
+            # authorize with the same key beat us (or a prior commit did) → read
+            # the winning IDEMP row and REPLAY its authorization. This is the
+            # read-then-write race the txn-level guard closes: whoever won wrote
+            # exactly one hold, and every racer returns that same authorization_id.
+            if (
+                len(reasons) > _IDEMP_IDX
+                and reasons[_IDEMP_IDX] == "ConditionalCheckFailed"
+            ):
+                winner = _read_idemp_with_prev_period(
+                    ledger, tenant_id, period, idempotency_key
+                )
+                if winner is not None:
+                    return _idemp_replay(winner, request_fingerprint)
+                # CCF but no readable row: get_idemp is ConsistentRead, so a CCF
+                # with no readable winner is a genuine transient (throttle) → retry
+                # (and count it as a throttle so exhaustion surfaces 503, not a
+                # misleading 402 — Fable review-1 M-3).
+                saw_throttle = True
+            # hold(1) CCF = a uuid collision (astronomically rare). Retrying with
+            # the SAME hold_id would CCF forever → re-mint the hold identity so the
+            # next attempt uses a fresh one (Fable review-1 Low). The
+            # authorization_id is derived from hold_id, so re-derive it too.
+            if (
+                len(reasons) > 1
+                and reasons[1] == "ConditionalCheckFailed"
+                and (len(reasons) <= _IDEMP_IDX or reasons[_IDEMP_IDX] != "ConditionalCheckFailed")
+            ):
+                hold_id = _fresh_idempotency_token()
+                hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+                authorization_id = authorization_id_factory(hold_id, period, hold_sk)
+            if {
+                "ThrottlingError",
+                "ProvisionedThroughputExceeded",
+                "TransactionConflict",
+                "RequestLimitExceeded",
+            } & set(reasons):
+                saw_throttle = True
+            continue
+        return ExternalAuthorizeResult(
+            authorization_id=authorization_id,
+            hold_id=hold_id,
+            hold_sk=hold_sk,
+            period=period,
+            amount_microusd=amount,
+            expires_at_epoch=hold_expires_at,
+            capture_mode=capture_mode,
+            replayed=False,
+        )
+
+    logger.warning(
+        "external_authorize_retries_exhausted",
+        tenant_id=tenant_id, period=period,
+        attempts=_RESERVE_MAX_RETRIES, throttled=saw_throttle,
+    )
+    if saw_throttle:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "type": "budget_unavailable",
+                "reason": "pool_reservation_contended",
+                "message": "Budget reservation is temporarily unavailable. Retry shortly.",
+            },
+        )
+    raise _err_402("tenant_pool_exhausted")
+
+
+@dataclass
+class ExternalAuthorizeResult:
+    """Outcome of `reserve_external_authorization` — the addressing + amounts the
+    authorize endpoint needs for its response. `replayed=True` when a duplicate
+    Idempotency-Key returned the ORIGINAL authorization (endpoint answers 200,
+    not 201)."""
+
+    authorization_id: str
+    hold_id: str
+    hold_sk: str
+    period: str
+    amount_microusd: int
+    expires_at_epoch: int
+    capture_mode: str
+    replayed: bool
+
+
+class ExternalAuthorizeNoPool(Exception):
+    """The tenant has no pool budget for the period, so an external authorize has
+    nothing to reserve against. The endpoint maps this to 404 (a tenant without a
+    pool is indistinguishable, to an external caller, from an unconfigured one)."""
+
+    def __init__(self, tenant_id: str, period: str):
+        super().__init__(f"tenant {tenant_id} has no pool for {period}")
+        self.tenant_id = tenant_id
+        self.period = period
+
+
+def _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key):
+    """Read the IDEMP row for a key in `period`, falling back to the previous
+    period (Fable authcap review-1 H-2: a retry crossing a month boundary must
+    still find the original). Both reads are ConsistentRead. Returns the row or
+    None. ttl_max is 24h so the original can only be one period back."""
+    row = ledger.get_idemp(
+        tenant_id=tenant_id, period=period, idempotency_key=idempotency_key
+    )
+    if row is not None:
+        return row
+    return ledger.get_idemp(
+        tenant_id=tenant_id,
+        period=_previous_period(period),
+        idempotency_key=idempotency_key,
+    )
+
+
+class IdempotencyKeyReuse(Exception):
+    """The same Idempotency-Key was reused for a DIFFERENT request body (or two
+    distinct keys collided under sanitization). The endpoint maps this to 422 —
+    it must NEVER silently replay a mismatched authorization (Fable authcap
+    review-1 H-1). Guards against both a client mixing up two requests and the
+    _safe_idemp_token collision handing back the wrong hold."""
+
+
+def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthorizeResult:
+    """Reconstruct an ExternalAuthorizeResult from a stored IDEMP row (a
+    duplicate-key replay). The row froze everything the authorize response needs,
+    so a replay is a pure read — no rehydrate, no second reserve.
+
+    First it verifies the incoming request's fingerprint matches the stored one:
+    a mismatch means the key was reused for a different request (or a sanitize
+    collision), which must be a 422, never a wrong-authorization replay (H-1).
+    A MISSING stored fingerprint is also a mismatch (Fable authcap review-4 M-C):
+    every IDEMP row this code writes carries one, so an absent fingerprint means
+    a partial write / hand-inserted / foreign row — replaying it could hand back
+    an authorization for a different body, so reject rather than skip the check."""
+    stored_fp = str(idemp_row.get("request_fingerprint", ""))
+    if stored_fp != request_fingerprint:
+        raise IdempotencyKeyReuse(
+            "Idempotency-Key reused for a different request"
+        )
+    return ExternalAuthorizeResult(
+        authorization_id=str(idemp_row["authorization_id"]),
+        hold_id=str(idemp_row["hold_id"]),
+        hold_sk=str(idemp_row["hold_sk"]),
+        period=str(idemp_row["period"]),
+        amount_microusd=int(idemp_row["amount_microusd"]),
+        expires_at_epoch=int(idemp_row["expires_at"]),
+        capture_mode=str(idemp_row.get("capture_mode", "amount")),
+        replayed=True,
+    )
+
+
+def rehydrate_reservation_context(
+    *,
+    tenant_id: str,
+    period: str,
+    hold_id: str,
+    hold_sk: str,
+) -> Optional[ReservationContext]:
+    """Rebuild the ReservationContext for an external hold from the ledger, so a
+    capture/void in a SEPARATE HTTP call runs `_settle_pool_side`/`release_pool`
+    BYTE-IDENTICALLY to the in-memory path (Fable authcap B — money logic is not
+    forked; only the ctx's construction is).
+
+    Source of truth is the RESERVE ledger event (durable, carries the frozen
+    rate_snapshot + source) plus the HOLD row (existence + amount). Returns None
+    when the hold row is gone — the caller then reads the terminal to answer
+    captured/voided/expired (it must NOT fabricate a context and settle a
+    non-existent hold). The returned context has `pool_active=True`,
+    `source="external"`, and the SAME field shape a fresh reserve produced, so
+    the F-1 equivalence property can assert the two produce identical txn items.
+
+    SECURITY (Fable authcap review-1 C-1): the RESERVE event's `source` MUST be
+    "external". The authorization token is not tamper-proof (by design — the PK
+    is always the authed tenant), and an inline LLM hold shares the SAME table +
+    sk shape, with hold_id/period/expiry all discoverable from the tenant's own
+    billing:read surface. So without this gate a tenant could forge a token
+    pointing at its OWN inline hold and void/capture it — erasing real spend
+    (a reserved-return with no charge) or pre-empting the inline settle. Gating
+    rehydrate on source=="external" makes external capture/void reach ONLY holds
+    that the external authorize API itself created. A non-external (or absent)
+    RESERVE → None → the endpoint answers 404, exactly as for a bogus token.
+    """
+    ledger = _reaper_ledger()
+    reserve_evt = ledger.get_reserve(
+        tenant_id=tenant_id, period=period, hold_id=hold_id
+    )
+    # C-1 gate: only holds minted by the external authorize API are rehydratable.
+    if reserve_evt is None or reserve_evt.get("source") != "external":
+        return None
+
+    budgets = TenantBudgetsRepository()
+    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
+    if hold is None:
+        return None
+    pool_reserved = int(hold.get("amount_microusd", 0))
+
+    # H-A (Fable authcap review-4): the authorized amount has two durable sources
+    # — the HOLD row's amount_microusd (which settle SUBTRACTS from pool_reserved
+    # and the capture 422 guard compares against) and the RESERVE event's
+    # reserved_delta_microusd (what the +reserved side recorded, and what GET
+    # displays). In the normal single-txn reserve they are equal. If they DIVERGE
+    # (a repair script, a future amount-adjust feature, or corruption edited only
+    # one), settling would move pool_reserved by an amount the ledger's +reserved
+    # never recorded — breaking I2 (ledger-derivability) silently. Refuse to
+    # settle a hold whose two amounts disagree: raise (the endpoint's outer
+    # handling surfaces it) rather than move money on an inconsistent hold.
+    reserve_delta = int(reserve_evt.get("reserved_delta_microusd", 0))
+    if pool_reserved != reserve_delta:
+        logger.error(
+            "external_hold_amount_mismatch",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            hold_amount=pool_reserved, reserve_delta=reserve_delta,
+        )
+        raise ExternalHoldInconsistent(hold_id)
+
+    rate_snap = None
+    pricing_key = None
+    raw = reserve_evt.get("rate_snapshot")
+    if raw:
+        try:
+            import json as _json
+
+            from .pricing import RateSnapshot as _RS
+
+            rate_snap = _RS.from_ledger_dict(_json.loads(raw))
+            pricing_key = rate_snap.pricing_key
+        except Exception:  # noqa: BLE001 — a corrupt snapshot degrades to amount-mode.
+            rate_snap = None
+    # M-A (Fable authcap review-4): restore the run attribution from the RESERVE
+    # event so the SETTLE keys the run-index the SAME way. Honour the fallback
+    # marker: a hold reserved WITHOUT a real workflow_run_id stored run_id=hold_id
+    # with run_id_source="hold_id_fallback" — feeding that hold_id back as
+    # workflow_run_id would make settle write run_id_is_fallback=False and surface
+    # a synthetic hold_id as a real run (the external analog of F1). So restore
+    # workflow_run_id ONLY when the RESERVE was NOT a fallback.
+    restored_run_id = None
+    if reserve_evt.get("run_id_source") != "hold_id_fallback":
+        _rid = reserve_evt.get("run_id")
+        restored_run_id = str(_rid) if _rid else None
+    return ReservationContext(
+        tenants_repo=UserTenantsRepository(),
+        reservation_tokens=0,
+        pool_reserved_microusd=pool_reserved,
+        period=period,
+        pricing_key=pricing_key,
+        rate_snapshot=rate_snap,
+        tenant_id=tenant_id,
+        pool_active=True,
+        hold_id=hold_id,
+        hold_sk=hold_sk,
+        workflow_run_id=restored_run_id,
+        source="external",
+    )
 
 
 def _reserve_quota_without_pool(
@@ -1323,6 +1992,204 @@ def _cancellation_codes(e: ClientError) -> list:
     return [r.get("Code", "") for r in (e.response.get("CancellationReasons", []) or [])]
 
 
+def _reaper_ledger():
+    """The credit ledger repo, imported lazily so the reaper (and the module's
+    import graph) does not hard-depend on the ledger when it is not used."""
+    from dynamo import CreditLedgerRepository
+
+    return CreditLedgerRepository()
+
+
+def _recover_spend_via_late_settle(
+    *,
+    client,
+    ledger,
+    budgets_table_name: str,
+    tenant_id: str,
+    period: str,
+    hold_id: str,
+    actual_microusd: int,
+    run_id: str,
+    run_is_fallback: bool,
+    facts: dict,
+) -> None:
+    """Record spend that a settle would otherwise lose because the reaper
+    reclaimed the hold first (Phase 2 revenue-leak fix).
+
+    The reaper's RECLAIM already returned `reserved`, so this moves the settled
+    side ONLY: a single TransactWriteItems of
+      [0] pool settled-only counter (+actual, reserved untouched),
+      [1] LATE_SETTLE ledger Put (distinct sk, attribute_not_exists),
+      [2] ConditionCheck: the terminal really is a RECLAIM.
+    Idempotent: a retry storm CCFs on [1]; we then read the existing LATE_SETTLE
+    and treat a matching actual as success, a mismatch as a client bug (metric).
+    """
+    so_items = [
+        _settled_only_txn_item(
+            table_name=budgets_table_name,
+            tenant_id=tenant_id,
+            period=period,
+            actual_microusd=actual_microusd,
+        ),
+        ledger.late_settle_txn_item(
+            tenant_id=tenant_id,
+            period=period,
+            hold_id=hold_id,
+            settled_delta_microusd=int(actual_microusd),
+            run_id=run_id,
+            run_id_is_fallback=run_is_fallback,
+            span_id=facts.get("span_id"),
+            request_id=facts.get("request_id"),
+            group_id=facts.get("group_id"),
+            model_id=facts.get("model_id"),
+            pricing_version=facts.get("pricing_version"),
+            pricing_key=facts.get("pricing_key"),
+            # INV-R6: the SAME frozen rating the SETTLE path would have written
+            # (computed from ctx.rate_snapshot), so SETTLE and this reaper-race
+            # LATE_SETTLE record identical money.
+            rating=facts.get("rating"),
+            tokens_in=facts.get("tokens_in"),
+            tokens_out=facts.get("tokens_out"),
+        ),
+        ledger.terminal_conditioncheck_is_reclaim(
+            tenant_id=tenant_id, period=period, hold_id=hold_id
+        ),
+    ]
+    # Idempotency comes from the LATE_SETTLE sk's `attribute_not_exists` (exactly
+    # one LATE_SETTLE per hold), NOT from the ClientRequestToken — so a FRESH
+    # token per attempt is correct. A derived/stable token would additionally
+    # require byte-identical request payloads across retries, which the ledger
+    # Put cannot promise (its ts_ms differs per attempt), and DynamoDB rejects a
+    # token reused with a different payload (IdempotentParameterMismatch). The
+    # fresh token still dedupes botocore's own transparent retry of THIS call.
+    #
+    # A TRANSIENT cancel (TransactionConflict / throttle) is RETRIED IN-PLACE with
+    # backoff, mirroring the primary settle loop: settle runs at the streaming
+    # tail with no client retry, and the reaper will not re-fire this (already
+    # reclaimed) hold, so swallowing a transient here would permanently drop the
+    # spend (the leak Phase 2 closes). On retry exhaustion we RAISE — NOT a silent
+    # success. Honest note on recovery (Fable P2 review-2 R2-1): the recovery moves
+    # counter[0] and ledger[1] ATOMICALLY, so if it never commits, counter and
+    # ledger both miss the spend EQUALLY — reconciliation (counter−ledger drift)
+    # therefore CANNOT see this gap. The only signal is the loud
+    # `pool_settle_late_settle_retries_exhausted` / `pool_settle_failed` log
+    # (alarmed in iac). Durable auto-redrive (an orphan sweep matching "RECLAIM
+    # terminal with no LATE_SETTLE" against usage, or a pending-recovery outbox) is
+    # future work — see the ledger Phase 2 task. The retry is safe because item [0]
+    # is a bare `ADD` (no snapshot) and [1] is idempotent on its sk.
+    transient = {
+        "TransactionConflict",
+        "ThrottlingError",
+        "ThrottlingException",
+        "ProvisionedThroughputExceeded",
+        "RequestLimitExceeded",
+    }
+    for _attempt in range(_SETTLE_MAX_RETRIES):
+        if _attempt:
+            time.sleep(_contention_backoff(_attempt, cap=_SETTLE_BACKOFF_CAP_SECONDS))
+        try:
+            client.transact_write_items(
+                TransactItems=so_items,
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+            logger.info(
+                "pool_settle_late_settle_recovered",
+                tenant_id=tenant_id,
+                period=period,
+                hold_id=hold_id,
+                actual_microusd=actual_microusd,
+            )
+            return
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            reasons = _cancellation_codes(e)
+            # [1] = LATE_SETTLE Put. A CCF here means a LATE_SETTLE already exists
+            # — a concurrent/retried recovery beat us. Read it and compare actual.
+            late_dup = len(reasons) > 1 and reasons[1] == "ConditionalCheckFailed"
+            if late_dup:
+                existing = ledger.get_late_settle(
+                    tenant_id=tenant_id, period=period, hold_id=hold_id
+                )
+                if existing is None:
+                    # The Put CCF'd on attribute_not_exists, so a LATE_SETTLE MUST
+                    # exist; a ConsistentRead that then finds none can only mean a
+                    # defect (pk/sk mismatch between write and read). Do NOT return
+                    # success — raise so it is not a silent drop (Fable P2 review-2
+                    # R2-2: symmetric with the None-terminal handling in settle).
+                    logger.error(
+                        "pool_settle_late_settle_missing_after_ccf",
+                        tenant_id=tenant_id,
+                        period=period,
+                        hold_id=hold_id,
+                    )
+                    raise
+                existing_actual = int(existing.get("settled_delta_microusd", 0))
+                if existing_actual == int(actual_microusd):
+                    # Idempotent success: the spend is recorded exactly once.
+                    return
+                # First-writer-wins: a retry arrived with a DIFFERENT actual. Keep
+                # the recorded value; surface the divergence (metric-filter alarm).
+                logger.error(
+                    "LateSettleActualMismatch",
+                    tenant_id=tenant_id,
+                    period=period,
+                    hold_id=hold_id,
+                    recorded_microusd=existing_actual,
+                    attempted_microusd=int(actual_microusd),
+                )
+                return
+            # Transient cancel → retry in-place (the settled-only item [0] is the
+            # hot pool-counter row, so a conflict here is realistic).
+            if any(code in transient for code in reasons):
+                logger.warning(
+                    "pool_settle_late_settle_transient_retry",
+                    tenant_id=tenant_id,
+                    period=period,
+                    hold_id=hold_id,
+                    attempt=_attempt,
+                    reasons=reasons,
+                )
+                continue
+            # [0] pool row vanished (legitimately deleted → nothing to reconcile)
+            # WITHOUT a [2] ConditionCheck failure → benign no-op.
+            pool_row_ccf = (
+                len(reasons) > 0
+                and reasons[0] == "ConditionalCheckFailed"
+                and not (len(reasons) > 2 and reasons[2] == "ConditionalCheckFailed")
+            )
+            if pool_row_ccf:
+                logger.info(
+                    "pool_settle_late_settle_pool_vanished",
+                    tenant_id=tenant_id,
+                    period=period,
+                    hold_id=hold_id,
+                )
+                return
+            # [2] terminal-is-RECLAIM ConditionCheck failed: the terminal is
+            # immutable+append-only, so a route that read RECLAIM cannot see it
+            # flip — this signals a routing/consistency defect. Do not swallow.
+            logger.error(
+                "pool_settle_late_settle_unexpected_cancel",
+                tenant_id=tenant_id,
+                period=period,
+                hold_id=hold_id,
+                reasons=reasons,
+            )
+            raise
+    # Transient retries exhausted: RAISE so the outer settle logs
+    # pool_settle_failed and reconciliation catches the (settled-side) gap —
+    # never report a silent success.
+    logger.error(
+        "pool_settle_late_settle_retries_exhausted",
+        tenant_id=tenant_id,
+        period=period,
+        hold_id=hold_id,
+        actual_microusd=actual_microusd,
+    )
+    raise RuntimeError(f"late-settle recovery exhausted retries for hold {hold_id}")
+
+
 def settle_reservation_and_log(
     *,
     user,
@@ -1403,23 +2270,42 @@ def settle_reservation_and_log(
 
     # ----- pool side (only when the reservation was pooled) -----
     # When the caller didn't pass an explicit actual cost, derive it from the
-    # real usage and the reservation's pricing key. This lets route handlers
-    # settle a pooled request by passing only `context=ctx`.
+    # real usage. Layer 5: rate against the rate FROZEN at reserve time (a pure
+    # function, no live-table read) so a rate flip between reserve and settle
+    # cannot change the price. `_rating` is the frozen breakdown embedded on the
+    # ledger terminal; its total IS the settled amount (single source of truth).
+    from .pricing import SNAPSHOT_FAILED_SENTINEL, UNVERSIONED_SENTINEL
+
+    _rating = None
     if (
         actual_cost_microusd is None
         and context is not None
         and context.pool_active
         and context.pricing_key
     ):
-        from .pricing import actual_cost_microusd as _price_actual
+        if context.rate_snapshot is not None:
+            from .pricing import rate_usage
 
-        actual_cost_microusd = _price_actual(
-            pricing_key=context.pricing_key,
-            input_tokens=actual_input_tokens,
-            output_tokens=actual_output_tokens,
-            cache_read_tokens=max(actual_cache_read_tokens, 0),
-            cache_write_tokens=max(actual_cache_write_tokens, 0),
-        )
+            _rating = rate_usage(
+                context.rate_snapshot,
+                input_tokens=actual_input_tokens,
+                output_tokens=actual_output_tokens,
+                cache_read_tokens=max(actual_cache_read_tokens, 0),
+                cache_write_tokens=max(actual_cache_write_tokens, 0),
+            )
+            actual_cost_microusd = _rating.total_cost_microusd
+        else:
+            # Legacy / snapshot-less reservation: fall back to the live-rate path
+            # (pre-Layer-5 behaviour). No frozen rating record is produced.
+            from .pricing import actual_cost_microusd as _price_actual
+
+            actual_cost_microusd = _price_actual(
+                pricing_key=context.pricing_key,
+                input_tokens=actual_input_tokens,
+                output_tokens=actual_output_tokens,
+                cache_read_tokens=max(actual_cache_read_tokens, 0),
+                cache_write_tokens=max(actual_cache_write_tokens, 0),
+            )
 
     if (
         context is not None
@@ -1434,7 +2320,54 @@ def settle_reservation_and_log(
         # streaming `finally`) must not double-subtract pool_reserved.
         context._pool_finalized = True
         try:
-            _settle_pool_side(user, context, int(actual_cost_microusd))
+            _settle_pool_side(
+                user,
+                context,
+                int(actual_cost_microusd),
+                ledger_facts={
+                    "tokens_in": int(actual_input_tokens),
+                    "tokens_out": int(actual_output_tokens),
+                    "model_id": model_id,
+                    # BUG #1 FIX + Fable review H3/M1: pricing_version labels the
+                    # terminal with the VERSION the charge was actually computed
+                    # at. It is set ONLY when we produced a frozen-snapshot rating
+                    # for THIS settle (`_rating is not None`). When the charge did
+                    # NOT go through the snapshot — an explicit caller-supplied
+                    # cost, or a snapshot-less legacy reservation — we must NOT
+                    # stamp a version the amount was not derived from (that would
+                    # be a false dispute label AND relapse bug#1 by writing the
+                    # pricing_key). Use a DISTINCT sentinel per cause instead
+                    # (Fable review-2 N2/N3): snapshot-failed vs unversioned-legacy.
+                    "pricing_version": (
+                        _rating.pricing_version
+                        if _rating is not None
+                        else (
+                            SNAPSHOT_FAILED_SENTINEL
+                            if context.rate_snapshot_failed
+                            else UNVERSIONED_SENTINEL
+                        )
+                    ),
+                    "pricing_key": context.pricing_key,
+                    "rating": _rating.to_ledger_dict() if _rating is not None else None,
+                    "settle_reason": "completion",
+                    # Attribution → the ledger event's run-index key. When the
+                    # client supplied a workflow_run_id, the terminal's gsi1pk is
+                    # TENANT#<id>#RUN#<workflow_run_id>, so per-run billing
+                    # (GET /billing/runs/<workflow_run_id>) finds it. Absent →
+                    # _settle_pool_side falls back to hold_id (run_id_is_fallback).
+                    #
+                    # NOTE (Fable L5d-e review F1): deliberately NOT passing
+                    # request_id here. _settle_pool_side's run_id chain is
+                    # `run_id or request_id or hold_id`, so a request_id in facts
+                    # would (a) key a per-request singleton "run" whenever
+                    # workflow_run_id is absent (the edge always mints a
+                    # request_id), and (b) flip run_id_is_fallback to False,
+                    # breaking the "synthetic run" audit filter. group_id is pure
+                    # attribution (not in the run_id chain), so it is safe.
+                    "run_id": context.workflow_run_id,
+                    "group_id": context.group_id,
+                },
+            )
         except Exception:  # noqa: BLE001
             # The pool settle must never prevent the UsageLogs write below: a
             # non-ClientError (e.g. ReadTimeoutError) here would otherwise lose
@@ -1450,6 +2383,23 @@ def settle_reservation_and_log(
         # Settle the per-model quota too: move `used` from the reserved estimate
         # to the actual spend (actual<=reserved so used only ever decreases here).
         _settle_quota_for(context, int(actual_cost_microusd))
+        # P0 decision log: fire-and-forget the OUTCOME record — the measured
+        # charge (from the frozen rating we just wrote) plus the counterfactual
+        # savings against the requested / max-servable baselines at THIS request's
+        # actual tokens. Never blocks or fails settle.
+        try:
+            from .learning.decision_log import record_outcome_from_context
+            record_outcome_from_context(
+                context,
+                actual_total_cost_microusd=int(actual_cost_microusd),
+                actual_input_tokens=int(actual_input_tokens),
+                actual_output_tokens=int(actual_output_tokens),
+                ledger_pricing_version=(
+                    _rating.pricing_version if _rating is not None else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 — decision logging never breaks settle.
+            pass
 
     # ALWAYS record usage, even if the pool settle above failed: the Bedrock
     # call happened and its cost must be auditable. This is deliberately outside
@@ -1491,26 +2441,49 @@ def settle_reservation_and_log(
     )
 
 
-def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
+def _settle_pool_side(
+    user,
+    context,
+    actual_cost_microusd: int,
+    *,
+    ledger_facts: Optional[dict] = None,
+) -> None:
     """Move this reservation's `reserved` into `settled` and delete its hold in
     one transaction, with the double-subtract and vanished-row races handled.
 
-    The transaction is [aggregate settle, conditional hold delete]. Three cancel
-    outcomes are reconciled by inspecting the per-item CancellationReasons:
+    The transaction is [aggregate settle, conditional hold delete, ledger SETTLE
+    event]. Cancel outcomes are reconciled by inspecting per-item
+    CancellationReasons:
       - hold-delete (index 1) failed ConditionalCheckFailed → the reaper already
         reclaimed this hold AND already returned its reserved share, so we must
         NOT subtract reserved again; record settled-only instead;
       - aggregate (index 0) failed ConditionalCheckFailed → the pool row was
         deleted mid-flight (pool_vanished) → nothing to reconcile, no-op;
+      - ledger (index 2) failed ConditionalCheckFailed → a terminal event for
+        this hold already exists (retried settle, or a reaper reclaim beat us) →
+        already finalized, treat as idempotent success;
       - anything else → transient, retry with the same idempotency token.
+
+    The ledger SETTLE event (P0-1) is written in the SAME transaction as the
+    counter move, so spend is recorded iff `pool_settled` advances. Its sk
+    (`EV#HOLD#<hold_id>#TERMINAL`) with `attribute_not_exists` is the app-level
+    idempotency guard — the ClientRequestToken only dedupes botocore's transparent
+    retries, not an application re-invocation. Ledger emission is best-effort in
+    the sense that a missing `hold_id` (should not happen for a pooled reserve)
+    skips it rather than blocking the settle.
     """
     budgets = TenantBudgetsRepository()
     # TransactItems ORDER IS A CONTRACT: index 0 = pool-row settle, index 1 =
-    # hold delete. The cancellation-reason parsing below reads reasons[_POOL_IDX]
-    # / reasons[_HOLD_IDX] by position, so these must stay in sync with the order
-    # items are appended here. Do not reorder without updating both.
+    # hold delete, index 2 = ledger SETTLE. The cancellation-reason parsing below
+    # reads reasons[_POOL_IDX] / reasons[_HOLD_IDX] / reasons[_LEDGER_IDX] by
+    # position, so these must stay in sync with the order items are appended.
+    # Indices are assigned as items are appended (the hold-delete item is
+    # conditional), NOT statically — a static _HOLD_IDX=1 would alias the ledger
+    # item when the hold item is absent (Fable impl review Bug 3). None means
+    # "this item is not in the transaction".
     _POOL_IDX = 0
-    _HOLD_IDX = 1
+    _HOLD_IDX: Optional[int] = None
+    _LEDGER_IDX: Optional[int] = None
     items = [
         _pool_settle_items(
             table_name=budgets.table_name,
@@ -1521,9 +2494,64 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
         )
     ]
     if context.hold_sk:
+        _HOLD_IDX = len(items)
         items.append(
             budgets.hold_delete_txn_item(tenant_id=user.org_id, sk=context.hold_sk)
         )
+
+    # Resolve the hold_id: prefer the explicit one, else parse it from the hold
+    # sk (`HOLD#<period>#<expires>#<hold_id>`). The ledger must not be silently
+    # skipped when the pool counter moves, or I1 (Σsettled == pool_settled)
+    # breaks for a legitimate settle (Fable impl review Bug 4).
+    _hold_id = context.hold_id
+    if not _hold_id and context.hold_sk:
+        _hold_id = context.hold_sk.rsplit("#", 1)[-1] or None
+
+    _ledger_item = None
+    # A separate ledger item for the reaper-race (settled-only) path: there the
+    # reaper already returned `reserved`, so the counter moves settled-ONLY —
+    # the ledger event must mirror that with reserved_delta=0, not -reserved
+    # (Fable impl review Bug 1). Both are terminal SETTLEs on the same sk, so
+    # attribute_not_exists still makes them mutually exclusive / idempotent.
+    _ledger_item_settled_only = None
+    if _hold_id:
+        from dynamo import CreditLedgerRepository
+
+        facts = ledger_facts or {}
+        _real_run = facts.get("run_id") or facts.get("request_id")
+        _run_id = _real_run or _hold_id
+        _run_is_fallback = _real_run is None
+        _ledger = CreditLedgerRepository()
+
+        def _mk_settle_event(reserved_delta: int, reason: str):
+            return _ledger.terminal_event_txn_item(
+                tenant_id=user.org_id,
+                period=context.period,
+                hold_id=_hold_id,
+                event_type="SETTLE",
+                reserved_delta_microusd=reserved_delta,
+                settled_delta_microusd=int(actual_cost_microusd),
+                run_id=_run_id,
+                run_id_is_fallback=_run_is_fallback,
+                span_id=facts.get("span_id"),
+                request_id=facts.get("request_id"),
+                group_id=facts.get("group_id"),
+                model_id=context.selected_model or facts.get("model_id"),
+                pricing_version=facts.get("pricing_version"),
+                pricing_key=facts.get("pricing_key"),
+                rating=facts.get("rating"),
+                tokens_in=facts.get("tokens_in"),
+                tokens_out=facts.get("tokens_out"),
+                settle_reason=reason,
+            )
+
+        _ledger_item = _mk_settle_event(
+            -int(context.pool_reserved_microusd),
+            facts.get("settle_reason") or "completion",
+        )
+        _ledger_item_settled_only = _mk_settle_event(0, "reaper_race")
+        _LEDGER_IDX = len(items)
+        items.append(_ledger_item)
     # One fresh token, generated ONCE and reused across our explicit retries: the
     # settle params are timestamp-free, so a retry after a lost ack carries the
     # same token+params and DynamoDB dedupes it to success instead of double-
@@ -1552,31 +2580,156 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                 # contention/underflow guard. If either condition ever becomes
                 # compound, disambiguate via ReturnValuesOnConditionCheckFailure
                 # instead of trusting the reason index.
+                # Ledger idempotency: a ConditionalCheckFailed on the ledger item
+                # means a TERMINAL event for this hold already exists — this
+                # reservation was already finalized (a retried settle, or the
+                # reaper reclaimed+recorded first). The whole transaction was
+                # cancelled, so the counters were NOT double-moved; treat it as an
+                # idempotent success and stop. Checked FIRST because it subsumes
+                # the settle having already happened.
+                ledger_dup = (
+                    _LEDGER_IDX is not None
+                    and len(reasons) > _LEDGER_IDX
+                    and reasons[_LEDGER_IDX] == "ConditionalCheckFailed"
+                )
+                if ledger_dup:
+                    # A TERMINAL event for this hold already exists. WHY decides
+                    # what we do (Phase 2 — no more blind return):
+                    #   SETTLE  → this settle already happened → idempotent success
+                    #   RELEASE → client abandoned the hold → already_released, and
+                    #             we must NOT record spend (protocol: a released
+                    #             hold is not billable)
+                    #   RECLAIM → the reaper reclaimed the hold (returned reserved)
+                    #             before we settled → record the spend via a
+                    #             LATE_SETTLE, or it is lost (the revenue leak this
+                    #             phase closes)
+                    existing = _ledger.get_terminal(
+                        tenant_id=user.org_id,
+                        period=context.period,
+                        hold_id=_hold_id,
+                    )
+                    _ev_type = (existing or {}).get("event_type")
+                    if _ev_type == "RECLAIM":
+                        # External authorize/capture (Fable authcap D-2): an
+                        # external hold that the reaper already reclaimed must NOT
+                        # be recovered via LATE_SETTLE. Unlike an inline request
+                        # (whose reserve→settle window is seconds, so the reclaimed
+                        # reserved has almost certainly not been re-lent), an
+                        # external capture window is tenant-controlled and
+                        # unbounded — the returned reserved may already back a
+                        # different authorize, so late-billing here could push
+                        # spent past limit. Signal the capture endpoint to return
+                        # 410 (expired) instead; the counters are untouched (the
+                        # whole txn cancelled), so no spend and no leak.
+                        if (getattr(context, "source", None) or "") == "external":
+                            logger.info(
+                                "external_capture_hold_reclaimed_410",
+                                tenant_id=user.org_id,
+                                period=context.period,
+                                hold_id=_hold_id,
+                            )
+                            raise ExternalHoldReclaimed(_hold_id)
+                        logger.info(
+                            "pool_settle_hold_reclaimed_recovering_spend",
+                            tenant_id=user.org_id,
+                            period=context.period,
+                            hold_id=_hold_id,
+                            actual_microusd=actual_cost_microusd,
+                        )
+                        _recover_spend_via_late_settle(
+                            client=client,
+                            ledger=_ledger,
+                            budgets_table_name=budgets.table_name,
+                            tenant_id=user.org_id,
+                            period=context.period,
+                            hold_id=_hold_id,
+                            actual_microusd=actual_cost_microusd,
+                            run_id=_run_id,
+                            run_is_fallback=_run_is_fallback,
+                            facts=facts,
+                        )
+                        return
+                    if _ev_type == "RELEASE":
+                        # Late settle after an explicit release: protocol violation
+                        # (the client abandoned this reservation). Do NOT bill it.
+                        logger.warning(
+                            "pool_settle_after_release_ignored",
+                            tenant_id=user.org_id,
+                            period=context.period,
+                            hold_id=_hold_id,
+                        )
+                        return
+                    if _ev_type == "SETTLE":
+                        # The settle already landed → idempotent success. The
+                        # counters were NOT double-moved (the whole txn cancelled).
+                        logger.info(
+                            "pool_settle_already_finalized_in_ledger",
+                            tenant_id=user.org_id,
+                            period=context.period,
+                            hold_id=_hold_id,
+                        )
+                        return
+                    # None / unknown terminal type. get_terminal is ConsistentRead,
+                    # so a CCF at _LEDGER_IDX (terminal already exists) can NOT read
+                    # back None or an unrecognised type unless there is a real defect
+                    # — an index/position mismatch in the txn, or a pk/period
+                    # mismatch between the write and the read. Returning "idempotent
+                    # success" here would silently DROP the spend. Treat it as an
+                    # invariant violation: error + raise. NOTE (Fable P2 review-2
+                    # R2-4): settle has no client retry (streaming tail), so this
+                    # raise is absorbed by the outer best-effort settle into a
+                    # `pool_settle_failed` log — it is an ALARM signal
+                    # (`pool_settle_terminal_unclassified`, alarmed in iac), not a
+                    # self-healing redrive. That is still strictly better than a
+                    # silent success; the defect it flags should never occur.
+                    logger.error(
+                        "pool_settle_terminal_unclassified",
+                        tenant_id=user.org_id,
+                        period=context.period,
+                        hold_id=_hold_id,
+                        terminal_type=_ev_type,
+                    )
+                    raise
                 hold_gone = (
-                    len(reasons) > _HOLD_IDX and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
+                    _HOLD_IDX is not None
+                    and len(reasons) > _HOLD_IDX
+                    and reasons[_HOLD_IDX] == "ConditionalCheckFailed"
                 )
                 row_gone = (
                     len(reasons) > _POOL_IDX and reasons[_POOL_IDX] == "ConditionalCheckFailed"
                 )
                 if hold_gone:
-                    # Reaper already returned `reserved`; just record the spend.
-                    logger.info(
-                        "pool_settle_hold_already_reclaimed",
+                    # The hold row is gone but the ledger TERMINAL clash did NOT
+                    # fire — so no terminal exists for this hold. In Phase 2 the
+                    # reaper writes its RECLAIM terminal in the SAME txn as the hold
+                    # delete, so `hold gone AND no terminal` can only be a LEGACY
+                    # pre-Phase-2 hold (reclaimed by an old reaper that wrote no
+                    # ledger event). Fall back to the Phase-1 behaviour: record the
+                    # spend settled-only (reaper already returned reserved) with a
+                    # settled-only SETTLE terminal, and emit a metric so operators
+                    # can confirm the legacy tail has drained before this fallback
+                    # is removed (see P2-d / rollout step 7).
+                    logger.error(
+                        "LegacyHoldNoTerminal",
                         tenant_id=user.org_id,
                         period=context.period,
+                        hold_id=_hold_id,
                         reserved_microusd=context.pool_reserved_microusd,
                         actual_microusd=actual_cost_microusd,
                     )
+                    _so_items = [
+                        _settled_only_txn_item(
+                            table_name=budgets.table_name,
+                            tenant_id=user.org_id,
+                            period=context.period,
+                            actual_microusd=actual_cost_microusd,
+                        )
+                    ]
+                    if _ledger_item_settled_only is not None:
+                        _so_items.append(_ledger_item_settled_only)
                     try:
                         client.transact_write_items(
-                            TransactItems=[
-                                _settled_only_txn_item(
-                                    table_name=budgets.table_name,
-                                    tenant_id=user.org_id,
-                                    period=context.period,
-                                    actual_microusd=actual_cost_microusd,
-                                )
-                            ],
+                            TransactItems=_so_items,
                             # Derive from the primary settle token (not a fresh
                             # UUID) so a lost-ack here that gets retried dedupes
                             # to the same write instead of double-recording spend.
@@ -1591,7 +2744,8 @@ def _settle_pool_side(user, context, actual_cost_microusd: int) -> None:
                             != "TransactionCanceledException"
                         ):
                             raise
-                        # settled-only cancelled → pool row also gone; nothing to do.
+                        # Cancelled → pool row also gone, or a terminal ledger event
+                        # already exists (already finalized) → nothing to do.
                     return
                 if row_gone:
                     # Pool row deleted mid-flight (pool_vanished): no reservation

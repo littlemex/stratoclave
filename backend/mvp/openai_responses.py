@@ -442,6 +442,10 @@ async def create_response(
         effort_multiplier=_multiplier,
         wire_protocol="responses",
         vsr_hard_model=model_pin,
+        # L5-d: per-run billing attribution.
+        workflow_run_id=ctx.workflow_run_id if ctx else None,
+        group_id=ctx.group_id if ctx else None,
+        request_id=ctx.request_id if ctx else None,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the

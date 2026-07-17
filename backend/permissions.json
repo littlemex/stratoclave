@@ -10,6 +10,7 @@
         "permissions:*",
         "accounts:*",
         "apikeys:*",
+        "billing:*",
         "messages:send",
         "responses:send"
       ]
@@ -24,6 +25,8 @@
         "apikeys:read-self",
         "apikeys:create-self",
         "apikeys:revoke-self",
+        "billing:read",
+        "billing:write",
         "messages:send",
         "responses:send"
       ]

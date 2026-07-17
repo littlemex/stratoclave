@@ -12,6 +12,8 @@ export default defineConfig({
     'prod-deploy-2026-06-11.spec.ts',
     'prod-authenticated-shell.spec.ts',
     'prod-p0-ui.spec.ts',
+    'prod-billing-redaction.spec.ts',
+    'prod-authcap-badge.spec.ts',
   ],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

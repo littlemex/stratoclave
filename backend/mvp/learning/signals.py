@@ -180,6 +180,44 @@ def _emit_guarded(kwargs: dict) -> None:
         _slots.release()
 
 
+def _submit(fn) -> None:
+    """Generic fire-and-forget submit onto the shared bounded, drop-on-full
+    executor. NEVER raises (not even BaseException) and NEVER blocks the event
+    loop — the same contract as emit_signal. Used by the routing decision log
+    (decision_log.py) so it shares this module's executor/backpressure rather
+    than spinning up a second one. `fn` is a zero-arg callable that does the
+    actual write and is expected to swallow its own errors; the wrapper releases
+    the slot regardless."""
+    def _guarded() -> None:
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 — a stray error must not vanish silently.
+            try:
+                logger.warning("routing_submit_task_failed", error=str(e))
+            except Exception:
+                pass
+        finally:
+            _slots.release()
+
+    try:
+        if not _slots.acquire(blocking=False):
+            logger.warning("routing_signal_dropped_queue_full")
+            return
+        try:
+            _executor.submit(_guarded)
+        except BaseException as e:  # noqa: BLE001
+            _slots.release()
+            try:
+                logger.warning("routing_signal_submit_failed", error=str(e))
+            except Exception:
+                pass
+    except BaseException as e:  # noqa: BLE001 — NEVER raises past this fence.
+        try:
+            logger.warning("routing_signal_submit_failed", error=str(e))
+        except Exception:
+            pass
+
+
 def emit_signal(**kwargs) -> None:
     """Fire-and-forget, off the event loop, bounded, drop-on-full. NEVER raises
     — not even BaseException: a KeyboardInterrupt/SystemExit landing in submit()

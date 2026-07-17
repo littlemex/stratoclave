@@ -150,6 +150,40 @@ class PoolBudgetResponse(BaseModel):
     remaining_usd_cents: int
 
 
+class PoolReconciliationResponse(BaseModel):
+    """Counter-vs-ledger reconciliation for one tenant/period.
+
+    The budget row's three counters are a materialized cache; the credit ledger
+    is the append-only source of truth. `*_drift_microusd` is counter − ledger:
+    a money source of truth tolerates NO drift, so any non-zero value is a defect
+    to investigate (a metric filter alarms on the emitted `LedgerDrift*` events).
+    `snapshot_stable` is False when the counters moved between the pre/post read
+    (a concurrent txn) — the drift is then inconclusive and should be re-run.
+    """
+    tenant_id: str
+    period: str
+    counter_settled_microusd: int
+    counter_reserved_microusd: int
+    counter_reclaimed_microusd: int
+    ledger_settled_microusd: int
+    ledger_reserved_microusd: int
+    ledger_reclaimed_microusd: int
+    settled_drift_microusd: int
+    reserved_drift_microusd: int
+    reclaimed_drift_microusd: int
+    snapshot_stable: bool
+    in_sync: bool
+    # True while the period still holds pre-Phase-2 terminals (no RESERVE event),
+    # so the reserved/reclaimed axes are migration artifacts, not yet derivable.
+    migrating: bool = False
+    pre_p2_terminals: int = 0
+    # Layer 5 replay audit: every frozen rating in the period recomputes to its
+    # own total AND to the settled_delta (INV-R2/R3). False + a sample of the
+    # offending holds when any rating fails to reproduce.
+    rating_replay_ok: bool = True
+    rating_replay_mismatches: list = Field(default_factory=list)
+
+
 _MICRO_USD_PER_CENT = 10_000  # 1 cent = 10_000 micro-USD
 
 
@@ -504,3 +538,134 @@ def get_pool_budget(
             detail=f"No pool budget set for tenant {tenant_id} period {resolved_period}",
         )
     return _pool_response(tenant_id, resolved_period, summary)
+
+
+def _read_counters(repo: "TenantBudgetsRepository", tenant_id: str, period: str) -> dict:
+    """Strongly-consistent read of the three budget counters (reclaimed is not in
+    pool_summary, so read the row directly)."""
+    row = repo.get(tenant_id, period, consistent_read=True) or {}
+    return {
+        "settled": int(row.get("pool_settled_microusd", 0)),
+        "reserved": int(row.get("pool_reserved_microusd", 0)),
+        "reclaimed": int(row.get("pool_reclaimed_microusd", 0)),
+    }
+
+
+@router.get(
+    "/{tenant_id}/pool-reconciliation", response_model=PoolReconciliationResponse
+)
+def get_pool_reconciliation(
+    tenant_id: str,
+    period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    _admin: AuthenticatedUser = Depends(require_permission("tenants:read-all")),
+) -> PoolReconciliationResponse:
+    """Reconcile the budget counters (materialized cache) against the credit
+    ledger (append-only source of truth) for a tenant/period.
+
+    Reads counters (C1, consistent) → folds the ledger partition → re-reads
+    counters (C2). When C1==C2 the drift is a true point-in-time comparison; a
+    non-zero drift is a defect. When C1!=C2 a txn ran mid-fold, so the result is
+    marked unstable (re-run). Any drift is logged as a `LedgerDrift*` event that a
+    CloudWatch metric filter alarms on (see iac)."""
+    from dynamo import CreditLedgerRepository
+
+    tenant = TenantsRepository().get(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    resolved_period = period or current_period()
+    repo = TenantBudgetsRepository()
+    if repo.get(tenant_id, resolved_period) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pool budget set for tenant {tenant_id} period {resolved_period}",
+        )
+
+    led_repo = CreditLedgerRepository()
+    c1 = _read_counters(repo, tenant_id, resolved_period)
+    ledger = led_repo.derived_totals(tenant_id=tenant_id, period=resolved_period)
+    replay_mismatches = led_repo.rating_replay_mismatches(
+        tenant_id=tenant_id, period=resolved_period
+    )
+    c2 = _read_counters(repo, tenant_id, resolved_period)
+    stable = (
+        c1["settled"] == c2["settled"]
+        and c1["reserved"] == c2["reserved"]
+        and c1["reclaimed"] == c2["reclaimed"]
+    )
+
+    settled_drift = c1["settled"] - ledger["settled_microusd"]
+    reserved_drift = c1["reserved"] - ledger["reserved_microusd"]
+    reclaimed_drift = c1["reclaimed"] - ledger["reclaimed_microusd"]
+
+    # Migration gate (Fable P2 review-2 R2-6): while the period still holds
+    # pre-Phase-2 terminals (SETTLE/RECLAIM written before RESERVE/RECLAIM ledger
+    # events existed), the reserved/reclaimed axes are NOT fully ledger-derivable
+    # — their "drift" is a migration artifact, not a defect. Suppress those two
+    # axes from in_sync and from alarming until the pre-P2 tail has drained (the
+    # period rolls over, or every legacy hold has finalized). Settled is valid
+    # across the boundary (SETTLE terminals always carried settled_delta).
+    migrating = int(ledger.get("pre_p2_terminals", 0)) > 0
+
+    # M-1 (Fable P2 review-1): the fold is a paginated consistent read, not a
+    # partition snapshot; a reserve+release pair straddling the fold cursor can
+    # show a PHANTOM reserved drift that passes C1==C2 (settled/reclaimed are
+    # monotonic so they can't). Re-fold once when a stable reserved drift shows
+    # up: a straddle usually heals on the re-fold. NOTE (R2-5): this is a
+    # mitigation, not a proof — a second independent straddle, or a uniform-price
+    # tenant, can still reproduce the same phantom value; treat a persistent
+    # reserved drift as "investigate", not "certain defect".
+    if stable and not migrating and reserved_drift != 0:
+        ledger2 = led_repo.derived_totals(tenant_id=tenant_id, period=resolved_period)
+        c3 = _read_counters(repo, tenant_id, resolved_period)
+        if c3["reserved"] == c1["reserved"]:
+            reserved_drift = c1["reserved"] - ledger2["reserved_microusd"]
+            ledger["reserved_microusd"] = ledger2["reserved_microusd"]
+        else:
+            # Counter moved during the re-fold → inconclusive; drop to unstable so
+            # we neither report nor alarm on a moving target.
+            stable = False
+
+    # in_sync: settled is always meaningful; reserved/reclaimed only once the
+    # migration tail has drained; and every frozen rating must replay (L5).
+    in_sync = stable and settled_drift == 0 and not replay_mismatches
+    if not migrating:
+        in_sync = in_sync and reserved_drift == 0 and reclaimed_drift == 0
+
+    # Emit drift metrics ONLY when stable. Settled always; reserved/reclaimed only
+    # when NOT migrating (else every migrated tenant alarms on day 1 — R2-6).
+    if stable:
+        axes = [("Settled", settled_drift)]
+        if not migrating:
+            axes += [("Reserved", reserved_drift), ("Reclaimed", reclaimed_drift)]
+        for axis, drift in axes:
+            if drift != 0:
+                # Event name is the metric-filter key (see iac dynamodb/ledger stack).
+                log_audit_event(
+                    event=f"LedgerDrift{axis}",
+                    actor_id=_admin.user_id,
+                    actor_email=_admin.email,
+                    target_id=tenant_id,
+                    target_type="tenant_pool",
+                    after={"period": resolved_period, "drift_microusd": drift},
+                )
+
+    return PoolReconciliationResponse(
+        tenant_id=tenant_id,
+        period=resolved_period,
+        counter_settled_microusd=c1["settled"],
+        counter_reserved_microusd=c1["reserved"],
+        counter_reclaimed_microusd=c1["reclaimed"],
+        ledger_settled_microusd=ledger["settled_microusd"],
+        ledger_reserved_microusd=ledger["reserved_microusd"],
+        ledger_reclaimed_microusd=ledger["reclaimed_microusd"],
+        settled_drift_microusd=settled_drift,
+        reserved_drift_microusd=reserved_drift,
+        reclaimed_drift_microusd=reclaimed_drift,
+        snapshot_stable=stable,
+        in_sync=in_sync,
+        migrating=migrating,
+        pre_p2_terminals=int(ledger.get("pre_p2_terminals", 0)),
+        rating_replay_ok=not replay_mismatches,
+        rating_replay_mismatches=replay_mismatches,
+    )

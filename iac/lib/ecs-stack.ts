@@ -3,6 +3,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -134,17 +135,129 @@ export class EcsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // Ledger P2-d: turn the ledger's structured log events into CloudWatch
+    // metrics + alarms. The backend logs one JSON line per event (structlog);
+    // a metric filter matching the event name emits a count metric, and an
+    // alarm fires when it is non-zero. These are the money-integrity signals:
+    //
+    //   LedgerDriftSettled/Reserved/Reclaimed — the reconciliation endpoint saw
+    //     the budget counter diverge from the ledger's derived total. A money
+    //     source of truth tolerates NO drift, so the alarm needs 3 consecutive
+    //     non-zero datapoints (the recon may transiently read mid-txn and the
+    //     endpoint already suppresses unstable snapshots, so 3× is belt-and-
+    //     braces against a flapping false positive).
+    //   LateSettleActualMismatch — a late-settle retry arrived with a different
+    //     actual than first recorded (client bug); first-writer-wins keeps money
+    //     correct, but it must be investigated → alarm on a single occurrence.
+    //   LegacyHoldNoTerminal — a pre-Phase-2 hold was settled via the legacy
+    //     fallback. Expected to trend to zero after rollout; the alarm is the
+    //     signal that the legacy fallback can be removed (rollout step 7). Not a
+    //     defect on its own → treated as an operational (info) alarm.
+    const METRIC_NS = `${prefix}/CreditLedger`;
+    const mkFilter = (event: string, metricName: string) =>
+      logGroup.addMetricFilter(`LedgerMF${metricName}`, {
+        filterName: `${prefix}-ledger-${metricName}`,
+        // structlog renders `event` as a JSON field; match on it.
+        filterPattern: logs.FilterPattern.stringValue('$.event', '=', event),
+        metricNamespace: METRIC_NS,
+        metricName,
+        metricValue: '1',
+        defaultValue: 0,
+      });
+
+    const driftAlarmConfigs: Array<[string, string]> = [
+      ['LedgerDriftSettled', 'LedgerDriftSettled'],
+      ['LedgerDriftReserved', 'LedgerDriftReserved'],
+      ['LedgerDriftReclaimed', 'LedgerDriftReclaimed'],
+    ];
+    for (const [event, metricName] of driftAlarmConfigs) {
+      const mf = mkFilter(event, metricName);
+      new cloudwatch.Alarm(this, `LedgerAlarm${metricName}`, {
+        alarmName: `${prefix}-${metricName}`,
+        alarmDescription: `Credit-ledger ${metricName}: budget counter diverged from the ledger source of truth (money integrity).`,
+        metric: mf.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+        threshold: 0,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+    }
+
+    const mismatchMf = mkFilter('LateSettleActualMismatch', 'LateSettleActualMismatch');
+    new cloudwatch.Alarm(this, 'LedgerAlarmLateSettleMismatch', {
+      alarmName: `${prefix}-LateSettleActualMismatch`,
+      alarmDescription:
+        'Credit-ledger LATE_SETTLE retry arrived with a different actual than first recorded (client bug; first-writer-wins keeps money correct).',
+      metric: mismatchMf.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Legacy fallback usage: a metric only (no alarm). It is expected to be
+    // non-zero briefly after rollout, then drain to zero — operators watch it to
+    // decide when to delete the legacy fallback, not to page on.
+    mkFilter('LegacyHoldNoTerminal', 'LegacyHoldNoTerminal');
+
+    // Unrecoverable spend / invariant-violation signals (Fable P2 review-2
+    // R2-1/R2-4): because settle runs at the streaming tail with no client retry,
+    // a raised recovery error is absorbed by the outer best-effort settle — so
+    // these are ALARM signals, not self-healing. Each means real spend may be
+    // unrecorded and needs a human: alarm on a single occurrence.
+    //   pool_settle_late_settle_retries_exhausted — LATE_SETTLE recovery gave up
+    //     after retrying a transient conflict; the spend is not recorded and
+    //     reconciliation can't see it (counter+ledger miss it atomically).
+    //   pool_settle_terminal_unclassified — a terminal CCF read back None/unknown
+    //     (a pk/index defect); spend dropped rather than mis-recorded.
+    for (const event of [
+      'pool_settle_late_settle_retries_exhausted',
+      'pool_settle_terminal_unclassified',
+      'pool_settle_late_settle_missing_after_ccf',
+    ]) {
+      // camelCase metric name from the snake_case event.
+      const metricName = event
+        .split('_')
+        .map((w, i) => (i === 0 ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+        .join('');
+      const mf = mkFilter(event, metricName);
+      new cloudwatch.Alarm(this, `LedgerAlarm_${metricName}`, {
+        alarmName: `${prefix}-${metricName}`,
+        alarmDescription: `Credit-ledger: ${event} — spend may be unrecorded, needs investigation.`,
+        metric: mf.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+        threshold: 0,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+    }
+    // Alarms are metric-only for now (no SNS action wired). A follow-up can
+    // attach an SNS topic via alarm.addAlarmAction once an ops topic exists;
+    // the alarms are already visible in the console and queryable by API.
+
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'BackendTaskDefinition', {
       cpu: props.cpu || 256,
       memoryLimitMiB: props.memory || 512,
       family: `${prefix}-backend`,
     });
 
-    // DynamoDB: restrict to the actual table ARNs only
-    const dynamoResources = [
-      ...props.dynamoDbTableArns,
-      ...props.dynamoDbTableArns.map((arn) => `${arn}/index/*`),
-    ];
+    // DynamoDB: restrict to the actual table ARNs only.
+    //
+    // Ledger P2-d: the credit-ledger table is APPEND-ONLY. It is excluded from
+    // the blanket CRUD grant below and given its own PutItem/ConditionCheck/
+    // GetItem/Query ALLOW plus an explicit DENY of UpdateItem/DeleteItem/
+    // BatchWriteItem. This append-only property is a PREMISE of the ledger's
+    // correctness proof (a terminal event is immutable, so the settle routing's
+    // "read RECLAIM ⇒ it stays RECLAIM" reasoning and the reserved-return
+    // exclusion hold) — not merely an operational guard. The DENY makes it
+    // enforced even if a future edit re-adds the ledger to a CRUD grant.
+    const ledgerArn = `arn:aws:dynamodb:${region}:${account}:table/${props.prefix}-credit-ledger`;
+    const isLedger = (arn: string) => arn === ledgerArn;
+    const crudArns = props.dynamoDbTableArns.filter((arn) => !isLedger(arn));
+    const dynamoResources = [...crudArns, ...crudArns.map((arn) => `${arn}/index/*`)];
 
     // P0-10 (2026-04 security review): the blanket Statement below used
     // to include `dynamodb:Scan` across every table. The review wanted
@@ -183,7 +296,39 @@ export class EcsStack extends cdk.Stack {
           'dynamodb:ConditionCheckItem',
         ],
         resources: dynamoResources,
-      })
+      }),
+    );
+
+    // Ledger P2-d: append-only ALLOW for the credit-ledger table + its GSI.
+    // Writes are always via TransactWriteItems (PutItem + ConditionCheckItem);
+    // reads via GetItem (terminal routing) + Query (balance derivation / recon /
+    // run audit). No UpdateItem/DeleteItem/BatchWriteItem — see the DENY below.
+    const ledgerResources = [ledgerArn, `${ledgerArn}/index/*`];
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'CreditLedgerAppendOnly',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:PutItem',
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:GetItem',
+          'dynamodb:Query',
+        ],
+        resources: ledgerResources,
+      }),
+    );
+    // Explicit DENY: the ledger is immutable once written. BatchWriteItem can
+    // carry deletes, so it is denied wholesale (all ledger writes go through
+    // TransactWriteItems/PutItem). An explicit DENY overrides any ALLOW, so this
+    // survives a future accidental re-grant — the append-only invariant is
+    // pinned by iac/test (see ecs-stack ledger append-only test).
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'CreditLedgerNoMutateOrDelete',
+        effect: iam.Effect.DENY,
+        actions: ['dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem'],
+        resources: ledgerResources,
+      }),
     );
 
     // Sweep-4 (2026-04-30) tightens sweep-1 C-D by dropping the
@@ -219,7 +364,7 @@ export class EcsStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['dynamodb:Scan'],
         resources: scanResources,
-      })
+      }),
     );
 
     // Bedrock: Anthropic (Claude) only — both the cross-region
@@ -253,7 +398,7 @@ export class EcsStack extends cdk.Stack {
           `arn:aws:bedrock:*:${account}:inference-profile/eu.anthropic.*`,
           `arn:aws:bedrock:*:${account}:inference-profile/global.anthropic.*`,
         ],
-      })
+      }),
     );
     // Bedrock read-only operations (model discovery / /v1/models).
     // ListFoundationModels / ListInferenceProfiles do not support
@@ -269,7 +414,7 @@ export class EcsStack extends cdk.Stack {
           'bedrock:GetInferenceProfile',
         ],
         resources: ['*'],
-      })
+      }),
     );
 
     // OpenAI (codex / GPT-5.x) on Amazon Bedrock — separate IAM namespace.
@@ -291,16 +436,12 @@ export class EcsStack extends cdk.Stack {
       new iam.PolicyStatement({
         sid: 'AllowOpenAIBedrockMantleInvoke',
         effect: iam.Effect.ALLOW,
-        actions: [
-          'bedrock-mantle:CreateInference',
-          'bedrock-mantle:Get*',
-          'bedrock-mantle:List*',
-        ],
+        actions: ['bedrock-mantle:CreateInference', 'bedrock-mantle:Get*', 'bedrock-mantle:List*'],
         resources: [
           `arn:aws:bedrock-mantle:us-east-2:${account}:project/*`,
           `arn:aws:bedrock-mantle:us-west-2:${account}:project/*`,
         ],
-      })
+      }),
     );
 
     // The bearer-token mint action that `aws-bedrock-token-generator`
@@ -321,7 +462,7 @@ export class EcsStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['bedrock-mantle:CallWithBearerToken'],
         resources: ['*'],
-      })
+      }),
     );
 
     // SSM messages permissions required by ECS Exec
@@ -345,7 +486,7 @@ export class EcsStack extends cdk.Stack {
             'ssmmessages:OpenDataChannel',
           ],
           resources: ['*'],
-        })
+        }),
       );
     }
 
@@ -368,7 +509,7 @@ export class EcsStack extends cdk.Stack {
           'cognito-idp:ListUsers',
         ],
         resources: [props.userPoolArn],
-      })
+      }),
     );
 
     // Secrets Manager — split into two least-privilege statements
@@ -388,10 +529,8 @@ export class EcsStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['secretsmanager:GetSecretValue'],
-        resources: [
-          `arn:aws:secretsmanager:${region}:${account}:secret:${prefix}/*`,
-        ],
-      })
+        resources: [`arn:aws:secretsmanager:${region}:${account}:secret:${prefix}/*`],
+      }),
     );
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
@@ -404,7 +543,7 @@ export class EcsStack extends cdk.Stack {
           // re-deploy the policy after every secret rotation.
           `arn:aws:secretsmanager:${region}:${account}:secret:${prefix}/bootstrap-admin-temp-password-*`,
         ],
-      })
+      }),
     );
 
     // SSM Parameter Store (restricted to /${prefix}/* only)
@@ -412,23 +551,16 @@ export class EcsStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-        resources: [
-          `arn:aws:ssm:${region}:${account}:parameter/${prefix}/*`,
-        ],
-      })
+        resources: [`arn:aws:ssm:${region}:${account}:parameter/${prefix}/*`],
+      }),
     );
 
     const container = this.taskDefinition.addContainer('BackendContainer', {
-      image: ecs.ContainerImage.fromEcrRepository(
-        props.repository,
-        props.imageTag || 'latest',
-      ),
+      image: ecs.ContainerImage.fromEcrRepository(props.repository, props.imageTag || 'latest'),
       logging: ecs.LogDriver.awsLogs({ logGroup, streamPrefix: 'backend' }),
       environment: props.environment || {},
       secrets: props.secrets || {},
-      portMappings: [
-        { containerPort: props.containerPort || 8000, protocol: ecs.Protocol.TCP },
-      ],
+      portMappings: [{ containerPort: props.containerPort || 8000, protocol: ecs.Protocol.TCP }],
       healthCheck: {
         command: ['CMD-SHELL', 'curl -f http://localhost:8000/health || exit 1'],
         interval: cdk.Duration.seconds(30),

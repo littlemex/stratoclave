@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod admin_cmd;       // Legacy single-shot create; preserved but unused in Phase 2.
 pub mod api;
+pub mod billing;         // L5-d: per-run charge breakdown (frozen ledger rating).
 pub mod api_keys;
 pub mod auth;
 pub mod child_launcher;  // Shared spawner used by claude_cmd and codex_cmd.

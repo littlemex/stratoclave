@@ -296,6 +296,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_OBSERVABILITY_TABLE: dynamoDBStack.observabilityTable.tableName,
     // P0-16: routing-signals write-only seam (writer live; consumer stubbed).
     DYNAMODB_ROUTING_SIGNALS_TABLE: dynamoDBStack.routingSignalsTable.tableName,
+    // Ledger P0-1: event-sourced credit ledger (money source of truth).
+    DYNAMODB_CREDIT_LEDGER_TABLE: dynamoDBStack.creditLedgerTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,

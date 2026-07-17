@@ -54,6 +54,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly observabilityTable: dynamodb.Table;
   /** P0-16: routing_signals — write-only append log (learning seam), TTL-reaped */
   public readonly routingSignalsTable: dynamodb.Table;
+  /** Ledger P0-1: append-only, event-sourced credit ledger (money source of truth). RETAIN + PITR, no TTL */
+  public readonly creditLedgerTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -327,6 +329,32 @@ export class DynamoDBStack extends cdk.Stack {
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
     });
 
+    // Ledger P0-1: append-only, event-sourced credit ledger — the source of
+    // truth for money (the tenant-budgets counters are a materialized cache for
+    // O(1) admission control). One immutable event per money move, co-located in
+    // the SAME TransactWriteItems as the budget reserve/settle so a spend can
+    // never be recorded without the counter moving, or vice versa.
+    //   PK "TENANT#<id>#P#<period>" (balance-derivation + billing-line queries)
+    //   SK "EV#HOLD#<hold_id>#TERMINAL" | "EV#HOLD#<hold_id>#RESERVE" | ...
+    //       (the sk IS the idempotency key — attribute_not_exists dedupes)
+    //   GSI1: gsi1pk "TENANT#<id>#RUN#<run>", gsi1sk "<ts_ms>#<event_id>" (run audit)
+    // RETAIN + PITR and NEVER a TTL: an audit/billing record must survive stack
+    // teardown and be point-in-time recoverable. Append-only is further enforced
+    // at the IAM layer (the task role gets PutItem/Query, not Update/Delete).
+    this.creditLedgerTable = new dynamodb.Table(this, 'CreditLedgerTable', {
+      ...baseTableProps,
+      removalPolicy: auditRemovalPolicy,
+      pointInTimeRecovery: true,
+      tableName: `${prefix}-credit-ledger`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+    this.creditLedgerTable.addGlobalSecondaryIndex({
+      indexName: 'run-index',
+      partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+    });
+
     // A-2: admin-editable per-model pricing. PK "CONFIG#pricing", SK versioned
     // rate rows + a CURRENT pointer. Small, rarely written, keyed reads only.
     this.pricingConfigTable = new dynamodb.Table(this, 'PricingConfigTable', {
@@ -435,6 +463,8 @@ export class DynamoDBStack extends cdk.Stack {
       this.observabilityTable.tableArn,
       `${this.observabilityTable.tableArn}/index/*`,
       this.routingSignalsTable.tableArn,
+      this.creditLedgerTable.tableArn,
+      `${this.creditLedgerTable.tableArn}/index/*`,
     ];
 
     // Parameter Store exports

@@ -121,6 +121,21 @@ class TenantBudgetsRepository:
         )
         return resp.get("Item")
 
+    def get_hold(
+        self, *, tenant_id: str, sk: str, consistent_read: bool = True
+    ) -> Optional[dict[str, Any]]:
+        """Strongly-consistent read of one hold row by exact `sk` (or None).
+
+        Used by the external-authorize rehydrate path to confirm the hold still
+        exists (not yet captured/voided/reclaimed) and read its `amount_microusd`.
+        ConsistentRead by default so a capture immediately after authorize sees
+        its own just-written hold."""
+        resp = self._table.get_item(
+            Key={"tenant_id": tenant_id, "sk": sk},
+            ConsistentRead=consistent_read,
+        )
+        return resp.get("Item")
+
     def pool_summary(self, tenant_id: str, period: str) -> Optional[dict[str, int]]:
         """Return the pool's limit/reserved/settled/remaining in micro-USD,
         or None when the tenant has no pool budget for the period.

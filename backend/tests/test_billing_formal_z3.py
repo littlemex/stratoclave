@@ -388,6 +388,172 @@ def test_sanity_without_delete_condition_double_reclaim_is_found():
 # COUNTEREXAMPLE: THE STRICT CEILING IS *NOT* AN INVARIANT
 # ===========================================================================
 
+# ===========================================================================
+# 4. LEDGER PHASE 2 — RECLAIM + LATE_SETTLE: NO DOUBLE-RETURN, SPEND EXACTLY-ONCE
+# ===========================================================================
+#
+# Phase 2 closes the revenue leak: when the reaper reclaims a hold FIRST
+# (writing a RECLAIM terminal that returns `reserved`), a late settle must
+# still record the spend — via a LATE_SETTLE on a DISTINCT sk with
+# reserved_delta == 0 — instead of blind-returning (Phase 1's leak).
+#
+# The terminal money moves SETTLE / RELEASE / RECLAIM share ONE sk under
+# attribute_not_exists, so AT MOST ONE terminal commits per hold (the reserved
+# return happens exactly once).  LATE_SETTLE is a separate sk, also under
+# attribute_not_exists (at most one), and its own txn carries a ConditionCheck
+# that the terminal IS a RECLAIM.
+#
+# We model, for one hold, the boolean commit of each of the four writers, with
+# the storage guards encoded exactly:
+#   * terminal cell: at most one of {settle, release, reclaim} commits
+#   * late cell:     at most one late_settle commits
+#   * late ⇒ reclaim committed  (the ConditionCheck: terminal.event_type=RECLAIM)
+# and prove:  reserved returned ∈ {0, R} (never 2R), settled ∈ {0, actual}
+# (never 2·actual), and — the liveness-flavoured safety the leak was about —
+# IF the reaper reclaimed AND a late settle committed, THEN settled == actual
+# (the spend is NOT lost).
+
+
+def _phase2_ledger_model(*, late_requires_reclaim: bool):
+    R, actual = z3.Ints("p2_R p2_actual")
+    settle = z3.Bool("p2_settle")
+    release = z3.Bool("p2_release")
+    reclaim = z3.Bool("p2_reclaim")
+    late = z3.Bool("p2_late")
+    cons = [R >= 1, actual >= 0, actual <= R]
+
+    # Terminal cell exclusion (attribute_not_exists on the shared TERMINAL sk):
+    # at most ONE of the three terminal money moves commits.
+    cons.append(
+        z3.AtMost(settle, release, reclaim, 1)
+    )
+    # LATE_SETTLE lives on its own sk; its guard is the terminal-is-RECLAIM
+    # ConditionCheck. With the guard, late ⇒ reclaim. The broken variant drops
+    # that link (models a mis-route that writes LATE without a RECLAIM).
+    if late_requires_reclaim:
+        cons.append(z3.Implies(late, reclaim))
+
+    # reserved returned: each terminal returns exactly R; LATE returns 0.
+    reserved_returned = z3.Sum([
+        z3.If(settle, R, z3.IntVal(0)),
+        z3.If(release, R, z3.IntVal(0)),
+        z3.If(reclaim, R, z3.IntVal(0)),
+        # late: reserved_delta == 0 by construction (no term here)
+    ])
+    # settled recorded: SETTLE records actual; RECLAIM records 0; LATE records
+    # actual; RELEASE records 0.
+    settled_recorded = z3.Sum([
+        z3.If(settle, actual, z3.IntVal(0)),
+        z3.If(late, actual, z3.IntVal(0)),
+    ])
+    return cons, R, actual, settle, release, reclaim, late, reserved_returned, settled_recorded
+
+
+def test_phase2_no_double_return_and_spend_exactly_once():
+    """With the terminal-cell exclusion + late⇒reclaim guard: reserved is
+    returned at most once (∈{0,R}), settled is recorded at most once
+    (∈{0,actual}), and a reaped-then-late-settled hold records the spend
+    (reclaim ∧ late ⇒ settled == actual) — the revenue leak cannot recur."""
+    (cons, R, actual, settle, release, reclaim, late,
+     reserved_returned, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=True)
+    s = _solver()
+    s.add(*cons)
+    prop = z3.And(
+        z3.Or(reserved_returned == 0, reserved_returned == R),      # never 2R
+        z3.Or(settled_recorded == 0, settled_recorded == actual),   # never 2·actual
+        # the leak-closure property: reaped AND late-settled ⇒ spend recorded.
+        z3.Implies(z3.And(reclaim, late), settled_recorded == actual),
+        # RECLAIM alone (no late settle) records no spend but DID return reserved.
+        z3.Implies(z3.And(reclaim, z3.Not(late)),
+                   z3.And(settled_recorded == 0, reserved_returned == R)),
+    )
+    s.add(z3.Not(prop))
+    assert_proved(s, "Phase 2: no double-return, spend exactly-once, leak closed")
+
+
+def test_phase2_late_settle_cannot_double_count_with_settle():
+    """A LATE_SETTLE and a SETTLE terminal cannot both record the same spend:
+    late⇒reclaim and terminal exclusion make settle∧late unsatisfiable, so
+    settled is never 2·actual."""
+    (cons, R, actual, settle, release, reclaim, late,
+     _rr, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=True)
+    s = _solver()
+    s.add(*cons)
+    s.add(actual >= 1)
+    s.add(settle, late)  # try to force the double-count
+    assert_proved(s, "settle ∧ late is impossible (no double-count of spend)")
+
+
+def _external_capture_model(*, external_forbids_late: bool):
+    """Phase-2 terminal model + a `source=external` flag. The external
+    authorize/capture contract (Fable authcap D-2) adds ONE rule to the base
+    model: an external hold never takes LATE_SETTLE (its capture window is
+    unbounded, so late-billing a reclaimed hold could break the budget
+    invariant). We model that as `external ⇒ ¬late`. The broken variant drops
+    the rule to prove the harness bites."""
+    (cons, R, actual, settle, release, reclaim, late,
+     reserved_returned, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=True)
+    external = z3.Bool("ext_source")
+    if external_forbids_late:
+        cons.append(z3.Implies(external, z3.Not(late)))
+    return (cons, R, actual, settle, release, reclaim, late, external,
+            reserved_returned, settled_recorded)
+
+
+def test_external_reclaimed_hold_records_no_spend():
+    """authcap D-2 (safety): an EXTERNAL hold the reaper reclaimed records NO
+    spend — no LATE_SETTLE recovery — so its reserved is returned exactly once
+    and settled stays 0. The terminal set for an external hold is closed to
+    {SETTLE, RELEASE, RECLAIM}; late is unreachable when source=external."""
+    (cons, R, actual, settle, release, reclaim, late, external,
+     reserved_returned, settled_recorded) = _external_capture_model(external_forbids_late=True)
+    s = _solver()
+    s.add(*cons)
+    s.add(external)  # the hold is external
+    prop = z3.And(
+        z3.Not(late),  # external ⇒ never late-settled
+        # a reclaimed external hold: reserved returned once, NO spend recorded.
+        z3.Implies(reclaim, z3.And(settled_recorded == 0, reserved_returned == R)),
+        # settled is still at-most-once (never 2·actual) and reserved never 2R.
+        z3.Or(settled_recorded == 0, settled_recorded == actual),
+        z3.Or(reserved_returned == 0, reserved_returned == R),
+    )
+    s.add(z3.Not(prop))
+    assert_proved(s, "external reclaimed hold records no spend (D-2)")
+
+
+def test_sanity_external_without_late_ban_allows_late_bill():
+    """Model validation: drop the external⇒¬late rule and Z3 finds a run where an
+    external hold IS late-settled after reclaim (settled == actual) — the exact
+    unbounded-window billing D-2 forbids."""
+    (cons, R, actual, settle, release, reclaim, late, external,
+     _rr, settled_recorded) = _external_capture_model(external_forbids_late=False)
+    s = _solver()
+    s.add(*cons)
+    s.add(actual >= 1)
+    s.add(external, reclaim, late)          # external hold, reaped, then late-billed
+    s.add(settled_recorded == actual)       # spend recorded on a reclaimed external hold
+    assert_counterexample_exists(
+        s, "external hold late-billed after reclaim when the ban is removed"
+    )
+
+
+def test_sanity_phase2_without_late_guard_double_count_is_found():
+    """Model validation: drop the late⇒reclaim ConditionCheck and Z3 finds a
+    run where a SETTLE terminal AND a LATE_SETTLE both record the spend —
+    settled == 2·actual (the bug the ConditionCheck prevents)."""
+    (cons, R, actual, settle, release, reclaim, late,
+     _rr, settled_recorded) = _phase2_ledger_model(late_requires_reclaim=False)
+    s = _solver()
+    s.add(*cons)
+    s.add(actual >= 1)
+    s.add(settle, late)                      # both writers land
+    s.add(settled_recorded > actual)         # double-counted spend
+    assert_counterexample_exists(
+        s, "double-counted spend when LATE_SETTLE is not gated on RECLAIM"
+    )
+
+
 def test_strict_ceiling_is_false_under_reaper_fallback_race():
     """CE: R + S <= L is NOT invariant, and we prove it with a witness.
 
@@ -419,3 +585,93 @@ def test_strict_ceiling_is_false_under_reaper_fallback_race():
     assert_counterexample_exists(
         s, "R + S <= L violated by metered overshoot + reaper fallback charge"
     )
+
+
+# ===========================================================================
+# 5. LAYER 5 RATING — rate_usage ARITHMETIC (ceil rounding, monotone, subadditive)
+# ===========================================================================
+#
+# rate_usage rates real usage against a FROZEN snapshot with per-component
+# ceil division: cost_c = ceildiv(tokens_c * rate_c, 10^6). These prove the
+# money-integrity properties of that pure function, independent of any race
+# (the freeze design removed rating's concurrency — see test_rating_properties
+# for the flip-race replay). Model ONE component; the total is their sum, so
+# each property lifts componentwise.
+
+_MTOK = 1_000_000
+# Bounds used across the rating proofs (also the documented overflow envelope):
+# tokens <= 10^10 (10 GT), rate <= 10^9 microUSD/MTok ($1000/MTok).
+_MAX_TOKENS = 10**10
+_MAX_RATE = 10**9
+
+
+def _ceildiv(num, den):
+    # z3 integer ceil division for non-negative num, positive den.
+    return (num + den - 1) / den
+
+
+def test_rating_ceil_never_undercharges_and_is_tightly_bounded():
+    """For one component: exact <= cost < exact + 1 microUSD-worth of rounding,
+    i.e. 0 <= cost*10^6 - tokens*rate < 10^6. Never under-charges (cost*10^6 >=
+    tokens*rate), never over by a full microUSD."""
+    tokens, rate = z3.Ints("tokens rate")
+    s = _solver()
+    s.add(tokens >= 0, tokens <= _MAX_TOKENS, rate >= 0, rate <= _MAX_RATE)
+    cost = _ceildiv(tokens * rate, _MTOK)
+    # negation: either under-charge, or rounded up by >= a full microUSD.
+    s.add(z3.Or(cost * _MTOK < tokens * rate,
+                cost * _MTOK >= tokens * rate + _MTOK))
+    assert_proved(s, "ceil rating: 0 <= cost*10^6 - tokens*rate < 10^6")
+
+
+def test_rating_total_rounding_bound_four_components():
+    """The 4-component total rounds up by strictly less than 4 microUSD vs the
+    exact real-valued sum (each component < 1 microUSD of rounding)."""
+    ti, to, tr, tw = z3.Ints("ti to tr tw")
+    ri, ro, rr, rw = z3.Ints("ri ro rr rw")
+    s = _solver()
+    for t in (ti, to, tr, tw):
+        s.add(t >= 0, t <= _MAX_TOKENS)
+    for r in (ri, ro, rr, rw):
+        s.add(r >= 0, r <= _MAX_RATE)
+    total = (_ceildiv(ti * ri, _MTOK) + _ceildiv(to * ro, _MTOK)
+             + _ceildiv(tr * rr, _MTOK) + _ceildiv(tw * rw, _MTOK))
+    exact_x = ti * ri + to * ro + tr * rr + tw * rw  # = exact_total * 10^6
+    s.add(z3.Or(total * _MTOK < exact_x,              # under-charge
+                total * _MTOK >= exact_x + 4 * _MTOK))  # over by >= 4 microUSD
+    assert_proved(s, "4-component total rounds up by < 4 microUSD, never under")
+
+
+def test_rating_monotone_in_tokens():
+    """More tokens never charges less (a component's cost is non-decreasing)."""
+    t1, t2, rate = z3.Ints("t1 t2 rate")
+    s = _solver()
+    s.add(t1 >= 0, t2 >= 0, rate >= 0, rate <= _MAX_RATE, t1 <= t2)
+    s.add(_ceildiv(t1 * rate, _MTOK) > _ceildiv(t2 * rate, _MTOK))  # negation
+    assert_proved(s, "rating monotone non-decreasing in tokens")
+
+
+def test_rating_subadditive_over_split_settle():
+    """ceil(a) + ceil(b) >= ceil(a+b): splitting usage into two settles can only
+    over-charge, never under — so a future partial/split settle is safe against
+    the budget (no under-billing by fragmentation)."""
+    ta, tb, rate = z3.Ints("ta tb rate")
+    s = _solver()
+    s.add(ta >= 0, tb >= 0, rate >= 0, rate <= _MAX_RATE,
+          ta <= _MAX_TOKENS, tb <= _MAX_TOKENS)
+    split = _ceildiv(ta * rate, _MTOK) + _ceildiv(tb * rate, _MTOK)
+    whole = _ceildiv((ta + tb) * rate, _MTOK)
+    s.add(split < whole)  # negation of subadditivity
+    assert_proved(s, "ceil rating subadditive: split settle never under-charges")
+
+
+def test_sanity_floor_rounding_would_undercharge():
+    """Model validation: FLOOR division (the wrong rounding) admits a strict
+    under-charge — Z3 finds tokens*rate not divisible by 10^6 charged as less
+    than the exact cost. This is why rating pins ceil."""
+    tokens, rate = z3.Ints("f_tokens f_rate")
+    s = _solver()
+    s.add(tokens >= 1, tokens <= _MAX_TOKENS, rate >= 1, rate <= _MAX_RATE)
+    floor_cost = (tokens * rate) / _MTOK  # z3 int division = floor for >=0
+    s.add(floor_cost * _MTOK < tokens * rate)  # a real under-charge exists
+    assert_counterexample_exists(s, "floor rounding under-charges the budget")

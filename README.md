@@ -67,17 +67,16 @@ limit, not a hard one. Judged purely on *shipped* capability (not "could be
 implemented"), Stratoclave is today the only one of the three that enforces the
 budget atomically at request time.
 
-Mapped to the canonical five-layer AI-billing gateway, Stratoclave ships
-layers 1–3 and feeds layer 4/5 at the right granularity; the ledger and rating
-layers are the roadmap (see [Roadmap](#roadmap-toward-a-complete-ai-saas-billing-gateway)):
+Mapped to the canonical five-layer AI-billing gateway, Stratoclave now ships
+all five layers:
 
 | Layer | What it is | Stratoclave |
 | --- | --- | --- |
 | 1. Billing gateway | Proxy all I/O; keep metering out of app code | **Shipped** — every route terminates here |
 | 2. Context propagation | Carry tenant / run / budget across hops | **Shipped** — `x-sc-group-id` / `x-sc-workflow-run-id`, hard `x-sc-model-pin` |
-| 3. Budget enforcement | Two-phase authorize/capture + staged breaker | **Shipped** — atomic pre-flight reserve + settle, staged budget breaker |
-| 4. Credit ledger | Idempotent, event-sourced balance history | Roadmap — dual-track span/`workflow_run` already emits the correct-grain input |
-| 5. Rating + revenue recognition | Physical usage → money, cost passthrough | Roadmap — per-model micro-USD pricing config exists; needs versioned rating |
+| 3. Budget enforcement | Two-phase authorize/capture + staged breaker | **Shipped** — atomic pre-flight reserve + settle, staged budget breaker; also exposed as an [external authorize/capture API](#external-authorizecapture-api-layer-5) |
+| 4. Credit ledger | Idempotent, event-sourced balance history | **Shipped** — dedicated append-only ledger table; every money move (RESERVE/SETTLE/RELEASE/RECLAIM/LATE_SETTLE) is one immutable event written in the same `TransactWriteItems` as the counter it moves |
+| 5. Rating + revenue recognition | Physical usage → money, cost passthrough | **Shipped** — rate frozen at reserve, versioned rating on the ledger terminal, per-run read API + provider-cost passthrough, and a routing decision log that makes router savings *provable* |
 
 ## Why a gateway? (what a credential broker cannot do)
 
@@ -495,6 +494,56 @@ the `TenantBudgets` schema and the reclaim invariants are documented in
 [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md) and
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
+### External authorize/capture API (Layer 5)
+
+The same atomic reserve that gates an LLM request is also exposed as a
+**two-phase external charge** so a tenant can hold budget for a *non-LLM*
+action — a batch job, a third-party API call, any billable unit — and settle it
+later from its own workflow:
+
+```
+POST /api/mvp/billing/authorize          # hold $X (Idempotency-Key required)
+POST /api/mvp/billing/authorizations/{id}/capture   # settle the actual amount (≤ authorized)
+POST /api/mvp/billing/authorizations/{id}/void      # release without charge
+GET  /api/mvp/billing/authorizations/{id}           # authorized | captured | voided | expired
+```
+
+The design rule is that **the money logic is not forked**: capture reuses the
+exact settle path an inline request uses, and void reuses the exact release
+path — only the reservation context's *construction* differs (rehydrated from
+the credit ledger across two HTTP calls, rather than held in memory within
+one). So the ledger's "exactly one terminal per hold" mutual exclusion and the
+frozen-rating guarantees carry over unchanged; the only genuinely new money
+code is one idempotency record and the rehydrate.
+
+- **`authorization_id`** is an opaque token that self-describes its hold. It is
+  addressing, not authorization — every ledger read is scoped to the
+  authenticated tenant's partition, so a token can only ever reach the caller's
+  own holds, and only holds this API itself created (an inline LLM hold's token
+  is rejected). Idempotent authorize is enforced by an idempotency record
+  written in the same transaction as the reserve, with a request fingerprint so
+  reusing a key for a *different* body is a `422`, never a silent wrong replay.
+- **Capture idempotency** is the ledger's single-terminal exclusion: a second
+  capture, a capture-vs-void, or a capture racing the orphan-hold reaper all
+  resolve deterministically (`200` replay / `409` / `410`). An expired
+  (reaper-reclaimed) hold returns `410` and is deliberately **not** late-billed
+  — an external capture window is unbounded, so late-billing a reclaimed hold
+  could break the budget invariant.
+- **The write verbs are rate-limited per source IP** (`authorize` / `capture` /
+  `void`; `BILLING_WRITE_RATE_LIMIT`, default `60/minute`, backed by the same
+  DynamoDB fixed-window limiter as the auth endpoints). Unlike an inline request
+  these calls do no Bedrock work, so an un-capped `authorize → void` loop — even
+  an accidental one from a buggy client that re-mints its `Idempotency-Key` each
+  time — could saturate the single tenant-budget row's optimistic-concurrency
+  retries and starve other users' inference in the same tenant. The cap bounds
+  that contention while staying generous for legitimate programmatic use; the
+  read-only `GET` is not capped.
+
+The web console surfaces authorization status read-only (an `external` badge);
+issuing authorize/capture stays programmatic (API/CLI:
+`stratoclave billing authorize | capture | void | get`), since a money mutation
+from a human form is a typo risk.
+
 ## API compatibility
 
 | Endpoint                               | Behavior                                                            |
@@ -506,6 +555,10 @@ the `TenantBudgets` schema and the reclaim invariants are documented in
 | `GET  /openai/v1/models`               | Returns OpenAI-family entries from the model registry, in the OpenAI `/v1/models` shape. Requires the `responses:send` scope. |
 | `GET  /.well-known/stratoclave-config` | Unauthenticated discovery document; drives `stratoclave setup`.    |
 | `POST /api/mvp/auth/sso-exchange`      | Vouch-by-STS entry point for CLI SSO login.                         |
+| `GET  /api/mvp/me/billing/runs/{run_id}` | The caller's own per-run charge breakdown (frozen rating from the credit ledger; **no** provider cost / margin — redacted by response type). Requires `usage:read-self`. |
+| `POST /api/mvp/billing/authorize`      | [External authorize](#external-authorizecapture-api-layer-5): reserve a fixed micro-USD amount from the tenant pool for a non-LLM action. `Idempotency-Key` header required. Requires `billing:write`. |
+| `POST /api/mvp/billing/authorizations/{id}/{capture,void}` | Capture (settle, ≤ authorized) or void (release) an open authorization. Requires `billing:write`. |
+| `GET  /api/mvp/billing/authorizations/{id}` | Authorization status (authorized / captured / voided / expired). Requires `billing:read`. |
 | `/api/mvp/admin/*`                     | Admin and team-lead operations (user, tenant, credit, usage, trusted accounts, invites). |
 
 The Claude family (via Bedrock `converse`) and the OpenAI family (via the
@@ -579,19 +632,20 @@ and an audit store today, path-agnostic failover, or already operate Postgres.
 
 ## Roadmap: toward a complete AI-SaaS billing gateway
 
-Stratoclave today ships layers 1–3 of the five-layer billing gateway (above).
-The remaining work turns it from "controls physical usage" into "converts usage
-to money and steers cost per request". The gating insight: **semantic routing
-only *proves* a cost saving once the ledger and rating layers exist** — an
-un-provable saving cannot be billed — so the ledger/rating work is P0 and the
-router is P1.
+Stratoclave now ships all five layers of the billing gateway (above). The four
+P0 items below — the credit ledger, the rating engine, the external
+authorize/capture API, and the routing decision log — are **shipped**; the
+remaining router work (P1/P2) turns "converts usage to money" into "steers cost
+per request". The gating insight held: **semantic routing only *proves* a cost
+saving once the ledger and rating layers exist** — an un-provable saving cannot
+be billed — so the ledger/rating work was P0 and shipped first; the router is P1.
 
-| Feature | Layer / router role | Why it matters (cost control) | Existing foundation | Priority |
+| Feature | Layer / router role | Why it matters (cost control) | Foundation | Status |
 | --- | --- | --- | --- | --- |
-| **Credit ledger** (event-sourced, idempotent) | Layer 4 body | Today only "current balance" exists; disputes, refunds, and idempotent external billing need an auditable event history | Crash-safe HOLD + settle; `run_id#span_id#event_type` is a natural idempotency key | **P0** |
-| **Rating engine** (usage → money) | Layer 5 front | Pins "which price, when" so a price change never breaks past invoices; also the basis for "how much the router saved" | Versioned per-model micro-USD pricing config; token actuals on each attempt | **P0** |
-| **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture inside their own workflows | `TransactWriteItems` reserve = authorize; settle = capture | **P0** |
-| **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable*, not a black box | `resolve_model` is deterministic; the P0-16 routing-signals append log is the sink | **P0** |
+| **Credit ledger** (event-sourced, idempotent) | Layer 4 body | Disputes, refunds, and idempotent external billing need an auditable event history, not just a current balance | Crash-safe HOLD + settle; single TERMINAL sk per hold is the idempotency key | **Shipped** |
+| **Rating engine** (usage → money) | Layer 5 front | Pins "which price, when" so a price change never breaks past invoices; also the basis for "how much the router saved" | Versioned per-model micro-USD config; rate frozen at reserve, versioned rating on the terminal | **Shipped** |
+| **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture non-LLM actions inside their own workflows | `TransactWriteItems` reserve = authorize; the unmodified settle = capture | **Shipped** |
+| **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box | `resolve_model` is deterministic; the routing-signals append log is the sink | **Shipped** |
 | **Latency/SLO-driven routing** (signals consumer) | Router's latency axis | Without a latency feedback loop, semantic routing collapses onto the cheap model and breaks SLOs | `attempt_facts.latency_ms` per attempt; signals writer already live | **P1** |
 | **Semantic routing** (meaning/difficulty → model) | The 4th routing axis | The "cheaper the more you use" curve — route the easy 60–80% to a 1/10-cost model; classify with embeddings + rules, and **meter the classifier's own cost** | `resolve_model` is the single decision point; `cost_tier` + fallback chain = a difficulty ladder | **P1** |
 | **Prompt-cache passthrough** | Layer 5 cost side | Bedrock prompt-cache reads are heavily discounted; direct margin win when tenants share a system prompt | Micro-USD pricing config; per-attempt token stats | **P1** |
@@ -684,11 +738,13 @@ deliberately does **not** do today:
   workloads. (Note: full-fidelity *audit* does not require a proxy — Bedrock
   model invocation logging + CloudTrail give you that with a broker too. A
   proxy is for *intervention before the call*, not merely observation.)
-- **Rate limiting is coarse.** Auth-endpoint caps are per-IP fixed-window
-  counters in DynamoDB (shared across all tasks, no Redis), which is enough to
-  blunt credential stuffing but is not a token-bucket or a per-tenant inference
-  quota. Credit reservation is the real spend ceiling and is always atomic in
-  DynamoDB.
+- **Rate limiting is coarse.** The auth endpoints and the external billing
+  write verbs (`authorize` / `capture` / `void`) carry per-IP fixed-window
+  counters in DynamoDB (shared across all tasks, no Redis) — enough to blunt
+  credential stuffing and budget-row contention, but not a token-bucket or a
+  per-tenant inference quota, and the inline LLM endpoints themselves are not
+  IP-capped. Credit reservation is the real spend ceiling and is always atomic
+  in DynamoDB.
 - **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
   commit, run it in an account you control, and read the threat model in
   [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.

@@ -71,6 +71,7 @@ _TABLE_ENVS = {
     "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
     "DYNAMODB_OBSERVABILITY_TABLE": "stratoclave-observability",
     "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
+    "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -92,6 +93,16 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     # Fresh in-process fallback counter per test (degraded-mode limiter state
     # must not leak across tests).
     _rl._local_fallback = _rl._LocalWindows()
+    # Pricing caches are process-global (the 60s effective-rate cache AND the
+    # immutable per-version snapshot cache). Moto tables reset per test but these
+    # do not, so a version set in one test would leak into the next (a settle
+    # would freeze a stale version). Reset both before every test.
+    try:
+        from mvp import pricing as _pricing
+        _pricing.reset_cache()
+        _pricing.reset_version_cache()
+    except Exception:  # noqa: BLE001 — pricing import optional in some minimal test envs
+        pass
 
 
 @pytest.fixture
@@ -183,6 +194,33 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             AttributeDefinitions=[
                 {"AttributeName": "tenant_id", "AttributeType": "S"},
                 {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # CreditLedger: PK pk ("TENANT#<id>#P#<period>"), SK sk ("EV#..."),
+        # GSI run-index (gsi1pk/gsi1sk) for per-run money-move audit.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_CREDIT_LEDGER_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "gsi1pk", "AttributeType": "S"},
+                {"AttributeName": "gsi1sk", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "run-index",
+                    "KeySchema": [
+                        {"AttributeName": "gsi1pk", "KeyType": "HASH"},
+                        {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
             ],
             BillingMode="PAY_PER_REQUEST",
         )

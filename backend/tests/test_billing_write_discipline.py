@@ -49,6 +49,17 @@ ALLOWED_SITES = {
     "backend/mvp/_pipeline.py": {
         # The pool money mutations. All transactional, all tokened.
         ("backend/mvp/_pipeline.py", "reserve_credit", "transact_write_items"),          # CAS reserve
+        # External authorize (Fable authcap). Pool-only CAS reserve: same shape as
+        # reserve_credit's pooled path — [pool CAS, HOLD put, RESERVE ledger event
+        # (source=external), IDEMP Put] — minus the per-user token debit (an
+        # external action is not token-metered). Fresh token per attempt; a
+        # cancelled txn writes nothing. The ONLY new money item is the IDEMP Put
+        # (attribute_not_exists → "IDEMP row ⟺ hold committed"), giving idempotent
+        # authorize. A2: only pool_reserved advances (+amount), gated by the same
+        # CAS on (reserved,settled); A5: fresh token, and the reserve is atomic so
+        # a lost ack cannot double-reserve (the retry re-reads and re-CASes).
+        # Reviewed OK.
+        ("backend/mvp/_pipeline.py", "reserve_external_authorization", "transact_write_items"),
         # Pool-less per-model quota reserve (P0-11 / Fable F-3). Same CAS-reserve
         # shape as reserve_credit: [user_txn, *quota_lines], fresh token per
         # attempt, cancelled transaction writes nothing. No pool counter touched
@@ -57,6 +68,14 @@ ALLOWED_SITES = {
         ("backend/mvp/_pipeline.py", "_settle_pool_side", "transact_write_items"),        # settle (stable token)
         ("backend/mvp/_pipeline.py", "ReservationContext.release_pool", "transact_write_items"),  # release
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "transact_write_items"),        # reaper reclaim
+        # Ledger P2: recovers spend after the reaper reclaimed the hold first
+        # (RECLAIM terminal). Writes [settled-only counter (+actual, reserved
+        # untouched — reaper already returned it), LATE_SETTLE ledger Put (distinct
+        # sk, attribute_not_exists), ConditionCheck terminal-is-RECLAIM]. A2: the
+        # counter only advances settled by `actual`, never re-touches reserved, so
+        # no double-return. A5: STABLE token (_derived_token(token,"late-settle"))
+        # so a lost-ack retry of the recovery dedupes to the same write. Reviewed OK.
+        ("backend/mvp/_pipeline.py", "_recover_spend_via_late_settle", "transact_write_items"),
         # A non-counter delete: removes an amount<=0 HOLD row only; does NOT
         # touch the BUDGET row / counters (reviewed — see _sweep_one_period).
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "delete_item"),
@@ -108,6 +127,10 @@ COUNTER_FUNCTIONS = {
         "_pool_settle_items",
         "_settled_only_txn_item",
         "reserve_credit",
+        # External authorize reads pool_reserved/settled for the CAS ceiling
+        # check (same as reserve_credit) — no counter is written except via the
+        # reused reserve_txn_item builder. Reviewed against A2.
+        "reserve_external_authorization",
         "_settle_pool_side",
         "_sweep_expired_holds",
         "_sweep_one_period",
@@ -130,6 +153,11 @@ EXPECTED_TOKEN_KIND = {
         # here we assert the token is at least freshly-minted per settle (never
         # a hard-coded constant, which the classifier WOULD flag).
         "reserve_credit": "fresh",
+        # External authorize: fresh token per attempt (same as reserve_credit).
+        # Idempotency comes from the IDEMP Put's attribute_not_exists, not the
+        # token — a cancelled txn writes nothing, so a fresh token per attempt is
+        # correct and a lost-ack retry re-reads the pool and re-CASes.
+        "reserve_external_authorization": "fresh",
         "_reserve_quota_without_pool": "fresh",
         "ReservationContext.release_pool": "fresh",
         "_sweep_one_period": "fresh",
@@ -138,6 +166,11 @@ EXPECTED_TOKEN_KIND = {
         # (_derived_token(token,...) = deterministic/stable so a lost-ack
         # dedupes). Both kinds are allowed here.
         "_settle_pool_side": ("fresh", "stable"),
+        # Ledger P2 late-settle recovery: FRESH token. Idempotency is the
+        # LATE_SETTLE sk's attribute_not_exists (exactly one per hold), NOT the
+        # token — a derived/stable token would need byte-identical payloads across
+        # retries, which the ledger Put's per-attempt ts_ms breaks (A5 review).
+        "_recover_spend_via_late_settle": "fresh",
     },
     "backend/dynamo/user_tenants.py": {
         # tenant reassignment: idempotent SET (attribute_exists-guarded), not a
