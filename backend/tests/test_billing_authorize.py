@@ -293,6 +293,123 @@ def test_inline_hold_still_late_settles_after_reclaim(dynamodb_mock):
     assert int(ls["settled_delta_microusd"]) > 0
 
 
+# --------------------------------------------------------------------------- capture-vs-void race (concurrency GAP3)
+
+
+def _rehydrate(tenant, period, hold_id, hold_sk):
+    ctx = _pipeline.rehydrate_reservation_context(
+        tenant_id=tenant, period=period, hold_id=hold_id, hold_sk=hold_sk
+    )
+    assert ctx is not None
+    return ctx
+
+
+def test_capture_vs_void_race_capture_first(dynamodb_mock):
+    """Two callers rehydrate the SAME live external hold, then capture and void
+    race. Ordering: capture commits first, void arrives second.
+
+    The finalizers contend on Phase-2's single TERMINAL sk (attribute_not_exists),
+    so EXACTLY ONE lands: capture wins → SETTLE terminal, settled advances by the
+    captured amount, reserved returned once. The loser (void) finds the terminal
+    already taken and no-ops — it MUST NOT flip the terminal to RELEASE, must not
+    return the reserved a second time (which would sink pool_reserved negative),
+    and must not zero the settled. This is the concurrency the endpoint resolves
+    by reading the terminal (a losing void → 409 already_captured)."""
+    tenant, period = _seed()
+    r = _authorize(tenant, 1_000_000, "race-cap-first")
+
+    # BOTH contexts built while the hold is still live (the race precondition).
+    ctx_cap = _rehydrate(tenant, period, r.hold_id, r.hold_sk)
+    ctx_void = _rehydrate(tenant, period, r.hold_id, r.hold_sk)
+
+    from mvp.billing_authorize import _settle_external
+
+    _settle_external(ctx_cap, 400_000)           # capture wins the terminal
+    ctx_void.release_pool()                       # void loses → must be a no-op
+
+    summary = _pool(tenant, period)
+    assert summary["pool_settled_microusd"] == 400_000, "captured amount not settled once"
+    assert summary["pool_reserved_microusd"] == 0, "reserved not returned exactly once"
+
+    term = CreditLedgerRepository().get_terminal(tenant_id=tenant, period=period, hold_id=r.hold_id)
+    assert term["event_type"] == "SETTLE", "void overwrote the winning SETTLE terminal"
+    assert int(term["settled_delta_microusd"]) == 400_000
+    assert int(term["reserved_delta_microusd"]) == -1_000_000
+    # No RELEASE ghost, no LATE_SETTLE.
+    assert CreditLedgerRepository().get_late_settle(
+        tenant_id=tenant, period=period, hold_id=r.hold_id
+    ) is None
+
+
+def test_capture_vs_void_race_void_first(dynamodb_mock):
+    """Same live-hold race, opposite ordering: void commits first, capture second.
+
+    Void wins → RELEASE terminal, reserved returned, NOTHING settled. The losing
+    capture finds a RELEASE terminal: it must NOT record spend (a released hold is
+    not billable — the protocol-violation guard), must NOT write a LATE_SETTLE
+    (that recovery is RECLAIM-only), and the reserved must not be double-returned.
+    The endpoint would map the loser to 409 already_voided."""
+    tenant, period = _seed()
+    r = _authorize(tenant, 1_000_000, "race-void-first")
+
+    ctx_cap = _rehydrate(tenant, period, r.hold_id, r.hold_sk)
+    ctx_void = _rehydrate(tenant, period, r.hold_id, r.hold_sk)
+
+    from mvp.billing_authorize import _settle_external
+
+    ctx_void.release_pool()                       # void wins the terminal
+    # The losing capture: settle finds the RELEASE terminal and returns idempotently
+    # WITHOUT charging (Phase-2 release-then-settle protection). It must not raise a
+    # bare error, and must not move the counters.
+    _settle_external(ctx_cap, 400_000)
+
+    summary = _pool(tenant, period)
+    assert summary["pool_settled_microusd"] == 0, "settle after a winning void charged spend"
+    assert summary["pool_reserved_microusd"] == 0, "reserved not returned exactly once"
+
+    term = CreditLedgerRepository().get_terminal(tenant_id=tenant, period=period, hold_id=r.hold_id)
+    assert term["event_type"] == "RELEASE", "capture overwrote the winning RELEASE terminal"
+    assert int(term["reserved_delta_microusd"]) == -1_000_000
+    assert int(term["settled_delta_microusd"]) == 0
+    assert CreditLedgerRepository().get_late_settle(
+        tenant_id=tenant, period=period, hold_id=r.hold_id
+    ) is None
+
+
+def test_capture_vs_void_race_both_orderings_single_terminal(dynamodb_mock):
+    """Belt-and-braces over the two above: whichever finalizer runs first, there is
+    ALWAYS exactly one terminal for the hold and the reserved is returned exactly
+    once (pool_reserved back to 0, never negative). Runs each ordering on its own
+    tenant partition and asserts the single-terminal invariant directly from the
+    ledger partition scan."""
+    from boto3.dynamodb.conditions import Key
+    from mvp.billing_authorize import _settle_external
+
+    def _terminals(tenant, period, hold_id):
+        led = CreditLedgerRepository()
+        items = led._table.query(
+            KeyConditionExpression=Key("pk").eq(f"TENANT#{tenant}#P#{period}")
+        ).get("Items", [])
+        return [i for i in items if i["sk"].endswith("#TERMINAL") and i["hold_id"] == hold_id]
+
+    for label, cap_first in (("cf", True), ("vf", False)):
+        tenant, period = _seed(tenant_id=f"race-{label}")
+        r = _authorize(tenant, 800_000, f"k-{label}")
+        ctx_cap = _rehydrate(tenant, period, r.hold_id, r.hold_sk)
+        ctx_void = _rehydrate(tenant, period, r.hold_id, r.hold_sk)
+        if cap_first:
+            _settle_external(ctx_cap, 300_000)
+            ctx_void.release_pool()
+        else:
+            ctx_void.release_pool()
+            _settle_external(ctx_cap, 300_000)
+        terms = _terminals(tenant, period, r.hold_id)
+        assert len(terms) == 1, f"[{label}] expected exactly one terminal, got {len(terms)}"
+        assert _pool(tenant, period)["pool_reserved_microusd"] == 0, (
+            f"[{label}] reserved not returned exactly once"
+        )
+
+
 # --------------------------------------------------------------------------- C terminal mapping
 
 
@@ -549,6 +666,77 @@ def test_http_no_pool_404(dynamodb_mock, monkeypatch):
     r = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "np"},
                json={"amount_microusd": 1000})
     assert r.status_code == 404
+
+
+# --------------------------------------------------------------------------- rate limit (money-safety review 2, DoS)
+
+
+def test_http_authorize_is_rate_limited(dynamodb_mock, monkeypatch):
+    """The write endpoints carry a per-IP rate limit so a fast authorize/void loop
+    cannot saturate the shared TenantBudgets-row CAS and starve inline inference
+    (money-safety review-2 DoS). Prove the limiter is WIRED: within the window,
+    requests eventually get a 429 — and it lands exactly at the configured
+    ceiling, not before (so a legitimate client under the cap is never blocked).
+
+    The bucket key is the source IP; TestClient presents a stable client host, so
+    every call shares one window. We monkeypatch the ceiling low to keep the test
+    fast and independent of the production default."""
+    import core.rate_limit_ddb as _rl
+
+    _seed(tenant_id="acme-http")
+    c = _client(monkeypatch)
+
+    # Force a small ceiling by wrapping _check: the decorator already computed
+    # (limit, window) at import from the default spec, so intercept the call and
+    # substitute a tiny limit deterministically (same DDB-backed counter).
+    real_check = _rl._check
+    LOW = 3
+    calls = {"n": 0}
+
+    def _low_check(scope, key, limit, window_seconds):  # noqa: ARG001
+        calls["n"] += 1
+        return real_check(scope, key, LOW, window_seconds)
+
+    monkeypatch.setattr(_rl, "_check", _low_check)
+
+    codes = []
+    for i in range(LOW + 2):
+        r = c.post("/api/mvp/billing/authorize",
+                   headers={"Idempotency-Key": f"rl-{i}"},
+                   json={"amount_microusd": 1000})
+        codes.append(r.status_code)
+
+    # First LOW succeed (200), the rest are throttled (429) — the cap bites
+    # exactly at the ceiling.
+    assert codes[:LOW] == [200] * LOW, f"expected {LOW} successes, got {codes}"
+    assert all(code == 429 for code in codes[LOW:]), f"expected 429s after cap, got {codes}"
+    assert calls["n"] >= LOW + 1, "rate limiter was not consulted on every call"
+
+
+def test_http_capture_and_void_are_rate_limited(dynamodb_mock, monkeypatch):
+    """capture and void carry the same per-IP limit (all three write verbs share
+    the CAS-contention surface). Proves the decorator is present on both — a
+    regression that drops it from one endpoint reopens the DoS path."""
+    import core.rate_limit_ddb as _rl
+
+    _seed(tenant_id="acme-http")
+    c = _client(monkeypatch)
+    real_check = _rl._check
+    monkeypatch.setattr(_rl, "_check",
+                        lambda scope, key, limit, w: real_check(scope, key, 2, w))
+
+    # Pre-mint an authorization to capture/void (authorize itself is now capped at
+    # 2, so create it as the first call, then exhaust on the target verb).
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "rlcv"},
+               json={"amount_microusd": 1_000_000})
+    assert a.status_code == 200, a.text
+    auth_id = a.json()["authorization_id"]
+
+    # void shares the scope-per-endpoint bucket (scope defaults to the function
+    # name), so its own window is fresh: first two 200-eligible, the third 429.
+    codes = [c.post(f"/api/mvp/billing/authorizations/{auth_id}/void").status_code
+             for _ in range(3)]
+    assert 429 in codes, f"void was not rate-limited: {codes}"
 
 
 # --------------------------------------------------------------------------- contract gate

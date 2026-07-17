@@ -158,6 +158,16 @@ def _client_key(request: Request) -> str:
 LOGIN_RATE_LIMIT = os.getenv("AUTH_LOGIN_RATE_LIMIT", "10/minute")
 RESPOND_RATE_LIMIT = os.getenv("AUTH_RESPOND_RATE_LIMIT", "10/minute")
 SSO_EXCHANGE_RATE_LIMIT = os.getenv("SSO_EXCHANGE_RATE_LIMIT", "20/minute")
+# External authorize/capture/void (Layer-5 authcap). These pool-only endpoints
+# do NOT call Bedrock, so a client can issue them far faster than an inline LLM
+# request — and they contend on the SAME single TenantBudgets row + CreditLedger
+# partition that every inline request's reserve/settle uses. Without a per-IP
+# cap, a fast authorize→void loop (even a buggy client re-minting Idempotency-Key
+# each time) can saturate that hot item's optimistic-CAS retries and starve
+# unrelated users' inference in the same tenant (503/402). 60/minute is generous
+# for legitimate programmatic use while bounding the contention burst well under
+# the ~20-way concurrency the reserve CAS was tuned for.
+BILLING_WRITE_RATE_LIMIT = os.getenv("BILLING_WRITE_RATE_LIMIT", "60/minute")
 
 
 # The limiter is DynamoDB-backed (fixed-window, TTL-reaped). Per-IP
@@ -171,6 +181,7 @@ limiter = DynamoRateLimiter(client_key_func=_client_key)
 
 
 __all__ = [
+    "BILLING_WRITE_RATE_LIMIT",
     "LOGIN_RATE_LIMIT",
     "RESPOND_RATE_LIMIT",
     "RateLimitExceeded",

@@ -42,9 +42,10 @@ import base64
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.rate_limit import BILLING_WRITE_RATE_LIMIT, limiter
 from dynamo import CreditLedgerRepository
 from dynamo.tenant_budgets import TenantBudgetsRepository
 
@@ -230,7 +231,9 @@ def _request_fingerprint(body: "AuthorizeRequest") -> str:
 
 
 @router.post("/authorize", response_model=AuthorizeResponse)
+@limiter.limit(BILLING_WRITE_RATE_LIMIT)
 def authorize(
+    request: Request,
     body: AuthorizeRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=200),
     user: AuthenticatedUser = Depends(get_current_user),
@@ -245,7 +248,13 @@ def authorize(
 
     The authorization_id is a pure function of the hold identity the reserve
     mints, so it is stored in the IDEMP row at write time and a duplicate-key
-    replay reconstructs the SAME token deterministically."""
+    replay reconstructs the SAME token deterministically.
+
+    Rate-limited per source IP (`BILLING_WRITE_RATE_LIMIT`, default 60/minute):
+    these pool-only endpoints do not call Bedrock, so an un-capped authorize/void
+    loop could saturate the shared TenantBudgets-row CAS and starve inline
+    inference in the same tenant."""
+    _ = request  # the rate limiter reads it from the signature
     ttl = _clamp_ttl(body.ttl_seconds)
     fingerprint = _request_fingerprint(body)
     try:
@@ -291,7 +300,9 @@ def authorize(
 
 
 @router.post("/authorizations/{authorization_id}/capture", response_model=CaptureResponse)
+@limiter.limit(BILLING_WRITE_RATE_LIMIT)
 def capture(
+    request: Request,
     authorization_id: str,
     body: CaptureRequest,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -302,7 +313,10 @@ def capture(
     Rehydrates the ReservationContext from the ledger and calls the UNMODIFIED
     `_settle_pool_side` — so this is byte-identically the inline settle. Idempotency
     and all races are Phase-2's terminal mutual-exclusion: a second capture, a
-    capture-vs-void, or a capture-vs-reaper all resolve by reading the terminal."""
+    capture-vs-void, or a capture-vs-reaper all resolve by reading the terminal.
+
+    Rate-limited per source IP (`BILLING_WRITE_RATE_LIMIT`) — see `authorize`."""
+    _ = request  # the rate limiter reads it from the signature
     hold_id, period, hold_sk = decode_authorization_id(authorization_id)
     tenant_id = user.org_id
     # SECURITY (C-1): confirm this token names an EXTERNAL authorization before
@@ -429,13 +443,18 @@ class _ExternalUser:
 
 
 @router.post("/authorizations/{authorization_id}/void", response_model=VoidResponse)
+@limiter.limit(BILLING_WRITE_RATE_LIMIT)
 def void(
+    request: Request,
     authorization_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
     _perm: AuthenticatedUser = Depends(require_permission("billing:write")),
 ) -> VoidResponse:
     """Release an open authorization without charge (RELEASE terminal). Reuses the
-    UNMODIFIED `ReservationContext.release_pool`."""
+    UNMODIFIED `ReservationContext.release_pool`.
+
+    Rate-limited per source IP (`BILLING_WRITE_RATE_LIMIT`) — see `authorize`."""
+    _ = request  # the rate limiter reads it from the signature
     hold_id, period, hold_sk = decode_authorization_id(authorization_id)
     tenant_id = user.org_id
     _require_external(tenant_id, period, hold_id)  # C-1: external-only
