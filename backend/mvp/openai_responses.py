@@ -468,7 +468,8 @@ async def create_response(
 
     if body.stream:
         return StreamingResponse(
-            _stream_response(body, entry, user, tenants_repo, reservation),
+            _stream_response(body, entry, user, tenants_repo, reservation,
+                             request_id=ctx.request_id if ctx else None),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -524,6 +525,8 @@ async def create_response(
         actual_output_tokens=output_tokens,
         model_id=entry.bedrock_model_id,
         context=tenants_repo,
+        # Key the UsageLogs row on the request id for the offline VSR reconcile join.
+        request_id=ctx.request_id if ctx else None,
     )
     return data
 
@@ -538,6 +541,7 @@ async def _stream_response(
     user: AuthenticatedUser,
     tenants_repo: UserTenantsRepository,
     reservation: int,
+    request_id: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Stream the Responses-API SSE feed back to the caller.
 
@@ -718,6 +722,7 @@ async def _stream_response(
             actual_output_tokens=output_tokens,
             model_id=entry.bedrock_model_id,
             context=tenants_repo,
+            request_id=request_id,
         )
         settled = True
     finally:
@@ -732,6 +737,7 @@ async def _stream_response(
                 actual_output_tokens=output_tokens,
                 model_id=entry.bedrock_model_id,
                 context=tenants_repo,
+                request_id=request_id,
             )
 
 

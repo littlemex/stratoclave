@@ -773,6 +773,9 @@ def messages(
         context=tenants_repo,
         actual_cache_read_tokens=cache_read,
         actual_cache_write_tokens=cache_write,
+        # Key the UsageLogs row on the request id so the offline VSR
+        # reconciliation can join it to the reserve-time decision record.
+        request_id=ctx.request_id if ctx else None,
     )
 
     content_blocks: list[dict[str, Any]] = []
@@ -1034,6 +1037,7 @@ async def _stream_messages(
         release=lambda ctx: _release_pool(ctx),
         adapter=_AnthropicAdapter(),
         on_finalized=_on_finalized,
+        request_id=ctx.request_id if ctx else None,
     ):
         yield frame
 

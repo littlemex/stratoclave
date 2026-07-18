@@ -2267,6 +2267,7 @@ def settle_reservation_and_log(
     actual_cache_read_tokens: int = 0,
     actual_cache_write_tokens: int = 0,
     requested_model: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> None:
     """Settle the reservation against actual usage and write a UsageLogs row.
 
@@ -2493,6 +2494,15 @@ def settle_reservation_and_log(
             # row reads as a fallback. Window-scoped and non-retroactive
             # (stored bytes are stable); acceptable for P1 visibility.
             requested_stored = requested
+    # The UsageLogs SK embeds this id (`log_id = request_id or uuid4()`). Passing
+    # the request's own id — not a fresh uuid — is what lets the offline VSR
+    # reconciliation (mvp.learning.vsr_reconcile) JOIN a usage row back to its
+    # reserve-time decision record (both keyed by the same span_id/request_id).
+    # Fall back to the reserve context's id, then to None (a bare uuid) for the
+    # rare call site that has neither.
+    settle_request_id = request_id or (
+        getattr(context, "request_id", None) if context is not None else None
+    )
     UsageLogsRepository().record(
         tenant_id=user.org_id,
         user_id=user.user_id,
@@ -2502,6 +2512,7 @@ def settle_reservation_and_log(
         output_tokens=actual_output_tokens,
         cost_microusd=actual_cost_microusd,
         requested_model_id=requested_stored,
+        request_id=settle_request_id,
     )
 
 

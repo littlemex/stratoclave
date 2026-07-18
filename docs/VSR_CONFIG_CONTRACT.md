@@ -113,6 +113,41 @@ Detecting the skew is Stratoclave's job (only the writer knows what it wrote);
 resolving it (reload / re-validation sweep) is the VSR's. Stratoclave never
 parses the id — it is an opaque equality token, bounded to 128 chars.
 
+## Observability boundary and offline billing reconciliation
+
+Stratoclave does NOT re-implement the VSR's routing-quality metrics (request
+counts, routing latency, TTFT/TPOT, cache hit rate). Those are the VSR's own —
+it already ships a Prometheus endpoint and a Grafana dashboard, and Stratoclave
+co-locates an ADOT sidecar in the VSR task to converge those series onto the
+same CloudWatch pane as the gateway (one dashboard, dark-safe: absent when the
+VSR is off). The division is: **how the advice was made = the VSR; what happened
+to that advice at Stratoclave's trust boundary, and what it billed = Stratoclave.**
+
+Stratoclave therefore keeps only the boundary-owned records, each keyed by the
+request's `span_id`:
+
+- the **decision record** (`vsr` block: decision, suggested_model, mode,
+  config_version) — written at reserve;
+- the **usage row** (effective billed model + `cost_microusd`) — written at
+  settle in the UsageLogs table.
+
+An INTERNAL offline job (`mvp.learning.vsr_reconcile` / `vsr_reconcile_cli`)
+joins the two per (tenant, day) — no admin API, no new table, no request-path
+code — to answer the three questions Stratoclave owns:
+
+1. **billing reconciliation** — for every VSR-acted request, what did it cost
+   (summed over matched rows only — an honest partial sum, unsettled requests
+   surfaced as a coverage gap, never counted as 0);
+2. **enforcement integrity** — was a `hard` pin actually honored (advised alias
+   == committed alias, both recorded on the decision item), or did a hard
+   decision commit a different model — a trust-boundary **violation** to surface;
+3. **coverage** — VSR decisions with no matching usage row (request failed
+   before settle, or a dropped best-effort write).
+
+A `prefer` suggestion is advisory (a local SAAR prefer may legitimately override
+it), so a `prefer`/`no-advice`/`timeout` decision is `n/a` for enforcement — only
+a `hard` pin is held to the billed-model equality check.
+
 ## Failure matrix
 
 | Failure | Admin/user sees | Running VSR task | Blast radius |

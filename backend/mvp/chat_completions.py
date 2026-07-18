@@ -309,7 +309,8 @@ def chat_completions(
 
     if body.stream:
         return StreamingResponse(
-            _stream_chat(body, model_id, user, tenants_repo, reservation, kwargs),
+            _stream_chat(body, model_id, user, tenants_repo, reservation, kwargs,
+                         request_id=ctx.request_id if ctx else None),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -339,6 +340,8 @@ def chat_completions(
         actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
         model_id=model_id, context=tenants_repo,
         actual_cache_read_tokens=cache_read, actual_cache_write_tokens=cache_write,
+        # Key the UsageLogs row on the request id for the offline VSR reconcile join.
+        request_id=ctx.request_id if ctx else None,
     )
 
     content_blocks = resp.get("output", {}).get("message", {}).get("content", [])
@@ -399,6 +402,7 @@ async def _stream_chat(
     tenants_repo: Any,
     reservation: int,
     kwargs: dict,
+    request_id: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE stream via the shared _budget_flow.run_stream + ChatAdapter.
 
@@ -489,5 +493,6 @@ async def _stream_chat(
         settle=lambda **kw: _settle_reservation_and_log(**kw),
         release=lambda ctx: _release_pool(ctx),
         adapter=_ChatAdapter(),
+        request_id=request_id,
     ):
         yield frame
