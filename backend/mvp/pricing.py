@@ -194,6 +194,13 @@ _DEFAULT_RATES: dict[str, Rate] = {
     # GPT-5.x on bedrock-mantle. Output priced at the Opus tier as a
     # conservative default until an admin sets an exact rate.
     "gpt-5": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
+    # Self-hosted vLLM (hybrid serving). An operator-set cost-recovery rate,
+    # NOT a Bedrock price. Cache rates MUST be 0 — vLLM reports no Bedrock
+    # cache-token split, so any nonzero cache rate would be dead pricing that
+    # also biases SAAR's warm-prefix delta (enforced by
+    # models.assert_vllm_cache_rates_zero). The input/output defaults here are
+    # a placeholder an operator overrides per deployment.
+    "vllm": Rate(200_000, 200_000, 0, 0),
     "default": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
 }
 

@@ -963,6 +963,14 @@ def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> N
         raise _err_400("invalid_model_pin")
     if wire_protocol is not None and entry.wire_protocol != wire_protocol:
         raise _err_400("invalid_model_pin")
+    if getattr(entry, "served_by", "bedrock") == "vllm":
+        # Servability first (400), same as an unservable region: a vLLM pin is
+        # only servable with hybrid serving on AND an allowlisted endpoint. Flag
+        # off => a vLLM pin is rejected loudly here, never routed with a bogus
+        # region into the Bedrock client.
+        from .serving.vllm import endpoint_is_servable
+        if not endpoint_is_servable(entry.endpoint_key):
+            raise _err_400("invalid_model_pin")
 
     # The pin must be in the tenant's configured model set (allowlist, else
     # chain). Compare on the registry entry so different spellings of the same
@@ -1052,6 +1060,14 @@ def _resolve_candidate_chain(
                            candidate=model, wire_protocol=entry.wire_protocol,
                            route_protocol=wire_protocol)
             return False
+        if getattr(entry, "served_by", "bedrock") == "vllm":
+            # A vLLM candidate is servable only when hybrid serving is on AND its
+            # endpoint is allowlisted; otherwise the cascade must skip it (flag
+            # off => byte-identical to today, since no shipped entry is vLLM).
+            from .serving.vllm import endpoint_is_servable
+            if not endpoint_is_servable(entry.endpoint_key):
+                logger.warning("cascade_candidate_vllm_unservable", candidate=model)
+                return False
         return True
 
     servable = [m for m in candidates if _servable(m)]

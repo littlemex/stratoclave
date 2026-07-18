@@ -229,6 +229,11 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   targetGroup: albStack.targetGroup,
   userPoolArn: cognitoStack.userPool.userPoolArn,
   dynamoDbTableArns: dynamoDBStack.allTableArns,
+  // Per-tenant VSR config bucket (opaque blobs, versioned). Provisioned only
+  // when the external VSR feature is switched on: without it the admin surface
+  // 404s and no bucket/grant/env is created (feature ships dark). The bucket
+  // name is injected as VSR_CONFIG_BUCKET into the container by EcsStack.
+  enableVsrConfigBucket: (process.env.EXTERNAL_VSR_ENABLED || 'false') === 'true',
   cpu: 256,
   memory: 512,
   // Two tasks so the ECS service spreads across both AZs (the VPC has
@@ -317,6 +322,33 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // byte-identical to pre-SAAR. Flip to 'true' to enable session-aware sticky
     // routing + switch-cost budget gating. Per-tenant opt-in still applies on top.
     SAAR_ENABLED: process.env.SAAR_ENABLED || 'false',
+    // Hybrid serving (self-hosted vLLM) master switch. Ships DARK: when 'false'
+    // every vLLM registry entry is unservable and the invoke path is
+    // byte-behaviour-identical to Bedrock-only. Flip to 'true' (and populate
+    // VLLM_ENDPOINTS) to route vLLM-served models to an internal endpoint.
+    HYBRID_SERVING_ENABLED: process.env.HYBRID_SERVING_ENABLED || 'false',
+    // Operator allowlist of internal vLLM endpoints as a JSON object
+    // {"<endpoint_key>": "<internal-url>"}. The URL set is closed here (SSRF
+    // guard): the registry and clients only ever reference the opaque key.
+    // Passed through ONLY when set, so unset => no vLLM endpoints => all vLLM
+    // entries unservable.
+    ...(process.env.VLLM_ENDPOINTS
+      ? { VLLM_ENDPOINTS: process.env.VLLM_ENDPOINTS }
+      : {}),
+    // External VSR (Value/Session Router) master switch. Ships DARK: when
+    // 'false' no version handshake runs and no consult is attempted, so routing
+    // is exactly today's. The VSR is version-pinned (VSR_EXPECTED_CONTRACT +
+    // VSR_EXPECTED_BUILDS): a build outside the pinned set is REFUSED and never
+    // followed. Its suggestion passes the SAME allowlist enforcement as a client
+    // x-sc-model-pin.
+    EXTERNAL_VSR_ENABLED: process.env.EXTERNAL_VSR_ENABLED || 'false',
+    ...(process.env.VSR_BASE_URL ? { VSR_BASE_URL: process.env.VSR_BASE_URL } : {}),
+    ...(process.env.VSR_EXPECTED_CONTRACT
+      ? { VSR_EXPECTED_CONTRACT: process.env.VSR_EXPECTED_CONTRACT }
+      : {}),
+    ...(process.env.VSR_EXPECTED_BUILDS
+      ? { VSR_EXPECTED_BUILDS: process.env.VSR_EXPECTED_BUILDS }
+      : {}),
     RATE_LIMIT_ENABLED: 'true',
     ADMIN_API_RATE_LIMIT: '60/minute',
     TEAM_API_RATE_LIMIT: '30/minute',

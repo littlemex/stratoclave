@@ -612,6 +612,31 @@ def messages(
             saar_prefer = sctx.decision.prefer_model
             saar_warm = int(sctx.decision.warm_prefix_tokens)
 
+    # External VSR consult (task #13). Runs ONLY when the client sent no explicit
+    # pin AND SAAR produced no hard lock (both are stronger, local signals). It
+    # is off by default (EXTERNAL_VSR_ENABLED) and version-pinned + fail-open:
+    # a missing/slow/version-skewed VSR yields no advice, routing = today. The
+    # suggestion is fed into the SAME resolver inputs as an x-sc-model-pin, so it
+    # passes the SAME allowlist/servability enforcement — the VSR is an untrusted
+    # advisor, never a bypass.
+    vsr_hard = None
+    if model_pin is None and saar_hard is None:
+        try:
+            from .vsr import client as _vsr
+
+            if _vsr.external_vsr_enabled():
+                sk = ctx.session_key() if ctx else None
+                suggestion = _vsr.consult(
+                    tenant_id=user.org_id, session_key=sk, requested_model=body.model,
+                )
+                if suggestion is not None:
+                    if suggestion.mode == "hard":
+                        vsr_hard = suggestion.model
+                    elif suggestion.mode == "prefer" and saar_prefer is None:
+                        saar_prefer = suggestion.model
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            vsr_hard = None
+
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit_for_model(
         user,
@@ -620,7 +645,9 @@ def messages(
         input_tokens_est=max(reservation - body.max_tokens, 0),
         max_output_tokens=body.max_tokens,
         wire_protocol="messages",
-        vsr_hard_model=model_pin or saar_hard,
+        # Hard-pin precedence: explicit client pin > SAAR tool-loop lock >
+        # external VSR hard suggestion. All three land on the same enforced pin.
+        vsr_hard_model=model_pin or saar_hard or vsr_hard,
         saar_prefer_model=saar_prefer,
         saar_warm_prefix_tokens=saar_warm,
         # L5-d: carry request attribution so settle keys the ledger run-index on

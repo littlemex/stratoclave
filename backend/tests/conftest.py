@@ -111,6 +111,33 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
         _pricing.reset_version_cache()
     except Exception:  # noqa: BLE001 — pricing import optional in some minimal test envs
         pass
+    # Hybrid-serving (vLLM) caches the parsed endpoint allowlist + pooled httpx
+    # clients as module globals; reset so a test varying VLLM_ENDPOINTS/flag
+    # does not leak into the next.
+    try:
+        from mvp.serving import vllm as _vllm
+        _vllm.reset_for_test()
+    except Exception:  # noqa: BLE001 — serving import optional in minimal envs
+        pass
+    # The catalog memoizes vLLM/bedrock targets; a test toggling the flag needs
+    # a rebuild.
+    try:
+        from mvp.routing import chains as _chains
+        _chains.reset_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+    # External VSR client caches a process-local pin state + httpx client.
+    try:
+        from mvp.vsr import client as _vsr
+        _vsr.reset_for_test()
+    except Exception:  # noqa: BLE001
+        pass
+    # Per-tenant VSR config store caches an S3 client + validate httpx client.
+    try:
+        from mvp.vsr import config_store as _vsr_cfg
+        _vsr_cfg.reset_for_test()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @pytest.fixture

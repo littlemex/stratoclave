@@ -46,7 +46,21 @@ def _mark_cooldown(target: Target) -> None:
 
 
 async def _attempt_invoke(target: Target, payload: dict) -> dict:
-    """Invoke converse_stream on a target, offloaded to thread."""
+    """Invoke converse_stream on a target, offloaded to thread.
+
+    Hybrid serving (P0): when the flag is on AND the committed target is
+    vLLM-served, route through the self-hosted vLLM branch instead of Bedrock.
+    Both branches return a ``converse_stream``-shaped dict whose ``["stream"]``
+    is a blocking iterable of Bedrock-shaped event dicts, so everything below
+    this line (peek, first-event commit, failover, normalized_events) is
+    unchanged. With the flag off, the guard is a single short-circuited boolean
+    and the Bedrock path is byte-identical to before."""
+    if getattr(target, "served_by", "bedrock") == "vllm":
+        from mvp.serving import vllm as _vllm
+
+        if _vllm.hybrid_serving_enabled():
+            return await asyncio.to_thread(_vllm.vllm_invoke, target, payload)
+
     client = bedrock_client(target.region)
     kwargs = dict(payload)
     kwargs["modelId"] = target.model_id
