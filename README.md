@@ -596,10 +596,10 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
 | Data residency / GovCloud | **Deploy region is operator-chosen** (`STRATOCLAVE_REGION`; only the CLOUDFRONT-scope WAF is pinned to us-east-1). **Bedrock model region is independent** (`BEDROCK_PRIMARY_REGION`). Streaming failover is configurable (`STRATOCLAVE_FAILOVER_REGIONS`), and the default set is jurisdiction-filtered so a non-US primary never back-doors to the US. `STRATOCLAVE_RESIDENCY=strict` fails the synth if any Bedrock call region (model + failover + codex) leaves the deploy region, or if the model is a geo inference profile. **aws partition only** (GovCloud/China rejected) | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
 | Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover (demonstrated end-to-end on real Bedrock via fault injection: a throttled primary commits to a healthy failover region), **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock); Bedrock cross-region inference profiles give free geography-level failover |
-| Providers | **Amazon Bedrock only** (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear win if you need breadth | Bedrock (Anthropic models, Claude Code context) |
+| Providers | **Amazon Bedrock** (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle), plus an optional **self-hosted vLLM** transport for selected models (ships dark; billed on the same reserve/rating/settle path) | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear win if you need breadth | Bedrock (Anthropic models, Claude Code context) |
 | Guardrails / prompt caching / embeddings | Not built-in (roadmap) | **Guardrails hooks, prompt caching, embeddings/rerank/batch** | Delegated to Bedrock (Guardrails usable directly) |
 | Observability integrations | CloudWatch Logs + dual-track span/`workflow_run` cost telemetry (no third-party exporters yet) | **Langfuse / Datadog / Prometheus / OTEL** callbacks, dashboard | OTEL |
-| Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming). Semantic (meaning-based) routing is roadmap | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win | None (client → Bedrock; CRIS only) |
+| Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming); **session-aware sticky routing** and an **external version-pinned VSR advisor** ship dark (flags off by default). Semantic (meaning-based) routing itself is roadmap (the VSR is its forward-compatible seam) | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win | None (client → Bedrock; CRIS only) |
 | Proxy latency overhead | One in-region hop (ALB → Fargate) + a synchronous DynamoDB reserve per call — the cost of a hard pre-flight budget | One proxy hop (+ cache/DB lookups) | **Zero** (no proxy in the path) |
 | License | **Apache 2.0 — all features OSS**, incl. the Vouch-by-STS identity path and JSON audit logging (framed honestly: identity *attestation* + *logging*, not a SAML-terminating SSO + an immutable audit store) | MIT core **+ Commercial** — SSO/SAML and audit logs are paid Enterprise | MIT (AWS Solutions sample) |
 
@@ -646,6 +646,9 @@ be billed — so the ledger/rating work was P0 and shipped first; the router is 
 | **Rating engine** (usage → money) | Layer 5 front | Pins "which price, when" so a price change never breaks past invoices; also the basis for "how much the router saved" | Versioned per-model micro-USD config; rate frozen at reserve, versioned rating on the terminal | **Shipped** |
 | **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture non-LLM actions inside their own workflows | `TransactWriteItems` reserve = authorize; the unmodified settle = capture | **Shipped** |
 | **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box | `resolve_model` is deterministic; the routing-signals append log is the sink | **Shipped** |
+| **Session-aware routing (SAAR)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; switch-cost gated at reserve | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve | **Shipped, dark** (`SAAR_ENABLED`) |
+| **Hybrid serving (self-hosted vLLM)** | Transport axis | Route selected models to an internal vLLM endpoint instead of Bedrock, priced as operator cost-recovery, so the *same* budget/rating/settle path covers self-hosted inference | `served_by` seam on the target; one transport binding at `_attempt_invoke`; SSE→converse translation | **Shipped, dark** (`HYBRID_SERVING_ENABLED`) |
+| **External VSR consult** (version-pinned advisor) | Router's central-advice axis | A central, external Value/Session Router can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money | Fail-open consult (150 ms); version-pin handshake; per-tenant opaque config in S3, validated by the VSR itself | **Shipped, dark** (`EXTERNAL_VSR_ENABLED`) |
 | **Latency/SLO-driven routing** (signals consumer) | Router's latency axis | Without a latency feedback loop, semantic routing collapses onto the cheap model and breaks SLOs | `attempt_facts.latency_ms` per attempt; signals writer already live | **P1** |
 | **Semantic routing** (meaning/difficulty → model) | The 4th routing axis | The "cheaper the more you use" curve — route the easy 60–80% to a 1/10-cost model; classify with embeddings + rules, and **meter the classifier's own cost** | `resolve_model` is the single decision point; `cost_tier` + fallback chain = a difficulty ladder | **P1** |
 | **Prompt-cache passthrough** | Layer 5 cost side | Bedrock prompt-cache reads are heavily discounted; direct margin win when tenants share a system prompt | Micro-USD pricing config; per-attempt token stats | **P1** |
@@ -775,15 +778,40 @@ observability** (per-request span records + per-workflow-run rollups, with a
 `canceled_by_client` flag) and a **write-only routing-signals log** for offline
 routing evaluation — all three fire-and-forget, DynamoDB-only, and money-neutral.
 
+**Shipped dark (wired into the request path, but behind a feature flag that
+defaults off — with the flag off the invoke path is byte-behaviour-identical
+to Bedrock-only):**
+
+- **Session-aware routing (SAAR)** (`SAAR_ENABLED`). Sticky per-session model
+  choice with a tool-loop hard-lock, switch-cost gated at reserve; backed by a
+  DynamoDB session-memory table. Per-tenant opt-in on top of the flag.
+- **Hybrid serving — self-hosted vLLM** (`HYBRID_SERVING_ENABLED`). A registry
+  entry can declare `served_by="vllm"` + an `endpoint_key`; the target then
+  routes to an internal vLLM endpoint (from an operator allowlist, `VLLM_ENDPOINTS`)
+  instead of Bedrock, priced as operator cost-recovery so the same
+  reserve/rating/settle path applies. The one transport seam is
+  `infrarouter._attempt_invoke`; the OpenAI SSE stream is translated into the
+  same Bedrock `converse_stream` events the rest of the pipeline already
+  consumes. A vLLM entry is catalogued only when the flag is on **and** its
+  endpoint is allowlisted (otherwise it resolves like an unknown model). Note:
+  Fargate has no GPU, so the *self-hosted GPU backend itself* is not part of
+  this deployment — this ships the client-side seam and its billing integration.
+- **External VSR consult** (`EXTERNAL_VSR_ENABLED`). An optional, external,
+  version-pinned Value/Session Router can be consulted for a routing suggestion
+  (fail-open, 150 ms, no retry). The suggestion is fed into the **same** resolver
+  inputs as a client `x-sc-model-pin`, so it passes the same tenant allowlist +
+  servability enforcement and can never expand model access or touch money. A
+  version-pin handshake (UNVERIFIED/VERIFIED/REFUSED) gates every consult; an
+  unreachable or unpinned VSR degrades to normal Bedrock routing. Per-tenant VSR
+  configuration is stored as an **opaque** S3 blob that Stratoclave never parses
+  — save-time validation is delegated to the VSR's own `/v1/config/validate`
+  (see [`docs/VSR_CONFIG_CONTRACT.md`](./docs/VSR_CONFIG_CONTRACT.md)). The
+  semantic routing logic itself lives in the external VSR, not in Stratoclave.
+
 **On the roadmap (designed, not yet wired into the request path):**
 
 - **Per-tenant reasoning-effort and tool caps.** App-layer policy hooks exist;
   enforcement is not wired.
-- **VSR (virtual service router) service.** The per-request hard pin is shipped
-  (`x-sc-model-pin` header → exactly that model, no cascade/fallback/downgrade,
-  allowlist- and servability-enforced; see "Model pinning & passthrough" below).
-  What remains is an *external* VSR service that would set that header centrally
-  — the header is the forward-compatible seam for it.
 - **Offline routing evaluator.** The routing-signals table is written today but
   nothing consumes it yet; the evaluator that feeds routing policy back is a
   later increment (the schema is day-bucketed + sharded + TTL'd for it).
