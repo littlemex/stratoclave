@@ -1603,11 +1603,28 @@ def reserve_external_authorization(
             pricing_key=pricing_key,
         )
         _IDEMP_IDX = 3
+        _txn_t0 = time.perf_counter()
         try:
             client.transact_write_items(
                 TransactItems=[pool_txn, hold_txn, reserve_evt, idemp_txn],
                 ClientRequestToken=_fresh_idempotency_token(),
             )
+            # Ledger-write latency telemetry (permanent): the synchronous
+            # TransactWriteItems is THE cost of putting the ledger on the hot
+            # path, so we log its wall-clock ms so a metric filter / benchmark can
+            # separate "ledger round-trip" from the HTTP/ALB shell. Only the
+            # committed path is timed; a CCF/throttle falls through to the retry
+            # loop below and is not a settled ledger write. Guarded — telemetry
+            # must never break a reserve.
+            try:
+                logger.info(
+                    "ledger_transact_latency",
+                    op="external_authorize_reserve",
+                    duration_ms=round((time.perf_counter() - _txn_t0) * 1000, 3),
+                    tenant_id=tenant_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code != "TransactionCanceledException":
