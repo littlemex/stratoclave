@@ -569,11 +569,16 @@ export class EcsStack extends cdk.Stack {
 
     // Per-tenant VSR config store (opaque blobs). The bucket is VERSIONED (free
     // rollback + last-known-good history), private, TLS-enforced, KMS-managed.
-    // The backend task role is granted Get/Put/Delete ONLY on the
-    // `vsr-config/*` object prefix — never a bucket-wide grant and no
-    // ListBucket (Stratoclave addresses objects by exact tenant key, never
-    // enumerates). Ships dark: without the flag there is no bucket, no grant,
-    // no env var, and the admin surface 404s.
+    // The backend task role is granted Get/Put/Delete on the `vsr-config/*`
+    // object prefix — never a bucket-wide object grant. A prefix-scoped
+    // ListBucket is ALSO granted (condition: s3:prefix = vsr-config/*): without
+    // it, S3 returns 403 AccessDenied (not 404 NoSuchKey) for a GetObject on a
+    // key that does not exist yet, because the caller has no permission to know
+    // whether the object exists. That turns the common "tenant has no config
+    // yet" case into a 400 error instead of the intended 404, breaking the UI's
+    // create-first-config flow. The prefix condition keeps enumeration scoped to
+    // the vsr-config/ keyspace only. Ships dark: without the flag there is no
+    // bucket, no grant, no env var, and the admin surface 404s.
     const vsrEnv: { [key: string]: string } = {};
     if (props.enableVsrConfigBucket) {
       const bucket = new s3.Bucket(this, 'VsrConfigBucket', {
@@ -591,6 +596,19 @@ export class EcsStack extends cdk.Stack {
           effect: iam.Effect.ALLOW,
           actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
           resources: [`${bucket.bucketArn}/vsr-config/*`],
+        }),
+      );
+      // Prefix-scoped ListBucket so a GetObject on a not-yet-created key returns
+      // 404 (NoSuchKey), not 403 (AccessDenied). Restricted to the vsr-config/
+      // prefix via the s3:prefix condition — the role can never enumerate any
+      // other keyspace in the bucket.
+      this.taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'VsrConfigBlobList',
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:ListBucket'],
+          resources: [bucket.bucketArn],
+          conditions: { StringLike: { 's3:prefix': ['vsr-config/*'] } },
         }),
       );
       vsrEnv.VSR_CONFIG_BUCKET = bucket.bucketName;

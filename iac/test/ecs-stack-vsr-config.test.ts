@@ -9,9 +9,10 @@ import { EcsStack } from '../lib/ecs-stack';
  * Per-tenant VSR config bucket: the S3 store for opaque VSR config blobs.
  *
  * Proves the security posture and the dark-ship default:
- *  - enabled  => a versioned, private, TLS-enforced bucket + a task-role grant
- *    scoped ONLY to the `vsr-config/*` object prefix (no bucket-wide grant, no
- *    ListBucket) + the VSR_CONFIG_BUCKET env var;
+ *  - enabled  => a versioned, private, TLS-enforced bucket + a task-role
+ *    object grant scoped ONLY to the `vsr-config/*` prefix (no bucket-wide
+ *    object grant) + a prefix-scoped ListBucket (so a GET on a not-yet-created
+ *    key returns 404, not 403) + the VSR_CONFIG_BUCKET env var;
  *  - disabled => NO bucket, NO grant, NO env (feature is invisible).
  */
 function synth(enableVsrConfigBucket: boolean): { template: Template; stack: EcsStack } {
@@ -72,7 +73,7 @@ describe('EcsStack VSR config bucket', () => {
       template.hasResource('AWS::S3::Bucket', { DeletionPolicy: 'Retain' });
     });
 
-    test('task role grant is scoped to vsr-config/* only, no ListBucket', () => {
+    test('object grant is scoped to vsr-config/* only', () => {
       const policies = template.findResources('AWS::IAM::Policy');
       const stmts: any[] = [];
       for (const k of Object.keys(policies)) {
@@ -85,14 +86,34 @@ describe('EcsStack VSR config bucket', () => {
       expect(vsrStmt.Action.sort()).toEqual(
         ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'].sort(),
       );
-      // No ListBucket anywhere for the config bucket.
-      const hasList = stmts.some(
-        (s) => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes('s3:ListBucket'),
-      );
-      expect(hasList).toBe(false);
-      // The resource is the /vsr-config/* prefix, not the bucket root.
+      // The object grant addresses the /vsr-config/* prefix, not the bucket root.
       const res = JSON.stringify(vsrStmt.Resource);
       expect(res).toContain('vsr-config/*');
+    });
+
+    test('ListBucket is granted but scoped to the vsr-config/ prefix only', () => {
+      // Without ListBucket, S3 returns 403 (not 404) for a GetObject on a key
+      // that does not exist yet, breaking the "no config yet" UI flow. The grant
+      // is required, but MUST be constrained to the vsr-config/ prefix so the
+      // role can never enumerate any other keyspace.
+      const policies = template.findResources('AWS::IAM::Policy');
+      const stmts: any[] = [];
+      for (const k of Object.keys(policies)) {
+        for (const s of policies[k].Properties.PolicyDocument.Statement) {
+          stmts.push(s);
+        }
+      }
+      const listStmt = stmts.find((s) => s.Sid === 'VsrConfigBlobList');
+      expect(listStmt).toBeDefined();
+      const actions = Array.isArray(listStmt.Action) ? listStmt.Action : [listStmt.Action];
+      expect(actions).toEqual(['s3:ListBucket']);
+      // Resource is the bucket ARN (ListBucket is a bucket-level action)...
+      const res = JSON.stringify(listStmt.Resource);
+      expect(res).not.toContain('vsr-config/*'); // bucket root, not an object arn
+      // ...but constrained by an s3:prefix condition to vsr-config/*.
+      const cond = JSON.stringify(listStmt.Condition);
+      expect(cond).toContain('s3:prefix');
+      expect(cond).toContain('vsr-config/*');
     });
 
     test('VSR_CONFIG_BUCKET env var is injected', () => {
