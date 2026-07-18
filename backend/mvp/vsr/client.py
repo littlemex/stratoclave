@@ -119,10 +119,18 @@ class VsrConsultResult:
     """The outcome of one consult, for observability. `suggestion` is non-None
     ONLY when `outcome == CONSULT_SUGGESTED`. This never carries the VSR URL or
     the tenant config contents — only the advised model id (already destined for
-    the same allowlist enforcement as a client pin)."""
+    the same allowlist enforcement as a client pin).
+
+    `config_version` is the opaque effective-config id the RUNNING VSR echoed on
+    the consult response (contract: header `x-vsr-config-version`), or None if it
+    did not echo one. Compared against the S3 version Stratoclave wrote at PUT,
+    this is how config validate/serve SKEW is detected — the running VSR may
+    lazy-load an older blob or fall back to last-known-good/default silently, and
+    only the writer (Stratoclave) can notice its write is not the one in effect."""
 
     outcome: str
     suggestion: Optional[VsrSuggestion] = None
+    config_version: Optional[str] = None
 
 
 def get_state() -> str:
@@ -254,17 +262,27 @@ def consult_ex(*, tenant_id: str, session_key: Optional[str],
         _set_state(REFUSED)
         logger.warning("vsr_consult_contract_mismatch")
         return VsrConsultResult(CONSULT_NO_ADVICE)
+    # The effective-config id the running VSR served this consult with (contract
+    # addition). Optional: an older VSR simply omits it -> None -> skew undetected
+    # (never an error). Bounded to a sane length so a hostile echo can't bloat the
+    # decision record.
+    cfg_ver = resp.headers.get("x-vsr-config-version")
+    if isinstance(cfg_ver, str):
+        cfg_ver = cfg_ver.strip()[:128] or None
+    else:
+        cfg_ver = None
     if resp.status_code != 200:
-        return VsrConsultResult(CONSULT_NO_ADVICE)
+        return VsrConsultResult(CONSULT_NO_ADVICE, config_version=cfg_ver)
     try:
         body = resp.json()
     except (json.JSONDecodeError, ValueError):
-        return VsrConsultResult(CONSULT_NO_ADVICE)
+        return VsrConsultResult(CONSULT_NO_ADVICE, config_version=cfg_ver)
     model = body.get("pin_model")
     mode = body.get("mode")
     if not isinstance(model, str) or not model or mode not in ("hard", "prefer"):
-        return VsrConsultResult(CONSULT_NO_ADVICE)
-    return VsrConsultResult(CONSULT_SUGGESTED, VsrSuggestion(model=model, mode=mode))
+        return VsrConsultResult(CONSULT_NO_ADVICE, config_version=cfg_ver)
+    return VsrConsultResult(
+        CONSULT_SUGGESTED, VsrSuggestion(model=model, mode=mode), config_version=cfg_ver)
 
 
 def consult(*, tenant_id: str, session_key: Optional[str],
@@ -307,3 +325,40 @@ def classify_consult_decision(result: "VsrConsultResult", *,
     if s.mode == "prefer":
         return DECISION_PREFER_OVERRIDDEN if saar_prefer_present else DECISION_PREFER_APPLIED
     return result.outcome  # pragma: no cover — mode is validated upstream
+
+
+# Response header names, following the existing `x-sc-saar-*` convention. These
+# are OBSERVATIONAL (a debugging aid so an operator/client can see, per request,
+# whether the VSR was consulted and honored) — never authoritative and never
+# carrying the session key / VSR url / config contents.
+HDR_VSR_DECISION = "x-sc-vsr-decision"
+HDR_VSR_SUGGESTED = "x-sc-vsr-suggested"
+HDR_VSR_CONFIG_VERSION = "x-sc-vsr-config-version"
+
+
+def decision_record(result: "VsrConsultResult", *, saar_prefer_present: bool) -> dict:
+    """PURE: the VSR block to attach to the reserve-time decision log record.
+    Only the fields safe to persist: the decision label, the advised model +
+    mode (when suggested), and the effective-config id the VSR echoed. NO raw
+    session key, NO VSR url, NO tenant config contents."""
+    s = result.suggestion
+    rec = {"decision": classify_consult_decision(result, saar_prefer_present=saar_prefer_present)}
+    if s is not None:
+        rec["suggested_model"] = s.model
+        rec["mode"] = s.mode
+    if result.config_version:
+        rec["config_version"] = result.config_version
+    return rec
+
+
+def decision_headers(result: "VsrConsultResult", *, saar_prefer_present: bool) -> dict:
+    """PURE: the `x-sc-vsr-*` response headers for one request, mirroring SAAR's
+    replay headers. Same safety as decision_record — only the decision label, the
+    advised model, and the echoed config id (all header-safe scalars)."""
+    s = result.suggestion
+    hdrs = {HDR_VSR_DECISION: classify_consult_decision(result, saar_prefer_present=saar_prefer_present)}
+    if s is not None:
+        hdrs[HDR_VSR_SUGGESTED] = s.model
+    if result.config_version:
+        hdrs[HDR_VSR_CONFIG_VERSION] = result.config_version
+    return hdrs

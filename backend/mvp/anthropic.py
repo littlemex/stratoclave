@@ -620,6 +620,8 @@ def messages(
     # passes the SAME allowlist/servability enforcement — the VSR is an untrusted
     # advisor, never a bypass.
     vsr_hard = None
+    vsr_decision = None   # dict attached to the reserve-time decision record
+    vsr_headers = {}      # x-sc-vsr-* observational response headers
     if model_pin is None and saar_hard is None:
         try:
             from .vsr import client as _vsr
@@ -633,20 +635,29 @@ def messages(
                     tenant_id=user.org_id, session_key=sk, requested_model=body.model,
                 )
                 suggestion = result.suggestion
+                saar_prefer_present = saar_prefer is not None
                 # The decision the gateway can prove AT CONSULT TIME (routing
                 # quality itself belongs to the VSR's own metrics stack). The
-                # post-reserve enforcement split (allowlist reject) is a later
-                # increment. classify_consult_decision is pure + unit-tested.
+                # post-reserve enforcement split (allowlist reject) is derivable
+                # offline from the committed model. classify/decision_record/
+                # decision_headers are pure + unit-tested.
                 decision = _vsr.classify_consult_decision(
-                    result, saar_prefer_present=saar_prefer is not None)
+                    result, saar_prefer_present=saar_prefer_present)
+                vsr_decision = _vsr.decision_record(
+                    result, saar_prefer_present=saar_prefer_present)
+                vsr_headers = _vsr.decision_headers(
+                    result, saar_prefer_present=saar_prefer_present)
                 if suggestion is not None and suggestion.mode == "hard":
                     vsr_hard = suggestion.model
                 elif (suggestion is not None and suggestion.mode == "prefer"
                       and saar_prefer is None):
                     saar_prefer = suggestion.model
                 # tenant_id is auth-derived; we log the advised model id (bound
-                # for the same allowlist enforcement as a client pin) but NEVER
-                # the raw session key, the VSR url, or the tenant config blob.
+                # for the same allowlist enforcement as a client pin) + the VSR's
+                # echoed effective-config id, but NEVER the raw session key, the
+                # VSR url, or the tenant config blob. The config_version rides the
+                # log so a metric filter / offline join can flag validate-serve
+                # skew (written S3 version vs the version actually served).
                 logger.info(
                     "vsr_consult_decision",
                     tenant_id=user.org_id,
@@ -654,9 +665,17 @@ def messages(
                     suggested_model=(suggestion.model if suggestion else None),
                     mode=(suggestion.mode if suggestion else None),
                     requested_model=body.model,
+                    config_version=result.config_version,
+                    request_id=(ctx.request_id if ctx else None),
                 )
         except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
             vsr_hard = None
+
+    # Echo the VSR decision on the non-streaming response (the streaming branch
+    # merges vsr_headers into its own StreamingResponse header block below).
+    # Empty when the feature is off => no new headers (dark ship).
+    if vsr_headers:
+        response.headers.update(vsr_headers)
 
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit_for_model(
@@ -676,6 +695,9 @@ def messages(
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        # Observability: the VSR consult decision, joined to the committed model
+        # on the reserve-time decision record (None when the feature is off).
+        vsr_decision=vsr_decision,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
@@ -707,6 +729,7 @@ def messages(
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
                 **saar_hdrs,
+                **vsr_headers,
                 **corr,
             },
         )

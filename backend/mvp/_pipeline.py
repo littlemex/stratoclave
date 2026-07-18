@@ -251,6 +251,12 @@ class ReservationContext:
     # Pure attribution — the handler emits it fire-and-forget; None when routing
     # had no real choice (single-candidate / no-config passthrough).
     decision_facts: Optional[dict] = None
+    # The external-VSR consult decision for this request, when the VSR feature
+    # acted: {decision, suggested_model, mode, config_version}. Observability
+    # only — NEVER money. Carried onto the reserve-time decision record so an
+    # offline job can join "VSR advised X" against the committed/billed model by
+    # span_id. None for every non-VSR request (dark ship).
+    vsr_decision: Optional[dict] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -681,6 +687,7 @@ def reserve_credit_for_model(
     request_id: Optional[str] = None,
     saar_warm_prefix_tokens: int = 0,
     saar_prefer_model: Optional[str] = None,
+    vsr_decision: Optional[dict] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -757,11 +764,16 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Carry the VSR consult decision (observability only) so the decision
+        # record can be joined to the committed/billed model by span_id.
+        ctx.vsr_decision = vsr_decision
         # Complete the decision facts with the estimate inputs the candidates
         # were priced against (P0 decision log), then fire-and-forget the
         # reserve-time decision record. The WHOLE block is fenced: this runs after
         # the reserve committed, so int(None)/any error must not fail the request
-        # (Fable RDL review High). Attribution is best-effort.
+        # (Fable RDL review High). Attribution is best-effort. A VSR decision
+        # alone (no routing facts, single-candidate passthrough) still emits the
+        # record — record_decision_from_context handles the facts-absent case.
         if ctx.decision_facts is not None:
             try:
                 ctx.decision_facts["estimate_inputs"] = {
@@ -769,6 +781,10 @@ def reserve_credit_for_model(
                     "max_out": int(max_output_tokens),
                     "effort": int(effort_multiplier),
                 }
+            except Exception:  # noqa: BLE001 — never fail reserve on attribution.
+                pass
+        if ctx.decision_facts is not None or vsr_decision:
+            try:
                 from .learning.decision_log import record_decision_from_context
                 record_decision_from_context(ctx)
             except Exception:  # noqa: BLE001 — decision logging never breaks reserve.
@@ -790,6 +806,16 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Observability: carry + record the VSR decision (fire-and-forget). A
+        # hard pin normally has no multi-candidate decision_facts, so this is the
+        # only place a hard-applied VSR decision reaches the decision log.
+        ctx.vsr_decision = vsr_decision
+        if vsr_decision:
+            try:
+                from .learning.decision_log import record_decision_from_context
+                record_decision_from_context(ctx)
+            except Exception:  # noqa: BLE001 — decision logging never breaks reserve.
+                pass
         return ctx
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).

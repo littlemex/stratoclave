@@ -80,6 +80,7 @@ def build_decision_item(
     rejected: list[dict],
     estimate_inputs: dict,
     created_at_ms: int,
+    vsr: Optional[dict] = None,
 ) -> dict[str, Any]:
     """PURE builder for the reserve-time decision record.
 
@@ -87,10 +88,17 @@ def build_decision_item(
                 pricing_version_at_decision}.
     `rejected` = [{model, pricing_key, cost_tier, reject_reason, servable,
                    est_cost_microusd|None}].
+    `vsr` (optional) = the external-VSR consult decision for this request:
+        {decision, suggested_model, mode, config_version} — present ONLY when the
+        VSR feature was on for the request. It is the observability half of the
+        VSR integration: joined against this record's `chosen.model` and (offline)
+        the ledger/usage-log keyed by the same `span_id`, it proves "the VSR
+        advised X, the request committed Y, and it was billed Z" without a new
+        table. Absent entirely when the feature is off (dark ship).
     No TTL attribute (audit record). Deterministic sk → an idempotent retry
     overwrites byte-identically.
     """
-    return {
+    item = {
         "pk": _decision_pk(tenant_id, _day(created_at_ms)),
         "sk": decision_sk(run_id, span_id),
         "record_type": "decision",
@@ -107,6 +115,11 @@ def build_decision_item(
         "rejected": list(rejected),
         "estimate_inputs": dict(estimate_inputs),
     }
+    # Only attach the VSR block when the feature acted — keeps the record
+    # byte-identical to today for every non-VSR request (dark ship + smaller item).
+    if vsr:
+        item["vsr"] = dict(vsr)
+    return item
 
 
 def build_outcome_item(
@@ -183,16 +196,33 @@ def emit_decision(item: dict) -> None:
 
 def record_decision_from_context(context) -> None:
     """Build + fire-and-forget the reserve-time decision record from a settled/
-    reserved context. No-op (never raises) when the context lacks decision facts
-    (single-candidate / no-config passthrough) or a run/span id. Called right
-    after the reserve chokepoint returns, so the decision is on record BEFORE the
-    outcome (the anti-post-hoc audit property)."""
+    reserved context. No-op (never raises) when the context has neither decision
+    facts (single-candidate / no-config passthrough) NOR a VSR decision, or lacks
+    a run/span id. Called right after the reserve chokepoint returns, so the
+    decision is on record BEFORE the outcome (the anti-post-hoc audit property).
+
+    A VSR decision ALONE is enough to emit the record even on a single-candidate
+    passthrough (no routing facts): the VSR is effective regardless of how many
+    Bedrock candidates existed, and the offline billing-reconciliation join needs
+    every VSR-acted request keyed by span_id."""
     try:
         facts = getattr(context, "decision_facts", None)
+        vsr = getattr(context, "vsr_decision", None)
         run_id = getattr(context, "workflow_run_id", None)
         span_id = getattr(context, "request_id", None) or getattr(context, "span_id", None)
-        if not facts or not run_id or not span_id:
+        if (not facts and not vsr) or not run_id or not span_id:
             return
+        if facts:
+            chosen = facts["chosen"]
+            rejected = facts["rejected"]
+            estimate_inputs = facts.get("estimate_inputs", {})
+        else:
+            # VSR-only record on a single-candidate passthrough: the committed
+            # model is what the reserve selected; no rejected alternates existed.
+            chosen = {"model": getattr(context, "selected_model", None)
+                      or getattr(context, "requested_model", "") or ""}
+            rejected = []
+            estimate_inputs = {}
         item = build_decision_item(
             tenant_id=getattr(context, "tenant_id", ""),
             run_id=run_id,
@@ -201,10 +231,11 @@ def record_decision_from_context(context) -> None:
             requested_model=getattr(context, "requested_model", "") or "",
             selection_reason=None,
             fallback_reason=None,
-            chosen=facts["chosen"],
-            rejected=facts["rejected"],
-            estimate_inputs=facts.get("estimate_inputs", {}),
+            chosen=chosen,
+            rejected=rejected,
+            estimate_inputs=estimate_inputs,
             created_at_ms=_now_ms(),
+            vsr=vsr,
         )
         emit_decision(item)
     except Exception:  # noqa: BLE001 — decision logging must never break a request.

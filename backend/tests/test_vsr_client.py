@@ -247,3 +247,77 @@ def test_classify_prefer_applied_vs_overridden():
     assert vsr.classify_consult_decision(r, saar_prefer_present=False) == vsr.DECISION_PREFER_APPLIED
     # A local SAAR prefer already holds it => the VSR prefer is overridden this turn.
     assert vsr.classify_consult_decision(r, saar_prefer_present=True) == vsr.DECISION_PREFER_OVERRIDDEN
+
+
+# --------------------------------------------------------------------------
+# consult_ex config-version echo (skew-detection contract) + the pure
+# decision_record / decision_headers builders (decision-log + response headers).
+# --------------------------------------------------------------------------
+
+def test_consult_ex_captures_config_version_echo(monkeypatch):
+    _install(monkeypatch)
+
+    def handler(req):
+        if req.url.path == "/version":
+            return httpx.Response(200, json={"contract": "vsr/1", "version": "1.4.2"})
+        return httpx.Response(
+            200,
+            headers={"x-vsr-contract": "vsr/1", "x-vsr-config-version": "cfgv-abc123"},
+            json={"pin_model": "claude-haiku-4-5", "mode": "hard"},
+        )
+
+    monkeypatch.setattr(vsr, "_get_client", lambda: _fake_client(handler))
+    assert vsr.handshake() == vsr.VERIFIED
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="m")
+    assert r.outcome == vsr.CONSULT_SUGGESTED
+    assert r.config_version == "cfgv-abc123"
+
+
+def test_consult_ex_config_version_none_when_not_echoed(monkeypatch):
+    _install(monkeypatch)
+
+    def handler(req):
+        if req.url.path == "/version":
+            return httpx.Response(200, json={"contract": "vsr/1", "version": "1.4.2"})
+        return httpx.Response(200, headers={"x-vsr-contract": "vsr/1"},
+                              json={"pin_model": "m", "mode": "prefer"})
+
+    monkeypatch.setattr(vsr, "_get_client", lambda: _fake_client(handler))
+    assert vsr.handshake() == vsr.VERIFIED
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="m")
+    assert r.config_version is None  # older VSR omits it -> skew simply undetected
+
+
+def test_decision_record_shape():
+    r = vsr.VsrConsultResult(vsr.CONSULT_SUGGESTED,
+                             vsr.VsrSuggestion(model="claude-haiku-4-5", mode="hard"),
+                             config_version="cfgv-1")
+    rec = vsr.decision_record(r, saar_prefer_present=False)
+    assert rec == {
+        "decision": vsr.DECISION_HARD_APPLIED,
+        "suggested_model": "claude-haiku-4-5",
+        "mode": "hard",
+        "config_version": "cfgv-1",
+    }
+
+
+def test_decision_record_no_advice_has_only_decision():
+    r = vsr.VsrConsultResult(vsr.CONSULT_NO_ADVICE)
+    assert vsr.decision_record(r, saar_prefer_present=False) == {"decision": "no-advice"}
+
+
+def test_decision_headers_shape():
+    r = vsr.VsrConsultResult(vsr.CONSULT_SUGGESTED,
+                             vsr.VsrSuggestion(model="claude-sonnet-4-6", mode="prefer"),
+                             config_version="cfgv-9")
+    h = vsr.decision_headers(r, saar_prefer_present=False)
+    assert h[vsr.HDR_VSR_DECISION] == vsr.DECISION_PREFER_APPLIED
+    assert h[vsr.HDR_VSR_SUGGESTED] == "claude-sonnet-4-6"
+    assert h[vsr.HDR_VSR_CONFIG_VERSION] == "cfgv-9"
+
+
+def test_decision_headers_prefer_overridden_carries_no_suggested_when_absent():
+    # A non-suggested outcome yields just the decision header (no model leak).
+    r = vsr.VsrConsultResult(vsr.CONSULT_TIMEOUT)
+    h = vsr.decision_headers(r, saar_prefer_present=False)
+    assert h == {vsr.HDR_VSR_DECISION: "timeout"}

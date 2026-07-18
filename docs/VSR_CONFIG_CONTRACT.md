@@ -96,6 +96,23 @@ suggestion the VSR returns is re-checked against the tenant allowlist by
 Stratoclave exactly as a client `x-sc-model-pin` is, so a config can never
 expand a tenant's model access or touch the money path.
 
+### 4. Effective-config echo (observability contract addition)
+
+On the `/v1/route` response the VSR SHOULD echo the header
+`x-vsr-config-version: <opaque id>` — the id (e.g. the S3 `VersionId`, an etag,
+or a content hash) of the tenant config blob it **actually served** this
+consult. It is OPTIONAL: an older VSR that omits it simply leaves skew
+undetected (never an error).
+
+Stratoclave records the echoed id on the reserve-time decision record
+(`vsr.config_version`) and on the `vsr_consult_decision` log line. Compared
+offline against the S3 version Stratoclave wrote at PUT, a mismatch reveals
+**validate/serve skew** — the running VSR lazy-loaded an older blob or fell back
+to last-known-good/default while the admin believes their newest config is live.
+Detecting the skew is Stratoclave's job (only the writer knows what it wrote);
+resolving it (reload / re-validation sweep) is the VSR's. Stratoclave never
+parses the id — it is an opaque equality token, bounded to 128 chars.
+
 ## Failure matrix
 
 | Failure | Admin/user sees | Running VSR task | Blast radius |
