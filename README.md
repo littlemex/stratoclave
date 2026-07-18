@@ -579,7 +579,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
-| Providers | Amazon Bedrock only (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) | Amazon Bedrock, Anthropic models only |
+| Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the _same_ reserve/rating/settle ledger** (ships dark). Fewer raw adapters than LiteLLM, but any bound backend flows through the formally-proven charge of record | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — more adapters, but their billing is best-effort | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
 | Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). A **hard** limit. | **No client bypass**, but the pre-call budget check reads a **cached spend counter**, so it is not atomic — a check-then-act (TOCTOU) window remains under concurrency. A **soft** limit at the margin | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
@@ -617,7 +617,8 @@ pre-call check races a cached counter under concurrency.
 > large, widely-deployed project. This table judges *capability*, not adoption —
 > weigh maturity separately for your own risk tolerance.
 
-**Pick Stratoclave** for an AWS-committed, Bedrock-only, single-region
+**Pick Stratoclave** for an AWS-committed, Bedrock-first (self-hosted GPU / any
+OpenAI-compatible backend bindable to the same proven ledger), single-region
 (operator-chosen) shop that needs hard per-tenant dollar caps enforced pre-flight
 so a user cannot exceed them, and — unlike a post-hoc counter — cannot even
 transiently overspend under concurrency (an application-level invariant: an

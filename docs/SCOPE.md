@@ -119,9 +119,27 @@ holds.
 
 ## LiteLLM differentiation
 
-Against LiteLLM, the goal on the **parity layer** is to not lose, not to win:
-OpenAI-compatible unified API, adapters for the major providers (not 100+),
-virtual keys with per-team budgets, fallback/retry, response cache.
+Stratoclave is **open source (Apache 2.0)**, so the comparison is on capability,
+not on distribution.
+
+Split the "provider network" axis in two — conflating them is an evaluation
+error:
+
+- **Breadth of connection** — LiteLLM wins. Its 100+ adapters are not a list of
+  URLs; they are years of absorbed per-provider streaming quirks, tool-call
+  schema differences, retry semantics, and auth. "OpenAI-compatible, so anything
+  connects" is ~80% true; the remaining ~20% (Anthropic-native features, Gemini
+  multimodal, provider-specific tool shapes) is LiteLLM's real moat and the vLLM
+  seam does not auto-fill it. On the **parity layer** the goal is to not lose,
+  not to win: OpenAI-compatible unified API, adapters for the major providers,
+  virtual keys with per-team budgets, fallback/retry, response cache.
+- **Depth of integration** — Stratoclave wins, and not narrowly. Bedrock, a
+  self-hosted GPU (the `served_by="vllm"` transport seam + `VLLM_ENDPOINTS`
+  allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and
+  any OpenAI-compatible endpoint all flow through the **same** reserve / rating /
+  settle and the same Z3-proven ledger. LiteLLM *connects* many backends; their
+  billing and idempotency are best-effort. Binding an arbitrary backend under a
+  formally-proven charge of record is a different category of capability.
 
 The three **weapons** LiteLLM does not have, all deriving from the strength of
 "fact confirmation":
@@ -149,6 +167,18 @@ stand-alone VSR can build. The differentiation is not any single feature; it is
 the **architecture that keeps judgment (VSR) and execution+recording
 (Stratoclave) separate while closing the loop between them.**
 
+**The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a thin
+compatibility shim for the non-OpenAI-compatible providers (weeks–months), and
+that traffic then flows through the proven ledger too. For LiteLLM to absorb
+Stratoclave's edge — an event-sourced, idempotent, formally-proven
+reserve/rating/settle ledger — is a re-design, not a retrofit
+(quarters–a year), carried out while preserving an existing best-effort billing
+base. The moat is on Stratoclave's side. The one thing that keeps the lead
+"provisional" rather than realized is that **the ledger's _speed_ is a design
+target (p99<50ms), not yet a published, load-and-fault-tested measurement** —
+its _correctness_ is proven, its speed is not yet shown. Closing that is the
+single highest-leverage next step (see [next-and-not-next](#next-and-not-next)).
+
 ## Two gravity wells (named warnings)
 
 Stratoclave can bloat in exactly two directions, each toward a bigger, better
@@ -171,10 +201,14 @@ it is someone else's job.**
 
 ## Where things stand today (2026-07)
 
+- **Open source (Apache 2.0).** The comparison is on capability, not on
+  distribution; the ledger's proof and code are inspectable.
 - **Owned and built:** the AI-gateway core (unified API, adapters, streaming,
   virtual keys, fallback, rate limit); the billing core (metering, rating,
   two-phase authorize/capture, tiered breaker, Z3-proven ledger); LLM router
-  execution (allowlist / breaker / VSR hard-pin / fallback chain); version-
+  execution (allowlist / breaker / VSR hard-pin / fallback chain); a transport
+  seam (`served_by="vllm"`) that binds a **self-hosted GPU / any
+  OpenAI-compatible backend** to the *same* reserve/rating/settle path; version-
   pinned external VSR consult with the "advice quality is the VSR's, honoring
   and charging is ours" boundary; SAAR (sticky, tool-loop lock, idle reset,
   decision drift, provider-state lock) as routing-optimization state; the
@@ -185,8 +219,14 @@ it is someone else's job.**
 - **Deliberately not owned:** semantic classification / routing algorithm /
   quality scoring (VSR); model training (external); price packaging, invoicing,
   tax, outcome-based billing (commerce / external); MCP hub / registry.
-- **Hygiene, not features:** p99<50ms is a design target without a benchmark
-  yet; reconciliation runs from a manual CLI, not a scheduled job.
+- **Hygiene, not features (but the top one gates the whole value claim):**
+  p99<50ms is a design target without a load-and-fault-tested benchmark yet —
+  the ledger's correctness is *proven* but its speed is not yet *shown*, and
+  "a proven ledger you can afford on the hot path" is the entire pitch;
+  reconciliation runs from a manual CLI, not a scheduled job; the VSR-down path
+  degrades to static routing but the graceful-degradation behaviour is not yet
+  benchmark-exercised (fold it into the same load test as a fault-injection
+  scenario).
 
 ## Next and not-next
 
