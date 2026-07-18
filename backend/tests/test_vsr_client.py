@@ -141,3 +141,109 @@ def test_empty_pinned_config_fails_closed(monkeypatch):
 
     monkeypatch.setattr(vsr, "_get_client", lambda: _fake_client(handler))
     assert vsr.handshake() == vsr.REFUSED
+
+
+# --------------------------------------------------------------------------
+# consult_ex: consult-time OUTCOME for observability (Fable design first step).
+# consult() stays a thin wrapper (contract preserved); consult_ex adds the
+# reason so the caller can emit one honest decision log line — WITHOUT
+# re-implementing the VSR's own routing metrics.
+# --------------------------------------------------------------------------
+
+def test_consult_ex_flag_off(monkeypatch):
+    _install(monkeypatch, flag=False)
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="m")
+    assert r.outcome == vsr.CONSULT_FLAG_OFF
+    assert r.suggestion is None
+
+
+def test_consult_ex_unverified_when_not_handshaked(monkeypatch):
+    # Flag on but no successful handshake => state UNVERIFIED => consult skipped.
+    _install(monkeypatch)
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="m")
+    assert r.outcome == vsr.CONSULT_UNVERIFIED
+    assert r.suggestion is None
+
+
+def test_consult_ex_timeout_on_transport_error(monkeypatch):
+    _install(monkeypatch)
+
+    def handler(req):
+        if req.url.path == "/version":
+            return httpx.Response(200, json={"contract": "vsr/1", "version": "1.4.2"})
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(vsr, "_get_client", lambda: _fake_client(handler))
+    assert vsr.handshake() == vsr.VERIFIED
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="m")
+    assert r.outcome == vsr.CONSULT_TIMEOUT
+    assert r.suggestion is None
+
+
+def test_consult_ex_no_advice_on_bad_shape(monkeypatch):
+    _install(monkeypatch)
+
+    def handler(req):
+        if req.url.path == "/version":
+            return httpx.Response(200, json={"contract": "vsr/1", "version": "1.4.2"})
+        return httpx.Response(200, headers={"x-vsr-contract": "vsr/1"},
+                              json={"pin_model": "", "mode": "sideways"})
+
+    monkeypatch.setattr(vsr, "_get_client", lambda: _fake_client(handler))
+    assert vsr.handshake() == vsr.VERIFIED
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="m")
+    assert r.outcome == vsr.CONSULT_NO_ADVICE
+    assert r.suggestion is None
+
+
+def test_consult_ex_suggested_carries_suggestion(monkeypatch):
+    _install(monkeypatch)
+
+    def handler(req):
+        if req.url.path == "/version":
+            return httpx.Response(200, json={"contract": "vsr/1", "version": "1.4.2"})
+        return httpx.Response(200, headers={"x-vsr-contract": "vsr/1"},
+                              json={"pin_model": "claude-haiku-4-5", "mode": "hard"})
+
+    monkeypatch.setattr(vsr, "_get_client", lambda: _fake_client(handler))
+    assert vsr.handshake() == vsr.VERIFIED
+    r = vsr.consult_ex(tenant_id="t", session_key="s", requested_model="claude-opus-4-7")
+    assert r.outcome == vsr.CONSULT_SUGGESTED
+    assert r.suggestion is not None
+    assert r.suggestion.model == "claude-haiku-4-5"
+    assert r.suggestion.mode == "hard"
+    # Backward-compat: consult() still returns just the suggestion.
+    s = vsr.consult(tenant_id="t", session_key="s", requested_model="claude-opus-4-7")
+    assert s is not None and s.model == "claude-haiku-4-5"
+
+
+# --------------------------------------------------------------------------
+# classify_consult_decision: PURE mapping consult-result -> logged label.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("outcome", [
+    vsr.CONSULT_FLAG_OFF, vsr.CONSULT_UNVERIFIED,
+    vsr.CONSULT_TIMEOUT, vsr.CONSULT_NO_ADVICE,
+])
+def test_classify_passes_through_non_suggested(outcome):
+    r = vsr.VsrConsultResult(outcome)
+    # No suggestion => the raw outcome is the label, regardless of SAAR state.
+    assert vsr.classify_consult_decision(r, saar_prefer_present=False) == outcome
+    assert vsr.classify_consult_decision(r, saar_prefer_present=True) == outcome
+
+
+def test_classify_hard_is_applied():
+    r = vsr.VsrConsultResult(vsr.CONSULT_SUGGESTED,
+                             vsr.VsrSuggestion(model="m", mode="hard"))
+    # A hard pin wins regardless of any local SAAR prefer.
+    assert vsr.classify_consult_decision(r, saar_prefer_present=False) == vsr.DECISION_HARD_APPLIED
+    assert vsr.classify_consult_decision(r, saar_prefer_present=True) == vsr.DECISION_HARD_APPLIED
+
+
+def test_classify_prefer_applied_vs_overridden():
+    r = vsr.VsrConsultResult(vsr.CONSULT_SUGGESTED,
+                             vsr.VsrSuggestion(model="m", mode="prefer"))
+    # No local SAAR prefer => the VSR prefer takes the cascade head.
+    assert vsr.classify_consult_decision(r, saar_prefer_present=False) == vsr.DECISION_PREFER_APPLIED
+    # A local SAAR prefer already holds it => the VSR prefer is overridden this turn.
+    assert vsr.classify_consult_decision(r, saar_prefer_present=True) == vsr.DECISION_PREFER_OVERRIDDEN

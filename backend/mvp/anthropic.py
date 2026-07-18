@@ -624,16 +624,37 @@ def messages(
         try:
             from .vsr import client as _vsr
 
+            # Only DO anything (and only LOG anything) when the feature is on:
+            # flag off => zero new work AND zero new log lines (dark ship). The
+            # consult itself is fail-open and never on the money path.
             if _vsr.external_vsr_enabled():
                 sk = ctx.session_key() if ctx else None
-                suggestion = _vsr.consult(
+                result = _vsr.consult_ex(
                     tenant_id=user.org_id, session_key=sk, requested_model=body.model,
                 )
-                if suggestion is not None:
-                    if suggestion.mode == "hard":
-                        vsr_hard = suggestion.model
-                    elif suggestion.mode == "prefer" and saar_prefer is None:
-                        saar_prefer = suggestion.model
+                suggestion = result.suggestion
+                # The decision the gateway can prove AT CONSULT TIME (routing
+                # quality itself belongs to the VSR's own metrics stack). The
+                # post-reserve enforcement split (allowlist reject) is a later
+                # increment. classify_consult_decision is pure + unit-tested.
+                decision = _vsr.classify_consult_decision(
+                    result, saar_prefer_present=saar_prefer is not None)
+                if suggestion is not None and suggestion.mode == "hard":
+                    vsr_hard = suggestion.model
+                elif (suggestion is not None and suggestion.mode == "prefer"
+                      and saar_prefer is None):
+                    saar_prefer = suggestion.model
+                # tenant_id is auth-derived; we log the advised model id (bound
+                # for the same allowlist enforcement as a client pin) but NEVER
+                # the raw session key, the VSR url, or the tenant config blob.
+                logger.info(
+                    "vsr_consult_decision",
+                    tenant_id=user.org_id,
+                    decision=decision,
+                    suggested_model=(suggestion.model if suggestion else None),
+                    mode=(suggestion.mode if suggestion else None),
+                    requested_model=body.model,
+                )
         except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
             vsr_hard = None
 

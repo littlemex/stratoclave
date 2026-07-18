@@ -101,6 +101,30 @@ class VsrSuggestion:
     mode: str  # "hard" | "prefer"
 
 
+# Consult outcomes observable AT CONSULT TIME (before the resolver runs). This
+# is the gateway-side half of the VSR observability boundary (Fable design): we
+# record what the VSR advised and why we did/didn't get advice — NOT the routing
+# quality (that is the VSR's own Prometheus/Grafana stack). The post-reserve
+# enforcement outcomes (rejected-by-allowlist / prefer-overridden) are a later
+# increment and are NOT decided here.
+CONSULT_FLAG_OFF = "flag-off"        # feature disabled — no consult attempted
+CONSULT_UNVERIFIED = "unverified"    # handshake not VERIFIED — consult skipped
+CONSULT_TIMEOUT = "timeout"          # consult attempted, transport failed/slow
+CONSULT_NO_ADVICE = "no-advice"      # consulted OK but VSR returned no usable pin
+CONSULT_SUGGESTED = "suggested"      # VSR returned a usable suggestion (see mode)
+
+
+@dataclass(frozen=True)
+class VsrConsultResult:
+    """The outcome of one consult, for observability. `suggestion` is non-None
+    ONLY when `outcome == CONSULT_SUGGESTED`. This never carries the VSR URL or
+    the tenant config contents — only the advised model id (already destined for
+    the same allowlist enforcement as a client pin)."""
+
+    outcome: str
+    suggestion: Optional[VsrSuggestion] = None
+
+
 def get_state() -> str:
     with _state_lock:
         return _state
@@ -194,22 +218,26 @@ def handshake() -> str:
     return REFUSED
 
 
-def consult(*, tenant_id: str, session_key: Optional[str],
-            requested_model: str) -> Optional[VsrSuggestion]:
-    """Ask the VSR for a routing suggestion. Returns None (fall back to the
-    normal resolver) UNLESS the flag is on AND the pin state is VERIFIED AND the
-    consult succeeds within budget AND the response carries the pinned contract
-    header AND parses cleanly. Any deviation -> None (fail-open).
+def consult_ex(*, tenant_id: str, session_key: Optional[str],
+               requested_model: str) -> VsrConsultResult:
+    """Ask the VSR for a routing suggestion and report the OUTCOME (for
+    observability), not just the suggestion. Returns a VsrConsultResult whose
+    `suggestion` is non-None only when `outcome == CONSULT_SUGGESTED`.
 
-    This is deliberately permissive on failure and strict on trust: a missing,
-    slow, or version-skewed VSR simply yields no advice."""
+    Trust/fail-open semantics are unchanged from `consult()`: a suggestion is
+    honored only when the flag is on AND the pin state is VERIFIED AND the
+    consult succeeds within budget AND the response carries the pinned contract
+    header AND parses cleanly. Any deviation yields NO suggestion — but now the
+    reason is surfaced (flag-off / unverified / timeout / no-advice) so the
+    caller can emit a single honest decision log line without guessing."""
     if not external_vsr_enabled():
-        return None
+        return VsrConsultResult(CONSULT_FLAG_OFF)
     if get_state() != VERIFIED:
-        return None
+        return VsrConsultResult(CONSULT_UNVERIFIED)
     client = _get_client()
     if client is None:
-        return None
+        # Base url unset while flag on: treat as unverified (no peer to consult).
+        return VsrConsultResult(CONSULT_UNVERIFIED)
     try:
         resp = client.post(
             "/v1/route",
@@ -218,22 +246,64 @@ def consult(*, tenant_id: str, session_key: Optional[str],
         )
     except Exception as e:  # noqa: BLE001 — fail-open, hot-path budget honored.
         logger.info("vsr_consult_failed", error=str(e))
-        return None
+        return VsrConsultResult(CONSULT_TIMEOUT)
     # Belt-and-suspenders: a mid-flight VSR redeploy inside the handshake
     # interval is caught by the per-response contract header. On mismatch,
     # discard this response AND flip to REFUSED pending re-handshake.
     if resp.headers.get("x-vsr-contract") != _expected_contract():
         _set_state(REFUSED)
         logger.warning("vsr_consult_contract_mismatch")
-        return None
+        return VsrConsultResult(CONSULT_NO_ADVICE)
     if resp.status_code != 200:
-        return None
+        return VsrConsultResult(CONSULT_NO_ADVICE)
     try:
         body = resp.json()
     except (json.JSONDecodeError, ValueError):
-        return None
+        return VsrConsultResult(CONSULT_NO_ADVICE)
     model = body.get("pin_model")
     mode = body.get("mode")
     if not isinstance(model, str) or not model or mode not in ("hard", "prefer"):
-        return None
-    return VsrSuggestion(model=model, mode=mode)
+        return VsrConsultResult(CONSULT_NO_ADVICE)
+    return VsrConsultResult(CONSULT_SUGGESTED, VsrSuggestion(model=model, mode=mode))
+
+
+def consult(*, tenant_id: str, session_key: Optional[str],
+            requested_model: str) -> Optional[VsrSuggestion]:
+    """Backward-compatible thin wrapper over `consult_ex`: returns just the
+    suggestion (or None). New callers that want the outcome for observability
+    should call `consult_ex` directly."""
+    return consult_ex(tenant_id=tenant_id, session_key=session_key,
+                      requested_model=requested_model).suggestion
+
+
+# Final per-request decision labels the caller logs. These REFINE a
+# CONSULT_SUGGESTED outcome by what the caller did with the advice; the
+# non-suggested outcomes (flag-off/unverified/timeout/no-advice) pass through
+# unchanged. The post-reserve enforcement split (rejected-by-allowlist) is a
+# later increment and is intentionally NOT decided here.
+DECISION_HARD_APPLIED = "hard-applied"
+DECISION_PREFER_APPLIED = "prefer-applied"
+DECISION_PREFER_OVERRIDDEN = "prefer-overridden"  # local SAAR prefer already won
+
+
+def classify_consult_decision(result: "VsrConsultResult", *,
+                              saar_prefer_present: bool) -> str:
+    """PURE mapping from a consult result to the decision label to log.
+
+    * a hard suggestion  -> DECISION_HARD_APPLIED (it becomes the enforced pin);
+    * a prefer suggestion -> DECISION_PREFER_APPLIED, unless a local SAAR prefer
+      already holds the cascade head, in which case the VSR prefer does not take
+      effect this turn -> DECISION_PREFER_OVERRIDDEN;
+    * anything else (flag-off / unverified / timeout / no-advice) -> the raw
+      consult outcome, verbatim.
+
+    Note this reflects only whether the VSR advice ENTERED the resolver, not the
+    final post-allowlist committed model (a later increment)."""
+    s = result.suggestion
+    if s is None:
+        return result.outcome
+    if s.mode == "hard":
+        return DECISION_HARD_APPLIED
+    if s.mode == "prefer":
+        return DECISION_PREFER_OVERRIDDEN if saar_prefer_present else DECISION_PREFER_APPLIED
+    return result.outcome  # pragma: no cover — mode is validated upstream
