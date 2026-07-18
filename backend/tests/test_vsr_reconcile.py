@@ -40,6 +40,16 @@ def _decision(span, *, vsr, chosen_model, tenant="acme"):
     }
 
 
+# Real registry ids (settle writes the resolved BEDROCK model id to UsageLogs,
+# via resolve_bedrock_model(body.model)); the advised side is the alias the VSR
+# returns. Enforcement compares the two AFTER normalizing both to the bedrock id.
+_HAIKU_ALIAS = "claude-haiku-4-5"
+_HAIKU_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_OPUS_ALIAS = "claude-opus-4-7"
+_OPUS_BEDROCK = "us.anthropic.claude-opus-4-7"
+_SONNET_BEDROCK = "us.anthropic.claude-sonnet-4-6"
+
+
 def _usage(span, *, model_id, cost, tenant="acme"):
     # UsageLogs SK is "{iso}#{log_id}" where log_id == request_id == span_id.
     return {
@@ -54,60 +64,73 @@ def _usage(span, *, model_id, cost, tenant="acme"):
 
 def test_join_matches_decision_to_usage_by_span():
     decisions = [_decision("sp-1", vsr={"decision": "hard-applied",
-                                        "suggested_model": "claude-haiku-4-5",
+                                        "suggested_model": _HAIKU_ALIAS,
                                         "mode": "hard"},
-                           chosen_model="claude-haiku-4-5")]
-    usages = [_usage("sp-1", model_id="haiku-4-5", cost=35)]
+                           chosen_model=_HAIKU_ALIAS)]
+    usages = [_usage("sp-1", model_id=_HAIKU_BEDROCK, cost=35)]
     rows = vr.reconcile_join(decisions, usages)
     assert len(rows) == 1
     r = rows[0]
     assert r["span_id"] == "sp-1"
     assert r["vsr_decision"] == "hard-applied"
-    assert r["suggested_model"] == "claude-haiku-4-5"
-    assert r["chosen_model"] == "claude-haiku-4-5"
-    assert r["billed_model_id"] == "haiku-4-5"
+    assert r["suggested_model"] == _HAIKU_ALIAS
+    assert r["chosen_model"] == _HAIKU_ALIAS
+    assert r["billed_model_id"] == _HAIKU_BEDROCK
     assert r["cost_microusd"] == 35
     assert r["matched"] is True
 
 
-def test_hard_pin_honored_when_advice_equals_commit():
+def test_hard_pin_honored_when_advice_equals_billed():
+    # advised alias and BILLED bedrock id normalize to the same registry id.
     decisions = [_decision("sp-1", vsr={"decision": "hard-applied",
-                                        "suggested_model": "claude-haiku-4-5",
+                                        "suggested_model": _HAIKU_ALIAS,
                                         "mode": "hard"},
-                           chosen_model="claude-haiku-4-5")]
-    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id="haiku", cost=10)])
+                           chosen_model=_HAIKU_ALIAS)]
+    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id=_HAIKU_BEDROCK, cost=10)])
     assert rows[0]["enforcement"] == vr.ENFORCE_HONORED
 
 
-def test_hard_pin_violation_when_commit_differs_from_advice():
-    # A `hard` decision whose committed alias differs from the advised alias =
-    # the pin did NOT reach the money path = a trust-boundary violation to flag.
+def test_hard_pin_violation_when_billed_differs_from_advice():
+    # A `hard` pin advised haiku but the money path BILLED opus = the pin did NOT
+    # reach the money path = a trust-boundary violation, detected against BILLED
+    # (not the decision's self-reported chosen).
     decisions = [_decision("sp-1", vsr={"decision": "hard-applied",
-                                        "suggested_model": "claude-haiku-4-5",
+                                        "suggested_model": _HAIKU_ALIAS,
                                         "mode": "hard"},
-                           chosen_model="claude-opus-4-7")]
-    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id="opus", cost=500)])
+                           chosen_model=_HAIKU_ALIAS)]  # decision SAYS haiku...
+    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id=_OPUS_BEDROCK, cost=500)])
+    # ...but opus was billed -> violation, even though chosen==advised on the record.
     assert rows[0]["enforcement"] == vr.ENFORCE_VIOLATION
 
 
+def test_hard_pin_indeterminate_when_model_unresolvable():
+    # A hard pin whose advised model can't be resolved is a DATA gap, not a breach.
+    decisions = [_decision("sp-1", vsr={"decision": "hard-applied",
+                                        "suggested_model": "totally-unknown-model",
+                                        "mode": "hard"},
+                           chosen_model="totally-unknown-model")]
+    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id="also-unknown", cost=1)])
+    assert rows[0]["enforcement"] == vr.ENFORCE_INDETERMINATE
+
+
 def test_prefer_overridden_is_not_a_violation():
-    # A local SAAR prefer legitimately outranks the VSR prefer: the committed
-    # model differing from the suggestion is EXPECTED, never a violation.
+    # A local SAAR prefer legitimately outranks the VSR prefer: the billed model
+    # differing from the suggestion is EXPECTED, never a violation.
     decisions = [_decision("sp-1", vsr={"decision": "prefer-overridden",
-                                        "suggested_model": "claude-haiku-4-5",
+                                        "suggested_model": _HAIKU_ALIAS,
                                         "mode": "prefer"},
                            chosen_model="claude-sonnet-4-6")]
-    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id="sonnet", cost=80)])
+    rows = vr.reconcile_join(decisions, [_usage("sp-1", model_id=_SONNET_BEDROCK, cost=80)])
     assert rows[0]["enforcement"] == vr.ENFORCE_NA
 
 
 def test_no_advice_and_timeout_are_na():
     decisions = [
-        _decision("sp-1", vsr={"decision": "no-advice"}, chosen_model="claude-opus-4-7"),
-        _decision("sp-2", vsr={"decision": "timeout"}, chosen_model="claude-opus-4-7"),
+        _decision("sp-1", vsr={"decision": "no-advice"}, chosen_model=_OPUS_ALIAS),
+        _decision("sp-2", vsr={"decision": "timeout"}, chosen_model=_OPUS_ALIAS),
     ]
-    usages = [_usage("sp-1", model_id="opus", cost=500),
-              _usage("sp-2", model_id="opus", cost=500)]
+    usages = [_usage("sp-1", model_id=_OPUS_BEDROCK, cost=500),
+              _usage("sp-2", model_id=_OPUS_BEDROCK, cost=500)]
     rows = {r["span_id"]: r for r in vr.reconcile_join(decisions, usages)}
     assert rows["sp-1"]["enforcement"] == vr.ENFORCE_NA
     assert rows["sp-2"]["enforcement"] == vr.ENFORCE_NA
@@ -115,9 +138,9 @@ def test_no_advice_and_timeout_are_na():
 
 def test_decision_without_usage_is_unsettled_coverage_gap():
     decisions = [_decision("sp-1", vsr={"decision": "hard-applied",
-                                        "suggested_model": "claude-haiku-4-5",
+                                        "suggested_model": _HAIKU_ALIAS,
                                         "mode": "hard"},
-                           chosen_model="claude-haiku-4-5")]
+                           chosen_model=_HAIKU_ALIAS)]
     rows = vr.reconcile_join(decisions, [])  # request failed before settle
     assert len(rows) == 1
     assert rows[0]["matched"] is False
@@ -126,12 +149,35 @@ def test_decision_without_usage_is_unsettled_coverage_gap():
     assert rows[0]["enforcement"] == vr.ENFORCE_UNSETTLED
 
 
+def test_duplicate_decision_counted_once():
+    # The decision log is fire-and-forget and may be retried: two decision rows
+    # for the same (tenant, span) must produce ONE joined row, not double-count.
+    d = _decision("sp-dup", vsr={"decision": "hard-applied",
+                                 "suggested_model": _HAIKU_ALIAS, "mode": "hard"},
+                  chosen_model=_HAIKU_ALIAS)
+    rows = vr.reconcile_join([d, dict(d)], [_usage("sp-dup", model_id=_HAIKU_BEDROCK, cost=35)])
+    assert len(rows) == 1
+    assert rows[0]["cost_microusd"] == 35
+
+
+def test_cross_tenant_span_collision_not_misattributed():
+    # Same span id under two tenants must not cross-join (join key is tenant+span).
+    d = _decision("sp-x", vsr={"decision": "hard-applied",
+                               "suggested_model": _HAIKU_ALIAS, "mode": "hard"},
+                  chosen_model=_HAIKU_ALIAS, tenant="acme")
+    # usage row belongs to a DIFFERENT tenant with the same span id.
+    other = _usage("sp-x", model_id=_HAIKU_BEDROCK, cost=35, tenant="globex")
+    rows = vr.reconcile_join([d], [other])
+    assert len(rows) == 1
+    assert rows[0]["matched"] is False  # acme's decision must NOT grab globex's usage.
+
+
 def test_non_vsr_decisions_are_ignored():
     # A decision record with no `vsr` block is a plain routing decision, out of
     # scope for VSR reconciliation — never joined, never counted.
     plain = {"record_type": "decision", "tenant_id": "acme", "span_id": "sp-9",
-             "chosen": {"model": "claude-opus-4-7"}}
-    rows = vr.reconcile_join([plain], [_usage("sp-9", model_id="opus", cost=500)])
+             "chosen": {"model": _OPUS_ALIAS}}
+    rows = vr.reconcile_join([plain], [_usage("sp-9", model_id=_OPUS_BEDROCK, cost=500)])
     assert rows == []
 
 
@@ -162,10 +208,21 @@ def test_summarize_counts_and_totals():
     assert s["enforcement_violation"] == 1
     assert s["enforcement_na"] == 1
     assert s["enforcement_unsettled"] == 1
+    assert s["enforcement_indeterminate"] == 0
+    assert s["enforcement_unknown"] == 0
     # The by-decision histogram is present for at-a-glance triage.
     assert s["by_decision"]["hard-applied"] == 3
     assert s["by_decision"]["prefer-applied"] == 1
     assert s["by_decision"]["no-advice"] == 1
+
+
+def test_summarize_flags_unknown_verdict():
+    # A row carrying a verdict outside the closed set is surfaced (not folded
+    # into n/a) so a future enum drift is caught, not hidden.
+    s = vr.summarize([{"span_id": "z", "vsr_decision": "hard-applied",
+                       "matched": True, "cost_microusd": 1, "enforcement": "bogus"}])
+    assert s["enforcement_unknown"] == 1
+    assert s["enforcement_na"] == 0
 
 
 def test_summarize_empty_is_all_zero():
@@ -200,10 +257,13 @@ def test_reconcile_day_reads_both_tables(dynamodb_mock):
     dl._put(item)
     day = dl._day(now_ms)
 
-    # The billed usage row for the SAME request id.
+    # The billed usage row for the SAME request id. model_id is the resolved
+    # BEDROCK id (settle writes resolve_bedrock_model(body.model)); it normalizes
+    # to the same registry id as the advised alias -> honored.
     UsageLogsRepository().record(
         tenant_id="acme", user_id="u1", user_email="a@b.c",
-        model_id="haiku-4-5", input_tokens=100, output_tokens=50,
+        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        input_tokens=100, output_tokens=50,
         request_id="req-abc", cost_microusd=35,
     )
 
@@ -214,7 +274,7 @@ def test_reconcile_day_reads_both_tables(dynamodb_mock):
     assert report["summary"]["enforcement_honored"] == 1
     row = report["rows"][0]
     assert row["span_id"] == "req-abc"
-    assert row["billed_model_id"] == "haiku-4-5"
+    assert row["billed_model_id"] == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     assert row["config_version"] == "v-1"
 
 
@@ -246,20 +306,20 @@ def test_cli_prints_summary_and_notice(dynamodb_mock, capsys):
     from dynamo import UsageLogsRepository
 
     now_ms = dl._now_ms()
-    # A hard pin that the money path did NOT honor (committed != advised) — the
-    # CLI must surface it as a violation, not hide it.
+    # A hard pin advised haiku, but the money path BILLED opus — the CLI must
+    # surface it as a violation (detected against the billed model), not hide it.
     dl._put(dl.build_decision_item(
         tenant_id="acme", run_id="wf-1", span_id="req-x",
         group_id=None, requested_model="claude-opus-4-7",
         selection_reason=None, fallback_reason=None,
-        chosen={"model": "claude-opus-4-7"}, rejected=[], estimate_inputs={},
+        chosen={"model": "claude-haiku-4-5"}, rejected=[], estimate_inputs={},
         created_at_ms=now_ms,
         vsr={"decision": "hard-applied", "suggested_model": "claude-haiku-4-5",
              "mode": "hard"},
     ))
     UsageLogsRepository().record(
         tenant_id="acme", user_id="u1", user_email="a@b.c",
-        model_id="opus", input_tokens=100, output_tokens=50,
+        model_id="us.anthropic.claude-opus-4-7", input_tokens=100, output_tokens=50,
         request_id="req-x", cost_microusd=500,
     )
     rc = cli.main(["--tenant", "acme", "--day", dl._day(now_ms), "--rows"])
@@ -268,5 +328,17 @@ def test_cli_prints_summary_and_notice(dynamodb_mock, capsys):
     assert "VSR billing reconciliation" in out
     assert "VIOLATION:  1" in out
     assert "PARTIAL SUM" in out
-    # The advised->committed divergence is visible in the row listing.
+    # The full (untruncated) span id is visible in the row listing.
     assert "req-x" in out
+
+    # --fail-on-violation makes the same violation a non-zero exit for CI/alarms.
+    rc2 = cli.main(["--tenant", "acme", "--day", dl._day(now_ms), "--fail-on-violation"])
+    assert rc2 == 2
+
+
+def test_cli_bad_day_is_loud(dynamodb_mock):
+    from mvp.learning import vsr_reconcile_cli as cli
+    import pytest as _pytest
+    # A malformed --day must raise (loud), not silently return an empty report.
+    with _pytest.raises(ValueError):
+        cli.main(["--tenant", "acme", "--day", "2026-07-18"])

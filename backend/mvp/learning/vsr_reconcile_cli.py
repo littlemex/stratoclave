@@ -22,9 +22,12 @@ from . import vsr_reconcile as vr
 NOTICE = (
     "NOTE: billed cost is summed over MATCHED rows only (a PARTIAL SUM — "
     "unsettled decisions are excluded, not counted as 0). 'violation' = a HARD "
-    "pin whose committed model differs from the advised one (a trust-boundary "
+    "pin whose billed model differs from the advised one (a trust-boundary "
     "breach to investigate); 'unsettled' = a decision with no billed usage row "
-    "(request failed before settle or a dropped write). Routing-quality metrics "
+    "(request failed before settle or a dropped write); 'indeterminate' = a HARD "
+    "pin whose advised or billed model could not be resolved (a data gap — NOT "
+    "counted as a breach, but a SUSTAINED rise likely means a registry/retirement "
+    "gap hiding real violations, so alarm on it too). Routing-quality metrics "
     "are the VSR's own; this tool covers only the Stratoclave boundary."
 )
 
@@ -42,14 +45,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit raw JSON")
     ap.add_argument("--rows", action="store_true",
                     help="also list every VSR-acted request row")
+    ap.add_argument("--fail-on-violation", action="store_true",
+                    help="exit non-zero (2) when any enforcement violation is "
+                         "found, so this can gate a CI/ops alarm")
     args = ap.parse_args(argv)
 
     report = vr.reconcile_day(tenant_id=args.tenant, day=args.day)
+    s = report["summary"]
+    # A violation (a HARD pin whose BILLED model differs from the advised one) is
+    # the one finding an operator must never miss; optionally make it a non-zero
+    # exit so a cron/CI wrapper can alarm on it.
+    rc = 2 if (args.fail_on_violation and s["enforcement_violation"] > 0) else 0
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
-        return 0
+        return rc
 
-    s = report["summary"]
     print(f"=== VSR billing reconciliation: tenant {args.tenant} day {args.day} ===")
     print(f"  VSR-acted requests:       {s['vsr_acted_count']}")
     print(f"  matched to a usage row:   {s['matched_count']}")
@@ -59,25 +70,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  enforcement — VIOLATION:  {s['enforcement_violation']}")
     print(f"  enforcement — n/a:        {s['enforcement_na']}")
     print(f"  enforcement — unsettled:  {s['enforcement_unsettled']}")
+    print(f"  enforcement — indeterm.:  {s['enforcement_indeterminate']} (missing model data)")
+    if s.get("enforcement_unknown"):
+        print(f"  enforcement — UNKNOWN:    {s['enforcement_unknown']} (unexpected verdict)")
     if s["by_decision"]:
         hist = ", ".join(f"{k}={v}" for k, v in sorted(s["by_decision"].items()))
         print(f"  by decision:              {hist}")
 
     if args.rows:
         print()
-        print(f"  {'span_id':26} {'decision':18} {'advised':20} {'committed':20} "
-              f"{'billed_model':14} {'cost':11} enforce")
+        # span ids are uuids (36 chars) — never truncate; a violation must be
+        # uniquely locatable. One row per line, fields tab-separated.
+        print("  span_id\tdecision\tadvised->committed\tbilled_model\tcost\tenforce")
         for r in report["rows"]:
             cost = _fmt_usd(r["cost_microusd"]) if r["cost_microusd"] is not None else "-"
             print(
-                f"  {str(r['span_id'])[:26]:26} {r['vsr_decision']:18} "
-                f"{str(r['suggested_model'] or '-'):20} "
-                f"{str(r['chosen_model'] or '-'):20} "
-                f"{str(r['billed_model_id'] or '-'):14} {cost:11} {r['enforcement']}"
+                f"  {r['span_id']}\t{r['vsr_decision']}\t"
+                f"{r['suggested_model'] or '-'}->{r['chosen_model'] or '-'}\t"
+                f"{r['billed_model_id'] or '-'}\t{cost}\t{r['enforcement']}"
             )
     print()
     print(f"  {NOTICE}")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":  # pragma: no cover

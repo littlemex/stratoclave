@@ -8,9 +8,12 @@ questions Stratoclave owns at the boundary, and ONLY those (the VSR keeps its
 own routing-quality metrics; see docs/VSR_CONFIG_CONTRACT.md §4):
 
   1. billing reconciliation — for each VSR-acted request, what did it cost;
-  2. enforcement integrity — was a HARD pin actually honored (advised alias ==
-     committed alias), or did a `hard` decision commit a different model — a
-     trust-boundary violation to surface;
+  2. enforcement integrity — was a HARD pin actually honored (advised model ==
+     the model that was ACTUALLY BILLED, both normalized to the registry's
+     bedrock id), or did the money path bill a different model — a trust-boundary
+     violation. Judged against the billed usage row, NOT the decision's own
+     self-reported `chosen` (which is reserve-time and can't reveal a routing
+     layer that recorded X then invoked Y);
   3. coverage — VSR decisions with no matching usage row (request unsettled, or
      a dropped best-effort usage write), surfaced as an `unsettled_count`.
 
@@ -38,17 +41,24 @@ from . import decision_log as dl
 # enforcement check to n/a (which would make every violation invisible).
 from ..vsr.client import DECISION_HARD_APPLIED as _HARD_DECISION
 
-# enforcement verdicts — a closed set so the CLI/report can rely on them.
-ENFORCE_HONORED = "honored"        # hard pin: advised alias == committed alias
-ENFORCE_VIOLATION = "violation"    # hard pin: committed alias != advised alias
-ENFORCE_NA = "n/a"                 # prefer/overridden/no-advice/timeout — nothing to enforce
-ENFORCE_UNSETTLED = "unsettled"    # decision present, no billed usage row to compare
+# enforcement verdicts — a closed set (ENFORCE_VERDICTS) so the CLI/report and
+# the property tests can rely on it exhaustively.
+ENFORCE_HONORED = "honored"          # hard pin: advised model == BILLED model
+ENFORCE_VIOLATION = "violation"      # hard pin: BILLED model != advised model
+ENFORCE_NA = "n/a"                   # prefer/overridden/no-advice/timeout — nothing to enforce
+ENFORCE_UNSETTLED = "unsettled"      # decision present, no billed usage row to compare
+ENFORCE_INDETERMINATE = "indeterminate"  # hard pin but advised/billed model missing — data gap, NOT a breach
+ENFORCE_VERDICTS = frozenset({
+    ENFORCE_HONORED, ENFORCE_VIOLATION, ENFORCE_NA, ENFORCE_UNSETTLED,
+    ENFORCE_INDETERMINATE,
+})
 
 
 def _usage_span(item: dict) -> str:
     """The request id a UsageLogs row belongs to. The SK is '{iso}#{log_id}'
     where log_id == request_id == the decision's span_id (usage_logs.record:
-    ``log_id = request_id or uuid4()``)."""
+    ``log_id = request_id or uuid4()``). Robust to a missing/`#`-less SK and to
+    a log_id that itself contains '#' (split once, keep the remainder)."""
     tsl = str(item.get("timestamp_log_id") or "")
     return tsl.split("#", 1)[1] if "#" in tsl else ""
 
@@ -62,39 +72,87 @@ def _as_int(v: Any) -> Optional[int]:
         return None
 
 
-def reconcile_join(decisions: list[dict], usages: list[dict]) -> list[dict[str, Any]]:
-    """PURE join of decision items and usage rows on span_id.
+def _norm_model(name, resolve) -> Optional[str]:
+    """Normalize a model alias OR a billed bedrock model id to the SAME
+    canonical token (the registry's bedrock_model_id) so an advised alias and a
+    billed effective id can be compared as equals. Returns None when `name` is
+    empty or unresolvable — the caller treats that as a data gap, never a match.
+
+    `resolve` is injected (mvp.models.resolve_model by default) so this module
+    can be unit-tested without the registry and so the reconciliation itself is
+    a pure function of (records, resolver)."""
+    if not name:
+        return None
+    try:
+        entry = resolve(str(name))
+    except Exception:  # noqa: BLE001 — an unknown/retired model is a data gap, not a crash.
+        return None
+    return getattr(entry, "bedrock_model_id", None) or str(name)
+
+
+def _default_resolver():
+    from ..models import resolve_model
+    return resolve_model
+
+
+def reconcile_join(
+    decisions: list[dict],
+    usages: list[dict],
+    *,
+    resolve=None,
+) -> list[dict[str, Any]]:
+    """PURE join of decision items and usage rows on (tenant_id, span_id).
 
     Only decisions that carry a `vsr` block are in scope (a plain routing
     decision is ignored). Each returned row records the advice, the committed
-    alias, the billed model+cost (or None when unmatched), and an `enforcement`
-    verdict. Unmatched VSR decisions are RETURNED (matched=False) so coverage
-    gaps are counted, never dropped."""
-    by_span: dict[str, dict] = {}
+    alias (reserve-time intent), the BILLED model+cost (settle-time truth, or
+    None when unmatched), and an `enforcement` verdict computed against the
+    BILLED model — not the decision's own self-reported `chosen` (which is
+    reserve-time and cannot reveal a routing layer that recorded X then invoked
+    Y). Unmatched VSR decisions are RETURNED (matched=False) so coverage gaps
+    are counted, never dropped.
+
+    Duplicate decision records for the same (tenant, span) — the decision log is
+    fire-and-forget and may be retried — are de-duplicated (first wins) so a
+    replayed decision can never double-count its cost.
+
+    `resolve` maps a model alias/id to a `ModelEntry` (default: the live
+    registry); injected for testability and to keep the join pure."""
+    if resolve is None:
+        resolve = _default_resolver()
+
+    by_span: dict[tuple[str, str], dict] = {}
     for u in usages:
         span = _usage_span(u)
         if span:
             # First write wins; a request id maps to one usage row. If a retry
-            # produced two, the earlier (settled) one is authoritative enough for
-            # a reconciliation count — exact dedup is the ledger's job, not ours.
-            by_span.setdefault(span, u)
+            # produced two (same log_id, different timestamp SK), only one is
+            # counted here — exact money dedup is the ledger's job, and counting
+            # both would inflate billed_microusd_matched_sum.
+            by_span.setdefault((str(u.get("tenant_id") or ""), span), u)
 
     rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for d in decisions:
         vsr = d.get("vsr")
         if not vsr:
             continue  # not a VSR-acted request — out of scope.
+        tenant = str(d.get("tenant_id") or "")
         span = str(d.get("span_id") or "")
+        key = (tenant, span)
+        if key in seen:
+            continue  # duplicate (retried) decision — count once.
+        seen.add(key)
         decision = str(vsr.get("decision") or "")
         suggested = vsr.get("suggested_model")
         chosen_model = (d.get("chosen") or {}).get("model")
-        u = by_span.get(span)
+        u = by_span.get(key)
         matched = u is not None
         billed_model = str(u.get("model_id") or "") if matched else None
         cost = _as_int(u.get("cost_microusd")) if matched else None
 
         rows.append({
-            "tenant_id": d.get("tenant_id", ""),
+            "tenant_id": tenant,
             "span_id": span,
             "vsr_decision": decision,
             "suggested_model": suggested,
@@ -105,28 +163,39 @@ def reconcile_join(decisions: list[dict], usages: list[dict]) -> list[dict[str, 
             "matched": matched,
             "billed_model_id": billed_model,
             "cost_microusd": cost,
-            "enforcement": _enforcement(decision, suggested, chosen_model, matched),
+            "enforcement": _enforcement(decision, suggested, billed_model, matched, resolve),
         })
     return rows
 
 
-def _enforcement(decision: str, suggested, chosen_model, matched: bool) -> str:
-    """Verdict for whether the VSR's advice was honored at the money path.
+def _enforcement(decision: str, suggested, billed_model, matched: bool, resolve) -> str:
+    """Verdict for whether the VSR's advice was honored AT THE MONEY PATH.
 
     We can only *enforce* a HARD pin (a `prefer` is advisory — a local SAAR
     prefer legitimately overrides it, so a mismatch there is expected, never a
-    violation). For a hard pin, the check is advised alias == committed alias;
-    both are model aliases (same unit) recorded on the decision item itself, so
-    no billed-id ↔ alias translation is needed. An unmatched decision cannot be
-    proven either way (no committed side to compare once the request never
-    settled) → UNSETTLED."""
+    violation). For a hard pin the check compares the advised model against the
+    model that was ACTUALLY BILLED (settle-time truth), each normalized to the
+    registry's bedrock id so an alias and an effective id compare as equals.
+    This is the whole point of reconciliation: a routing layer that recorded the
+    pin as `chosen` but then invoked a different model is invisible to any
+    decision-internal check, but shows up here as a billed-model mismatch.
+
+      * not a hard pin           -> n/a
+      * hard, no usage row       -> unsettled (nothing billed to compare)
+      * hard, advised or billed model missing/unresolvable -> indeterminate
+        (a DATA gap, deliberately NOT flagged as a breach — avoids false alarms)
+      * hard, advised == billed  -> honored
+      * hard, advised != billed  -> violation
+    """
     if decision != _HARD_DECISION:
         return ENFORCE_NA
     if not matched:
         return ENFORCE_UNSETTLED
-    if suggested and chosen_model and str(suggested) == str(chosen_model):
-        return ENFORCE_HONORED
-    return ENFORCE_VIOLATION
+    advised = _norm_model(suggested, resolve)
+    billed = _norm_model(billed_model, resolve)
+    if advised is None or billed is None:
+        return ENFORCE_INDETERMINATE
+    return ENFORCE_HONORED if advised == billed else ENFORCE_VIOLATION
 
 
 def summarize(joined: list[dict]) -> dict[str, Any]:
@@ -134,9 +203,13 @@ def summarize(joined: list[dict]) -> dict[str, Any]:
     summed over MATCHED rows only — an honest partial sum whose coverage is made
     explicit by matched_count / unsettled_count (never a fabricated total)."""
     by_decision: dict[str, int] = {}
+    # Tally each enforcement verdict by its own name — NOT via an else fallback,
+    # so an unexpected verdict string surfaces (in `enforcement_unknown`) instead
+    # of being silently folded into n/a.
+    enf_counts: dict[str, int] = {v: 0 for v in ENFORCE_VERDICTS}
+    unknown = 0
     billed_sum = 0
     matched = unsettled = 0
-    honored = violation = na = unsettled_enf = 0
     for r in joined:
         by_decision[r["vsr_decision"]] = by_decision.get(r["vsr_decision"], 0) + 1
         if r.get("matched"):
@@ -145,23 +218,21 @@ def summarize(joined: list[dict]) -> dict[str, Any]:
         else:
             unsettled += 1
         enf = r.get("enforcement")
-        if enf == ENFORCE_HONORED:
-            honored += 1
-        elif enf == ENFORCE_VIOLATION:
-            violation += 1
-        elif enf == ENFORCE_UNSETTLED:
-            unsettled_enf += 1
+        if enf in enf_counts:
+            enf_counts[enf] += 1
         else:
-            na += 1
+            unknown += 1
     return {
         "vsr_acted_count": len(joined),
         "matched_count": matched,
         "unsettled_count": unsettled,
         "billed_microusd_matched_sum": billed_sum,
-        "enforcement_honored": honored,
-        "enforcement_violation": violation,
-        "enforcement_na": na,
-        "enforcement_unsettled": unsettled_enf,
+        "enforcement_honored": enf_counts[ENFORCE_HONORED],
+        "enforcement_violation": enf_counts[ENFORCE_VIOLATION],
+        "enforcement_na": enf_counts[ENFORCE_NA],
+        "enforcement_unsettled": enf_counts[ENFORCE_UNSETTLED],
+        "enforcement_indeterminate": enf_counts[ENFORCE_INDETERMINATE],
+        "enforcement_unknown": unknown,
         "by_decision": by_decision,
     }
 
@@ -169,7 +240,13 @@ def summarize(joined: list[dict]) -> dict[str, Any]:
 def _day_iso_bounds(day: str) -> tuple[str, str]:
     """('YYYYMMDD') → the [lo, hi] ISO-prefix bounds for a UsageLogs SK range
     query on that UTC calendar day. The SK is '{iso}#{log_id}'; every id in the
-    day sorts within ['YYYY-MM-DD', 'YYYY-MM-DD\\uffff']."""
+    day sorts within ['YYYY-MM-DD', 'YYYY-MM-DD\\uffff'].
+
+    Validates the day is exactly 8 digits — a malformed day would otherwise
+    build a garbage range that silently returns 0 rows (a false 'nothing that
+    day' rather than a loud error)."""
+    if len(day) != 8 or not day.isdigit():
+        raise ValueError(f"day must be 'YYYYMMDD' (8 digits), got {day!r}")
     iso = f"{day[0:4]}-{day[4:6]}-{day[6:8]}"
     return iso, iso + "￿"
 
@@ -208,6 +285,7 @@ def reconcile_day(*, tenant_id: str, day: str) -> dict[str, Any]:
     day-boundary crosser (decision and usage in different UTC days) shows up as
     an unsettled decision plus an unmatched usage row — the same honest coverage
     treatment decision_log.day_summary already applies."""
+    _day_iso_bounds(day)  # validate 'YYYYMMDD' loudly before any query.
     decisions = [
         r for r in dl.query_day(tenant_id=tenant_id, day=day)
         if r.get("record_type") == "decision"

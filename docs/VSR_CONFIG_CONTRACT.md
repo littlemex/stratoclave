@@ -138,15 +138,23 @@ code — to answer the three questions Stratoclave owns:
 1. **billing reconciliation** — for every VSR-acted request, what did it cost
    (summed over matched rows only — an honest partial sum, unsettled requests
    surfaced as a coverage gap, never counted as 0);
-2. **enforcement integrity** — was a `hard` pin actually honored (advised alias
-   == committed alias, both recorded on the decision item), or did a hard
-   decision commit a different model — a trust-boundary **violation** to surface;
+2. **enforcement integrity** — was a `hard` pin actually honored (advised model
+   == the model that was **actually billed**, both normalized to the registry's
+   bedrock id), or did the money path bill a different model — a trust-boundary
+   **violation** to surface. The check is against the billed usage row, NOT the
+   decision's own `chosen` field: a routing layer that recorded the pin as
+   `chosen` but then invoked a different model is invisible to any
+   decision-internal check, yet shows up here as a billed-model mismatch;
 3. **coverage** — VSR decisions with no matching usage row (request failed
    before settle, or a dropped best-effort write).
 
 A `prefer` suggestion is advisory (a local SAAR prefer may legitimately override
 it), so a `prefer`/`no-advice`/`timeout` decision is `n/a` for enforcement — only
-a `hard` pin is held to the billed-model equality check.
+a `hard` pin is held to the billed-model equality check. A `hard` pin whose
+advised or billed model cannot be resolved is `indeterminate` (a data gap,
+deliberately NOT flagged as a breach). The reconciliation joins on
+`(tenant_id, span_id)` and de-duplicates retried decision writes so a replayed
+decision can never double-count its cost.
 
 ## Failure matrix
 
