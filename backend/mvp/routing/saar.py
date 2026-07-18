@@ -123,6 +123,13 @@ class SessionMemory:
         P0 so SAAR degenerates to cost-neutral stickiness until evidence exists).
       * ``rating_version``      — the rating version the last claim used, so a
         replayed claim recomputes the same micro-USD delta (provable).
+      * ``minted_response_id``  — the provider continuation id the LAST turn
+        minted (a Responses ``response_id``), bound to ``last_physical_model``.
+        The provider-state lock fires ONLY when the next request's
+        ``previous_response_id`` EQUALS this — so a client can never force a lock
+        (or a wrong-backend lock) with an arbitrary/forged id, and the lock
+        target is provably the backend that actually minted the state. Stored,
+        not conversation content: it is an opaque routing token.
     """
 
     last_physical_model: str
@@ -135,6 +142,7 @@ class SessionMemory:
     last_cache_write_at: int = 0
     rating_version: Optional[str] = None
     replay_id: Optional[str] = None
+    minted_response_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +252,7 @@ def load_session_memory(
             last_cache_write_at=_n(item, "last_cache_write_at"),
             rating_version=_s(item, "rating_version") or None,
             replay_id=_s(item, "replay_id") or None,
+            minted_response_id=_s(item, "minted_response_id") or None,
         )
     except Exception as e:  # noqa: BLE001 — fail-open: a memory read must never
         # break routing (a timeout, a throttle, a missing table). Degrade to the
@@ -315,6 +324,8 @@ def save_session_memory(
                 item["rating_version"] = mem.rating_version
             if mem.replay_id is not None:
                 item["replay_id"] = mem.replay_id
+            if mem.minted_response_id is not None:
+                item["minted_response_id"] = mem.minted_response_id
             get_dynamodb_resource().Table(_TABLE_NAME).put_item(
                 Item=item,
                 # monotonic-writer-wins: only advance the item if this turn is
@@ -353,6 +364,17 @@ def save_session_memory(
 # later (P1); a single env default for P0.
 _IDLE_RESET_SECONDS = int(_env_float("SAAR_IDLE_RESET_SECONDS", default=300, lo=1, hi=86_400))
 
+# Provider-state hard cap: the MAXIMUM age a provider-state lock may reach before
+# it yields to idle reset. A provider-state lock outlives the normal idle boundary
+# (a continuation id stays bound to its backend), but NOT forever — past this cap
+# the session is freed even if the client keeps replaying the id, so a retired /
+# permanently-broken backend can never strand a session (Fable review §1 escape
+# hatch). Default 1h: comfortably longer than any live continuation, far short of
+# "forever". Bounded like the idle boundary.
+_PROVIDER_STATE_HARD_CAP_SECONDS = int(
+    _env_float("SAAR_PROVIDER_STATE_HARD_CAP_SECONDS", default=3600, lo=1, hi=86_400)
+)
+
 
 @dataclass(frozen=True)
 class SaarDecision:
@@ -373,7 +395,7 @@ class SaarDecision:
     # served (via cascade) into a 403/402/429 (Fable SAAR review-1 C2).
     prefer_model: Optional[str]
     phase: str                         # resulting phase (persisted for next turn)
-    reason: str                        # 'sticky'|'tool-loop-lock'|'reset'|'drift'|'cold'|'disabled'
+    reason: str                        # 'sticky'|'tool-loop-lock'|'provider-state-lock'|'reset'|'drift'|'cold'|'disabled'
     switched: bool                     # True iff the committed model differs from prev (set post-settle)
     prev_model: Optional[str] = None   # last_physical_model from memory (for stay/switch pricing)
     warm_prefix_tokens: int = 0        # cache evidence carried for the RESERVE estimate (P0: 0)
@@ -393,8 +415,10 @@ def decide(
     mem: Optional[SessionMemory],
     now_epoch: int,
     request_has_tool_result: bool,
+    request_provider_state_id: Optional[str] = None,
     matched_decision: Optional[str] = None,
     idle_reset_seconds: int = _IDLE_RESET_SECONDS,
+    provider_state_hard_cap_seconds: int = _PROVIDER_STATE_HARD_CAP_SECONDS,
 ) -> SaarDecision:
     """Pure SAAR decision (no I/O — memory is already loaded, persistence is the
     caller's). Precedence, highest first:
@@ -403,11 +427,23 @@ def decide(
          decides. Degenerate-safe: a failed read is indistinguishable from a new
          session, and both mean "no continuity to preserve".
       2. Idle reset: idle past the boundary ⇒ discard continuity + cache evidence,
-         no opinion (``reset`` phase).
-      3. Tool-loop HARD lock: stored phase ``tool-loop`` AND this request carries a
-         tool result ⇒ the result MUST return to the model that emitted the
-         tool_use ⇒ ``hard_model = last_physical_model`` (cascade disabled). The
-         ONLY hard case — a correctness boundary, not a cost one.
+         no opinion (``reset`` phase). Does NOT fire for a VERIFIED, in-cap
+         provider-state continuation (handled at 3a) — a non-portable id is bound
+         to its origin backend regardless of elapsed time — but DOES fire once the
+         provider-state hard cap is exceeded (a bounded escape hatch, below).
+      3a. Provider-state HARD lock: stored phase ``provider-state`` AND this
+         request's ``previous_response_id`` EXACTLY MATCHES the id the last turn
+         minted (``mem.minted_response_id``) AND the lock is within its hard cap
+         ⇒ the state lives ONLY on the backend that minted it ⇒ ``hard_model =
+         last_physical_model`` (cascade disabled). Verified against the stored
+         minted id, so a client can NEVER force a lock (or a wrong-backend lock)
+         with an arbitrary/forged/foreign id. Checked before idle reset so a
+         still-referenced continuation is not reset away — but bounded by a hard
+         cap so a client that keeps replaying the same id can never strand the
+         session on a dead backend forever (Fable provider-state review §1).
+      3b. Tool-loop HARD lock: stored phase ``tool-loop`` AND this request carries
+         a tool result ⇒ the result MUST return to the model that emitted the
+         tool_use ⇒ ``hard_model = last_physical_model`` (cascade disabled).
       4. Decision drift (normal phase only): the matched routing decision changed
          ⇒ the task shape changed ⇒ no opinion, let the cascade reselect.
       5. Sticky-by-default (normal phase, no drift): ``prefer_model =
@@ -421,16 +457,36 @@ def decide(
                             reason="cold", switched=False)
 
     prev = mem.last_physical_model
-
-    # 2. idle reset ⇒ no opinion
     idle = max(0, now_epoch - int(mem.last_turn_at or 0))
+
+    # 3a. provider-state HARD lock — VERIFIED and BOUNDED. Fires only when the
+    # request's previous_response_id equals the id THIS session's last turn minted
+    # (never a forged/foreign id) AND the lock has not exceeded its hard cap.
+    # Checked before idle reset so a live continuation is not reset away; the cap
+    # is the escape hatch so a dead backend can't strand the session forever.
+    provider_state_matches = bool(
+        mem.phase == Phase.PROVIDER_STATE
+        and mem.minted_response_id
+        and request_provider_state_id
+        and str(request_provider_state_id) == str(mem.minted_response_id)
+    )
+    within_cap = idle <= max(1, int(provider_state_hard_cap_seconds))
+    if provider_state_matches and within_cap:
+        return SaarDecision(
+            hard_model=prev, prefer_model=None, phase=Phase.PROVIDER_STATE,
+            reason="provider-state-lock", switched=False, prev_model=prev,
+            warm_prefix_tokens=int(mem.warm_prefix_tokens),
+        )
+
+    # 2. idle reset ⇒ no opinion (a matched-but-over-cap provider-state lock also
+    #    lands here — the bounded escape hatch)
     if mem.last_turn_at and idle > max(1, int(idle_reset_seconds)):
         return SaarDecision(
             hard_model=None, prefer_model=None, phase=Phase.RESET, reason="reset",
             switched=False, prev_model=prev, stale=True,
         )
 
-    # 3. tool-loop HARD lock (correctness — cost cannot override, cascade disabled)
+    # 3b. tool-loop HARD lock (correctness — cost cannot override, cascade disabled)
     if mem.phase == Phase.TOOL_LOOP and request_has_tool_result:
         return SaarDecision(
             hard_model=prev, prefer_model=None, phase=Phase.TOOL_LOOP,
@@ -474,8 +530,9 @@ def replay_headers(
     ``x-sc-saar-switch`` is computed from the ACTUAL committed model vs the
     session's previous model (passed by the caller post-settle), not from an
     a-priori flag — so it never claims "stayed" on a turn that actually switched
-    (Fable review-1 M2). ``locked`` marks the tool-loop hard lock."""
-    if decision.reason == "tool-loop-lock":
+    (Fable review-1 M2). ``locked`` marks a hard lock (tool-loop or
+    provider-state)."""
+    if decision.reason in ("tool-loop-lock", "provider-state-lock"):
         switch = "locked"
     elif decision.prev_model and chosen_model != decision.prev_model:
         switch = "switched"
@@ -543,13 +600,24 @@ def response_has_tool_use(content_blocks: object) -> bool:
     return False
 
 
-def next_phase_after_turn(*, response_had_tool_use: bool, request_had_tool_result: bool) -> str:
-    """Compute the phase to PERSIST after this turn completes:
-      * the model emitted a tool_use ⇒ the next turn's tool result must come back
-        here ⇒ ``tool-loop``;
-      * otherwise ⇒ ``normal`` (a tool result with no further tool_use closes the
-        loop).
-    provider-state is a P1 concern (Responses continuation) and never set here."""
+def next_phase_after_turn(
+    *,
+    response_had_tool_use: bool,
+    request_had_tool_result: bool,
+    response_emitted_provider_state: bool = False,
+) -> str:
+    """Compute the phase to PERSIST after this turn completes. Precedence:
+      * the response minted non-portable continuation state (a Responses
+        ``response_id`` the next turn can reference) ⇒ ``provider-state`` — the
+        next request that references it must return to THIS backend;
+      * else the model emitted a tool_use ⇒ the next turn's tool result must come
+        back here ⇒ ``tool-loop``;
+      * else ⇒ ``normal`` (a plain turn closes any loop).
+    provider-state wins over tool-loop: continuation state is the stricter,
+    non-portable binding, so if a turn both emitted a tool_use AND minted a
+    referenceable response id, the harder provider-state lock is persisted."""
+    if response_emitted_provider_state:
+        return Phase.PROVIDER_STATE
     if response_had_tool_use:
         return Phase.TOOL_LOOP
     return Phase.NORMAL
@@ -594,6 +662,7 @@ def saar_pre_reserve(
     user_id: Optional[str],
     request_messages: object,
     matched_decision: Optional[str] = None,
+    previous_response_id: object = None,
     now_epoch: Optional[int] = None,
 ) -> Optional[SaarContext]:
     """Run the SAAR pre-pass for one turn, BEFORE the reserve. Returns None (SAAR
@@ -628,10 +697,16 @@ def saar_pre_reserve(
             tenant_id=tenant_id, session_key=session_key,
             user_scoped=user_scoped, user_id=user_id,
         )
+        req_ps_id = (
+            previous_response_id
+            if isinstance(previous_response_id, str) and previous_response_id.strip()
+            else None
+        )
         decision = decide(
             mem=mem,
             now_epoch=now,
             request_has_tool_result=request_has_tool_result(request_messages),
+            request_provider_state_id=req_ps_id,
             matched_decision=matched_decision,
         )
         return SaarContext(
@@ -659,6 +734,7 @@ def saar_post_settle(
     committed_model: str,
     response_had_tool_use: bool,
     request_had_tool_result: bool,
+    minted_response_id: Optional[str] = None,
     warm_prefix_tokens: int = 0,
     rating_version: Optional[str] = None,
     checkout_delta_microusd: int = 0,
@@ -668,7 +744,13 @@ def saar_post_settle(
     """Persist the session's new routing state and fire the provable claim, AFTER
     the turn settled. Fire-and-forget throughout: never raises, never blocks,
     never touches a ledger transaction (money-neutrality invariant). ``sctx`` is
-    the one returned by :func:`saar_pre_reserve` for this turn (None ⇒ no-op)."""
+    the one returned by :func:`saar_pre_reserve` for this turn (None ⇒ no-op).
+
+    ``minted_response_id`` is the provider continuation id THIS response actually
+    produced (a non-empty Responses ``response_id``), or None. When present it
+    both drives the persisted phase to ``provider-state`` AND is stored on the
+    memory, so the NEXT turn hard-locks to ``committed_model`` ONLY if it echoes
+    back exactly this id — never a forged or foreign id (Fable review §3)."""
     if sctx is None:
         return
     try:
@@ -677,9 +759,15 @@ def saar_post_settle(
         now = int(now_epoch if now_epoch is not None else _t.time())
         prev_model = sctx.decision.prev_model
         switched = bool(prev_model) and committed_model != prev_model
+        minted = (
+            minted_response_id
+            if isinstance(minted_response_id, str) and minted_response_id.strip()
+            else None
+        )
         phase = next_phase_after_turn(
             response_had_tool_use=response_had_tool_use,
             request_had_tool_result=request_had_tool_result,
+            response_emitted_provider_state=minted is not None,
         )
         new_mem = SessionMemory(
             last_physical_model=committed_model,
@@ -692,6 +780,7 @@ def saar_post_settle(
             last_cache_write_at=now if warm_prefix_tokens else 0,
             rating_version=rating_version,
             replay_id=sctx.replay_id,
+            minted_response_id=minted,
         )
         save_session_memory(
             tenant_id=sctx.tenant_id, session_key=sctx.session_key, mem=new_mem,

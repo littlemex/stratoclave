@@ -247,26 +247,87 @@ def test_live_workload_zero_continuity_violations():
 
 
 # ---------------------------------------------------------------------------
-# 9. provider-state lock — NOT IMPLEMENTED (pinned so the gap can't be forgotten)
+# 9. provider-state lock — a continuation reference hard-locks to its backend
 # ---------------------------------------------------------------------------
 
-def test_provider_state_lock_is_documented_not_implemented():
-    # The catalogue must mark it not-implemented...
-    assert bs.by_id("provider-state-lock").coverage == bs.NOT_IMPLEMENTED
+def test_provider_state_lock_is_now_covered():
+    assert bs.by_id("provider-state-lock").coverage == bs.COVERED
 
 
-@pytest.mark.xfail(strict=True, reason="provider-state lock is a P1 concern: the "
-                   "Phase.PROVIDER_STATE constant exists but next_phase_after_turn "
-                   "never sets it. When the Responses continuation path wires it "
-                   "up, this xfail will XPASS and force the catalogue to be updated.")
-def test_provider_state_lock_enforced():
-    # next_phase_after_turn is the ONLY place a post-turn phase is chosen. If
-    # provider-state is ever implemented it must be reachable from here for a
-    # response that carried a provider continuation id. Today it cannot.
-    phase = saar.next_phase_after_turn(response_had_tool_use=False,
-                                       request_had_tool_result=False)
-    # This asserts the (currently false) implemented-state; xfail until it's real.
-    assert phase == saar.Phase.PROVIDER_STATE
+def test_provider_state_lock_returns_to_origin_backend():
+    # turn 0: a normal request whose response mints id 'resp_A' (opens the
+    #         provider-state phase on 'opus').
+    # turn 1: references EXACTLY 'resp_A' — even though the cascade would pick
+    #         'haiku', SAAR must hard-lock back to the minting backend 'opus'.
+    turns = [
+        bs.Turn(emitted_response_id="resp_A", cascade_choice="opus", at_epoch=1000),
+        bs.Turn(references_response_id="resp_A", cascade_choice="haiku", at_epoch=1001),
+    ]
+    out = bs.drive_session(turns)
+    assert out.results[1].hard_locked is True
+    assert out.results[1].committed_model == "opus"     # NOT the cascade's haiku
+    assert out.results[1].reason == "provider-state-lock"
+    assert out.violations == 0
+
+
+def test_provider_state_lock_rejects_forged_or_foreign_id():
+    # A client that sends an id the session never minted must NOT lock: the
+    # verified-id design defeats forced/wrong-backend locking (Fable review §3).
+    turns = [
+        bs.Turn(emitted_response_id="resp_A", cascade_choice="opus", at_epoch=1000),
+        bs.Turn(references_response_id="resp_FORGED", cascade_choice="haiku", at_epoch=1001),
+    ]
+    out = bs.drive_session(turns)
+    assert out.results[1].hard_locked is False
+    # unverified id => no lock => the turn is free to move (soft sticky, here).
+    assert out.results[1].reason != "provider-state-lock"
+
+
+def test_provider_state_lock_survives_a_long_idle_gap_within_cap():
+    # THE distinguishing invariant vs the tool-loop lock: a verified continuation
+    # id is bound to its backend across an idle gap that WOULD reset a tool loop,
+    # PROVIDED the gap is within the provider-state hard cap.
+    turns = [
+        bs.Turn(emitted_response_id="resp_A", cascade_choice="opus", at_epoch=1000),
+        # 1800s later (> 300s idle boundary, < 3600s hard cap): still references A.
+        bs.Turn(references_response_id="resp_A", cascade_choice="haiku",
+                at_epoch=1000 + 1800),
+    ]
+    out = bs.drive_session(turns, idle_reset_seconds=300)
+    assert out.results[1].reason == "provider-state-lock"
+    assert out.results[1].committed_model == "opus"
+
+
+def test_provider_state_lock_yields_past_hard_cap():
+    # Escape hatch: past the hard cap, even a still-referenced continuation is
+    # freed (a retired/dead backend can't strand the session forever, Fable §1).
+    turns = [
+        bs.Turn(emitted_response_id="resp_A", cascade_choice="opus", at_epoch=1000),
+        # 100_000s later (>> 3600s hard cap): the lock yields to idle reset.
+        bs.Turn(references_response_id="resp_A", cascade_choice="haiku",
+                at_epoch=1000 + 100_000),
+    ]
+    out = bs.drive_session(turns, idle_reset_seconds=300)
+    assert out.results[1].reason == "reset"
+    assert out.results[1].committed_model == "haiku"  # freed to reselect
+
+
+def test_provider_state_zero_violations_under_workload():
+    # 40 sessions, each: mint a continuation, then reference EXACTLY it while the
+    # cascade tries to yank the backend. A correct lock => 0 violations.
+    total = 0
+    for s in range(40):
+        base = 5000 + s * 1000
+        rid1, rid2 = f"resp_{s}_1", f"resp_{s}_2"
+        turns = [
+            bs.Turn(emitted_response_id=rid1, cascade_choice="opus", at_epoch=base),
+            bs.Turn(references_response_id=rid1, emitted_response_id=rid2,
+                    cascade_choice="haiku", at_epoch=base + 1),
+            bs.Turn(references_response_id=rid2, cascade_choice="sonnet",
+                    at_epoch=base + 2),
+        ]
+        total += bs.drive_session(turns).violations
+    assert total == 0
 
 
 # ---------------------------------------------------------------------------

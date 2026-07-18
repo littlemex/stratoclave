@@ -39,7 +39,7 @@ def test_sse_error_event_with_malformed_json_falls_back_to_sanitizer():
         b"data: arn:aws:bedrock:us-east-1:123456789012:inference-profile/p\n"
         b"\n"
     )
-    out, _ = _handle_sse_event(raw)
+    out, _, _ = _handle_sse_event(raw)
     text = out.decode("utf-8")
     assert text.startswith("event: error\n")
     # account-id digits must be redacted by the sanitizer
@@ -58,7 +58,7 @@ def test_sse_error_event_with_string_message_is_still_sanitized():
         {"error": {"message": "boom: arn:aws:iam::123456789012:role/r"}}
     )
     raw = f"event: error\ndata: {body}\n\n".encode("utf-8")
-    out, _ = _handle_sse_event(raw)
+    out, _, _ = _handle_sse_event(raw)
     assert b"123456789012" not in out
 
 

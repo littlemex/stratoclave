@@ -203,6 +203,83 @@ def test_next_phase_after_turn():
     assert saar.next_phase_after_turn(response_had_tool_use=False, request_had_tool_result=True) == Phase.NORMAL
 
 
+# --------------------------------------------------------------------------- provider-state lock
+
+
+def test_next_phase_provider_state_wins_over_tool_loop():
+    # A turn that both emitted a tool_use AND minted a referenceable response id
+    # persists the STRICTER provider-state lock.
+    assert saar.next_phase_after_turn(
+        response_had_tool_use=True, request_had_tool_result=False,
+        response_emitted_provider_state=True) == Phase.PROVIDER_STATE
+    assert saar.next_phase_after_turn(
+        response_had_tool_use=False, request_had_tool_result=False,
+        response_emitted_provider_state=True) == Phase.PROVIDER_STATE
+
+
+def test_decide_provider_state_hard_lock_on_verified_id():
+    # provider-state phase + a request echoing EXACTLY the minted id => hard-lock
+    # back to the origin model (cascade disabled).
+    m = SessionMemory(last_physical_model="opus", phase=Phase.PROVIDER_STATE,
+                      last_turn_at=1000, minted_response_id="resp_A")
+    d = saar.decide(mem=m, now_epoch=1010, request_has_tool_result=False,
+                    request_provider_state_id="resp_A")
+    assert d.hard_model == "opus" and d.reason == "provider-state-lock"
+    assert d.phase == Phase.PROVIDER_STATE
+
+
+def test_decide_provider_state_rejects_forged_id():
+    # An id the session never minted must NOT lock (defeats forced/wrong-backend
+    # locking) — falls through to sticky.
+    m = SessionMemory(last_physical_model="opus", phase=Phase.PROVIDER_STATE,
+                      last_turn_at=1000, minted_response_id="resp_A")
+    d = saar.decide(mem=m, now_epoch=1010, request_has_tool_result=False,
+                    request_provider_state_id="resp_FORGED")
+    assert d.hard_model is None and d.reason == "sticky"
+
+
+def test_decide_provider_state_no_lock_without_ref():
+    # In provider-state phase but the request does NOT reference any continuation
+    # => no hard lock; soft-sticks like a normal turn.
+    m = SessionMemory(last_physical_model="opus", phase=Phase.PROVIDER_STATE,
+                      last_turn_at=1000, minted_response_id="resp_A")
+    d = saar.decide(mem=m, now_epoch=1010, request_has_tool_result=False,
+                    request_provider_state_id=None)
+    assert d.hard_model is None and d.reason == "sticky"
+
+
+def test_provider_state_lock_survives_idle_within_cap():
+    # A verified continuation id is bound across an idle gap that WOULD reset a
+    # tool loop, provided it is within the provider-state hard cap.
+    m = SessionMemory(last_physical_model="sonnet", phase=Phase.PROVIDER_STATE,
+                      last_turn_at=1000, minted_response_id="resp_A")
+    d = saar.decide(mem=m, now_epoch=1000 + 1800, request_has_tool_result=False,
+                    request_provider_state_id="resp_A",
+                    idle_reset_seconds=300, provider_state_hard_cap_seconds=3600)
+    assert d.reason == "provider-state-lock" and d.hard_model == "sonnet"
+
+
+def test_provider_state_lock_yields_past_hard_cap():
+    # Escape hatch: past the hard cap, even a verified, still-referenced
+    # continuation is freed (a dead backend can't strand the session forever).
+    m = SessionMemory(last_physical_model="sonnet", phase=Phase.PROVIDER_STATE,
+                      last_turn_at=1000, minted_response_id="resp_A")
+    d = saar.decide(mem=m, now_epoch=1000 + 100_000, request_has_tool_result=False,
+                    request_provider_state_id="resp_A",
+                    idle_reset_seconds=300, provider_state_hard_cap_seconds=3600)
+    assert d.reason == "reset" and d.hard_model is None
+
+
+def test_provider_state_idle_reset_without_ref():
+    # An idle session whose NEW request does NOT reference the continuation is a
+    # genuinely stale session => idle reset applies (no strand).
+    m = SessionMemory(last_physical_model="sonnet", phase=Phase.PROVIDER_STATE,
+                      last_turn_at=1000, minted_response_id="resp_A")
+    d = saar.decide(mem=m, now_epoch=1000 + 100_000, request_has_tool_result=False,
+                    request_provider_state_id=None)
+    assert d.reason == "reset" and d.hard_model is None
+
+
 # --------------------------------------------------------------------------- P0-4 checkout delta pricing
 
 

@@ -303,6 +303,26 @@ def _extract_usage(usage: dict[str, Any]) -> tuple[int, int]:
     return input_tokens, output_tokens
 
 
+def _previous_response_id(body: OpenAIResponsesRequest) -> Optional[str]:
+    """The `previous_response_id` this request references, if any. The Responses
+    request model allows extra fields, so the continuation id (non-portable
+    provider state) arrives as an extra attr / model_extra entry. Returns a
+    non-empty string or None — the trigger for SAAR's provider-state lock."""
+    v = getattr(body, "previous_response_id", None)
+    if v is None:
+        extra = getattr(body, "model_extra", None) or {}
+        v = extra.get("previous_response_id")
+    return v if isinstance(v, str) and v.strip() else None
+
+
+def _response_id(data: dict[str, Any]) -> Optional[str]:
+    """The `id` a Responses result minted (the referenceable continuation id).
+    Its presence means the NEXT turn that references it must hard-lock to the
+    backend that produced it (provider-state)."""
+    rid = data.get("id") if isinstance(data, dict) else None
+    return rid if isinstance(rid, str) and rid.strip() else None
+
+
 # ---------------------------------------------------------------------------
 # Error sanitization
 # ---------------------------------------------------------------------------
@@ -386,6 +406,39 @@ def list_openai_models(
     return {"object": "list", "data": data}
 
 
+def _saar_finalize_responses(
+    sctx,
+    response: Response,
+    *,
+    committed_model: str,
+    minted_response_id: Optional[str],
+) -> None:
+    """Persist SAAR routing state + emit replay headers for a Responses turn.
+    ``minted_response_id`` is the id THIS response actually produced (or None);
+    it is stored so the next turn can only lock by echoing it back exactly.
+    No-op when SAAR did not act (sctx is None). Entirely best-effort: a failure
+    here never affects the response (money-neutrality + fail-open)."""
+    if sctx is None:
+        return
+    try:
+        from .routing import saar as _saar
+
+        _saar.saar_post_settle(
+            sctx=sctx,
+            committed_model=committed_model,
+            response_had_tool_use=False,          # Responses tool calls are a P1 concern
+            request_had_tool_result=False,
+            minted_response_id=minted_response_id,
+        )
+        for k, v in _saar.replay_headers(
+            replay_id=sctx.replay_id, decision=sctx.decision,
+            chosen_model=committed_model,
+        ).items():
+            response.headers[k] = v
+    except Exception:  # noqa: BLE001 — observability/persist must never break a request.
+        pass
+
+
 @router.post("/openai/v1/responses")
 async def create_response(
     body: OpenAIResponsesRequest,
@@ -431,6 +484,33 @@ async def create_response(
             },
         )
 
+    # SAAR pre-pass (session-aware routing). Fail-open: sctx None => pre-SAAR
+    # cascade, nothing touched. This is the Responses route's provider-state
+    # lock: a request carrying `previous_response_id` references non-portable
+    # continuation state that lives only on the backend that minted it, so a
+    # stored provider-state phase hard-locks it back to the origin model.
+    sctx = None
+    saar_hard = None
+    saar_prefer = None
+    saar_warm = 0
+    prev_response_id = _previous_response_id(body)
+    try:
+        from .routing import saar as _saar
+
+        sctx = _saar.saar_pre_reserve(
+            ctx=ctx,
+            org_id=user.org_id,
+            user_id=user.user_id,
+            request_messages=[],  # Responses input is not the Converse message list
+            previous_response_id=prev_response_id,
+        )
+        if sctx is not None:
+            saar_hard = sctx.decision.hard_model
+            saar_prefer = sctx.decision.prefer_model
+            saar_warm = int(sctx.decision.warm_prefix_tokens)
+    except Exception:  # noqa: BLE001 — SAAR must never break the request.
+        sctx = None
+
     reservation = _estimate_reservation_tokens(body)
     _multiplier = _reasoning_multiplier(body)
     tenants_repo = reserve_credit_for_model(
@@ -441,7 +521,10 @@ async def create_response(
         max_output_tokens=body.max_output_tokens,
         effort_multiplier=_multiplier,
         wire_protocol="responses",
-        vsr_hard_model=model_pin,
+        # Hard-pin precedence: explicit client pin > SAAR provider-state lock.
+        vsr_hard_model=model_pin or saar_hard,
+        saar_prefer_model=saar_prefer,
+        saar_warm_prefix_tokens=saar_warm,
         # L5-d: per-run billing attribution.
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
@@ -469,7 +552,8 @@ async def create_response(
     if body.stream:
         return StreamingResponse(
             _stream_response(body, entry, user, tenants_repo, reservation,
-                             request_id=ctx.request_id if ctx else None),
+                             request_id=ctx.request_id if ctx else None,
+                             sctx=sctx),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -528,6 +612,14 @@ async def create_response(
         # Key the UsageLogs row on the request id for the offline VSR reconcile join.
         request_id=ctx.request_id if ctx else None,
     )
+    # SAAR post-settle: persist the session's routing state. A minted response id
+    # marks non-portable continuation state, so the NEXT turn that references it
+    # hard-locks to this backend (provider-state). Emit replay headers. Best-
+    # effort throughout — never affects the response.
+    _saar_finalize_responses(
+        sctx, response, committed_model=entry.bedrock_model_id,
+        minted_response_id=_response_id(data),
+    )
     return data
 
 
@@ -542,6 +634,7 @@ async def _stream_response(
     tenants_repo: UserTenantsRepository,
     reservation: int,
     request_id: Optional[str] = None,
+    sctx=None,
 ) -> AsyncGenerator[bytes, None]:
     """Stream the Responses-API SSE feed back to the caller.
 
@@ -582,6 +675,10 @@ async def _stream_response(
     input_tokens = 0
     output_tokens = 0
     settled = False
+    # The provider continuation id the stream actually minted (from
+    # response.completed). None unless a real completed event carried one — so a
+    # cut / errored / id-less stream arms NO provider-state lock (Fable review §2).
+    minted_id: Optional[str] = None
 
     payload = body.model_dump(exclude_none=True)
     payload["stream"] = True
@@ -633,10 +730,12 @@ async def _stream_response(
                             continue
                         buffer.extend(chunk)
                         for raw_event in _drain_events(buffer):
-                            out_bytes, usage = _handle_sse_event(raw_event)
+                            out_bytes, usage, ev_id = _handle_sse_event(raw_event)
                             yield out_bytes
                             if usage is not None:
                                 input_tokens, output_tokens = usage
+                            if ev_id is not None:
+                                minted_id = ev_id
 
                     # Flush any trailing bytes that were not terminated
                     # by a blank line. bedrock-mantle (or any hop in
@@ -653,7 +752,9 @@ async def _stream_response(
                     # streams flow through unchanged.
                     if buffer:
                         trailing = bytes(buffer)
-                        out_bytes, usage = _handle_sse_event(trailing)
+                        out_bytes, usage, ev_id = _handle_sse_event(trailing)
+                        if ev_id is not None:
+                            minted_id = ev_id
                         if out_bytes:
                             if not (
                                 out_bytes.endswith(b"\n\n")
@@ -725,6 +826,25 @@ async def _stream_response(
             request_id=request_id,
         )
         settled = True
+        # SAAR post-settle (stream): persist routing state, storing the ACTUAL
+        # response id the stream minted (from response.completed) — NOT a fixed
+        # True. A stream that errored / was cut / minted no id stores minted_id=
+        # None, so the next turn arms NO provider-state lock (Fable review §2: no
+        # false lock). Replay headers can't be added post-hoc to an already-
+        # flushed SSE response, so only the phase persist runs here.
+        if sctx is not None:
+            try:
+                from .routing import saar as _saar
+
+                _saar.saar_post_settle(
+                    sctx=sctx,
+                    committed_model=entry.bedrock_model_id,
+                    response_had_tool_use=False,
+                    request_had_tool_result=False,
+                    minted_response_id=minted_id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort, never breaks the stream.
+                pass
     finally:
         # Defensive: if the generator was closed mid-stream (client drop,
         # cancellation), still settle so the reservation does not leak.
@@ -779,12 +899,17 @@ def _drain_events(buffer: bytearray) -> list[bytes]:
     return events
 
 
-def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]]]:
+def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Optional[str]]:
     """Process one fully-buffered SSE event.
 
     Returns the bytes to forward to the client (usually `raw` itself —
-    we are byte-transparent by default) plus an optional `(input_tokens,
-    output_tokens)` extracted from `response.completed`.
+    we are byte-transparent by default), an optional `(input_tokens,
+    output_tokens)` extracted from `response.completed`, and the minted
+    `response_id` from that same completed event (or None). The id is
+    captured ONLY from `response.completed` — never from an error/failed/
+    partial event — so the provider-state lock is armed only when a real,
+    referenceable continuation was actually produced (Fable review §2: no
+    false lock on a stream that errored / was cut / minted no id).
 
     The only event whose bytes we rewrite is `event: error`: its
     `data:` payload is JSON-decoded, `error.message` is sanitized, and
@@ -799,11 +924,12 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]]]:
         # somehow violated that we still want to forward it verbatim
         # rather than drop the frame. The codex parser will handle the
         # decode error itself.
-        return raw, None
+        return raw, None, None
 
     event_name, data_payload = _parse_sse_frame(text)
 
     usage: Optional[tuple[int, int]] = None
+    minted_id: Optional[str] = None
     if event_name == "response.completed" and data_payload is not None:
         try:
             obj = json.loads(data_payload)
@@ -813,6 +939,7 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]]]:
             response_block = obj.get("response")
             if isinstance(response_block, dict):
                 usage = _extract_usage(response_block.get("usage", {}))
+                minted_id = _response_id(response_block)
 
     if event_name == "error":
         # A-03-sse: when the upstream error payload does not match the
@@ -828,14 +955,14 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]]]:
             else None
         )
         if sanitized is not None:
-            return f"event: error\ndata: {sanitized}\n\n".encode("utf-8"), usage
+            return f"event: error\ndata: {sanitized}\n\n".encode("utf-8"), usage, minted_id
         fallback = data_payload if data_payload is not None else text
         scrubbed = sanitize_exception_message(fallback)
         return (
             f"event: error\ndata: {json.dumps({'error': {'message': scrubbed}}, ensure_ascii=False)}\n\n"
-        ).encode("utf-8"), usage
+        ).encode("utf-8"), usage, minted_id
 
-    return raw, usage
+    return raw, usage, minted_id
 
 
 def _parse_sse_frame(text: str) -> tuple[Optional[str], Optional[str]]:

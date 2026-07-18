@@ -130,11 +130,14 @@ SCENARIOS: list[BlogScenario] = [
         claim="Requests carrying non-portable continuation state (a response id) "
               "are locked to their backend; the blog eliminated 432 provider-state "
               "violations.",
-        stratoclave_behavior="Phase.PROVIDER_STATE exists and is in HARD_LOCK, but "
-              "NOTHING sets it: next_phase_after_turn only ever returns TOOL_LOOP or "
-              "NORMAL (provider-state is a documented P1 concern for the Responses "
-              "continuation path). So Stratoclave does NOT yet enforce this lock.",
-        coverage=NOT_IMPLEMENTED,
+        stratoclave_behavior="A Responses request carrying previous_response_id "
+              "sets request_has_provider_state; a turn that minted a response id "
+              "persists Phase.PROVIDER_STATE via next_phase_after_turn; decide() "
+              "then hard-locks the continuation back to its origin model (peer of "
+              "the tool-loop lock, checked BEFORE idle reset so a still-referenced "
+              "continuation is never reset away). Wired into the /v1/responses "
+              "handler (non-stream + stream).",
+        coverage=COVERED,
     ),
 ]
 
@@ -156,6 +159,12 @@ class Turn:
     """One agent turn fed to the driver."""
     has_tool_result: bool = False      # this request returns a tool output
     emits_tool_use: bool = False       # the response asks for a tool (=> next turn locks)
+    # provider-state (Responses continuation). `emitted_response_id`: the id THIS
+    # turn's response mints (armed for the next turn). `references_response_id`:
+    # the previous_response_id THIS request sends. A lock fires only when the
+    # referenced id EXACTLY equals the id the prior turn minted (verified).
+    emitted_response_id: Optional[str] = None
+    references_response_id: Optional[str] = None
     matched_decision: Optional[str] = None  # routing-decision label (for drift)
     at_epoch: int = 0                  # wall-clock of this turn (for idle reset)
     # The model the cascade WOULD pick this turn if SAAR had no opinion. This is
@@ -225,6 +234,7 @@ def drive_session(
             mem=mem,
             now_epoch=t.at_epoch,
             request_has_tool_result=t.has_tool_result,
+            request_provider_state_id=t.references_response_id,
             matched_decision=t.matched_decision,
             idle_reset_seconds=idle_reset_seconds,
         )
@@ -242,18 +252,34 @@ def drive_session(
         prev_model = mem.last_physical_model if mem else None
         switched = bool(prev_model) and committed != prev_model
 
-        # a violation: this turn returns a tool result while the session was in a
-        # tool loop, yet the committed model is NOT the model that opened the loop.
-        violation = (
+        # a violation: a continuity-bearing request committed to a model OTHER
+        # than the one holding the continuity. Two forms:
+        #  * a tool result while in tool-loop phase went to a different model;
+        #  * a provider-state continuation reference while in provider-state phase
+        #    went to a different (non-origin) backend.
+        tool_loop_violation = (
             t.has_tool_result
             and mem is not None
             and mem.phase == saar.Phase.TOOL_LOOP
             and committed != mem.last_physical_model
         )
+        # provider-state violation: the request references EXACTLY the id the
+        # prior turn minted (a real, verified continuation), the session is in
+        # provider-state phase, yet the commit went to a different backend.
+        provider_state_violation = (
+            mem is not None
+            and mem.phase == saar.Phase.PROVIDER_STATE
+            and t.references_response_id is not None
+            and mem.minted_response_id is not None
+            and t.references_response_id == mem.minted_response_id
+            and committed != mem.last_physical_model
+        )
+        violation = tool_loop_violation or provider_state_violation
 
         phase_out = saar.next_phase_after_turn(
             response_had_tool_use=t.emits_tool_use,
             request_had_tool_result=t.has_tool_result,
+            response_emitted_provider_state=bool(t.emitted_response_id),
         )
         out.results.append(TurnResult(
             turn_index=i,
@@ -266,7 +292,8 @@ def drive_session(
             violation=violation,
         ))
 
-        # persist (in-memory) exactly as saar_post_settle would
+        # persist (in-memory) exactly as saar_post_settle would, storing the id
+        # this turn minted so the NEXT turn can only lock by echoing it back.
         mem = saar.SessionMemory(
             last_physical_model=committed,
             phase=phase_out,
@@ -275,6 +302,7 @@ def drive_session(
             turn_count=(mem.turn_count if mem else 0) + 1,
             last_turn_at=t.at_epoch,
             warm_prefix_tokens=0,
+            minted_response_id=t.emitted_response_id,
         )
 
     return out
