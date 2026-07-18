@@ -38,6 +38,9 @@ markers = [
     # Hits REAL AWS (DynamoDB / CloudFront). Skipped by default; opt in with the
     # documented env var. NOT a per-commit gate — run it pre-merge.
     "live: exercises real AWS resources; requires opt-in env + credentials",
+    # Exhaustive replay of the vLLM SAAR blog's nine scenarios against the SAAR
+    # decision core. Pure + deterministic (no AWS); runs every commit.
+    "saar_scenario: vLLM SAAR blog scenario coverage (deterministic, no AWS)",
 ]
 
 [tool.ruff]
