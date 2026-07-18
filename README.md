@@ -646,9 +646,10 @@ be billed — so the ledger/rating work was P0 and shipped first; the router is 
 | **Rating engine** (usage → money) | Layer 5 front | Pins "which price, when" so a price change never breaks past invoices; also the basis for "how much the router saved" | Versioned per-model micro-USD config; rate frozen at reserve, versioned rating on the terminal | **Shipped** |
 | **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture non-LLM actions inside their own workflows | `TransactWriteItems` reserve = authorize; the unmodified settle = capture | **Shipped** |
 | **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box | `resolve_model` is deterministic; the routing-signals append log is the sink | **Shipped** |
-| **Session-aware routing (SAAR)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; switch-cost gated at reserve | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve | **Shipped, dark** (`SAAR_ENABLED`) |
+| **Session-aware routing (SAAR)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch-cost gated at reserve | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve; blog-scenario harness runs per commit | **Shipped, dark** (`SAAR_ENABLED`) |
 | **Hybrid serving (self-hosted vLLM)** | Transport axis | Route selected models to an internal vLLM endpoint instead of Bedrock, priced as operator cost-recovery, so the *same* budget/rating/settle path covers self-hosted inference | `served_by` seam on the target; one transport binding at `_attempt_invoke`; SSE→converse translation | **Shipped, dark** (`HYBRID_SERVING_ENABLED`) |
 | **External VSR consult** (version-pinned advisor) | Router's central-advice axis | A central, external Value/Session Router can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money | Fail-open consult (150 ms); version-pin handshake; per-tenant opaque config in S3, validated by the VSR itself | **Shipped, dark** (`EXTERNAL_VSR_ENABLED`) |
+| **VSR billing reconciliation** | Boundary observability | Joins each VSR-acted request's decision record to its billed usage by `span_id` — what it cost, whether a hard pin was honored against the *billed* model, coverage — without re-implementing the VSR's own routing metrics | `vsr_consult_decision` log + `x-sc-vsr-*` headers + config-skew echo; offline join in `mvp.learning.vsr_reconcile` | **Shipped** (internal ops CLI) |
 | **Latency/SLO-driven routing** (signals consumer) | Router's latency axis | Without a latency feedback loop, semantic routing collapses onto the cheap model and breaks SLOs | `attempt_facts.latency_ms` per attempt; signals writer already live | **P1** |
 | **Semantic routing** (meaning/difficulty → model) | The 4th routing axis | The "cheaper the more you use" curve — route the easy 60–80% to a 1/10-cost model; classify with embeddings + rules, and **meter the classifier's own cost** | `resolve_model` is the single decision point; `cost_tier` + fallback chain = a difficulty ladder | **P1** |
 | **Prompt-cache passthrough** | Layer 5 cost side | Bedrock prompt-cache reads are heavily discounted; direct margin win when tenants share a system prompt | Micro-USD pricing config; per-attempt token stats | **P1** |
@@ -785,7 +786,16 @@ to Bedrock-only):**
 
 - **Session-aware routing (SAAR)** (`SAAR_ENABLED`). Sticky per-session model
   choice with a tool-loop hard-lock, switch-cost gated at reserve; backed by a
-  DynamoDB session-memory table. Per-tenant opt-in on top of the flag.
+  DynamoDB session-memory table. Per-tenant opt-in on top of the flag. Beyond
+  the sticky/tool-loop core, SAAR also implements **idle-timeout reset**,
+  **decision-drift reset**, and a **provider-state lock** — a request carrying
+  a non-portable continuation id (an OpenAI Responses `previous_response_id`) is
+  hard-locked to the backend that minted it, verified against the id the session
+  actually minted (a forged/foreign id never locks) and bounded by a hard cap so
+  a retired backend can never strand a session. Coverage against every scenario
+  in the vLLM SAAR blog is pinned by a deterministic scenario harness
+  (`backend/tests/scenarios/saar/`, `pytest -m saar_scenario`) that runs each
+  commit.
 - **Hybrid serving — self-hosted vLLM** (`HYBRID_SERVING_ENABLED`). A registry
   entry can declare `served_by="vllm"` + an `endpoint_key`; the target then
   routes to an internal vLLM endpoint (from an operator allowlist, `VLLM_ENDPOINTS`)
@@ -808,6 +818,20 @@ to Bedrock-only):**
   — save-time validation is delegated to the VSR's own `/v1/config/validate`
   (see [`docs/VSR_CONFIG_CONTRACT.md`](./docs/VSR_CONFIG_CONTRACT.md)). The
   semantic routing logic itself lives in the external VSR, not in Stratoclave.
+
+  Observability keeps to the same boundary — **routing quality is the VSR's own
+  Prometheus/Grafana; Stratoclave records only what happened to the advice at
+  its trust boundary and what it billed.** Per consult it logs a structured
+  `vsr_consult_decision`, echoes `x-sc-vsr-decision` / `x-sc-vsr-suggested` /
+  `x-sc-vsr-config-version` response headers, and detects validate/serve config
+  skew from the VSR's echoed effective-config id. An internal **offline billing
+  reconciliation** (`mvp.learning.vsr_reconcile`, run via `vsr_reconcile_cli`)
+  joins each VSR-acted request's decision record to its billed UsageLogs row by
+  `span_id`, answering the three boundary questions Stratoclave owns: what it
+  cost, whether a hard pin was honored **against the actually-billed model** (a
+  hard pin whose billed model differs is flagged as a violation), and coverage.
+  The VSR's own metrics are converged onto the same CloudWatch pane via an ADOT
+  sidecar co-located in the VSR task (dark-safe: absent when the VSR is off).
 
 **On the roadmap (designed, not yet wired into the request path):**
 
