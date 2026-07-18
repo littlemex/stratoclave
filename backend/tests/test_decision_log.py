@@ -42,6 +42,67 @@ def test_decision_item_shape_and_no_ttl():
     assert "expires_at" not in item and "ttl" not in item
 
 
+def test_decision_item_has_no_vsr_block_by_default():
+    # Non-VSR request => byte-identical to before (no `vsr` key at all).
+    assert "vsr" not in _decision()
+
+
+def test_decision_item_carries_vsr_block_when_present():
+    item = _decision(vsr={
+        "decision": "hard-applied",
+        "suggested_model": "claude-haiku-4-5",
+        "mode": "hard",
+        "config_version": "cfgv-1",
+    })
+    assert item["vsr"]["decision"] == "hard-applied"
+    assert item["vsr"]["suggested_model"] == "claude-haiku-4-5"
+    assert item["vsr"]["config_version"] == "cfgv-1"
+    # The join key that ties this to the ledger/usage-log is the span_id.
+    assert item["span_id"] == "sp-1"
+
+
+def test_record_from_context_vsr_only_passthrough(monkeypatch):
+    """A single-candidate passthrough has NO decision_facts, but a VSR decision
+    alone must still emit a record (keyed by span_id) so the offline billing
+    reconciliation can join every VSR-acted request. The committed model is
+    taken from selected_model."""
+    class _Ctx:
+        tenant_id = "acme"
+        workflow_run_id = "wf-9"
+        request_id = "sp-9"
+        requested_model = "claude-opus-4-7"
+        selected_model = "claude-haiku-4-5"
+        decision_facts = None
+        vsr_decision = {"decision": "hard-applied",
+                        "suggested_model": "claude-haiku-4-5", "mode": "hard"}
+
+    captured = {}
+    monkeypatch.setattr(dl, "emit_decision", lambda item: captured.update(item))
+    dl.record_decision_from_context(_Ctx())
+    assert captured["record_type"] == "decision"
+    assert captured["span_id"] == "sp-9"
+    assert captured["chosen"]["model"] == "claude-haiku-4-5"
+    assert captured["vsr"]["decision"] == "hard-applied"
+
+
+def test_record_from_context_noop_without_facts_or_vsr(monkeypatch):
+    """No facts AND no VSR decision => no record emitted (dark ship: a plain
+    passthrough writes nothing new)."""
+    class _Ctx:
+        tenant_id = "acme"
+        workflow_run_id = "wf-9"
+        request_id = "sp-9"
+        requested_model = "opus"
+        selected_model = "opus"
+        decision_facts = None
+        vsr_decision = None
+
+    calls = {"n": 0}
+    monkeypatch.setattr(dl, "emit_decision", lambda item: calls.__setitem__("n", calls["n"] + 1))
+    dl.record_decision_from_context(_Ctx())
+    assert calls["n"] == 0
+
+
 def test_outcome_item_shape_and_basis():
     o = dl.build_outcome_item(
         tenant_id="acme", run_id="wf-1", span_id="sp-1",

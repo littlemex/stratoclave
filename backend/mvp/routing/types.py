@@ -26,6 +26,14 @@ class Target:
     region: str
     cost_tier: int = 1
     price_key: str = ""
+    # Hybrid serving (P0). "bedrock" (default) == today's behaviour. "vllm"
+    # routes the invoke through mvp.serving.vllm to a self-hosted, internal
+    # OpenAI-compatible endpoint identified by `endpoint_key` (an opaque token
+    # resolved against an operator allowlist — never a URL). A vLLM target
+    # carries region="self-hosted" and is a single target with no cross-region
+    # failover fan-out.
+    served_by: str = "bedrock"
+    endpoint_key: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -93,6 +93,68 @@ def _selected_bedrock_model(context, default_model_id: str) -> str:
     except ValueError:
         logger.warning("cascade_model_unresolvable", selected_model=selected)
         return default_model_id
+
+
+def _saar_req_tool_result(body) -> bool:
+    """Did THIS request carry a tool_result block? (tool-loop-lock trigger.)
+    Fenced so a shape surprise never breaks the handler."""
+    try:
+        from .routing.saar import request_has_tool_result
+
+        return request_has_tool_result(getattr(body, "messages", None))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _saar_finalize(sctx, response, context, committed_model_id, content_blocks, *,
+                   request_had_tool_result: bool, cache_read_tokens: int) -> None:
+    """Persist SAAR routing state + fire the provable claim + set the x-sc-saar-*
+    replay headers. No-op when SAAR did not act (sctx is None). Entirely best-
+    effort and money-neutral — the charge already settled. NEVER raises."""
+    if sctx is None:
+        return
+    try:
+        from .routing import saar as _saar
+        from . import pricing as _pricing
+
+        # The committed pricing_key + frozen rating version (so the claim's
+        # micro-USD delta is recomputable — the "provable" property).
+        pk = getattr(context, "pricing_key", None) or "default"
+        snap = getattr(context, "rate_snapshot", None)
+        rating_version = getattr(snap, "version", None) if snap else None
+        had_tool_use = _saar.response_has_tool_use(content_blocks)
+        # P0: warm_prefix_tokens is 0 (cache evidence lands in P1); the checkout
+        # delta is therefore 0 and is honestly recorded as such in the claim.
+        warm = int(sctx.decision.warm_prefix_tokens)
+        try:
+            delta = _pricing.saar_checkout_delta_microusd(
+                pricing_key=pk, warm_prefix_tokens=warm
+            )
+        except Exception:  # noqa: BLE001 — pricing miss ⇒ claim delta 0.
+            delta = 0
+        _saar.saar_post_settle(
+            sctx=sctx,
+            committed_model=committed_model_id,
+            response_had_tool_use=had_tool_use,
+            request_had_tool_result=request_had_tool_result,
+            warm_prefix_tokens=warm,
+            rating_version=rating_version,
+            checkout_delta_microusd=delta,
+            pricing_key=pk,
+        )
+        # Replay headers on the response (money-neutral, observational).
+        for k, v in _saar.replay_headers(
+            replay_id=sctx.replay_id, decision=sctx.decision,
+            chosen_model=committed_model_id, checkout_delta_microusd=delta,
+        ).items():
+            response.headers[k] = v
+    except Exception as e:  # noqa: BLE001 — SAAR finalize must never break a settled request.
+        try:
+            logger.warning("saar_finalize_failed", error=str(e))
+        except Exception:
+            pass
+
+
 router = APIRouter(tags=["mvp-anthropic"])
 
 
@@ -524,6 +586,97 @@ def messages(
     # validated against the allowlist + servability downstream (403 / 400).
     model_pin = extract_model_pin(request)
 
+    # SAAR (session-aware routing). Runs ONLY when the client did not send an
+    # explicit x-sc-model-pin (an explicit pin always wins — Fable design
+    # precedence #1). saar_pre_reserve checks SAAR_ENABLED FIRST and fetches
+    # routing config internally, so a flag-off deployment touches nothing here
+    # (C1). It yields a HARD pin (tool-loop lock only → vsr_hard_model, disables
+    # cascade) and/or a SOFT preference (sticky → heads the cascade but keeps
+    # fallback, so SAAR can never turn a servable request into a 402/403). Fail-
+    # open: sctx None ⇒ pre-SAAR cascade, nothing touched.
+    sctx = None
+    saar_hard = None
+    saar_prefer = None
+    saar_warm = 0
+    if model_pin is None:
+        from .routing import saar as _saar
+
+        sctx = _saar.saar_pre_reserve(
+            ctx=ctx,
+            org_id=user.org_id,
+            user_id=user.user_id,
+            request_messages=body.messages,
+        )
+        if sctx is not None:
+            saar_hard = sctx.decision.hard_model
+            saar_prefer = sctx.decision.prefer_model
+            saar_warm = int(sctx.decision.warm_prefix_tokens)
+
+    # External VSR consult (task #13). Runs ONLY when the client sent no explicit
+    # pin AND SAAR produced no hard lock (both are stronger, local signals). It
+    # is off by default (EXTERNAL_VSR_ENABLED) and version-pinned + fail-open:
+    # a missing/slow/version-skewed VSR yields no advice, routing = today. The
+    # suggestion is fed into the SAME resolver inputs as an x-sc-model-pin, so it
+    # passes the SAME allowlist/servability enforcement — the VSR is an untrusted
+    # advisor, never a bypass.
+    vsr_hard = None
+    vsr_decision = None   # dict attached to the reserve-time decision record
+    vsr_headers = {}      # x-sc-vsr-* observational response headers
+    if model_pin is None and saar_hard is None:
+        try:
+            from .vsr import client as _vsr
+
+            # Only DO anything (and only LOG anything) when the feature is on:
+            # flag off => zero new work AND zero new log lines (dark ship). The
+            # consult itself is fail-open and never on the money path.
+            if _vsr.external_vsr_enabled():
+                sk = ctx.session_key() if ctx else None
+                result = _vsr.consult_ex(
+                    tenant_id=user.org_id, session_key=sk, requested_model=body.model,
+                )
+                suggestion = result.suggestion
+                saar_prefer_present = saar_prefer is not None
+                # The decision the gateway can prove AT CONSULT TIME (routing
+                # quality itself belongs to the VSR's own metrics stack). The
+                # post-reserve enforcement split (allowlist reject) is derivable
+                # offline from the committed model. classify/decision_record/
+                # decision_headers are pure + unit-tested.
+                decision = _vsr.classify_consult_decision(
+                    result, saar_prefer_present=saar_prefer_present)
+                vsr_decision = _vsr.decision_record(
+                    result, saar_prefer_present=saar_prefer_present)
+                vsr_headers = _vsr.decision_headers(
+                    result, saar_prefer_present=saar_prefer_present)
+                if suggestion is not None and suggestion.mode == "hard":
+                    vsr_hard = suggestion.model
+                elif (suggestion is not None and suggestion.mode == "prefer"
+                      and saar_prefer is None):
+                    saar_prefer = suggestion.model
+                # tenant_id is auth-derived; we log the advised model id (bound
+                # for the same allowlist enforcement as a client pin) + the VSR's
+                # echoed effective-config id, but NEVER the raw session key, the
+                # VSR url, or the tenant config blob. The config_version rides the
+                # log so a metric filter / offline join can flag validate-serve
+                # skew (written S3 version vs the version actually served).
+                logger.info(
+                    "vsr_consult_decision",
+                    tenant_id=user.org_id,
+                    decision=decision,
+                    suggested_model=(suggestion.model if suggestion else None),
+                    mode=(suggestion.mode if suggestion else None),
+                    requested_model=body.model,
+                    config_version=result.config_version,
+                    request_id=(ctx.request_id if ctx else None),
+                )
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            vsr_hard = None
+
+    # Echo the VSR decision on the non-streaming response (the streaming branch
+    # merges vsr_headers into its own StreamingResponse header block below).
+    # Empty when the feature is off => no new headers (dark ship).
+    if vsr_headers:
+        response.headers.update(vsr_headers)
+
     reservation = _estimate_reservation_tokens(body)
     tenants_repo = _reserve_credit_for_model(
         user,
@@ -532,12 +685,19 @@ def messages(
         input_tokens_est=max(reservation - body.max_tokens, 0),
         max_output_tokens=body.max_tokens,
         wire_protocol="messages",
-        vsr_hard_model=model_pin,
+        # Hard-pin precedence: explicit client pin > SAAR tool-loop lock >
+        # external VSR hard suggestion. All three land on the same enforced pin.
+        vsr_hard_model=model_pin or saar_hard or vsr_hard,
+        saar_prefer_model=saar_prefer,
+        saar_warm_prefix_tokens=saar_warm,
         # L5-d: carry request attribution so settle keys the ledger run-index on
         # the client's workflow_run_id (per-run billing).
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        # Observability: the VSR consult decision, joined to the committed model
+        # on the reserve-time decision record (None when the feature is off).
+        vsr_decision=vsr_decision,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
@@ -548,13 +708,28 @@ def messages(
     model_id = _selected_bedrock_model(tenants_repo, model_id)
 
     if body.stream:
+        # SAAR replay headers are known BEFORE the stream (replay id, chosen
+        # model, phase, decision) since the reserve already committed the model;
+        # the checkout delta is 0 in P0. Persist + claim happen in _on_finalized.
+        saar_hdrs = {}
+        if sctx is not None:
+            try:
+                from .routing import saar as _saar
+                saar_hdrs = _saar.replay_headers(
+                    replay_id=sctx.replay_id, decision=sctx.decision,
+                    chosen_model=model_id, checkout_delta_microusd=0,
+                )
+            except Exception:  # noqa: BLE001 — headers are best-effort.
+                saar_hdrs = {}
         return StreamingResponse(
-            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec, ctx=ctx),
+            _stream_messages(body, model_id, user, tenants_repo, reservation, fault_spec=fault_spec, ctx=ctx, sctx=sctx),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                **saar_hdrs,
+                **vsr_headers,
                 **corr,
             },
         )
@@ -598,6 +773,9 @@ def messages(
         context=tenants_repo,
         actual_cache_read_tokens=cache_read,
         actual_cache_write_tokens=cache_write,
+        # Key the UsageLogs row on the request id so the offline VSR
+        # reconciliation can join it to the reserve-time decision record.
+        request_id=ctx.request_id if ctx else None,
     )
 
     content_blocks: list[dict[str, Any]] = []
@@ -615,6 +793,15 @@ def messages(
 
     stop_reason_bedrock = resp.get("stopReason", "end_turn")
     stop_reason = _map_stop_reason(stop_reason_bedrock)
+
+    # SAAR: persist the session's new routing state + fire the provable claim, and
+    # echo the x-sc-saar-* replay headers. All best-effort / money-neutral (the
+    # settle above already committed the charge). Only runs when SAAR chose to act.
+    _saar_finalize(
+        sctx, response, tenants_repo, model_id, content_blocks,
+        request_had_tool_result=_saar_req_tool_result(body),
+        cache_read_tokens=cache_read,
+    )
 
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -642,6 +829,7 @@ async def _stream_messages(
     reservation: int,
     fault_spec: Optional[str] = None,
     ctx: Optional[RequestContext] = None,
+    sctx=None,
 ) -> AsyncGenerator[bytes, None]:
     """Delegation shim — forwards to `_budget_flow.run_stream`.
 
@@ -780,6 +968,43 @@ async def _stream_messages(
             except Exception:
                 pass
 
+        # SAAR: persist the session's routing state + fire the provable claim on
+        # the SAME at-most-once finalizer claim (money-neutral, fire-and-forget).
+        # Anthropic signals a tool call via stop_reason == "tool_use", so the next
+        # turn's phase is derived from that. No-op when SAAR did not act.
+        if sctx is not None:
+            try:
+                from .routing import saar as _saar
+                from . import pricing as _pricing
+
+                committed = (target.model_id if target else model_id)
+                pk = getattr(tenants_repo, "pricing_key", None) or "default"
+                snap = getattr(tenants_repo, "rate_snapshot", None)
+                rating_version = getattr(snap, "version", None) if snap else None
+                had_tool_use = str(getattr(acc, "stop_reason", "")) == "tool_use"
+                warm = int(sctx.decision.warm_prefix_tokens)
+                try:
+                    delta = _pricing.saar_checkout_delta_microusd(
+                        pricing_key=pk, warm_prefix_tokens=warm
+                    )
+                except Exception:  # noqa: BLE001
+                    delta = 0
+                _saar.saar_post_settle(
+                    sctx=sctx,
+                    committed_model=committed,
+                    response_had_tool_use=had_tool_use,
+                    request_had_tool_result=_saar_req_tool_result(body),
+                    warm_prefix_tokens=warm,
+                    rating_version=rating_version,
+                    checkout_delta_microusd=delta,
+                    pricing_key=pk,
+                )
+            except Exception as _saar_exc:  # noqa: BLE001 — never-raises stays local.
+                try:
+                    logger.warning("saar_stream_finalize_failed", error=str(_saar_exc))
+                except Exception:
+                    pass
+
     class _AnthropicAdapter:
         def __init__(self):
             self.state = wire.AnthropicStreamState(model=body.model)
@@ -812,6 +1037,7 @@ async def _stream_messages(
         release=lambda ctx: _release_pool(ctx),
         adapter=_AnthropicAdapter(),
         on_finalized=_on_finalized,
+        request_id=ctx.request_id if ctx else None,
     ):
         yield frame
 

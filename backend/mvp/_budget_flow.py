@@ -37,6 +37,7 @@ async def run_stream(
     release: Callable[..., Any],
     adapter: StreamAdapter,
     on_finalized: Optional[Callable[[str, "t.UsageAccumulator"], None]] = None,
+    request_id: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Streaming budget flow — the settle-once invariant is explicit.
 
@@ -108,6 +109,9 @@ async def run_stream(
             model_id=model_id, context=tenants_repo,
             actual_cache_read_tokens=acc.cache_read_tokens,
             actual_cache_write_tokens=acc.cache_write_tokens,
+            # Key the UsageLogs row on the request id so the offline VSR
+            # reconciliation can join it to the reserve-time decision record.
+            request_id=request_id,
         )
 
     def _do_refund_release():

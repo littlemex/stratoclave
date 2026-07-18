@@ -29,6 +29,7 @@ excluded), never as a complete figure.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Optional
 
@@ -79,6 +80,7 @@ def build_decision_item(
     rejected: list[dict],
     estimate_inputs: dict,
     created_at_ms: int,
+    vsr: Optional[dict] = None,
 ) -> dict[str, Any]:
     """PURE builder for the reserve-time decision record.
 
@@ -86,10 +88,17 @@ def build_decision_item(
                 pricing_version_at_decision}.
     `rejected` = [{model, pricing_key, cost_tier, reject_reason, servable,
                    est_cost_microusd|None}].
+    `vsr` (optional) = the external-VSR consult decision for this request:
+        {decision, suggested_model, mode, config_version} — present ONLY when the
+        VSR feature was on for the request. It is the observability half of the
+        VSR integration: joined against this record's `chosen.model` and (offline)
+        the ledger/usage-log keyed by the same `span_id`, it proves "the VSR
+        advised X, the request committed Y, and it was billed Z" without a new
+        table. Absent entirely when the feature is off (dark ship).
     No TTL attribute (audit record). Deterministic sk → an idempotent retry
     overwrites byte-identically.
     """
-    return {
+    item = {
         "pk": _decision_pk(tenant_id, _day(created_at_ms)),
         "sk": decision_sk(run_id, span_id),
         "record_type": "decision",
@@ -106,6 +115,11 @@ def build_decision_item(
         "rejected": list(rejected),
         "estimate_inputs": dict(estimate_inputs),
     }
+    # Only attach the VSR block when the feature acted — keeps the record
+    # byte-identical to today for every non-VSR request (dark ship + smaller item).
+    if vsr:
+        item["vsr"] = dict(vsr)
+    return item
 
 
 def build_outcome_item(
@@ -182,16 +196,33 @@ def emit_decision(item: dict) -> None:
 
 def record_decision_from_context(context) -> None:
     """Build + fire-and-forget the reserve-time decision record from a settled/
-    reserved context. No-op (never raises) when the context lacks decision facts
-    (single-candidate / no-config passthrough) or a run/span id. Called right
-    after the reserve chokepoint returns, so the decision is on record BEFORE the
-    outcome (the anti-post-hoc audit property)."""
+    reserved context. No-op (never raises) when the context has neither decision
+    facts (single-candidate / no-config passthrough) NOR a VSR decision, or lacks
+    a run/span id. Called right after the reserve chokepoint returns, so the
+    decision is on record BEFORE the outcome (the anti-post-hoc audit property).
+
+    A VSR decision ALONE is enough to emit the record even on a single-candidate
+    passthrough (no routing facts): the VSR is effective regardless of how many
+    Bedrock candidates existed, and the offline billing-reconciliation join needs
+    every VSR-acted request keyed by span_id."""
     try:
         facts = getattr(context, "decision_facts", None)
+        vsr = getattr(context, "vsr_decision", None)
         run_id = getattr(context, "workflow_run_id", None)
         span_id = getattr(context, "request_id", None) or getattr(context, "span_id", None)
-        if not facts or not run_id or not span_id:
+        if (not facts and not vsr) or not run_id or not span_id:
             return
+        if facts:
+            chosen = facts["chosen"]
+            rejected = facts["rejected"]
+            estimate_inputs = facts.get("estimate_inputs", {})
+        else:
+            # VSR-only record on a single-candidate passthrough: the committed
+            # model is what the reserve selected; no rejected alternates existed.
+            chosen = {"model": getattr(context, "selected_model", None)
+                      or getattr(context, "requested_model", "") or ""}
+            rejected = []
+            estimate_inputs = {}
         item = build_decision_item(
             tenant_id=getattr(context, "tenant_id", ""),
             run_id=run_id,
@@ -200,14 +231,104 @@ def record_decision_from_context(context) -> None:
             requested_model=getattr(context, "requested_model", "") or "",
             selection_reason=None,
             fallback_reason=None,
-            chosen=facts["chosen"],
-            rejected=facts["rejected"],
-            estimate_inputs=facts.get("estimate_inputs", {}),
+            chosen=chosen,
+            rejected=rejected,
+            estimate_inputs=estimate_inputs,
             created_at_ms=_now_ms(),
+            vsr=vsr,
         )
         emit_decision(item)
     except Exception:  # noqa: BLE001 — decision logging must never break a request.
         pass
+
+
+def saar_eval_sk(run_id: str, span_id: str) -> str:
+    return f"saar#{_safe_key_token(run_id)}#{_safe_key_token(span_id)}"
+
+
+def _hash_session_key(session_key: str) -> str:
+    """One-way HMAC of a client-chosen session id for the audit record. Unlike
+    ``_safe_key_token`` (which passes a short grammar-clean value through
+    verbatim), this ALWAYS hashes: a tenant may embed meaningful/sensitive text
+    in its session ids, and the decision log is a durable audit store, so the raw
+    value must never be persisted. Correlation across records is preserved
+    because the same session id maps to the same marker.
+
+    Keyed with a server secret (``SAAR_SESSION_HASH_SECRET``, else the deploy
+    prefix as a weak default) so a plain SHA-256 dictionary/rainbow reversal of a
+    low-entropy client session id ("chat-1") is not trivially possible (Fable SAAR
+    review-1 M4). The secret need not be high-entropy to defeat precomputation;
+    it only has to be non-public and stable per deployment."""
+    import hashlib
+    import hmac
+
+    secret = (
+        os.getenv("SAAR_SESSION_HASH_SECRET")
+        or os.getenv("STRATOCLAVE_PREFIX")
+        or "stratoclave-saar"
+    ).encode("utf-8")
+    digest = hmac.new(secret, (session_key or "").encode("utf-8"), hashlib.sha256)
+    return "s_" + digest.hexdigest()[:24]
+
+
+def build_saar_eval_item(
+    *,
+    tenant_id: str,
+    run_id: str,
+    span_id: str,
+    session_key: str,
+    replay_id: str,
+    reason: str,
+    phase: str,
+    prev_model: Optional[str],
+    chosen_model: str,
+    switched: bool,
+    warm_prefix_tokens_claimed: int,
+    checkout_delta_microusd: int,
+    rating_version: Optional[str],
+    created_at_ms: int,
+) -> dict[str, Any]:
+    """PURE builder for the SAAR routing claim (Fable SAAR design §4/§5).
+
+    This is the *provable* half of session-aware routing: it records, per turn,
+    what SAAR decided and — crucially — the micro-USD ``checkout_delta`` it
+    claimed a switch would have cost, pinned to ``rating_version``. An offline
+    reconciliation (P2) recomputes that delta from the same versioned rate table
+    and reconciles the claimed prefix-cache saving against the ledger's actual
+    ``cache_read`` charge for the same ``replay_id`` — so the saving a
+    session-aware router reports is not a black box.
+
+    The session key is stored HASHED (not raw) so this audit record can never
+    leak a client-chosen session identifier. No TTL (audit)."""
+    return {
+        "pk": _decision_pk(tenant_id, _day(created_at_ms)),
+        "sk": saar_eval_sk(run_id, span_id),
+        "record_type": "saar_switch_eval",
+        "schema_version": SCHEMA_VERSION,
+        "tenant_id": tenant_id,
+        "workflow_run_id": run_id,
+        "span_id": span_id,
+        "session_key_hash": _hash_session_key(session_key),
+        "replay_id": replay_id,
+        "reason": reason,
+        "phase": phase,
+        "prev_model": prev_model or "",
+        "chosen_model": chosen_model,
+        "switched": bool(switched),
+        "warm_prefix_tokens_claimed": int(warm_prefix_tokens_claimed),
+        "checkout_delta_microusd": int(checkout_delta_microusd),
+        "rating_version": rating_version or "",
+        "decided_at_ms": int(created_at_ms),
+    }
+
+
+def emit_saar_eval(item: dict) -> None:
+    """Fire-and-forget write of a pre-built SAAR eval item. Same contract as
+    emit_decision — never raises, never blocks, a drop is caught by
+    reconciliation rather than by failing the request."""
+    from . import signals
+
+    signals._submit(lambda: _put(item))
 
 
 def _now_ms() -> int:

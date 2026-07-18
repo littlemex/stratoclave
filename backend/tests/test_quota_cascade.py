@@ -78,7 +78,7 @@ def _used(model, *, user=None):
 
 
 def _reserve(model="claude-sonnet-4-6", tokens=1000, wire_protocol="messages",
-             vsr_hard_model=None):
+             vsr_hard_model=None, saar_prefer_model=None):
     return _pipeline.reserve_credit_for_model(
         _User(user_id=USER, org_id=TENANT),
         tokens,
@@ -87,6 +87,7 @@ def _reserve(model="claude-sonnet-4-6", tokens=1000, wire_protocol="messages",
         max_output_tokens=500,
         wire_protocol=wire_protocol,
         vsr_hard_model=vsr_hard_model,
+        saar_prefer_model=saar_prefer_model,
     )
 
 
@@ -491,3 +492,35 @@ class TestQuotaIdempotencyAndPeriod:
             "sk": _quota._sk("claude-sonnet-4-6", reserved_period),
         }).get("Item")
         assert int(row["used"]) == reserved // 4
+
+
+class TestSaarSoftPreference:
+    """SAAR sticky is a SOFT preference, not a hard pin (Fable review-1 C2): it
+    heads the cascade with the warm model but NEVER disables fallback, so it can
+    never turn a servable request into a 402/403."""
+
+    def test_prefer_in_chain_heads_the_cascade(self, env):
+        # sonnet is requested & first in chain, but the session is warm on haiku:
+        # the preference should reorder haiku to the head and serve it (it has no
+        # quota configured → unlimited), NOT sonnet.
+        _put_routing_config(
+            chain=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={"claude-sonnet-4-6": {"limit": 10**9}},
+            fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6", saar_prefer_model="claude-haiku-4-5")
+        assert ctx.selected_model == "claude-haiku-4-5"
+
+    def test_prefer_not_in_chain_is_ignored_cascade_proceeds(self, env):
+        # The warm model is NOT in the resolved candidate chain (e.g. it was
+        # dropped from the allowlist since the session started). The preference
+        # must be IGNORED and the request served by the normal chain — never a
+        # 402/403 (the C2 availability guarantee). A hard pin outside the chain
+        # would 403; a soft preference is silently dropped.
+        _put_routing_config(
+            chain=["claude-sonnet-4-6", "claude-haiku-4-5"],
+            quotas={}, fallback_default="on",
+        )
+        ctx = _reserve("claude-sonnet-4-6", saar_prefer_model="claude-opus-4-7")
+        # Served by the normal chain head, not the (disallowed) preferred model.
+        assert ctx.selected_model == "claude-sonnet-4-6"

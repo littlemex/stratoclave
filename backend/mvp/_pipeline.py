@@ -251,6 +251,12 @@ class ReservationContext:
     # Pure attribution — the handler emits it fire-and-forget; None when routing
     # had no real choice (single-candidate / no-config passthrough).
     decision_facts: Optional[dict] = None
+    # The external-VSR consult decision for this request, when the VSR feature
+    # acted: {decision, suggested_model, mode, config_version}. Observability
+    # only — NEVER money. Carried onto the reserve-time decision record so an
+    # offline job can join "VSR advised X" against the committed/billed model by
+    # span_id. None for every non-VSR request (dark ship).
+    vsr_decision: Optional[dict] = None
     # This reservation's HOLD row identity. `hold_sk` is the FULL sort key
     # (`HOLD#<period>#<expires_at:010d>#<hold_id>`) — the expiry is embedded so
     # the reaper can range-scan by expiry, so settle/release must delete by the
@@ -679,6 +685,9 @@ def reserve_credit_for_model(
     workflow_run_id: Optional[str] = None,
     group_id: Optional[str] = None,
     request_id: Optional[str] = None,
+    saar_warm_prefix_tokens: int = 0,
+    saar_prefer_model: Optional[str] = None,
+    vsr_decision: Optional[dict] = None,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -720,11 +729,22 @@ def reserve_credit_for_model(
             pk = _resolve_pricing(model).pricing_key
         except ValueError:
             pk = "default"
+        # SAAR: when this request is served by the session's warm model,
+        # `saar_warm_prefix_tokens` of the input estimate re-bill at the cheaper
+        # cache-read rate — so staying warm reserves LESS than switching cold, and
+        # a switch that would breach the pool while a stay would fit is naturally
+        # gated at the 402. In P0 this is always 0 (cache evidence lands in P1), so
+        # the estimate is byte-identical to pre-SAAR. The discount applies ONLY to
+        # the warm model itself — the tool-loop hard pin (`vsr_hard_model`) or the
+        # sticky soft preference (`saar_prefer_model`) — never to a cold candidate.
+        warm_model = vsr_hard_model or saar_prefer_model
+        warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
         return pk, estimate_cost_microusd(
             pricing_key=pk,
             input_tokens_est=input_tokens_est,
             max_output_tokens=max_output_tokens,
             effort_multiplier=effort_multiplier,
+            warm_prefix_tokens=warm,
         )
 
     tenant_cfg = get_tenant_routing_config(user.org_id)
@@ -744,11 +764,16 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Carry the VSR consult decision (observability only) so the decision
+        # record can be joined to the committed/billed model by span_id.
+        ctx.vsr_decision = vsr_decision
         # Complete the decision facts with the estimate inputs the candidates
         # were priced against (P0 decision log), then fire-and-forget the
         # reserve-time decision record. The WHOLE block is fenced: this runs after
         # the reserve committed, so int(None)/any error must not fail the request
-        # (Fable RDL review High). Attribution is best-effort.
+        # (Fable RDL review High). Attribution is best-effort. A VSR decision
+        # alone (no routing facts, single-candidate passthrough) still emits the
+        # record — record_decision_from_context handles the facts-absent case.
         if ctx.decision_facts is not None:
             try:
                 ctx.decision_facts["estimate_inputs"] = {
@@ -756,6 +781,10 @@ def reserve_credit_for_model(
                     "max_out": int(max_output_tokens),
                     "effort": int(effort_multiplier),
                 }
+            except Exception:  # noqa: BLE001 — never fail reserve on attribution.
+                pass
+        if ctx.decision_facts is not None or vsr_decision:
+            try:
                 from .learning.decision_log import record_decision_from_context
                 record_decision_from_context(ctx)
             except Exception:  # noqa: BLE001 — decision logging never breaks reserve.
@@ -777,6 +806,16 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Observability: carry + record the VSR decision (fire-and-forget). A
+        # hard pin normally has no multi-candidate decision_facts, so this is the
+        # only place a hard-applied VSR decision reaches the decision log.
+        ctx.vsr_decision = vsr_decision
+        if vsr_decision:
+            try:
+                from .learning.decision_log import record_decision_from_context
+                record_decision_from_context(ctx)
+            except Exception:  # noqa: BLE001 — decision logging never breaks reserve.
+                pass
         return ctx
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
@@ -796,6 +835,15 @@ def reserve_credit_for_model(
         breaker_max_tier=breaker_max_tier,
         wire_protocol=wire_protocol,
     )
+    # SAAR soft preference (Fable review-1 C2): move the session's warm model to
+    # the HEAD of the already-resolved candidate list so it is tried first (prefix-
+    # cache locality), but keep the rest of the chain intact as fallback. This is a
+    # pure REORDER of models the cascade already validated (allowlist ∩ chain ∩
+    # breaker tier) — it never injects a new model and never disables fallback, so
+    # a warm model that is disallowed/quota-exhausted simply isn't in the list and
+    # the request still cascades exactly as pre-SAAR (cannot reduce availability).
+    if saar_prefer_model and saar_prefer_model in candidates:
+        candidates = [saar_prefer_model] + [m for m in candidates if m != saar_prefer_model]
     return _stamp_requested(_reserve_over_candidates(
         user, reservation_tokens, candidates=candidates,
         tenant_cfg=tenant_cfg, price=_price,
@@ -941,6 +989,14 @@ def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> N
         raise _err_400("invalid_model_pin")
     if wire_protocol is not None and entry.wire_protocol != wire_protocol:
         raise _err_400("invalid_model_pin")
+    if getattr(entry, "served_by", "bedrock") == "vllm":
+        # Servability first (400), same as an unservable region: a vLLM pin is
+        # only servable with hybrid serving on AND an allowlisted endpoint. Flag
+        # off => a vLLM pin is rejected loudly here, never routed with a bogus
+        # region into the Bedrock client.
+        from .serving.vllm import endpoint_is_servable
+        if not endpoint_is_servable(entry.endpoint_key):
+            raise _err_400("invalid_model_pin")
 
     # The pin must be in the tenant's configured model set (allowlist, else
     # chain). Compare on the registry entry so different spellings of the same
@@ -1030,6 +1086,14 @@ def _resolve_candidate_chain(
                            candidate=model, wire_protocol=entry.wire_protocol,
                            route_protocol=wire_protocol)
             return False
+        if getattr(entry, "served_by", "bedrock") == "vllm":
+            # A vLLM candidate is servable only when hybrid serving is on AND its
+            # endpoint is allowlisted; otherwise the cascade must skip it (flag
+            # off => byte-identical to today, since no shipped entry is vLLM).
+            from .serving.vllm import endpoint_is_servable
+            if not endpoint_is_servable(entry.endpoint_key):
+                logger.warning("cascade_candidate_vllm_unservable", candidate=model)
+                return False
         return True
 
     servable = [m for m in candidates if _servable(m)]
@@ -2203,6 +2267,7 @@ def settle_reservation_and_log(
     actual_cache_read_tokens: int = 0,
     actual_cache_write_tokens: int = 0,
     requested_model: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> None:
     """Settle the reservation against actual usage and write a UsageLogs row.
 
@@ -2429,6 +2494,15 @@ def settle_reservation_and_log(
             # row reads as a fallback. Window-scoped and non-retroactive
             # (stored bytes are stable); acceptable for P1 visibility.
             requested_stored = requested
+    # The UsageLogs SK embeds this id (`log_id = request_id or uuid4()`). Passing
+    # the request's own id — not a fresh uuid — is what lets the offline VSR
+    # reconciliation (mvp.learning.vsr_reconcile) JOIN a usage row back to its
+    # reserve-time decision record (both keyed by the same span_id/request_id).
+    # Fall back to the reserve context's id, then to None (a bare uuid) for the
+    # rare call site that has neither.
+    settle_request_id = request_id or (
+        getattr(context, "request_id", None) if context is not None else None
+    )
     UsageLogsRepository().record(
         tenant_id=user.org_id,
         user_id=user.user_id,
@@ -2438,6 +2512,7 @@ def settle_reservation_and_log(
         output_tokens=actual_output_tokens,
         cost_microusd=actual_cost_microusd,
         requested_model_id=requested_stored,
+        request_id=settle_request_id,
     )
 
 

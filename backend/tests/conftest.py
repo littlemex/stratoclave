@@ -71,6 +71,7 @@ _TABLE_ENVS = {
     "DYNAMODB_MODEL_QUOTAS_TABLE": "stratoclave-model-quotas",
     "DYNAMODB_OBSERVABILITY_TABLE": "stratoclave-observability",
     "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
+    "DYNAMODB_SAAR_MEMORY_TABLE": "stratoclave-saar-memory",
     "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
 }
 for k, v in _TABLE_ENVS.items():
@@ -93,6 +94,13 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     # Fresh in-process fallback counter per test (degraded-mode limiter state
     # must not leak across tests).
     _rl._local_fallback = _rl._LocalWindows()
+    # SAAR's hot-read client is a lazily-built module global with the same
+    # leak-across-moto-mocks hazard; reset it per test.
+    try:
+        from mvp.routing import saar as _saar
+        _saar.reset_read_client()
+    except Exception:  # noqa: BLE001 — routing import optional in minimal envs
+        pass
     # Pricing caches are process-global (the 60s effective-rate cache AND the
     # immutable per-version snapshot cache). Moto tables reset per test but these
     # do not, so a version set in one test would leak into the next (a settle
@@ -102,6 +110,33 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
         _pricing.reset_cache()
         _pricing.reset_version_cache()
     except Exception:  # noqa: BLE001 — pricing import optional in some minimal test envs
+        pass
+    # Hybrid-serving (vLLM) caches the parsed endpoint allowlist + pooled httpx
+    # clients as module globals; reset so a test varying VLLM_ENDPOINTS/flag
+    # does not leak into the next.
+    try:
+        from mvp.serving import vllm as _vllm
+        _vllm.reset_for_test()
+    except Exception:  # noqa: BLE001 — serving import optional in minimal envs
+        pass
+    # The catalog memoizes vLLM/bedrock targets; a test toggling the flag needs
+    # a rebuild.
+    try:
+        from mvp.routing import chains as _chains
+        _chains.reset_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+    # External VSR client caches a process-local pin state + httpx client.
+    try:
+        from mvp.vsr import client as _vsr
+        _vsr.reset_for_test()
+    except Exception:  # noqa: BLE001
+        pass
+    # Per-tenant VSR config store caches an S3 client + validate httpx client.
+    try:
+        from mvp.vsr import config_store as _vsr_cfg
+        _vsr_cfg.reset_for_test()
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -295,6 +330,21 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
         # TTL expires_at. No GSI.
         dynamodb.create_table(
             TableName=_TABLE_ENVS["DYNAMODB_ROUTING_SIGNALS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # SAAR memory: PK pk ("SAARMEM#<tenant>"), SK sk ("SESSION#<...>"),
+        # TTL ttl. One small item per (tenant, session). No GSI.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_SAAR_MEMORY_TABLE"],
             KeySchema=[
                 {"AttributeName": "pk", "KeyType": "HASH"},
                 {"AttributeName": "sk", "KeyType": "RANGE"},

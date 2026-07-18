@@ -54,6 +54,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly observabilityTable: dynamodb.Table;
   /** P0-16: routing_signals — write-only append log (learning seam), TTL-reaped */
   public readonly routingSignalsTable: dynamodb.Table;
+  /** SAAR: session-aware routing memory (one small item per tenant+session), TTL-reaped */
+  public readonly saarMemoryTable: dynamodb.Table;
   /** Ledger P0-1: append-only, event-sourced credit ledger (money source of truth). RETAIN + PITR, no TTL */
   public readonly creditLedgerTable: dynamodb.Table;
 
@@ -440,6 +442,22 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'expires_at',
     });
 
+    // SAAR: session-aware routing memory. One small item per (tenant, session)
+    // carrying only the minimal state the next model-selection decision needs
+    // (last physical model, phase, counters, cache evidence) — NOT conversation
+    // content. pk = SAARMEM#{tenant} isolates per tenant; the session id is only
+    // ever a sk component. Money-neutral (never in a ledger TransactWriteItems),
+    // so no PITR; TTL-reaped (`ttl`) since an abandoned session's routing state
+    // is worthless after a day. No GSI/Stream — reads are point GetItems by key.
+    this.saarMemoryTable = new dynamodb.Table(this, 'SaarMemoryTable', {
+      ...baseTableProps,
+      pointInTimeRecovery: false,
+      tableName: `${prefix}-saar-memory`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'ttl',
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -463,6 +481,7 @@ export class DynamoDBStack extends cdk.Stack {
       this.observabilityTable.tableArn,
       `${this.observabilityTable.tableArn}/index/*`,
       this.routingSignalsTable.tableArn,
+      this.saarMemoryTable.tableArn,
       this.creditLedgerTable.tableArn,
       `${this.creditLedgerTable.tableArn}/index/*`,
     ];
@@ -490,6 +509,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableModelQuotasParam', 'dynamodb/table-model-quotas', this.modelQuotasTable],
       ['TableObservabilityParam', 'dynamodb/table-observability', this.observabilityTable],
       ['TableRoutingSignalsParam', 'dynamodb/table-routing-signals', this.routingSignalsTable],
+      ['TableSaarMemoryParam', 'dynamodb/table-saar-memory', this.saarMemoryTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

@@ -53,6 +53,15 @@ class ModelEntry:
     # from `bedrock_model_id` so that re-pricing a tier does not require
     # touching every registry entry.
     pricing_key: str = "default"
+    # Hybrid serving (P0). "bedrock" (default) == today. "vllm" means this
+    # model is served by a self-hosted, internal OpenAI-compatible vLLM
+    # endpoint keyed by `endpoint_key` (resolved against an operator allowlist,
+    # never a URL). A vLLM entry is only servable when HYBRID_SERVING_ENABLED
+    # is on AND the key is in the allowlist; its pricing fields are an
+    # operator-set micro-USD cost-recovery rate, and its cache rates MUST be 0
+    # (vLLM reports no Bedrock cache-token split). Enforced at registry load.
+    served_by: Literal["bedrock", "vllm"] = "bedrock"
+    endpoint_key: Optional[str] = None
 
 
 # Source of truth. To add a model: append an entry, redeploy. There is no
@@ -196,6 +205,43 @@ _ALIAS_MAP: dict[str, ModelEntry] = {
 _BEDROCK_ID_MAP: dict[str, ModelEntry] = {
     entry.bedrock_model_id: entry for entry in _REGISTRY
 }
+
+
+def _validate_registry(registry: tuple[ModelEntry, ...]) -> None:
+    """Fail fast at import time on an incoherent registry. Currently enforces
+    the hybrid-serving (vLLM) invariants so a mis-authored vLLM entry cannot
+    ship: a vLLM entry MUST name an `endpoint_key` (the opaque allowlist token
+    — never a URL) and MUST price its cache tokens at 0 (vLLM reports no
+    Bedrock cache-token split, so any nonzero cache rate would be dead pricing
+    that also biases SAAR's warm-prefix delta). Cache rates are validated
+    lazily against the pricing module to avoid an import cycle at module load."""
+    for entry in registry:
+        if getattr(entry, "served_by", "bedrock") != "vllm":
+            continue
+        if not entry.endpoint_key:
+            raise ValueError(
+                f"vLLM model entry '{entry.bedrock_model_id}' must set endpoint_key"
+            )
+
+
+def assert_vllm_cache_rates_zero() -> None:
+    """Assert every vLLM entry's pricing key has zero cache read/write rates.
+    Called lazily (e.g. at first hybrid use / in tests) rather than at import
+    to avoid a models<->pricing import cycle."""
+    from .pricing import _cache
+
+    for entry in _REGISTRY:
+        if getattr(entry, "served_by", "bedrock") != "vllm":
+            continue
+        rate = _cache.get(entry.pricing_key)
+        if rate.cache_read_per_mtok_microusd != 0 or rate.cache_write_per_mtok_microusd != 0:
+            raise ValueError(
+                f"vLLM entry '{entry.bedrock_model_id}' (pricing_key="
+                f"'{entry.pricing_key}') must have zero cache rates"
+            )
+
+
+_validate_registry(_REGISTRY)
 
 
 def resolve_model(name: Optional[str]) -> ModelEntry:

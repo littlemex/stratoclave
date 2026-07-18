@@ -101,6 +101,42 @@ def _build_catalog() -> dict[str, list[Target]]:
     )
 
     for entry in _REGISTRY:
+        served_by = getattr(entry, "served_by", "bedrock")
+        # Bedrock catalog covers the Anthropic (Messages) family as before.
+        # vLLM entries are ALSO catalogued (any provider) so hybrid serving can
+        # route to them; they get exactly ONE self-hosted target (no
+        # cross-region fan-out — a self-hosted endpoint has no regions), so on
+        # endpoint failure the chain exhausts and the request fails cleanly
+        # rather than fanning out to nonexistent regions.
+        if served_by == "vllm":
+            # A vLLM entry is catalogued ONLY when hybrid serving is on AND its
+            # endpoint_key is in the operator allowlist. Flag off / unknown key
+            # => the entry is NOT catalogued at all, so it resolves exactly like
+            # a model that does not exist (unservable), and a request naming it
+            # is rejected pre-reserve — never routed with a bogus "self-hosted"
+            # region into the Bedrock client.
+            from mvp.serving.vllm import endpoint_is_servable
+
+            if not endpoint_is_servable(entry.endpoint_key):
+                continue
+            # Enforce the zero-cache-rate invariant the moment a vLLM entry
+            # actually becomes servable (lazy, avoiding a models<->pricing import
+            # cycle at module load). A nonzero cache rate would be dead pricing
+            # that also biases SAAR's warm-prefix delta — fail fast.
+            from mvp.models import assert_vllm_cache_rates_zero
+            assert_vllm_cache_rates_zero()
+            for alias in entry.aliases:
+                target = Target(
+                    model_id=entry.bedrock_model_id,
+                    region="self-hosted",
+                    cost_tier=_tier_for(entry.pricing_key),
+                    price_key=entry.pricing_key,
+                    served_by="vllm",
+                    endpoint_key=entry.endpoint_key,
+                )
+                catalog[alias] = [target]
+                catalog[entry.bedrock_model_id] = [target]
+            continue
         if entry.provider != "anthropic":
             continue
         for alias in entry.aliases:

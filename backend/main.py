@@ -54,6 +54,8 @@ from mvp.ui_ticket import router as mvp_ui_ticket_router
 # Phase C: Long-lived API keys (for gateway clients such as cowork).
 from mvp.me_api_keys import router as mvp_me_api_keys_router
 from mvp.admin_api_keys import router as mvp_admin_api_keys_router
+# Per-tenant VSR config (opaque blob; loose coupling — validated via the VSR).
+from mvp.admin_vsr_config import router as mvp_admin_vsr_config_router
 # CLI bootstrap (unauthenticated: distributes CLI config from the CloudFront URL).
 from mvp.well_known import router as mvp_well_known_router
 
@@ -133,6 +135,23 @@ async def lifespan(app: FastAPI):
             error_type=type(exc).__name__,
             exc_info=True,
         )
+
+    # External VSR (task #13): perform the version-pin handshake at startup so a
+    # consult can be honored only after the running VSR's contract+build match
+    # the pinned set. INERT unless EXTERNAL_VSR_ENABLED — handshake() checks the
+    # flag first and no-ops (staying UNVERIFIED) when off. A failure here never
+    # blocks boot: an unreachable/mismatched VSR leaves the state degraded
+    # (UNVERIFIED/REFUSED) and the backend serves as today (Bedrock routing).
+    # The state auto-heals on a later successful handshake; a periodic re-check
+    # is a follow-up (a consult that sees a contract-header mismatch already
+    # flips the state to REFUSED mid-flight).
+    try:
+        from mvp.vsr.client import external_vsr_enabled, handshake
+        if external_vsr_enabled():
+            state = handshake()
+            logger.info("vsr_startup_handshake", state=state)
+    except Exception as exc:  # noqa: BLE001 — VSR is advisory; never block boot.
+        logger.warning("vsr_startup_handshake_failed", error=str(exc))
 
     yield
     logger.info("application_shutdown")
@@ -412,6 +431,7 @@ app.include_router(mvp_ui_ticket_router)                 # POST /api/mvp/auth/ui
 # Phase C
 app.include_router(mvp_me_api_keys_router)               # /api/mvp/me/api-keys[*]
 app.include_router(mvp_admin_api_keys_router)            # /api/mvp/admin/api-keys[*] + /api/mvp/admin/users/{id}/api-keys
+app.include_router(mvp_admin_vsr_config_router)          # /api/mvp/admin/tenants/{id}/vsr-config[/validate] (opaque blob)
 # CLI bootstrap
 app.include_router(mvp_well_known_router)                # GET /.well-known/stratoclave-config
 

@@ -7,6 +7,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import { applyCommonTags, putStringParameter } from './_common';
 
@@ -34,6 +35,15 @@ export interface EcsStackProps extends cdk.StackProps {
 
   environment?: { [key: string]: string };
   secrets?: { [key: string]: ecs.Secret };
+
+  /**
+   * When true, create the per-tenant VSR config bucket (versioned, private,
+   * TLS-enforced) and grant the backend task role Get/Put/Delete ONLY on the
+   * ``vsr-config/*`` prefix, and inject ``VSR_CONFIG_BUCKET`` into the container
+   * environment. Absent/false => no bucket, no grant, no env (feature ships
+   * dark; the admin surface 404s until this is provisioned).
+   */
+  enableVsrConfigBucket?: boolean;
 
   /**
    * P1-C (2026-04 security review).
@@ -78,6 +88,8 @@ export class EcsStack extends cdk.Stack {
   public readonly cluster: ecs.Cluster;
   public readonly service: ecs.FargateService;
   public readonly taskDefinition: ecs.FargateTaskDefinition;
+  /** The per-tenant VSR config bucket, when enabled (else undefined). */
+  public readonly vsrConfigBucket?: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: EcsStackProps) {
     super(scope, id, props);
@@ -555,10 +567,57 @@ export class EcsStack extends cdk.Stack {
       }),
     );
 
+    // Per-tenant VSR config store (opaque blobs). The bucket is VERSIONED (free
+    // rollback + last-known-good history), private, TLS-enforced, KMS-managed.
+    // The backend task role is granted Get/Put/Delete on the `vsr-config/*`
+    // object prefix — never a bucket-wide object grant. A prefix-scoped
+    // ListBucket is ALSO granted (condition: s3:prefix = vsr-config/*): without
+    // it, S3 returns 403 AccessDenied (not 404 NoSuchKey) for a GetObject on a
+    // key that does not exist yet, because the caller has no permission to know
+    // whether the object exists. That turns the common "tenant has no config
+    // yet" case into a 400 error instead of the intended 404, breaking the UI's
+    // create-first-config flow. The prefix condition keeps enumeration scoped to
+    // the vsr-config/ keyspace only. Ships dark: without the flag there is no
+    // bucket, no grant, no env var, and the admin surface 404s.
+    const vsrEnv: { [key: string]: string } = {};
+    if (props.enableVsrConfigBucket) {
+      const bucket = new s3.Bucket(this, 'VsrConfigBucket', {
+        bucketName: `${prefix}-vsr-config-${this.account}`,
+        versioned: true,
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        encryption: s3.BucketEncryption.S3_MANAGED,
+        enforceSSL: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      });
+      this.vsrConfigBucket = bucket;
+      this.taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'VsrConfigBlobRw',
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
+          resources: [`${bucket.bucketArn}/vsr-config/*`],
+        }),
+      );
+      // Prefix-scoped ListBucket so a GetObject on a not-yet-created key returns
+      // 404 (NoSuchKey), not 403 (AccessDenied). Restricted to the vsr-config/
+      // prefix via the s3:prefix condition — the role can never enumerate any
+      // other keyspace in the bucket.
+      this.taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'VsrConfigBlobList',
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:ListBucket'],
+          resources: [bucket.bucketArn],
+          conditions: { StringLike: { 's3:prefix': ['vsr-config/*'] } },
+        }),
+      );
+      vsrEnv.VSR_CONFIG_BUCKET = bucket.bucketName;
+    }
+
     const container = this.taskDefinition.addContainer('BackendContainer', {
       image: ecs.ContainerImage.fromEcrRepository(props.repository, props.imageTag || 'latest'),
       logging: ecs.LogDriver.awsLogs({ logGroup, streamPrefix: 'backend' }),
-      environment: props.environment || {},
+      environment: { ...(props.environment || {}), ...vsrEnv },
       secrets: props.secrets || {},
       portMappings: [{ containerPort: props.containerPort || 8000, protocol: ecs.Protocol.TCP }],
       healthCheck: {

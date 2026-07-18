@@ -194,6 +194,13 @@ _DEFAULT_RATES: dict[str, Rate] = {
     # GPT-5.x on bedrock-mantle. Output priced at the Opus tier as a
     # conservative default until an admin sets an exact rate.
     "gpt-5": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
+    # Self-hosted vLLM (hybrid serving). An operator-set cost-recovery rate,
+    # NOT a Bedrock price. Cache rates MUST be 0 — vLLM reports no Bedrock
+    # cache-token split, so any nonzero cache rate would be dead pricing that
+    # also biases SAAR's warm-prefix delta (enforced by
+    # models.assert_vllm_cache_rates_zero). The input/output defaults here are
+    # a placeholder an operator overrides per deployment.
+    "vllm": Rate(200_000, 200_000, 0, 0),
     "default": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
 }
 
@@ -334,6 +341,7 @@ def estimate_cost_microusd(
     input_tokens_est: int,
     max_output_tokens: int,
     effort_multiplier: int = 1,
+    warm_prefix_tokens: int = 0,
     repo: Optional[PricingConfigRepository] = None,
 ) -> int:
     """Up-front reservation cost in micro-USD for a request.
@@ -343,13 +351,49 @@ def estimate_cost_microusd(
     type: input at the input rate, the (multiplied) max output at the output
     rate. Reasoning-effort multipliers (1/2/4/8 on the OpenAI route) apply to
     the output leg only, matching where the extra tokens are actually spent.
-    """
+
+    SAAR (Fable design §4): ``warm_prefix_tokens`` splits the input leg — up to
+    that many input tokens are expected to hit the model's warm prefix cache and
+    so re-bill at the discounted ``cache_read`` rate, not the full input rate.
+    The estimate for STAYING on a warm model is therefore cheaper than SWITCHING
+    to a cold one (where warm=0 ⇒ every input token is full-price). ``warm=0`` (the
+    default, and always in P0 until cache evidence lands) makes this byte-identical
+    to the pre-SAAR estimate. Clamped so warm can never exceed the input estimate."""
     rate = _cache.get(pricing_key, repo)
     reserved_output = max(max_output_tokens, 0) * max(effort_multiplier, 1)
+    total_input = max(input_tokens_est, 0)
+    warm = min(max(warm_prefix_tokens, 0), total_input)
+    fresh_input = total_input - warm
     return (
-        _mtok_cost(max(input_tokens_est, 0), rate.input_per_mtok_microusd)
+        _mtok_cost(fresh_input, rate.input_per_mtok_microusd)
+        + _mtok_cost(warm, rate.cache_read_per_mtok_microusd)
         + _mtok_cost(reserved_output, rate.output_per_mtok_microusd)
     )
+
+
+def saar_checkout_delta_microusd(
+    *,
+    pricing_key: str,
+    warm_prefix_tokens: int,
+    repo: Optional[PricingConfigRepository] = None,
+) -> int:
+    """The micro-USD *penalty* of discarding a warm prefix cache by switching
+    models (SAAR "cache checkout"). If the session stays on its warm model, the
+    ``warm_prefix_tokens`` re-bill at the discounted cache-read rate; if it
+    switches, that same prefix is cold on the new model and re-bills at the full
+    input rate. The delta a switch costs is therefore:
+
+        warm_prefix_tokens × (input_rate − cache_read_rate)
+
+    priced at ``pricing_key``'s current rate. Non-negative by construction (the
+    cache-read rate is never above the input rate); clamped at 0 defensively so a
+    misconfigured rate table can never turn a switch into a fake saving. This is
+    the number SAAR adds to a switch candidate's expected cost and records as its
+    provable claim — computed from the same versioned rate table the ledger
+    charges from, so a replay recomputes it exactly (Fable SAAR design §4)."""
+    rate = _cache.get(pricing_key, repo)
+    per_mtok = max(0, rate.input_per_mtok_microusd - rate.cache_read_per_mtok_microusd)
+    return _mtok_cost(max(warm_prefix_tokens, 0), per_mtok)
 
 
 def actual_cost_microusd(

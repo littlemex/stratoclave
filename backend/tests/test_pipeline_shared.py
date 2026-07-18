@@ -188,3 +188,41 @@ def test_pipeline_overrun_clamps_when_balance_exhausted(stub_usage_logs):
     log = stub_usage_logs[0]
     assert log["input_tokens"] == 10_000
     assert log["output_tokens"] == 2_000
+
+
+def test_settle_passes_request_id_to_usage_log(stub_usage_logs):
+    """The request id MUST reach UsageLogsRepository.record(request_id=...).
+
+    This is the join key the offline VSR reconciliation (mvp.learning.
+    vsr_reconcile) relies on: without it, the usage row's SK is a fresh uuid
+    unrelated to the decision record's span_id, so every VSR-acted request would
+    read back as unsettled. A regression here silently breaks reconciliation,
+    so it is pinned explicitly."""
+    repo = _StubTenantsRepo(total_credit=10_000, used=0)
+    settle_reservation_and_log(
+        user=_user("u-1", "default-org"),
+        tenants_repo=repo,  # type: ignore[arg-type]
+        reservation=5_000,
+        actual_input_tokens=1_000,
+        actual_output_tokens=500,
+        model_id="us.anthropic.claude-opus-4-7",
+        request_id="req-explicit-123",
+    )
+    assert stub_usage_logs[0]["request_id"] == "req-explicit-123"
+
+
+def test_settle_request_id_none_when_absent(stub_usage_logs):
+    """No explicit request_id and a context without one (the production case —
+    context is the tenants_repo, which has no request_id attr) → record() gets
+    request_id=None and UsageLogsRepository falls back to a uuid. The join is
+    then simply absent, never crashing."""
+    repo = _StubTenantsRepo(total_credit=10_000, used=0)
+    settle_reservation_and_log(
+        user=_user("u-1", "default-org"),
+        tenants_repo=repo,  # type: ignore[arg-type]
+        reservation=5_000,
+        actual_input_tokens=1_000,
+        actual_output_tokens=500,
+        model_id="us.anthropic.claude-opus-4-7",
+    )
+    assert stub_usage_logs[0]["request_id"] is None

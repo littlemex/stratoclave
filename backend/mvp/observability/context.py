@@ -50,6 +50,13 @@ _ID_GRAMMAR = re.compile(r"\A[A-Za-z0-9._:-]{1,64}\Z")
 HDR_GROUP_ID = "x-sc-group-id"
 HDR_WORKFLOW_RUN_ID = "x-sc-workflow-run-id"
 HDR_SPAN_ID = "x-sc-span-id"  # response only (server echoes the assigned span)
+# SAAR session id: the routing session an agentic client wants continuity for.
+# Same grammar as the correlation ids (so it is a safe DynamoDB sk component and
+# response-header value), and — like them — tenant_id is NEVER taken from it; the
+# SAAR memory partition is keyed by the authenticated tenant, so a session id can
+# only ever address the caller's OWN tenant's routing state. Absent ⇒ SAAR falls
+# back to workflow_run_id, then group_id (see ``session_key``).
+HDR_SESSION_ID = "x-sc-session-id"
 
 
 class InvalidCorrelationHeader(ValueError):
@@ -75,6 +82,21 @@ class RequestContext:
     group_id: Optional[str]   # client header, else None
     workflow_run_supplied: bool  # True iff the client sent the run id
     received_at_ms: int
+    # SAAR: the client-supplied routing session id (``x-sc-session-id``), or None
+    # when absent. Opaque, grammar-validated. NOT a tenant selector — see the
+    # module docstring and ``session_key``.
+    session_id_supplied: Optional[str] = None
+
+    def session_key(self) -> str:
+        """The SAAR session key for this request: the explicit ``x-sc-session-id``
+        if the client sent one, else the workflow_run_id (always present — server
+        -generated when the client omitted it), else the group_id. A run without
+        any of these still gets a stable key (the server-minted workflow_run_id),
+        so every request maps to exactly one session — a fresh one per request in
+        the degenerate no-header case, which correctly means "no continuity to
+        preserve". The tenant partition is supplied separately from the auth
+        principal, never from this value."""
+        return self.session_id_supplied or self.workflow_run_id or (self.group_id or "")
 
 
 def _validate(header: str, value: Optional[str]) -> Optional[str]:
@@ -107,16 +129,20 @@ def build_request_context(
     tenant_id: str,
     group_id_header: Optional[str],
     workflow_run_id_header: Optional[str],
+    session_id_header: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> RequestContext:
     """Assemble a RequestContext from the authenticated tenant + raw headers.
 
     ``request_id`` is minted here when not supplied by the caller (tests may
     pin it). ``span_id`` is always ``request_id``. A missing workflow-run header
-    yields a fresh server-generated run id (a run of one span).
+    yields a fresh server-generated run id (a run of one span). The optional
+    ``x-sc-session-id`` is validated by the same grammar (empty ≡ absent) and is
+    the preferred SAAR session key; absence is the compatible default.
     """
     group_id = _validate(HDR_GROUP_ID, group_id_header)
     supplied_run = _validate(HDR_WORKFLOW_RUN_ID, workflow_run_id_header)
+    session_id = _validate(HDR_SESSION_ID, session_id_header)
 
     rid = request_id or f"req_{uuid.uuid4().hex[:16]}"
     workflow_run_id = supplied_run or f"wr_{uuid.uuid4().hex[:16]}"
@@ -129,6 +155,7 @@ def build_request_context(
         group_id=group_id,
         workflow_run_supplied=supplied_run is not None,
         received_at_ms=int(time.time() * 1000),
+        session_id_supplied=session_id,
     )
 
 

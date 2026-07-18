@@ -39,6 +39,13 @@ class RoutingConfig:
     fallback_mode: str = "loud"
     fallback_default: str = "off"
     free_tier_model: Optional[str] = None
+    # SAAR (session-aware routing). When the SAAR_ENABLED flag is on, a tenant
+    # can additionally opt into per-user session scoping: the routing-memory sk
+    # is namespaced by the acting user so two users sharing a session id (or one
+    # guessing another's) cannot perturb each other's continuity state. Default
+    # False keeps the session shared across the tenant's users (the common
+    # single-agent case). This field is inert when SAAR is globally disabled.
+    saar_user_scoped: bool = False
 
 
 @dataclass(frozen=True)
