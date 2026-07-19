@@ -186,6 +186,59 @@ the design must change, and the data points at where —
 These are design changes, not tuning, and choosing among them is follow-up work.
 Publishing the miss is the point; engineering a 50 ms number is not.
 
+## Item-count spike — does reducing the transaction to 2 items help? (measured: NO)
+
+The two-item migration's performance premise was "moving the RESERVE ledger event
+(and IDEMP row) off the synchronous transaction — 4 items → 2 — shrinks the p99
+tail." Before investing the correctness work, that premise was measured directly:
+the same real DynamoDB (us-east-1), the same single hot pool row, the same
+production item builders, composed into 4- / 3- / 2-item `TransactWriteItems`
+variants, with per-transaction attribution (SDK retries, `TransactionConflict`
+count). 3,000 sequential + 3,000 concurrent (c=16) per variant. This is a
+throwaway spike (correctness intentionally not preserved; bench namespace cleaned
+up), run from `bench/ledger-latency/bench_itemcount_spike.py`.
+
+**Floor (c=1, zero contention) — item count barely moves the tail:**
+
+| Transaction | p50 | p99 | p99.9 | max |
+|---|---|---|---|---|
+| 4-item (pool + HOLD + RESERVE + IDEMP, today) | 21.9 ms | 90.2 ms | 241 ms | 265 ms |
+| 3-item (RESERVE async'd) | 20.6 ms | 60.5 ms | 157 ms | 168 ms |
+| 2-item (RESERVE + IDEMP removed) | 19.0 ms | 69.7 ms | 176 ms | 239 ms |
+
+**Single-row contention (c=16) — item count is IRRELEVANT:**
+
+| Transaction | p50 | p99 | max | errors | TransactionConflict total |
+|---|---|---|---|---|---|
+| 4-item | 25.5 ms | 1,194 ms | 1,888 ms | 35 | 3,291 |
+| 3-item | 23.5 ms | 1,188 ms | 1,954 ms | 35 | 3,325 |
+| 2-item | 22.3 ms | 1,189 ms | 1,767 ms | 38 | 3,193 |
+
+**Conclusion (decisive): the two-item migration does NOT, on its own, meet the p99
+target.** Neither the floor nor the contention tail responds to item count. The
+c=16 p99 is quantized at ~1,190 ms across all three variants because the tail is
+100% SDK-backoff accumulation on `TransactionConflict` — the optimistic
+serialization of concurrent transactions touching the SAME pool row, which is a
+function of *there being a transaction on a hot row*, not of how many items it
+carries. (The 3-item < 2-item floor inversion is sampling noise: at n=3,000 the
+p99 confidence interval comfortably spans a 10 ms gap.) A further signal: at c=16,
+35–38 of 3,000 transactions still FAILED after 8 retries — under a burst past
+c=16 the current transactional design does not just get slow, it drops requests.
+
+**What this redirects the design to.** Because the killer is *the transaction
+itself* on a hot row, the next measured step is the **PENDING protocol** (design
+doc): Put HOLD `PENDING` → a SINGLE conditional `UpdateItem` on the pool row (no
+transaction, so no `TransactionConflict` failure mode — concurrent single-item
+writes queue at the leader replica rather than cancel) → mark HOLD `ACTIVE`. This
+attacks the floor AND the contention tail; sharding (which only divides contention
+by N and cannot touch the transaction floor that already misses at c=1) is held as
+a composable second stage. Crucially, the two-item migration is NOT abandoned — it
+is re-scoped as the **prerequisite path to PENDING** (PENDING's write path touches
+only pool + HOLD, so moving RESERVE/IDEMP off the synchronous transaction is a
+precondition), and the deployed shadow projector + reconciler become the
+drift/orphan safety net that de-transactionalization requires. See
+[docs/design/ledger-hot-path.md](../design/ledger-hot-path.md).
+
 ## Not measured (the honest limits)
 
 - **Multi-tenant aggregate performance.** Authorize targets the caller's own

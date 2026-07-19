@@ -253,8 +253,17 @@ before proceeding.
   [../benchmarks/ledger-latency.md](../benchmarks/ledger-latency.md)): contention
   error rate 6.2% → 0% at c=16, c=16 e2e p99 6,512 → 4,508 ms. The storm is gone;
   single-row p99 still misses target (the residual `TransactionConflict` on one
-  hot pool row), which the next step targets.
-- **Now: two-item transaction (HOLD promoted) + Streams-derived events.**
+  hot pool row).
+- **DONE (measured, decisive): item-count is a dead end; PENDING is the answer.**
+  The step-0 spike proved 4/3/2-item transactions have an identical ~1,190 ms c=16
+  p99 (the tail is the transaction-on-a-hot-row, not item count), and the step-0b
+  spike proved a non-transactional single conditional `UpdateItem` cuts the floor
+  p99 to 8.6 ms and c=16 to 88 ms with zero conflict retries. See "The two-item
+  transaction does NOT hit target" and "Confirmed design: the PENDING protocol"
+  below. The hot-path direction is now PENDING (+ sharding second stage).
+- **Now: (a) build the PENDING protocol (its correctness machinery is the real
+  work); (b) the two-item migration continues as PENDING's prerequisite, not as a
+  latency step.**
 
 ### Two-item migration (each step rollback-safe, gated on divergence = 0)
 
@@ -354,17 +363,96 @@ the HOLD key becomes idempotency-derived); a feature flag (AppConfig or env);
 CloudWatch on IteratorAge, DLQ depth, divergence count, TransactionConflict/CCF
 breakdown, and an I2-drift alarm.
 
-### If two items still miss target → PENDING protocol
+### The two-item transaction does NOT hit target — item count is a dead end (measured)
 
-Trigger (measured): if after two-item cut-over (i) p99 > 100 ms AND (ii) ≥2
-`TransactionConflict` retries occur on > 1% of txns (or the pool row nears the
-per-partition write ceiling), move to the PENDING protocol — Put HOLD `PENDING`
-(uncontended) → a SINGLE conditional `UpdateItem` on the pool row (ADD reserved,
-condition headroom, NO transaction = minimal lock window) → mark HOLD `ACTIVE`.
-The crash window (PENDING orphan, pool incremented but not ACTIVE) is closed by a
-compensating sweeper. This trades atomicity for dropping the contended write to a
-single non-transactional item, and requires formal verification of the
-compensation logic first.
+The step-0 item-count spike (see
+[../benchmarks/ledger-latency.md](../benchmarks/ledger-latency.md)) settled the
+premise BEFORE the correctness work was finished: on the same hot pool row, 4- vs
+3- vs 2-item `TransactWriteItems` produced a c=16 p99 of 1,194 / 1,188 / 1,189 ms
+— **statistically identical**, with ~3,200 `TransactionConflict` cancellations per
+3,000 txns regardless of item count, and 35–38 txns still FAILING after 8 retries.
+The floor (c=1) p99 stayed 60–90 ms across all three. Conclusion: the tail is
+**the transaction itself on a hot row** (optimistic-serialization conflict →
+SDK-backoff accumulation), not the item count. Reducing to two items cannot reach
+p99 < 50 ms. The item-count reduction is therefore NOT pursued as a performance
+lever.
+
+### Confirmed design: the PENDING protocol (measured to work)
+
+The step-0b PENDING spike measured the alternative on the same hot row, and it is
+now the **confirmed** hot-path design (not a fallback). A single conditional
+`UpdateItem` (no transaction) has no `TransactionConflict` failure mode — the
+leader replica serializes concurrent single-item writes in a queue instead of
+cancelling them — so the retry-storm-then-backoff mechanism that produced the
+~1,190 ms transactional tail cannot occur. Measured (real DynamoDB, same hot row,
+retries/errors = 0 at every level):
+
+| | c=1 p99 | c=16 p99 | c=64 p99 |
+|---|---|---|---|
+| single conditional `UpdateItem` | **8.6 ms** | 88 ms | 622 ms |
+| PENDING 3-write e2e | 32 ms | 168 ms | 1,341 ms |
+| (4-item transaction, for contrast) | 90 ms | 1,194 ms | — |
+
+The single-write floor p99 (8.6 ms) is a ~10× win over the transaction floor and
+well under target; c=16 is 7× better than the transaction. The c=64 knee (retries
+still 0) is the single-partition write ceiling (~1,000 writes/s), addressed by
+sharding as a composable second stage — see below.
+
+**Protocol (confirmed invariants):**
+
+1. Put HOLD `status=PENDING` (unique key, uncontended, on a distributed
+   partition). **This write MUST precede the pool decrement** — it is the
+   write-ahead intent that guarantees every pool decrement has a discoverable HOLD
+   record, which is the sweeper's recovery basis. Parallelising step 1 and 2 is
+   FORBIDDEN: a "pool decremented, no HOLD record" state is an unfindable capacity
+   leak.
+2. A SINGLE conditional `UpdateItem` on the pool row (`ADD reserved`, condition
+   headroom ≥ amount, NO transaction). This is the sole contended write and the
+   commit point — success here returns success to the caller.
+3. Mark HOLD `ACTIVE`. This step is OFF the synchronous critical path: issued
+   async (fire-with-retry) after the caller is answered, so the client-observed
+   e2e is 2 round-trips (cheap Put + hot UpdateItem), ~95 ms at c=16 before
+   sharding. If the business flow already writes the HOLD later (capture/settle),
+   ACTIVE-marking rides on that write.
+
+**Crash / ambiguity safety (confirmed, must be built with the protocol):**
+
+- A sweeper fences timed-out PENDING rows with a CONDITIONAL transition
+  (PENDING → EXPIRED only if still PENDING) so it can never race a late async
+  ACTIVE. Step 3 is likewise conditional ("only if still PENDING").
+- **Idempotency anchor moves off the ClientRequestToken.** Dropping
+  `TransactWriteItems` loses its 10-minute idempotency token, so a blind SDK retry
+  of `ADD reserved` on a timeout would DOUBLE-DECREMENT. Rule: on an ambiguous
+  failure of step 2, do NOT resend the decrement — mark the HOLD FAILED and mint a
+  fresh hold (leak-safe side); a reconciliation job (pool counter vs Σ active
+  HOLD) recovers the leaked decrement. The ambiguous-case default is ALWAYS
+  leak-safe (never credit back on uncertainty — that is oversell).
+- Formal verification of the PENDING state machine (PENDING/ACTIVE/EXPIRED/FAILED,
+  sweeper fencing, ambiguous-failure branch) precedes the cut-over.
+
+**Sharding is the composable second stage** (only the pool counter, N a config
+value; HOLD keys are already distributed). N is chosen by measurement, not
+guessed — a shard N=2/4/8 × c=16/64 sweep is the next spike. Near-exhaustion
+behaviour (a chosen shard empty → condition-fail → retry another shard) is a tail
+source that MUST be measured before shipping sharding.
+
+**Still to measure before production (not yet claimed):** SDK-level throttle/retry
+visibility to confirm the c=64 mechanism (CloudWatch `WriteThrottleEvents` +
+boto3 `RetryAttempts`); open-loop (arrival-rate) test at target writes/s to avoid
+coordinated-omission bias; read+write mixed load on the same hot row; the shard-N
+sweep; near-exhaustion condition-fail rate; sweeper running concurrently under
+load.
+
+### The two-item migration is re-scoped, not abandoned
+
+The step 3–6 work (RESERVE → async projection, IDEMP → HOLD key) is NO LONGER
+justified as a performance step (item count is a dead end above). It is re-scoped
+as the **prerequisite path to PENDING**: PENDING's write path touches only pool +
+HOLD, so moving RESERVE and IDEMP off the synchronous write is a precondition, and
+the deployed shadow projector + reconciler (steps 1–3) become the drift/orphan
+safety net that de-transactionalisation requires. Its live justification is now
+"PENDING prerequisite + ledger single-responsibility + reserve-txn blast-radius
+reduction", not latency.
 
 Contention collapse was a customer-visible failure (now fixed); the floor tail is
-the debt this step retires. This order is fixed.
+the debt the PENDING protocol retires.
