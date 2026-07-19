@@ -150,10 +150,21 @@ oversell source:
   holds first lets a reserve that commits in between appear only in the counter,
   overestimating drift → over-credit → oversell. Counter-first underestimates
   drift → leak-safe. This order is a spec requirement and a Z3 lemma.
-- **(b) Hysteresis:** a PENDING within its timeout and a hold within step 3's
-  retry horizon are "maybe entitled" — include them in Σ. Only recover drift that
-  is stably observed across ≥ 2 scans spaced longer than `PENDING timeout + step-3
-  retry horizon`.
+- **(b) Hysteresis — defer while any PENDING is in flight (sharpened by the
+  formal model).** A PENDING hold may be debited (committed, awaiting activate) OR
+  undebited (rejected / ambiguous-lost, awaiting fence), and the reconciler cannot
+  tell which. Counting it as entitled can hide a real leak (drift too low);
+  NOT counting it can oversell a live reserve (drift too high). The stateful model
+  produced a concrete counterexample where an undebited PENDING coexisting with a
+  debited EXPIRED_UNCREDITED made the naive aggregate flip a real leak to RECLAIMED
+  without crediting it (a silent I1' break). The resolution: **recovery runs only
+  when no PENDING is in flight** — defer until the confounding PENDINGs drain to
+  ACTIVE (always debited) or EXPIRED_UNCREDITED (the leak candidates). With no
+  PENDING present, `drift = counter − Σ(ACTIVE)` is EXACTLY the debited leak, and
+  a negative drift there is impossible under I1' (it is raised as a model bug, not
+  silently absorbed). Operationally this is the ≥ 2-scan spacing (longer than
+  `PENDING timeout + step-3 retry horizon`) — by the second scan the in-flight
+  PENDINGs of the first have resolved.
 - **(c) Idempotent, atomic recovery:** this is a COLD path, so a transaction is
   allowed here (the ban was hot-path only). Credit the aggregate drift and flip
   the covered `EXPIRED_UNCREDITED → RECLAIMED` in one conditional
