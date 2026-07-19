@@ -14,16 +14,22 @@ uncertain whether the pool was debited, never credit it back** (crediting an
 un-debited hold is oversell = unrecoverable; not crediting a debited orphan is a
 leak = recoverable by the reconciler).
 
-MODEL SHAPE (faithful to the design doc)
-----------------------------------------
+MODEL SHAPE (faithful to the shipped design)
+---------------------------------------------
 This object IS the environment (the fake DynamoDB): it holds the real state
-(``pool_reserved`` counter, per-hold ``status``) AND a GHOST variable
-(``_debited[hold_id]``) that records whether step 2 actually applied the debit.
-The ghost is the environment's private truth. The methods that model the
-protocol ACTORS (sweeper, reconciler, client-after-ambiguity) MUST NOT read the
-ghost — that unreadability is the formal meaning of "the sweeper cannot know
-whether the debit happened". Only ``commit_debit`` (the fake DB executing step 2)
-writes the ghost, and only the TEST reads it, to state the invariants.
+(``pool_reserved`` counter, per-hold ``status``) and ``_debited[hold_id]``.
+
+GHOST PROMOTED TO A REAL MARKER (Fable marker redesign). In the first model
+``_debited`` was a pure GHOST — the sweeper/reconciler were forbidden to read it,
+which forced the aggregate defer-until-quiescent reconciler (and its livelock). In
+the shipped design ``_debited[hold_id]`` is realized by the OBSERVABLE pool marker
+``applied.<hold_id>`` (written ATOMICALLY with the debit in one UpdateItem —
+``dynamo.tenant_budgets.pool_reserve_update`` / ``pool_credit_back``). So the
+reconciler MAY now read it per-hold and credit back exactly once. The old ghost
+rule (sweeper must not credit on fence) still holds — the SWEEPER has no reason to
+touch the pool — but the RECONCILER's decisiveness comes from the real marker, not
+a quiescence guess. ``commit_debit`` writes the marker; settle/release/reap/
+reconcile REMOVE it (mirroring the production ``REMOVE applied.<hold_id>``).
 
 We model the CONTENDED counter (``pool_reserved``) only; the settled-counter /
 headroom split is already proved in ``test_billing_formal_z3`` and
@@ -226,6 +232,7 @@ class PendingLedger:
                 f"settle/release of {hold_id} whose debit never applied "
                 "(violates capability axiom A1)")
         self.pool_reserved -= h.amount
+        self._debited[hold_id] = False   # REMOVE the marker (same write, prod)
         h.status = terminal
 
     # ======================================================================
@@ -238,6 +245,7 @@ class PendingLedger:
         if h is None or h.status is not Status.ACTIVE:
             return False
         self.pool_reserved -= h.amount
+        self._debited[hold_id] = False   # REMOVE the marker (same write, prod)
         h.status = Status.EXPIRED
         return True
 
@@ -270,48 +278,30 @@ class PendingLedger:
     # then the hold set. NEVER an admission authority; never reads the ghost.
     # ======================================================================
     def reconcile(self) -> int:
-        """Recover the aggregate leak. Reads the counter FIRST, the hold set
-        SECOND (so a reserve that commits in between inflates ``entitled`` and
-        UNDERestimates drift -> leak-safe, never oversell).
-
-        HYSTERESIS (Fable review, and the fix for the stateful counterexample):
-        recovery runs ONLY when no PENDING hold is in flight. A PENDING hold may
-        be debited (committed, awaiting activate) OR undebited (rejected /
-        ambiguous-lost, awaiting fence), and the reconciler cannot tell which —
-        so counting it as entitled can hide a real leak (drift too low), while not
-        counting it can oversell a live reserve (drift too high). The design's
-        answer is to defer: only recover drift that is stable once the confounding
-        in-flight PENDINGs have drained to ACTIVE (always debited) or
-        EXPIRED_UNCREDITED (the leak candidates). With no PENDING present,
-        ``drift = counter - Σ(ACTIVE)`` is EXACTLY the debited leak, and flipping
-        every EXPIRED_UNCREDITED to RECLAIMED is safe (undebited ones contributed
-        0 to both the counter and the post-flip debited-outstanding sum).
-        """
-        if any(h.status is Status.PENDING for h in self._holds.values()):
-            return 0                                               # defer (hysteresis)
-        counter_snapshot = self.pool_reserved                      # (a) counter FIRST
-        entitled = sum(h.amount for h in self._holds.values()      # (a) holds SECOND
-                       if h.status is Status.ACTIVE)
-        drift = counter_snapshot - entitled
-        if drift < 0:
-            raise OversellError(
-                f"reconcile drift negative ({drift}) with no PENDING in flight — "
-                "the counter is below the live floor, impossible under I1'")
-        if drift == 0:
-            # Nothing debited-and-orphaned; any EXPIRED_UNCREDITED are undebited
-            # (contributed 0) and may be retired.
-            self._flip_uncredited_to_reclaimed()
-            return 0
-        if self.pool_reserved - drift < entitled:
-            raise OversellError("reconcile would oversell live holds")
-        self.pool_reserved -= drift
-        self._flip_uncredited_to_reclaimed()
-        return drift
-
-    def _flip_uncredited_to_reclaimed(self) -> None:
-        for h in self._holds.values():
-            if h.status is Status.EXPIRED_UNCREDITED:
-                h.status = Status.RECLAIMED
+        """MARKER-DRIVEN per-hold leak recovery (the shipped design — Fable marker
+        redesign). The ghost `_debited` is now the REAL, observable pool marker
+        `applied.<hold_id>` (production `dynamo.tenant_budgets.pool_credit_back`),
+        so recovery is DETERMINISTIC per hold, NOT an aggregate-drift guess (which
+        livelocked on hot pools). For each EXPIRED_UNCREDITED hold:
+          * marker present (debited) -> credit back EXACTLY ONCE (atomic remove-
+            marker + add-headroom; a second pass finds no marker -> no double
+            credit), then retire to RECLAIMED.
+          * marker absent (never debited) -> retire WITHOUT crediting (crediting
+            an un-debited hold would oversell). Leak-safe either way.
+        No defer/hysteresis is needed: the marker resolves the debited/undebited
+        ambiguity that forced the old aggregate reconciler to wait for quiescence.
+        Returns the total recovered."""
+        recovered = 0
+        for hid, h in list(self._holds.items()):
+            if h.status is not Status.EXPIRED_UNCREDITED:
+                continue
+            if self._debited.get(hid, False):
+                # marker present: credit back exactly once (remove marker + add).
+                self.pool_reserved -= h.amount
+                self._debited[hid] = False        # REMOVE the marker (atomic in prod)
+                recovered += h.amount
+            h.status = Status.RECLAIMED             # retire (stops rescan)
+        return recovered
 
     # -- invariant checks (TEST oracles) ------------------------------------
 

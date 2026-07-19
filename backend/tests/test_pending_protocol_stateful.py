@@ -245,20 +245,45 @@ def test_duplicate_hold_id_is_idempotency_anchor():
     led.check_I1()
 
 
-def test_reconcile_counter_first_is_leak_safe_under_inflight():
-    """The reconciler reads the counter FIRST then the hold set: a reserve that
-    commits between the two snapshots inflates `entitled` and underestimates
-    drift (leak-safe), never overestimates (which would oversell)."""
+def test_reconcile_recovers_only_the_marked_leak_not_live_holds():
+    """Marker-driven reconcile credits back ONLY the fenced hold that carries a
+    marker (the debited orphan), leaving a live ACTIVE hold's reservation intact."""
     led = PendingLedger(limit=1000)
-    # a genuine leak: debited orphan
     led.put_pending("leak", 200)
-    led.commit_debit("leak", "ambiguous_applied")
+    led.commit_debit("leak", "ambiguous_applied")   # debited -> marker present
     led.fence_pending_expired("leak")
-    # a live committed hold present at reconcile time
     led.put_pending("live", 300)
     led.commit_debit("live", "commit")
     led.activate("live")
     recovered = led.reconcile()
     assert recovered == 200                       # only the leak, not the live hold
     assert led.pool_reserved == 300               # live hold's reservation intact
+    led.check_I1()
+
+
+def test_reconcile_credits_marked_leak_exactly_once():
+    """The marker guarantees EXACTLY-ONCE credit-back (Fable marker design): a
+    second reconcile pass over the same fenced hold finds no marker and credits
+    nothing — double credit is structurally impossible."""
+    led = PendingLedger(limit=1000)
+    led.put_pending("h", 250)
+    led.commit_debit("h", "ambiguous_applied")      # marker present
+    led.fence_pending_expired("h")
+    assert led.reconcile() == 250                   # first pass credits once
+    assert led.pool_reserved == 0
+    assert led.reconcile() == 0                     # second pass: marker gone, no double credit
+    assert led.pool_reserved == 0
+    led.check_I1()
+    assert led.is_quiescent()
+
+
+def test_reconcile_skips_unmarked_fenced_hold():
+    """A fenced hold whose debit never committed (no marker) is NOT credited —
+    crediting it would oversell. reserved stays 0."""
+    led = PendingLedger(limit=1000)
+    led.put_pending("h", 400)
+    led.commit_debit("h", "ambiguous_lost")         # NOT debited -> no marker
+    led.fence_pending_expired("h")
+    assert led.reconcile() == 0                     # skipped (no marker)
+    assert led.pool_reserved == 0                   # no oversell
     led.check_I1()

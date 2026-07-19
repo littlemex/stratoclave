@@ -15,21 +15,50 @@ is the design and the **proof obligations** — the protocol trades transactiona
 atomicity for latency, so the correctness machinery IS the work, and it is
 specified here before implementation.
 
-**Implementation status (2026-07-20): IMPLEMENTED, flag-gated OFF.** The production
-code is in place behind `STRATOCLAVE_RESERVE_PROTOCOL` (default `transaction` =
-today's path, byte-for-byte unchanged; `pending` = this protocol):
-`dynamo/tenant_budgets.py` carries the primitives (`hold_put_pending`,
-`pool_reserve_update`, `hold_activate`, `fence_pending_expired`,
-`reconcile_credit_back`, `list_holds`, status transitions); `mvp/_pipeline.py`
-carries `_reserve_external_pending` (the 3-write reserve), `sweep_fence_pending`,
-and `reconcile_pool`. The readers were made status-aware FIRST (reaper credits
-only `status = ACTIVE OR attribute_not_exists(status)`), so the whole path is
-inert until the flag is flipped per-tenant. The write-discipline guard
-(`test_billing_write_discipline`) records the deliberate non-transactional counter
-writes as PENDING-proof-backed exceptions to axiom A2. What remains is NOT code —
-it is the live per-tenant canary flip, which is gated on the observation windows
-in "Still to measure" below and cannot be short-cut. Turning the flag on globally
-is an operational rollout, not an engineering task.
+**Implementation status (2026-07-20): IMPLEMENTED with the MARKER design, flag-gated
+OFF.** Behind `STRATOCLAVE_RESERVE_PROTOCOL` (default `transaction` = today's path,
+byte-for-byte unchanged; `pending` = this protocol). A first cut shipped with a
+"CCF = replay success" branch and an aggregate-drift reconciler; a Fable money-bug
+review + a test-gap audit found oversell / fail-open defects and a flag-on
+capture/void/get 404 (the C-1 gate read a RESERVE event the pending path never
+writes). The shipped design is the corrected **marker** design:
+
+- **Per-hold marker.** The pool item carries an `applied.<hold_id>` map; the debit
+  and the marker are written in ONE conditional `UpdateItem`
+  (`pool_reserve_update`) — multi-attribute updates to one item are atomic, so it
+  is still a single non-transactional write (the ~88 ms p99 is kept). The marker
+  makes "did this hold's debit commit?" a decisive, locally-readable fact (A1
+  without a transaction). CCF is resolved by `ALL_OLD`: marker present ⇒ idempotent
+  success (no double-debit), absent ⇒ genuine exhaustion (402). The write is
+  idempotent, so an SDK auto-retry is harmless.
+- **Exactly-once credit-back.** `pool_credit_back` = REMOVE marker + ADD headroom,
+  guarded on `attribute_exists(applied.<hold_id>)`; settle/release/reaper REMOVE
+  the marker in the same write that moves the counters. Double credit is
+  structurally impossible.
+- **IDEMP intent (step 0)** persists `hold_sk`/`amount`/`authorization_id`, so a
+  duplicate-key replay returns durable addressing and resolves by READING state
+  (marker + hold status) — never by assuming success.
+- **capture/void/get is HOLD-first** (`_require_external` reads the HOLD's own
+  `source`; RESERVE-event fallback only for legacy) — fixes the flag-on 404.
+  Capture helps a PENDING hold to ACTIVE via CAS only after confirming the marker.
+- **Reconciler is per-hold marker-driven** (credit iff marker present, then retire
+  the row) — replaces the aggregate-drift reconciler that livelocked on hot pools.
+
+Code: `dynamo/tenant_budgets.py` (`hold_put_pending`, `pool_reserve_update`,
+`pool_credit_back`, `pool_marker_amount`, `ensure_applied_map`, `hold_activate`,
+`fence_pending_expired`, status transitions); `dynamo/credit_ledger.py`
+(`put_idemp_intent` + finalizers); `mvp/_pipeline.py` (`_reserve_external_pending`,
+`_pending_replay_result`, `sweep_fence_pending`, `reconcile_pool`);
+`mvp/billing_authorize.py` (HOLD-first `_require_external`). Readers were made
+status-aware FIRST (reaper credits only `status = ACTIVE OR attribute_not_exists(
+status)`), so the path is inert until the flag is flipped per-tenant. The
+write-discipline guard records the deliberate non-transactional counter writes
+(`pool_reserve_update`, `pool_credit_back`) as marker-proof-backed exceptions to
+axiom A2, still requiring a ConditionExpression on each. The formal model
+(`billing/pending_protocol.py` + `test_pending_protocol_*`) promotes the old ghost
+`_debited` to the real observable marker and proves exactly-once credit-back.
+What remains is NOT code — it is the live per-tenant canary flip, gated on the
+observation windows in "Still to measure" below.
 
 The whole design derives mechanically from ONE decision, fixed first: **when it is
 uncertain whether the pool was debited, never credit it back.** Crediting an
