@@ -10,6 +10,7 @@ import { EcsStack } from '../lib/ecs-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { CognitoStack } from '../lib/cognito-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
+import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
 import { WafStack } from '../lib/waf-stack';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -427,6 +428,27 @@ ecsStack.addDependency(frontendStack);
 // ecsStack because that is where the Bedrock-call env vars live. (Fable M-3/C-1)
 for (const w of residencyWarnings) {
   cdk.Annotations.of(ecsStack).addWarning(w);
+}
+
+// --- 7b. Ledger Streams projector + reconciler (two-item migration step 1) ---
+// Opt-in: needs the Lambda image (backend/Dockerfile.lambda) built + pushed to
+// the backend ECR repo under LAMBDA_IMAGE_TAG. Gated on the `ledgerProjector`
+// context flag so a normal deploy is unaffected until the image exists. Writes
+// SHADOW# events by default (step 1); the async cut-over sets `-c projectorShadow=false`.
+if (app.node.tryGetContext('ledgerProjector') === true ||
+    app.node.tryGetContext('ledgerProjector') === 'true') {
+  const ledgerProjectorStack = new LedgerProjectorStack(app, stackName(prefix, 'ledger-projector'), {
+    env,
+    prefix,
+    lambdaRepository: ecrStack.repository,
+    lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+    tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+    creditLedgerTable: dynamoDBStack.creditLedgerTable,
+    shadow: app.node.tryGetContext('projectorShadow') !== 'false',
+    description: `[${prefix}] Ledger Streams RESERVE-event projector + reconciler (shadow)`,
+  });
+  ledgerProjectorStack.addDependency(ecrStack);
+  ledgerProjectorStack.addDependency(dynamoDBStack);
 }
 
 // --- 8. Backend Config (static Parameter Store values) ---

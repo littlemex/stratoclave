@@ -1,0 +1,22 @@
+# Lambda image for the ledger Streams projector + reconciler (two-item migration,
+# docs/design/ledger-hot-path.md step 1). Reuses the EXACT backend code
+# (billing/ledger_projector.py + dynamo/*) so the async projection derives events
+# byte-identically to the synchronous path — no forked money logic.
+#
+# Separate from the uvicorn Dockerfile because the runtime contract differs: the
+# app image serves HTTP under a non-root user; a Lambda image must use the AWS
+# Lambda Runtime Interface Client and set the handler as CMD.
+ARG PYTHON_BASE=public.ecr.aws/lambda/python:3.11
+FROM ${PYTHON_BASE}
+
+# Runtime deps only (boto3 is provided by the Lambda base, but pin the same
+# requirements the app uses so shared imports resolve identically).
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+
+# Application code (the projector imports dynamo/ + billing/).
+COPY . ${LAMBDA_TASK_ROOT}/
+
+# Default handler: the Streams projector. The reconciler Lambda overrides CMD to
+# `billing.ledger_reconciler.handler` (same image, different entrypoint).
+CMD ["billing.ledger_projector.handler"]
