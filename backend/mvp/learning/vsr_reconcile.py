@@ -163,6 +163,12 @@ def reconcile_join(
             "matched": matched,
             "billed_model_id": billed_model,
             "cost_microusd": cost,
+            # Token counts from the billed usage row — the SAME tokens the request
+            # actually produced, so a counterfactual "what would the suggested
+            # model have cost" (savings.py) prices the identical workload, never a
+            # re-estimate. None when unmatched (no usage row to read tokens from).
+            "input_tokens": _as_int(u.get("input_tokens")) if matched else None,
+            "output_tokens": _as_int(u.get("output_tokens")) if matched else None,
             "enforcement": _enforcement(decision, suggested, billed_model, matched, resolve),
         })
     return rows
