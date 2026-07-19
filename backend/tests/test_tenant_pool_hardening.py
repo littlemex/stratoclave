@@ -86,11 +86,13 @@ def _seed_expired_hold(seed, amount, *, period=None, hold_id=None, expires_at=1)
     hid = hold_id or f"orphan-{_uuid.uuid4()}"
     repo = TenantBudgetsRepository()
     sk = hold_sk(period, expires_at, hid)
-    # 1) inflate the aggregate as the dead reserve had (create row if absent).
+    # 1) inflate the aggregate exactly as the dead reserve had: +reserved AND
+    #    -headroom (the live reserve moves both, so crash residue carries both;
+    #    a reclaim later returns +headroom, restoring the invariant).
     repo._table.update_item(
         Key={"tenant_id": seed["tenant_id"], "sk": budget_sk(period)},
-        UpdateExpression="ADD pool_reserved_microusd :a",
-        ExpressionAttributeValues={":a": amount},
+        UpdateExpression="ADD pool_reserved_microusd :a, pool_headroom_microusd :na",
+        ExpressionAttributeValues={":a": amount, ":na": -amount},
     )
     # 2) write the sibling HOLD, already expired.
     repo._table.put_item(

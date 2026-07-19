@@ -67,6 +67,12 @@ class BillingLedger:
         self._reserved = 0
         self._settled = 0
         self._reclaimed = 0
+        # Hot-path headroom counter (docs/design/ledger-hot-path.md): the single
+        # attribute the real reserve gate reads/writes. Maintained here by the
+        # SAME deltas the real code applies so the executable spec proves the
+        # invariant `headroom == limit - reserved - settled` holds after every
+        # operation of the full randomized lifecycle. Seeded to `limit` (R=S=0).
+        self._headroom = int(limit)
         self._live: dict[str, _Hold] = {}
         self._state: dict[str, str] = {}  # hold_id -> live|settled|released|reaped
         self._ids = itertools.count(1)
@@ -77,6 +83,9 @@ class BillingLedger:
 
     def settled_total(self) -> int:
         return self._settled
+
+    def headroom(self) -> int:
+        return self._headroom
 
     def limit(self) -> int:
         return self._limit
@@ -95,6 +104,7 @@ class BillingLedger:
             )
         hold_id = f"h{next(self._ids)}"
         self._reserved += amount
+        self._headroom -= amount           # reserve: headroom -= amount
         self._live[hold_id] = _Hold(amount=amount)
         self._state[hold_id] = "live"
         return hold_id
@@ -115,6 +125,7 @@ class BillingLedger:
         # an admin lowering the limit; see the Z3 CE test). Do NOT reject it.
         self._reserved -= hold.amount
         self._settled += actual
+        self._headroom += hold.amount - actual   # settle: headroom += (reserved - actual)
         del self._live[hold_id]
         self._state[hold_id] = "settled"
 
@@ -124,6 +135,7 @@ class BillingLedger:
         if hold is None:
             raise HoldNotFound(hold_id)
         self._reserved -= hold.amount
+        self._headroom += hold.amount        # release: headroom += amount (no spend)
         del self._live[hold_id]
         self._state[hold_id] = "released"
 
@@ -148,6 +160,7 @@ class BillingLedger:
             if hold.expired:
                 self._reserved -= hold.amount
                 self._reclaimed += hold.amount
+                self._headroom += hold.amount    # reap: headroom += amount (no spend)
                 del self._live[hold_id]
                 self._state[hold_id] = "reaped"
                 reaped[hold_id] = hold.amount
@@ -155,4 +168,8 @@ class BillingLedger:
 
     # ----- admin -----
     def set_limit(self, new_limit: int) -> None:
+        # Ceiling delta-CAS (Fable review finding 3): headroom shifts by the
+        # limit delta only; reserved/settled untouched. Mirrors the real
+        # `SET pool_limit ADD pool_headroom (:new - :old)`.
+        self._headroom += int(new_limit) - self._limit
         self._limit = int(new_limit)

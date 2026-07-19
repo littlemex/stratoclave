@@ -174,6 +174,22 @@ class BillingMachine(RuleBasedStateMachine):
         )
 
     @invariant()
+    def inv_headroom_equals_limit_minus_reserved_settled(self):
+        """Hot-path headroom counter (docs/design/ledger-hot-path.md): the single
+        attribute the real reserve gate checks must equal limit - reserved -
+        settled after EVERY operation in the randomized lifecycle — reserve,
+        settle (incl. actual>reserved overshoot), release, crash+reap, and admin
+        limit raises/lowers. This is the invariant Fable review finding 4 asked
+        the formal layer to exercise across settle/reclaim/set_limit, not just
+        reserves. It may go negative (a lowered limit) — that is correct, and the
+        reserve gate's `headroom >= amount` then refuses all admissions."""
+        assert self.ledger.headroom() == (
+            self.ledger.limit()
+            - self.ledger.reserved()
+            - self.ledger.settled_total()
+        )
+
+    @invariant()
     def inv_no_hold_both_settled_and_reaped(self):
         assert not (set(self.settled) & set(self.reaped))
         for hold_id, expected in (

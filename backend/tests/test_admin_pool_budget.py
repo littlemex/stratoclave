@@ -106,12 +106,16 @@ def test_put_updates_limit_but_preserves_spend(monkeypatch, dynamodb_mock):
         f"/api/mvp/admin/tenants/{tid}/pool-budget",
         json={"limit_usd_cents": 50000, "period": "2026-07"},
     )
-    # Simulate some spend recorded against the pool.
+    # Simulate some spend recorded against the pool. A real settle moves BOTH
+    # pool_settled (+spend) AND pool_headroom (-spend) in one transaction, so the
+    # invariant headroom == limit - reserved - settled stays intact; mirror that
+    # here (a raw ADD to settled alone would leave headroom drifted, which never
+    # happens in production and is not what this contract test is about).
     repo = TenantBudgetsRepository()
     repo._table.update_item(
         Key={"tenant_id": tid, "sk": "BUDGET#2026-07"},
-        UpdateExpression="ADD pool_settled_microusd :s",
-        ExpressionAttributeValues={":s": 100_000_000},
+        UpdateExpression="ADD pool_settled_microusd :s, pool_headroom_microusd :h",
+        ExpressionAttributeValues={":s": 100_000_000, ":h": -100_000_000},
     )
     # Raise the ceiling.
     resp = client.put(

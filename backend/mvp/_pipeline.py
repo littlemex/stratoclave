@@ -158,10 +158,17 @@ def _pool_settle_items(
     """
     from dynamo.tenant_budgets import budget_sk
 
-    expr = "ADD pool_reserved_microusd :dr, pool_settled_microusd :actual"
+    # headroom = limit - reserved - settled, so releasing `reserved` and adding
+    # `actual` of true spend shifts headroom by (reserved - actual). This keeps
+    # the invariant on settle (actual>0), release, and reclaim (both actual=0 =>
+    # full reservation returned to headroom). Same aggregate for all three paths.
+    delta_headroom = int(reserved_microusd) - int(actual_microusd)
+    expr = ("ADD pool_reserved_microusd :dr, pool_settled_microusd :actual, "
+            "pool_headroom_microusd :dh")
     values = {
         ":dr": {"N": str(-int(reserved_microusd))},
         ":actual": {"N": str(int(actual_microusd))},
+        ":dh": {"N": str(delta_headroom)},
     }
     if reclaimed_microusd:
         expr += ", pool_reclaimed_microusd :rec"
@@ -1299,8 +1306,6 @@ def reserve_credit(
             tenant_id=user.org_id,
             period=period,
             amount_microusd=cost,
-            expected_reserved=p_reserved,
-            expected_settled=p_settled,
         )
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=user.org_id,
@@ -1563,8 +1568,6 @@ def reserve_external_authorization(
             tenant_id=tenant_id,
             period=period,
             amount_microusd=amount,
-            expected_reserved=p_reserved,
-            expected_settled=p_settled,
         )
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=tenant_id,
@@ -2054,6 +2057,11 @@ def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actu
     still record the actual spend, but decrementing `pool_reserved` again would
     double-subtract. Gated on `attribute_exists(tenant_id)` so a vanished pool
     row is a no-op.
+
+    Headroom: the reaper's reclaim already returned the full reservation to
+    headroom (`+= reserved`). Now that the true spend is known, deduct it —
+    `headroom -= actual` — so the invariant `headroom == limit - reserved -
+    settled` holds after this settled-only spend record.
     """
     from dynamo.tenant_budgets import budget_sk
 
@@ -2061,9 +2069,14 @@ def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actu
         "Update": {
             "TableName": table_name,
             "Key": {"tenant_id": {"S": tenant_id}, "sk": {"S": budget_sk(period)}},
-            "UpdateExpression": "ADD pool_settled_microusd :actual",
+            "UpdateExpression": (
+                "ADD pool_settled_microusd :actual, pool_headroom_microusd :dh"
+            ),
             "ConditionExpression": "attribute_exists(tenant_id)",
-            "ExpressionAttributeValues": {":actual": {"N": str(int(actual_microusd))}},
+            "ExpressionAttributeValues": {
+                ":actual": {"N": str(int(actual_microusd))},
+                ":dh": {"N": str(-int(actual_microusd))},
+            },
         }
     }
 
