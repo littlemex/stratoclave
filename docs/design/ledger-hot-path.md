@@ -379,6 +379,13 @@ lever.
 
 ### Confirmed design: the PENDING protocol (measured to work)
 
+> The full protocol, state machine, proof obligations (I1'–I6, I-biz, axioms
+> A1–A3), reconciler read-order/hysteresis rules, and the readers-first
+> implementation sequencing are specified in
+> [pending-protocol.md](./pending-protocol.md). The summary below is the
+> orientation; that document is the spec the implementation and formal models
+> follow.
+
 The step-0b PENDING spike measured the alternative on the same hot row, and it is
 now the **confirmed** hot-path design (not a fallback). A single conditional
 `UpdateItem` (no transaction) has no `TransactionConflict` failure mode — the
