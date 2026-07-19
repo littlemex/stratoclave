@@ -15,6 +15,22 @@ is the design and the **proof obligations** — the protocol trades transactiona
 atomicity for latency, so the correctness machinery IS the work, and it is
 specified here before implementation.
 
+**Implementation status (2026-07-20): IMPLEMENTED, flag-gated OFF.** The production
+code is in place behind `STRATOCLAVE_RESERVE_PROTOCOL` (default `transaction` =
+today's path, byte-for-byte unchanged; `pending` = this protocol):
+`dynamo/tenant_budgets.py` carries the primitives (`hold_put_pending`,
+`pool_reserve_update`, `hold_activate`, `fence_pending_expired`,
+`reconcile_credit_back`, `list_holds`, status transitions); `mvp/_pipeline.py`
+carries `_reserve_external_pending` (the 3-write reserve), `sweep_fence_pending`,
+and `reconcile_pool`. The readers were made status-aware FIRST (reaper credits
+only `status = ACTIVE OR attribute_not_exists(status)`), so the whole path is
+inert until the flag is flipped per-tenant. The write-discipline guard
+(`test_billing_write_discipline`) records the deliberate non-transactional counter
+writes as PENDING-proof-backed exceptions to axiom A2. What remains is NOT code —
+it is the live per-tenant canary flip, which is gated on the observation windows
+in "Still to measure" below and cannot be short-cut. Turning the flag on globally
+is an operational rollout, not an engineering task.
+
 The whole design derives mechanically from ONE decision, fixed first: **when it is
 uncertain whether the pool was debited, never credit it back.** Crediting an
 un-debited hold is oversell (unrecoverable, customer-visible over-admission); not

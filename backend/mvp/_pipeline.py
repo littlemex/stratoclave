@@ -193,6 +193,16 @@ def _hold_created_epoch(hold: dict) -> Optional[float]:
 # Parsed once at import; an unparseable value raises here (fail-fast at boot).
 _ENRICHMENT_EPOCH = _parse_epoch_env(os.getenv("STRATOCLAVE_ENRICHMENT_EPOCH"))
 
+# PENDING protocol selector (docs/design/pending-protocol.md). Default
+# "transaction" = today's 4-item TransactWriteItems, byte-for-byte unchanged.
+# "pending" = the non-transactional 3-write hot path (Put PENDING -> single
+# conditional UpdateItem commit -> async ACTIVE) that the spikes proved cuts the
+# c=16 p99 from ~1,190 ms to ~168 ms. Flipping this is a per-tenant canary that,
+# per the design doc, is gated on live observation windows — so it ships OFF and
+# the readers were taught `status` (absent == ACTIVE) first, making the whole
+# path inert until deliberately enabled.
+_RESERVE_PROTOCOL = os.getenv("STRATOCLAVE_RESERVE_PROTOCOL", "transaction").lower()
+
 
 def _pool_settle_items(
     *,
@@ -465,6 +475,7 @@ class ReservationContext:
 
 
 _LOW_LEVEL_CLIENT = None
+_NO_RETRY_TABLE = None
 
 
 def _low_level_client():
@@ -478,10 +489,32 @@ def _low_level_client():
     return _LOW_LEVEL_CLIENT
 
 
+def _no_retry_table():
+    """A resource ``Table`` for tenant-budgets on a DynamoDB client with SDK
+    retries DISABLED (max_attempts=1), for the PENDING protocol's step-2 commit
+    (docs/design/pending-protocol.md, I4). The single conditional `ADD reserved`
+    UpdateItem is NOT idempotent, so a transparent SDK retry after a lost ack would
+    double-debit; disabling retries turns every ambiguous outcome into an exception
+    the caller resolves leak-safe (never resend the debit). Resource API so it
+    binds to the same serialization the repo uses."""
+    global _NO_RETRY_TABLE
+    if _NO_RETRY_TABLE is None:
+        from botocore.config import Config
+
+        from dynamo.client import tenant_budgets_table_name
+        region = os.getenv("AWS_REGION", "us-east-1")
+        res = boto3.resource(
+            "dynamodb", region_name=region,
+            config=Config(retries={"max_attempts": 1, "mode": "standard"}))
+        _NO_RETRY_TABLE = res.Table(tenant_budgets_table_name())
+    return _NO_RETRY_TABLE
+
+
 def _reset_low_level_client() -> None:
-    """Test hook: drop the cached client so a new moto region takes effect."""
-    global _LOW_LEVEL_CLIENT
+    """Test hook: drop the cached clients so a new moto region takes effect."""
+    global _LOW_LEVEL_CLIENT, _NO_RETRY_TABLE
     _LOW_LEVEL_CLIENT = None
+    _NO_RETRY_TABLE = None
 
 
 def _fresh_idempotency_token() -> str:
@@ -583,6 +616,17 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
         amount = int(hold.get("amount_microusd", 0))
         if not sk:
             continue
+        # PENDING protocol (docs/design/pending-protocol.md, readers-first): this
+        # reaper CREDITS BACK the reservation, so it must only touch holds whose
+        # debit is known to have committed — ACTIVE, or the pre-PENDING implicit
+        # ACTIVE (no status attribute). A PENDING hold may be un-debited, so
+        # crediting it would oversell; those are handled by the sweeper's
+        # `fence_pending_expired` (pool untouched) + the reconciler. This branch is
+        # INERT for today's data (no hold carries `status`), so the reaper is
+        # byte-identical until the flag is flipped.
+        _status = hold.get("status")
+        if _status is not None and str(_status) != "ACTIVE":
+            continue
         if amount <= 0:
             # A zero/negative-amount hold ties up no budget; just delete it so it
             # stops being scanned (unconditional single-item delete, no aggregate
@@ -671,6 +715,126 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                 error_code="non_client_error",
             )
     return reclaimed
+
+
+# ---------------------------------------------------------------------------
+# PENDING protocol background jobs (docs/design/pending-protocol.md). Neither is
+# on the hot path; a scheduled worker calls them. Kept here so they share the
+# repositories and the ledger helpers the reserve/reap paths use.
+# ---------------------------------------------------------------------------
+
+def sweep_fence_pending(budgets, tenant_id: str, period: str, *, cap: int = 50) -> int:
+    """Sweeper fence (step-3 companion): move EXPIRED, still-PENDING holds to
+    EXPIRED_UNCREDITED WITHOUT touching the pool. The sweeper cannot know whether
+    a PENDING hold's debit committed (no hold_id capability), so it never credits
+    back — a debited-but-fenced hold leaks (bounded) until `reconcile_pool`
+    recovers it in aggregate; crediting here would oversell an un-debited hold
+    (I1'). Returns the count fenced. Best-effort, never raises."""
+    now_epoch = int(time.time())
+    fenced = 0
+    try:
+        pending = budgets.query_pending_expired_holds(
+            tenant_id=tenant_id, period=period, now_epoch=now_epoch, limit=cap)
+    except Exception:  # noqa: BLE001
+        return 0
+    for hold in pending:
+        sk = str(hold.get("sk", ""))
+        if not sk:
+            continue
+        try:
+            if budgets.fence_pending_expired(tenant_id=tenant_id, sk=sk):
+                fenced += 1
+                logger.info(
+                    "pending_hold_fenced", tenant_id=tenant_id, period=period,
+                    hold_id=str(hold.get("hold_id", "")),
+                    amount_microusd=int(hold.get("amount_microusd", 0)),
+                )
+        except Exception:  # noqa: BLE001 — a fence failure just defers to next sweep
+            continue
+    return fenced
+
+
+def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
+    """Aggregate leak recovery (docs/design/pending-protocol.md). NEVER an
+    admission authority — authority is always the step-2 conditional headroom
+    check; this recovers debited-but-orphaned reservations after the fact.
+
+    Rules the model proved (test_pending_protocol_*):
+      * COUNTER-FIRST read order: read `pool_reserved` BEFORE the hold set, so a
+        reserve committing in between inflates `entitled` and UNDER-estimates
+        drift (leak-safe), never over-credits (oversell).
+      * HYSTERESIS / defer-while-PENDING: if any PENDING hold is in flight, DEFER
+        (return without recovering) — a PENDING hold may be debited or not, and
+        counting it either way can hide a leak or oversell a live reserve. Once
+        PENDINGs drain to ACTIVE (debited) or EXPIRED_UNCREDITED (leak candidate),
+        `drift = counter - Σ ACTIVE` is exactly the debited leak.
+      * A negative drift with no PENDING in flight is impossible under I1' — it is
+        surfaced as an alarm, not silently absorbed.
+    Recovery is aggregate (a single conditional credit-back UpdateItem, cold path
+    so a guard condition is fine); per-hold "was it really debited" stays unknown.
+    Returns a summary dict (deferred / recovered_microusd / drift) for the caller
+    to log + alarm on."""
+    pool = budgets.get(tenant_id, period, consistent_read=True)   # (a) COUNTER FIRST
+    if pool is None:
+        return {"deferred": False, "recovered_microusd": 0, "drift": 0, "reason": "no_pool"}
+    counter = int(pool.get("pool_reserved_microusd", 0))
+    holds = budgets.list_holds(tenant_id=tenant_id, period=period)  # (a) holds SECOND
+    active = 0
+    has_pending = False
+    for h in holds:
+        st = str(h.get("status", "ACTIVE"))   # absent == ACTIVE (pre-PENDING data)
+        if st == "PENDING":
+            has_pending = True
+        elif st == "ACTIVE":
+            active += int(h.get("amount_microusd", 0))
+    if has_pending:
+        return {"deferred": True, "recovered_microusd": 0, "drift": None,
+                "reason": "pending_in_flight"}
+    drift = counter - active
+    if drift < 0:
+        logger.error(
+            "pool_reconcile_negative_drift", tenant_id=tenant_id, period=period,
+            counter=counter, active=active, drift=drift,
+        )
+        return {"deferred": False, "recovered_microusd": 0, "drift": drift,
+                "reason": "negative_drift_alarm"}
+    if drift == 0:
+        _retire_uncredited(budgets, tenant_id, period, holds)
+        return {"deferred": False, "recovered_microusd": 0, "drift": 0, "reason": "clean"}
+    # Recover the aggregate leak: credit `drift` back, guarded so a concurrent
+    # writer cannot let us drop reserved below the live floor.
+    try:
+        budgets.reconcile_credit_back(
+            tenant_id=tenant_id, period=period, drift_microusd=drift,
+            expected_reserved=counter)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            # The counter moved under us — a concurrent reserve/settle. Defer to
+            # the next scan (idempotent: recomputed against the new counter).
+            return {"deferred": True, "recovered_microusd": 0, "drift": drift,
+                    "reason": "counter_moved"}
+        raise
+    _retire_uncredited(budgets, tenant_id, period, holds)
+    logger.warning(
+        "pool_reconcile_recovered", tenant_id=tenant_id, period=period,
+        recovered_microusd=drift,
+    )
+    return {"deferred": False, "recovered_microusd": drift, "drift": drift, "reason": "recovered"}
+
+
+def _retire_uncredited(budgets, tenant_id: str, period: str, holds) -> None:
+    """Flip EXPIRED_UNCREDITED holds to RECLAIMED so they stop being rescanned.
+    Only called after a clean/recovered reconcile pass (no PENDING in flight), so
+    the aggregate leak they represented is already accounted for."""
+    for h in holds:
+        if str(h.get("status", "")) == "EXPIRED_UNCREDITED":
+            sk = str(h.get("sk", ""))
+            if sk:
+                try:
+                    budgets.retire_reclaimed_best_effort(tenant_id=tenant_id, sk=sk)
+                except Exception:  # noqa: BLE001
+                    continue
 
 
 def _err_402(reason: str) -> HTTPException:
@@ -1608,6 +1772,18 @@ def reserve_external_authorization(
     if prior is not None:
         return _idemp_replay(prior, request_fingerprint)
 
+    # PENDING protocol dispatch (docs/design/pending-protocol.md). Default
+    # "transaction" falls through to the unchanged 4-item path below.
+    if _RESERVE_PROTOCOL == "pending":
+        return _reserve_external_pending(
+            tenant_id=tenant_id, period=period, amount=amount,
+            idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
+            authorization_id_factory=authorization_id_factory,
+            ttl_seconds=ttl_seconds, pricing_key=pricing_key,
+            rate_snapshot=rate_snapshot, description=description,
+            workflow_run_id=workflow_run_id, budgets=budgets, ledger=ledger,
+        )
+
     client = _low_level_client()
     _sweep_expired_holds(budgets, tenant_id, period)
     saw_throttle = False
@@ -1780,6 +1956,128 @@ def reserve_external_authorization(
             },
         )
     raise _err_402("tenant_pool_exhausted")
+
+
+def _pending_hold_id(tenant_id: str, period: str, idempotency_key: str) -> str:
+    """Deterministic hold_id from the Idempotency-Key (I6, docs/design/
+    pending-protocol.md). Step 1's `attribute_not_exists(sk)` then doubles as the
+    duplicate-Key detector: a replay derives the SAME hold_id → the SAME sk →
+    collides, so no second hold or debit is created. Namespaced by tenant+period
+    so the same key in different tenants/periods never collides."""
+    ns = uuid.uuid5(uuid.NAMESPACE_URL, f"stratoclave/pending/{tenant_id}/{period}")
+    return uuid.uuid5(ns, idempotency_key).hex
+
+
+class _AmbiguousReserve(Exception):
+    """Step 2 (the pool debit) returned an ambiguous outcome (timeout / 5xx): it
+    MAY or MAY NOT have applied. Per I4 the debit is NEVER resent; per the leak-
+    safe rule the hold is abandoned PENDING (the sweeper fences it, the reconciler
+    recovers any real debit in aggregate) and the caller surfaces a 503 so the
+    client retries with a NEW Idempotency-Key rather than us re-debiting."""
+
+
+def _reserve_external_pending(
+    *, tenant_id, period, amount, idempotency_key, request_fingerprint,
+    authorization_id_factory, ttl_seconds, pricing_key, rate_snapshot,
+    description, workflow_run_id, budgets, ledger,
+) -> "ExternalAuthorizeResult":
+    """The PENDING protocol reserve (docs/design/pending-protocol.md): three
+    single-item writes, only the middle contended, no transaction on the hot pool
+    row. Invariants enforced here — I6 (deterministic hold_id), I4 (max_attempts=1
+    step-2 client, never resend the debit), leak-safe ambiguity, HOLD-PENDING
+    written BEFORE the debit (write-ahead intent).
+    """
+    _sweep_expired_holds(budgets, tenant_id, period)  # unchanged background reclaim
+    hold_id = _pending_hold_id(tenant_id, period, idempotency_key)
+    hold_expires_at = int(time.time()) + max(int(ttl_seconds), 0)
+    hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+    authorization_id = authorization_id_factory(hold_id, period, hold_sk)
+    rate_snapshot_dict = rate_snapshot.to_ledger_dict() if rate_snapshot is not None else None
+    capture_mode = "amount" if pricing_key is None else "units"
+
+    # STEP 1 (write-ahead intent): Put HOLD status=PENDING, uncontended. A
+    # duplicate Idempotency-Key derives the same hold_id -> same sk -> CCF here,
+    # which IS the idempotency check: read the existing hold and replay.
+    try:
+        budgets.hold_put_pending(
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            amount_microusd=amount, expires_at_epoch=hold_expires_at,
+            source="external", description=description,
+            rate_snapshot=rate_snapshot_dict, payload_hash=request_fingerprint,
+            run_id=workflow_run_id or hold_id, run_id_is_fallback=workflow_run_id is None,
+        )
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        # Duplicate key (or a concurrent racer that wrote the same hold): the
+        # authorization is deterministic from the key, so replay it. The prior
+        # attempt already (or will) drive the pool via its own step 2; we do NOT
+        # re-debit. This mirrors the transactional path's IDEMP-CCF replay.
+        return ExternalAuthorizeResult(
+            authorization_id=authorization_id, hold_id=hold_id, hold_sk=hold_sk,
+            period=period, amount_microusd=amount,
+            expires_at_epoch=hold_expires_at, capture_mode=capture_mode,
+            replayed=True,
+        )
+
+    # STEP 2 (COMMIT POINT): single conditional UpdateItem on the pool row, with
+    # SDK retries DISABLED so an ambiguous outcome is never silently re-sent (I4).
+    _t0 = time.perf_counter()
+    try:
+        budgets.pool_reserve_update(
+            tenant_id=tenant_id, period=period, amount_microusd=amount,
+            table=_no_retry_table())
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            # Definitive: budget exhausted / suspended. The HOLD is a leak-safe
+            # PENDING orphan the sweeper fences (pool never touched). Surface 402.
+            budgets.mark_pending_failed_best_effort(tenant_id=tenant_id, sk=hold_sk)
+            raise _err_402("tenant_pool_exhausted")
+        if code == "ResourceNotFoundException":
+            raise ExternalAuthorizeNoPool(tenant_id, period)
+        # AMBIGUOUS (timeout / 5xx / throttle after send): may or may not have
+        # applied. Do NOT resend. Abandon the PENDING hold; sweeper + reconciler
+        # handle both ghost outcomes. Surface 503 so the client retries with a new
+        # key rather than us double-debiting.
+        logger.warning(
+            "pending_reserve_ambiguous", tenant_id=tenant_id, period=period,
+            hold_id=hold_id, code=code,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "type": "budget_unavailable",
+                "reason": "pool_reservation_ambiguous",
+                "message": "Budget reservation could not be confirmed. Retry with a new Idempotency-Key.",
+            },
+        )
+    try:
+        logger.info(
+            "ledger_transact_latency", op="external_authorize_reserve_pending",
+            duration_ms=round((time.perf_counter() - _t0) * 1000, 3), tenant_id=tenant_id,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # STEP 3 (async, off the critical path): PENDING -> ACTIVE. Best-effort with
+    # a conditional guard; if it loses to a sweeper fence the reconciler recovers
+    # the (committed) debit and we alert. We do NOT block the caller on it.
+    activated = budgets.hold_activate(tenant_id=tenant_id, sk=hold_sk)
+    if not activated:
+        # I-biz: a committed reserve was fenced before activate. Accounting stays
+        # correct (reconciler recovers it), but this is a client-visible contract
+        # signal, so alert loudly rather than swallow.
+        logger.error(
+            "pending_activate_lost_to_fence", tenant_id=tenant_id, period=period,
+            hold_id=hold_id,
+        )
+
+    return ExternalAuthorizeResult(
+        authorization_id=authorization_id, hold_id=hold_id, hold_sk=hold_sk,
+        period=period, amount_microusd=amount, expires_at_epoch=hold_expires_at,
+        capture_mode=capture_mode, replayed=False,
+    )
 
 
 @dataclass

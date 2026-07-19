@@ -103,6 +103,23 @@ ALLOWED_SITES = {
         # UpdateExpression SETs pool_headroom (+ updated_at) and NEVER names the
         # protected counters — check_non_mutating_counter_update enforces that.
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.reconcile_headroom", "update_item"),
+        # PENDING protocol (docs/design/pending-protocol.md) — DELIBERATE non-
+        # transactional counter writes whose no-oversell safety is proven by the
+        # PENDING formal model (test_pending_protocol_z3/_stateful: I1' inductive
+        # preservation), NOT by transactional A2. A2 is a SUFFICIENT condition for
+        # no-oversell, not a necessary one. Registered in PENDING_COUNTER_WRITES so
+        # the engine verifies each still carries a ConditionExpression (bare ADD is
+        # never allowed). Inert until STRATOCLAVE_RESERVE_PROTOCOL=pending.
+        #   * pool_reserve_update: step-2 commit — headroom-gated conditional ADD.
+        #   * reconcile_credit_back: cold-path leak recovery — expected-counter guard.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_reserve_update", "update_item"),
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.reconcile_credit_back", "update_item"),
+        # PENDING status transitions: single-item conditional SET of `status`
+        # only; NEVER name a pool counter (verified structurally — they are NOT in
+        # COUNTER_FUNCTIONS). Put of a PENDING hold row (no counter, like
+        # hold_put_txn_item's transactional sibling).
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_put_pending", "put_item"),
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository._status_transition", "update_item"),
     },
     # backend/migrations/backfill_pool_headroom.py makes NO raw write of its own
     # (see COUNTER_FUNCTIONS note): it backfills by delegating to the reviewed
@@ -156,6 +173,12 @@ COUNTER_FUNCTIONS = {
         # write never names a protected counter (see READONLY_COUNTER_UPDATES).
         "TenantBudgetsRepository.reconcile_headroom",
         "TenantBudgetsRepository.pool_summary",
+        # PENDING protocol counter writers (docs/design/pending-protocol.md). Both
+        # are non-transactional by design; their no-oversell proof is the PENDING
+        # model, and each is in ALLOWED_SITES + PENDING_COUNTER_WRITES so the engine
+        # verifies a ConditionExpression is present. Reviewed against I1'.
+        "TenantBudgetsRepository.pool_reserve_update",
+        "TenantBudgetsRepository.reconcile_credit_back",
         "<module>",  # module docstring names the counters
     },
     "backend/dynamo/user_tenants.py": set(),
@@ -181,7 +204,24 @@ COUNTER_FUNCTIONS = {
         "_sweep_one_period",
         "ReservationContext.release_pool",
         "ReservationContext",
+        # PENDING protocol reconciler (docs/design/pending-protocol.md): reads the
+        # pool counter (counter-first) + sums ACTIVE holds to compute drift; the
+        # actual counter mutation is delegated to the reviewed
+        # TenantBudgetsRepository.reconcile_credit_back. No raw counter write here.
+        "reconcile_pool",
         "<module>",
+    },
+}
+
+# Non-transactional counter writes whose no-oversell safety is proven by the
+# PENDING protocol formal model (test_pending_protocol_z3 / _stateful), NOT by
+# transactional axiom A2. The engine still requires each to carry a
+# ConditionExpression (a bare unconditional counter ADD is never allowed). See
+# docs/design/pending-protocol.md and billing_guards.check_pending_counter_write.
+PENDING_COUNTER_WRITES = {
+    "backend/dynamo/tenant_budgets.py": {
+        "TenantBudgetsRepository.pool_reserve_update",     # step-2 commit (headroom-gated)
+        "TenantBudgetsRepository.reconcile_credit_back",   # cold-path leak recovery (guarded)
     },
 }
 
@@ -243,7 +283,7 @@ BUDGET_TABLE_MARKERS = ("tenant_budgets", "TenantBudgets", "TENANT_BUDGETS_TABLE
 
 
 def _run(module, source=None, *, allowed=None, preserving=None, counters=None,
-         readonly_updates=None):
+         readonly_updates=None, pending_writes=None):
     billing_guards.REQUIRED_CONDITIONS = REQUIRED_CONDITIONS
     billing_guards.EXPECTED_TOKEN_KIND = EXPECTED_TOKEN_KIND
     src = source if source is not None else (REPO_ROOT / module).read_text()
@@ -255,6 +295,9 @@ def _run(module, source=None, *, allowed=None, preserving=None, counters=None,
         readonly_counter_updates=(
             READONLY_COUNTER_UPDATES.get(module, set())
             if readonly_updates is None else readonly_updates),
+        pending_counter_writes=(
+            PENDING_COUNTER_WRITES.get(module, set())
+            if pending_writes is None else pending_writes),
     )
 
 

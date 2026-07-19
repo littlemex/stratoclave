@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource, tenant_budgets_table_name
@@ -593,6 +593,221 @@ class TenantBudgetsRepository:
             }
         }
 
+    # ----- PENDING protocol primitives (docs/design/pending-protocol.md) -----
+    # The non-transactional hot-path reserve, gated behind
+    # STRATOCLAVE_RESERVE_PROTOCOL=pending (default off). These are separate
+    # single-item writes, NOT transaction fragments — the whole point is to avoid
+    # TransactWriteItems on the hot pool row (the measured ~1,190 ms c=16 tail).
+    # Every existing reader learns `status` semantics (absent == ACTIVE) FIRST, so
+    # these are inert until the flag is flipped per-tenant.
+
+    def hold_put_pending(
+        self,
+        *,
+        tenant_id: str,
+        period: str,
+        hold_id: str,
+        amount_microusd: int,
+        expires_at_epoch: int,
+        source: Optional[str] = None,
+        description: Optional[str] = None,
+        rate_snapshot: Optional[dict[str, Any]] = None,
+        payload_hash: Optional[str] = None,
+        run_id: Optional[str] = None,
+        run_id_is_fallback: bool = False,
+    ) -> None:
+        """Step 1 of the PENDING protocol: Put a HOLD with ``status=PENDING``,
+        uncontended, ``attribute_not_exists(sk)``. The WRITE-AHEAD INTENT — it MUST
+        precede the pool debit so every debit has a discoverable HOLD record.
+        Returns nothing; raises the client's ConditionalCheckFailedException on a
+        duplicate sk (which, because ``hold_id`` is derived from the
+        Idempotency-Key, is the duplicate-Key detector = idempotency anchor I6).
+
+        Carries the same enrichment as ``hold_put_txn_item`` so capture/void can
+        rehydrate from the HOLD alone. The ONLY difference from the transactional
+        builder is the explicit ``status`` attribute (the transactional HOLD is
+        implicitly ACTIVE = absent status). Uses the resource API (plain values,
+        auto-serialized) so it always binds to the same session as the repo."""
+        item: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "sk": hold_sk(period, expires_at_epoch, hold_id),
+            "hold_id": hold_id,
+            "period": period,
+            "amount_microusd": int(amount_microusd),
+            "expires_at": int(expires_at_epoch),
+            "created_at": _now_iso(),
+            "status": "PENDING",
+        }
+        if source:
+            item["source"] = str(source)
+        if description:
+            item["hold_description"] = str(description)
+        if payload_hash:
+            item["payload_hash"] = str(payload_hash)
+        if rate_snapshot is not None:
+            item["rate_snapshot"] = _json_compact_budget(rate_snapshot)
+        if run_id:
+            item["run_id"] = str(run_id)
+            if run_id_is_fallback:
+                item["run_id_source"] = "hold_id_fallback"
+        self._table.put_item(Item=item, ConditionExpression=Attr("sk").not_exists())
+
+    def pool_reserve_update(self, *, tenant_id: str, period: str, amount_microusd: int,
+                            table=None) -> None:
+        """Step 2 of the PENDING protocol = THE COMMIT POINT: a single conditional
+        ``UpdateItem`` on the pool row (NOT a transaction). Same headroom ADD +
+        condition as ``reserve_txn_item``, issued bare so there is no
+        ``TransactionConflict`` failure mode — concurrent single-item conditional
+        writes serialize at the leader replica instead of cancelling.
+
+        `table` (optional) is a resource ``Table`` bound to a no-retry client
+        (max_attempts=1): a blind SDK retry of this non-idempotent ADD on a
+        timeout would double-debit (I4). A ``ConditionalCheckFailedException`` is
+        the definitive 'budget exhausted' (402); a timeout/5xx is AMBIGUOUS and the
+        caller must NOT resend it."""
+        tbl = table if table is not None else self._table
+        tbl.update_item(
+            Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+            UpdateExpression=(
+                "ADD pool_headroom_microusd :neg, pool_reserved_microusd :amt "
+                "SET updated_at = :now"
+            ),
+            ConditionExpression=(
+                "attribute_exists(pool_headroom_microusd) AND #st = :active AND "
+                "pool_headroom_microusd >= :amt"
+            ),
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":amt": int(amount_microusd),
+                ":neg": -int(amount_microusd),
+                ":active": "active",
+                ":now": _now_iso(),
+            },
+        )
+
+    def _status_transition(self, *, tenant_id: str, sk: str, frm: str, to: str) -> bool:
+        """Conditional status transition ``frm -> to`` on a HOLD row. Returns True
+        on success, False if the row was not in `frm` (a race lost). Resource API."""
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": sk},
+                UpdateExpression="SET #st = :to",
+                ConditionExpression="#st = :frm",
+                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeValues={":to": to, ":frm": frm},
+            )
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def hold_activate(self, *, tenant_id: str, sk: str) -> bool:
+        """Step 3: PENDING -> ACTIVE, conditional on still PENDING (so it can never
+        race a sweeper fence — A2 single-item serialization decides the winner).
+        OFF the synchronous critical path. Returns False if already fenced/terminal
+        (the caller MUST alert, never swallow — I-biz)."""
+        return self._status_transition(tenant_id=tenant_id, sk=sk,
+                                        frm="PENDING", to="ACTIVE")
+
+    def fence_pending_expired(self, *, tenant_id: str, sk: str) -> bool:
+        """Sweeper fence: PENDING -> EXPIRED_UNCREDITED, conditional on still
+        PENDING. Touches the pool NOT AT ALL — the sweeper cannot know whether the
+        debit committed (no hold_id capability), so it never credits back; a
+        debited-but-fenced hold leaks (bounded) until the reconciler recovers it in
+        aggregate. Crediting here would oversell an un-debited hold. Returns False
+        if the row was activated/terminal first (the activate won the race)."""
+        return self._status_transition(tenant_id=tenant_id, sk=sk,
+                                        frm="PENDING", to="EXPIRED_UNCREDITED")
+
+    def list_holds(self, *, tenant_id: str, period: str) -> list[dict[str, Any]]:
+        """All HOLD rows for a tenant/period (any status), strongly consistent.
+        Used by the reconciler to sum ACTIVE and detect in-flight PENDING. A full
+        per-period hold scan is acceptable on the cold reconcile path."""
+        items: list[dict[str, Any]] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("tenant_id").eq(tenant_id)
+                & Key("sk").begins_with(hold_sk_prefix(period))
+            ),
+            "ConsistentRead": True,
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+        return items
+
+    def reconcile_credit_back(
+        self, *, tenant_id: str, period: str, drift_microusd: int, expected_reserved: int
+    ) -> None:
+        """Cold-path aggregate leak recovery: credit `drift` back to the pool
+        (``reserved -= drift, headroom += drift``), guarded on ``pool_reserved ==
+        expected_reserved`` so a concurrent reserve/settle that moved the counter
+        since the reconciler read it cancels this (the reconciler then defers to
+        its next scan — idempotent by construction). Raises
+        ConditionalCheckFailedException on that race."""
+        self._table.update_item(
+            Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+            UpdateExpression=(
+                "ADD pool_reserved_microusd :negdrift, pool_headroom_microusd :drift "
+                "SET updated_at = :now"
+            ),
+            ConditionExpression="pool_reserved_microusd = :expected",
+            ExpressionAttributeValues={
+                ":negdrift": -int(drift_microusd),
+                ":drift": int(drift_microusd),
+                ":expected": int(expected_reserved),
+                ":now": _now_iso(),
+            },
+        )
+
+    def retire_reclaimed_best_effort(self, *, tenant_id: str, sk: str) -> None:
+        """Flip EXPIRED_UNCREDITED -> RECLAIMED (conditional) so it stops being
+        rescanned. Best-effort; never raises."""
+        try:
+            self._status_transition(tenant_id=tenant_id, sk=sk,
+                                    frm="EXPIRED_UNCREDITED", to="RECLAIMED")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def mark_pending_failed_best_effort(self, *, tenant_id: str, sk: str) -> None:
+        """Optional leak-safe terminal a caller MAY write when step 2 DEFINITIVELY
+        failed (ConditionalCheckFailed = budget exhausted, so nothing was debited):
+        PENDING -> FAILED, conditional on still PENDING, pool untouched. Best-
+        effort — the proof must NOT depend on it (a crash before this leaves the
+        sweeper to fence the hold), it only spares the sweeper one pass. Never
+        raises: a failure here just defers to the sweeper."""
+        try:
+            self._status_transition(tenant_id=tenant_id, sk=sk,
+                                    frm="PENDING", to="FAILED")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def query_pending_expired_holds(
+        self, *, tenant_id: str, period: str, now_epoch: int, limit: int = 25
+    ) -> list[dict[str, Any]]:
+        """Expired holds still in ``status=PENDING`` (the sweeper's fence targets).
+        Same expiry-embedded range scan as ``query_expired_holds`` (so Limit bounds
+        by expiry, oldest first), filtered to PENDING. A filtered scan is
+        acceptable here: the fence is a bounded background sweep, not the hot path."""
+        resp = self._table.query(
+            KeyConditionExpression=(
+                Key("tenant_id").eq(tenant_id)
+                & Key("sk").between(
+                    hold_sk_prefix(period),
+                    hold_sk_expiry_ceiling(period, now_epoch),
+                )
+            ),
+            FilterExpression=Attr("status").eq("PENDING"),
+            ConsistentRead=True,
+            Limit=int(limit),
+        )
+        return resp.get("Items", [])
+
     def hold_delete_txn_item(
         self, *, tenant_id: str, sk: str, require_exists: bool = True
     ) -> dict[str, Any]:
@@ -624,13 +839,22 @@ class TenantBudgetsRepository:
         self, *, tenant_id: str, sk: str
     ) -> dict[str, Any]:
         """Transaction item that deletes an expired hold by exact `sk` *only if
-        it still exists*, so the paired aggregate decrement happens at most once.
+        it still exists* AND its debit is known to have committed, so the paired
+        aggregate decrement (credit-back) happens at most once and never on an
+        un-debited hold.
 
         The sweep composes this Delete with an aggregate
-        `pool_reserved_microusd -= amount`. The `attribute_exists(sk)` condition
-        is the idempotency latch: if a concurrent sweep or a late settle already
-        removed the hold, the whole transaction cancels and no double-subtract
-        occurs.
+        `pool_reserved_microusd -= amount`. Two conditions:
+          * `attribute_exists(sk)` — idempotency latch (a concurrent sweep or late
+            settle already removed it → the whole txn cancels, no double-subtract).
+          * `status = ACTIVE OR attribute_not_exists(status)` — the PENDING-protocol
+            credit gate (docs/design/pending-protocol.md, readers-first). A
+            transactional (pre-PENDING) hold has NO status attribute, so
+            `attribute_not_exists(status)` keeps this reaper byte-identical for
+            today's data — it is INERT until PENDING holds exist. Once they do, a
+            PENDING hold may be un-debited, so crediting it would oversell; the
+            sweeper's `fence_pending_expired` handles those WITHOUT touching the
+            pool, and this reaper only credits ACTIVE (known-debited) holds.
         """
         return {
             "Delete": {
@@ -639,7 +863,12 @@ class TenantBudgetsRepository:
                     "tenant_id": {"S": tenant_id},
                     "sk": {"S": sk},
                 },
-                "ConditionExpression": "attribute_exists(sk)",
+                "ConditionExpression": (
+                    "attribute_exists(sk) AND "
+                    "(#st = :active_h OR attribute_not_exists(#st))"
+                ),
+                "ExpressionAttributeNames": {"#st": "status"},
+                "ExpressionAttributeValues": {":active_h": {"S": "ACTIVE"}},
             }
         }
 
