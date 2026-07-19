@@ -452,6 +452,13 @@ if (app.node.tryGetContext('ledgerProjector') === true ||
     projectorEpochMs: process.env.PROJECTOR_EPOCH_MS
       ? parseInt(process.env.PROJECTOR_EPOCH_MS, 10)
       : undefined,
+    // ENRICHMENT_EPOCH_MS = the time the HOLD-enrichment deploy FINISHED rolling
+    // out (step 3). The reconciler flags any post-epoch HOLD with no `source` —
+    // the epoch-set-too-early detector that gates the capture/void HOLD-only
+    // cut-over and the eventual RESERVE-event fallback deletion.
+    enrichmentEpochMs: process.env.ENRICHMENT_EPOCH_MS
+      ? parseInt(process.env.ENRICHMENT_EPOCH_MS, 10)
+      : undefined,
     description: `[${prefix}] Ledger Streams RESERVE-event projector + reconciler (shadow)`,
   });
   ledgerProjectorStack.addDependency(ecrStack);

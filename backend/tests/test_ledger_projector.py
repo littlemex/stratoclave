@@ -126,6 +126,72 @@ def test_handler_writes_shadow_event_idempotently(monkeypatch):
         assert len(shadow_rows) == 1
 
 
+def _insert_record_with_keys(hold_id="h1", tenant_id="t1", period="2026-07", **kw):
+    """An INSERT record that ALSO carries dynamodb.Keys (as the real stream does),
+    so per-key fail-forward can key on (tenant_id, sk)."""
+    img = _hold_image(hold_id=hold_id, tenant_id=tenant_id, period=period, **kw)
+    return {"eventName": "INSERT",
+            "dynamodb": {"SequenceNumber": f"seq-{hold_id}",
+                         "Keys": {"tenant_id": {"S": tenant_id},
+                                  "sk": img["sk"]},
+                         "NewImage": img}}
+
+
+def test_fail_forward_stops_later_records_of_same_hold(monkeypatch):
+    """Per-key fail-forward (Fable review 3): once a record for a source item
+    (tenant_id, sk) fails, every LATER record for the SAME item in the batch is
+    returned in batchItemFailures UNPROCESSED — so a transient failure can never
+    let a later transition of the same hold commit ahead of the stuck one."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    monkeypatch.setenv("LEDGER_PROJECTOR_SHADOW", "true")
+    with mock_aws():
+        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        _make_ledger_table(ddb)
+        from dynamo.client import get_dynamodb_resource
+        get_dynamodb_resource.cache_clear()
+
+        # First record for hold "hz" is malformed → raises inside the writer.
+        bad = _insert_record_with_keys("hz")
+        bad["dynamodb"]["SequenceNumber"] = "seq-hz-1"
+        bad["dynamodb"]["NewImage"]["amount_microusd"] = {"N": "not-a-number"}
+        # A LATER record for the SAME source item (same tenant_id+sk): a MODIFY
+        # today is skipped by _new_image, but fail-forward must STILL re-queue it
+        # so it can never be processed ahead of the stuck predecessor.
+        later_same = {"eventName": "MODIFY",
+                      "dynamodb": {"SequenceNumber": "seq-hz-2",
+                                   "Keys": bad["dynamodb"]["Keys"],
+                                   "NewImage": bad["dynamodb"]["NewImage"]}}
+        # An unrelated hold in the same batch must still commit.
+        other = _insert_record_with_keys("ho")
+        out = handler({"Records": [bad, later_same, other]})
+        ids = {f["itemIdentifier"] for f in out["batchItemFailures"]}
+        assert "seq-hz-1" in ids       # the failing record
+        assert "seq-hz-2" in ids       # its same-key successor, re-queued
+        assert "seq-ho" not in ids     # unrelated hold committed
+
+
+def test_fail_forward_survives_record_missing_keys(monkeypatch):
+    """A record whose derivation raises but which carries no dynamodb.Keys is
+    still reported (never dropped) and does not NameError the handler."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    monkeypatch.setenv("LEDGER_PROJECTOR_SHADOW", "true")
+    with mock_aws():
+        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        _make_ledger_table(ddb)
+        from dynamo.client import get_dynamodb_resource
+        get_dynamodb_resource.cache_clear()
+        bad = {"eventName": "INSERT",
+               "dynamodb": {"SequenceNumber": "seq-nokey",
+                            "NewImage": _hold_image(hold_id="hn")}}
+        bad["dynamodb"]["NewImage"]["amount_microusd"] = {"N": "nope"}
+        out = handler({"Records": [bad]})
+        assert {"itemIdentifier": "seq-nokey"} in out["batchItemFailures"]
+
+
 def test_handler_reports_partial_failure_on_bad_record(monkeypatch):
     """A record that raises during processing is returned in batchItemFailures
     (retried), never silently dropped; good records in the same batch still
@@ -284,6 +350,31 @@ def test_reconciler_handler_zero_divergence_across_partitions(monkeypatch):
         assert out["partitions"] == 2
 
 
+def test_reconciler_handler_emits_post_epoch_sourceless_metric(monkeypatch):
+    """The scheduled reconciler surfaces the enrichment-epoch misconfiguration
+    metric (Fable review-2 finding 2) alongside the divergence metric, ALWAYS
+    with an EMF Timestamp."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    monkeypatch.setenv("ENRICHMENT_EPOCH_MS", "1700000000000")
+    with mock_aws():
+        tbl = _seed_ledger()
+        budgets = _make_budgets_table(
+            boto3.resource("dynamodb", region_name="us-east-1"))
+        # a post-epoch HOLD with no source → offender
+        budgets.put_item(Item={"tenant_id": "t1", "sk": "HOLD#2026-07#x#h1",
+                               "hold_id": "h1",
+                               "created_at": "2026-07-19T00:00:00+00:00"})
+        from billing.ledger_reconciler import handler as rec_handler
+        out = rec_handler({})
+        assert out["PostEpochSourcelessHolds"] == 1
+        assert out["post_epoch_sourceless_holds"] == 1
+        names = [m["Name"] for m in out["_aws"]["CloudWatchMetrics"][0]["Metrics"]]
+        assert "PostEpochSourcelessHolds" in names and "ReserveShadowDivergence" in names
+        assert out["_aws"]["Timestamp"] > 0
+
+
 def test_reconciler_handler_flags_divergence(monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
@@ -299,6 +390,53 @@ def test_reconciler_handler_flags_divergence(monkeypatch):
         out = rec_handler({})
         assert out["total_divergence"] == 1
         assert out["ReserveShadowDivergence"] == 1
+
+
+def _make_budgets_table(ddb, name="stratoclave-tenant-budgets"):
+    ddb.create_table(
+        TableName=name,
+        KeySchema=[{"AttributeName": "tenant_id", "KeyType": "HASH"},
+                   {"AttributeName": "sk", "KeyType": "RANGE"}],
+        AttributeDefinitions=[{"AttributeName": "tenant_id", "AttributeType": "S"},
+                              {"AttributeName": "sk", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    return ddb.Table(name)
+
+
+def test_post_epoch_sourceless_detector_flags_offender():
+    """A HOLD minted AT/AFTER the enrichment epoch with no `source` is the
+    epoch-set-too-early signal (Fable review-2 finding 2) — it must be counted."""
+    with mock_aws():
+        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        tbl = _make_budgets_table(ddb)
+        from billing.ledger_projector import count_post_epoch_sourceless_holds
+        epoch_ms = 1_700_000_000_000
+        # offender: post-epoch, no source
+        tbl.put_item(Item={"tenant_id": "t1", "sk": "HOLD#2026-07#x#h1",
+                           "hold_id": "h1", "created_at": "2026-07-19T00:00:00+00:00"})
+        # benign: post-epoch but HAS source
+        tbl.put_item(Item={"tenant_id": "t1", "sk": "HOLD#2026-07#x#h2",
+                           "hold_id": "h2", "source": "external",
+                           "created_at": "2026-07-19T00:00:00+00:00"})
+        # benign: pre-epoch, no source (legacy, expected)
+        tbl.put_item(Item={"tenant_id": "t1", "sk": "HOLD#2026-07#x#h3",
+                           "hold_id": "h3", "created_at": "2020-01-01T00:00:00+00:00"})
+        # not a HOLD row
+        tbl.put_item(Item={"tenant_id": "t1", "sk": "BUDGET#2026-07"})
+        out = count_post_epoch_sourceless_holds(tbl, epoch_ms)
+        assert out["post_epoch_sourceless"] == 1
+        assert out["hold_ids"] == ["h1"]
+
+
+def test_post_epoch_sourceless_detector_disabled_when_epoch_unset():
+    with mock_aws():
+        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        tbl = _make_budgets_table(ddb)
+        from billing.ledger_projector import count_post_epoch_sourceless_holds
+        tbl.put_item(Item={"tenant_id": "t1", "sk": "HOLD#2026-07#x#h1",
+                           "hold_id": "h1", "created_at": "2026-07-19T00:00:00+00:00"})
+        assert count_post_epoch_sourceless_holds(tbl, 0)["post_epoch_sourceless"] == 0
 
 
 def test_reconcile_excludes_pre_epoch_backlog(monkeypatch):

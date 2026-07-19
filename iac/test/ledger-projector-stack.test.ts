@@ -29,6 +29,7 @@ describe('LedgerProjectorStack', () => {
       tenantBudgetsTable: budgets,
       creditLedgerTable: ledger,
       shadow: true,
+      enrichmentEpochMs: 1700000000000,
     });
     template = Template.fromStack(stack);
   });
@@ -81,6 +82,29 @@ describe('LedgerProjectorStack', () => {
       ComparisonOperator: 'GreaterThanThreshold',
       // missing data must be BREACHING so a dead reconciler can't green-light cut-over
       TreatMissingData: 'breaching',
+    });
+  });
+
+  test('reconciler receives the enrichment epoch (step-3 misconfiguration gate)', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: 'stratoclave-ledger-reconciler',
+      Environment: {
+        Variables: Match.objectLike({
+          ENRICHMENT_EPOCH_MS: '1700000000000',
+          // it also scans the budgets table, so it must know its name
+          DYNAMODB_TENANT_BUDGETS_TABLE: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('post-epoch-sourceless-holds alarm gates the HOLD-only cut-over', () => {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'stratoclave-ledger-post-epoch-sourceless-holds',
+      Threshold: 0,
+      ComparisonOperator: 'GreaterThanThreshold',
+      // inert until an epoch is configured, so missing data is NOT breaching
+      TreatMissingData: 'notBreaching',
     });
   });
 

@@ -281,23 +281,46 @@ before proceeding.
    writing the extra attributes.
 3. **capture/void → HOLD-only** (requires mismatch = 0). Verify the
    authorize-then-immediate-capture race and inline-token capture rejection.
-   **PRECONDITION (Fable review-2 finding 2, a hard blocker): a blunt env-flag
-   flip is a data-loss hazard** — at flip time any pre-enrichment external hold
-   still within its TTL is authorized + reserved but its capture 404s, so the
-   caller declines and the reaper voids an authorized transaction. The cut-over
-   MUST therefore be gated one of two ways, NOT a bare flag:
-   (a) a `created_at >= ENRICHMENT_EPOCH` predicate so only holds minted after
-   enrichment take the HOLD-only path and older holds keep the RESERVE-event
-   fallback (safe by construction; the fallback code is deleted only after
-   ENRICHMENT_EPOCH + max-hold-TTL); or (b) a reconciler gate that scans the HOLD
-   table and confirms zero rows with `attribute_not_exists(source)` before the
-   flag is allowed to flip. (a) is preferred. The current `STRATOCLAVE_CAPTURE_
-   HOLD_ONLY` env flag is the mechanism, but it must not be flipped in prod until
-   (a) or (b) is in place. Rollback: flip the flag / relax the predicate.
+   **DONE (code) — the cut-over is per-hold epoch-gated, not a bare flag** (Fable
+   review-2 finding 2 + step-3 review, both CONFIRMED-fixed). The blunt
+   `STRATOCLAVE_CAPTURE_HOLD_ONLY` flag is REMOVED. capture/void now routes a hold
+   to the HOLD-only path iff it is post-enrichment — either it already carries
+   `source`, OR its `created_at >= STRATOCLAVE_ENRICHMENT_EPOCH`. A pre-epoch
+   source-less hold keeps the RESERVE-event fallback, so no authorized hold can be
+   404'd (the finding-2 hazard is closed by construction). Supporting guarantees,
+   all implemented + tested:
+   - `STRATOCLAVE_ENRICHMENT_EPOCH` is parsed once at boot with FAIL-FAST on a
+     bad value (a typo can't silently become a no-op cut-over) and naive ISO is
+     normalized to UTC (no naive/aware comparison bug). It MUST be the enrichment
+     deploy's ROLL-OUT-FINISH time + an NTP-skew margin, never deploy-start: too
+     late only keeps benign holds on the (still-correct) fallback; too early is
+     the ONLY money-losing setting.
+   - The reconciler emits a `PostEpochSourcelessHolds` EMF metric (alarmed,
+     threshold 0) — the sole automatic detector of an epoch set too early, and the
+     gate for the fallback deletion below.
+   - The HOLD-only path KEEPS the log-only dual-read crosscheck against the still-
+     synchronous RESERVE event (step 3 write side is still 4-item), as the go/no-go
+     evidence for step 4; it is retired in step 4 when the sync RESERVE goes away.
+   Rollback: unset `STRATOCLAVE_ENRICHMENT_EPOCH` (every hold reverts to the
+   source-presence rule = step-2 dual-read behaviour). Fallback code is deleted in
+   a SEPARATE later deploy, gated on `PostEpochSourcelessHolds == 0` sustained for
+   ENRICHMENT_EPOCH + max-hold-TTL. LIVE cut-over is still pending: it needs the
+   real roll-out-finish epoch set and the divergence + post-epoch-sourceless
+   alarms observed green over a window.
 4. **Promote the projector to the real `event_id`** (conditional Put). The
    synchronous writer and the projector now both target the same event under
    `attribute_not_exists`, so the dual-writer state is safe in both directions —
-   this is the core of rollback-safety.
+   this is the core of rollback-safety. **Prerequisite already landed** (step-3
+   review finding 3): the projector handler now does PER-KEY FAIL-FORWARD, keyed
+   on the stream record's source-item key `(tenant_id, sk)` taken at the TOP of
+   processing (so it is defined before any derivation can raise). Once a record
+   for a key fails, every later record for the SAME key in the batch is pushed to
+   `batchItemFailures` unprocessed. Today only INSERT→RESERVE is derived so no
+   same-key ordering exists yet, but this makes projecting terminal (MODIFY)
+   transitions here — where SETTLE derivation depends on the RESERVE row existing
+   — safe without a rewrite. Still open for THIS step: the terminal Put needs a
+   `ConditionCheck` on the RESERVE event's existence (a bare idempotent Put is
+   insufficient to express "SETTLE presupposes RESERVE").
 5. **Remove the synchronous RESERVE item from the txn** (per-tenant canary,
    guarded by the I2-async reconciler). Re-measure the c=16 curve. Rollback: put
    the item back (safe by step 4's idempotent-Put property).

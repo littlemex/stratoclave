@@ -122,11 +122,38 @@ def _new_image(record: dict) -> Optional[dict]:
     return record.get("dynamodb", {}).get("NewImage")
 
 
+def _source_key(record: dict) -> Optional[tuple[str, str]]:
+    """The stream record's SOURCE-ITEM key (tenant_id, sk) — the unit DynamoDB
+    Streams preserves order on, and therefore the unit per-key fail-forward must
+    stop on. Taken from `dynamodb.Keys` at the TOP of record processing so it is
+    defined BEFORE any derivation can raise (Fable review 3: computing the key
+    only after `reserve_event_from_hold` leaves it undefined/stale on an early
+    exception). Returns None if the record carries no keys."""
+    keys = record.get("dynamodb", {}).get("Keys")
+    if not isinstance(keys, dict):
+        return None
+    tid = _s(keys, "tenant_id")
+    sk = _s(keys, "sk")
+    if tid is None or sk is None:
+        return None
+    return (tid, sk)
+
+
 def handler(event, context=None):  # noqa: ARG001 — Lambda signature
     """Stream event-source handler. Derives a RESERVE event per new HOLD record
     and writes it idempotently. Returns `batchItemFailures` (partial-batch
     response) so a transient write failure retries ONLY that record and never
     silently drops an audit event.
+
+    PER-KEY FAIL-FORWARD (Fable review 3). Records are grouped by their SOURCE
+    item key (tenant_id, sk) — the unit Streams preserves order on. Once a record
+    for a key fails, EVERY later record for the SAME key in this batch is pushed
+    to `batchItemFailures` UNPROCESSED, so a transient failure of an earlier
+    transition can never let a later transition of the same hold commit ahead of
+    it (an externally-visible order inversion). Today only INSERT→RESERVE is
+    derived so no same-key ordering exists yet, but the structure is in place so
+    projecting terminal (MODIFY) transitions later — where SETTLE derivation
+    depends on the RESERVE row existing — is safe without a rewrite.
 
     `LEDGER_PROJECTOR_SHADOW` (env, default "true") writes to the SHADOW# sk
     namespace during migration step 1.
@@ -143,8 +170,19 @@ def handler(event, context=None):  # noqa: ARG001 — Lambda signature
     table = credit_ledger_table_name()
 
     failures: list[dict] = []
+    failed_keys: set[tuple[str, str]] = set()
     for record in event.get("Records", []):
         seq = record.get("dynamodb", {}).get("SequenceNumber")
+        # Key FIRST — before any derivation that could raise — so fail-forward is
+        # decided on a value that always exists for a real stream record.
+        key = _source_key(record)
+        # A prior record for this SAME source item already failed: do NOT process
+        # this later transition (it would jump ahead of the stuck predecessor).
+        # Re-queue it so the checkpoint rewind replays the whole key in order.
+        if key is not None and key in failed_keys:
+            if seq:
+                failures.append({"itemIdentifier": seq})
+            continue
         try:
             img = _new_image(record)
             if img is None:
@@ -176,6 +214,9 @@ def handler(event, context=None):  # noqa: ARG001 — Lambda signature
         except Exception:  # noqa: BLE001 — surface to partial-batch retry, never drop.
             if seq:
                 failures.append({"itemIdentifier": seq})
+            # Stop every later record for this source item (order preservation).
+            if key is not None:
+                failed_keys.add(key)
     return {"batchItemFailures": failures}
 
 
@@ -302,4 +343,66 @@ def reconcile_partition(table, tenant_id: str, period: str, *,
         "lagging_shadow": lagging_shadow,          # benign in-budget lag
         "out_of_domain": len(out_of_domain),       # pre-epoch backlog (excluded)
         "field_diff": field_diff,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Enrichment-epoch misconfiguration detector (Fable review-2 step-3 gate).
+# ---------------------------------------------------------------------------
+
+def _iso_to_epoch_ms(raw) -> Optional[int]:
+    """ISO-8601 string → epoch ms (UTC), or None if absent/unparseable. A naive
+    string is assumed UTC so the comparison never mixes naive/aware datetimes."""
+    if not raw:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def count_post_epoch_sourceless_holds(budgets_table, enrichment_epoch_ms: int) -> dict[str, Any]:
+    """Scan the budgets table for HOLD rows minted AT OR AFTER the enrichment
+    epoch that carry NO `source` attribute. This count MUST be zero: it is the
+    ONLY automatic detector that the enrichment epoch was set too early (a hold
+    written by pre-enrichment code but stamped post-epoch, which the capture/void
+    epoch gate would route to the HOLD-only path and 404 — the finding-2 data-loss
+    scenario). It is also the safety gate for DELETING the RESERVE-event fallback:
+    the fallback may be removed only after this stays zero for a full max-hold-TTL
+    window past the epoch. Read-only.
+
+    `enrichment_epoch_ms` <= 0 disables the check (returns count 0) so the metric
+    is inert until an epoch is actually configured.
+    """
+    if not enrichment_epoch_ms or enrichment_epoch_ms <= 0:
+        return {"post_epoch_sourceless": 0, "checked": 0, "hold_ids": []}
+    offenders: list[str] = []
+    checked = 0
+    kwargs: dict[str, Any] = {
+        "FilterExpression": "attribute_not_exists(#src) AND attribute_exists(created_at)",
+        "ExpressionAttributeNames": {"#src": "source"},
+        "ProjectionExpression": "tenant_id, sk, hold_id, created_at",
+    }
+    while True:
+        resp = budgets_table.scan(**kwargs)
+        for it in resp.get("Items", []):
+            sk = str(it.get("sk", ""))
+            if not sk.startswith("HOLD#"):
+                continue
+            checked += 1
+            ce = _iso_to_epoch_ms(it.get("created_at"))
+            if ce is not None and ce >= enrichment_epoch_ms:
+                offenders.append(str(it.get("hold_id") or sk))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    return {
+        "post_epoch_sourceless": len(offenders),
+        "checked": checked,
+        "hold_ids": offenders[:20],
     }

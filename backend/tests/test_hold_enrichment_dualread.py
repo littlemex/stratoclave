@@ -50,7 +50,13 @@ def _authorize(tenant_id: str, amount: int, key: str, *, run_id=None):
 
 
 def _set_hold_only(monkeypatch, on: bool):
-    monkeypatch.setattr(_pipeline, "_CAPTURE_HOLD_ONLY", on)
+    """Drive the HOLD-only path via the ENRICHMENT_EPOCH gate (finding 2 fix).
+    on=True  -> epoch in the distant past, so EVERY hold (even a source-less
+                legacy row) is post-epoch and takes the HOLD-only path.
+    on=False -> epoch unset, so ONLY holds already carrying `source` take
+                HOLD-only and a legacy row falls back to the RESERVE event.
+    This preserves the original flag's semantics exactly."""
+    monkeypatch.setattr(_pipeline, "_ENRICHMENT_EPOCH", 0.0 if on else None)
 
 
 def test_authorize_enriches_hold_row(dynamodb_mock):
@@ -121,8 +127,11 @@ def test_c1_gate_denies_inline_hold(dynamodb_mock, monkeypatch, hold_only):
 
 
 def test_c1_missing_source_fails_closed_under_hold_only(dynamodb_mock, monkeypatch):
-    """A hold with NO source attribute, under HOLD-only, must be denied (a legacy
-    row is not capturable once the RESERVE-event fallback is off)."""
+    """A POST-EPOCH hold with NO source attribute must be denied: the epoch gate
+    routes it to the HOLD-only path (created_at >= epoch) and C-1 fails closed on
+    the missing source (a corruption/bug case — an enriched-era hold must carry
+    source). The created_at is set so this genuinely exercises HOLD-only, not the
+    legacy fallback."""
     tid = "c1-nosrc"
     period = _seed(tid)
     import time
@@ -132,12 +141,65 @@ def test_c1_missing_source_fails_closed_under_hold_only(dynamodb_mock, monkeypat
     TenantBudgetsRepository()._table.put_item(Item={
         "tenant_id": tid, "sk": _hsk(period, exp, hold_id), "hold_id": hold_id,
         "period": period, "amount_microusd": 400_000, "expires_at": exp,
+        "created_at": "2026-07-19T00:00:00+00:00",  # post-epoch (epoch=0.0)
     })
     _set_hold_only(monkeypatch, True)
     ctx = _pipeline.rehydrate_reservation_context(
         tenant_id=tid, period=period, hold_id=hold_id,
         hold_sk=_hsk(period, exp, hold_id))
     assert ctx is None, "missing source must fail closed under HOLD-only"
+
+
+def test_enrichment_epoch_parses_iso_and_epoch_seconds():
+    """_parse_epoch_env accepts both an epoch-seconds number and an ISO-8601
+    timestamp, and a naive ISO string is assumed UTC (no naive/aware mixing)."""
+    assert _pipeline._parse_epoch_env(None) is None
+    assert _pipeline._parse_epoch_env("  ") is None
+    assert _pipeline._parse_epoch_env("1700000000") == 1700000000.0
+    aware = _pipeline._parse_epoch_env("2026-07-19T00:00:00+00:00")
+    naive = _pipeline._parse_epoch_env("2026-07-19T00:00:00")  # assumed UTC
+    assert aware == naive is not None
+
+
+def test_enrichment_epoch_fail_fast_on_garbage():
+    """A typo'd epoch env must FAIL-FAST, not silently become None (which would
+    leave the process permanently on step-2 behaviour after an operator believed
+    they cut over)."""
+    with pytest.raises(ValueError):
+        _pipeline._parse_epoch_env("not-a-timestamp")
+
+
+def test_hold_created_epoch_handles_missing_and_bad(dynamodb_mock):
+    """A hold with no/garbage created_at → None → routed to the money-safe
+    (pre-epoch legacy) path, never mis-classified as post-epoch."""
+    assert _pipeline._hold_created_epoch({}) is None
+    assert _pipeline._hold_created_epoch({"created_at": "garbage"}) is None
+    naive = _pipeline._hold_created_epoch({"created_at": "2026-07-19T00:00:00"})
+    aware = _pipeline._hold_created_epoch({"created_at": "2026-07-19T00:00:00+00:00"})
+    assert naive == aware is not None
+
+
+def test_pre_epoch_hold_uses_legacy_fallback_not_hold_only(dynamodb_mock, monkeypatch):
+    """A hold minted BEFORE the enrichment epoch, with its source stripped, must
+    take the legacy RESERVE-event fallback (finding 2: it must NOT be forced onto
+    the HOLD-only path where it would 404 an authorized txn)."""
+    tid = "epoch-legacy"
+    period = _seed(tid)
+    r = _authorize(tid, 1_200_000, "epoch-k", run_id="run-e")
+    # Strip enrichment AND stamp an OLD created_at (pre-epoch).
+    TenantBudgetsRepository()._table.update_item(
+        Key={"tenant_id": tid, "sk": r.hold_sk},
+        UpdateExpression="REMOVE #s, run_id, rate_snapshot SET created_at = :c",
+        ExpressionAttributeNames={"#s": "source"},
+        ExpressionAttributeValues={":c": "2020-01-01T00:00:00+00:00"},
+    )
+    # Epoch is set to a recent time; the old hold is pre-epoch.
+    monkeypatch.setattr(_pipeline, "_ENRICHMENT_EPOCH",
+                        _pipeline._parse_epoch_env("2026-07-01T00:00:00+00:00"))
+    ctx = _pipeline.rehydrate_reservation_context(
+        tenant_id=tid, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
+    assert ctx is not None, "pre-epoch hold must rehydrate via RESERVE-event fallback"
+    assert ctx.pool_reserved_microusd == 1_200_000
 
 
 def test_legacy_hold_rehydrates_via_reserve_event_fallback(dynamodb_mock, monkeypatch):

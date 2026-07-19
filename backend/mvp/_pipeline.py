@@ -129,12 +129,69 @@ _HOLD_TTL_SECONDS = max(
 # the hot reserve path into an unbounded scan.
 _SWEEP_MAX_HOLDS = int(os.getenv("STRATOCLAVE_POOL_SWEEP_MAX_HOLDS", "5"))
 
-# Two-item migration (docs/design/ledger-hot-path.md step 3). When ON, external
-# capture/void rehydrate reads the HOLD row ALONE (source/amount/rate_snapshot
-# folded onto it) and NEVER the RESERVE event — the cutover that lets the RESERVE
-# event go fully async. OFF (default) = dual-read: HOLD is preferred but the
-# RESERVE event is cross-checked so a mismatch is logged before the cutover.
-_CAPTURE_HOLD_ONLY = os.getenv("STRATOCLAVE_CAPTURE_HOLD_ONLY", "false").lower() == "true"
+# Two-item migration (docs/design/ledger-hot-path.md step 3): capture/void reads
+# the HOLD row ALONE (source/amount/rate_snapshot folded onto it) instead of the
+# soon-async RESERVE event. The cutover is NOT a bare flag (Fable review-2 finding
+# 2, CONFIRMED data-loss hazard): a blunt flip would route a pre-enrichment
+# external hold still inside its TTL to the HOLD-only path where its `source` is
+# absent → 404 → the caller declines an ALREADY-AUTHORIZED + reserved transaction
+# → the reaper voids it. Instead the path is decided per-hold by an ENRICHMENT
+# EPOCH: only holds minted AT OR AFTER the epoch take HOLD-only; older holds keep
+# the RESERVE-event fallback (safe by construction — the fallback is deleted only
+# after epoch + max hold TTL, in a SEPARATE deploy gated on the reconciler's
+# post-epoch-source-less count being zero for that whole window).
+#
+# The epoch MUST be the time the enrichment deploy finished rolling out to EVERY
+# instance (NOT deploy start): a clock-forward hold minted by an old-code instance
+# before enrichment could otherwise look post-epoch, have no `source`, and 404 —
+# reintroducing the hazard. Set it conservatively LATE (finish time + an NTP-skew
+# margin); too-late only keeps benign holds on the (still-correct) fallback, while
+# too-early is the only setting that loses money.
+
+
+def _parse_epoch_env(raw: Optional[str]) -> Optional[float]:
+    """Parse STRATOCLAVE_ENRICHMENT_EPOCH → epoch seconds (float, UTC), or None if
+    unset. Accepts an epoch-seconds number or an ISO-8601 timestamp. FAIL-FAST on
+    an unparseable value (Fable review): silently treating a typo as None would
+    leave the process permanently on step-2 behaviour after an operator BELIEVED
+    they cut over — safe money-wise but an undetectable no-op. A naive ISO string
+    is assumed UTC so the comparison never mixes naive/aware datetimes."""
+    if raw is None or raw.strip() == "":
+        return None
+    raw = raw.strip()
+    try:
+        return float(raw)  # epoch seconds
+    except ValueError:
+        pass
+    from datetime import datetime, timezone
+
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _hold_created_epoch(hold: dict) -> Optional[float]:
+    """A HOLD row's `created_at` (ISO-8601 string) → epoch seconds (UTC), or None
+    if absent/unparseable. A naive string is assumed UTC to match
+    `_parse_epoch_env`; None routes the hold to the pre-epoch (legacy) path, which
+    is the fail-closed / money-safe side during migration."""
+    raw = hold.get("created_at")
+    if not raw:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+# Parsed once at import; an unparseable value raises here (fail-fast at boot).
+_ENRICHMENT_EPOCH = _parse_epoch_env(os.getenv("STRATOCLAVE_ENRICHMENT_EPOCH"))
 
 
 def _pool_settle_items(
@@ -1923,21 +1980,34 @@ def rehydrate_reservation_context(
     # Two-item migration step 2/3 (docs/design/ledger-hot-path.md): the HOLD row
     # now carries `source`/`rate_snapshot`/description synchronously, so the C-1
     # gate and rehydration can read the HOLD ALONE — no dependency on the RESERVE
-    # event, which is moving to an async Streams projection. DUAL-READ during
-    # migration: prefer the HOLD's enriched attributes; fall back to the RESERVE
-    # event only for a legacy hold written before enrichment (no `source` attr).
-    # C-1 is fail-closed: a MISSING source on an enriched-era hold denies.
+    # event, which is moving to an async Streams projection.
+    #
+    # PATH SELECTION (Fable review-2 finding 2): a hold takes the HOLD-only path
+    # iff it is post-enrichment. Two independent signals both route to HOLD-only,
+    # and neither can misroute a pre-enrichment hold there:
+    #   * the hold already carries `source` (it was written by enriched code), OR
+    #   * the hold was minted AT OR AFTER _ENRICHMENT_EPOCH (created_at gate).
+    # A pre-epoch hold with no `source` falls to the legacy RESERVE-event path,
+    # which still exists during step 3 (write side is still 4-item). The epoch
+    # gate is what makes the eventual fallback DELETION safe: after epoch + max
+    # hold TTL, no pre-epoch hold can still be live. C-1 stays fail-closed on the
+    # HOLD-only path: a missing/non-external source denies (404).
     hold_has_source = hold is not None and "source" in hold
-    if hold_has_source or _CAPTURE_HOLD_ONLY:
-        # HOLD is the authority (or the flag forces HOLD-only even for legacy,
-        # which then correctly 404s a pre-enrichment hold — fail-closed).
+    hold_is_post_epoch = (
+        _ENRICHMENT_EPOCH is not None
+        and hold is not None
+        and (_ce := _hold_created_epoch(hold)) is not None
+        and _ce >= _ENRICHMENT_EPOCH
+    )
+    if hold_has_source or hold_is_post_epoch:
         if hold is None or hold.get("source") != "external":
             return None
         pool_reserved = int(hold.get("amount_microusd", 0))
-        # In dual-read (flag off) we still cross-check against the RESERVE event
-        # to prove equivalence before the HOLD-only cutover; log any mismatch.
-        if not _CAPTURE_HOLD_ONLY:
-            _dual_read_crosscheck(tenant_id, period, hold_id, hold)
+        # Step 3 keeps writing the synchronous RESERVE event, so cross-check the
+        # HOLD-only rehydrate against it and log any divergence — this is the
+        # go/no-go evidence for step 4 (write cutover). Retired in step 4 (Fable
+        # review: after the sync RESERVE goes away this would be constant noise).
+        _dual_read_crosscheck(tenant_id, period, hold_id, hold)
         return _rehydrate_from_hold(tenant_id, period, hold_id, hold_sk, hold,
                                     pool_reserved)
 

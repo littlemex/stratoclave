@@ -51,8 +51,11 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
 
     import boto3
 
-    from billing.ledger_projector import reconcile_partition
-    from dynamo.client import credit_ledger_table_name
+    from billing.ledger_projector import (
+        count_post_epoch_sourceless_holds,
+        reconcile_partition,
+    )
+    from dynamo.client import credit_ledger_table_name, tenant_budgets_table_name
 
     ddb = boto3.resource("dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"))
     table = ddb.Table(credit_ledger_table_name())
@@ -74,6 +77,16 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
         if summ["divergence"] or summ["missing_shadow"]:
             worst.append(summ)
 
+    # Step-3 gate (Fable review-2 finding 2): detect an enrichment epoch set too
+    # early. A HOLD minted at/after ENRICHMENT_EPOCH_MS but with NO `source` would
+    # be routed to the capture/void HOLD-only path and 404 an authorized txn. This
+    # count MUST be zero; it is also the safety gate for deleting the RESERVE-event
+    # fallback. Independent of the projector epoch (different concern).
+    enrichment_epoch_ms = int(os.getenv("ENRICHMENT_EPOCH_MS", "0"))
+    budgets_table = ddb.Table(tenant_budgets_table_name())
+    epoch_check = count_post_epoch_sourceless_holds(budgets_table, enrichment_epoch_ms)
+    post_epoch_sourceless = epoch_check["post_epoch_sourceless"]
+
     # EMF requires a Timestamp; a scheduled EventBridge event carries none, so an
     # earlier "pop if absent" version silently dropped the metric — leaving the
     # divergence ALARM with no data and a cut-over ungated (Fable review finding 4,
@@ -83,17 +96,25 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
         "reconciler": "ledger_reserve_shadow",
         "partitions": partitions,
         "total_divergence": total_divergence,
-        # EMF-style embedded metric so a CloudWatch alarm can gate on divergence.
+        "post_epoch_sourceless_holds": post_epoch_sourceless,
+        "enrichment_epoch_ms": enrichment_epoch_ms,
+        # EMF-style embedded metrics so CloudWatch alarms can gate on both the
+        # shadow divergence and the enrichment-epoch misconfiguration.
         "_aws": {
             "CloudWatchMetrics": [{
                 "Namespace": "Stratoclave/Ledger",
                 "Dimensions": [[]],
-                "Metrics": [{"Name": "ReserveShadowDivergence"}],
+                "Metrics": [
+                    {"Name": "ReserveShadowDivergence"},
+                    {"Name": "PostEpochSourcelessHolds"},
+                ],
             }],
             "Timestamp": ts_ms,
         },
         "ReserveShadowDivergence": total_divergence,
+        "PostEpochSourcelessHolds": post_epoch_sourceless,
         "detail": worst[:20],  # cap the log line
+        "epoch_check_detail": epoch_check,
     }
     print(json.dumps(result))
     return result

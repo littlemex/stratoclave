@@ -45,6 +45,14 @@ export interface LedgerProjectorStackProps extends cdk.StackProps {
    * compares the whole table (only correct on a table with no prior RESERVEs).
    */
   projectorEpochMs?: number;
+  /**
+   * Epoch (ms) the HOLD-enrichment deploy FINISHED rolling out to every instance
+   * (step 3, Fable review-2 finding 2). The reconciler counts HOLD rows minted
+   * at/after this with no `source` — which MUST be zero (an epoch set too early
+   * would route a pre-enrichment hold to the capture/void HOLD-only path and 404
+   * an authorized txn). Distinct from `projectorEpochMs`. Unset = check disabled.
+   */
+  enrichmentEpochMs?: number;
 }
 
 export class LedgerProjectorStack extends cdk.Stack {
@@ -68,6 +76,9 @@ export class LedgerProjectorStack extends cdk.Stack {
     };
     if (props.projectorEpochMs) {
       commonEnv.PROJECTOR_EPOCH_MS = String(props.projectorEpochMs);
+    }
+    if (props.enrichmentEpochMs) {
+      commonEnv.ENRICHMENT_EPOCH_MS = String(props.enrichmentEpochMs);
     }
     // Same image, different entrypoint per function: the CMD override lives on
     // DockerImageCode (image config), not the function props.
@@ -124,6 +135,9 @@ export class LedgerProjectorStack extends cdk.Stack {
       description: 'Diffs shadow RESERVE projections vs synchronous events; emits divergence metric.',
     });
     creditLedgerTable.grantReadData(this.reconciler);
+    // The reconciler also scans the budgets table for post-epoch source-less HOLD
+    // rows (enrichment-epoch misconfiguration detector, step-3 gate). Read only.
+    tenantBudgetsTable.grantReadData(this.reconciler);
 
     new events.Rule(this, 'ReconcilerSchedule', {
       ruleName: `${prefix}-ledger-reconciler-schedule`,
@@ -149,6 +163,25 @@ export class LedgerProjectorStack extends cdk.Stack {
       // drop, disabled schedule) would otherwise silently green-light the cut-over.
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       alarmDescription: 'Shadow RESERVE projection diverged (or the reconciler stopped emitting) — block cut-over.',
+    });
+    // Enrichment-epoch misconfiguration (step-3 gate, Fable review-2 finding 2):
+    // any HOLD minted post-epoch with no `source` would 404 an authorized txn on
+    // the HOLD-only capture path. Must be 0. Missing data is NOT breaching (the
+    // metric is inert until ENRICHMENT_EPOCH_MS is set), unlike the divergence
+    // gate whose absence is itself a failure.
+    new cloudwatch.Alarm(this, 'PostEpochSourcelessHoldsAlarm', {
+      alarmName: `${prefix}-ledger-post-epoch-sourceless-holds`,
+      metric: new cloudwatch.Metric({
+        namespace: 'Stratoclave/Ledger',
+        metricName: 'PostEpochSourcelessHolds',
+        statistic: 'Maximum',
+        period: cdk.Duration.minutes(15),
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'A post-enrichment-epoch HOLD has no source — the enrichment epoch was set too early; block the capture/void HOLD-only cut-over.',
     });
     new cloudwatch.Alarm(this, 'ProjectorDlqAlarm', {
       alarmName: `${prefix}-ledger-projector-dlq-depth`,
