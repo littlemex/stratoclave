@@ -231,6 +231,37 @@ class TenantBudgetsRepository:
         )
         return resp.get("Item")
 
+    @staticmethod
+    def _estimate_item_size_bytes(item: dict[str, Any]) -> int:
+        """Approximate a DynamoDB item's stored size in bytes (attribute-name bytes
+        + value bytes), the quantity WCU is charged on. Used by the PENDING-protocol
+        pool item-size metric (docs/design/pending-protocol.md, PR-1 canary item A′):
+        the WHOLE POINT of moving the marker out of the pool item is that the pool
+        item stays SMALL and FLAT — this lets an alarm fire the instant a code
+        regression reintroduces growth on the hot item. Rough by design (numbers are
+        counted as their UTF-8 string length, matching DynamoDB's own ~ accounting);
+        a monitoring signal, never a money quantity."""
+        def _val_bytes(v: Any) -> int:
+            if isinstance(v, dict):
+                return sum(len(str(k)) + _val_bytes(vv) for k, vv in v.items())
+            if isinstance(v, (list, tuple, set)):
+                return sum(_val_bytes(x) for x in v)
+            if isinstance(v, bool):
+                return 1
+            return len(str(v))
+        return sum(len(str(name)) + _val_bytes(val) for name, val in (item or {}).items())
+
+    def pool_item_size_bytes(self, tenant_id: str, period: str) -> Optional[int]:
+        """Estimated stored size of the pool item (or None if absent). The canary
+        detector for the item-growth regression the separate-item marker fixed: a
+        healthy pool item is a handful of fixed counters (< ~200 B) and MUST NOT
+        grow with the number of holds. Emit as a gauge; alarm above a small ceiling.
+        Eventually-consistent read (Fable E-phase review Q2): a monitoring gauge does
+        not need the current instant — an eventually-consistent GetItem halves RCU
+        and loses nothing for this signal."""
+        item = self.get(tenant_id, period, consistent_read=False)
+        return None if item is None else self._estimate_item_size_bytes(item)
+
     def get_hold(
         self, *, tenant_id: str, sk: str, consistent_read: bool = True
     ) -> Optional[dict[str, Any]]:

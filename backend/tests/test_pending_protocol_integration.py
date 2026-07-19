@@ -63,6 +63,58 @@ def _set_protocol(monkeypatch, value):
     _tb._reset_budgets_low_level_client()
 
 
+def test_per_tenant_canary_allowlist_routes_only_listed_tenant(dynamodb_mock, monkeypatch):
+    """Canary rollout (docs/design/pending-protocol.md): with the GLOBAL flag OFF
+    (default "transaction"), a tenant in STRATOCLAVE_RESERVE_PROTOCOL_TENANTS uses
+    the PENDING marker path while every other tenant stays transaction-mode. This
+    is the Shadow->Canary->Full lever — a single tenant flipped without a global
+    switch."""
+    from dynamo.tenant_budgets import marker_sk
+    # global flag stays "transaction"; only `canary-t` is allowlisted.
+    monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL", "transaction")
+    monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL_TENANTS", frozenset({"canary-t"}))
+    _pipeline._reset_low_level_client()
+    from dynamo import tenant_budgets as _tb
+    _tb._reset_budgets_low_level_client()
+    assert _pipeline._reserve_protocol_for("canary-t") == "pending"
+    assert _pipeline._reserve_protocol_for("other-t") == "transaction"
+    assert _pipeline._reserve_protocol_for(None) == "transaction"
+    # canary tenant → marker item written (pending path).
+    ct, cp = _seed("canary-t")
+    rc = _authorize(ct, 120_000, "ck")
+    assert _pipeline.rehydrate_reservation_context(
+        tenant_id=ct, period=cp, hold_id=rc.hold_id, hold_sk=rc.hold_sk) is not None
+    assert TenantBudgetsRepository()._table.get_item(
+        Key={"tenant_id": ct, "sk": marker_sk(rc.hold_id)}).get("Item") is not None
+    # non-canary tenant → transaction path, NO marker item, RESERVE event written.
+    ot, op = _seed("other-t")
+    ro = _authorize(ot, 120_000, "ok")
+    assert TenantBudgetsRepository()._table.get_item(
+        Key={"tenant_id": ot, "sk": marker_sk(ro.hold_id)}).get("Item") is None
+    assert CreditLedgerRepository().get_reserve(
+        tenant_id=ot, period=op, hold_id=ro.hold_id) is not None
+
+
+def test_pool_item_stays_small_across_many_reserves(dynamodb_mock, monkeypatch):
+    """A′ (Fable next-step review): the CI regression guard that the separate-item
+    marker keeps the pool item FLAT — the whole reason the map design was rejected.
+    Under the pending path, 40 distinct reserves must NOT grow the pool item (each
+    marker is its OWN item, not an entry on the pool item). This catches a code
+    regression that reintroduces per-hold growth on the hot item, which the
+    deductive WCU∝size argument assumes cannot happen."""
+    _set_protocol(monkeypatch, "pending")
+    tenant, period = _seed("pool-flat")
+    b = TenantBudgetsRepository()
+    size0 = b.pool_item_size_bytes(tenant, period)
+    for i in range(40):
+        _authorize(tenant, 1_000, f"flat-{i}")
+    size1 = b.pool_item_size_bytes(tenant, period)
+    # the pool item is a handful of fixed counters — small and essentially constant.
+    assert size1 < 300, f"pool item grew to {size1} bytes (marker leaked onto it?)"
+    # allow only tiny drift (updated_at timestamp etc.), NEVER per-hold growth.
+    assert size1 - size0 < 40, f"pool item grew {size1 - size0}B over 40 reserves"
+
+
 def test_audit_sweep_max_ttl_matches_authorize_clamp():
     """Fable PR-1 review non-blocking #4: the audit sweep's orphan age gate mirrors
     billing_authorize._TTL_MAX_SECONDS by hand. If the authorize clamp grows beyond

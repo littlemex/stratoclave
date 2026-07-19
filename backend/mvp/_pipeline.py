@@ -223,6 +223,32 @@ _ENRICHMENT_EPOCH = _parse_epoch_env(os.getenv("STRATOCLAVE_ENRICHMENT_EPOCH"))
 # path inert until deliberately enabled.
 _RESERVE_PROTOCOL = os.getenv("STRATOCLAVE_RESERVE_PROTOCOL", "transaction").lower()
 
+# Per-tenant canary allowlist (docs/design/pending-protocol.md, rollout
+# Shadow->Canary->Full). A comma-separated set of tenant ids that use the PENDING
+# protocol EVEN WHEN the global default is "transaction", so a single tenant can be
+# flipped without a global switch. Parsed ONCE at import (no per-request I/O — the
+# hot path must not add a lookup). The global flag still wins when it is "pending"
+# (all tenants). Precedence: global=="pending" OR tenant in allowlist -> pending.
+_RESERVE_PROTOCOL_TENANTS = frozenset(
+    t.strip() for t in os.getenv("STRATOCLAVE_RESERVE_PROTOCOL_TENANTS", "").split(",")
+    if t.strip()
+)
+
+
+def _reserve_protocol_for(tenant_id: Optional[str]) -> str:
+    """Resolve the reserve protocol for a tenant: "pending" if the global flag is
+    "pending" OR this tenant is in the canary allowlist, else "transaction". This is
+    the SINGLE decision point every reserve/settle/reclaim/capture marker branch
+    consults, so a canary tenant is byte-consistent across its whole lifecycle
+    (reserve writes a marker ⇒ settle/reclaim must clean it up even if the global
+    flag never flipped). Marker cleanup is money-neutral when no marker exists, so a
+    tenant removed from the allowlist mid-flight still settles cleanly."""
+    if _RESERVE_PROTOCOL == "pending":
+        return "pending"
+    if tenant_id and tenant_id in _RESERVE_PROTOCOL_TENANTS:
+        return "pending"
+    return "transaction"
+
 
 def _pool_settle_items(
     *,
@@ -458,7 +484,7 @@ class ReservationContext:
             # PENDING protocol (PR-1): the release above returned headroom + deleted
             # the hold atomically; settle the separate marker as cleanup (best-effort,
             # money-neutral — see the settle path).
-            if _RESERVE_PROTOCOL == "pending" and _rel_hold_id:
+            if _reserve_protocol_for(self.tenant_id) == "pending" and _rel_hold_id:
                 budgets.marker_settle_best_effort(
                     tenant_id=self.tenant_id, hold_id=_rel_hold_id)
         except ClientError as e:
@@ -701,7 +727,7 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
             # PENDING protocol (PR-1): the reclaim above returned this ACTIVE hold's
             # headroom atomically; settle its separate marker as cleanup (best-effort,
             # money-neutral — an EXPIRED hold is never EXPIRED_UNCREDITED).
-            if _RESERVE_PROTOCOL == "pending" and hold_id:
+            if _reserve_protocol_for(tenant_id) == "pending" and hold_id:
                 budgets.marker_settle_best_effort(tenant_id=tenant_id, hold_id=hold_id)
             # error level, with amount: an orphan means a request that reserved
             # budget then vanished. If the crash was AFTER a successful Bedrock
@@ -793,7 +819,8 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
     holds = budgets.list_holds(tenant_id=tenant_id, period=period)
     recovered = 0
     recovered_count = 0
-    still_uncredited = 0
+    still_uncredited = 0        # retire_reclaimed_best_effort failures (hold rescanned next pass)
+    credit_back_deferred = 0    # credit-back skipped this pass (transient/invariant), NOT retired
     for h in holds:
         if str(h.get("status", "")) != "EXPIRED_UNCREDITED":
             continue
@@ -818,12 +845,12 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
             # retiring (leaving the hold visible for a human), never crediting.
             logger.error("pool_reconcile_credit_back_invariant", tenant_id=tenant_id,
                          period=period, hold_id=hold_id)
-            still_uncredited += 1
+            credit_back_deferred += 1
             continue
         except Exception:  # noqa: BLE001 — transient credit-back failure: retry next pass
             logger.warning("pool_reconcile_credit_back_transient", tenant_id=tenant_id,
                            period=period, hold_id=hold_id)
-            still_uncredited += 1
+            credit_back_deferred += 1
             continue   # do NOT retire; the hold stays EXPIRED_UNCREDITED for retry
         if credited:
             recovered += int(h.get("amount_microusd", 0))
@@ -896,12 +923,33 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
             stale_markers_settled += 1
     except Exception:  # noqa: BLE001 — the audit sweep is best-effort observability
         pass
+    # POOL ITEM SIZE GAUGE (Fable next-step review A′): the whole point of the
+    # separate-item marker is that the pool item stays SMALL and FLAT. Emit its
+    # estimated size here (cold path — one GetItem per reconcile, not the hot path)
+    # so an alarm fires the instant a code regression reintroduces per-hold growth
+    # on the hot item. This is the live detector that replaces the (now-redundant)
+    # 2×-provisioned c=1×3000 flatness re-benchmark: a fixed-size item cannot grow
+    # by the WCU∝size argument, and this catches an implementation regression that
+    # the deductive argument assumes away. Best-effort; never fails reconcile.
+    pool_item_bytes = None
+    try:
+        pool_item_bytes = budgets.pool_item_size_bytes(tenant_id, period)
+        if pool_item_bytes is not None:
+            logger.info("pool_item_size", tenant_id=tenant_id, period=period,
+                        size_bytes=pool_item_bytes)
+    except Exception:  # noqa: BLE001 — the gauge is observability, never money
+        pass
     if recovered or stale_markers_settled:
         logger.warning("pool_reconcile_recovered", tenant_id=tenant_id, period=period,
                        recovered_microusd=recovered, holds=recovered_count,
                        stale_markers_settled=stale_markers_settled)
     return {"recovered_microusd": recovered, "recovered_holds": recovered_count,
-            "retire_failures": still_uncredited, "stale_markers_settled": stale_markers_settled,
+            # Split (Fable PR-1 follow-up D): distinguish "retire failed" from
+            # "credit-back deferred to next pass" — they had been conflated.
+            "retire_failures": still_uncredited,
+            "credit_back_deferred": credit_back_deferred,
+            "stale_markers_settled": stale_markers_settled,
+            "pool_item_size_bytes": pool_item_bytes,
             "reason": "recovered" if recovered else "clean"}
 
 
@@ -1841,8 +1889,9 @@ def reserve_external_authorization(
         return _idemp_replay(prior, request_fingerprint)
 
     # PENDING protocol dispatch (docs/design/pending-protocol.md). Default
-    # "transaction" falls through to the unchanged 4-item path below.
-    if _RESERVE_PROTOCOL == "pending":
+    # "transaction" falls through to the unchanged 4-item path below; a canary
+    # tenant (allowlist) or a global "pending" flag takes the marker path.
+    if _reserve_protocol_for(tenant_id) == "pending":
         return _reserve_external_pending(
             tenant_id=tenant_id, period=period, amount=amount,
             idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
@@ -2535,7 +2584,7 @@ def rehydrate_reservation_context(
         # (transaction mode / migration). The PENDING protocol writes no RESERVE
         # event, so skip the crosscheck for a pending-origin hold to avoid a
         # spurious "reserve missing" warning on every capture.
-        if _RESERVE_PROTOCOL != "pending":
+        if _reserve_protocol_for(tenant_id) != "pending":
             _dual_read_crosscheck(tenant_id, period, hold_id, hold)
         return _rehydrate_from_hold(tenant_id, period, hold_id, hold_sk, hold,
                                     pool_reserved)
@@ -3414,7 +3463,7 @@ def _settle_pool_side(
             # does not depend on it (a settled hold is never EXPIRED_UNCREDITED, so
             # the reconciler can never credit it), and the reconcile audit sweep
             # settles any marker this misses.
-            if _RESERVE_PROTOCOL == "pending" and _hold_id_for_marker:
+            if _reserve_protocol_for(user.org_id) == "pending" and _hold_id_for_marker:
                 budgets.marker_settle_best_effort(
                     tenant_id=user.org_id, hold_id=_hold_id_for_marker)
             return  # settled cleanly (reserved returned, spend recorded, hold gone)

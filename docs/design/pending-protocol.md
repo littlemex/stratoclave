@@ -164,11 +164,53 @@ bugs were found and fixed, each with a regression test:
     `period` disagrees with the caller's, surfaced as an alarm (poison-item safe:
     the reconcile loop logs + skips without retiring).
 
-Follow-up (non-blocking, tracked for a later PR): markers older than
-`previous_period` are settled by no reconcile pass (money-neutral — headroom was
-already returned — but a lingering RESERVED storage orphan that never gets TTL);
-split the `retire_failures` metric into retire-vs-credit-back-deferred; enable a
-`pool item size` CloudWatch metric before the canary.
+Follow-up (non-blocking, tracked for a later PR):
+  - markers older than `previous_period` are settled by no reconcile pass
+    (money-neutral — headroom was already returned — but a lingering RESERVED
+    storage orphan that never gets TTL);
+  - **`vsrEnv` rename** (Fable E-phase review): the ECS env map named `vsrEnv` now
+    also carries the reserve-canary var — rename to a generic `extraEnv`;
+  - **`PoolItemSizeBytes` alarm notification-repeat** (Fable E-phase review Bug-1
+    note): the gauge is emitted only once per reconcile (SPARSE), so with 1/1 +
+    `treatMissingData=NOT_BREACHING` a sustained over-threshold can flap
+    ALARM→OK→ALARM and re-notify each reconcile. If it proves noisy in the canary,
+    switch that alarm's missing-data handling to `MISSING` (keeps the state sticky
+    between sparse datapoints). Left 1/1 for now — a re-notifying alarm is far
+    better than the original 3/3 alarm that could never fire at all.
+
+**Canary rollout (Shadow → Canary → Full), landed.** The reserve protocol is
+resolved per tenant by `mvp._pipeline._reserve_protocol_for(tenant_id)`: it returns
+"pending" iff the global `STRATOCLAVE_RESERVE_PROTOCOL=pending` OR the tenant is in
+the `STRATOCLAVE_RESERVE_PROTOCOL_TENANTS` allowlist (parsed once at import — no
+per-request I/O). Every reserve / settle / release / reclaim / capture marker
+branch consults this SAME resolver, so a canary tenant is byte-consistent across
+its whole lifecycle (marker written on reserve ⇒ cleaned up on settle even if the
+global flag never flips; marker cleanup is money-neutral when no marker exists, so
+removing a tenant from the allowlist mid-flight still settles cleanly). CDK wires
+it via `EcsStackProps.reserveProtocolCanaryTenants` (dark by default — no env var
+until set). Graduation ladder:
+  1. **Shadow/Canary**: add ONE low-traffic internal tenant to the allowlist. Watch
+     `PoolItemSizeBytes` (must stay flat < ~200 B — the live proof the item-growth
+     bug is gone, replacing the redundant 2×-provisioned c=1×3000 re-benchmark),
+     the ledger drift alarms (must stay zero), and
+     `PoolReconcileCreditBackInvariant` (must never fire). The `pool_item_size`
+     gauge is emitted once per reconcile (cold path).
+  2. **Full**: once the canary bakes clean, set the global
+     `STRATOCLAVE_RESERVE_PROTOCOL=pending` (all tenants) and drop the allowlist.
+Observability shipped with this: `PoolItemSizeBytes` gauge + growth alarm (>2 KB),
+`PoolReconcileCreditBackInvariant` alarm, and the reconcile summary now splits
+`retire_failures` from `credit_back_deferred`.
+
+**Deferred by decision (NOT an oversight) — sharded-pool throughput.** The single
+pool item is still one item on one partition, so a single hot tenant is bounded by
+~1000 WCU/s (TransactWrite consumes 2×, so ~half effective). With zero paying
+tenants and no real load, that ceiling is many orders of magnitude away, and the
+litellm-competition differentiator is the VSR trust-boundary + the provable Savings
+Certificate, NOT ledger throughput — a ceiling worth fixing only once it is
+approached, with a known solution (sharded counter). TRIGGER to start it: a
+throttle event on the pool partition, OR a single tenant sustaining ~300 tx/s. At
+that point, move the marker to its own table (PK=hold_id) at the same time. Until
+then: do not build it.
 
 **Key-design note (why this bites here).** All of a tenant's pool + holds + (the
 mistaken) markers share ONE partition key (`tenant_id`), so a single hot tenant is
