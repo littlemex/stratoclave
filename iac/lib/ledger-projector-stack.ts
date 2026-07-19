@@ -38,6 +38,13 @@ export interface LedgerProjectorStackProps extends cdk.StackProps {
   creditLedgerTable: dynamodb.ITable;
   /** SHADOW# mode (step 1). Default true; the async cut-over flips it off. */
   shadow?: boolean;
+  /**
+   * Epoch (ms) the projector went live. The reconciler excludes RESERVE events
+   * older than this from divergence (they predate the LATEST stream position, so
+   * a missing shadow is expected, not a bug). Set to the deploy time; unset = 0
+   * compares the whole table (only correct on a table with no prior RESERVEs).
+   */
+  projectorEpochMs?: number;
 }
 
 export class LedgerProjectorStack extends cdk.Stack {
@@ -50,7 +57,18 @@ export class LedgerProjectorStack extends cdk.Stack {
     const { prefix, lambdaRepository, lambdaImageTag, tenantBudgetsTable, creditLedgerTable } = props;
     const shadow = props.shadow ?? true;
 
-    const commonEnv = { LEDGER_PROJECTOR_SHADOW: String(shadow) };
+    // The Lambda code resolves table names from DYNAMODB_* env (fallback is the
+    // 'stratoclave-' prefix, which is WRONG for a 'scverify-'-prefixed deploy),
+    // so inject the ACTUAL table names the stack was given. Without this the
+    // projector writes to a non-existent ledger table and silently drops events.
+    const commonEnv: Record<string, string> = {
+      LEDGER_PROJECTOR_SHADOW: String(shadow),
+      DYNAMODB_CREDIT_LEDGER_TABLE: creditLedgerTable.tableName,
+      DYNAMODB_TENANT_BUDGETS_TABLE: tenantBudgetsTable.tableName,
+    };
+    if (props.projectorEpochMs) {
+      commonEnv.PROJECTOR_EPOCH_MS = String(props.projectorEpochMs);
+    }
     // Same image, different entrypoint per function: the CMD override lives on
     // DockerImageCode (image config), not the function props.
     const projectorCode = lambda.DockerImageCode.fromEcr(lambdaRepository, {

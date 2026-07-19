@@ -299,3 +299,28 @@ def test_reconciler_handler_flags_divergence(monkeypatch):
         out = rec_handler({})
         assert out["total_divergence"] == 1
         assert out["ReserveShadowDivergence"] == 1
+
+
+def test_reconcile_excludes_pre_epoch_backlog(monkeypatch):
+    """A RESERVE minted before the projector's epoch has no shadow by
+    construction (stream started at LATEST); it must be OUT OF DOMAIN, not
+    divergence — else the historical backlog perpetually fails the gate."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    with mock_aws():
+        tbl = _seed_ledger()
+        # an old RESERVE (pre-epoch), no shadow
+        old = _real_reserve_row("h_old"); old["ts_ms"] = 1_000_000
+        tbl.put_item(Item=old)
+        # a new in-domain RESERVE with its matching shadow
+        new = _real_reserve_row("h_new"); new["ts_ms"] = 5_000_000
+        tbl.put_item(Item=new)
+        sh = dict(new); sh["sk"] = SHADOW_PREFIX + new["sk"]
+        tbl.put_item(Item=sh)
+        summ = reconcile_partition(tbl, "t1", "2026-07",
+                                   now_ms=5_000_000 + 60_000,
+                                   projector_epoch_ms=3_000_000)
+        assert summ["divergence"] == 0          # old is out of domain, new matches
+        assert summ["out_of_domain"] == 1
+        assert summ["missing_shadow"] == []

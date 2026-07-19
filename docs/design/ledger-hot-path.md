@@ -263,6 +263,17 @@ before proceeding.
    prefix. A reconciler compares shadow vs the still-synchronous RESERVE event
    and asserts divergence = 0 over an observation window. Rollback: disable the
    event-source mapping. (No hot-path change — pure observability.)
+   **DEPLOYED + live-verified** (scverify, us-east-1): an enriched HOLD written to
+   the budgets table projects to a shadow RESERVE in ~5s and the reconciler
+   reports divergence 0. Operational requirements learned from that verification,
+   now encoded in the stack: (a) the Lambda MUST receive `DYNAMODB_CREDIT_LEDGER_
+   TABLE` / `DYNAMODB_TENANT_BUDGETS_TABLE` — the code's fallback prefix is
+   `stratoclave-`, wrong for a `scverify-` deploy, and an unset env silently drops
+   every event into a non-existent table; (b) the reconciler MUST be given
+   `PROJECTOR_EPOCH_MS` = the projector's go-live time, because the stream starts
+   at LATEST and the pre-existing RESERVE backlog has no shadow by construction —
+   without the epoch the gate reads that backlog as permanent divergence and never
+   goes green.
 2. **HOLD enrichment dual-write + capture/void dual-read.** The synchronous txn
    (still old item count) additionally writes `source` / `amount` /
    `rate_snapshot` / `payload_hash` onto the HOLD row. capture/void dual-reads

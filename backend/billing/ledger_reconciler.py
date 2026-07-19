@@ -57,12 +57,19 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
     ddb = boto3.resource("dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"))
     table = ddb.Table(credit_ledger_table_name())
 
+    # The projector starts at LATEST, so RESERVE events minted BEFORE it went live
+    # have no shadow by construction — that historical backlog is NOT divergence.
+    # PROJECTOR_EPOCH_MS bounds the gate to the projector's actual domain; set it
+    # to the projector's deploy time (epoch ms). Unset (0) = compare everything
+    # (correct only for a table with no pre-projector RESERVE events).
+    epoch_ms = int(os.getenv("PROJECTOR_EPOCH_MS", "0"))
+
     total_divergence = 0
     partitions = 0
     worst: list[dict] = []
     for tenant_id, period in _iter_ledger_partitions(table):
         partitions += 1
-        summ = reconcile_partition(table, tenant_id, period)
+        summ = reconcile_partition(table, tenant_id, period, projector_epoch_ms=epoch_ms)
         total_divergence += summ["divergence"]
         if summ["divergence"] or summ["missing_shadow"]:
             worst.append(summ)

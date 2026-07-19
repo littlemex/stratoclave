@@ -210,7 +210,8 @@ def diff_events(shadow_item: dict, real_item: dict) -> dict[str, tuple]:
 
 def reconcile_partition(table, tenant_id: str, period: str, *,
                         now_ms: Optional[int] = None,
-                        lag_budget_ms: int = 15 * 60 * 1000) -> dict[str, Any]:
+                        lag_budget_ms: int = 15 * 60 * 1000,
+                        projector_epoch_ms: int = 0) -> dict[str, Any]:
     """Scan one tenant×period ledger partition and compare each SHADOW# RESERVE
     projection to its synchronous RESERVE event. Returns a summary with the
     divergence count and any mismatching hold_ids. Read-only — never writes.
@@ -265,11 +266,23 @@ def reconcile_partition(table, tenant_id: str, period: str, *,
         d = diff_events(shadow, real)
         if d:
             field_diff[hid] = d
+    out_of_domain = []
     for hid, real in reserve_by_hold.items():
         if hid in shadow_by_hold:
             continue
-        # Classify by the synchronous RESERVE's age: young = the projector just
-        # hasn't caught up (lag); old = it never will (a dropped event = bug).
+        try:
+            real_ts = int(real.get("ts_ms", 0))
+        except (TypeError, ValueError):
+            real_ts = 0
+        # A RESERVE minted BEFORE the projector went live (startingPosition=LATEST)
+        # is outside the projector's domain — it never saw that INSERT, so a
+        # missing shadow is EXPECTED, not divergence. Exclude the historical
+        # backlog so the gate measures only what the projector is responsible for.
+        if projector_epoch_ms and real_ts and real_ts < projector_epoch_ms:
+            out_of_domain.append(hid)
+            continue
+        # In-domain: classify by age — young = projector hasn't caught up (lag);
+        # old = it never will (a dropped event = bug).
         try:
             real_ts = int(real.get("ts_ms", 0))
         except (TypeError, ValueError):
@@ -287,5 +300,6 @@ def reconcile_partition(table, tenant_id: str, period: str, *,
         "missing_real": missing_real,
         "missing_shadow": stale_missing_shadow,   # only the BUG class (backward-compatible key)
         "lagging_shadow": lagging_shadow,          # benign in-budget lag
+        "out_of_domain": len(out_of_domain),       # pre-epoch backlog (excluded)
         "field_diff": field_diff,
     }

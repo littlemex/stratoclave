@@ -37,10 +37,18 @@ describe('LedgerProjectorStack', () => {
     template.resourceCountIs('AWS::Lambda::Function', 2);
   });
 
-  test('projector runs in SHADOW mode by default', () => {
+  test('projector runs in SHADOW mode with the ledger table name injected', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       FunctionName: 'stratoclave-ledger-projector',
-      Environment: { Variables: { LEDGER_PROJECTOR_SHADOW: 'true' } },
+      Environment: {
+        Variables: Match.objectLike({
+          LEDGER_PROJECTOR_SHADOW: 'true',
+          // Must inject the ACTUAL table name — the code's fallback prefix is
+          // wrong for a non-'stratoclave' deploy, so an unset env silently drops
+          // every projected event into a non-existent table.
+          DYNAMODB_CREDIT_LEDGER_TABLE: Match.anyValue(),
+        }),
+      },
     });
   });
 

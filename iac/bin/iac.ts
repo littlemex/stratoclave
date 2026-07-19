@@ -435,9 +435,10 @@ for (const w of residencyWarnings) {
 // the backend ECR repo under LAMBDA_IMAGE_TAG. Gated on the `ledgerProjector`
 // context flag so a normal deploy is unaffected until the image exists. Writes
 // SHADOW# events by default (step 1); the async cut-over sets `-c projectorShadow=false`.
+let ledgerProjectorStack: LedgerProjectorStack | undefined;
 if (app.node.tryGetContext('ledgerProjector') === true ||
     app.node.tryGetContext('ledgerProjector') === 'true') {
-  const ledgerProjectorStack = new LedgerProjectorStack(app, stackName(prefix, 'ledger-projector'), {
+  ledgerProjectorStack = new LedgerProjectorStack(app, stackName(prefix, 'ledger-projector'), {
     env,
     prefix,
     lambdaRepository: ecrStack.repository,
@@ -445,6 +446,12 @@ if (app.node.tryGetContext('ledgerProjector') === true ||
     tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
     creditLedgerTable: dynamoDBStack.creditLedgerTable,
     shadow: app.node.tryGetContext('projectorShadow') !== 'false',
+    // Set PROJECTOR_EPOCH_MS to the projector's deploy time so the reconciler
+    // excludes the pre-existing RESERVE backlog (no shadow by construction — the
+    // stream starts at LATEST) from the divergence gate.
+    projectorEpochMs: process.env.PROJECTOR_EPOCH_MS
+      ? parseInt(process.env.PROJECTOR_EPOCH_MS, 10)
+      : undefined,
     description: `[${prefix}] Ledger Streams RESERVE-event projector + reconciler (shadow)`,
   });
   ledgerProjectorStack.addDependency(ecrStack);
@@ -613,6 +620,11 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
       reason:
         'BootstrapAdminTempPasswordSecret is single-use: the operator reads it exactly once and rotates the admin password through Cognito (`admin-set-user-password`) immediately. Secrets Manager rotation does not apply to a placeholder that is overwritten by the seed code on first boot, and there is no managed service that knows how to rotate a temporary Cognito password on our behalf.',
     },
+    {
+      id: 'AwsSolutions-SQS3',
+      reason:
+        'The ledger-projector queue IS the terminal dead-letter queue for the Streams event-source mapping (OnFailure). A DLQ does not need its own DLQ; a record that lands here is already the end of the retry chain and is surfaced by the DLQ-depth alarm.',
+    },
   ];
   NagSuppressions.addStackSuppressions(networkStack, appLevelSuppressions);
   NagSuppressions.addStackSuppressions(albStack, appLevelSuppressions);
@@ -622,6 +634,9 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   NagSuppressions.addStackSuppressions(cognitoStack, appLevelSuppressions);
   if (wafStack) {
     NagSuppressions.addStackSuppressions(wafStack, appLevelSuppressions);
+  }
+  if (ledgerProjectorStack) {
+    NagSuppressions.addStackSuppressions(ledgerProjectorStack, appLevelSuppressions);
   }
 }
 
