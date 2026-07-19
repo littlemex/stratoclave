@@ -68,6 +68,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _json_compact_budget(obj: Any) -> str:
+    """Deterministic compact JSON (sorted keys) for freezing a rate_snapshot onto
+    the HOLD row. Matches credit_ledger._json_compact so a rehydrate reads back
+    byte-identically regardless of which writer produced it."""
+    import json
+
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
 def budget_sk(period: str) -> str:
     return f"BUDGET#{period}"
 
@@ -518,6 +527,12 @@ class TenantBudgetsRepository:
         hold_id: str,
         amount_microusd: int,
         expires_at_epoch: int,
+        source: Optional[str] = None,
+        description: Optional[str] = None,
+        rate_snapshot: Optional[dict[str, Any]] = None,
+        payload_hash: Optional[str] = None,
+        run_id: Optional[str] = None,
+        run_id_is_fallback: bool = False,
     ) -> dict[str, Any]:
         """Transaction item that records a per-reservation hold.
 
@@ -525,19 +540,55 @@ class TenantBudgetsRepository:
         hold exists iff its share of `pool_reserved_microusd` is outstanding.
         The SK embeds the expiry (see `hold_sk`) so the reaper can range-scan by
         expiry; `attribute_not_exists(sk)` guards against a hold_id collision.
+
+        Enrichment (two-item migration, docs/design/ledger-hot-path.md step 2):
+        the HOLD row is promoted to the synchronous source of truth so
+        capture/void can read it ALONE instead of the (soon-async) RESERVE event.
+        Optional, additive attributes, written only when supplied:
+
+          * `source` — "external" | "inline". The C-1 security gate reads this
+            (an inline LLM hold's token must never be capturable/voidable). The
+            gate defaults DENY on a MISSING attribute, so a legacy hold written
+            before this enrichment is not capturable via the external API — the
+            same fail-closed answer as a bogus token.
+          * `description` / `rate_snapshot` — frozen here so an external capture
+            in a separate HTTP call rehydrates from the HOLD alone.
+          * `payload_hash` — the authorize request fingerprint, so a duplicate
+            Idempotency-Key that resolves to this hold can 422 on a different body.
+
+        Inline holds pass `source="inline"` (and nothing else); external authorize
+        passes the full set. Absent args are simply not written (no None in DDB).
         """
+        item: dict[str, Any] = {
+            "tenant_id": {"S": tenant_id},
+            "sk": {"S": hold_sk(period, expires_at_epoch, hold_id)},
+            "hold_id": {"S": hold_id},
+            "period": {"S": period},
+            "amount_microusd": {"N": str(int(amount_microusd))},
+            "expires_at": {"N": str(int(expires_at_epoch))},
+            "created_at": {"S": _now_iso()},
+        }
+        if source:
+            item["source"] = {"S": str(source)}
+        if description:
+            item["hold_description"] = {"S": str(description)}
+        if payload_hash:
+            item["payload_hash"] = {"S": str(payload_hash)}
+        if rate_snapshot is not None:
+            item["rate_snapshot"] = {"S": _json_compact_budget(rate_snapshot)}
+        if run_id:
+            # Run attribution so a HOLD-only rehydrate keys the SETTLE's run-index
+            # the SAME way the RESERVE event did. The fallback marker mirrors the
+            # RESERVE event's run_id_source: a hold reserved WITHOUT a real
+            # workflow_run_id stored run_id=hold_id and must NOT resurface that
+            # synthetic id as a real run on settle.
+            item["run_id"] = {"S": str(run_id)}
+            if run_id_is_fallback:
+                item["run_id_source"] = {"S": "hold_id_fallback"}
         return {
             "Put": {
                 "TableName": self._name,
-                "Item": {
-                    "tenant_id": {"S": tenant_id},
-                    "sk": {"S": hold_sk(period, expires_at_epoch, hold_id)},
-                    "hold_id": {"S": hold_id},
-                    "period": {"S": period},
-                    "amount_microusd": {"N": str(int(amount_microusd))},
-                    "expires_at": {"N": str(int(expires_at_epoch))},
-                    "created_at": {"S": _now_iso()},
-                },
+                "Item": item,
                 "ConditionExpression": "attribute_not_exists(sk)",
             }
         }

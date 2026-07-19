@@ -112,21 +112,69 @@ headroom decrement (the hard-budget gate), (ii) the idempotency verdict
 (retry vs replay), (iii) the HOLD existence (the settle/release/reclaim target,
 double-reserve guard). **(ii) collapses into (iii):** derive the HOLD row's key
 deterministically from the idempotency key and Put it with
-`attribute_not_exists` — the HOLD row IS the idempotency row. So the synchronous
-transaction shrinks from four items to **two: (1) headroom ADD+condition,
-(2) HOLD put (attribute_not_exists)**.
+`attribute_not_exists` — the HOLD row IS the idempotency row.
+
+### HOLD is promoted to the synchronous source of truth (Fable design)
+
+A subtlety the first sketch missed: the external-authorize **capture/void path
+reads the RESERVE ledger event synchronously** — both as the C-1 security gate
+(`source == "external"`; an inline LLM hold's token must not be capturable) and
+to rehydrate the reservation (amount / description / rate_snapshot). So the
+RESERVE event cannot simply go async without a capture-right-after-authorize race
+producing a false 404 or a C-1 bypass window.
+
+Resolution: **fold `source` / `amount` / `description` / `rate_snapshot` /
+`payload_hash` into the HOLD row itself** (written in the same synchronous txn,
+under `attribute_not_exists`). capture/void then reads ONLY the HOLD row — which
+is synchronously durable at authorize time — so the RESERVE event can become a
+pure async audit projection. C-1 becomes `hold.source == "external"`, **default
+DENY on a missing attribute** (fail-closed for legacy/unwritten rows). During
+migration, capture/void dual-reads (HOLD first, fall back to `get_reserve`) until
+the pre-cutover holds' max TTL elapses.
+
+**Synchronous txn — final shape (per path):**
+
+- **External authorize (B):** 2 items = `[pool headroom ADD + condition,
+  HOLD Put (attribute_not_exists, carrying the full context, doubling as the
+  idempotency row)]`.
+- **Inline LLM hold (A):** honestly **3 items**, not 2 = `[per-user debit
+  (condition), pool headroom ADD, HOLD Put]` (+ optional quota slice). Async-ing
+  the per-user debit *would* reach 2 items but admits per-user budget overrun in
+  the lag window. The per-user row is a **low-contention per-user partition**;
+  the tail is dominated by the *contended* item (the pool row) lock-hold time, so
+  we measure at 3 items first and only async the debit if that is proven
+  insufficient. The failure-interpretation map is preserved (pool CCF = 402,
+  quota CCF = quota-exhausted, HOLD CCF = idempotent replay, TransactionConflict
+  = retry).
+
+### RESERVE event becomes an async audit projection
 
 The RESERVE ledger event goes **asynchronous, derived from DynamoDB Streams** —
-not written concurrently by the app. Committed writes to the pool and HOLD rows
-flow to Streams (at-least-once, per-key ordered); a Lambda derives each event
-deterministically and writes it with `event_id = (hold_id, transition)` under
-`attribute_not_exists`. Zero-double-posting is preserved by the idempotent event
-Put; "the ledger is a complete image of committed state" is preserved by Streams
-delivery. What breaks is only "the event exists at the same instant as the
-commit" — which is neither an audit requirement nor a Z3 invariant. It is in
-fact *better*: the event becomes a derivation of the state change, so
-state/event divergence cannot occur. Audit lemma: "every pool/HOLD transition
-has a corresponding event eventually exactly-once."
+not written concurrently by the app. Events are derived from the **HOLD item's
+stream records only** (NEW_AND_OLD_IMAGES): INSERT → RESERVE, MODIFY to a
+terminal status → SETTLE/VOID/EXPIRE. DynamoDB Streams guarantees per-partition
+(per-hold) record order, so a hold's SETTLE record can never arrive before its
+RESERVE record. A Lambda writes each event with `event_id = (hold_id, transition)`
+under `attribute_not_exists` (idempotent under at-least-once delivery), with
+**deterministic content** (no `now()`/random in the Lambda, so a retry can never
+produce same-id-different-body). Two additional holes are closed: (1) failed
+records use `ReportBatchItemFailures` + a DLQ (a permanent projector bug halts
+the audit shard but never touches billing); (2) each terminal event Put is gated
+by a `ConditionCheck` on the RESERVE event's existence, so a missing predecessor
+is *detected*, not silently reordered.
+
+**I2 is split; authority is the synchronous side:**
+
+- **I2-sync (always holds):** `pool_reserved == Σ(active HOLD.amount)`. The
+  synchronous txn updates the pool and HOLD atomically, so this holds at every
+  instant and is the sole basis for the billing decision.
+- **I2-async (eventually holds):** once Streams drains, `pool_reserved ==
+  Σ RESERVE.reserved_delta − Σ terminal returned`. A scheduled reconciler checks
+  it and pages only when drift > 0 while IteratorAge is below threshold (drained
+  yet divergent). A projector bug is an audit-lemma violation, not a billing
+  error, and is repaired by re-projecting from the HOLD rows. **The discipline:
+  never reconstruct state from events** — events are a projection of state, not
+  its source.
 
 Final option (only if two-item transact still can't beat 50 ms): drop the
 transaction entirely — Put HOLD `status=PENDING` (idempotency gate) → headroom
@@ -201,8 +249,64 @@ before proceeding.
   single row remain (see finding 1), so the post-fix p99 is an empirical question
   — do not quote a specific number until the bench confirms it. The floor
   p99 = 58 ms does NOT move with this one change.
-- **Then: two-item transaction + Streams-derived events** for the floor tail →
-  ledger-op p99 ≈ 40 ms; PENDING protocol after that if sub-30 ms is required.
+- **DONE: the headroom ADD cut-over.** Measured (see
+  [../benchmarks/ledger-latency.md](../benchmarks/ledger-latency.md)): contention
+  error rate 6.2% → 0% at c=16, c=16 e2e p99 6,512 → 4,508 ms. The storm is gone;
+  single-row p99 still misses target (the residual `TransactionConflict` on one
+  hot pool row), which the next step targets.
+- **Now: two-item transaction (HOLD promoted) + Streams-derived events.**
 
-Contention collapse is a customer-visible failure now; the floor overshoot is a
-debt the next step retires. This order is fixed.
+### Two-item migration (each step rollback-safe, gated on divergence = 0)
+
+1. **Streams + shadow projector + reconciler.** Enable Streams
+   (NEW_AND_OLD_IMAGES); the projector Lambda writes events under a `SHADOW#`
+   prefix. A reconciler compares shadow vs the still-synchronous RESERVE event
+   and asserts divergence = 0 over an observation window. Rollback: disable the
+   event-source mapping. (No hot-path change — pure observability.)
+2. **HOLD enrichment dual-write + capture/void dual-read.** The synchronous txn
+   (still old item count) additionally writes `source` / `amount` /
+   `rate_snapshot` / `payload_hash` onto the HOLD row. capture/void dual-reads
+   (HOLD first, fall back to `get_reserve`, log any mismatch). Rollback: stop
+   writing the extra attributes.
+3. **capture/void → HOLD-only** (flag-gated; requires mismatch = 0). Verify the
+   authorize-then-immediate-capture race and inline-token capture rejection.
+   Rollback: flip the flag.
+4. **Promote the projector to the real `event_id`** (conditional Put). The
+   synchronous writer and the projector now both target the same event under
+   `attribute_not_exists`, so the dual-writer state is safe in both directions —
+   this is the core of rollback-safety.
+5. **Remove the synchronous RESERVE item from the txn** (per-tenant canary,
+   guarded by the I2-async reconciler). Re-measure the c=16 curve. Rollback: put
+   the item back (safe by step 4's idempotent-Put property).
+6. **Fold IDEMP into the HOLD deterministic key** (write both, verify replay on
+   HOLD, then drop the IDEMP item; old-period IDEMP rows remain a read-only
+   fallback until they expire).
+
+Between steps 3 and 5, a **TLA+/P (or Z3 stateful) model** checks: I2-sync always
+holds, I2-async eventually holds, and C-1 holds — with SETTLE-before-RESERVE,
+projector lag, and double-delivery adversarially injected.
+
+### IaC components
+
+DynamoDB Streams (NEW_AND_OLD_IMAGES); Lambda event-source mapping
+(`ReportBatchItemFailures`, `ParallelizationFactor`, `MaximumRetryAttempts`,
+`OnFailure` = SQS DLQ); projector Lambda + reconciler Lambda (EventBridge
+schedule); a sparse GSI for the expiry index (and a hold_id index if needed once
+the HOLD key becomes idempotency-derived); a feature flag (AppConfig or env);
+CloudWatch on IteratorAge, DLQ depth, divergence count, TransactionConflict/CCF
+breakdown, and an I2-drift alarm.
+
+### If two items still miss target → PENDING protocol
+
+Trigger (measured): if after two-item cut-over (i) p99 > 100 ms AND (ii) ≥2
+`TransactionConflict` retries occur on > 1% of txns (or the pool row nears the
+per-partition write ceiling), move to the PENDING protocol — Put HOLD `PENDING`
+(uncontended) → a SINGLE conditional `UpdateItem` on the pool row (ADD reserved,
+condition headroom, NO transaction = minimal lock window) → mark HOLD `ACTIVE`.
+The crash window (PENDING orphan, pool incremented but not ACTIVE) is closed by a
+compensating sweeper. This trades atomicity for dropping the contended write to a
+single non-transactional item, and requires formal verification of the
+compensation logic first.
+
+Contention collapse was a customer-visible failure (now fixed); the floor tail is
+the debt this step retires. This order is fixed.

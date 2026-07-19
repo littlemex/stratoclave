@@ -129,6 +129,13 @@ _HOLD_TTL_SECONDS = max(
 # the hot reserve path into an unbounded scan.
 _SWEEP_MAX_HOLDS = int(os.getenv("STRATOCLAVE_POOL_SWEEP_MAX_HOLDS", "5"))
 
+# Two-item migration (docs/design/ledger-hot-path.md step 3). When ON, external
+# capture/void rehydrate reads the HOLD row ALONE (source/amount/rate_snapshot
+# folded onto it) and NEVER the RESERVE event — the cutover that lets the RESERVE
+# event go fully async. OFF (default) = dual-read: HOLD is preferred but the
+# RESERVE event is cross-checked so a mismatch is logged before the cutover.
+_CAPTURE_HOLD_ONLY = os.getenv("STRATOCLAVE_CAPTURE_HOLD_ONLY", "false").lower() == "true"
+
 
 def _pool_settle_items(
     *,
@@ -1313,6 +1320,12 @@ def reserve_credit(
             hold_id=hold_id,
             amount_microusd=cost,
             expires_at_epoch=hold_expires_at,
+            # C-1 (two-item migration): tag inline LLM holds so the external
+            # capture/void gate — which reads the HOLD's `source` once it goes
+            # HOLD-only — DENIES them. An inline hold is never externally
+            # capturable/voidable; without this tag it would rely on the RESERVE
+            # event's source, which is exactly what that step stops reading.
+            source="inline",
         )
         txn_items = [user_txn, pool_txn, hold_txn]
         _quota_start = len(txn_items)
@@ -1569,12 +1582,24 @@ def reserve_external_authorization(
             period=period,
             amount_microusd=amount,
         )
+        # HOLD enrichment (two-item migration step 2, dual-write phase): the HOLD
+        # row now carries source/description/rate_snapshot/payload_hash so a later
+        # step can move capture/void to read the HOLD ALONE (and the RESERVE event
+        # async). The RESERVE event is STILL written synchronously below in this
+        # phase; capture/void keeps reading it until the dual-read cutover proves
+        # HOLD-only is equivalent (see docs/design/ledger-hot-path.md).
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=tenant_id,
             period=period,
             hold_id=hold_id,
             amount_microusd=amount,
             expires_at_epoch=hold_expires_at,
+            source="external",
+            description=description,
+            rate_snapshot=rate_snapshot_dict,
+            payload_hash=request_fingerprint,
+            run_id=workflow_run_id or hold_id,
+            run_id_is_fallback=workflow_run_id is None,
         )
         # TransactItems ORDER: [pool(0), hold(1), RESERVE(2), IDEMP(3)]. Only the
         # IDEMP item's CCF is interpreted specially (duplicate key); a pool(0) CCF
@@ -1782,6 +1807,85 @@ def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthoriz
     )
 
 
+def _rehydrate_from_hold(
+    tenant_id: str, period: str, hold_id: str, hold_sk: str,
+    hold: dict, pool_reserved: int,
+) -> "ReservationContext":
+    """Build the ReservationContext from the enriched HOLD row ALONE (two-item
+    migration). Byte-equivalent to the RESERVE-event path: same field shape, same
+    run-attribution rules, same rate_snapshot rehydration — so settle/void run
+    identically. Caller has already applied the C-1 gate (hold.source=="external").
+    """
+    rate_snap = None
+    pricing_key = None
+    raw = hold.get("rate_snapshot")
+    if raw:
+        try:
+            import json as _json
+
+            from .pricing import RateSnapshot as _RS
+
+            rate_snap = _RS.from_ledger_dict(_json.loads(raw))
+            pricing_key = rate_snap.pricing_key
+        except Exception:  # noqa: BLE001 — a corrupt snapshot degrades to amount-mode.
+            rate_snap = None
+    # Same fallback rule as the RESERVE-event path: only restore workflow_run_id
+    # when the reserve was NOT a hold_id fallback (else a synthetic hold_id would
+    # resurface as a real run on settle).
+    restored_run_id = None
+    if hold.get("run_id_source") != "hold_id_fallback":
+        _rid = hold.get("run_id")
+        restored_run_id = str(_rid) if _rid else None
+    return ReservationContext(
+        tenants_repo=UserTenantsRepository(),
+        reservation_tokens=0,
+        pool_reserved_microusd=pool_reserved,
+        period=period,
+        pricing_key=pricing_key,
+        rate_snapshot=rate_snap,
+        tenant_id=tenant_id,
+        pool_active=True,
+        hold_id=hold_id,
+        hold_sk=hold_sk,
+        workflow_run_id=restored_run_id,
+        source="external",
+    )
+
+
+def _dual_read_crosscheck(tenant_id: str, period: str, hold_id: str, hold: dict) -> None:
+    """Migration guard (dual-read phase): compare the enriched HOLD against the
+    still-synchronous RESERVE event and log any divergence, so the HOLD-only
+    cutover only flips once the field is proven equivalent. Never raises — a
+    crosscheck failure must not fail a live capture/void."""
+    try:
+        reserve_evt = _reaper_ledger().get_reserve(
+            tenant_id=tenant_id, period=period, hold_id=hold_id
+        )
+    except Exception:  # noqa: BLE001 — the crosscheck is best-effort telemetry.
+        return
+    if reserve_evt is None:
+        logger.warning(
+            "hold_dualread_reserve_missing",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+        )
+        return
+    mismatches = {}
+    if hold.get("source") != reserve_evt.get("source"):
+        mismatches["source"] = (hold.get("source"), reserve_evt.get("source"))
+    h_amt = int(hold.get("amount_microusd", 0))
+    r_amt = int(reserve_evt.get("reserved_delta_microusd", 0))
+    if h_amt != r_amt:
+        mismatches["amount"] = (h_amt, r_amt)
+    if hold.get("run_id") != reserve_evt.get("run_id"):
+        mismatches["run_id"] = (hold.get("run_id"), reserve_evt.get("run_id"))
+    if mismatches:
+        logger.warning(
+            "hold_dualread_mismatch",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            mismatches=mismatches,
+        )
+
+
 def rehydrate_reservation_context(
     *,
     tenant_id: str,
@@ -1813,6 +1917,33 @@ def rehydrate_reservation_context(
     that the external authorize API itself created. A non-external (or absent)
     RESERVE → None → the endpoint answers 404, exactly as for a bogus token.
     """
+    budgets = TenantBudgetsRepository()
+    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
+
+    # Two-item migration step 2/3 (docs/design/ledger-hot-path.md): the HOLD row
+    # now carries `source`/`rate_snapshot`/description synchronously, so the C-1
+    # gate and rehydration can read the HOLD ALONE — no dependency on the RESERVE
+    # event, which is moving to an async Streams projection. DUAL-READ during
+    # migration: prefer the HOLD's enriched attributes; fall back to the RESERVE
+    # event only for a legacy hold written before enrichment (no `source` attr).
+    # C-1 is fail-closed: a MISSING source on an enriched-era hold denies.
+    hold_has_source = hold is not None and "source" in hold
+    if hold_has_source or _CAPTURE_HOLD_ONLY:
+        # HOLD is the authority (or the flag forces HOLD-only even for legacy,
+        # which then correctly 404s a pre-enrichment hold — fail-closed).
+        if hold is None or hold.get("source") != "external":
+            return None
+        pool_reserved = int(hold.get("amount_microusd", 0))
+        # In dual-read (flag off) we still cross-check against the RESERVE event
+        # to prove equivalence before the HOLD-only cutover; log any mismatch.
+        if not _CAPTURE_HOLD_ONLY:
+            _dual_read_crosscheck(tenant_id, period, hold_id, hold)
+        return _rehydrate_from_hold(tenant_id, period, hold_id, hold_sk, hold,
+                                    pool_reserved)
+
+    # Legacy path: no enrichment on the HOLD → the RESERVE event is the only
+    # source of source/amount/rate_snapshot. (Removed after all pre-enrichment
+    # holds' max TTL elapses.)
     ledger = _reaper_ledger()
     reserve_evt = ledger.get_reserve(
         tenant_id=tenant_id, period=period, hold_id=hold_id
@@ -1821,8 +1952,6 @@ def rehydrate_reservation_context(
     if reserve_evt is None or reserve_evt.get("source") != "external":
         return None
 
-    budgets = TenantBudgetsRepository()
-    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
     if hold is None:
         return None
     pool_reserved = int(hold.get("amount_microusd", 0))
