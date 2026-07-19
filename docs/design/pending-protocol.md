@@ -201,6 +201,26 @@ Observability shipped with this: `PoolItemSizeBytes` gauge + growth alarm (>2 KB
 `PoolReconcileCreditBackInvariant` alarm, and the reconcile summary now splits
 `retire_failures` from `credit_back_deferred`.
 
+**Status: SHIPPED, DORMANT (frozen by decision).** Z3-proven, 1164 tests green,
+Fable-approved, and canary-Shadow verified on live scverify (30 reserves kept the
+pool item at 217→223 B — the item-growth blowup is gone; money invariant,
+idempotent re-commit, and exactly-once credit-back all held on live DynamoDB). The
+per-tenant canary lever + observability are in place. With ZERO paying tenants and
+ZERO real load, flipping the prod default from `transaction` to `pending` yields NO
+observable benefit (the win is contention reduction at high concurrency), so the
+rollout is intentionally NOT completed — the code is left activation-ready and the
+work moves to the differentiators (Savings Certificate / VSR). Fable-confirmed:
+completing the rollout now is pure opportunity cost.
+
+ACTIVATION RUNBOOK (do these, in order, only when real/paying load arrives — do NOT
+pre-polish): (1) deploy the CDK (PITR + `ttl` on tenant-budgets); (2) redeploy ECS
+with `reserveProtocolCanaryTenants=[<one tenant>]`; (3) on scverify, drive
+authorize→capture→settle over HTTP ONCE (the one wiring gap Shadow did not cover —
+env-name typo / task-def flag / default-branch direction, none of which are money
+bugs); (4) watch that tenant's `PoolItemSizeBytes` (flat) + ledger drift alarms
+(zero) for a bake window; (5) set global `STRATOCLAVE_RESERVE_PROTOCOL=pending` and
+drop the allowlist.
+
 **Deferred by decision (NOT an oversight) — sharded-pool throughput.** The single
 pool item is still one item on one partition, so a single hot tenant is bounded by
 ~1000 WCU/s (TransactWrite consumes 2×, so ~half effective). With zero paying
