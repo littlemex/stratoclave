@@ -246,7 +246,8 @@ def test_diff_events_matches_when_equal():
 
 def test_diff_events_detects_field_diff():
     real = _real_reserve_row(amount=2_000_000)
-    shadow = dict(real); shadow["reserved_delta_microusd"] = 999
+    shadow = dict(real)
+    shadow["reserved_delta_microusd"] = 999
     d = diff_events(shadow, real)
     assert "reserved_delta_microusd" in d and d["reserved_delta_microusd"] == (999, 2_000_000)
 
@@ -267,7 +268,8 @@ def test_reconcile_partition_zero_divergence(monkeypatch):
         tbl = _seed_ledger()
         real = _real_reserve_row("h1")
         tbl.put_item(Item=real)
-        shadow = dict(real); shadow["sk"] = SHADOW_PREFIX + real["sk"]
+        shadow = dict(real)
+        shadow["sk"] = SHADOW_PREFIX + real["sk"]
         tbl.put_item(Item=shadow)
         summ = reconcile_partition(tbl, "t1", "2026-07")
         assert summ["divergence"] == 0
@@ -282,7 +284,8 @@ def test_reconcile_partition_flags_field_diff(monkeypatch):
         tbl = _seed_ledger()
         real = _real_reserve_row("h1", amount=2_000_000)
         tbl.put_item(Item=real)
-        shadow = dict(real); shadow["sk"] = SHADOW_PREFIX + real["sk"]
+        shadow = dict(real)
+        shadow["sk"] = SHADOW_PREFIX + real["sk"]
         shadow["reserved_delta_microusd"] = 111  # corrupt
         tbl.put_item(Item=shadow)
         summ = reconcile_partition(tbl, "t1", "2026-07")
@@ -342,7 +345,8 @@ def test_reconciler_handler_zero_divergence_across_partitions(monkeypatch):
         for tid in ("t1", "t2"):
             real = _real_reserve_row("h1", tenant_id=tid)
             tbl.put_item(Item=real)
-            shadow = dict(real); shadow["sk"] = SHADOW_PREFIX + real["sk"]
+            shadow = dict(real)
+            shadow["sk"] = SHADOW_PREFIX + real["sk"]
             tbl.put_item(Item=shadow)
         from billing.ledger_reconciler import handler as rec_handler
         out = rec_handler({})
@@ -359,7 +363,7 @@ def test_reconciler_handler_emits_post_epoch_sourceless_metric(monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
     monkeypatch.setenv("ENRICHMENT_EPOCH_MS", "1700000000000")
     with mock_aws():
-        tbl = _seed_ledger()
+        _seed_ledger()  # the reconciler handler scans this table
         budgets = _make_budgets_table(
             boto3.resource("dynamodb", region_name="us-east-1"))
         # a post-epoch HOLD with no source → offender
@@ -383,7 +387,8 @@ def test_reconciler_handler_flags_divergence(monkeypatch):
         tbl = _seed_ledger()
         real = _real_reserve_row("h1", amount=2_000_000)
         tbl.put_item(Item=real)
-        shadow = dict(real); shadow["sk"] = SHADOW_PREFIX + real["sk"]
+        shadow = dict(real)
+        shadow["sk"] = SHADOW_PREFIX + real["sk"]
         shadow["reserved_delta_microusd"] = 7  # corrupt projection
         tbl.put_item(Item=shadow)
         from billing.ledger_reconciler import handler as rec_handler
@@ -449,12 +454,15 @@ def test_reconcile_excludes_pre_epoch_backlog(monkeypatch):
     with mock_aws():
         tbl = _seed_ledger()
         # an old RESERVE (pre-epoch), no shadow
-        old = _real_reserve_row("h_old"); old["ts_ms"] = 1_000_000
+        old = _real_reserve_row("h_old")
+        old["ts_ms"] = 1_000_000
         tbl.put_item(Item=old)
         # a new in-domain RESERVE with its matching shadow
-        new = _real_reserve_row("h_new"); new["ts_ms"] = 5_000_000
+        new = _real_reserve_row("h_new")
+        new["ts_ms"] = 5_000_000
         tbl.put_item(Item=new)
-        sh = dict(new); sh["sk"] = SHADOW_PREFIX + new["sk"]
+        sh = dict(new)
+        sh["sk"] = SHADOW_PREFIX + new["sk"]
         tbl.put_item(Item=sh)
         summ = reconcile_partition(tbl, "t1", "2026-07",
                                    now_ms=5_000_000 + 60_000,

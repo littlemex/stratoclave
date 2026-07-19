@@ -61,7 +61,7 @@ def _set_hold_only(monkeypatch, on: bool):
 
 def test_authorize_enriches_hold_row(dynamodb_mock):
     tid = "enrich-t1"
-    period = _seed(tid)
+    _seed(tid)
     r = _authorize(tid, 2_000_000, "k1", run_id="run-abc")
     hold = TenantBudgetsRepository().get_hold(tenant_id=tid, sk=r.hold_sk)
     assert hold["source"] == "external"
@@ -113,6 +113,7 @@ def test_c1_gate_denies_inline_hold(dynamodb_mock, monkeypatch, hold_only):
         tenant_id=tid, period=period, hold_id=hold_id,
         amount_microusd=500_000, expires_at_epoch=exp, source="inline",
     )["Put"]["Item"]
+    assert item["source"] == {"S": "inline"}  # builder tags the inline source
     # deserialize the low-level item to the resource API for a direct put
     budgets._table.put_item(Item={
         "tenant_id": tid, "sk": _hsk(period, exp, hold_id), "hold_id": hold_id,
@@ -148,6 +149,26 @@ def test_c1_missing_source_fails_closed_under_hold_only(dynamodb_mock, monkeypat
         tenant_id=tid, period=period, hold_id=hold_id,
         hold_sk=_hsk(period, exp, hold_id))
     assert ctx is None, "missing source must fail closed under HOLD-only"
+
+
+def test_holdonly_amount_mismatch_raises_inconsistent(dynamodb_mock, monkeypatch):
+    """H-A money-safety must survive the migration: on the HOLD-only path, if the
+    HOLD amount and the still-synchronous RESERVE event's reserved_delta disagree,
+    rehydrate RAISES ExternalHoldInconsistent (settling would move pool_reserved by
+    an amount the ledger never recorded — I2 break). This is the reason the
+    HOLD-only path keeps reading the RESERVE event during step 3."""
+    tid = "holdonly-mm"
+    period = _seed(tid)
+    r = _authorize(tid, 500_000, "mm-holdonly", run_id="run-mm")
+    # Corrupt ONLY the HOLD amount; the RESERVE event keeps 500k.
+    budgets = TenantBudgetsRepository()
+    item = budgets._table.get_item(Key={"tenant_id": tid, "sk": r.hold_sk})["Item"]
+    item["amount_microusd"] = 600_000
+    budgets._table.put_item(Item=item)
+    _set_hold_only(monkeypatch, True)  # HOLD-only path
+    with pytest.raises(_pipeline.ExternalHoldInconsistent):
+        _pipeline.rehydrate_reservation_context(
+            tenant_id=tid, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
 
 
 def test_enrichment_epoch_parses_iso_and_epoch_seconds():

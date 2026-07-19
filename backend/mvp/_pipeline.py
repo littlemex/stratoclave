@@ -1911,14 +1911,26 @@ def _rehydrate_from_hold(
 
 def _dual_read_crosscheck(tenant_id: str, period: str, hold_id: str, hold: dict) -> None:
     """Migration guard (dual-read phase): compare the enriched HOLD against the
-    still-synchronous RESERVE event and log any divergence, so the HOLD-only
-    cutover only flips once the field is proven equivalent. Never raises — a
-    crosscheck failure must not fail a live capture/void."""
+    still-synchronous RESERVE event.
+
+    H-A (Fable authcap review-4) is MONEY-SAFETY and is preserved across the
+    migration: while both durable sources exist, if the HOLD's `amount_microusd`
+    and the RESERVE event's `reserved_delta_microusd` DISAGREE, settling would move
+    `pool_reserved` by an amount the ledger's +reserved never recorded — breaking
+    I2 silently. So an AMOUNT mismatch RAISES `ExternalHoldInconsistent` (surfaced
+    as 409), exactly as the legacy RESERVE-event path did; this is the reason the
+    HOLD-only path keeps reading the RESERVE event during step 3. Once step 4
+    removes the synchronous RESERVE event there is a single source and nothing to
+    diverge, so this guard (and the crosscheck) is retired with it.
+
+    A source/run_id divergence is NOT money-critical (it would change auth/attrib,
+    not the amount moved) — it is logged as cutover-readiness telemetry, not
+    raised, so it never fails a live capture/void."""
     try:
         reserve_evt = _reaper_ledger().get_reserve(
             tenant_id=tenant_id, period=period, hold_id=hold_id
         )
-    except Exception:  # noqa: BLE001 — the crosscheck is best-effort telemetry.
+    except Exception:  # noqa: BLE001 — a lookup error is best-effort telemetry.
         return
     if reserve_evt is None:
         logger.warning(
@@ -1926,13 +1938,20 @@ def _dual_read_crosscheck(tenant_id: str, period: str, hold_id: str, hold: dict)
             tenant_id=tenant_id, period=period, hold_id=hold_id,
         )
         return
-    mismatches = {}
-    if hold.get("source") != reserve_evt.get("source"):
-        mismatches["source"] = (hold.get("source"), reserve_evt.get("source"))
+    # Money-critical: refuse to settle on an amount divergence (H-A).
     h_amt = int(hold.get("amount_microusd", 0))
     r_amt = int(reserve_evt.get("reserved_delta_microusd", 0))
     if h_amt != r_amt:
-        mismatches["amount"] = (h_amt, r_amt)
+        logger.error(
+            "external_hold_amount_mismatch",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            hold_amount=h_amt, reserve_delta=r_amt,
+        )
+        raise ExternalHoldInconsistent(hold_id)
+    # Informational: non-money divergences inform the cutover go/no-go, never fail.
+    mismatches = {}
+    if hold.get("source") != reserve_evt.get("source"):
+        mismatches["source"] = (hold.get("source"), reserve_evt.get("source"))
     if hold.get("run_id") != reserve_evt.get("run_id"):
         mismatches["run_id"] = (hold.get("run_id"), reserve_evt.get("run_id"))
     if mismatches:
