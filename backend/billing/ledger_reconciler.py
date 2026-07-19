@@ -47,6 +47,8 @@ def _iter_ledger_partitions(table):
 
 
 def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
+    import time
+
     import boto3
 
     from billing.ledger_projector import reconcile_partition
@@ -65,6 +67,11 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
         if summ["divergence"] or summ["missing_shadow"]:
             worst.append(summ)
 
+    # EMF requires a Timestamp; a scheduled EventBridge event carries none, so an
+    # earlier "pop if absent" version silently dropped the metric — leaving the
+    # divergence ALARM with no data and a cut-over ungated (Fable review finding 4,
+    # CONFIRMED). ALWAYS stamp `now` so the gate metric is emitted every run.
+    ts_ms = int(time.time() * 1000)
     result = {
         "reconciler": "ledger_reserve_shadow",
         "partitions": partitions,
@@ -76,14 +83,10 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
                 "Dimensions": [[]],
                 "Metrics": [{"Name": "ReserveShadowDivergence"}],
             }],
-            "Timestamp": int((event or {}).get("_ts_ms", 0)) or None,
+            "Timestamp": ts_ms,
         },
         "ReserveShadowDivergence": total_divergence,
         "detail": worst[:20],  # cap the log line
     }
-    # Drop a None timestamp so EMF doesn't reject it (the Lambda runtime stamps
-    # the log event time anyway).
-    if result["_aws"]["Timestamp"] is None:
-        result["_aws"].pop("Timestamp")
     print(json.dumps(result))
     return result

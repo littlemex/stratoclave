@@ -66,11 +66,13 @@ describe('LedgerProjectorStack', () => {
     });
   });
 
-  test('divergence alarm blocks cut-over on any drift', () => {
+  test('divergence alarm blocks cut-over on any drift AND on missing data', () => {
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       AlarmName: 'stratoclave-ledger-reserve-shadow-divergence',
       Threshold: 0,
       ComparisonOperator: 'GreaterThanThreshold',
+      // missing data must be BREACHING so a dead reconciler can't green-light cut-over
+      TreatMissingData: 'breaching',
     });
   });
 

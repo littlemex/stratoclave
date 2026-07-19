@@ -126,8 +126,11 @@ export class LedgerProjectorStack extends cdk.Stack {
       threshold: 0,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       evaluationPeriods: 1,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'Shadow RESERVE projection diverged from the synchronous event — block cut-over.',
+      // MISSING data is BREACHING (Fable review finding 4): "no divergence metric"
+      // must NOT read as healthy — a reconciler that stopped emitting (crash, EMF
+      // drop, disabled schedule) would otherwise silently green-light the cut-over.
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      alarmDescription: 'Shadow RESERVE projection diverged (or the reconciler stopped emitting) — block cut-over.',
     });
     new cloudwatch.Alarm(this, 'ProjectorDlqAlarm', {
       alarmName: `${prefix}-ledger-projector-dlq-depth`,

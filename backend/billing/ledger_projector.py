@@ -160,7 +160,18 @@ def handler(event, context=None):  # noqa: ARG001 — Lambda signature
                 )
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                    continue  # already projected (at-least-once redelivery) — no-op
+                    # Already projected — an at-least-once redelivery of the SAME
+                    # INSERT is a true no-op. This is only safe because a HOLD is
+                    # written exactly once (fresh-uuid hold_id, unique sk, HOLD Put
+                    # is attribute_not_exists) so a second INSERT for the same
+                    # hold_id — hence the same reserve_sk — cannot legitimately
+                    # occur. If a future design re-INSERTs a HOLD under the same
+                    # hold_id with a DIFFERENT amount (e.g. expiry extension via
+                    # new sk mapping to the same reserve_sk), this swallow would
+                    # hide the change; the reconciler's field_diff is the backstop
+                    # (it compares reserved_delta), and that design must add a
+                    # read-back-and-compare here before it ships (Fable review 3).
+                    continue
                 raise
         except Exception:  # noqa: BLE001 — surface to partial-batch retry, never drop.
             if seq:
@@ -197,7 +208,9 @@ def diff_events(shadow_item: dict, real_item: dict) -> dict[str, tuple]:
     return out
 
 
-def reconcile_partition(table, tenant_id: str, period: str) -> dict[str, Any]:
+def reconcile_partition(table, tenant_id: str, period: str, *,
+                        now_ms: Optional[int] = None,
+                        lag_budget_ms: int = 15 * 60 * 1000) -> dict[str, Any]:
     """Scan one tenant×period ledger partition and compare each SHADOW# RESERVE
     projection to its synchronous RESERVE event. Returns a summary with the
     divergence count and any mismatching hold_ids. Read-only — never writes.
@@ -206,11 +219,21 @@ def reconcile_partition(table, tenant_id: str, period: str) -> dict[str, Any]:
       * `missing_real`  — shadow exists, synchronous RESERVE absent (projector ran
         for a hold the app never wrote synchronously — should be impossible while
         dual-write is on; flags a bug).
-      * `missing_shadow`— synchronous RESERVE exists, no shadow (projector lag or
-        a pre-enrichment hold that carries no `source`).
+      * `missing_shadow`— synchronous RESERVE exists, no shadow. This is only
+        BENIGN LAG within the stream-processing budget; a synchronous RESERVE
+        OLDER than `lag_budget_ms` with no shadow is a projector that PERMANENTLY
+        dropped the event (a source-detection or image-parse bug) — counted as
+        divergence, NOT hidden as lag (Fable review finding 4).
       * `field_diff`    — both exist but a reconciled field differs.
+
+    `now_ms` / `lag_budget_ms` are injectable for tests; `now_ms` defaults to the
+    wall clock (the reconciler runs in a live Lambda where that is allowed).
     """
     from boto3.dynamodb.conditions import Key
+
+    if now_ms is None:
+        import time
+        now_ms = int(time.time() * 1000)
 
     pk = ledger_pk(tenant_id, period)
     items = []
@@ -232,7 +255,8 @@ def reconcile_partition(table, tenant_id: str, period: str) -> dict[str, Any]:
         elif sk.startswith("EV#HOLD#") and sk.endswith("#RESERVE"):
             reserve_by_hold[str(it.get("hold_id"))] = it
 
-    missing_real, missing_shadow, field_diff = [], [], {}
+    missing_real, field_diff = [], {}
+    lagging_shadow, stale_missing_shadow = [], []
     for hid, shadow in shadow_by_hold.items():
         real = reserve_by_hold.get(hid)
         if real is None:
@@ -241,16 +265,27 @@ def reconcile_partition(table, tenant_id: str, period: str) -> dict[str, Any]:
         d = diff_events(shadow, real)
         if d:
             field_diff[hid] = d
-    for hid in reserve_by_hold:
-        if hid not in shadow_by_hold:
-            missing_shadow.append(hid)
+    for hid, real in reserve_by_hold.items():
+        if hid in shadow_by_hold:
+            continue
+        # Classify by the synchronous RESERVE's age: young = the projector just
+        # hasn't caught up (lag); old = it never will (a dropped event = bug).
+        try:
+            real_ts = int(real.get("ts_ms", 0))
+        except (TypeError, ValueError):
+            real_ts = 0
+        if real_ts and (now_ms - real_ts) > lag_budget_ms:
+            stale_missing_shadow.append(hid)
+        else:
+            lagging_shadow.append(hid)
 
-    divergence = len(missing_real) + len(field_diff)  # missing_shadow = lag, not a bug
+    divergence = len(missing_real) + len(field_diff) + len(stale_missing_shadow)
     return {
         "tenant_id": tenant_id, "period": period,
         "shadow_count": len(shadow_by_hold), "real_count": len(reserve_by_hold),
         "divergence": divergence,
         "missing_real": missing_real,
-        "missing_shadow": missing_shadow,
+        "missing_shadow": stale_missing_shadow,   # only the BUG class (backward-compatible key)
+        "lagging_shadow": lagging_shadow,          # benign in-budget lag
         "field_diff": field_diff,
     }

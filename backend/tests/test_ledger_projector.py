@@ -224,15 +224,41 @@ def test_reconcile_partition_flags_field_diff(monkeypatch):
         assert "h1" in summ["field_diff"]
 
 
-def test_reconcile_missing_shadow_is_lag_not_divergence(monkeypatch):
+def test_reconcile_young_missing_shadow_is_lag_not_divergence(monkeypatch):
+    """A synchronous RESERVE within the stream-lag budget with no shadow is
+    benign lag (the projector just hasn't caught up), NOT divergence."""
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
     with mock_aws():
         tbl = _seed_ledger()
-        tbl.put_item(Item=_real_reserve_row("h1"))  # synchronous only, projector lagging
-        summ = reconcile_partition(tbl, "t1", "2026-07")
-        assert summ["divergence"] == 0          # lag is not a bug
+        row = _real_reserve_row("h1")
+        row["ts_ms"] = 1_000_000          # a fixed event time
+        tbl.put_item(Item=row)
+        # now is 5 min after the event; lag budget 15 min → still lag.
+        summ = reconcile_partition(tbl, "t1", "2026-07",
+                                   now_ms=1_000_000 + 5 * 60 * 1000)
+        assert summ["divergence"] == 0
+        assert summ["lagging_shadow"] == ["h1"]
+        assert summ["missing_shadow"] == []
+
+
+def test_reconcile_stale_missing_shadow_is_divergence(monkeypatch):
+    """Fable review finding 4: a synchronous RESERVE OLDER than the lag budget
+    with no shadow means the projector PERMANENTLY dropped it — this MUST count as
+    divergence, not be hidden as lag (else the cut-over gate is worthless)."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    with mock_aws():
+        tbl = _seed_ledger()
+        row = _real_reserve_row("h1")
+        row["ts_ms"] = 1_000_000
+        tbl.put_item(Item=row)
+        # now is 30 min after the event; lag budget 15 min → stale = bug.
+        summ = reconcile_partition(tbl, "t1", "2026-07",
+                                   now_ms=1_000_000 + 30 * 60 * 1000)
+        assert summ["divergence"] == 1
         assert summ["missing_shadow"] == ["h1"]
 
 

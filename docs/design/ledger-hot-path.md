@@ -268,9 +268,21 @@ before proceeding.
    `rate_snapshot` / `payload_hash` onto the HOLD row. capture/void dual-reads
    (HOLD first, fall back to `get_reserve`, log any mismatch). Rollback: stop
    writing the extra attributes.
-3. **capture/void → HOLD-only** (flag-gated; requires mismatch = 0). Verify the
+3. **capture/void → HOLD-only** (requires mismatch = 0). Verify the
    authorize-then-immediate-capture race and inline-token capture rejection.
-   Rollback: flip the flag.
+   **PRECONDITION (Fable review-2 finding 2, a hard blocker): a blunt env-flag
+   flip is a data-loss hazard** — at flip time any pre-enrichment external hold
+   still within its TTL is authorized + reserved but its capture 404s, so the
+   caller declines and the reaper voids an authorized transaction. The cut-over
+   MUST therefore be gated one of two ways, NOT a bare flag:
+   (a) a `created_at >= ENRICHMENT_EPOCH` predicate so only holds minted after
+   enrichment take the HOLD-only path and older holds keep the RESERVE-event
+   fallback (safe by construction; the fallback code is deleted only after
+   ENRICHMENT_EPOCH + max-hold-TTL); or (b) a reconciler gate that scans the HOLD
+   table and confirms zero rows with `attribute_not_exists(source)` before the
+   flag is allowed to flip. (a) is preferred. The current `STRATOCLAVE_CAPTURE_
+   HOLD_ONLY` env flag is the mechanism, but it must not be flipped in prod until
+   (a) or (b) is in place. Rollback: flip the flag / relax the predicate.
 4. **Promote the projector to the real `event_id`** (conditional Put). The
    synchronous writer and the projector now both target the same event under
    `attribute_not_exists`, so the dual-writer state is safe in both directions —
@@ -278,6 +290,18 @@ before proceeding.
 5. **Remove the synchronous RESERVE item from the txn** (per-tenant canary,
    guarded by the I2-async reconciler). Re-measure the c=16 curve. Rollback: put
    the item back (safe by step 4's idempotent-Put property).
+   **PRECONDITION (Fable review-2 finding 5, a hard blocker): the RESERVE event's
+   derivation source (the HOLD row) is deleted on settle/void, and Streams
+   retention is 24h.** If the projector is disabled/broken for > 24h, a
+   since-settled hold's RESERVE event becomes permanently underivable — a SETTLE
+   orphan with no RESERVE. Before removing the synchronous item, one of these MUST
+   exist: (a) a repair job that re-derives a missing RESERVE from the terminal
+   event (the synchronous SETTLE/VOID carries amount + run_id), or (b) self-heal:
+   terminal processing Puts the RESERVE if absent. And: **the event-derived
+   `reserved = ΣRESERVE − Σterminal` is eventually-consistent and MUST NOT be used
+   for any admission/refund decision** — the synchronous pool `reserved` mirror is
+   the sole authority. This invariant is documented in `dynamo/credit_ledger.py`
+   and enforced by the reconciler's continuous pool-mirror cross-check.
 6. **Fold IDEMP into the HOLD deterministic key** (write both, verify replay on
    HOLD, then drop the IDEMP item; old-period IDEMP rows remain a read-only
    fallback until they expire).
