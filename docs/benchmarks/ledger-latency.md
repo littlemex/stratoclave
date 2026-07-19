@@ -107,6 +107,42 @@ The degradation is therefore NOT DynamoDB — it is the application's
 optimistic-CAS retry (snapshot re-read + full-jitter backoff) on the single hot
 pool row. A single pool row is a structural hot spot under concurrency.
 
+### After: headroom ADD gate (same worst case, re-measured)
+
+The snapshot-all-equal CAS above was replaced with a single conditional ADD to a
+derived `pool_headroom_microusd` counter (see
+[../design/ledger-hot-path.md](../design/ledger-hot-path.md)). The reserve's
+condition now references only the counter it mutates, so a concurrent reserve
+that still fits no longer invalidates the others — the snapshot-invalidation
+`ConditionalCheckFailed` storm cannot occur. Re-measured on the same ALB and the
+same in-region load-gen host, same single hot pool row:
+
+| Concurrency | e2e p50 (before → after) | e2e p99 (before → after) | error rate (before → after) |
+|---|---|---|---|
+| 2  | 206 → 151 ms   | 1,953 → 556 ms   | 1.3% → **0%** |
+| 8  | 855 → 480 ms   | 4,903 → 2,112 ms | 2.4% → **0%** |
+| 16 | 989 → 860 ms   | 6,512 → 4,508 ms | 6.2% → **0%** |
+
+What changed, stated plainly:
+
+- **The contention error rate went to zero at every step** (6.2% → 0% at c=16).
+  The snapshot-invalidation storm — the thing that made concurrent reserves fail
+  and retry — is gone, exactly as the design intended.
+- **p99 improved materially under contention** (c=2 −72%, c=8 −57%, c=16 −31%).
+- **But single-row p99 still climbs steeply with concurrency and still misses the
+  target.** The projected "6,512 → ~200 ms" in the design doc was **NOT met**:
+  measured c=16 p99 is 4,508 ms. The reason is exactly the residual the design
+  doc flagged (finding 1): the reserve item is composed into a multi-item
+  `TransactWriteItems`, so two reserves on the *same* pool row still collide at
+  the transaction layer with reason `TransactionConflict` and the caller still
+  bounded-retries. Headroom removed the application-CAS storm; it did **not** make
+  a single hot row's p99 flat. Flattening that tail is the next step's job (the
+  two-item transaction + Streams-derived events), not this change's.
+
+(The after-run's c=1 step was a short 45 s sample and is not comparable to the
+long dedicated floor run above; the floor p99 = 58 ms is unchanged by this
+change, as the design predicted.) Raw CSVs: `bench/ledger-latency/results/headroom_c{1,2,8,16}.csv`.
+
 ### CPU is not the limiter
 
 During the runs, ECS service `CPUUtilization` averaged 7–37 % (max 52–84 %) — the
