@@ -330,12 +330,24 @@ export class DynamoDBStack extends cdk.Stack {
     // record. NEW image gives the enriched HOLD to project from; OLD image lets a
     // later step derive terminal transitions. Enabling the stream is inert until a
     // consumer (the projector Lambda's event-source mapping) is attached.
+    // PR-1 (docs/design/pending-protocol.md): the PENDING-protocol per-hold marker
+    // now lives in its OWN fixed-size item (SK=MARKER#<hold_id>) instead of an
+    // unbounded map on the hot pool item. A SETTLED marker is cleaned up by native
+    // TTL on the `ttl` attribute (stamped only at the terminal transition, never at
+    // creation), so markers cannot accumulate. TTL is cleanup only — money-safety
+    // never depends on it (see the module design doc). PITR is enabled
+    // unconditionally here (not just isProd): the pool counters are the admission
+    // cache and the PENDING marker is money-adjacent recovery state, so
+    // point-in-time recovery is groundwork for the future S3 tiering export and a
+    // cheap safety net now.
     this.tenantBudgetsTable = new dynamodb.Table(this, 'TenantBudgetsTable', {
       ...baseTableProps,
+      pointInTimeRecovery: true,
       tableName: `${prefix}-tenant-budgets`,
       partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
       stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      timeToLiveAttribute: 'ttl',
     });
 
     // Ledger P0-1: append-only, event-sourced credit ledger — the source of

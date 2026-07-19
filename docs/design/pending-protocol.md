@@ -97,36 +97,78 @@ backoff accumulation, possible boto3 internal retries, and a 16-thread client
 against boto3's default 10-connection pool (client-side queueing). They are a
 symptom of the design flaw, not a number to tune against.
 
-**Corrected design (next PR, PR-1): marker in a SEPARATE item via
-`TransactWriteItems`.** Pool conditional debit + a `PK=hold_id` marker item Put
-(`attribute_not_exists`) in ONE transaction. Atomicity preserved; the marker item
-is FIXED-SIZE (no map growth), lives on its own partition, and O(1) per operation
-regardless of table size. Cost ~2 WCU/item + the transaction tax (warm p50 ≈
-10–20 ms — within the p50 target), predictable instead of "fast then dies". This
-supersedes the shipped marker-in-pool-item `pool_reserve_update` /
-`pool_credit_back`. Confirmed with Fable; the exact PR-1 scope:
+**Corrected design (IMPLEMENTED, PR-1): marker in a SEPARATE item via
+`TransactWriteItems`.** Pool conditional debit + a marker item Put
+(`SK=MARKER#<hold_id>`, `attribute_not_exists`) in ONE transaction. Atomicity
+preserved; the marker item is FIXED-SIZE (no map growth) and O(1) per operation
+regardless of table size — the structural fix for the item-growth blowup. It stays
+on the tenant partition (SK-scoped), which is what kills the growth; the
+single-partition WCU ceiling remains bounded by the pool item itself and is a
+SEPARATE concern deferred to a future sharded-pool PR (Fable Q1: moving markers to
+their own `PK=hold_id` table would gain only ~2× and not touch the real ceiling).
+Cost ~2 WCU/item + the transaction tax (warm p50 ≈ 10–20 ms — within the p50
+target), predictable instead of "fast then dies". This supersedes the shipped
+marker-in-pool-item map. Confirmed with Fable; the PR-1 scope, as landed:
 
-1. `reserve` → `TransactWriteItems([pool conditional debit, marker Put(PK=hold_id,
-   attribute_not_exists)])`.
-2. **`CancellationReasons` branch (mandatory, else idempotency looks broken):** on
-   `TransactionCanceledException`, inspect which item failed — marker-side CCF ⇒
-   already applied ⇒ return SUCCESS (idempotent); pool-side CCF ⇒ insufficient
-   budget ⇒ reject (402).
-3. **TTL race fix:** do NOT put a TTL at marker creation (an active hold's marker
-   must never expire and let a retry pass `attribute_not_exists` → double-debit).
-   Write `ttl = now + reconcile-window + 7d` only at the settle/void terminal
-   transition. TTL is cleanup, never the correctness basis.
-4. terminal hold-row reaper via the same TTL-stamp discipline; ALL deletion timers
-   derive from one shared "reconcile-window + margin" constant.
-5. metrics: pool item size (must stay flat), `TransactionConflict`/`Canceled`
-   counts, SDK retry count.
-6. re-benchmark at **2× provisioned WCU** (TransactWrite is 2× consuming, so equal
-   provisioning would re-introduce throttle and dirty the measurement); FIRST
-   prove `c=1 × 3000` latency is FLAT (Q1 ≈ Q5 — the direct proof the growth bug
-   is gone), THEN the concurrency/shard sweep.
-7. today's cheap groundwork (does NOT wait for PR-2): enable PITR on the ledger /
-   decision tables, and stamp a UTC `event_day` attribute on new writes (the
-   future Parquet partition key — back-filling it later is painful).
+1. `reserve` → `TransactWriteItems([pool conditional debit, marker Put(
+   SK=MARKER#<hold_id>, attribute_not_exists)])`
+   (`dynamo.tenant_budgets.reserve_commit_txn_items`, executed by
+   `mvp._pipeline._pending_commit_transact`). NO `ClientRequestToken` — the marker's
+   `attribute_not_exists` is the idempotency guarantee (Fable Q4-item-1).
+2. **`CancellationReasons` branch (done):** on `TransactionCanceledException`,
+   inspect the MARKER reason FIRST — marker-side CCF ⇒ already applied ⇒ SUCCESS
+   (`RESERVE_ALREADY`, idempotent); else pool-side CCF ⇒ insufficient budget ⇒
+   `RESERVE_EXHAUSTED` (402). Reversing the order would 402 a hold whose debit
+   already landed → re-reserve under a new id → double debit. An ambiguous
+   timeout/conflict re-reads the marker (ConsistentRead) BEFORE responding, never
+   deferring to the reconciler (Fable Q4-item-2/3).
+3. **TTL race fix (done):** no TTL at marker creation (an active hold's marker must
+   never expire and let a retry pass `attribute_not_exists` → double-debit). The
+   marker is transitioned `RESERVED → SETTLED` + `ttl = now + reconcile-window + 7d`
+   only at the settle/void/reconcile terminal — and NOT deleted, so it still dedupes
+   a late reserve retry until TTL. Credit-back is a phase CAS (`marker_phase =
+   RESERVED`) paired transactionally with the pool return, so it is exactly-once
+   (proven in `test_pending_protocol_z3.py::test_phase_gated_credit_back_is_exactly_once`).
+4. all deletion timers derive from one shared `_RECONCILE_WINDOW_SECONDS +
+   _MARKER_TTL_MARGIN_SECONDS` constant (`dynamo.tenant_budgets`).
+5. a reconcile AUDIT SWEEP settles RESERVED markers whose hold row is gone (a lost
+   best-effort settle) WITHOUT crediting the pool — the storage-orphan safety net
+   (Fable Q2 hole 3, `reconcile_pool` → `list_reserved_markers`).
+6. groundwork landed now (does NOT wait for PR-2): PITR enabled on the
+   tenant-budgets table (ledger already had it) + native TTL attribute `ttl` for
+   marker GC; a UTC `event_day` attribute stamped on every new ledger write (the
+   future Parquet partition key — back-filling later is painful).
+7. REMAINING before canary: re-benchmark at **2× provisioned WCU** — FIRST prove
+   `c=1 × 3000` latency is FLAT (Q1 ≈ Q5, the direct proof the growth bug is gone),
+   THEN the concurrency/shard sweep; and a `pool item size` metric (must stay flat).
+
+**Fable adversarial code-review (PR-1 diff), resolved before merge.** Four money
+bugs were found and fixed, each with a regression test:
+  - *credit-back cancel-reason conflation* — `pool_credit_back` returned `False`
+    (="already credited") for ALL `TransactionCanceledException`s, so a transient
+    `TransactionConflict`/throttle looked definitive and the reconciler retired the
+    hold → stranded RESERVED marker → permanent leak. Fixed: inspect
+    `CancellationReasons`, `False` only on the MARKER-index CCF, else raise; the
+    reconcile loop `continue`s (no retire) on a raise so the next pass retries.
+  - *audit-sweep live-hold settle* — the sweep keyed "is it live?" on the
+    EXPIRED_UNCREDITED snapshot, so a PENDING/ACTIVE hold's marker was wrongly
+    SETTLED, killing its later credit-back. Fixed: settle only markers with NO hold
+    of ANY status (`hold_exists_by_id`, fully paginated) AND older than
+    max-hold-TTL+margin (fail-closed on unparseable `created_at`).
+  - *cross-period leak* — `list_reserved_markers` returns every period's markers,
+    but the existence checks are period-scoped, so a prior period's live hold's
+    marker was settled by the current period's reconcile. Fixed: the sweep acts only
+    on markers whose stamped `period` == this reconcile's period (fail-closed on a
+    missing period); each period's own pass handles its markers.
+  - *pool_credit_back period cross-check* — defensive `ValueError` if the marker's
+    `period` disagrees with the caller's, surfaced as an alarm (poison-item safe:
+    the reconcile loop logs + skips without retiring).
+
+Follow-up (non-blocking, tracked for a later PR): markers older than
+`previous_period` are settled by no reconcile pass (money-neutral — headroom was
+already returned — but a lingering RESERVED storage orphan that never gets TTL);
+split the `retire_failures` metric into retire-vs-credit-back-deferred; enable a
+`pool item size` CloudWatch metric before the canary.
 
 **Key-design note (why this bites here).** All of a tenant's pool + holds + (the
 mistaken) markers share ONE partition key (`tenant_id`), so a single hot tenant is

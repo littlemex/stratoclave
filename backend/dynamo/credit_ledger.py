@@ -50,6 +50,19 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _event_day(ts_ms: Optional[int] = None) -> str:
+    """UTC calendar day (YYYY-MM-DD) an event belongs to, from its ts_ms.
+
+    Stamped on every new ledger write (docs/design/pending-protocol.md, PR-1
+    groundwork item 7) so the future DynamoDB -> S3 incremental export can
+    partition by day WITHOUT a painful back-fill. Derived from the EVENT time,
+    not wall-clock at export, so a late/retried write lands in the correct day's
+    Parquet partition. Purely additive — no reader depends on it yet."""
+    if ts_ms is None:
+        ts_ms = _now_ms()
+    return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
 def _json_compact(obj: Any) -> str:
     """Deterministic compact JSON for frozen rating attributes (sorted keys, no
     spaces) — stable bytes so a replay recompute compares exactly."""
@@ -193,6 +206,9 @@ class CreditLedgerRepository:
             "settled_delta_microusd": {"N": str(int(settled_delta_microusd))},
             "ts_ms": {"N": str(ts)},
             "actor": {"S": actor},
+            # UTC event-day partition key for the future S3 tiering export (PR-1
+            # groundwork). Additive; no reader depends on it yet.
+            "event_day": {"S": _event_day(ts)},
             # GSI1 (run-index): per-run money-move audit trail.
             "gsi1pk": {"S": f"TENANT#{tenant_id}#RUN#{run_id}"},
             "gsi1sk": {"S": f"{ts:013d}#{event_id}"},

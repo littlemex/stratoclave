@@ -19,17 +19,25 @@ MODEL SHAPE (faithful to the shipped design)
 This object IS the environment (the fake DynamoDB): it holds the real state
 (``pool_reserved`` counter, per-hold ``status``) and ``_debited[hold_id]``.
 
-GHOST PROMOTED TO A REAL MARKER (Fable marker redesign). In the first model
-``_debited`` was a pure GHOST — the sweeper/reconciler were forbidden to read it,
-which forced the aggregate defer-until-quiescent reconciler (and its livelock). In
-the shipped design ``_debited[hold_id]`` is realized by the OBSERVABLE pool marker
-``applied.<hold_id>`` (written ATOMICALLY with the debit in one UpdateItem —
-``dynamo.tenant_budgets.pool_reserve_update`` / ``pool_credit_back``). So the
-reconciler MAY now read it per-hold and credit back exactly once. The old ghost
-rule (sweeper must not credit on fence) still holds — the SWEEPER has no reason to
-touch the pool — but the RECONCILER's decisiveness comes from the real marker, not
-a quiescence guess. ``commit_debit`` writes the marker; settle/release/reap/
-reconcile REMOVE it (mirroring the production ``REMOVE applied.<hold_id>``).
+GHOST PROMOTED TO A REAL MARKER (Fable marker redesign; PR-1 separate-item form).
+In the first model ``_debited`` was a pure GHOST — the sweeper/reconciler were
+forbidden to read it, which forced the aggregate defer-until-quiescent reconciler
+(and its livelock). In the shipped design ``_debited[hold_id]`` is realized by an
+OBSERVABLE per-hold MARKER, written ATOMICALLY with the pool debit. The marker
+started as an ``applied.<hold_id>`` entry in a MAP on the hot pool item; that
+placement was MEASURED and REJECTED (unbounded map growth bloated the pool item
+and its write cost rose super-linearly — bench_marker_shard_spike.py). PR-1 moves
+the marker to its OWN fixed-size item (``SK=MARKER#<hold_id>``) written in a
+2-item ``TransactWriteItems`` with the pool debit
+(``dynamo.tenant_budgets.reserve_commit_txn_items``); credit-back is a phase CAS
+RESERVED->SETTLED paired transactionally with the pool return
+(``pool_credit_back``). This is INVISIBLE to this model: ``_debited[hold_id]``
+True still means "the debit committed and its headroom is still held out" (=
+marker phase RESERVED), and clearing it means the exactly-once credit-back ran (=
+phase SETTLED + the pool returned). The reconciler MAY read it per-hold and credit
+back exactly once; the sweeper still never touches the pool. ``commit_debit`` sets
+the marker; settle/release/reap/reconcile clear it (mirroring the production phase
+CAS + TTL, which supersedes the old in-item ``REMOVE applied.<hold_id>``).
 
 We model the CONTENDED counter (``pool_reserved``) only; the settled-counter /
 headroom split is already proved in ``test_billing_formal_z3`` and

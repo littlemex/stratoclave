@@ -240,3 +240,58 @@ def test_reconcile_holds_first_CAN_oversell_SANITY():
     true_live_floor = active_outstanding + new
     s.add(reserved_after < true_live_floor)
     assert_has_bug(s, "holds-first reconcile can oversell")
+
+
+# ---------------------------------------------------------------------------
+# PR-1 (docs/design/pending-protocol.md): the SEPARATE-item marker's credit-back
+# is exactly-once because it is gated on the marker PHASE, not mere presence. The
+# marker is NOT deleted at credit-back (it must survive to dedupe a late reserve
+# retry) — it transitions RESERVED -> SETTLED + TTL. So the credit-back MUST be
+# conditioned on phase==RESERVED, else a second credit-back of a marker that is
+# still present (but already SETTLED) would double-return headroom.
+#
+# Model two credit-back attempts of the SAME hold over the reserved counter, with
+# a boolean `phase_reserved` that flips to False after the first credit. Symbols:
+#   reserved0     : reserved before any credit (== amount + others, hold debited)
+#   amount (> 0)
+#   others (>= 0) : other holds' outstanding
+# The phase CAS: a credit applies iff phase_reserved is True; it then subtracts
+# amount and sets phase_reserved False.
+# ---------------------------------------------------------------------------
+def _credit_back(reserved, amount, phase_reserved):
+    """Return (reserved', phase') for one phase-gated credit-back attempt."""
+    applied = phase_reserved
+    reserved_after = z3.If(applied, reserved - amount, reserved)
+    phase_after = z3.If(applied, z3.BoolVal(False), phase_reserved)
+    return reserved_after, phase_after
+
+
+def test_phase_gated_credit_back_is_exactly_once():
+    # Two credit-back attempts of the same hold. After BOTH, reserved must equal
+    # `others` (the hold's amount returned EXACTLY once), never others-amount.
+    s = _solver()
+    amount = z3.Int("amount")
+    others = z3.Int("others")
+    s.add(amount > 0, others >= 0)
+    reserved0 = others + amount                 # hold debited-outstanding
+    r1, p1 = _credit_back(reserved0, amount, z3.BoolVal(True))   # first: applies
+    r2, p2 = _credit_back(r1, amount, p1)                         # second: CAS fails
+    s.add(z3.Not(r2 == others))                 # negate "returned exactly once"
+    assert_proved(s, "phase-gated credit-back returns the hold exactly once")
+
+
+def test_presence_only_credit_back_double_returns_SANITY():
+    # If credit-back were gated on marker PRESENCE (which stays True after settle,
+    # since the marker is kept for TTL dedupe) instead of PHASE, a second attempt
+    # would subtract amount AGAIN -> reserved = others - amount < others (oversell
+    # of the other holds). Z3 must find it, proving the phase gate is necessary.
+    s = _solver()
+    amount = z3.Int("amount")
+    others = z3.Int("others")
+    s.add(amount > 0, others >= 0)
+    reserved0 = others + amount
+    # presence stays True across both attempts (marker not deleted) -> both apply.
+    r1, _ = _credit_back(reserved0, amount, z3.BoolVal(True))
+    r2, _ = _credit_back(r1, amount, z3.BoolVal(True))
+    s.add(r2 < others)                          # oversell witness
+    assert_has_bug(s, "presence-gated credit-back double-returns headroom")
