@@ -250,6 +250,13 @@ class TenantBudgetsRepository:
                             "pool_headroom_microusd": Decimal(headroom),
                             "pool_reserved_microusd": Decimal(0),
                             "pool_settled_microusd": Decimal(0),
+                            # PENDING protocol per-hold marker map (docs/design/
+                            # pending-protocol.md). Empty at creation; the
+                            # non-transactional reserve SETs applied.<hold_id> in
+                            # the same UpdateItem as the debit. Seeded here so the
+                            # nested SET has a map to write into. Inert while the
+                            # protocol flag is off (nothing writes it).
+                            "applied": {},
                             "status": status,
                             "version": "2",
                             "updated_at": _now_iso(),
@@ -652,38 +659,130 @@ class TenantBudgetsRepository:
                 item["run_id_source"] = "hold_id_fallback"
         self._table.put_item(Item=item, ConditionExpression=Attr("sk").not_exists())
 
-    def pool_reserve_update(self, *, tenant_id: str, period: str, amount_microusd: int,
-                            table=None) -> None:
-        """Step 2 of the PENDING protocol = THE COMMIT POINT: a single conditional
-        ``UpdateItem`` on the pool row (NOT a transaction). Same headroom ADD +
-        condition as ``reserve_txn_item``, issued bare so there is no
-        ``TransactionConflict`` failure mode — concurrent single-item conditional
-        writes serialize at the leader replica instead of cancelling.
+    # Sentinel returned by pool_reserve_update to distinguish the three outcomes
+    # of the marker-carrying conditional UpdateItem.
+    RESERVE_APPLIED = "applied"        # the debit committed on THIS call (200)
+    RESERVE_ALREADY = "already"        # this hold's marker already present (idempotent)
+    RESERVE_EXHAUSTED = "exhausted"    # genuine budget exhaustion (402)
 
-        `table` (optional) is a resource ``Table`` bound to a no-retry client
-        (max_attempts=1): a blind SDK retry of this non-idempotent ADD on a
-        timeout would double-debit (I4). A ``ConditionalCheckFailedException`` is
-        the definitive 'budget exhausted' (402); a timeout/5xx is AMBIGUOUS and the
-        caller must NOT resend it."""
+    def pool_reserve_update(self, *, tenant_id: str, period: str, hold_id: str,
+                            amount_microusd: int, table=None) -> str:
+        """Step 2 of the PENDING protocol = THE COMMIT POINT. A single conditional
+        ``UpdateItem`` on the pool row (NOT a transaction) that ATOMICALLY debits
+        the counter AND records a per-hold marker ``applied.<hold_id> = amount``.
+        Multi-attribute updates to ONE item are unconditionally atomic in DynamoDB,
+        so this stays a single non-transactional write (the ~88 ms p99 property is
+        preserved) — no ``TransactionConflict`` failure mode.
+
+        The marker is what makes the debit LOCALLY OBSERVABLE and the write
+        IDEMPOTENT (docs/design/pending-protocol.md, Fable marker design). Returns
+        one of three outcomes, resolving the ambiguity that a bare ADD could not:
+
+          * RESERVE_APPLIED   — condition held, counter debited + marker written.
+          * RESERVE_ALREADY   — CCF but ALL_OLD shows this hold's marker already
+            present: a prior attempt of THIS hold committed (a retry / lost-ack).
+            The debit is a fact; treat as success, do NOT re-debit (I4 — the write
+            is idempotent by construction, so an SDK auto-retry is harmless).
+          * RESERVE_EXHAUSTED — CCF with no marker: genuine budget exhaustion (402).
+
+        Condition: ``headroom >= amount AND active AND attribute_not_exists(
+        applied.<hold_id>)``. On CCF we read ALL_OLD to pick ALREADY vs EXHAUSTED.
+        `table` (optional) is a no-retry table; the marker makes retries safe, but
+        an explicit single attempt keeps the ALL_OLD inspection deterministic."""
         tbl = table if table is not None else self._table
-        tbl.update_item(
-            Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-            UpdateExpression=(
-                "ADD pool_headroom_microusd :neg, pool_reserved_microusd :amt "
-                "SET updated_at = :now"
-            ),
-            ConditionExpression=(
-                "attribute_exists(pool_headroom_microusd) AND #st = :active AND "
-                "pool_headroom_microusd >= :amt"
-            ),
-            ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={
-                ":amt": int(amount_microusd),
-                ":neg": -int(amount_microusd),
-                ":active": "active",
-                ":now": _now_iso(),
-            },
-        )
+        try:
+            tbl.update_item(
+                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                UpdateExpression=(
+                    "ADD pool_headroom_microusd :neg, pool_reserved_microusd :amt "
+                    "SET updated_at = :now, applied.#hid = :amt"
+                ),
+                ConditionExpression=(
+                    "attribute_exists(pool_headroom_microusd) AND #st = :active AND "
+                    "pool_headroom_microusd >= :amt AND attribute_not_exists(applied.#hid)"
+                ),
+                ExpressionAttributeNames={"#st": "status", "#hid": hold_id},
+                ExpressionAttributeValues={
+                    ":amt": int(amount_microusd),
+                    ":neg": -int(amount_microusd),
+                    ":active": "active",
+                    ":now": _now_iso(),
+                },
+                ReturnValuesOnConditionCheckFailure="ALL_OLD",
+            )
+            return self.RESERVE_APPLIED
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            # ALL_OLD is on the exception under ReturnValuesOnConditionCheckFailure.
+            # NOTE: even from a resource Table, the CCF exception's `Item` is the
+            # LOW-LEVEL (DynamoDB-JSON) shape — `{"applied": {"M": {hid: {"N": ..}}}}`
+            # — not resource-deserialized. Read the marker at the low-level path.
+            old = e.response.get("Item", {}) or {}
+            applied = (old.get("applied") or {}).get("M") or {}
+            if hold_id in applied:
+                return self.RESERVE_ALREADY   # our debit is already a fact (idempotent)
+            return self.RESERVE_EXHAUSTED     # no marker -> genuine exhaustion (402)
+
+    def pool_credit_back(self, *, tenant_id: str, period: str, hold_id: str) -> bool:
+        """Exactly-once credit-back for the PENDING protocol: a single conditional
+        ``UpdateItem`` that ATOMICALLY removes this hold's ``applied`` marker and
+        returns its amount to the counter — conditional on the marker STILL being
+        present. The marker's existence is the exact same-value predicate for "this
+        hold's amount is currently debited from the pool", so double-credit is
+        structurally impossible (the second call CCFs on the absent marker).
+
+        Uses `applied.<hold_id>` as the amount source so it can never over/under-
+        return. Returns True if it credited, False if the marker was already gone
+        (already credited / never debited) — both leak-safe, never oversell. This
+        is the ONLY way credit-back happens under the PENDING protocol; crediting
+        by reading a hold's `amount_microusd` (the old path) is forbidden here
+        because it is not gated on the debit actually having happened."""
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                UpdateExpression=(
+                    "SET pool_headroom_microusd = pool_headroom_microusd + applied.#hid, "
+                    "pool_reserved_microusd = pool_reserved_microusd - applied.#hid, "
+                    "updated_at = :now REMOVE applied.#hid"
+                ),
+                ConditionExpression="attribute_exists(applied.#hid)",
+                ExpressionAttributeNames={"#hid": hold_id},
+                ExpressionAttributeValues={":now": _now_iso()},
+            )
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def ensure_applied_map(self, *, tenant_id: str, period: str) -> None:
+        """Idempotently seed the ``applied`` marker map on a pool row that predates
+        the PENDING protocol (created before it was added to the create branch).
+        Conditional on the map being absent, so it never clobbers live markers and
+        is a no-op on rows that already have it. Called once per (tenant, period)
+        by the pending reserve path (cached), NOT on the hot path per request."""
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                UpdateExpression="SET applied = :empty",
+                ConditionExpression="attribute_exists(tenant_id) AND attribute_not_exists(applied)",
+                ExpressionAttributeValues={":empty": {}},
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return  # already has the map (or no pool row) — nothing to do
+            raise
+
+    def pool_marker_amount(self, *, tenant_id: str, period: str, hold_id: str) -> Optional[int]:
+        """ConsistentRead of this hold's `applied` marker amount, or None if absent.
+        The local, decisive answer to 'did this hold's debit commit?' (A1 restored
+        without a transaction). Used by replay + capture's helping path."""
+        resp = self._table.get_item(
+            Key={"tenant_id": tenant_id, "sk": budget_sk(period)}, ConsistentRead=True)
+        applied = (resp.get("Item") or {}).get("applied") or {}
+        v = applied.get(hold_id)
+        return int(v) if v is not None else None
 
     def _status_transition(self, *, tenant_id: str, sk: str, frm: str, to: str) -> bool:
         """Conditional status transition ``frm -> to`` on a HOLD row. Returns True
@@ -740,30 +839,6 @@ class TenantBudgetsRepository:
                 break
             kwargs["ExclusiveStartKey"] = lek
         return items
-
-    def reconcile_credit_back(
-        self, *, tenant_id: str, period: str, drift_microusd: int, expected_reserved: int
-    ) -> None:
-        """Cold-path aggregate leak recovery: credit `drift` back to the pool
-        (``reserved -= drift, headroom += drift``), guarded on ``pool_reserved ==
-        expected_reserved`` so a concurrent reserve/settle that moved the counter
-        since the reconciler read it cancels this (the reconciler then defers to
-        its next scan — idempotent by construction). Raises
-        ConditionalCheckFailedException on that race."""
-        self._table.update_item(
-            Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-            UpdateExpression=(
-                "ADD pool_reserved_microusd :negdrift, pool_headroom_microusd :drift "
-                "SET updated_at = :now"
-            ),
-            ConditionExpression="pool_reserved_microusd = :expected",
-            ExpressionAttributeValues={
-                ":negdrift": -int(drift_microusd),
-                ":drift": int(drift_microusd),
-                ":expected": int(expected_reserved),
-                ":now": _now_iso(),
-            },
-        )
 
     def retire_reclaimed_best_effort(self, *, tenant_id: str, sk: str) -> None:
         """Flip EXPIRED_UNCREDITED -> RECLAIMED (conditional) so it stops being

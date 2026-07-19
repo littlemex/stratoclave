@@ -500,6 +500,69 @@ class CreditLedgerRepository:
         )
         return resp.get("Item")
 
+    # ---- PENDING protocol IDEMP intent (docs/design/pending-protocol.md) ----
+    # The transactional path writes the IDEMP row INSIDE the reserve txn (atomic).
+    # The PENDING path has no transaction, so it writes an IDEMP *intent* FIRST
+    # (before the hold / debit), status=IN_PROGRESS, carrying the durable
+    # addressing (hold_sk / amount / authorization_id) a replay must return. A
+    # later single-item update finalizes it to COMPLETED / FAILED. The intent's
+    # attribute_not_exists is the duplicate-key detector; replay decisiveness comes
+    # from reading the pool marker + hold status, NOT from the intent's mere
+    # presence (Fable review bug 2/7).
+
+    def put_idemp_intent(
+        self, *, tenant_id: str, period: str, idempotency_key: str, hold_id: str,
+        hold_sk: str, authorization_id: str, amount_microusd: int,
+        expires_at_epoch: int, capture_mode: str, request_fingerprint: str,
+        pricing_key: Optional[str] = None,
+    ) -> None:
+        """Put the IDEMP intent row (status=IN_PROGRESS), conditional on
+        attribute_not_exists(pk) — a duplicate Idempotency-Key raises the client's
+        ConditionalCheckFailedException, which the caller resolves by reading
+        state. Resource API (plain values)."""
+        item: dict[str, Any] = {
+            "pk": ledger_pk(tenant_id, period),
+            "sk": idemp_sk(idempotency_key),
+            "event_type": "IDEMP",
+            "schema_version": SCHEMA_VERSION,
+            "tenant_id": tenant_id,
+            "period": period,
+            "idempotency_key": str(idempotency_key),
+            "hold_id": hold_id,
+            "hold_sk": hold_sk,
+            "authorization_id": authorization_id,
+            "amount_microusd": int(amount_microusd),
+            "expires_at": int(expires_at_epoch),
+            "capture_mode": capture_mode,
+            "request_fingerprint": str(request_fingerprint),
+            "idemp_status": "IN_PROGRESS",
+            "ts_ms": _now_ms(),
+        }
+        if pricing_key:
+            item["pricing_key"] = str(pricing_key)
+        self._table.put_item(Item=item, ConditionExpression="attribute_not_exists(pk)")
+
+    def mark_idemp_completed_best_effort(self, *, tenant_id, period, idempotency_key) -> None:
+        """IN_PROGRESS -> COMPLETED (best-effort; replay works off marker+status
+        even if this doesn't land). Never raises."""
+        self._set_idemp_status(tenant_id, period, idempotency_key, "COMPLETED")
+
+    def mark_idemp_failed_best_effort(self, *, tenant_id, period, idempotency_key) -> None:
+        """IN_PROGRESS -> FAILED so a replay of a genuinely-exhausted key replays
+        the 402 rather than re-attempting. Best-effort; never raises."""
+        self._set_idemp_status(tenant_id, period, idempotency_key, "FAILED")
+
+    def _set_idemp_status(self, tenant_id, period, idempotency_key, status) -> None:
+        try:
+            self._table.update_item(
+                Key={"pk": ledger_pk(tenant_id, period), "sk": idemp_sk(idempotency_key)},
+                UpdateExpression="SET idemp_status = :s",
+                ConditionExpression="attribute_exists(pk)",
+                ExpressionAttributeValues={":s": status},
+            )
+        except Exception:  # noqa: BLE001 — best-effort finalize
+            pass
+
     def get_terminal(
         self, *, tenant_id: str, period: str, hold_id: str
     ) -> Optional[dict[str, Any]]:

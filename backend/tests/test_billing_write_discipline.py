@@ -110,16 +110,25 @@ ALLOWED_SITES = {
         # no-oversell, not a necessary one. Registered in PENDING_COUNTER_WRITES so
         # the engine verifies each still carries a ConditionExpression (bare ADD is
         # never allowed). Inert until STRATOCLAVE_RESERVE_PROTOCOL=pending.
-        #   * pool_reserve_update: step-2 commit — headroom-gated conditional ADD.
-        #   * reconcile_credit_back: cold-path leak recovery — expected-counter guard.
+        #   * pool_reserve_update: step-2 commit — headroom-gated conditional ADD
+        #     + per-hold marker (applied.<hold_id>) written atomically; CCF is
+        #     resolved by ALL_OLD (marker present = idempotent success).
+        #   * pool_credit_back: exactly-once credit-back — REMOVE marker + ADD
+        #     headroom, guarded on attribute_exists(applied.<hold_id>) so a second
+        #     call CCFs (no double credit).
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_reserve_update", "update_item"),
-        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.reconcile_credit_back", "update_item"),
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_credit_back", "update_item"),
         # PENDING status transitions: single-item conditional SET of `status`
         # only; NEVER name a pool counter (verified structurally — they are NOT in
         # COUNTER_FUNCTIONS). Put of a PENDING hold row (no counter, like
         # hold_put_txn_item's transactional sibling).
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_put_pending", "put_item"),
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository._status_transition", "update_item"),
+        # ensure_applied_map: seeds the `applied` marker map on a legacy pool row
+        # (SET applied = :empty, guarded attribute_not_exists(applied)). Touches
+        # NO protected counter — only the marker map — so it is a plain reviewed
+        # site, not a counter write. Idempotent, race-safe (never clobbers markers).
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.ensure_applied_map", "update_item"),
     },
     # backend/migrations/backfill_pool_headroom.py makes NO raw write of its own
     # (see COUNTER_FUNCTIONS note): it backfills by delegating to the reviewed
@@ -178,7 +187,7 @@ COUNTER_FUNCTIONS = {
         # model, and each is in ALLOWED_SITES + PENDING_COUNTER_WRITES so the engine
         # verifies a ConditionExpression is present. Reviewed against I1'.
         "TenantBudgetsRepository.pool_reserve_update",
-        "TenantBudgetsRepository.reconcile_credit_back",
+        "TenantBudgetsRepository.pool_credit_back",
         "<module>",  # module docstring names the counters
     },
     "backend/dynamo/user_tenants.py": set(),
@@ -221,7 +230,7 @@ COUNTER_FUNCTIONS = {
 PENDING_COUNTER_WRITES = {
     "backend/dynamo/tenant_budgets.py": {
         "TenantBudgetsRepository.pool_reserve_update",     # step-2 commit (headroom-gated)
-        "TenantBudgetsRepository.reconcile_credit_back",   # cold-path leak recovery (guarded)
+        "TenantBudgetsRepository.pool_credit_back",   # cold-path leak recovery (guarded)
     },
 }
 
