@@ -303,6 +303,15 @@ DECISION_HARD_APPLIED = "hard-applied"
 DECISION_PREFER_APPLIED = "prefer-applied"
 DECISION_PREFER_OVERRIDDEN = "prefer-overridden"  # local SAAR prefer already won
 
+# The decisions in which the VSR's suggestion ACTUALLY STEERED the model this
+# turn — the base for any counterfactual "if you'd followed the VSR" savings
+# (mvp.learning.savings). SINGLE SOURCE OF TRUTH: savings imports this so a new
+# steering label added here can never silently shrink the savings base (Fable
+# review finding d). PREFER_OVERRIDDEN is EXCLUDED — a local SAAR prefer held the
+# head, so the VSR's prefer did not take effect and there is nothing the tenant
+# "did not follow".
+STEERING_DECISIONS = frozenset({DECISION_HARD_APPLIED, DECISION_PREFER_APPLIED})
+
 
 def classify_consult_decision(result: "VsrConsultResult", *,
                               saar_prefer_present: bool) -> str:

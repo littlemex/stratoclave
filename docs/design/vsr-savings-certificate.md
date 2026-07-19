@@ -57,19 +57,40 @@ none is silently dropped:
 | `followed` | billed model already == suggested (saving already in the bill) | 0 (never double-counted) |
 | `counterfactual` | billed ≠ suggested → `saving = billed − cost_if_suggested` | signed |
 
-`cost_if_suggested = actual_cost_microusd(suggested_pricing_key, input_tokens,
-output_tokens)` — the suggested model priced over the request's REAL tokens.
+**MODEL-VS-MODEL AT ONE SNAPSHOT (Fable review, findings 1 + 3).** The billed
+usage row records only `(model_id, input_tokens, output_tokens, cost_microusd)` —
+NO pricing version and NO cache-token breakdown. So `billed_microusd −
+actual_cost(suggested)` would mix a past, versioned, cache-inclusive charge with a
+present, cache-free estimate — a double asymmetry that BOTH fall VSR-favourable
+(saving inflated). Instead we price BOTH models at ONE rate snapshot over the SAME
+tokens:
 
-Summary headline: **`net_saving = gross_saving − escalation_loss`**, where
-`gross` sums only positive counterfactuals and `escalation_loss` sums the
-magnitudes of the negatives. **`net` can be negative** — when the VSR routed a
-workload cheap that then escalated dearer, or advised a dearer model than what was
-billed, the certificate shows a LOSS. A certificate that can show a loss is one a
-buyer trusts to show a gain. Escalation is never clipped to zero.
+```
+saving = recompute(billed_model, in, out) − recompute(suggested_model, in, out)
+```
 
-Coverage (`class_counts`, `priced_request_count`, `billed_microusd_over_base`) is
-always explicit, so the figure is a partial sum with a stated base, never a
-fabricated total.
+Both legs share the identical rate basis and identical (cache-free) token
+treatment, so rate drift and cache asymmetry **cancel exactly** — the saving
+depends only on the rate DIFFERENCE between the two models (proven in
+`test_savings_z3`). We also recompute the billed model and compare to the actual
+`cost_microusd`; a divergence beyond tolerance is classified `basis_drift` and
+EXCLUDED (a stale/cache-heavy basis never silently inflates savings). The rate
+version is stamped on the certificate so a past `(tenant, day)` recomputes to the
+same number (audit reproducibility). `followed` = SAME `bedrock_model_id` (not
+merely same pricing key), and a matched row with no `cost_microusd` is `no_cost`
+(never a fake `−cf` loss).
+
+Summary headline: **`net_saving_microusd`** at top level; the decomposition
+(`positive_deltas_microusd` / `negative_deltas_microusd`) is nested under
+`decomposition` with deliberately un-promotable names so a report cannot
+cherry-pick a gross figure (Fable finding 4). **`net` can be negative** — a
+workload the VSR routed dearer than what was billed shows a LOSS. A certificate
+that can show a loss is one a buyer trusts to show a gain.
+
+Coverage is explicit AND spend-weighted: `class_counts` (per class), plus
+`class_billed_microusd` and `total_billed_microusd_all_classes` so a saving % is
+never computed against a cherry-picked subset (Fable finding 5) — the honest
+denominator (total billed across all classes) is always in the output.
 
 ## Quality is NOT asserted here
 

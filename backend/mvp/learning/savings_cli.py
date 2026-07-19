@@ -56,16 +56,21 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(cert, indent=2, sort_keys=True, default=str))
         return 0
 
+    decomp = s["decomposition"]
+    base = s["billed_microusd_over_priced_base"]
     print(f"=== VSR Savings Certificate: tenant {args.tenant} day {args.day} ===")
+    print(f"  rate version:             {cert.get('rate_version', '-')}")
     print(f"  priced requests (base):   {s['priced_request_count']}")
-    print(f"  billed over base:         {_fmt_usd(s['billed_microusd_over_base'])}")
-    print(f"  gross saving:             {_fmt_usd(s['gross_saving_microusd'])}")
-    print(f"  escalation loss:         -{_fmt_usd(s['escalation_loss_microusd'])}")
+    print(f"  billed over priced base:  {_fmt_usd(base)}")
+    print(f"  total billed (all reqs):  {_fmt_usd(s['total_billed_microusd_all_classes'])}")
+    # NET is the headline; the decomposition is shown BELOW it, never instead of
+    # it (Fable finding 4: gross must not be cherry-pickable as "the saving").
     print(f"  NET saving:               {_fmt_usd(s['net_saving_microusd'])}")
-    base = s["billed_microusd_over_base"]
+    print(f"    (+ cheaper-if-followed: {_fmt_usd(decomp['positive_deltas_microusd'])})")
+    print(f"    (- dearer-if-followed:  {_fmt_usd(decomp['negative_deltas_microusd'])})")
     if base > 0:
         pct = 100.0 * s["net_saving_microusd"] / base
-        print(f"  net saving vs billed:     {pct:.1f}%")
+        print(f"  net saving vs priced base: {pct:.1f}%")
     counts = ", ".join(f"{k}={v}" for k, v in sorted(s["class_counts"].items()))
     print(f"  request classes:          {counts or '(none)'}")
     print(f"  quality measured:         {s['quality']['measured']} "
@@ -73,13 +78,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.detail:
         print()
-        print("  span_id\tsuggested->billed\tbilled\tcounterfactual\tsaving")
+        print("  span_id\tsuggested->billed\trecompute(billed)\trecompute(sug)\tsaving")
         for r in s["detail"]:
             print(
                 f"  {r['span_id']}\t{r['suggested_model'] or '-'}->"
                 f"{r['billed_model_id'] or '-'}\t"
-                f"{_fmt_usd(r['billed_microusd'] or 0)}\t"
-                f"{_fmt_usd(r['counterfactual_microusd'] or 0)}\t"
+                f"{_fmt_usd(r.get('recompute_billed_microusd') or 0)}\t"
+                f"{_fmt_usd(r.get('recompute_suggested_microusd') or 0)}\t"
                 f"{_fmt_usd(r['saving_microusd'])}"
             )
     print()

@@ -1,51 +1,51 @@
 """Counterfactual savings — the "Savings Certificate" engine (VSR core weapon).
 
-This is the number litellm structurally cannot produce (docs/design/
+The number LiteLLM structurally cannot produce (docs/design/
 vsr-savings-certificate.md): for each VSR-acted request, "if the tenant had
 FOLLOWED the VSR's routing advice, how much cheaper (or dearer) would this exact
-workload have been?" — priced from the SAME versioned rate table the ledger
-charges from, against the SAME token counts the request actually produced (read
-off the billed usage row, never re-estimated). The output is a savings figure
-with the honesty controls a CFO / procurement will demand: escalation cost is
-SUBTRACTED (never hidden), and coverage (unmatched / non-consulted / missing
-tokens) is reported explicitly so the number is never a fabricated total.
+workload have been?" — computed so the comparison is APPLES-TO-APPLES and the
+bias can only fall to the CONSERVATIVE (VSR-unfavourable) side, because the whole
+value proposition is that the number is a certificate, not a dashboard estimate.
 
-WHY THIS IS DEFENSIBLE (and litellm's "70% cheaper!" dashboards are not):
+FABLE REVIEW FIXES (why this is model-vs-model, not billed−cf):
+The billed usage row records only (model_id, input_tokens, output_tokens,
+cost_microusd) — NO pricing version and NO cache-token breakdown. So we CANNOT
+reconstruct the billed model's historical, cache-inclusive charge. Naively doing
+`billed_microusd − actual_cost(suggested, in, out)` mixes a past versioned,
+cache-inclusive charge (billed) with a present, cache-free estimate (cf) — a
+double asymmetry that both fall VSR-favourable (Fable findings 1 + 3).
 
-  1. Ledger-precision baseline. `billed_microusd` is a settled charge, not a
-     dashboard estimate.
-  2. Same-token counterfactual. The suggested model is priced over the request's
-     REAL (input_tokens, output_tokens), so the comparison is apples-to-apples.
-  3. Honest sign. When the VSR suggested a cheap model that then escalated (the
-     expensive model was actually billed), the counterfactual is DEARER and the
-     saving is NEGATIVE — we surface it, we do not clip it to zero. A certificate
-     that can show a loss is one a buyer can trust to show a gain.
+Resolution: price BOTH the billed model AND the suggested model at ONE rate
+snapshot, over the SAME (input, output) tokens. `saving = recompute(billed_model)
+− recompute(suggested_model)`. Both legs use the identical rate basis and the
+identical (cache-free) token treatment, so rate drift and cache asymmetry cancel
+exactly. We ALSO recompute the billed model and compare it to the actual
+`cost_microusd`: a large divergence (`basis_drift`) is surfaced, never silently
+folded into savings. The rate snapshot version is stamped on the certificate so a
+past (tenant, day) recomputes to the same number (audit reproducibility).
 
-SCOPE / boundary: this is a PURE fold over reconcile-join rows (which already
-carry the VSR decision, the billed model+cost, and the billed token counts).
-It owns ONLY the money-side counterfactual; routing QUALITY (did the cheaper
-model actually solve the task?) is the VSR's own metric plus a tenant-defined
-eval — represented here as an explicit, un-fabricated `quality` placeholder the
-certificate must fill from that separate signal before any saving is CLAIMED.
-No request-path code, no new table.
+SCOPE: PURE fold over reconcile-join rows (VSR decision + billed model/cost +
+billed tokens). Money side only; routing QUALITY is a separate tenant eval —
+`quality.measured=false` until it fills, and no saving is CLAIMED before then.
 """
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-# The VSR decision labels that constitute a COST-REDUCING suggestion (the VSR
-# advised a model other than what the request would otherwise use). A hard pin
-# and a prefer are both "the VSR steered the model"; a passthrough / no-advice /
-# timeout steered nothing and contributes no counterfactual.
-from ..vsr.client import DECISION_HARD_APPLIED as _HARD
+# Single source of truth for the steering-decision label set (Fable finding d):
+# imported from vsr.client so a new label there can never silently fall to
+# `no_suggestion` and quietly shrink the base.
+from ..vsr.client import STEERING_DECISIONS as _STEERING_DECISIONS
 
-# Rows whose vsr_decision is one of these carried an actionable routing suggestion.
-_STEERING_DECISIONS = frozenset({_HARD, "prefer", "prefer_applied", "suggested"})
+# A recomputed-billed vs actual-billed divergence beyond this fraction is flagged
+# as `basis_drift` (rate change since the charge, or cache-heavy billing the
+# cache-free recompute can't see) rather than trusted as a counterfactual base.
+_BASIS_DRIFT_TOLERANCE = 0.25
 
 
 def _default_pricer() -> Callable[[str, int, int], int]:
-    """(pricing_key, input_tokens, output_tokens) -> micro-USD, from the live
-    rate table. Injected so the fold stays pure and unit-testable."""
+    """(pricing_key, input_tokens, output_tokens) -> micro-USD at ONE rate
+    snapshot. Injected so the fold stays pure and unit-testable."""
     from ..pricing import actual_cost_microusd
 
     def _price(pricing_key: str, input_tokens: int, output_tokens: int) -> int:
@@ -55,140 +55,182 @@ def _default_pricer() -> Callable[[str, int, int], int]:
     return _price
 
 
-def _default_pricing_key_for() -> Callable[[str], Optional[str]]:
-    """model alias/id -> pricing_key (or None if unresolvable). Injected."""
+def _default_resolver() -> Callable[[str], Optional[dict]]:
+    """model alias/id -> {'pricing_key', 'bedrock_model_id'} or None. Injected."""
     from ..models import resolve_model
 
-    def _pk(model: str) -> Optional[str]:
+    def _r(model: str) -> Optional[dict]:
         try:
-            return resolve_model(str(model)).pricing_key
+            e = resolve_model(str(model))
+            return {"pricing_key": e.pricing_key, "bedrock_model_id": e.bedrock_model_id}
         except Exception:  # noqa: BLE001 — unknown/retired model = data gap, not a crash
             return None
-    return _pk
+    return _r
 
 
 def counterfactual_row(
     row: dict,
     *,
     price: Optional[Callable[[str, int, int], int]] = None,
-    pricing_key_for: Optional[Callable[[str], Optional[str]]] = None,
+    resolve: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> dict[str, Any]:
-    """Per-request counterfactual saving from ONE reconcile-join row.
+    """Per-request model-vs-model counterfactual from ONE reconcile-join row.
 
-    Returns a dict with a `class` field partitioning every VSR-acted request into
-    a small, exhaustive set so the summary can never silently drop one:
-
-      * "no_suggestion"  — the VSR steered nothing (passthrough/timeout): 0, out
-        of the savings base.
-      * "unmatched"      — no billed usage row: cannot price, counted as coverage
-        gap, contributes 0.
-      * "no_tokens"      — matched but the usage row lacks token counts: data gap.
-      * "unpriceable"    — suggested model does not resolve to a pricing key: gap.
-      * "followed"       — the billed model already IS the suggested model, so the
-        saving is already REALISED in the billed cost; counterfactual delta 0 (we
-        do not double-count a saving the ledger already reflects).
-      * "counterfactual" — the billed model differs from the suggestion; savings =
-        billed_microusd - cost_if_suggested (may be negative = escalation loss).
+    Exhaustive, mutually-exclusive `class`:
+      * no_suggestion — VSR steered nothing (out of base).
+      * unmatched     — no billed usage row (coverage gap).
+      * no_cost       — matched but no billed cost recorded (cannot cross-check).
+      * no_tokens     — matched, cost present, but token counts missing/zero.
+      * unpriceable   — suggested OR billed model has no pricing key (data gap).
+      * followed      — billed model IS the suggested model (same bedrock id):
+                        saving already realised in the bill, delta 0.
+      * basis_drift   — recomputed billed diverges from the actual charge beyond
+                        tolerance (rate change / cache-heavy bill) — EXCLUDED from
+                        savings so a stale/asymmetric basis never inflates it.
+      * counterfactual— priced both models at one snapshot; saving =
+                        recompute(billed) − recompute(suggested) (signed).
     """
     price = price or _default_pricer()
-    pricing_key_for = pricing_key_for or _default_pricing_key_for()
+    resolve = resolve or _default_resolver()
 
     decision = str(row.get("vsr_decision") or "")
     suggested = row.get("suggested_model")
+    billed_model = row.get("billed_model_id")
     out: dict[str, Any] = {
         "tenant_id": row.get("tenant_id"),
         "span_id": row.get("span_id"),
         "vsr_decision": decision,
         "suggested_model": suggested,
-        "billed_model_id": row.get("billed_model_id"),
+        "billed_model_id": billed_model,
         "billed_microusd": row.get("cost_microusd"),
-        "counterfactual_microusd": None,
+        "recompute_billed_microusd": None,
+        "recompute_suggested_microusd": None,
         "saving_microusd": 0,
         "class": None,
     }
+
+    def _fin(cls: str) -> dict:
+        out["class"] = cls
+        return out
+
     if decision not in _STEERING_DECISIONS or not suggested:
-        out["class"] = "no_suggestion"
-        return out
+        return _fin("no_suggestion")
     if not row.get("matched"):
-        out["class"] = "unmatched"
-        return out
-    tin = row.get("input_tokens")
-    tout = row.get("output_tokens")
-    if tin is None or tout is None:
-        out["class"] = "no_tokens"
-        return out
-    billed = int(row.get("cost_microusd") or 0)
-    billed_model = str(row.get("billed_model_id") or "")
-    sug_pk = pricing_key_for(str(suggested))
-    if sug_pk is None:
-        out["class"] = "unpriceable"
-        return out
-    # If the billed model already resolves to the suggested model's pricing key,
-    # the suggestion was followed — the saving is in the billed cost already.
-    billed_pk = pricing_key_for(billed_model) if billed_model else None
-    if billed_pk is not None and billed_pk == sug_pk:
-        out["class"] = "followed"
-        out["counterfactual_microusd"] = billed
-        return out
-    cf = int(price(sug_pk, int(tin), int(tout)))
-    out["counterfactual_microusd"] = cf
-    out["saving_microusd"] = billed - cf   # positive = VSR would have saved; negative = escalation loss
-    out["class"] = "counterfactual"
-    return out
+        return _fin("unmatched")
+    if row.get("cost_microusd") is None:
+        return _fin("no_cost")               # (Fable b) no billed cost -> not a fake loss
+    tin, tout = row.get("input_tokens"), row.get("output_tokens")
+    if tin is None or tout is None or (int(tin) == 0 and int(tout) == 0):
+        return _fin("no_tokens")
+    if not billed_model:
+        return _fin("unpriceable")
+
+    sug = resolve(str(suggested))
+    bil = resolve(str(billed_model))
+    if sug is None or bil is None:
+        return _fin("unpriceable")
+
+    # (Fable 2) followed = SAME bedrock model id, not merely same pricing key.
+    if sug["bedrock_model_id"] == bil["bedrock_model_id"]:
+        return _fin("followed")
+
+    tin, tout = int(tin), int(tout)
+    recompute_billed = int(price(bil["pricing_key"], tin, tout))
+    recompute_sug = int(price(sug["pricing_key"], tin, tout))
+    out["recompute_billed_microusd"] = recompute_billed
+    out["recompute_suggested_microusd"] = recompute_sug
+
+    # (Fable 1 + 3) cross-check the one-snapshot recompute of the BILLED model
+    # against the ACTUAL charge. A large gap means the charge used a different
+    # rate version or cache-heavy pricing this cache-free recompute cannot see;
+    # its saving basis is untrustworthy -> exclude (never inflate silently).
+    actual = int(row.get("cost_microusd"))
+    if actual > 0:
+        drift = abs(recompute_billed - actual) / actual
+        if drift > _BASIS_DRIFT_TOLERANCE:
+            out["basis_drift_fraction"] = round(drift, 4)
+            return _fin("basis_drift")
+
+    # model-vs-model at ONE snapshot, SAME tokens -> apples-to-apples, signed.
+    out["saving_microusd"] = recompute_billed - recompute_sug
+    return _fin("counterfactual")
 
 
-def summarize_savings(rows: list[dict], *, price=None, pricing_key_for=None) -> dict[str, Any]:
+def summarize_savings(rows: list[dict], *, price=None, resolve=None) -> dict[str, Any]:
     """Fold reconcile-join rows into a Savings Certificate summary. Every counter
-    is exact and every exclusion is named (no fabricated totals). `gross_saving`
-    sums only the POSITIVE counterfactual deltas; `escalation_loss` sums the
-    NEGATIVE ones (as a positive magnitude); `net_saving = gross - escalation` is
-    the headline honest number. Coverage fields make the base explicit."""
-    classes: dict[str, int] = {}
-    gross = 0            # Σ positive savings (VSR would have been cheaper)
-    escalation_loss = 0  # Σ |negative savings| (VSR-suggested-cheap then escalated dearer)
-    net = 0              # gross - escalation_loss (== Σ all counterfactual deltas)
-    billed_base = 0      # Σ billed cost over the priced counterfactual base
-    priced = 0           # rows that produced a real counterfactual delta
+    is exact and every exclusion is named with BOTH its count AND its billed
+    micro-USD (Fable 5: a count-only class hides how much spend it represents).
+
+    Headline is `net_saving_microusd` at top level; the gross/loss decomposition
+    is nested under `decomposition` with deliberately un-promotable names (Fable
+    4), so a report cannot cherry-pick the gross figure. `net` can be negative."""
+    class_counts: dict[str, int] = {}
+    class_billed: dict[str, int] = {}     # billed micro-USD per class (matched only)
+    positive = 0     # Σ positive deltas (VSR would have been cheaper)
+    negative = 0     # Σ |negative deltas| (VSR-advised route dearer than billed)
+    net = 0
+    billed_base = 0  # Σ actual billed over the priced (counterfactual) base
+    priced = 0
+    seen: set[tuple] = set()             # (Fable c) span-level dedup
     detail: list[dict] = []
     for r in rows:
-        cr = counterfactual_row(r, price=price, pricing_key_for=pricing_key_for)
-        classes[cr["class"]] = classes.get(cr["class"], 0) + 1
-        if cr["class"] == "counterfactual":
+        key = (r.get("tenant_id"), r.get("span_id"))
+        if key in seen:
+            _bump(class_counts, "duplicate")
+            continue
+        seen.add(key)
+        cr = counterfactual_row(r, price=price, resolve=resolve)
+        cls = cr["class"]
+        _bump(class_counts, cls)
+        if r.get("cost_microusd") is not None:
+            class_billed[cls] = class_billed.get(cls, 0) + int(r.get("cost_microusd"))
+        if cls == "counterfactual":
             s = int(cr["saving_microusd"])
             net += s
             if s >= 0:
-                gross += s
+                positive += s
             else:
-                escalation_loss += -s
+                negative += -s
             billed_base += int(cr.get("billed_microusd") or 0)
             priced += 1
             detail.append(cr)
+    # (Fable 4) audit-sort detail by |saving| desc so a large item never falls
+    # off the truncation tail.
+    detail.sort(key=lambda d: abs(int(d.get("saving_microusd") or 0)), reverse=True)
+    total_billed = sum(class_billed.values())
     return {
+        "net_saving_microusd": net,                 # headline, top-level, can be negative
         "priced_request_count": priced,
-        "billed_microusd_over_base": billed_base,
-        "gross_saving_microusd": gross,
-        "escalation_loss_microusd": escalation_loss,
-        "net_saving_microusd": net,
-        # honest coverage: every VSR-acted request lands in exactly one class.
-        "class_counts": classes,
-        # quality is NOT computed here — a saving is only CLAIMABLE once the
-        # tenant-defined eval / VSR quality signal fills this. Kept explicit so a
-        # certificate can never imply quality parity it did not measure.
+        "billed_microusd_over_priced_base": billed_base,
+        "total_billed_microusd_all_classes": total_billed,   # honest denominator
+        "decomposition": {
+            "positive_deltas_microusd": positive,   # NOT "gross saving" (un-promotable)
+            "negative_deltas_microusd": negative,   # dearer-if-followed magnitude
+        },
+        "class_counts": class_counts,
+        "class_billed_microusd": class_billed,       # (Fable 5) spend per class
         "quality": {"measured": False, "note": "fill from tenant eval + VSR quality signal"},
         "detail": detail[:200],
     }
 
 
+def _bump(d: dict, k: str) -> None:
+    d[k] = d.get(k, 0) + 1
+
+
 def savings_certificate(*, tenant_id: str, day: str) -> dict[str, Any]:
-    """Assemble a (tenant, day) Savings Certificate: join the VSR decision log
-    against billed usage (`vsr_reconcile.reconcile_day`, which now carries the
-    billed token counts), then fold the counterfactual savings. INTERNAL ops path
-    — same posture as `vsr_reconcile` (reads DynamoDB directly, no request-path,
-    no new table). Returns {tenant_id, day, savings, reconcile} so a caller can
-    show both the money-side saving and the enforcement/coverage context."""
+    """Assemble a (tenant, day) Savings Certificate: join VSR decisions against
+    billed usage (`vsr_reconcile.reconcile_day`, which carries billed tokens),
+    then fold the model-vs-model counterfactual. Stamps the rate-table version
+    used so a re-run reproduces the number (Fable 1 reproducibility). INTERNAL ops
+    path — same posture as vsr_reconcile (reads DynamoDB directly, no request
+    path, no new table)."""
     from . import vsr_reconcile as vr
+    from ..pricing import effective_rates
 
     report = vr.reconcile_day(tenant_id=tenant_id, day=day)
     savings = summarize_savings(report["rows"])
-    return {"tenant_id": tenant_id, "day": day, "savings": savings,
-            "reconcile": report["summary"]}
+    rate_version, _, _ = effective_rates()
+    return {"tenant_id": tenant_id, "day": day,
+            "rate_version": rate_version or "builtin-defaults",
+            "savings": savings, "reconcile": report["summary"]}
