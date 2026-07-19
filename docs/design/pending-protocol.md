@@ -60,6 +60,80 @@ axiom A2, still requiring a ConditionExpression on each. The formal model
 What remains is NOT code — it is the live per-tenant canary flip, gated on the
 observation windows in "Still to measure" below.
 
+### MEASURED 2026-07-20: marker-in-the-hot-item is REJECTED (item-growth blowup)
+
+The step-0c spike (`bench/ledger-latency/bench_marker_shard_spike.py`) measured
+the production-faithful marker commit on live DynamoDB (a verification env,
+on-demand table),
+sharded N=1/2/4/8, 3000 sequential + 3000 concurrent @ c=16.
+
+**Measured facts** (errors=0 throughout):
+
+| shard N | floor(c=1) p99 | c16 p50 | c16 p99 | throttle retries |
+|---|---|---|---|---|
+| 1 | 185 ms | 399 ms | 27,285 ms | 122 |
+| 2 | 74 ms | 182 ms | 25,720 ms | 38 |
+| 4 | 67 ms | 75 ms | 25,647 ms | 23 |
+| 8 | 64 ms | 67 ms | 6,413 ms | 3 |
+
+For contrast, step-0b's marker-FREE single `UpdateItem` was floor p99 = 8.6 ms,
+c16 p99 = 88 ms.
+
+**Discriminating experiment (zero new runs, from the shard1 floor CSV):** the
+c=1 (no concurrency) latency rises MONOTONICALLY across the run — mean by quintile
+10.6 → 31.4 → 51.9 → 72.4 → 92.9 ms. With no concurrency this cannot be
+throttling or a cold partition; it is **`applied` map growth**. Each reserve adds
+a marker to the SINGLE pool item; DynamoDB's write WCU is proportional to the
+POST-update item size, so as the map grows to hundreds of KB, every 1-byte debit
+costs ~150 WCU and the c=1 path alone approaches the ~1000 WCU/s single-partition
+ceiling. This is a **positive feedback that degrades super-linearly with load** —
+the harder the hot tenant is used, the faster its pool item bloats. Sharding only
+divides the growth rate by N; it does not remove it.
+
+**What this table CAN and CANNOT be used for (the honest boundary):** it rejects
+the *marker-in-the-hot-item placement*, NOT the marker CONCEPT and NOT the 50 ms
+target. The c16 p99 figures are additionally NOT a clean server metric — they mix
+backoff accumulation, possible boto3 internal retries, and a 16-thread client
+against boto3's default 10-connection pool (client-side queueing). They are a
+symptom of the design flaw, not a number to tune against.
+
+**Corrected design (next PR, PR-1): marker in a SEPARATE item via
+`TransactWriteItems`.** Pool conditional debit + a `PK=hold_id` marker item Put
+(`attribute_not_exists`) in ONE transaction. Atomicity preserved; the marker item
+is FIXED-SIZE (no map growth), lives on its own partition, and O(1) per operation
+regardless of table size. Cost ~2 WCU/item + the transaction tax (warm p50 ≈
+10–20 ms — within the p50 target), predictable instead of "fast then dies". This
+supersedes the shipped marker-in-pool-item `pool_reserve_update` /
+`pool_credit_back`. Confirmed with Fable; the exact PR-1 scope:
+
+1. `reserve` → `TransactWriteItems([pool conditional debit, marker Put(PK=hold_id,
+   attribute_not_exists)])`.
+2. **`CancellationReasons` branch (mandatory, else idempotency looks broken):** on
+   `TransactionCanceledException`, inspect which item failed — marker-side CCF ⇒
+   already applied ⇒ return SUCCESS (idempotent); pool-side CCF ⇒ insufficient
+   budget ⇒ reject (402).
+3. **TTL race fix:** do NOT put a TTL at marker creation (an active hold's marker
+   must never expire and let a retry pass `attribute_not_exists` → double-debit).
+   Write `ttl = now + reconcile-window + 7d` only at the settle/void terminal
+   transition. TTL is cleanup, never the correctness basis.
+4. terminal hold-row reaper via the same TTL-stamp discipline; ALL deletion timers
+   derive from one shared "reconcile-window + margin" constant.
+5. metrics: pool item size (must stay flat), `TransactionConflict`/`Canceled`
+   counts, SDK retry count.
+6. re-benchmark at **2× provisioned WCU** (TransactWrite is 2× consuming, so equal
+   provisioning would re-introduce throttle and dirty the measurement); FIRST
+   prove `c=1 × 3000` latency is FLAT (Q1 ≈ Q5 — the direct proof the growth bug
+   is gone), THEN the concurrency/shard sweep.
+7. today's cheap groundwork (does NOT wait for PR-2): enable PITR on the ledger /
+   decision tables, and stamp a UTC `event_day` attribute on new writes (the
+   future Parquet partition key — back-filling it later is painful).
+
+**Key-design note (why this bites here).** All of a tenant's pool + holds + (the
+mistaken) markers share ONE partition key (`tenant_id`), so a single hot tenant is
+bounded by one partition's ~1000 WCU/s AND any per-item bloat lands on that same
+partition. The separate-item marker keyed by `hold_id` moves that heat off the
+tenant partition.
+
 The whole design derives mechanically from ONE decision, fixed first: **when it is
 uncertain whether the pool was debited, never credit it back.** Crediting an
 un-debited hold is oversell (unrecoverable, customer-visible over-admission); not
@@ -270,4 +344,29 @@ Carried from the spike review: SDK-level throttle/retry visibility (CloudWatch
 open-loop (arrival-rate) load at target writes/s to avoid coordinated-omission
 bias; read+write mixed load on the hot row; the pool-counter shard-N sweep
 (N=2/4/8 × c=16/64) with near-exhaustion condition-fail behaviour; the sweeper
-running concurrently under load.
+running concurrently under load. Superseded in part by the 2026-07-20 finding:
+the separate-item marker (TransactWriteItems) must be A/B'd against the rejected
+in-pool-item marker under warm/provisioned conditions BEFORE any target claim.
+
+## Data lifecycle / DynamoDB → S3 tiering (accumulation is a first-class concern)
+
+The item-growth blowup above is the acute form of a general truth: **unbounded
+per-tenant accumulation on a single partition degrades both cost and latency.**
+Two distinct layers, do not conflate:
+
+1. **Hot-path state (pool item).** NOT solvable by tiering — a hot item must stay
+   small and O(1). The fix is structural (separate-item marker, above), plus the
+   existing reaper/reconciler that DELETE terminal hold rows so they never
+   accumulate. Terminal `RECLAIMED`/`FAILED` rows should carry a short native TTL
+   as a backstop.
+2. **History (ledger events, decision log, usage logs, terminal audit).** These
+   grow forever by design (audit) and DO want tiering: keep the last N days hot in
+   DynamoDB for reconcile/certificate reads, then **export older partitions to S3
+   (Parquet) and read them via Athena**. `usage_logs` already carries a `ttl`
+   attribute; the ledger/decision tables do not and would bloat their tenant
+   partitions indefinitely. A scheduled exporter (DynamoDB PITR export to S3, or a
+   Streams→Firehose→S3 sink) + a TTL on the hot copy is the standard shape. The
+   Savings Certificate / VSR reconcile must then read hot-DDB for recent days and
+   S3/Athena for older ones behind the same `reconcile_day` interface. This is a
+   prerequisite for running the certificate over long windows without the read
+   cost climbing with tenant age.
