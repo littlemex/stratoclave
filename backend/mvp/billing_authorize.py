@@ -322,7 +322,7 @@ def capture(
     # SECURITY (C-1): confirm this token names an EXTERNAL authorization before
     # ANY terminal read or state change — an inline LLM hold's (forgeable) token
     # must 404 on every path, never be captured or have its state mapped.
-    _require_external(tenant_id, period, hold_id)
+    _require_external(tenant_id, period, hold_id, hold_sk)
     try:
         ctx = _pipeline.rehydrate_reservation_context(
             tenant_id=tenant_id, period=period, hold_id=hold_id, hold_sk=hold_sk
@@ -457,7 +457,7 @@ def void(
     _ = request  # the rate limiter reads it from the signature
     hold_id, period, hold_sk = decode_authorization_id(authorization_id)
     tenant_id = user.org_id
-    _require_external(tenant_id, period, hold_id)  # C-1: external-only
+    _require_external(tenant_id, period, hold_id, hold_sk)  # C-1: external-only
     try:
         ctx = _pipeline.rehydrate_reservation_context(
             tenant_id=tenant_id, period=period, hold_id=hold_id, hold_sk=hold_sk
@@ -497,20 +497,23 @@ def get_authorization(
     budgets = TenantBudgetsRepository()
     ledger = CreditLedgerRepository()
 
-    reserve_evt = ledger.get_reserve(tenant_id=tenant_id, period=period, hold_id=hold_id)
-    # SECURITY (C-1): a token is only an external authorization if its RESERVE
-    # event was minted by this API (source=external). An inline LLM hold's token
-    # (forgeable, same sk shape) must 404 here too, never expose its state.
-    if reserve_evt is None or reserve_evt.get("source") != "external":
-        raise HTTPException(status_code=404, detail="authorization not found")
-    amount = int(reserve_evt.get("reserved_delta_microusd", 0))
+    # SECURITY (C-1): HOLD-first external check (docs/design/pending-protocol.md).
+    # The PENDING protocol writes no synchronous RESERVE event, so the gate reads
+    # the HOLD's own `source` when present, falling back to the RESERVE event only
+    # for a legacy transaction-mode hold. An inline/forged token 404s on both.
+    _require_external(tenant_id, period, hold_id, hold_sk)
 
     hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
+    # Amount source of truth: the HOLD row (PENDING protocol) if present, else the
+    # RESERVE event (legacy). Terminal branches below read the terminal's amount.
+    reserve_evt = ledger.get_reserve(tenant_id=tenant_id, period=period, hold_id=hold_id)
     if hold is not None:
+        amount = int(hold.get("amount_microusd", 0))
         return AuthorizationStatus(
             authorization_id=authorization_id, tenant_id=tenant_id,
             amount_microusd=amount, status="authorized",
         )
+    amount = int((reserve_evt or {}).get("reserved_delta_microusd", 0))
     terminal = ledger.get_terminal(tenant_id=tenant_id, period=period, hold_id=hold_id)
     et = (terminal or {}).get("event_type")
     if et == "SETTLE":
@@ -542,12 +545,28 @@ def get_authorization(
 # ---------------------------------------------------------------------------
 
 
-def _require_external(tenant_id: str, period: str, hold_id: str) -> None:
-    """Raise 404 unless the hold's RESERVE event was minted by this API
+def _require_external(tenant_id: str, period: str, hold_id: str,
+                      hold_sk: Optional[str] = None) -> None:
+    """Raise 404 unless this hold was minted by the external authorize API
     (source=external). The single C-1 gate for capture/void — it must run BEFORE
-    any terminal read so an inline hold's token can neither be acted on nor have
-    its state observed. get_reserve is a ConsistentRead so a capture immediately
-    after authorize sees its own RESERVE."""
+    any terminal read so an inline hold's (forgeable) token can neither be acted
+    on nor have its state observed.
+
+    HOLD-FIRST (docs/design/pending-protocol.md): the PENDING protocol does NOT
+    write a synchronous RESERVE ledger event (that is the whole point — the event
+    becomes an async projection), so the gate reads the HOLD row's own `source`
+    when present. It falls back to the RESERVE event only for a legacy
+    transaction-mode hold whose HOLD row carries no `source` (pre-enrichment).
+    Both reads are ConsistentRead so a capture immediately after authorize sees
+    its own write. A missing/non-external source on BOTH → 404, exactly as for a
+    bogus token (fail-closed)."""
+    if hold_sk is not None:
+        hold = TenantBudgetsRepository().get_hold(tenant_id=tenant_id, sk=hold_sk)
+        if hold is not None and "source" in hold:
+            if hold.get("source") != "external":
+                raise HTTPException(status_code=404, detail="authorization not found")
+            return
+    # Legacy fallback: no HOLD-carried source → the RESERVE event is the authority.
     reserve_evt = CreditLedgerRepository().get_reserve(
         tenant_id=tenant_id, period=period, hold_id=hold_id
     )

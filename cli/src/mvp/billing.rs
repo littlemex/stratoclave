@@ -450,4 +450,90 @@ mod tests {
         let res: Result<AuthorizationStatus, _> = serde_json::from_str(leaked);
         assert!(res.is_err());
     }
+
+    // ---- PENDING protocol: replayed=true / new status values ----
+    //
+    // The PENDING protocol (docs/design/pending-protocol.md) can now answer an
+    // idempotent duplicate authorize with `replayed: true` (mvp/_pipeline.py
+    // `_pending_replay_result` / `ExternalAuthorizeResult(replayed=True)`), and
+    // `GET /authorizations/{id}` can report `status` of "authorized",
+    // "captured", "voided", or "expired" (mvp/billing_authorize.py
+    // `get_authorization`). These structs are `deny_unknown_fields`, so any
+    // response shape drift on these new paths breaks the CLI build/test the
+    // same way the existing cross-layer contract gate does.
+
+    #[test]
+    fn authorize_response_replayed_true_shape() {
+        // A duplicate Idempotency-Key replay of an authorize
+        // (billing_authorize.py: `replayed=result.replayed` from
+        // `_pending_replay_result` / `ExternalAuthorizeResult(replayed=True)`).
+        let r: AuthorizeResponse = serde_json::from_str(
+            r#"{"authorization_id":"auth_x","amount_microusd":500000,
+                "expires_at_epoch":123,"status":"authorized","replayed":true}"#,
+        )
+        .unwrap();
+        assert!(r.replayed);
+        assert_eq!(r.status, "authorized");
+    }
+
+    #[test]
+    fn authorize_response_defaults_replayed_false_when_absent() {
+        // `#[serde(default)]` on `replayed`: a legacy/omitted field must not
+        // fail deserialization and must default to false (a fresh, non-replayed
+        // authorize never sends the key at all in some backend versions).
+        let r: AuthorizeResponse = serde_json::from_str(
+            r#"{"authorization_id":"auth_y","amount_microusd":1,
+                "expires_at_epoch":1,"status":"authorized"}"#,
+        )
+        .unwrap();
+        assert!(!r.replayed);
+    }
+
+    #[test]
+    fn authorization_status_all_status_values_deserialize() {
+        // `get_authorization` (billing_authorize.py) reports one of these four
+        // `status` strings depending on the terminal read
+        // (authorized/captured/voided/expired). None of them are constrained by
+        // an enum on the CLI side (status is a plain String), so this pins that
+        // all four round-trip through the typed struct without a deny_unknown_fields
+        // rejection or a parse failure.
+        for (status, extra) in [
+            ("authorized", ""),
+            ("captured", r#","terminal":"SETTLE","captured_microusd":700000"#),
+            ("voided", r#","terminal":"RELEASE""#),
+            ("expired", r#","terminal":"RECLAIM""#),
+        ] {
+            let body = format!(
+                r#"{{"authorization_id":"auth_x","tenant_id":"t","amount_microusd":1000000,
+                    "status":"{status}"{extra}}}"#
+            );
+            let s: AuthorizationStatus = serde_json::from_str(&body)
+                .unwrap_or_else(|e| panic!("status={status} failed to deserialize: {e}"));
+            assert_eq!(s.status, status);
+        }
+    }
+
+    #[test]
+    fn capture_response_shape_unaffected_by_pending_protocol() {
+        // Capture's response shape (`CaptureResponse`) is unchanged by the
+        // PENDING protocol — the new 402/410/503/409 outcomes are HTTP errors
+        // handled by `api::raise_http`, never a 200 body. This test documents
+        // that boundary: a successful capture (terminal=SETTLE) still
+        // deserializes exactly as before.
+        let r: CaptureResponse = serde_json::from_str(
+            r#"{"authorization_id":"auth_x","captured_microusd":300000,"terminal":"SETTLE"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.terminal, "SETTLE");
+        assert_eq!(r.captured_microusd, 300_000);
+    }
+
+    #[test]
+    fn void_response_shape_unaffected_by_pending_protocol() {
+        let r: VoidResponse = serde_json::from_str(
+            r#"{"authorization_id":"auth_x","terminal":"RELEASE"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.terminal, "RELEASE");
+    }
 }

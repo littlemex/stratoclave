@@ -33,6 +33,7 @@ SCANNED_FILES = {
     "backend/mvp/_pipeline.py",
     "backend/dynamo/tenant_budgets.py",
     "backend/dynamo/user_tenants.py",
+    "backend/migrations/backfill_pool_headroom.py",
 }
 
 # Reviewed write sites. Seeded from the current design:
@@ -81,10 +82,57 @@ ALLOWED_SITES = {
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "delete_item"),
     },
     "backend/dynamo/tenant_budgets.py": {
-        # Preserving put: read-then-rewrite that carries the live counters
-        # (structurally verified by check_preserving_put).
+        # set_pool_limit CREATE branch: conditional put_item seeding a brand-new
+        # pool row (attribute_not_exists(tenant_id)). reserved=settled=0 literals
+        # are correct at creation (there is no prior row to preserve), verified by
+        # check_preserving_put's read + constant checks.
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.set_pool_limit", "put_item"),
+        # set_pool_limit UPDATE branches (Fable review finding 3): the ceiling-CAS
+        # (SET pool_limit ADD pool_headroom :delta, guarded pool_limit=:old) and
+        # the legacy-repair (SET pool_headroom = computed, guarded
+        # attribute_not_exists(pool_headroom)). Both READ reserved/settled in
+        # Python to compute a value but their DynamoDB expressions NEVER name the
+        # protected counters — verified structurally by
+        # check_non_mutating_counter_update. A2 governs mutations, not reads, so a
+        # non-transactional update that only moves pool_limit/pool_headroom is
+        # sound. Race-safe: the delta ADD composes with concurrent reserve ADDs.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.set_pool_limit", "update_item"),
+        # reconcile_headroom (Fable review finding 2): value-repairs pool_headroom
+        # to `limit - reserved - settled` under a CAS (attribute_not_exists OR
+        # pool_headroom = :observed). Reads reserved/settled in Python only; its
+        # UpdateExpression SETs pool_headroom (+ updated_at) and NEVER names the
+        # protected counters — check_non_mutating_counter_update enforces that.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.reconcile_headroom", "update_item"),
+        # PENDING protocol (docs/design/pending-protocol.md) — DELIBERATE non-
+        # transactional counter writes whose no-oversell safety is proven by the
+        # PENDING formal model (test_pending_protocol_z3/_stateful: I1' inductive
+        # preservation), NOT by transactional A2. A2 is a SUFFICIENT condition for
+        # no-oversell, not a necessary one. Registered in PENDING_COUNTER_WRITES so
+        # the engine verifies each still carries a ConditionExpression (bare ADD is
+        # never allowed). Inert until STRATOCLAVE_RESERVE_PROTOCOL=pending.
+        #   * pool_reserve_update: step-2 commit — headroom-gated conditional ADD
+        #     + per-hold marker (applied.<hold_id>) written atomically; CCF is
+        #     resolved by ALL_OLD (marker present = idempotent success).
+        #   * pool_credit_back: exactly-once credit-back — REMOVE marker + ADD
+        #     headroom, guarded on attribute_exists(applied.<hold_id>) so a second
+        #     call CCFs (no double credit).
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_reserve_update", "update_item"),
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_credit_back", "update_item"),
+        # PENDING status transitions: single-item conditional SET of `status`
+        # only; NEVER name a pool counter (verified structurally — they are NOT in
+        # COUNTER_FUNCTIONS). Put of a PENDING hold row (no counter, like
+        # hold_put_txn_item's transactional sibling).
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_put_pending", "put_item"),
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository._status_transition", "update_item"),
+        # ensure_applied_map: seeds the `applied` marker map on a legacy pool row
+        # (SET applied = :empty, guarded attribute_not_exists(applied)). Touches
+        # NO protected counter — only the marker map — so it is a plain reviewed
+        # site, not a counter write. Idempotent, race-safe (never clobbers markers).
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.ensure_applied_map", "update_item"),
     },
+    # backend/migrations/backfill_pool_headroom.py makes NO raw write of its own
+    # (see COUNTER_FUNCTIONS note): it backfills by delegating to the reviewed
+    # set_pool_limit preserving put, so it has no write site to allow here.
     "backend/dynamo/user_tenants.py": {
         # These write the per-USER token-balance row (user_id/tenant_id), NOT
         # the pool BUDGET counters. Reviewed: none carry pool_*_microusd.
@@ -105,6 +153,18 @@ PRESERVING_PUTS = {
     "backend/dynamo/tenant_budgets.py": {"TenantBudgetsRepository.set_pool_limit"},
 }
 
+# update_item calls in counter-referencing functions that are allowed BECAUSE
+# their own DynamoDB expressions never name pool_reserved/pool_settled — they
+# read those counters only in Python to compute a non-counter attribute
+# (pool_limit / pool_headroom). check_non_mutating_counter_update enforces the
+# "no protected counter in the call's strings" invariant structurally.
+READONLY_COUNTER_UPDATES = {
+    "backend/dynamo/tenant_budgets.py": {
+        "TenantBudgetsRepository.set_pool_limit",
+        "TenantBudgetsRepository.reconcile_headroom",
+    },
+}
+
 # Only these qualnames may mention pool counter attribute names at all. In
 # tenant_budgets.py the counters appear in the txn-item BUILDERS (pure dict
 # builders — they emit the UpdateExpression the pipeline composes into a
@@ -118,10 +178,27 @@ COUNTER_FUNCTIONS = {
         "TenantBudgetsRepository.reclaim_hold_txn_item",
         "TenantBudgetsRepository.hold_put_txn_item",
         "TenantBudgetsRepository.set_pool_limit",
+        # reconcile_headroom reads the mirrors to recompute the invariant; its
+        # write never names a protected counter (see READONLY_COUNTER_UPDATES).
+        "TenantBudgetsRepository.reconcile_headroom",
         "TenantBudgetsRepository.pool_summary",
+        # PENDING protocol counter writers (docs/design/pending-protocol.md). Both
+        # are non-transactional by design; their no-oversell proof is the PENDING
+        # model, and each is in ALLOWED_SITES + PENDING_COUNTER_WRITES so the engine
+        # verifies a ConditionExpression is present. Reviewed against I1'.
+        "TenantBudgetsRepository.pool_reserve_update",
+        "TenantBudgetsRepository.pool_credit_back",
         "<module>",  # module docstring names the counters
     },
     "backend/dynamo/user_tenants.py": set(),
+    "backend/migrations/backfill_pool_headroom.py": {
+        # The migration reads limit/reserved/settled in _classify to report the
+        # target headroom, and delegates the write to reconcile_headroom (a
+        # reviewed repo method). It makes NO raw counter write of its own.
+        "_classify",
+        "backfill",
+        "<module>",
+    },
     "backend/mvp/_pipeline.py": {
         # counter attrs appear in the settle/settled-only item builders + flow
         "_pool_settle_items",
@@ -136,7 +213,24 @@ COUNTER_FUNCTIONS = {
         "_sweep_one_period",
         "ReservationContext.release_pool",
         "ReservationContext",
+        # PENDING protocol reconciler (docs/design/pending-protocol.md): reads the
+        # pool counter (counter-first) + sums ACTIVE holds to compute drift; the
+        # actual counter mutation is delegated to the reviewed
+        # TenantBudgetsRepository.reconcile_credit_back. No raw counter write here.
+        "reconcile_pool",
         "<module>",
+    },
+}
+
+# Non-transactional counter writes whose no-oversell safety is proven by the
+# PENDING protocol formal model (test_pending_protocol_z3 / _stateful), NOT by
+# transactional axiom A2. The engine still requires each to carry a
+# ConditionExpression (a bare unconditional counter ADD is never allowed). See
+# docs/design/pending-protocol.md and billing_guards.check_pending_counter_write.
+PENDING_COUNTER_WRITES = {
+    "backend/dynamo/tenant_budgets.py": {
+        "TenantBudgetsRepository.pool_reserve_update",     # step-2 commit (headroom-gated)
+        "TenantBudgetsRepository.pool_credit_back",   # cold-path leak recovery (guarded)
     },
 }
 
@@ -184,9 +278,12 @@ EXPECTED_TOKEN_KIND = {
 # builder qualname whose emitted Update/Delete carries them.
 REQUIRED_CONDITIONS = {
     "backend/dynamo/tenant_budgets.py": {
+        # The reserve gate is now a single conditional ADD to pool_headroom
+        # (headroom == limit - reserved - settled), not a snapshot-all-equal CAS.
+        # The proof (test_billing_formal_z3.py::test_headroom_*) relies on the
+        # `pool_headroom_microusd >= amount` condition being present.
         "TenantBudgetsRepository.reserve_txn_item": [
-            "pool_reserved_microusd",   # CAS pins the counter snapshot
-            "pool_settled_microusd",
+            "pool_headroom_microusd",   # the conditional-ADD budget gate
         ],
     },
 }
@@ -194,7 +291,8 @@ REQUIRED_CONDITIONS = {
 BUDGET_TABLE_MARKERS = ("tenant_budgets", "TenantBudgets", "TENANT_BUDGETS_TABLE")
 
 
-def _run(module, source=None, *, allowed=None, preserving=None, counters=None):
+def _run(module, source=None, *, allowed=None, preserving=None, counters=None,
+         readonly_updates=None, pending_writes=None):
     billing_guards.REQUIRED_CONDITIONS = REQUIRED_CONDITIONS
     billing_guards.EXPECTED_TOKEN_KIND = EXPECTED_TOKEN_KIND
     src = source if source is not None else (REPO_ROOT / module).read_text()
@@ -203,6 +301,12 @@ def _run(module, source=None, *, allowed=None, preserving=None, counters=None):
         allowed_sites=ALLOWED_SITES.get(module, set()) if allowed is None else allowed,
         preserving_puts=PRESERVING_PUTS.get(module, set()) if preserving is None else preserving,
         counter_registry=COUNTER_FUNCTIONS.get(module, set()) if counters is None else counters,
+        readonly_counter_updates=(
+            READONLY_COUNTER_UPDATES.get(module, set())
+            if readonly_updates is None else readonly_updates),
+        pending_counter_writes=(
+            PENDING_COUNTER_WRITES.get(module, set())
+            if pending_writes is None else pending_writes),
     )
 
 
@@ -345,3 +449,31 @@ def test_engine_flags_constant_counter_in_preserving_put():
              counters={"TenantBudgets.set_pool_limit"})
     _assert_flagged(v, "pool_reserved_microusd")
     assert any("constant" in x.lower() or "literal" in x.lower() for x in v), v
+
+
+# The readonly-counter-update exception (set_pool_limit / reconcile_headroom)
+# must NOT become a hole: an allow-listed update_item that actually MUTATES a
+# protected counter in its own DynamoDB expression must still be rejected.
+PLANTED_READONLY_UPDATE_THAT_MUTATES = '''
+class TenantBudgets:
+    def set_pool_limit(self, tenant_id, period, limit):
+        row = self.get(tenant_id, period)  # reads reserved/settled
+        self.table.update_item(
+            Key={"pk": tenant_id},
+            UpdateExpression="ADD pool_reserved_microusd :r SET pool_limit_microusd = :l",
+            ExpressionAttributeValues={":r": 1, ":l": limit},
+        )
+'''
+
+
+def test_engine_flags_readonly_update_that_actually_mutates_counter():
+    v = _run("<planted>", PLANTED_READONLY_UPDATE_THAT_MUTATES,
+             allowed={("<planted>", "TenantBudgets.set_pool_limit", "update_item")},
+             preserving=set(),
+             counters={"TenantBudgets.set_pool_limit"},
+             readonly_updates={"TenantBudgets.set_pool_limit"})
+    # even though it's allow-listed as read-only, naming a protected counter in
+    # the UpdateExpression is an A2 regression the guard must catch.
+    _assert_flagged(v, "pool_reserved_microusd")
+    assert any("read-only" in x.lower() or "regression" in x.lower()
+               or "transactional" in x.lower() for x in v), v

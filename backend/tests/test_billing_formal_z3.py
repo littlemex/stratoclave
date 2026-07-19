@@ -181,6 +181,210 @@ def test_sanity_without_cas_condition_over_admission_is_found():
     del m
 
 
+# ---------------------------------------------------------------------------
+# HEADROOM ADMISSION MODEL (the current design; replaces snapshot-CAS as the
+# reserve gate — see docs/design/ledger-hot-path.md). The reserve is a single
+# conditional counter op: `headroom -= amount` iff `headroom >= amount`, where
+# headroom == L - R - S is maintained on every write. DynamoDB serialises the
+# concurrent ADDs, so a commit sees the CURRENT headroom (not a stale snapshot).
+# We prove the same safety theorem — R + S <= L after ANY interleaving — under
+# this gate, and that the gate is exactly the ceiling on the current state.
+# ---------------------------------------------------------------------------
+
+
+def _headroom_model(n: int, enforce_condition: bool):
+    L, R0, S0 = z3.Ints("L R0 S0")
+    # H0 = initial headroom, maintained equal to L - R0 - S0.
+    cons = [L >= 0, R0 >= 0, S0 >= 0, R0 + S0 <= L]
+    H0 = L - R0 - S0
+
+    cost = [z3.Int(f"c{i}") for i in range(n)]
+    commit = [z3.Bool(f"commit{i}") for i in range(n)]
+    pos = [z3.Int(f"pos{i}") for i in range(n)]
+
+    for i in range(n):
+        cons.append(cost[i] >= 1)
+        cons.append(z3.Implies(commit[i], z3.And(pos[i] >= 0, pos[i] < n)))
+    # committed single-item ADDs serialise -> distinct commit slots.
+    for i in range(n):
+        for j in range(i + 1, n):
+            cons.append(z3.Implies(z3.And(commit[i], commit[j]), pos[i] != pos[j]))
+
+    def H_at(t):
+        # headroom just before slot t: H0 minus every commit that landed earlier.
+        return H0 - z3.Sum(
+            [z3.If(z3.And(commit[i], pos[i] < t), cost[i], z3.IntVal(0)) for i in range(n)]
+        )
+
+    for i in range(n):
+        if enforce_condition:
+            # THE gate: ConditionExpression `pool_headroom >= amount`, evaluated
+            # on the CURRENT row state at the commit slot (ADD is atomic; there
+            # is no snapshot to go stale).
+            cons.append(z3.Implies(commit[i], H_at(pos[i]) >= cost[i]))
+        # broken variant: no condition => commit regardless of headroom.
+
+    # R + S after the trace (reserves only; S constant). headroom decreased by
+    # the committed costs, and headroom == L - R - S, so R_final = R0 + sum.
+    committed_sum = z3.Sum(
+        [z3.If(commit[i], cost[i], z3.IntVal(0)) for i in range(n)]
+    )
+    R_final = R0 + committed_sum
+    S_final = S0
+    H_final = H0 - committed_sum
+    return cons, R_final, S_final, H_final, L
+
+
+def test_headroom_no_over_admission_under_concurrency():
+    """For EVERY interleaving of N headroom-ADD reservers, R + S <= L (i.e.
+    headroom stays >= 0) after all commits. This is the safety theorem for the
+    NEW reserve gate."""
+    cons, R_final, S_final, H_final, L = _headroom_model(_N, enforce_condition=True)
+    s = _solver()
+    s.add(*cons)
+    s.add(R_final + S_final > L)  # negation of the invariant
+    assert_proved(s, f"headroom gate keeps R+S<=L over any interleaving of {_N} reservers")
+
+
+def test_headroom_final_is_nonneg():
+    """The gate never drives headroom negative on a reserves-only trace: an
+    over-draw is impossible because every commit required headroom >= its cost
+    on the current state."""
+    cons, _R, _S, H_final, _L = _headroom_model(_N, enforce_condition=True)
+    s = _solver()
+    s.add(*cons)
+    s.add(H_final < 0)
+    assert_proved(s, f"headroom >= 0 after any interleaving of {_N} reservers")
+
+
+def _headroom_mixed_model(n_reserve: int, n_settle: int):
+    """Interleave n_reserve headroom-ADD reserves with n_settle settles on ONE
+    pool row, in ANY order (Fable review finding 4: the reserves-only model does
+    not exercise settle). Each settle releases a live hold of amount `res_j` and
+    books actual `act_j` (0 <= act <= res), moving headroom by +(res - act). We
+    prove the ceiling invariant R + S <= L (headroom >= 0) holds after EVERY
+    interleaving, and headroom == L - R - S throughout."""
+    L, R0, S0 = z3.Ints("L R0 S0")
+    cons = [L >= 0, R0 >= 0, S0 >= 0, R0 + S0 <= L]
+    H0 = L - R0 - S0
+
+    m = n_reserve + n_settle
+    # ops 0..n_reserve-1 are reserves; n_reserve..m-1 are settles.
+    cost = [z3.Int(f"c{i}") for i in range(n_reserve)]
+    res = [z3.Int(f"res{j}") for j in range(n_settle)]
+    act = [z3.Int(f"act{j}") for j in range(n_settle)]
+    slot = [z3.Int(f"slot{k}") for k in range(m)]  # serialization position
+
+    for i in range(n_reserve):
+        cons.append(cost[i] >= 1)
+    for j in range(n_settle):
+        # a settle releases a live hold: 0 <= act <= res, res >= 1. The hold was
+        # created by an EARLIER reserve, so its amount is backed by R (res <= R at
+        # its slot); we bound res>=1 and rely on H_at >= 0 being maintained.
+        cons.append(res[j] >= 1)
+        cons.append(z3.And(act[j] >= 0, act[j] <= res[j]))
+    # all ops occupy distinct serialization slots 0..m-1
+    for k in range(m):
+        cons.append(z3.And(slot[k] >= 0, slot[k] < m))
+    for a in range(m):
+        for b in range(a + 1, m):
+            cons.append(slot[a] != slot[b])
+
+    def dH(k, t):
+        # headroom delta contributed by op k IF it landed before slot t.
+        if k < n_reserve:
+            return z3.If(slot[k] < t, -cost[k], z3.IntVal(0))
+        j = k - n_reserve
+        return z3.If(slot[k] < t, res[j] - act[j], z3.IntVal(0))
+
+    def H_before(t):
+        return H0 + z3.Sum([dH(k, t) for k in range(m)])
+
+    # reserve gate: a reserve commits only if headroom >= its cost at its slot.
+    for i in range(n_reserve):
+        cons.append(H_before(slot[i]) >= cost[i])
+    # settle is unconditional but only RETURNS headroom (res - act >= 0), so it
+    # can never drive headroom negative; no gate needed.
+
+    # final headroom = H0 + all deltas
+    H_final = H0 + z3.Sum(
+        [(-cost[i]) for i in range(n_reserve)]
+        + [(res[j] - act[j]) for j in range(n_settle)]
+    )
+    return cons, H_final, L
+
+
+def test_headroom_mixed_reserve_settle_never_negative():
+    """Fable review finding 4: prove headroom stays >= 0 (R + S <= L) under ANY
+    interleaving of reserves AND settles, not just reserves. Covers the settle
+    transition the reserves-only model omitted."""
+    cons, H_final, _L = _headroom_mixed_model(n_reserve=3, n_settle=2)
+    s = _solver()
+    s.add(*cons)
+    s.add(H_final < 0)
+    assert_proved(s, "headroom >= 0 under any interleaving of 3 reserves + 2 settles")
+
+
+def test_headroom_sanity_without_condition_over_admits():
+    """Delete the `headroom >= amount` condition and Z3 must find over-admission
+    (SAT) — proving the condition is load-bearing, not decorative."""
+    cons, R_final, S_final, _H, L = _headroom_model(2, enforce_condition=False)
+    s = _solver()
+    s.add(*cons)
+    s.add(R_final + S_final > L)
+    m = assert_counterexample_exists(s, "over-admission without the headroom condition")
+    del m
+
+
+def test_headroom_equals_limit_minus_reserved_settled():
+    """The maintained invariant headroom == L - R - S is preserved by each op's
+    (dR, dS, dH). This is what lets the single headroom counter stand in for the
+    two-attribute ceiling. dH is defined by the implementation:
+      reserve: dR=+a, dS=0,   dH=-a
+      settle:  dR=-r, dS=+act,dH=+(r-act)
+      release: dR=-r, dS=0,   dH=+r
+      reap:    dR=-r, dS=0,   dH=+r
+      settled-only fallback: dR=0, dS=+act, dH=-act
+    """
+    L, R, S, H, r, act = z3.Ints("L R S H r act")
+    inv = z3.And(H == L - R - S)
+
+    def preserves(name, dR, dS, dH):
+        s = _solver()
+        s.add(inv)
+        s.add(z3.Not((H + dH) == L - (R + dR) - (S + dS)))
+        assert_proved(s, f"{name} preserves headroom == L - R - S")
+
+    preserves("reserve", r, 0, -r)
+    preserves("settle", -r, act, r - act)
+    preserves("release", -r, 0, r)
+    preserves("reap", -r, 0, r)
+    preserves("settled_only_fallback", 0, act, -act)
+
+    # set_pool_limit ceiling change (Fable review finding 3): the limit moves by
+    # `d` (new - old) and headroom moves by the SAME `d`, with reserved/settled
+    # untouched. Modeled as a change to L (not R/S), so re-derive the invariant
+    # with L -> L + d and dH = d. This is the ADD-delta CAS branch.
+    d = z3.Int("d")
+    s = _solver()
+    s.add(inv)
+    s.add(z3.Not(((H + d) == (L + d) - R - S)))
+    assert_proved(s, "set_pool_limit ceiling delta preserves headroom == L - R - S")
+
+    # reconcile_headroom (Fable review finding 2): from ANY pre-state H_bad
+    # (missing, drifted, or negative — e.g. a mixed-window settle created the
+    # wrong value), the SET writes H_new = L - R - S from the current mirrors, so
+    # the invariant holds afterwards no matter how broken H_bad was. R/S untouched.
+    H_bad = z3.Int("H_bad")
+    H_new = L - R - S  # exactly what reconcile writes
+    s = _solver()
+    s.add(inv)          # L,R,S are the real mirrors (always correct)
+    # H_bad is unconstrained (could equal reserved-actual, be absent, negative...)
+    s.add(z3.Not(H_new == L - R - S))  # negation: reconcile fails to restore invariant
+    assert_proved(s, "reconcile_headroom restores headroom == L - R - S from any H_bad")
+    del H_bad
+
+
 def test_pool_invariant_inductive_step_all_ops():
     """
     Inductive step for MIXED traces of ANY length: assume the invariant

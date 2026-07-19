@@ -164,3 +164,115 @@ def test_context_delegates_refund_to_repo(seed_tenant_with_pool):
     ctx.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=4000)
     after = ctx.remaining_credit(user.user_id, user.org_id)
     assert after == before + 4000
+
+
+# ---------------------------------------------------------------------------
+# Headroom counter (hot-path design, docs/design/ledger-hot-path.md).
+# ---------------------------------------------------------------------------
+
+
+def test_headroom_initialized_and_maintained(seed_tenant_with_pool):
+    """set_pool_limit seeds pool_headroom = limit; a reserve decrements it; a
+    settle returns the (reserved - actual) net — headroom == limit - reserved -
+    settled holds throughout."""
+    seed = seed_tenant_with_pool
+    user = _user(seed)
+    p0 = _pool(seed)
+    assert p0["pool_headroom_microusd"] == 5_000_000  # == limit at seed
+
+    ctx = reserve_credit(user, 1000, pricing_key="opus", cost_microusd=1_000_000)
+    p1 = _pool(seed)
+    assert p1["pool_headroom_microusd"] == 4_000_000
+    assert p1["pool_headroom_microusd"] == (
+        p1["pool_limit_microusd"] - p1["pool_reserved_microusd"] - p1["pool_settled_microusd"]
+    )
+
+    settle_reservation_and_log(
+        user=user, tenants_repo=ctx, reservation=1000,
+        actual_input_tokens=200, actual_output_tokens=100,
+        model_id="us.anthropic.claude-opus-4-7", context=ctx,
+        actual_cost_microusd=600_000,
+    )
+    p2 = _pool(seed)
+    # settle returns net (reserved - actual) = 1_000_000 - 600_000 = +400_000 to
+    # the headroom that the reserve had taken down to 4_000_000 => 4_400_000
+    # (equivalently limit 5M - reserved 0 - settled 600_000).
+    assert p2["pool_reserved_microusd"] == 0
+    assert p2["pool_settled_microusd"] == 600_000
+    assert p2["pool_headroom_microusd"] == 4_400_000
+    assert p2["pool_headroom_microusd"] == (
+        p2["pool_limit_microusd"] - p2["pool_reserved_microusd"] - p2["pool_settled_microusd"]
+    )
+
+
+def test_headroom_exhaustion_is_402_not_a_retry(seed_tenant_with_pool):
+    """A reserve that would drive headroom negative is a clean 402 (genuine
+    exhaustion), and headroom is left untouched — not a lost race that retried."""
+    seed = seed_tenant_with_pool
+    user = _user(seed)
+    reserve_credit(user, 1000, pricing_key="opus", cost_microusd=5_000_000)  # exact fill
+    assert _pool(seed)["pool_headroom_microusd"] == 0
+    with pytest.raises(HTTPException) as exc:
+        reserve_credit(user, 1000, pricing_key="opus", cost_microusd=1)
+    assert exc.value.status_code == 402
+    assert _pool(seed)["pool_headroom_microusd"] == 0  # unchanged
+
+
+def test_many_reserves_all_succeed_within_headroom(seed_tenant_with_pool):
+    """The design's core property: every reserve that fits in headroom commits —
+    there is no spurious contention failure, only genuine 402 on exhaustion.
+    (True parallelism is exercised in the live benchmark; moto is not
+    thread-safe, so this drives the same many-reserves-one-row path serially and
+    asserts none is falsely rejected and the counters stay exact.) 50 reserves of
+    $0.01 against a $5 pool all commit; headroom lands exact."""
+    seed = seed_tenant_with_pool
+    user = _user(seed)
+    n = 50
+    amt = 10_000  # $0.01 each => 50 * $0.01 = $0.50, well within $5
+
+    ok = 0
+    for _ in range(n):
+        try:
+            reserve_credit(user, 1, pricing_key="opus", cost_microusd=amt)
+            ok += 1
+        except HTTPException:
+            pass
+
+    assert ok == n, "every reserve within headroom must succeed (no false rejection)"
+    p = _pool(seed)
+    assert p["pool_reserved_microusd"] == n * amt
+    assert p["pool_headroom_microusd"] == 5_000_000 - n * amt
+
+
+def test_set_pool_limit_shifts_headroom_by_delta_not_clobber(seed_tenant_with_pool):
+    """Fable review finding 3: changing the ceiling mid-period must shift headroom
+    by the ceiling DELTA and preserve reserved/settled — never rewrite headroom
+    from a stale read (which would drop a concurrent reserve's move). Raising 5M
+    -> 8M after a 1M reserve leaves headroom 4M -> 7M and reserved at 1M; lowering
+    below reserved drives headroom negative (refuses admission)."""
+    seed = seed_tenant_with_pool
+    tid, period = seed["tenant_id"], seed["period"]
+    repo = TenantBudgetsRepository()
+    user = _user(seed)
+
+    reserve_credit(user, 1000, pricing_key="opus", cost_microusd=1_000_000)
+    assert _pool(seed)["pool_headroom_microusd"] == 4_000_000
+
+    # RAISE 5M -> 8M: headroom shifts +3M to 7M, reserved untouched.
+    repo.set_pool_limit(tenant_id=tid, period=period, pool_limit_microusd=8_000_000)
+    p = _pool(seed)
+    assert p["pool_limit_microusd"] == 8_000_000
+    assert p["pool_reserved_microusd"] == 1_000_000
+    assert p["pool_headroom_microusd"] == 7_000_000
+
+    # LOWER 8M -> 0.5M (below the 1M reserved): headroom goes negative, remaining
+    # clamps to 0, and a new reserve is refused (402) — no over-admission.
+    repo.set_pool_limit(tenant_id=tid, period=period, pool_limit_microusd=500_000)
+    p = _pool(seed)
+    assert p["pool_reserved_microusd"] == 1_000_000  # still preserved
+    raw = repo.get(tid, period)
+    assert int(raw["pool_headroom_microusd"]) == -500_000
+    assert p["remaining_microusd"] == 0
+    with pytest.raises(HTTPException) as exc:
+        reserve_credit(user, 1, pricing_key="opus", cost_microusd=1)
+    assert exc.value.status_code == 402

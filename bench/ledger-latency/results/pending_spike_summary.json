@@ -1,0 +1,113 @@
+{
+  "metric": "ledger_pending_spike",
+  "tenant": "pending-1784472513",
+  "period": "2026-07",
+  "by_mode": {
+    "single_update": {
+      "floor_c1": {
+        "count": 3000,
+        "p50": 5.477,
+        "p90": 5.947,
+        "p99": 8.578,
+        "p99_9": 30.361,
+        "max": 91.722,
+        "min": 4.869,
+        "mean": 5.659,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "conditional_check_failed": 0,
+          "total_retries": 0,
+          "error_codes": {}
+        }
+      },
+      "c16": {
+        "count": 3000,
+        "p50": 21.869,
+        "p90": 46.725,
+        "p99": 87.745,
+        "p99_9": 491.092,
+        "max": 513.357,
+        "min": 5.139,
+        "mean": 27.659,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "conditional_check_failed": 0,
+          "total_retries": 0,
+          "error_codes": {}
+        }
+      },
+      "c64": {
+        "count": 3000,
+        "p50": 73.414,
+        "p90": 161.885,
+        "p99": 621.783,
+        "p99_9": 816.1,
+        "max": 924.899,
+        "min": 5.853,
+        "mean": 93.566,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "conditional_check_failed": 0,
+          "total_retries": 0,
+          "error_codes": {}
+        }
+      }
+    },
+    "pending_e2e": {
+      "floor_c1": {
+        "count": 3000,
+        "p50": 16.797,
+        "p90": 19.088,
+        "p99": 32.057,
+        "p99_9": 224.871,
+        "max": 232.281,
+        "min": 15.026,
+        "mean": 17.814,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "conditional_check_failed": 0,
+          "total_retries": 0,
+          "error_codes": {}
+        }
+      },
+      "c16": {
+        "count": 3000,
+        "p50": 72.352,
+        "p90": 114.46,
+        "p99": 168.167,
+        "p99_9": 302.621,
+        "max": 322.918,
+        "min": 20.245,
+        "mean": 77.488,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "conditional_check_failed": 0,
+          "total_retries": 0,
+          "error_codes": {}
+        }
+      },
+      "c64": {
+        "count": 3000,
+        "p50": 68.007,
+        "p90": 332.914,
+        "p99": 1341.04,
+        "p99_9": 1690.166,
+        "max": 1923.648,
+        "min": 18.964,
+        "mean": 161.72,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "conditional_check_failed": 0,
+          "total_retries": 0,
+          "error_codes": {}
+        }
+      }
+    }
+  }
+}

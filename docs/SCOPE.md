@@ -174,10 +174,17 @@ Stratoclave's edge — an event-sourced, idempotent, formally-proven
 reserve/rating/settle ledger — is a re-design, not a retrofit
 (quarters–a year), carried out while preserving an existing best-effort billing
 base. The moat is on Stratoclave's side. The one thing that keeps the lead
-"provisional" rather than realized is that **the ledger's _speed_ is a design
-target (p99<50ms), not yet a published, load-and-fault-tested measurement** —
-its _correctness_ is proven, its speed is not yet shown. Closing that is the
-single highest-leverage next step (see [next-and-not-next](#next-and-not-next)).
+"provisional" rather than realized is the ledger's _speed_ — now **measured, not
+asserted** ([benchmarks/ledger-latency.md](benchmarks/ledger-latency.md)): the
+p50 is fast (ledger write 20 ms, end-to-end authorize 57 ms) but the **p99 does
+NOT meet the < 50 ms target** — the ledger `TransactWriteItems` is p99 = 58 ms
+even at the zero-contention floor, and single-pool-row contention degrades it
+further. The miss is neither CPU- nor client-bound; it is the DynamoDB
+transaction tail plus single-row optimistic-CAS retry. Honest current state:
+_correctness_ proven, _speed_ measured and **below target on the current
+synchronous four-item-transaction design** — closing it needs a design change
+(single-item conditional update where the money-move allows, and/or pool-row
+sharding), not tuning. See [next-and-not-next](#next-and-not-next).
 
 ## Two gravity wells (named warnings)
 
@@ -219,13 +226,17 @@ it is someone else's job.**
 - **Deliberately not owned:** semantic classification / routing algorithm /
   quality scoring (VSR); model training (external); price packaging, invoicing,
   tax, outcome-based billing (commerce / external); MCP hub / registry.
-- **Hygiene, not features (but the top one gates the whole value claim):**
-  p99<50ms is a design target without a load-and-fault-tested benchmark yet —
-  the ledger's correctness is *proven* but its speed is not yet *shown*, and
-  "a proven ledger you can afford on the hot path" is the entire pitch;
-  reconciliation runs from a manual CLI, not a scheduled job; the VSR-down path
-  degrades to static routing but the graceful-degradation behaviour is not yet
-  benchmark-exercised (fold it into the same load test as a fault-injection
+- **Measured, and it points at a design change:** the ledger p99<50ms target is
+  now benchmarked ([benchmarks/ledger-latency.md](benchmarks/ledger-latency.md))
+  and **missed** — p50 fast (20 ms ledger / 57 ms e2e), p99 = 58 ms at the
+  zero-contention floor, worse under single-row contention, and NOT CPU-bound.
+  "A proven ledger you can afford on the hot path" is the entire pitch, so this
+  is the highest-leverage item: it needs a design change (single-item
+  conditional update and/or pool-row sharding), not tuning.
+- **Hygiene, not features:** reconciliation runs from a manual CLI, not a
+  scheduled job; the VSR-down path degrades to static routing but the
+  graceful-degradation behaviour is not yet benchmark-exercised (fold it into a
+  load test as a fault-injection
   scenario).
 
 ## Next and not-next

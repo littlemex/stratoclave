@@ -10,6 +10,7 @@ import { EcsStack } from '../lib/ecs-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { CognitoStack } from '../lib/cognito-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
+import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
 import { WafStack } from '../lib/waf-stack';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -429,6 +430,41 @@ for (const w of residencyWarnings) {
   cdk.Annotations.of(ecsStack).addWarning(w);
 }
 
+// --- 7b. Ledger Streams projector + reconciler (two-item migration step 1) ---
+// Opt-in: needs the Lambda image (backend/Dockerfile.lambda) built + pushed to
+// the backend ECR repo under LAMBDA_IMAGE_TAG. Gated on the `ledgerProjector`
+// context flag so a normal deploy is unaffected until the image exists. Writes
+// SHADOW# events by default (step 1); the async cut-over sets `-c projectorShadow=false`.
+let ledgerProjectorStack: LedgerProjectorStack | undefined;
+if (app.node.tryGetContext('ledgerProjector') === true ||
+    app.node.tryGetContext('ledgerProjector') === 'true') {
+  ledgerProjectorStack = new LedgerProjectorStack(app, stackName(prefix, 'ledger-projector'), {
+    env,
+    prefix,
+    lambdaRepository: ecrStack.repository,
+    lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+    tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+    creditLedgerTable: dynamoDBStack.creditLedgerTable,
+    shadow: app.node.tryGetContext('projectorShadow') !== 'false',
+    // Set PROJECTOR_EPOCH_MS to the projector's deploy time so the reconciler
+    // excludes the pre-existing RESERVE backlog (no shadow by construction — the
+    // stream starts at LATEST) from the divergence gate.
+    projectorEpochMs: process.env.PROJECTOR_EPOCH_MS
+      ? parseInt(process.env.PROJECTOR_EPOCH_MS, 10)
+      : undefined,
+    // ENRICHMENT_EPOCH_MS = the time the HOLD-enrichment deploy FINISHED rolling
+    // out (step 3). The reconciler flags any post-epoch HOLD with no `source` —
+    // the epoch-set-too-early detector that gates the capture/void HOLD-only
+    // cut-over and the eventual RESERVE-event fallback deletion.
+    enrichmentEpochMs: process.env.ENRICHMENT_EPOCH_MS
+      ? parseInt(process.env.ENRICHMENT_EPOCH_MS, 10)
+      : undefined,
+    description: `[${prefix}] Ledger Streams RESERVE-event projector + reconciler (shadow)`,
+  });
+  ledgerProjectorStack.addDependency(ecrStack);
+  ledgerProjectorStack.addDependency(dynamoDBStack);
+}
+
 // --- 8. Backend Config (static Parameter Store values) ---
 class BackendConfigStack extends Stack {
   constructor(scope: Construct, id: string, stackProps: cdk.StackProps) {
@@ -591,6 +627,11 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
       reason:
         'BootstrapAdminTempPasswordSecret is single-use: the operator reads it exactly once and rotates the admin password through Cognito (`admin-set-user-password`) immediately. Secrets Manager rotation does not apply to a placeholder that is overwritten by the seed code on first boot, and there is no managed service that knows how to rotate a temporary Cognito password on our behalf.',
     },
+    {
+      id: 'AwsSolutions-SQS3',
+      reason:
+        'The ledger-projector queue IS the terminal dead-letter queue for the Streams event-source mapping (OnFailure). A DLQ does not need its own DLQ; a record that lands here is already the end of the retry chain and is surfaced by the DLQ-depth alarm.',
+    },
   ];
   NagSuppressions.addStackSuppressions(networkStack, appLevelSuppressions);
   NagSuppressions.addStackSuppressions(albStack, appLevelSuppressions);
@@ -600,6 +641,9 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   NagSuppressions.addStackSuppressions(cognitoStack, appLevelSuppressions);
   if (wafStack) {
     NagSuppressions.addStackSuppressions(wafStack, appLevelSuppressions);
+  }
+  if (ledgerProjectorStack) {
+    NagSuppressions.addStackSuppressions(ledgerProjectorStack, appLevelSuppressions);
   }
 }
 

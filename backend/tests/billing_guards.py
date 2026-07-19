@@ -163,11 +163,28 @@ def counter_touching_qualnames(tree: ast.Module) -> dict:
 # --------------------------------------------------------------- A2 checks
 
 def check_nontransactional_counter_writes(sites, counter_funcs, module,
-                                          preserving_put_allowlist):
+                                          preserving_put_allowlist,
+                                          readonly_counter_update_allowlist=frozenset(),
+                                          pending_counter_write_allowlist=frozenset()):
     """HARD rule.  A non-transactional write that (a) mentions a counter attr
     in its own arguments, or (b) lives in a function that mentions one, is a
-    violation -- with the single reviewed exception of a *preserving*
-    put_item (set_pool_limit), which must still pass a structural check."""
+    violation -- with three reviewed exceptions:
+
+      * a *preserving* put_item (set_pool_limit's create branch);
+      * a *counter-read-only* update_item (set_pool_limit's ceiling-CAS /
+        legacy-repair branches): the function READS pool_reserved/pool_settled
+        in Python to compute a value, but its DynamoDB UpdateExpression must not
+        ADD/SET/REMOVE either protected counter. A2 governs mutations, not reads.
+      * a *PENDING-protocol* counter write (pending_counter_write_allowlist): a
+        DELIBERATE non-transactional single-item conditional counter mutation
+        whose safety is proven NOT by transactional A2 but by the PENDING protocol
+        formal model (test_pending_protocol_z3 / _stateful: I1' inductive
+        preservation, counter-first reconcile). AXIOM A2 is a SUFFICIENT condition
+        for no-oversell, not a necessary one; the PENDING model supplies the
+        alternative proof for these exact sites (docs/design/pending-protocol.md).
+        Each MUST still carry a ConditionExpression (a bare unconditional counter
+        ADD is never allowed) — checked structurally below.
+    """
     v = []
     for s in sites:
         if s.api not in NON_TRANSACTIONAL_APIS:
@@ -179,6 +196,12 @@ def check_nontransactional_counter_writes(sites, counter_funcs, module,
         if s.api == "put_item" and s.qualname in preserving_put_allowlist:
             v.extend(check_preserving_put(s))
             continue
+        if s.api == "update_item" and s.qualname in readonly_counter_update_allowlist:
+            v.extend(check_non_mutating_counter_update(s))
+            continue
+        if s.api == "update_item" and s.qualname in pending_counter_write_allowlist:
+            v.extend(check_pending_counter_write(s))
+            continue
         v.append(
             f"{s.module}:{s.lineno} {s.qualname}: non-transactional {s.api} "
             f"in code that references the pool money counters. AXIOM A2 of "
@@ -187,6 +210,45 @@ def check_nontransactional_counter_writes(sites, counter_funcs, module,
             f"transact_write_items with a ConditionExpression. This write "
             f"voids the no-over-admission proof.")
     return v
+
+
+def check_non_mutating_counter_update(site: WriteSite):
+    """A reviewed non-transactional update_item is allowed ONLY if it does not
+    name either protected counter in ANY of its own DynamoDB expression strings
+    (UpdateExpression / ConditionExpression / attribute maps). If a counter name
+    is absent from the call, the write cannot ADD/SET/REMOVE it — so it is not a
+    mutation A2 governs. Reading the counter in Python to compute a *different*
+    attribute's value (e.g. legacy headroom repair) is fine and invisible here."""
+    bad = sorted({st for st in site.strings
+                  for a in COUNTER_ATTRS if a in st})
+    if bad:
+        return [
+            f"{site.module}:{site.lineno} {site.qualname}: allow-listed "
+            f"non-transactional update_item names a protected counter in "
+            f"{bad!r}. An UpdateExpression/ConditionExpression over "
+            f"pool_reserved/pool_settled MUST be transactional (A2 regression); "
+            f"a read-only update may not mutate the counters."]
+    return []
+
+
+def check_pending_counter_write(site: WriteSite):
+    """A reviewed PENDING-protocol non-transactional counter write must STILL be
+    conditional — a bare unconditional `ADD pool_reserved` is never sound, even
+    under the PENDING proof (the commit gate is the ConditionExpression on
+    headroom; the reconcile credit is guarded on the expected counter value). We
+    verify a ConditionExpression is present in the call's kwargs. The specific
+    condition's correctness is proven by test_pending_protocol_z3 (headroom guard
+    for step 2, expected-reserved guard for reconcile)."""
+    has_condition = any(
+        kw.arg == "ConditionExpression" for kw in site.call.keywords
+    ) if hasattr(site.call, "keywords") else False
+    if not has_condition:
+        return [
+            f"{site.module}:{site.lineno} {site.qualname}: PENDING-protocol counter "
+            f"write has NO ConditionExpression. Even under the PENDING proof a "
+            f"counter mutation MUST be conditional (headroom gate / expected-counter "
+            f"guard); an unconditional ADD voids I1'."]
+    return []
 
 
 def check_preserving_put(site: WriteSite):
@@ -519,13 +581,15 @@ def check_required_conditions(tree, module, requirements):
 # ---------------------------------------------------------------- pipeline
 
 def analyze_module(source, module, *, allowed_sites, preserving_puts,
-                   counter_registry):
+                   counter_registry, readonly_counter_updates=frozenset(),
+                   pending_counter_writes=frozenset()):
     tree = load(source)
     sites, hard = collect_write_sites(tree, module)
     counter_funcs = counter_touching_qualnames(tree)
     v = list(hard)
     v += check_nontransactional_counter_writes(
-        sites, counter_funcs, module, preserving_puts)
+        sites, counter_funcs, module, preserving_puts,
+        readonly_counter_updates, pending_counter_writes)
     v += check_write_inventory(sites, allowed_sites)
     v += check_counter_registry(counter_funcs, counter_registry, module)
     v += check_no_budget_row_deletion(tree, module, sites)

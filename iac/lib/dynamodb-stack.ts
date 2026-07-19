@@ -324,11 +324,18 @@ export class DynamoDBStack extends cdk.Stack {
     // Debited atomically with the per-user token balance in a single
     // TransactWriteItems so a tenant can never overspend its pool under
     // concurrency. Audit-critical (spend record) → RETAIN + PITR in prod.
+    // NEW_AND_OLD_IMAGES stream (two-item migration, docs/design/ledger-hot-path.md
+    // step 1): the RESERVE ledger event is being moved off the synchronous reserve
+    // transaction to an async projector that derives it from the HOLD row's stream
+    // record. NEW image gives the enriched HOLD to project from; OLD image lets a
+    // later step derive terminal transitions. Enabling the stream is inert until a
+    // consumer (the projector Lambda's event-source mapping) is attached.
     this.tenantBudgetsTable = new dynamodb.Table(this, 'TenantBudgetsTable', {
       ...baseTableProps,
       tableName: `${prefix}-tenant-budgets`,
       partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
     // Ledger P0-1: append-only, event-sourced credit ledger — the source of

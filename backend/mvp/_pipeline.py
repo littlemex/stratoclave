@@ -129,6 +129,80 @@ _HOLD_TTL_SECONDS = max(
 # the hot reserve path into an unbounded scan.
 _SWEEP_MAX_HOLDS = int(os.getenv("STRATOCLAVE_POOL_SWEEP_MAX_HOLDS", "5"))
 
+# Two-item migration (docs/design/ledger-hot-path.md step 3): capture/void reads
+# the HOLD row ALONE (source/amount/rate_snapshot folded onto it) instead of the
+# soon-async RESERVE event. The cutover is NOT a bare flag (Fable review-2 finding
+# 2, CONFIRMED data-loss hazard): a blunt flip would route a pre-enrichment
+# external hold still inside its TTL to the HOLD-only path where its `source` is
+# absent → 404 → the caller declines an ALREADY-AUTHORIZED + reserved transaction
+# → the reaper voids it. Instead the path is decided per-hold by an ENRICHMENT
+# EPOCH: only holds minted AT OR AFTER the epoch take HOLD-only; older holds keep
+# the RESERVE-event fallback (safe by construction — the fallback is deleted only
+# after epoch + max hold TTL, in a SEPARATE deploy gated on the reconciler's
+# post-epoch-source-less count being zero for that whole window).
+#
+# The epoch MUST be the time the enrichment deploy finished rolling out to EVERY
+# instance (NOT deploy start): a clock-forward hold minted by an old-code instance
+# before enrichment could otherwise look post-epoch, have no `source`, and 404 —
+# reintroducing the hazard. Set it conservatively LATE (finish time + an NTP-skew
+# margin); too-late only keeps benign holds on the (still-correct) fallback, while
+# too-early is the only setting that loses money.
+
+
+def _parse_epoch_env(raw: Optional[str]) -> Optional[float]:
+    """Parse STRATOCLAVE_ENRICHMENT_EPOCH → epoch seconds (float, UTC), or None if
+    unset. Accepts an epoch-seconds number or an ISO-8601 timestamp. FAIL-FAST on
+    an unparseable value (Fable review): silently treating a typo as None would
+    leave the process permanently on step-2 behaviour after an operator BELIEVED
+    they cut over — safe money-wise but an undetectable no-op. A naive ISO string
+    is assumed UTC so the comparison never mixes naive/aware datetimes."""
+    if raw is None or raw.strip() == "":
+        return None
+    raw = raw.strip()
+    try:
+        return float(raw)  # epoch seconds
+    except ValueError:
+        pass
+    from datetime import datetime, timezone
+
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _hold_created_epoch(hold: dict) -> Optional[float]:
+    """A HOLD row's `created_at` (ISO-8601 string) → epoch seconds (UTC), or None
+    if absent/unparseable. A naive string is assumed UTC to match
+    `_parse_epoch_env`; None routes the hold to the pre-epoch (legacy) path, which
+    is the fail-closed / money-safe side during migration."""
+    raw = hold.get("created_at")
+    if not raw:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+# Parsed once at import; an unparseable value raises here (fail-fast at boot).
+_ENRICHMENT_EPOCH = _parse_epoch_env(os.getenv("STRATOCLAVE_ENRICHMENT_EPOCH"))
+
+# PENDING protocol selector (docs/design/pending-protocol.md). Default
+# "transaction" = today's 4-item TransactWriteItems, byte-for-byte unchanged.
+# "pending" = the non-transactional 3-write hot path (Put PENDING -> single
+# conditional UpdateItem commit -> async ACTIVE) that the spikes proved cuts the
+# c=16 p99 from ~1,190 ms to ~168 ms. Flipping this is a per-tenant canary that,
+# per the design doc, is gated on live observation windows — so it ships OFF and
+# the readers were taught `status` (absent == ACTIVE) first, making the whole
+# path inert until deliberately enabled.
+_RESERVE_PROTOCOL = os.getenv("STRATOCLAVE_RESERVE_PROTOCOL", "transaction").lower()
+
 
 def _pool_settle_items(
     *,
@@ -138,6 +212,7 @@ def _pool_settle_items(
     reserved_microusd: int,
     actual_microusd: int,
     reclaimed_microusd: int = 0,
+    hold_id: Optional[str] = None,
 ):
     """Build the single TransactWriteItems fragment that settles a pool hold.
 
@@ -158,26 +233,45 @@ def _pool_settle_items(
     """
     from dynamo.tenant_budgets import budget_sk
 
-    expr = "ADD pool_reserved_microusd :dr, pool_settled_microusd :actual"
+    # headroom = limit - reserved - settled, so releasing `reserved` and adding
+    # `actual` of true spend shifts headroom by (reserved - actual). This keeps
+    # the invariant on settle (actual>0), release, and reclaim (both actual=0 =>
+    # full reservation returned to headroom). Same aggregate for all three paths.
+    delta_headroom = int(reserved_microusd) - int(actual_microusd)
+    expr = ("ADD pool_reserved_microusd :dr, pool_settled_microusd :actual, "
+            "pool_headroom_microusd :dh")
     values = {
         ":dr": {"N": str(-int(reserved_microusd))},
         ":actual": {"N": str(int(actual_microusd))},
+        ":dh": {"N": str(delta_headroom)},
     }
     if reclaimed_microusd:
         expr += ", pool_reclaimed_microusd :rec"
         values[":rec"] = {"N": str(int(reclaimed_microusd))}
-    return {
-        "Update": {
-            "TableName": table_name,
-            "Key": {
-                "tenant_id": {"S": tenant_id},
-                "sk": {"S": budget_sk(period)},
-            },
-            "UpdateExpression": expr,
-            "ConditionExpression": "attribute_exists(tenant_id)",
-            "ExpressionAttributeValues": values,
-        }
+    names = None
+    if hold_id is not None:
+        # PENDING protocol: this hold's debit is recorded as an `applied.<hold_id>`
+        # marker on the pool item (docs/design/pending-protocol.md). Settle/release
+        # must REMOVE it in the SAME write that moves the counters, so the item-
+        # local invariant `available + Σ(applied) == limit - settled` is preserved
+        # and the reconciler never later double-credits this hold. Harmless no-op
+        # for a transaction-mode hold (no marker exists) — REMOVE of an absent path
+        # is a no-op in DynamoDB, so this is protocol-agnostic.
+        expr += " REMOVE applied.#hid"
+        names = {"#hid": hold_id}
+    item: dict = {
+        "TableName": table_name,
+        "Key": {
+            "tenant_id": {"S": tenant_id},
+            "sk": {"S": budget_sk(period)},
+        },
+        "UpdateExpression": expr,
+        "ConditionExpression": "attribute_exists(tenant_id)",
+        "ExpressionAttributeValues": values,
     }
+    if names:
+        item["ExpressionAttributeNames"] = names
+    return {"Update": item}
 
 
 @dataclass
@@ -295,6 +389,9 @@ class ReservationContext:
         # slow error path that outlived the TTL), it ALSO already returned the
         # reserved amount — so the cancelled transaction correctly leaves the
         # aggregate untouched instead of subtracting `reserved` a second time.
+        _rel_hold_id = self.hold_id
+        if not _rel_hold_id and self.hold_sk:
+            _rel_hold_id = self.hold_sk.rsplit("#", 1)[-1] or None
         items = [
             _pool_settle_items(
                 table_name=budgets.table_name,
@@ -302,6 +399,7 @@ class ReservationContext:
                 period=self.period,
                 reserved_microusd=self.pool_reserved_microusd,
                 actual_microusd=0,
+                hold_id=_rel_hold_id,   # REMOVE this hold's marker (PENDING protocol)
             )
         ]
         if self.hold_sk:
@@ -394,6 +492,7 @@ class ReservationContext:
 
 
 _LOW_LEVEL_CLIENT = None
+_NO_RETRY_TABLE = None
 
 
 def _low_level_client():
@@ -407,10 +506,32 @@ def _low_level_client():
     return _LOW_LEVEL_CLIENT
 
 
+def _no_retry_table():
+    """A resource ``Table`` for tenant-budgets on a DynamoDB client with SDK
+    retries DISABLED (max_attempts=1), for the PENDING protocol's step-2 commit
+    (docs/design/pending-protocol.md, I4). The single conditional `ADD reserved`
+    UpdateItem is NOT idempotent, so a transparent SDK retry after a lost ack would
+    double-debit; disabling retries turns every ambiguous outcome into an exception
+    the caller resolves leak-safe (never resend the debit). Resource API so it
+    binds to the same serialization the repo uses."""
+    global _NO_RETRY_TABLE
+    if _NO_RETRY_TABLE is None:
+        from botocore.config import Config
+
+        from dynamo.client import tenant_budgets_table_name
+        region = os.getenv("AWS_REGION", "us-east-1")
+        res = boto3.resource(
+            "dynamodb", region_name=region,
+            config=Config(retries={"max_attempts": 1, "mode": "standard"}))
+        _NO_RETRY_TABLE = res.Table(tenant_budgets_table_name())
+    return _NO_RETRY_TABLE
+
+
 def _reset_low_level_client() -> None:
-    """Test hook: drop the cached client so a new moto region takes effect."""
-    global _LOW_LEVEL_CLIENT
+    """Test hook: drop the cached clients so a new moto region takes effect."""
+    global _LOW_LEVEL_CLIENT, _NO_RETRY_TABLE
     _LOW_LEVEL_CLIENT = None
+    _NO_RETRY_TABLE = None
 
 
 def _fresh_idempotency_token() -> str:
@@ -512,6 +633,17 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
         amount = int(hold.get("amount_microusd", 0))
         if not sk:
             continue
+        # PENDING protocol (docs/design/pending-protocol.md, readers-first): this
+        # reaper CREDITS BACK the reservation, so it must only touch holds whose
+        # debit is known to have committed — ACTIVE, or the pre-PENDING implicit
+        # ACTIVE (no status attribute). A PENDING hold may be un-debited, so
+        # crediting it would oversell; those are handled by the sweeper's
+        # `fence_pending_expired` (pool untouched) + the reconciler. This branch is
+        # INERT for today's data (no hold carries `status`), so the reaper is
+        # byte-identical until the flag is flipped.
+        _status = hold.get("status")
+        if _status is not None and str(_status) != "ACTIVE":
+            continue
         if amount <= 0:
             # A zero/negative-amount hold ties up no budget; just delete it so it
             # stops being scanned (unconditional single-item delete, no aggregate
@@ -534,6 +666,7 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                     reserved_microusd=amount,
                     actual_microusd=0,
                     reclaimed_microusd=amount,
+                    hold_id=hold_id or None,  # REMOVE marker (PENDING ACTIVE reclaim)
                 ),
                 budgets.reclaim_hold_txn_item(tenant_id=tenant_id, sk=sk),
             ]
@@ -600,6 +733,87 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                 error_code="non_client_error",
             )
     return reclaimed
+
+
+# ---------------------------------------------------------------------------
+# PENDING protocol background jobs (docs/design/pending-protocol.md). Neither is
+# on the hot path; a scheduled worker calls them. Kept here so they share the
+# repositories and the ledger helpers the reserve/reap paths use.
+# ---------------------------------------------------------------------------
+
+def sweep_fence_pending(budgets, tenant_id: str, period: str, *, cap: int = 50) -> int:
+    """Sweeper fence (step-3 companion): move EXPIRED, still-PENDING holds to
+    EXPIRED_UNCREDITED WITHOUT touching the pool. The sweeper cannot know whether
+    a PENDING hold's debit committed (no hold_id capability), so it never credits
+    back — a debited-but-fenced hold leaks (bounded) until `reconcile_pool`
+    recovers it in aggregate; crediting here would oversell an un-debited hold
+    (I1'). Returns the count fenced. Best-effort, never raises."""
+    now_epoch = int(time.time())
+    fenced = 0
+    try:
+        pending = budgets.query_pending_expired_holds(
+            tenant_id=tenant_id, period=period, now_epoch=now_epoch, limit=cap)
+    except Exception:  # noqa: BLE001
+        return 0
+    for hold in pending:
+        sk = str(hold.get("sk", ""))
+        if not sk:
+            continue
+        try:
+            if budgets.fence_pending_expired(tenant_id=tenant_id, sk=sk):
+                fenced += 1
+                logger.info(
+                    "pending_hold_fenced", tenant_id=tenant_id, period=period,
+                    hold_id=str(hold.get("hold_id", "")),
+                    amount_microusd=int(hold.get("amount_microusd", 0)),
+                )
+        except Exception:  # noqa: BLE001 — a fence failure just defers to next sweep
+            continue
+    return fenced
+
+
+def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
+    """Marker-driven leak recovery (docs/design/pending-protocol.md, Fable marker
+    design). NEVER an admission authority — authority is always the step-2
+    conditional headroom check; this recovers debited-but-orphaned reservations.
+
+    With the per-hold `applied` marker, recovery is DETERMINISTIC and PER-HOLD, not
+    an aggregate-drift guess (which had a livelock on hot pools — Fable review bug
+    5b). For each EXPIRED_UNCREDITED hold, `pool_credit_back` credits it back iff
+    its marker still exists — an ATOMIC remove-marker + add-headroom, so double
+    credit is structurally impossible and a hold whose debit never committed (no
+    marker) is skipped (leak-safe, never oversell). Re-run continuously: a
+    late-arriving ambiguous debit that lands AFTER a fence is picked up on the next
+    pass (the marker appears, then this credits it). Returns a summary for
+    logging/alarms. The `available + Σ(applied) == limit - settled` item-local
+    invariant is what the canary A1 checker asserts."""
+    holds = budgets.list_holds(tenant_id=tenant_id, period=period)
+    recovered = 0
+    recovered_count = 0
+    still_uncredited = 0
+    for h in holds:
+        if str(h.get("status", "")) != "EXPIRED_UNCREDITED":
+            continue
+        hold_id = str(h.get("hold_id", ""))
+        if not hold_id:
+            continue
+        # Credit back iff the marker is still present (debit committed). Atomic
+        # remove+add; a second pass CCFs on the absent marker (no double credit).
+        credited = budgets.pool_credit_back(tenant_id=tenant_id, period=period, hold_id=hold_id)
+        if credited:
+            recovered += int(h.get("amount_microusd", 0))
+            recovered_count += 1
+        # Retire the hold row so it stops being rescanned (starvation fix). Whether
+        # or not a marker existed, an EXPIRED_UNCREDITED hold is now accounted for.
+        try:
+            budgets.retire_reclaimed_best_effort(tenant_id=tenant_id, sk=str(h.get("sk", "")))
+        except Exception:  # noqa: BLE001
+            still_uncredited += 1
+    if recovered:
+        logger.warning("pool_reconcile_recovered", tenant_id=tenant_id, period=period,
+                       recovered_microusd=recovered, holds=recovered_count)
+    return {"recovered_microusd": recovered, "recovered_holds": recovered_count,
+            "retire_failures": still_uncredited, "reason": "recovered" if recovered else "clean"}
 
 
 def _err_402(reason: str) -> HTTPException:
@@ -1299,8 +1513,6 @@ def reserve_credit(
             tenant_id=user.org_id,
             period=period,
             amount_microusd=cost,
-            expected_reserved=p_reserved,
-            expected_settled=p_settled,
         )
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=user.org_id,
@@ -1308,6 +1520,12 @@ def reserve_credit(
             hold_id=hold_id,
             amount_microusd=cost,
             expires_at_epoch=hold_expires_at,
+            # C-1 (two-item migration): tag inline LLM holds so the external
+            # capture/void gate — which reads the HOLD's `source` once it goes
+            # HOLD-only — DENIES them. An inline hold is never externally
+            # capturable/voidable; without this tag it would rely on the RESERVE
+            # event's source, which is exactly what that step stops reading.
+            source="inline",
         )
         txn_items = [user_txn, pool_txn, hold_txn]
         _quota_start = len(txn_items)
@@ -1533,6 +1751,18 @@ def reserve_external_authorization(
     if prior is not None:
         return _idemp_replay(prior, request_fingerprint)
 
+    # PENDING protocol dispatch (docs/design/pending-protocol.md). Default
+    # "transaction" falls through to the unchanged 4-item path below.
+    if _RESERVE_PROTOCOL == "pending":
+        return _reserve_external_pending(
+            tenant_id=tenant_id, period=period, amount=amount,
+            idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
+            authorization_id_factory=authorization_id_factory,
+            ttl_seconds=ttl_seconds, pricing_key=pricing_key,
+            rate_snapshot=rate_snapshot, description=description,
+            workflow_run_id=workflow_run_id, budgets=budgets, ledger=ledger,
+        )
+
     client = _low_level_client()
     _sweep_expired_holds(budgets, tenant_id, period)
     saw_throttle = False
@@ -1563,15 +1793,25 @@ def reserve_external_authorization(
             tenant_id=tenant_id,
             period=period,
             amount_microusd=amount,
-            expected_reserved=p_reserved,
-            expected_settled=p_settled,
         )
+        # HOLD enrichment (two-item migration step 2, dual-write phase): the HOLD
+        # row now carries source/description/rate_snapshot/payload_hash so a later
+        # step can move capture/void to read the HOLD ALONE (and the RESERVE event
+        # async). The RESERVE event is STILL written synchronously below in this
+        # phase; capture/void keeps reading it until the dual-read cutover proves
+        # HOLD-only is equivalent (see docs/design/ledger-hot-path.md).
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=tenant_id,
             period=period,
             hold_id=hold_id,
             amount_microusd=amount,
             expires_at_epoch=hold_expires_at,
+            source="external",
+            description=description,
+            rate_snapshot=rate_snapshot_dict,
+            payload_hash=request_fingerprint,
+            run_id=workflow_run_id or hold_id,
+            run_id_is_fallback=workflow_run_id is None,
         )
         # TransactItems ORDER: [pool(0), hold(1), RESERVE(2), IDEMP(3)]. Only the
         # IDEMP item's CCF is interpreted specially (duplicate key); a pool(0) CCF
@@ -1603,11 +1843,28 @@ def reserve_external_authorization(
             pricing_key=pricing_key,
         )
         _IDEMP_IDX = 3
+        _txn_t0 = time.perf_counter()
         try:
             client.transact_write_items(
                 TransactItems=[pool_txn, hold_txn, reserve_evt, idemp_txn],
                 ClientRequestToken=_fresh_idempotency_token(),
             )
+            # Ledger-write latency telemetry (permanent): the synchronous
+            # TransactWriteItems is THE cost of putting the ledger on the hot
+            # path, so we log its wall-clock ms so a metric filter / benchmark can
+            # separate "ledger round-trip" from the HTTP/ALB shell. Only the
+            # committed path is timed; a CCF/throttle falls through to the retry
+            # loop below and is not a settled ledger write. Guarded — telemetry
+            # must never break a reserve.
+            try:
+                logger.info(
+                    "ledger_transact_latency",
+                    op="external_authorize_reserve",
+                    duration_ms=round((time.perf_counter() - _txn_t0) * 1000, 3),
+                    tenant_id=tenant_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code != "TransactionCanceledException":
@@ -1678,6 +1935,202 @@ def reserve_external_authorization(
             },
         )
     raise _err_402("tenant_pool_exhausted")
+
+
+def _pending_hold_id(tenant_id: str, period: str, idempotency_key: str) -> str:
+    """Deterministic hold_id from the Idempotency-Key (I6, docs/design/
+    pending-protocol.md). Step 1's `attribute_not_exists(sk)` then doubles as the
+    duplicate-Key detector: a replay derives the SAME hold_id → the SAME sk →
+    collides, so no second hold or debit is created. Namespaced by tenant+period
+    so the same key in different tenants/periods never collides."""
+    ns = uuid.uuid5(uuid.NAMESPACE_URL, f"stratoclave/pending/{tenant_id}/{period}")
+    return uuid.uuid5(ns, idempotency_key).hex
+
+
+class _AmbiguousReserve(Exception):
+    """Step 2 (the pool debit) returned an ambiguous outcome (timeout / 5xx): it
+    MAY or MAY NOT have applied. Per I4 the debit is NEVER resent; per the leak-
+    safe rule the hold is abandoned PENDING (the sweeper fences it, the reconciler
+    recovers any real debit in aggregate) and the caller surfaces a 503 so the
+    client retries with a NEW Idempotency-Key rather than us re-debiting."""
+
+
+# Minimum TTL for a PENDING hold (Fable review, bug 6): the sweeper's fence must
+# never race step 3, so the hold's lifetime must dominate the step-3 retry
+# horizon. A ttl of 0 (or a few seconds) would let a fence beat activate. The
+# authorize endpoint already clamps ttl to >= 30s, but pending re-asserts a floor
+# so a mis-wired caller cannot create a self-fencing hold.
+_PENDING_MIN_TTL_SECONDS = 30
+
+
+def _pending_replay_result(budgets, ledger, *, tenant_id, period, hold_id,
+                           idempotency_key, request_fingerprint, capture_mode):
+    """Resolve a duplicate Idempotency-Key (step-1 CCF) by READING state, never by
+    assuming success (Fable review bug 2/7). The IDEMP intent row (written before
+    the hold) carries the ORIGINAL, persisted hold_sk / amount / authorization_id,
+    so replay returns addressing that actually matches the durable row. Branch on
+    the hold's status + the pool marker so we only report success when the debit
+    is a proven fact:
+      * marker present (debit committed) -> success replay with persisted values.
+      * IDEMP intent present but no marker + hold still PENDING -> 503 in-flight
+        (the original attempt has not committed the debit yet; do NOT report
+        success — that would be the fail-open bug).
+      * hold FAILED -> replay the original 402.
+      * hold terminal/absent -> expired.
+    """
+    intent = ledger.get_idemp(tenant_id=tenant_id, period=period,
+                              idempotency_key=idempotency_key)
+    if intent is not None:
+        # fingerprint mismatch = same key, different body -> 422 (never replay).
+        fp = intent.get("request_fingerprint")
+        if fp is not None and fp != request_fingerprint:
+            raise IdempotencyKeyReuse(idempotency_key)
+        o_hold_sk = str(intent.get("hold_sk", ""))
+        o_amount = int(intent.get("amount_microusd", 0))
+        o_auth = str(intent.get("authorization_id", ""))
+        marker = budgets.pool_marker_amount(tenant_id=tenant_id, period=period, hold_id=hold_id)
+        hold = budgets.get_hold(tenant_id=tenant_id, sk=o_hold_sk) if o_hold_sk else None
+        h_status = str((hold or {}).get("status", "")) if hold else ""
+        if marker is not None or h_status == "ACTIVE":
+            # Debit is a fact: success replay with the PERSISTED addressing.
+            return ExternalAuthorizeResult(
+                authorization_id=o_auth, hold_id=hold_id, hold_sk=o_hold_sk,
+                period=period, amount_microusd=o_amount,
+                expires_at_epoch=int(intent.get("expires_at", 0)),
+                capture_mode=str(intent.get("capture_mode", capture_mode)),
+                replayed=True)
+        if h_status == "FAILED":
+            raise _err_402("tenant_pool_exhausted")   # replay the original failure
+        if h_status == "PENDING":
+            # In-flight: the original attempt has NOT committed the debit. Do NOT
+            # report success (fail-open). 503 so the client retries the SAME key.
+            raise HTTPException(status_code=503, detail={
+                "type": "budget_unavailable", "reason": "pool_reservation_in_flight",
+                "message": "A reservation for this Idempotency-Key is in flight. Retry shortly."})
+    # No IDEMP intent readable, or hold terminal/absent: treat as gone (expired).
+    raise HTTPException(status_code=404, detail="authorization not found")
+
+
+def _reserve_external_pending(
+    *, tenant_id, period, amount, idempotency_key, request_fingerprint,
+    authorization_id_factory, ttl_seconds, pricing_key, rate_snapshot,
+    description, workflow_run_id, budgets, ledger,
+) -> "ExternalAuthorizeResult":
+    """The PENDING protocol reserve (docs/design/pending-protocol.md, Fable marker
+    design). Non-transactional hot path whose money-safety comes from a per-hold
+    marker (`applied.<hold_id>`) written ATOMICALLY with the pool debit in a single
+    UpdateItem, so "did this hold's debit commit?" is a decisive, locally-readable
+    fact (A1 restored without a transaction). Steps:
+
+      0. IDEMP intent Put (persist hold_sk/amount/authorization_id) — the durable
+         addressing a replay returns, and the duplicate-key detector.
+      1. HOLD status=PENDING (write-ahead intent, precedes the debit).
+      2. COMMIT: marker-carrying conditional UpdateItem on the pool. Its outcome
+         (APPLIED / ALREADY / EXHAUSTED) is decisive; ambiguity is resolved by the
+         marker, so an SDK retry is harmless and there is no fail-open (bug 7d).
+      3. async PENDING -> ACTIVE (off the critical path).
+    """
+    _sweep_expired_holds(budgets, tenant_id, period)  # unchanged background reclaim
+    budgets.ensure_applied_map(tenant_id=tenant_id, period=period)  # seed marker map (idempotent)
+    hold_id = _pending_hold_id(tenant_id, period, idempotency_key)
+    ttl = max(int(ttl_seconds), _PENDING_MIN_TTL_SECONDS)
+    hold_expires_at = int(time.time()) + ttl
+    hold_sk = _hold_sk(period, hold_expires_at, hold_id)
+    authorization_id = authorization_id_factory(hold_id, period, hold_sk)
+    rate_snapshot_dict = rate_snapshot.to_ledger_dict() if rate_snapshot is not None else None
+    capture_mode = "amount" if pricing_key is None else "units"
+
+    # STEP 0 (IDEMP intent): persist the addressing a replay must return. A
+    # duplicate key CCFs here -> resolve by READING state (never assume success).
+    try:
+        ledger.put_idemp_intent(
+            tenant_id=tenant_id, period=period, idempotency_key=idempotency_key,
+            hold_id=hold_id, hold_sk=hold_sk, authorization_id=authorization_id,
+            amount_microusd=amount, expires_at_epoch=hold_expires_at,
+            capture_mode=capture_mode, request_fingerprint=request_fingerprint,
+            pricing_key=pricing_key)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        return _pending_replay_result(
+            budgets, ledger, tenant_id=tenant_id, period=period, hold_id=hold_id,
+            idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
+            capture_mode=capture_mode)
+
+    # STEP 1 (write-ahead intent): HOLD status=PENDING. A self SDK-retry / re-entry
+    # CCFs; the marker read in step 2 makes that harmless (idempotent).
+    try:
+        budgets.hold_put_pending(
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            amount_microusd=amount, expires_at_epoch=hold_expires_at,
+            source="external", description=description,
+            rate_snapshot=rate_snapshot_dict, payload_hash=request_fingerprint,
+            run_id=workflow_run_id or hold_id, run_id_is_fallback=workflow_run_id is None,
+        )
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        # hold already exists (self-retry / re-entry): fall through to step 2,
+        # which is idempotent via the marker.
+
+    # STEP 2 (COMMIT POINT): marker-carrying conditional UpdateItem. Idempotent —
+    # a re-issue of the SAME hold either applies once or reports ALREADY.
+    _t0 = time.perf_counter()
+    try:
+        outcome = budgets.pool_reserve_update(
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            amount_microusd=amount, table=_no_retry_table())
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ResourceNotFoundException":
+            raise ExternalAuthorizeNoPool(tenant_id, period)
+        # AMBIGUOUS (timeout / 5xx): the marker makes this recoverable — a replay
+        # (same key) re-issues the idempotent UpdateItem and gets a decisive
+        # APPLIED/ALREADY/EXHAUSTED. Surface 503 asking the client to retry the
+        # SAME key (NOT a new one — the marker dedupes, so no double debit).
+        logger.warning("pending_reserve_ambiguous", tenant_id=tenant_id,
+                       period=period, hold_id=hold_id, code=code)
+        raise HTTPException(status_code=503, detail={
+            "type": "budget_unavailable", "reason": "pool_reservation_ambiguous",
+            "message": "Budget reservation could not be confirmed. Retry with the same Idempotency-Key."})
+
+    if outcome == budgets.RESERVE_EXHAUSTED:
+        # Genuine exhaustion: no marker was written, pool untouched. Mark the
+        # IDEMP intent + hold FAILED (leak-safe, replayable) and 402.
+        budgets.mark_pending_failed_best_effort(tenant_id=tenant_id, sk=hold_sk)
+        ledger.mark_idemp_failed_best_effort(tenant_id=tenant_id, period=period,
+                                             idempotency_key=idempotency_key)
+        raise _err_402("tenant_pool_exhausted")
+    # RESERVE_APPLIED or RESERVE_ALREADY: the debit is a fact. Continue.
+    try:
+        logger.info("ledger_transact_latency", op="external_authorize_reserve_pending",
+                    duration_ms=round((time.perf_counter() - _t0) * 1000, 3),
+                    tenant_id=tenant_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # STEP 3 (async, off the critical path): PENDING -> ACTIVE. If it loses to a
+    # sweeper fence, the reconciler recovers the (committed) debit; we alert. On a
+    # non-CCF transient the hold stays PENDING and capture's helping-CAS activates
+    # it later, so we never fail the caller here.
+    try:
+        activated = budgets.hold_activate(tenant_id=tenant_id, sk=hold_sk)
+        if not activated:
+            logger.error("pending_activate_lost_to_fence", tenant_id=tenant_id,
+                         period=period, hold_id=hold_id)
+    except Exception:  # noqa: BLE001 — step 3 is best-effort; debit is already durable
+        logger.warning("pending_activate_transient", tenant_id=tenant_id,
+                       period=period, hold_id=hold_id)
+
+    # Finalize the IDEMP intent (best-effort; replay works off intent + marker
+    # even if this doesn't land).
+    ledger.mark_idemp_completed_best_effort(tenant_id=tenant_id, period=period,
+                                            idempotency_key=idempotency_key)
+    return ExternalAuthorizeResult(
+        authorization_id=authorization_id, hold_id=hold_id, hold_sk=hold_sk,
+        period=period, amount_microusd=amount, expires_at_epoch=hold_expires_at,
+        capture_mode=capture_mode, replayed=(outcome == budgets.RESERVE_ALREADY),
+    )
 
 
 @dataclass
@@ -1762,6 +2215,104 @@ def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthoriz
     )
 
 
+def _rehydrate_from_hold(
+    tenant_id: str, period: str, hold_id: str, hold_sk: str,
+    hold: dict, pool_reserved: int,
+) -> "ReservationContext":
+    """Build the ReservationContext from the enriched HOLD row ALONE (two-item
+    migration). Byte-equivalent to the RESERVE-event path: same field shape, same
+    run-attribution rules, same rate_snapshot rehydration — so settle/void run
+    identically. Caller has already applied the C-1 gate (hold.source=="external").
+    """
+    rate_snap = None
+    pricing_key = None
+    raw = hold.get("rate_snapshot")
+    if raw:
+        try:
+            import json as _json
+
+            from .pricing import RateSnapshot as _RS
+
+            rate_snap = _RS.from_ledger_dict(_json.loads(raw))
+            pricing_key = rate_snap.pricing_key
+        except Exception:  # noqa: BLE001 — a corrupt snapshot degrades to amount-mode.
+            rate_snap = None
+    # Same fallback rule as the RESERVE-event path: only restore workflow_run_id
+    # when the reserve was NOT a hold_id fallback (else a synthetic hold_id would
+    # resurface as a real run on settle).
+    restored_run_id = None
+    if hold.get("run_id_source") != "hold_id_fallback":
+        _rid = hold.get("run_id")
+        restored_run_id = str(_rid) if _rid else None
+    return ReservationContext(
+        tenants_repo=UserTenantsRepository(),
+        reservation_tokens=0,
+        pool_reserved_microusd=pool_reserved,
+        period=period,
+        pricing_key=pricing_key,
+        rate_snapshot=rate_snap,
+        tenant_id=tenant_id,
+        pool_active=True,
+        hold_id=hold_id,
+        hold_sk=hold_sk,
+        workflow_run_id=restored_run_id,
+        source="external",
+    )
+
+
+def _dual_read_crosscheck(tenant_id: str, period: str, hold_id: str, hold: dict) -> None:
+    """Migration guard (dual-read phase): compare the enriched HOLD against the
+    still-synchronous RESERVE event.
+
+    H-A (Fable authcap review-4) is MONEY-SAFETY and is preserved across the
+    migration: while both durable sources exist, if the HOLD's `amount_microusd`
+    and the RESERVE event's `reserved_delta_microusd` DISAGREE, settling would move
+    `pool_reserved` by an amount the ledger's +reserved never recorded — breaking
+    I2 silently. So an AMOUNT mismatch RAISES `ExternalHoldInconsistent` (surfaced
+    as 409), exactly as the legacy RESERVE-event path did; this is the reason the
+    HOLD-only path keeps reading the RESERVE event during step 3. Once step 4
+    removes the synchronous RESERVE event there is a single source and nothing to
+    diverge, so this guard (and the crosscheck) is retired with it.
+
+    A source/run_id divergence is NOT money-critical (it would change auth/attrib,
+    not the amount moved) — it is logged as cutover-readiness telemetry, not
+    raised, so it never fails a live capture/void."""
+    try:
+        reserve_evt = _reaper_ledger().get_reserve(
+            tenant_id=tenant_id, period=period, hold_id=hold_id
+        )
+    except Exception:  # noqa: BLE001 — a lookup error is best-effort telemetry.
+        return
+    if reserve_evt is None:
+        logger.warning(
+            "hold_dualread_reserve_missing",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+        )
+        return
+    # Money-critical: refuse to settle on an amount divergence (H-A).
+    h_amt = int(hold.get("amount_microusd", 0))
+    r_amt = int(reserve_evt.get("reserved_delta_microusd", 0))
+    if h_amt != r_amt:
+        logger.error(
+            "external_hold_amount_mismatch",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            hold_amount=h_amt, reserve_delta=r_amt,
+        )
+        raise ExternalHoldInconsistent(hold_id)
+    # Informational: non-money divergences inform the cutover go/no-go, never fail.
+    mismatches = {}
+    if hold.get("source") != reserve_evt.get("source"):
+        mismatches["source"] = (hold.get("source"), reserve_evt.get("source"))
+    if hold.get("run_id") != reserve_evt.get("run_id"):
+        mismatches["run_id"] = (hold.get("run_id"), reserve_evt.get("run_id"))
+    if mismatches:
+        logger.warning(
+            "hold_dualread_mismatch",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            mismatches=mismatches,
+        )
+
+
 def rehydrate_reservation_context(
     *,
     tenant_id: str,
@@ -1793,6 +2344,67 @@ def rehydrate_reservation_context(
     that the external authorize API itself created. A non-external (or absent)
     RESERVE → None → the endpoint answers 404, exactly as for a bogus token.
     """
+    budgets = TenantBudgetsRepository()
+    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
+
+    # Two-item migration step 2/3 (docs/design/ledger-hot-path.md): the HOLD row
+    # now carries `source`/`rate_snapshot`/description synchronously, so the C-1
+    # gate and rehydration can read the HOLD ALONE — no dependency on the RESERVE
+    # event, which is moving to an async Streams projection.
+    #
+    # PATH SELECTION (Fable review-2 finding 2): a hold takes the HOLD-only path
+    # iff it is post-enrichment. Two independent signals both route to HOLD-only,
+    # and neither can misroute a pre-enrichment hold there:
+    #   * the hold already carries `source` (it was written by enriched code), OR
+    #   * the hold was minted AT OR AFTER _ENRICHMENT_EPOCH (created_at gate).
+    # A pre-epoch hold with no `source` falls to the legacy RESERVE-event path,
+    # which still exists during step 3 (write side is still 4-item). The epoch
+    # gate is what makes the eventual fallback DELETION safe: after epoch + max
+    # hold TTL, no pre-epoch hold can still be live. C-1 stays fail-closed on the
+    # HOLD-only path: a missing/non-external source denies (404).
+    hold_has_source = hold is not None and "source" in hold
+    hold_is_post_epoch = (
+        _ENRICHMENT_EPOCH is not None
+        and hold is not None
+        and (_ce := _hold_created_epoch(hold)) is not None
+        and _ce >= _ENRICHMENT_EPOCH
+    )
+    if hold_has_source or hold_is_post_epoch:
+        if hold is None or hold.get("source") != "external":
+            return None
+        pool_reserved = int(hold.get("amount_microusd", 0))
+        # PENDING protocol (docs/design/pending-protocol.md, Fable helping-CAS):
+        # a capture/void may arrive while the hold is still PENDING (step 3 async
+        # activate lost/delayed). settle is ACTIVE-only, so HELP it forward — but
+        # ONLY after confirming the debit committed via the pool marker (A1). No
+        # marker = the debit did not commit (ambiguous/uncommitted) → deny (404),
+        # never settle an un-debited hold (which would credit-back an amount the
+        # pool never lost = oversell).
+        if str(hold.get("status", "")) == "PENDING":
+            budgets_repo = TenantBudgetsRepository()
+            marker = budgets_repo.pool_marker_amount(
+                tenant_id=tenant_id, period=period, hold_id=hold_id)
+            if marker is None:
+                return None  # debit not committed yet — not capturable
+            # Help the hold to ACTIVE (idempotent CAS; a racing activate/fence is
+            # resolved by single-item serialization). If a fence already won, the
+            # reconciler credits the marker back and this capture 404s — leak-safe.
+            if not budgets_repo.hold_activate(tenant_id=tenant_id, sk=hold_sk):
+                if str((budgets_repo.get_hold(tenant_id=tenant_id, sk=hold_sk) or {}
+                        ).get("status", "")) != "ACTIVE":
+                    return None
+        # Cross-check against the synchronous RESERVE event ONLY when one exists
+        # (transaction mode / migration). The PENDING protocol writes no RESERVE
+        # event, so skip the crosscheck for a pending-origin hold to avoid a
+        # spurious "reserve missing" warning on every capture.
+        if _RESERVE_PROTOCOL != "pending":
+            _dual_read_crosscheck(tenant_id, period, hold_id, hold)
+        return _rehydrate_from_hold(tenant_id, period, hold_id, hold_sk, hold,
+                                    pool_reserved)
+
+    # Legacy path: no enrichment on the HOLD → the RESERVE event is the only
+    # source of source/amount/rate_snapshot. (Removed after all pre-enrichment
+    # holds' max TTL elapses.)
     ledger = _reaper_ledger()
     reserve_evt = ledger.get_reserve(
         tenant_id=tenant_id, period=period, hold_id=hold_id
@@ -1801,8 +2413,6 @@ def rehydrate_reservation_context(
     if reserve_evt is None or reserve_evt.get("source") != "external":
         return None
 
-    budgets = TenantBudgetsRepository()
-    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
     if hold is None:
         return None
     pool_reserved = int(hold.get("amount_microusd", 0))
@@ -2037,6 +2647,11 @@ def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actu
     still record the actual spend, but decrementing `pool_reserved` again would
     double-subtract. Gated on `attribute_exists(tenant_id)` so a vanished pool
     row is a no-op.
+
+    Headroom: the reaper's reclaim already returned the full reservation to
+    headroom (`+= reserved`). Now that the true spend is known, deduct it —
+    `headroom -= actual` — so the invariant `headroom == limit - reserved -
+    settled` holds after this settled-only spend record.
     """
     from dynamo.tenant_budgets import budget_sk
 
@@ -2044,9 +2659,14 @@ def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actu
         "Update": {
             "TableName": table_name,
             "Key": {"tenant_id": {"S": tenant_id}, "sk": {"S": budget_sk(period)}},
-            "UpdateExpression": "ADD pool_settled_microusd :actual",
+            "UpdateExpression": (
+                "ADD pool_settled_microusd :actual, pool_headroom_microusd :dh"
+            ),
             "ConditionExpression": "attribute_exists(tenant_id)",
-            "ExpressionAttributeValues": {":actual": {"N": str(int(actual_microusd))}},
+            "ExpressionAttributeValues": {
+                ":actual": {"N": str(int(actual_microusd))},
+                ":dh": {"N": str(-int(actual_microusd))},
+            },
         }
     }
 
@@ -2559,6 +3179,12 @@ def _settle_pool_side(
     _POOL_IDX = 0
     _HOLD_IDX: Optional[int] = None
     _LEDGER_IDX: Optional[int] = None
+    # Resolve hold_id up front so the pool settle item can REMOVE this hold's
+    # PENDING-protocol `applied` marker in the SAME write (no-op for a
+    # transaction-mode hold that has no marker).
+    _hold_id_for_marker = context.hold_id
+    if not _hold_id_for_marker and context.hold_sk:
+        _hold_id_for_marker = context.hold_sk.rsplit("#", 1)[-1] or None
     items = [
         _pool_settle_items(
             table_name=budgets.table_name,
@@ -2566,6 +3192,7 @@ def _settle_pool_side(
             period=context.period,
             reserved_microusd=context.pool_reserved_microusd,
             actual_microusd=actual_cost_microusd,
+            hold_id=_hold_id_for_marker,
         )
     ]
     if context.hold_sk:

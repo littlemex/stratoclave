@@ -1,0 +1,121 @@
+{
+  "metric": "ledger_itemcount_spike",
+  "tenant": "spike-1784471460",
+  "period": "2026-07",
+  "by_item_count": {
+    "4": {
+      "floor_c1": {
+        "count": 3000,
+        "p50": 21.871,
+        "p90": 25.436,
+        "p99": 90.219,
+        "p99_9": 240.965,
+        "max": 265.148,
+        "min": 17.589,
+        "mean": 24.143,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "total_retries": 0,
+          "txns_with_transaction_conflict": 0,
+          "cancellation_reasons": {}
+        }
+      },
+      "concurrent_c16": {
+        "count": 2965,
+        "p50": 25.501,
+        "p90": 331.492,
+        "p99": 1194.334,
+        "p99_9": 1655.968,
+        "max": 1887.834,
+        "min": 17.075,
+        "mean": 128.865,
+        "attribution": {
+          "calls": 3000,
+          "errors": 35,
+          "total_retries": 3011,
+          "txns_with_transaction_conflict": 1312,
+          "cancellation_reasons": {
+            "TransactionConflict": 3291
+          }
+        }
+      }
+    },
+    "3": {
+      "floor_c1": {
+        "count": 3000,
+        "p50": 20.595,
+        "p90": 23.639,
+        "p99": 60.468,
+        "p99_9": 157.134,
+        "max": 168.344,
+        "min": 16.049,
+        "mean": 22.105,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "total_retries": 0,
+          "txns_with_transaction_conflict": 0,
+          "cancellation_reasons": {}
+        }
+      },
+      "concurrent_c16": {
+        "count": 2965,
+        "p50": 23.527,
+        "p90": 308.622,
+        "p99": 1187.996,
+        "p99_9": 1586.967,
+        "max": 1953.822,
+        "min": 15.895,
+        "mean": 121.657,
+        "attribution": {
+          "calls": 3000,
+          "errors": 35,
+          "total_retries": 3045,
+          "txns_with_transaction_conflict": 1333,
+          "cancellation_reasons": {
+            "TransactionConflict": 3325
+          }
+        }
+      }
+    },
+    "2": {
+      "floor_c1": {
+        "count": 3000,
+        "p50": 19.015,
+        "p90": 22.208,
+        "p99": 69.656,
+        "p99_9": 175.985,
+        "max": 239.227,
+        "min": 15.123,
+        "mean": 20.727,
+        "attribution": {
+          "calls": 3000,
+          "errors": 0,
+          "total_retries": 0,
+          "txns_with_transaction_conflict": 0,
+          "cancellation_reasons": {}
+        }
+      },
+      "concurrent_c16": {
+        "count": 2962,
+        "p50": 22.318,
+        "p90": 300.483,
+        "p99": 1188.599,
+        "p99_9": 1712.682,
+        "max": 1767.35,
+        "min": 15.017,
+        "mean": 118.506,
+        "attribution": {
+          "calls": 3000,
+          "errors": 38,
+          "total_retries": 2889,
+          "txns_with_transaction_conflict": 1256,
+          "cancellation_reasons": {
+            "TransactionConflict": 3193
+          }
+        }
+      }
+    }
+  }
+}
