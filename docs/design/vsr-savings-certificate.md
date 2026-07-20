@@ -147,6 +147,62 @@ the one asset (credibility) the whole strategy rests on.
   escalation, no clipping, exhaustive classification), `test_savings_certificate.py`
   (end-to-end over moto: positive saving + surfaced escalation loss).
 
+## Auto-issue (litellm-wedge slice-4)
+
+The certificate computation is a fold; slice-4 makes it a **durable, auto-issued
+artifact** so a tenant gets an audited record without an operator running the CLI.
+
+- `backend/mvp/learning/certificate_store.py` — `issue_certificate` (pure: decide
+  if the day is honestly certifiable), `store_certificate` (WRITE-ONCE via
+  `attribute_not_exists`; a re-run is a no-op, a genuine recompute is a NEW
+  `revision` that `supersedes` the old, never an overwrite), `issue_and_store`,
+  and `issue_for_tenants` (the scheduler body — per-tenant try/except isolation).
+  Stored on the routing-signals table under a `CERT#<tenant>` / `cert#D#<day>#r#<rev>`
+  key namespace (no new table).
+- `backend/mvp/learning/certificate_cli.py` — `issue` / `get` ops face.
+
+Honesty guards are runtime invariants, not tests (Fable slice-4 design):
+  - **data-absent != $0.** A day with no VSR-acted traffic is a documented SKIP
+    (`SKIP_NO_TRAFFIC`), never a $0 certificate (which would lie "we saved
+    nothing" about a day we could not measure).
+  - **coverage gate.** A day whose reconcile is >10% unsettled is skipped
+    (`SKIP_UNMATCHED_HIGH`) rather than stamped `final` at an understated number.
+  - **no synthetic in the store.** `store_certificate` refuses any provenance
+    other than `real`.
+  - **caveats are load-bearing.** It refuses a certificate that dropped its
+    honesty caveats (quality unmeasured, potential is an upper-bound estimate).
+  - **injected clock.** No module here reads a clock; `generated_at_ms` is passed
+    by the caller (the Lambda handler, from the EventBridge event `time`).
+
+Deploy leg (CDK, wired separately): a daily EventBridge rule → Lambda that calls
+`issue_for_tenants` for the previous settled day (**D+N**, N = a settle window;
+the backend coverage gate then refuses to finalize any day that is STILL under-
+settled after N — the two are complementary: D+N gives settle time, the gate
+refuses to stamp `final` on a day that never settled). Shadow-stage certificates
+are an INTERNAL artifact; the tenant-facing HTTP surface is a later slice (per the
+rollout rule — no external claim before Shadow numbers exist).
+
+Alarms the Lambda must emit (honesty depends on them, not just on the backend):
+
+- **per-run failure**: `BatchIssueReport.failed` non-empty → a tenant errored.
+- **silent-skip / issued < expected**: issued count < active-tenant count.
+- **fleet-wide NO_TRAFFIC (outage vs quiet)**: SKIP_NO_TRAFFIC cannot itself tell
+  "the VSR genuinely acted on nothing" from "the decision-log ingestion was down"
+  (backend note on SKIP_NO_TRAFFIC). A SINGLE tenant's quiet day is normal; ALL /
+  most tenants skipping NO_TRAFFIC on the same day is an ingestion outage — alarm
+  on that separately so honest-absence never masks an outage.
+- **consecutive-skip series**: a tenant skipping many days in a row (e.g. a
+  mis-config stuck at UNMATCHED_HIGH) is healthy per-day but anomalous as a
+  series. The daily batch report looks fine, so this must be tracked across runs.
+  To count it, the scheduler must PERSIST skips (a `skip` row per tenant/day, or a
+  CloudWatch metric per skip_reason) — a skipped day should be auditable too, so
+  a gap in the certificate series is explained, never a silent hole. **Follow-up:
+  persist skip rows; until then the Lambda emits a per-skip_reason metric.**
+
+Backend follow-ups (recorded, not silent): tune `DEFAULT_MAX_UNMATCHED_FRACTION`
+(0.10) from the observed unmatched distribution once the scheduler has run;
+persist skip rows for series-level auditing.
+
 ## Still to build (this is the wedge, not the finish line)
 
 - The **quality signal** (tenant eval + judge) to make savings CLAIMABLE.
