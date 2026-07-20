@@ -284,6 +284,28 @@ def chat_completions(
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
 
+    # Shadow VSR (litellm wedge): this endpoint has no external-VSR consult, so the
+    # local rule judge is the only advisory. Dark by default + fail-open +
+    # advisory-only: it never sets a pin (no vsr_hard_model) and emits no response
+    # header; it only attaches a shadow-advised block to the decision record so the
+    # offline savings certificate can show the POTENTIAL saving. Never on money path.
+    # Suppressed when a pin decides routing (a deliberate pin is not a downgrade
+    # candidate); shadow_enabled() checked FIRST so a dark deploy extracts no
+    # features on the hot path (Fable review-2 (d)/(e)).
+    _shadow_vsr = None
+    if model_pin is None:
+        try:
+            from .vsr import shadow as _shadow
+            if _shadow.shadow_enabled():
+                _shadow_vsr = _shadow.shadow_vsr_decision(
+                    requested_model=body.model,
+                    features=_shadow.extract_features_openai(
+                        approx_input_tokens=input_est,
+                        tools=getattr(body, "tools", None), messages=body.messages),
+                )
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            _shadow_vsr = None
+
     tenants_repo = reserve_credit_for_model(
         user, reservation,
         model_name=body.model,
@@ -295,6 +317,7 @@ def chat_completions(
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        vsr_decision=_shadow_vsr,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point

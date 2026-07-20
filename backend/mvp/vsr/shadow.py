@@ -38,8 +38,22 @@ _TIER_ORDER = ("haiku", "sonnet", "opus")
 
 def shadow_enabled() -> bool:
     """Master switch. Dark by default — the judge is inert (propose() returns None)
-    unless STRATOCLAVE_SHADOW_VSR=true, so it ships without touching any request."""
+    unless STRATOCLAVE_SHADOW_VSR=true, so it ships without touching any request.
+    Read PER REQUEST (not memoised at import) so the flag is a live kill-switch."""
     return os.getenv("STRATOCLAVE_SHADOW_VSR", "false").lower() == "true"
+
+
+# Version of THIS local rule set. Rides every shadow decision record (Fable
+# wiring review §c/§e) so (1) the savings certificate can attribute each
+# potential saving to the exact judge that proposed it and reproduce the report,
+# and (2) shadow-origin potential is distinguishable from real-VSR-origin
+# advisory potential when a tenant has both. Bump when the rules change.
+SHADOW_CONFIG_VERSION = "shadow-r1v1"
+
+# The decision label a shadow suggestion logs. MUST be vsr.client's shadow label
+# so savings/reconcile classify it into SHADOW_DECISIONS (enacted=False,
+# potential-only) — never realized. Imported lazily in shadow_vsr_decision to
+# avoid a module import cycle (client imports nothing from shadow, keep it so).
 
 
 @dataclass(frozen=True)
@@ -157,3 +171,110 @@ def _default_cheapest_for_tier(pricing_key: str) -> Optional[str]:
         if e.pricing_key == pricing_key and getattr(e, "served_by", "bedrock") == "bedrock":
             return e.aliases[0] if e.aliases else e.bedrock_model_id
     return None
+
+
+# --- request-path wiring (Fable shadow-wiring review) ------------------------
+#
+# The single seam the route handlers call. It is the ONLY place the shadow judge
+# touches a live request, and it is designed so a handler needs one line and
+# carries NO error handling of its own:
+#
+#   * DARK BY DEFAULT: returns None instantly when shadow_enabled() is False, and
+#     does so WITHOUT calling propose() — "dark" means the judge never runs, not
+#     "runs and is discarded" (Fable §d).
+#   * FAIL-OPEN: any exception (registry miss, pricing gap, bad features) is
+#     swallowed and yields None — the judge can never break or slow a request
+#     beyond the cheap pure-rule evaluation. It touches NO money and NO routing.
+#   * SUPPRESSED WHEN A REAL VSR ALREADY SPOKE: the caller passes shadow ONLY when
+#     the real external-VSR decision is None/non-actionable, so at most ONE vsr
+#     block is ever attached to a request's decision record — no double-count of
+#     the same request into `potential` (Fable §a).
+#
+# The returned dict mirrors vsr.client.decision_record's shape
+# ({decision, suggested_model, mode, config_version}) so it flows through the
+# EXACT same decision-log / reconcile / savings path as a real VSR advisory,
+# classified into SHADOW_DECISIONS (enacted=False → potential only, never the
+# realized headline).
+
+
+def shadow_vsr_decision(*, requested_model: str,
+                        features: "RequestFeatures") -> Optional[dict]:
+    """Return the shadow VSR decision dict to attach to the reserve-time decision
+    record, or None to attach nothing. Dark by default, fail-open, side-effect and
+    money free. See module note above. `mode` is the informational literal
+    "shadow"; the AUTHORITATIVE classifier downstream is `decision`
+    (DECISION_SHADOW_ADVISED ∈ SHADOW_DECISIONS), never `mode`."""
+    if not shadow_enabled():
+        return None
+    try:
+        from .client import DECISION_SHADOW_ADVISED
+
+        suggestion = propose(requested_model=requested_model, features=features)
+        if suggestion is None:
+            return None
+        return {
+            "decision": DECISION_SHADOW_ADVISED,
+            "suggested_model": suggestion.model,
+            "mode": "shadow",
+            "config_version": SHADOW_CONFIG_VERSION,
+            "rule_id": suggestion.rule_id,
+        }
+    except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+        return None
+
+
+def extract_features_openai(*, approx_input_tokens: int,
+                            tools: object = None, messages: object = None,
+                            ) -> RequestFeatures:
+    """Cheap features from an OpenAI-family request (chat.completions / responses).
+    NO prompt text is read — only a bool for tool presence, a bool for any image
+    content part, and the caller's already-computed token estimate. Deliberately
+    conservative: on any doubt it reports the capability PRESENT (has_tools/
+    has_images True) so a capability-bearing request is never downgraded."""
+    has_tools = bool(tools)
+    has_images = False
+    try:
+        for m in (messages or []):
+            content = getattr(m, "content", None)
+            if content is None and isinstance(m, dict):
+                content = m.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    ptype = (part.get("type") if isinstance(part, dict)
+                             else getattr(part, "type", None))
+                    if ptype in ("image_url", "input_image", "image"):
+                        has_images = True
+                        break
+            if has_images:
+                break
+    except Exception:  # noqa: BLE001 — feature miss = report capability present.
+        has_images = True
+    return RequestFeatures(approx_input_tokens=max(int(approx_input_tokens), 0),
+                           has_tools=has_tools, has_images=has_images)
+
+
+def extract_features_anthropic(*, approx_input_tokens: int,
+                               tools: object = None, messages: object = None,
+                               ) -> RequestFeatures:
+    """Cheap features from an Anthropic /v1/messages request. Same contract as
+    extract_features_openai: bools only, no prompt text, conservative on doubt."""
+    has_tools = bool(tools)
+    has_images = False
+    try:
+        for m in (messages or []):
+            content = getattr(m, "content", None)
+            if content is None and isinstance(m, dict):
+                content = m.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    ptype = (part.get("type") if isinstance(part, dict)
+                             else getattr(part, "type", None))
+                    if ptype == "image":
+                        has_images = True
+                        break
+            if has_images:
+                break
+    except Exception:  # noqa: BLE001 — feature miss = report capability present.
+        has_images = True
+    return RequestFeatures(approx_input_tokens=max(int(approx_input_tokens), 0),
+                           has_tools=has_tools, has_images=has_images)
