@@ -87,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  request classes:          {counts or '(none)'}")
     print(f"  quality measured:         {s['quality']['measured']} "
           f"({s['quality']['note']})")
+    # SCOPE declaration (Fable savings-certificate review): the denominator is
+    # VSR-acted requests only, so the reader never mistakes the net% for a
+    # whole-traffic figure. This is a VSR savings proof, not a full-traffic report.
+    print("  scope:                    VSR-acted requests only "
+          "(non-steered traffic is not in this certificate)")
 
     if args.detail:
         print()

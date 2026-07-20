@@ -64,6 +64,8 @@ def test_human_mode_shows_net_and_loss(monkeypatch, capsys):
     # honesty: the quality-not-measured caveat is always printed.
     assert "quality measured:         False" in out
     assert "QUALITY IS NOT MEASURED" in out    # NOTICE block
+    # scope declaration: the reader never mistakes net% for a whole-traffic figure.
+    assert "VSR-acted requests only" in out
 
 
 def test_human_mode_reports_class_counts(monkeypatch, capsys):
