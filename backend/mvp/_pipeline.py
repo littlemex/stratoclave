@@ -2201,18 +2201,14 @@ def _pending_commit_transact(budgets, *, tenant_id, period, hold_id, amount) -> 
                 amount_microusd=amount, outcome=outcome,
                 exhausted_sentinel=budgets.RESERVE_EXHAUSTED,
                 applied_sentinel=budgets.RESERVE_APPLIED)
-            # First compare against the PRE-READ snapshot. Only if they disagree do
-            # we pay a SECOND read, to tell a genuine mismatch from a TOCTOU race
-            # (a concurrent reserve/release near the ceiling flipping the verdict).
-            if (golden.verdict == pending.verdict
-                    and golden.reserved_delta_int == pending.reserved_delta_int):
-                _ro.compare_and_log(tenant_id=tenant_id, period=period, hold_id=hold_id,
-                                    golden=golden, pending=pending)  # -> "match"
-            else:
-                pool_after = budgets.get(tenant_id, period, consistent_read=True)
-                _ro.compare_and_log(tenant_id=tenant_id, period=period, hold_id=hold_id,
-                                    golden=golden, pending=pending,
-                                    pool_before=_oracle_pool_row, pool_after=pool_after)
+            # The equivalence check lives ENTIRELY in compare_and_log (no caller
+            # pre-judge, so they can't drift). It calls `reread` ONLY on a
+            # disagreement — a strongly-consistent post-commit pool read — to tell a
+            # genuine mismatch from a benign TOCTOU race. A match pays no extra read.
+            _ro.compare_and_log(
+                tenant_id=tenant_id, period=period, hold_id=hold_id,
+                golden=golden, pending=pending, pool_before=_oracle_pool_row,
+                reread=lambda: budgets.get(tenant_id, period, consistent_read=True))
         except Exception:  # noqa: BLE001 — a detector must never fail the reserve
             pass
 

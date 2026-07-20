@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from core.logging import get_logger
 
@@ -132,15 +132,22 @@ def _concurrent_move(before: Optional[dict[str, Any]], after: Optional[dict[str,
 def compare_and_log(*, tenant_id: str, period: str, hold_id: str,
                     golden: ReserveWriteSet, pending: ReserveWriteSet,
                     pool_before: Optional[dict[str, Any]] = None,
-                    pool_after: Optional[dict[str, Any]] = None) -> str:
+                    reread: Optional["Callable[[], Optional[dict[str, Any]]]"] = None) -> str:
     """Compare golden-predicted vs pending-actual write-sets. Returns "match",
     "race", or "mismatch". NEVER raises, NEVER changes control flow — money is
     already decided by pending; the oracle only records.
 
-    On disagreement, `pool_after` (a post-commit re-read taken by the caller)
-    disambiguates: if the pool moved by MORE than this reserve's own committed
-    delta (i.e. a concurrent op raced), the golden prediction was computed off a
-    now-stale snapshot → `reserve_oracle_race` (benign TOCTOU, non-alarming). Only a
+    The equivalence check lives ONLY here (Fable review-2b: no caller-side
+    pre-judge, so the two never drift). On agreement → `reserve_oracle_match`, and
+    `reread` is NOT called (a match costs no extra read). ONLY on disagreement is
+    `reread()` invoked — a strongly-consistent post-commit pool re-read — to tell a
+    genuine mismatch from a benign TOCTOU: if the pool moved by MORE than this
+    reserve's own committed delta (a concurrent op raced), the golden prediction was
+    off a now-stale snapshot → `reserve_oracle_race` (non-alarming). NOTE (residual,
+    fail directions): a concurrent op landing in the commit→reread window can
+    misclassify a genuine mismatch as a race (fail-silent) — but a deterministic
+    logic divergence recurs on low-contention samples, and the match>=N gate covers
+    it; conversely a benign ABA falls to `mismatch` (fail-loud → triaged). Only a
     disagreement with NO concurrent move is a genuine `reserve_oracle_mismatch`
     (alarmed, blocks the delete gate)."""
     if golden.verdict == pending.verdict and golden.reserved_delta_int == pending.reserved_delta_int:
@@ -148,6 +155,7 @@ def compare_and_log(*, tenant_id: str, period: str, hold_id: str,
                     hold_id=hold_id, verdict=pending.verdict,
                     reserved_delta=pending.reserved_delta_int)
         return "match"
+    pool_after = reread() if reread is not None else None
     if _concurrent_move(pool_before, pool_after, pending.reserved_delta_int):
         logger.warning("reserve_oracle_race", tenant_id=tenant_id, period=period,
                        hold_id=hold_id, golden_verdict=golden.verdict,

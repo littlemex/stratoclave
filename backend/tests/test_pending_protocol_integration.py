@@ -278,6 +278,32 @@ def test_pending_commit_cancellation_reasons(dynamodb_mock, monkeypatch):
     assert b.pool_marker_amount(tenant_id=tenant, period=period, hold_id=hid2) is None
 
 
+def test_marker_present_and_pool_full_replays_not_debits(dynamodb_mock, monkeypatch):
+    """Fable review-2b pt3 (the combined marker×pool-CCF state the write-set oracle
+    skips, so the offline path must cover it): a hold whose debit ALREADY committed
+    (marker present) is replayed WHILE the pool is now full. Both conditions fail in
+    the 2-item transact — DynamoDB puts BOTH in CancellationReasons — and the
+    marker-first classification returns RESERVE_ALREADY (idempotent success), NOT
+    EXHAUSTED. Crucially, NO second debit: pool_reserved is unchanged. Getting this
+    order wrong would 402 a hold whose debit is a fact and re-reserve it double."""
+    _set_protocol(monkeypatch, "pending")
+    tenant, period = _seed("pend-marker-poolfull", limit=500_000)
+    b = TenantBudgetsRepository()
+    hid = _pipeline._pending_hold_id(tenant, period, "pk-mpf")
+    # commit hold X (300k), then fill the pool to the ceiling with a different hold.
+    assert _pipeline._pending_commit_transact(
+        b, tenant_id=tenant, period=period, hold_id=hid, amount=300_000) == b.RESERVE_APPLIED
+    hid_fill = _pipeline._pending_hold_id(tenant, period, "pk-fill")
+    assert _pipeline._pending_commit_transact(
+        b, tenant_id=tenant, period=period, hold_id=hid_fill, amount=200_000) == b.RESERVE_APPLIED
+    assert _pool(tenant, period)["pool_reserved_microusd"] == 500_000    # full
+    # NOW replay X: marker present (CCF) AND pool full (CCF) simultaneously.
+    out = _pipeline._pending_commit_transact(
+        b, tenant_id=tenant, period=period, hold_id=hid, amount=300_000)
+    assert out == b.RESERVE_ALREADY                    # marker-first: idempotent success
+    assert _pool(tenant, period)["pool_reserved_microusd"] == 500_000   # NO second debit
+
+
 def test_capture_settles_marker_to_settled_phase(dynamodb_mock, monkeypatch):
     """After an HTTP capture settles the hold, the SEPARATE marker is transitioned
     RESERVED -> SETTLED + TTL (cleanup), not deleted — so a late reserve retry of

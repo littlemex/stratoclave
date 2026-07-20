@@ -66,20 +66,30 @@ def test_pending_writeset_rejects_replay_outcome():
                                    exhausted_sentinel="exhausted", applied_sentinel="applied")
 
 
-def test_compare_match_race_mismatch():
+def test_compare_match_does_not_reread():
     a = ro.ReserveWriteSet(ro.VERDICT_ADMIT, 40)
-    b = ro.ReserveWriteSet(ro.VERDICT_REJECT, 0)
-    # agreement -> match
-    assert ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=a, pending=a) == "match"
-    # disagreement + pool MOVED between snapshots -> race (benign TOCTOU)
+    calls = {"n": 0}
+
+    def _reread():
+        calls["n"] += 1
+        return _pool(100, 40)
+    assert ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=a, pending=a,
+                              pool_before=_pool(100, 0), reread=_reread) == "match"
+    assert calls["n"] == 0          # a match pays NO extra read (lazy reread)
+
+
+def test_compare_race_and_mismatch_via_reread():
+    a = ro.ReserveWriteSet(ro.VERDICT_ADMIT, 40)   # golden predicts admit +40
+    b = ro.ReserveWriteSet(ro.VERDICT_REJECT, 0)   # pending actually rejected (disagree)
     before = _pool(100, 60)
-    after = _pool(100, 10)          # a concurrent release moved reserved
+    # reread shows the pool moved by MORE than pending's own delta (0) -> concurrent
+    # release raced -> benign race.
+    moved = _pool(100, 10)
     assert ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=a, pending=b,
-                              pool_before=before, pool_after=after) == "race"
-    # disagreement + pool UNCHANGED -> genuine mismatch
-    same = _pool(100, 60)
+                              pool_before=before, reread=lambda: moved) == "race"
+    # reread shows the pool unchanged (pending's own delta is 0) -> genuine mismatch.
     assert ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=a, pending=b,
-                              pool_before=same, pool_after=dict(same)) == "mismatch"
+                              pool_before=before, reread=lambda: _pool(100, 60)) == "mismatch"
 
 
 def test_enabled_flag(monkeypatch):
