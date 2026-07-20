@@ -46,6 +46,13 @@ class RoutingConfig:
     # False keeps the session shared across the tenant's users (the common
     # single-agent case). This field is inert when SAAR is globally disabled.
     saar_user_scoped: bool = False
+    # Per-tenant shadow VSR toggle (advisory-only; NEVER affects execution,
+    # billing, or routing — it only controls whether the shadow judge records a
+    # potential-saving advisory on the decision log for the Savings Certificate).
+    # Tri-state: True = on for this tenant, False = off, None = follow the global
+    # env default (STRATOCLAVE_SHADOW_VSR, dark unless set). A tenant with no
+    # routing-config item resolves to None, so existing tenants are unchanged.
+    shadow_vsr: Optional[bool] = None
 
 
 @dataclass(frozen=True)

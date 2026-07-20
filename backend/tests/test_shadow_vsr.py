@@ -188,3 +188,45 @@ def test_savings_classification_is_mode_independent(monkeypatch):
     row = counterfactual_row(base)
     # classified by `decision` (shadow-advised) => advice only, never realized.
     assert row["enacted"] is False
+
+
+# --------------------------------------------------- per-tenant shadow toggle
+# (Fable per-tenant review): shadow_enabled resolves tri-state — tenant explicit
+# wins; None falls back to the global env default. shadow.py stays free of any
+# storage dependency (the caller passes the resolved bool).
+
+def test_shadow_enabled_tenant_true_overrides_env_off(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "false")   # global OFF
+    assert shadow.shadow_enabled(True) is True             # tenant opted in
+
+
+def test_shadow_enabled_tenant_false_overrides_env_on(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")    # global ON
+    assert shadow.shadow_enabled(False) is False           # tenant opted out
+
+
+def test_shadow_enabled_none_follows_global_default(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")
+    assert shadow.shadow_enabled(None) is True
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "false")
+    assert shadow.shadow_enabled(None) is False
+    monkeypatch.delenv("STRATOCLAVE_SHADOW_VSR", raising=False)
+    assert shadow.shadow_enabled(None) is False            # dark by default
+    # legacy no-arg call (existing callers) still resolves to the global default.
+    assert shadow.shadow_enabled() is False
+
+
+def test_shadow_vsr_decision_respects_tenant_off(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")    # global ON...
+    # ...but this tenant is explicitly OFF -> no advisory even for a downgradable req.
+    assert shadow.shadow_vsr_decision(
+        requested_model="claude-opus-4-7", features=_simple(),
+        tenant_shadow=False) is None
+
+
+def test_shadow_vsr_decision_tenant_on_beats_env_off(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "false")   # global OFF...
+    # ...tenant explicitly ON -> advisory is produced.
+    d = shadow.shadow_vsr_decision(
+        requested_model="claude-opus-4-7", features=_simple(), tenant_shadow=True)
+    assert d is not None and d["decision"]

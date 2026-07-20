@@ -272,6 +272,31 @@ def list_tenants(
 
 
 @router.post("", response_model=TenantItem, status_code=201)
+def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
+    """New tenants get shadow VSR ON by default so the Savings Certificate is
+    populated from week one (the litellm-wedge value prop). This writes an
+    EXPLICIT shadow_vsr=True routing-config record (not an implicit default), so
+    existing tenants are untouched and the state is visible/auditable. An OSS
+    operator can opt the default out with STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT
+    =false. Best-effort + fenced: never fails tenant creation (shadow is advisory,
+    money-neutral)."""
+    import os
+
+    if os.getenv("STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT", "true").lower() == "false":
+        return
+    try:
+        from . import admin_routing as _ar
+
+        _ar.provision_shadow_default_config(tenant_id, updated_by=actor_id)
+    except Exception as e:  # noqa: BLE001 — advisory default; never break creation.
+        try:
+            from core.logging import get_logger
+            get_logger(__name__).warning("shadow_default_provision_failed",
+                                         tenant_id=tenant_id, error=str(e))
+        except Exception:
+            pass
+
+
 def create_tenant(
     body: CreateTenantRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
@@ -286,6 +311,7 @@ def create_tenant(
         )
     except TenantLimitExceededError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    _provision_shadow_default(item["tenant_id"], actor_id=actor.user_id)
     log_audit_event(
         event="tenant_created",
         actor_id=actor.user_id,

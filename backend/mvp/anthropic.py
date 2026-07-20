@@ -95,6 +95,19 @@ def _selected_bedrock_model(context, default_model_id: str) -> str:
         return default_model_id
 
 
+def _shadow_tenant_pref(org_id: str):
+    """The tenant's per-tenant shadow_vsr preference (True/False/None) from the
+    60s-TTL-cached routing config. None => follow the global default. Fenced +
+    fail-open: any lookup failure yields None (fall back to the global default),
+    so the advisory shadow path can never break a request."""
+    try:
+        from .routing.config import get_tenant_routing_config
+
+        return get_tenant_routing_config(org_id).shadow_vsr
+    except Exception:  # noqa: BLE001 — advisory only; never break the request.
+        return None
+
+
 def _saar_req_tool_result(body) -> bool:
     """Did THIS request carry a tool_result block? (tool-loop-lock trigger.)
     Fenced so a shape surprise never breaks the handler."""
@@ -695,9 +708,15 @@ def messages(
             and vsr_hard is None):
         try:
             from .vsr import shadow as _shadow
-            if _shadow.shadow_enabled():
+            # per-tenant toggle: read from the 60s-TTL-cached routing config the
+            # reserve already loaded for this tenant (no extra hot-path read);
+            # None => global env default. shadow_enabled() is checked FIRST so a
+            # dark tenant extracts no features.
+            _tenant_shadow = _shadow_tenant_pref(user.org_id)
+            if _shadow.shadow_enabled(_tenant_shadow):
                 _shadow_vsr = _shadow.shadow_vsr_decision(
                     requested_model=body.model,
+                    tenant_shadow=_tenant_shadow,
                     features=_shadow.extract_features_anthropic(
                         approx_input_tokens=max(reservation - body.max_tokens, 0),
                         tools=getattr(body, "tools", None), messages=body.messages),

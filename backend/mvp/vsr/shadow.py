@@ -36,11 +36,32 @@ from typing import Callable, Optional
 _TIER_ORDER = ("haiku", "sonnet", "opus")
 
 
-def shadow_enabled() -> bool:
-    """Master switch. Dark by default — the judge is inert (propose() returns None)
-    unless STRATOCLAVE_SHADOW_VSR=true, so it ships without touching any request.
-    Read PER REQUEST (not memoised at import) so the flag is a live kill-switch."""
+def _global_shadow_default() -> bool:
+    """The global fallback used when a tenant expresses no preference. Dark by
+    default (STRATOCLAVE_SHADOW_VSR=false) so the judge ships inert. Read PER
+    REQUEST (not memoised) so the env stays a live kill-switch."""
     return os.getenv("STRATOCLAVE_SHADOW_VSR", "false").lower() == "true"
+
+
+def shadow_enabled(tenant_shadow: Optional[bool] = None) -> bool:
+    """Resolve whether the shadow judge runs for THIS request.
+
+    Tri-state resolution (Fable per-tenant review): a tenant's explicit
+    preference wins; absence (None) falls back to the global env default. The
+    caller passes the tenant's resolved `shadow_vsr` value (read from the
+    routing config it ALREADY loaded for the reserve — no extra DynamoDB read,
+    and shadow.py stays free of storage dependencies):
+
+        tenant_shadow is True   -> ON  (this tenant opted in / provisioned ON)
+        tenant_shadow is False  -> OFF (this tenant opted out)
+        tenant_shadow is None   -> the global env default (dark unless set)
+
+    A missing routing-config item yields None, so an existing tenant that never
+    touched its config behaves EXACTLY as before this change (dark unless the
+    env was set) — the dark-by-default shipping guarantee is preserved."""
+    if tenant_shadow is not None:
+        return bool(tenant_shadow)
+    return _global_shadow_default()
 
 
 # Version of THIS local rule set. Rides every shadow decision record (Fable
@@ -198,13 +219,18 @@ def _default_cheapest_for_tier(pricing_key: str) -> Optional[str]:
 
 
 def shadow_vsr_decision(*, requested_model: str,
-                        features: "RequestFeatures") -> Optional[dict]:
+                        features: "RequestFeatures",
+                        tenant_shadow: Optional[bool] = None) -> Optional[dict]:
     """Return the shadow VSR decision dict to attach to the reserve-time decision
     record, or None to attach nothing. Dark by default, fail-open, side-effect and
     money free. See module note above. `mode` is the informational literal
     "shadow"; the AUTHORITATIVE classifier downstream is `decision`
-    (DECISION_SHADOW_ADVISED ∈ SHADOW_DECISIONS), never `mode`."""
-    if not shadow_enabled():
+    (DECISION_SHADOW_ADVISED ∈ SHADOW_DECISIONS), never `mode`.
+
+    `tenant_shadow` is the calling tenant's resolved per-tenant preference
+    (True/False/None) from the routing config the caller already loaded; None
+    falls back to the global env default. See shadow_enabled()."""
+    if not shadow_enabled(tenant_shadow):
         return None
     try:
         from .client import DECISION_SHADOW_ADVISED

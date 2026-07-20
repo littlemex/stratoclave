@@ -60,6 +60,11 @@ class TenantRoutingConfigRequest(BaseModel):
     fallback_mode: Literal["loud", "silent"] = "loud"
     fallback_default: Literal["on", "off"] = "off"
     free_tier_model: Optional[str] = None
+    # Shadow VSR — advisory ONLY: does NOT affect execution, billing, or routing.
+    # It only controls whether the shadow judge records a potential-saving
+    # advisory on the decision log (for the Savings Certificate). Tri-state:
+    # true/false = explicit per-tenant, null = follow the global default.
+    shadow_vsr: Optional[bool] = None
 
 
 class UserRoutingConfigRequest(BaseModel):
@@ -78,6 +83,8 @@ class TenantRoutingConfigResponse(BaseModel):
     fallback_mode: str
     fallback_default: str
     free_tier_model: Optional[str] = None
+    # advisory-only shadow toggle (see request). Tri-state; null = global default.
+    shadow_vsr: Optional[bool] = None
 
 
 class UserRoutingConfigResponse(BaseModel):
@@ -235,6 +242,11 @@ def tenant_config_to_item(
     }
     if body.free_tier_model is not None:
         item["free_tier"] = {"model": _canon_or_self(body.free_tier_model)}
+    # Only persist shadow_vsr when explicitly set — absence stays absent so the
+    # parsed config resolves to None (follow the global default). This keeps the
+    # tri-state honest through the store round-trip.
+    if body.shadow_vsr is not None:
+        item["shadow_vsr"] = bool(body.shadow_vsr)
     if updated_by is not None:
         item["updated_by"] = updated_by
         item["updated_at"] = _now_iso()
@@ -272,6 +284,20 @@ def _read_config_item(pk: str, tenant_id: str) -> Optional[dict]:
     return resp.get("Item")
 
 
+def provision_shadow_default_config(tenant_id: str, *, updated_by: str) -> None:
+    """Write an EXPLICIT shadow_vsr=True routing-config record for a freshly
+    created tenant so the Savings Certificate is populated from week one (the
+    litellm-wedge value prop). It lives here (the routing-config write home)
+    rather than in admin_tenants so the raw put stays in a module that only
+    touches the ROUTING config item — never the budgets table. Advisory-only:
+    shadow VSR never steers execution/routing/money, so this is money-neutral."""
+    item = tenant_config_to_item(
+        tenant_id, TenantRoutingConfigRequest(shadow_vsr=True), updated_by=updated_by
+    )
+    _table().put_item(Item=item)
+    routing_config.invalidate_routing_cache(tenant_id)
+
+
 def _require_tenant(tenant_id: str) -> None:
     if not TenantsRepository().get(tenant_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -304,6 +330,7 @@ def _tenant_view(cfg: RoutingConfig) -> dict:
         "fallback_mode": cfg.fallback_mode,
         "fallback_default": cfg.fallback_default,
         "free_tier_model": cfg.free_tier_model,
+        "shadow_vsr": cfg.shadow_vsr,
     }
 
 

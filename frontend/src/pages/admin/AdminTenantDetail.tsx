@@ -985,6 +985,16 @@ function RoutingConfigCard({
               }
             />
             <RoutingStat label="Fallback default" value={config!.fallback_default} />
+            <RoutingStat
+              label="Shadow VSR (advisory)"
+              value={
+                config!.shadow_vsr === true
+                  ? 'on'
+                  : config!.shadow_vsr === false
+                    ? 'off'
+                    : 'default'
+              }
+            />
           </dl>
         ) : (
           <div className="space-y-1" data-testid="routing-config-empty">
@@ -1036,6 +1046,11 @@ function RoutingConfigDialog({
         quotas: current?.quotas ?? {},
         fallback_default: current?.fallback_default ?? 'off',
         ...(current?.free_tier_model ? { free_tier_model: current.free_tier_model } : {}),
+        // Advisory only — no effect on execution, billing, or routing; controls
+        // whether the shadow judge records potential-saving advisories for the
+        // Savings Certificate. Seeded so a full-replace save never silently drops
+        // it (true/false explicit, null = follow the global default).
+        shadow_vsr: current?.shadow_vsr ?? null,
       },
       null,
       2,
