@@ -302,15 +302,27 @@ def consult(*, tenant_id: str, session_key: Optional[str],
 DECISION_HARD_APPLIED = "hard-applied"
 DECISION_PREFER_APPLIED = "prefer-applied"
 DECISION_PREFER_OVERRIDDEN = "prefer-overridden"  # local SAAR prefer already won
+# The judgment-only shadow decision (litellm drop-in wedge, docs/design/
+# vsr-savings-certificate.md): a (local, rule-based) shadow VSR advised a cheaper
+# model but execution was NOT steered — the client pin was billed. It is NOT a
+# steering decision (nothing was enacted); it feeds the SEPARATE "potential"
+# savings base, never mixed into realized savings.
+DECISION_SHADOW_ADVISED = "shadow-advised"
 
 # The decisions in which the VSR's suggestion ACTUALLY STEERED the model this
-# turn — the base for any counterfactual "if you'd followed the VSR" savings
-# (mvp.learning.savings). SINGLE SOURCE OF TRUTH: savings imports this so a new
-# steering label added here can never silently shrink the savings base (Fable
-# review finding d). PREFER_OVERRIDDEN is EXCLUDED — a local SAAR prefer held the
-# head, so the VSR's prefer did not take effect and there is nothing the tenant
-# "did not follow".
+# turn — the base for REALIZED "if you'd followed the VSR" savings
+# (mvp.learning.savings). SINGLE SOURCE OF TRUTH for the REALIZED base: savings
+# imports this so a new steering label added here can never silently shrink it
+# (Fable review finding d). PREFER_OVERRIDDEN is EXCLUDED — a local SAAR prefer
+# held the head, so the VSR's prefer did not take effect. SHADOW_ADVISED is
+# EXCLUDED on purpose: it did not steer, so putting it here would be a naming lie
+# ("STEERING" must mean execution was intervened) — it has its own base below.
 STEERING_DECISIONS = frozenset({DECISION_HARD_APPLIED, DECISION_PREFER_APPLIED})
+
+# The judgment-only base: advice given, execution NOT enacted. SINGLE SOURCE OF
+# TRUTH for the POTENTIAL savings base (Fable shadow-label review: two separate
+# bases, never a union — potential must never be summed into realized).
+SHADOW_DECISIONS = frozenset({DECISION_SHADOW_ADVISED})
 
 
 def classify_consult_decision(result: "VsrConsultResult", *,

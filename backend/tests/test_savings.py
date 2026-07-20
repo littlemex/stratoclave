@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 
 from mvp.learning.savings import counterfactual_row, summarize_savings
 from mvp.vsr.client import DECISION_PREFER_APPLIED as _PREFER
+from mvp.vsr.client import DECISION_SHADOW_ADVISED as _SHADOW
 
 # fake, monotonic rate table: micro-USD per token. cheap < mid < dear.
 _RATE = {"cheap": 1, "mid": 5, "dear": 50}
@@ -139,6 +140,53 @@ def test_duplicate_span_is_deduped():
 def test_quality_never_implied():
     s = summarize_savings([_row()], price=_price, resolve=_resolve)
     assert s["quality"]["measured"] is False
+
+
+# -------------------------------------------- realized vs potential (shadow)
+
+def test_shadow_advised_row_is_counterfactual_but_not_enacted():
+    cr = _cr(decision=_SHADOW)
+    assert cr["class"] == "counterfactual"
+    assert cr["enacted"] is False          # advice only, execution not steered
+    # same model-vs-model recompute as a realized row.
+    assert cr["saving_microusd"] == cr["recompute_billed_microusd"] - cr["recompute_suggested_microusd"]
+
+
+def test_realized_row_is_enacted():
+    assert _cr(decision=_PREFER)["enacted"] is True
+
+
+def test_potential_never_summed_into_realized_headline():
+    # one enacted saving + one shadow (potential) saving, distinct spans.
+    r_real = _row(decision=_PREFER)
+    r_real["span_id"] = "real"
+    r_shadow = _row(decision=_SHADOW)
+    r_shadow["span_id"] = "shadow"
+    s = summarize_savings([r_real, r_shadow], price=_price, resolve=_resolve)
+    one = _cr()["saving_microusd"]         # each row's saving is identical here
+    # HEADLINE = realized ONLY (one saving), NOT two.
+    assert s["net_saving_microusd"] == one
+    assert s["priced_request_count"] == 1
+    # potential is SEPARATE, carries the same magnitude, and is flagged not-enacted.
+    assert s["potential"]["net_saving_microusd"] == one
+    assert s["potential"]["priced_request_count"] == 1
+    assert s["potential"]["enacted"] is False
+    assert "UPPER-BOUND" in s["potential"]["note"]
+    # both counted in class_counts as counterfactual (transparency).
+    assert s["class_counts"]["counterfactual"] == 2
+
+
+def test_all_shadow_leaves_realized_headline_zero():
+    rows = []
+    for i in range(3):
+        r = _row(decision=_SHADOW)
+        r["span_id"] = f"sh{i}"
+        rows.append(r)
+    s = summarize_savings(rows, price=_price, resolve=_resolve)
+    assert s["net_saving_microusd"] == 0            # nothing was enacted
+    assert s["priced_request_count"] == 0
+    assert s["potential"]["priced_request_count"] == 3
+    assert s["potential"]["net_saving_microusd"] > 0
 
 
 @given(rows=st.lists(st.fixed_dictionaries({

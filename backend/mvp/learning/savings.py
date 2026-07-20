@@ -32,10 +32,19 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-# Single source of truth for the steering-decision label set (Fable finding d):
-# imported from vsr.client so a new label there can never silently fall to
-# `no_suggestion` and quietly shrink the base.
+# Single source of truth for the two decision-label sets (Fable findings d +
+# shadow-label review): imported from vsr.client so a new label there can never
+# silently fall to `no_suggestion` and shrink a base. STEERING = REALIZED savings
+# (execution was steered); SHADOW = POTENTIAL savings (advice only, not enacted).
+# These are kept as SEPARATE bases — never unioned — so a potential (hypothetical)
+# saving can never be summed into the realized headline (Fable: "we don't count
+# savings we didn't deliver").
+from ..vsr.client import SHADOW_DECISIONS as _SHADOW_DECISIONS
 from ..vsr.client import STEERING_DECISIONS as _STEERING_DECISIONS
+
+# A row is in the savings computation iff its decision is in EITHER base; the
+# `enacted` flag (set per row) records which side it belongs to.
+_SAVINGS_DECISIONS = _STEERING_DECISIONS | _SHADOW_DECISIONS
 
 # A recomputed-billed vs actual-billed divergence beyond this fraction is flagged
 # as `basis_drift` (rate change since the charge, or cache-heavy billing the
@@ -96,10 +105,15 @@ def counterfactual_row(
     decision = str(row.get("vsr_decision") or "")
     suggested = row.get("suggested_model")
     billed_model = row.get("billed_model_id")
+    # `enacted` = did execution actually follow the advice this turn (realized) or
+    # was it advice only (shadow, potential)? Recorded per row so summarize can
+    # keep the two bases separate and never sum potential into realized.
+    enacted = decision in _STEERING_DECISIONS
     out: dict[str, Any] = {
         "tenant_id": row.get("tenant_id"),
         "span_id": row.get("span_id"),
         "vsr_decision": decision,
+        "enacted": enacted,
         "suggested_model": suggested,
         "billed_model_id": billed_model,
         "billed_microusd": row.get("cost_microusd"),
@@ -113,7 +127,7 @@ def counterfactual_row(
         out["class"] = cls
         return out
 
-    if decision not in _STEERING_DECISIONS or not suggested:
+    if decision not in _SAVINGS_DECISIONS or not suggested:
         return _fin("no_suggestion")
     if not row.get("matched"):
         return _fin("unmatched")
@@ -161,18 +175,27 @@ def summarize_savings(rows: list[dict], *, price=None, resolve=None) -> dict[str
     is exact and every exclusion is named with BOTH its count AND its billed
     micro-USD (Fable 5: a count-only class hides how much spend it represents).
 
-    Headline is `net_saving_microusd` at top level; the gross/loss decomposition
-    is nested under `decomposition` with deliberately un-promotable names (Fable
-    4), so a report cannot cherry-pick the gross figure. `net` can be negative."""
+    REALIZED vs POTENTIAL (Fable shadow-label review, case 2): the top-level
+    headline `net_saving_microusd` is the REALIZED saving — counterfactual rows the
+    VSR actually STEERED (`enacted=True`). Rows the shadow VSR only ADVISED
+    (`enacted=False`, execution not changed) are aggregated SEPARATELY under
+    `potential` and NEVER summed into the headline — a hypothetical saving must not
+    be shown as delivered ("we don't count savings we didn't deliver"). Both use
+    the identical model-vs-model recompute; `potential` carries an explicit caveat
+    that it is an UPPER-BOUND estimate (a real switch could change output length or
+    force retries, and quality is unmeasurable since the suggested model never ran).
+
+    Headline decomposition is nested with deliberately un-promotable names (Fable
+    4); `net` can be negative."""
     class_counts: dict[str, int] = {}
     class_billed: dict[str, int] = {}     # billed micro-USD per class (matched only)
-    positive = 0     # Σ positive deltas (VSR would have been cheaper)
-    negative = 0     # Σ |negative deltas| (VSR-advised route dearer than billed)
-    net = 0
-    billed_base = 0  # Σ actual billed over the priced (counterfactual) base
-    priced = 0
+
+    def _acc() -> dict:
+        return {"net": 0, "positive": 0, "negative": 0, "billed_base": 0,
+                "priced": 0, "detail": []}
+    realized = _acc()      # enacted=True  (STEERING_DECISIONS)
+    potential = _acc()     # enacted=False (SHADOW_DECISIONS, advice only)
     seen: set[tuple] = set()             # (Fable c) span-level dedup
-    detail: list[dict] = []
     for r in rows:
         key = (r.get("tenant_id"), r.get("span_id"))
         if key in seen:
@@ -185,32 +208,53 @@ def summarize_savings(rows: list[dict], *, price=None, resolve=None) -> dict[str
         if r.get("cost_microusd") is not None:
             class_billed[cls] = class_billed.get(cls, 0) + int(r.get("cost_microusd"))
         if cls == "counterfactual":
+            acc = realized if cr.get("enacted") else potential
             s = int(cr["saving_microusd"])
-            net += s
+            acc["net"] += s
             if s >= 0:
-                positive += s
+                acc["positive"] += s
             else:
-                negative += -s
-            billed_base += int(cr.get("billed_microusd") or 0)
-            priced += 1
-            detail.append(cr)
-    # (Fable 4) audit-sort detail by |saving| desc so a large item never falls
-    # off the truncation tail.
-    detail.sort(key=lambda d: abs(int(d.get("saving_microusd") or 0)), reverse=True)
+                acc["negative"] += -s
+            acc["billed_base"] += int(cr.get("billed_microusd") or 0)
+            acc["priced"] += 1
+            acc["detail"].append(cr)
+    for acc in (realized, potential):
+        # (Fable 4) audit-sort detail by |saving| desc so a large item never falls
+        # off the truncation tail.
+        acc["detail"].sort(key=lambda d: abs(int(d.get("saving_microusd") or 0)),
+                           reverse=True)
     total_billed = sum(class_billed.values())
     return {
-        "net_saving_microusd": net,                 # headline, top-level, can be negative
-        "priced_request_count": priced,
-        "billed_microusd_over_priced_base": billed_base,
+        # HEADLINE = REALIZED only (never includes potential/shadow).
+        "net_saving_microusd": realized["net"],     # headline, top-level, can be negative
+        "priced_request_count": realized["priced"],
+        "billed_microusd_over_priced_base": realized["billed_base"],
         "total_billed_microusd_all_classes": total_billed,   # honest denominator
         "decomposition": {
-            "positive_deltas_microusd": positive,   # NOT "gross saving" (un-promotable)
-            "negative_deltas_microusd": negative,   # dearer-if-followed magnitude
+            "positive_deltas_microusd": realized["positive"],   # NOT "gross saving"
+            "negative_deltas_microusd": realized["negative"],   # dearer-if-followed magnitude
+        },
+        # SEPARATE section — advice the VSR did NOT enact. UPPER-BOUND estimate.
+        "potential": {
+            "net_saving_microusd": potential["net"],
+            "priced_request_count": potential["priced"],
+            "billed_microusd_over_priced_base": potential["billed_base"],
+            "decomposition": {
+                "positive_deltas_microusd": potential["positive"],
+                "negative_deltas_microusd": potential["negative"],
+            },
+            "enacted": False,
+            "note": ("UPPER-BOUND estimate of savings the VSR ADVISED but did NOT "
+                     "enact (execution stayed on the client's model). A real switch "
+                     "could change output length or force retries, and quality is "
+                     "UNMEASURABLE since the suggested model never ran. Never summed "
+                     "into the realized headline."),
+            "detail": potential["detail"][:200],
         },
         "class_counts": class_counts,
         "class_billed_microusd": class_billed,       # (Fable 5) spend per class
         "quality": {"measured": False, "note": "fill from tenant eval + VSR quality signal"},
-        "detail": detail[:200],
+        "detail": realized["detail"][:200],
     }
 
 
