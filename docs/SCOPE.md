@@ -167,6 +167,23 @@ stand-alone VSR can build. The differentiation is not any single feature; it is
 the **architecture that keeps judgment (VSR) and execution+recording
 (Stratoclave) separate while closing the loop between them.**
 
+**The weapon this loop fires: the Savings Certificate (shipped).** Weapons 1 and
+3 combine into a number LiteLLM structurally cannot produce — the
+**counterfactual, ledger-precision saving** of having followed the VSR's advice,
+per `(tenant, period)`, priced from the versioned rate table over each request's
+REAL billed tokens (`mvp.learning.savings`, joined via `vsr_reconcile` on
+`span_id`). It subtracts escalation loss (never hides it — `net` can be negative)
+and states its coverage, so it is an *audited* figure, not a dashboard estimate.
+The adoption wedge is **Shadow mode**: put Stratoclave behind an existing LiteLLM
+deployment in passthrough, consult the VSR without changing execution, and emit a
+savings report on the tenant's own traffic at zero risk — then Canary, then Full.
+Quality parity is a separate, tenant-defined eval; a saving is not externally
+CLAIMED until it is measured. See
+[docs/design/vsr-savings-certificate.md](./design/vsr-savings-certificate.md).
+This is how Stratoclave attacks LiteLLM **head-on**: not by matching its provider
+breadth (absorbed via the shim below), but by turning "cheaper routing" from a
+claim into a certificate.
+
 **The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a thin
 compatibility shim for the non-OpenAI-compatible providers (weeks–months), and
 that traffic then flows through the proven ledger too. For LiteLLM to absorb

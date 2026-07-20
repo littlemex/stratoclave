@@ -56,6 +56,35 @@ def _drain_obs_executor():
         f.result(timeout=10)
 
 
+def _wait_for_obs(query_fn, predicate, *, timeout=5.0, interval=0.05):
+    """Poll `query_fn()` until `predicate(items)` holds, or `timeout` elapses.
+
+    The span/rollup (and the P0-16 signal) are written FIRE-AND-FORGET on a
+    dedicated ThreadPoolExecutor, submitted from the stream generator's finalize
+    hook. `_drain_obs_executor` only waits for work ALREADY submitted; if the
+    finalize hook's submit lands after the drain (which happens on a loaded/slow
+    CI runner — reproduced by delaying the emit), a drain-then-query reads an
+    empty table and the test flakes (assert 0 == 1). Draining first and then
+    polling for the EXPECTED COMPLETE state (`predicate`, e.g. span AND rollup
+    both present) is faithful to the fire-and-forget contract without racing it.
+    The caller keeps its strict assertions: on timeout we return the last-seen
+    items and let those asserts fail with the diagnostic printed below."""
+    import time as _time
+    import mvp.observability.store as _store
+    _drain_obs_executor()
+    deadline = _time.monotonic() + timeout
+    items = query_fn()
+    while not predicate(items) and _time.monotonic() < deadline:
+        _time.sleep(interval)
+        _drain_obs_executor()
+        items = query_fn()
+    if not predicate(items):
+        pending = _store._MAX_WORKERS + _store._MAX_QUEUED - _store._slots._value
+        print(f"[_wait_for_obs] timeout after {timeout}s; items={len(items)} "
+              f"approx_pending_obs_writes={pending}")
+    return items
+
+
 @pytest.fixture
 def api_client(dynamodb_mock, monkeypatch):
     import mvp.authz as _authz
@@ -93,13 +122,18 @@ class TestSpanAndRollupWritten:
         resp = _stream(api_client, headers={HDR_WORKFLOW_RUN_ID: "run-obs-1"})
         assert resp.status_code == 200
         list(resp.iter_lines())  # exhaust the stream so the generator finalizes
-        _drain_obs_executor()
 
         tbl = _obs_table()
-        items = tbl.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
-                "TENANT#obs-org#RUN#run-obs-1"),
-        )["Items"]
+
+        def _q():
+            return tbl.query(
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
+                    "TENANT#obs-org#RUN#run-obs-1"),
+            )["Items"]
+
+        items = _wait_for_obs(_q, lambda it: (
+            len([i for i in it if i["sk"].startswith("SPAN#")]) == 1
+            and len([i for i in it if i["sk"] == "ROLLUP"]) == 1))
         spans = [i for i in items if i["sk"].startswith("SPAN#")]
         rollups = [i for i in items if i["sk"] == "ROLLUP"]
         assert len(spans) == 1, items
@@ -123,12 +157,17 @@ class TestSpanAndRollupWritten:
         for _ in range(2):
             r = _stream(api_client, headers={HDR_WORKFLOW_RUN_ID: "run-obs-2"})
             list(r.iter_lines())
-        _drain_obs_executor()
 
         tbl = _obs_table()
-        items = tbl.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
-                "TENANT#obs-org#RUN#run-obs-2"))["Items"]
+
+        def _q():
+            return tbl.query(
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
+                    "TENANT#obs-org#RUN#run-obs-2"))["Items"]
+
+        items = _wait_for_obs(_q, lambda it: (
+            len([i for i in it if i["sk"].startswith("SPAN#")]) == 2
+            and any(i["sk"] == "ROLLUP" and int(i.get("span_count", 0)) == 2 for i in it)))
         spans = [i for i in items if i["sk"].startswith("SPAN#")]
         rollup = next(i for i in items if i["sk"] == "ROLLUP")
         assert len(spans) == 2
@@ -140,14 +179,17 @@ class TestSpanAndRollupWritten:
         resp = _stream(api_client, headers={HDR_WORKFLOW_RUN_ID: "run-sig-1"})
         assert resp.status_code == 200
         list(resp.iter_lines())
-        _drain_obs_executor()
 
         import mvp.learning.signals as signals
         tbl = boto3.resource("dynamodb", region_name="us-east-1").Table(
             "stratoclave-routing-signals")
-        items = tbl.scan()["Items"]
-        mine = [i for i in items if i.get("workflow_run_id") == "run-sig-1"]
-        assert len(mine) == 1, items
+
+        def _q():
+            return [i for i in tbl.scan()["Items"]
+                    if i.get("workflow_run_id") == "run-sig-1"]
+
+        mine = _wait_for_obs(_q, lambda it: len(it) == 1)
+        assert len(mine) == 1, mine
         sig = mine[0]
         # key scheme: pk day-bucketed + sharded, sk time-ordered
         assert sig["pk"].startswith("TENANT#obs-org#CAT#")
@@ -164,12 +206,17 @@ class TestSpanAndRollupWritten:
     def test_no_run_header_uses_request_id_as_run(self, api_client):
         resp = _stream(api_client)
         list(resp.iter_lines())
-        _drain_obs_executor()
         run_id = resp.headers[HDR_WORKFLOW_RUN_ID]  # server-generated wr_...
         tbl = _obs_table()
-        items = tbl.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
-                f"TENANT#obs-org#RUN#{run_id}"))["Items"]
+
+        def _q():
+            return tbl.query(
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
+                    f"TENANT#obs-org#RUN#{run_id}"))["Items"]
+
+        items = _wait_for_obs(_q, lambda it: (
+            any(i["sk"].startswith("SPAN#") for i in it)
+            and any(i["sk"] == "ROLLUP" for i in it)))
         assert any(i["sk"].startswith("SPAN#") for i in items)
         assert any(i["sk"] == "ROLLUP" for i in items)
 

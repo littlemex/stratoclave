@@ -262,6 +262,13 @@ def resolve_model(name: Optional[str]) -> ModelEntry:
     return entry
 
 
+def registry_entries() -> tuple[ModelEntry, ...]:
+    """Read-only view of the model registry (the code-resident allowlist). Used by
+    the shadow VSR to find the cheapest model in a price tier; a plain accessor so
+    callers never import the private `_REGISTRY`."""
+    return _REGISTRY
+
+
 # ---------------------------------------------------------------------------
 # Backward-compatibility shims
 # ---------------------------------------------------------------------------

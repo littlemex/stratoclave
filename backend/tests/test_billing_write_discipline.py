@@ -77,6 +77,13 @@ ALLOWED_SITES = {
         # no double-return. A5: STABLE token (_derived_token(token,"late-settle"))
         # so a lost-ack retry of the recovery dedupes to the same write. Reviewed OK.
         ("backend/mvp/_pipeline.py", "_recover_spend_via_late_settle", "transact_write_items"),
+        # PENDING-protocol commit (docs/design/pending-protocol.md, PR-1): the
+        # 2-item TransactWriteItems [pool conditional debit, SEPARATE marker Put
+        # (attribute_not_exists)]. Only pool_reserved advances (+amount), gated by
+        # the headroom condition (A2/I1'); idempotency is the marker Put's
+        # attribute_not_exists, NOT a token (EXPECTED_TOKEN_KIND "none"). Inert until
+        # STRATOCLAVE_RESERVE_PROTOCOL=pending. Reviewed OK.
+        ("backend/mvp/_pipeline.py", "_pending_commit_transact", "transact_write_items"),
         # A non-counter delete: removes an amount<=0 HOLD row only; does NOT
         # touch the BUDGET row / counters (reviewed — see _sweep_one_period).
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "delete_item"),
@@ -103,32 +110,33 @@ ALLOWED_SITES = {
         # UpdateExpression SETs pool_headroom (+ updated_at) and NEVER names the
         # protected counters — check_non_mutating_counter_update enforces that.
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.reconcile_headroom", "update_item"),
-        # PENDING protocol (docs/design/pending-protocol.md) — DELIBERATE non-
-        # transactional counter writes whose no-oversell safety is proven by the
-        # PENDING formal model (test_pending_protocol_z3/_stateful: I1' inductive
-        # preservation), NOT by transactional A2. A2 is a SUFFICIENT condition for
-        # no-oversell, not a necessary one. Registered in PENDING_COUNTER_WRITES so
-        # the engine verifies each still carries a ConditionExpression (bare ADD is
-        # never allowed). Inert until STRATOCLAVE_RESERVE_PROTOCOL=pending.
-        #   * pool_reserve_update: step-2 commit — headroom-gated conditional ADD
-        #     + per-hold marker (applied.<hold_id>) written atomically; CCF is
-        #     resolved by ALL_OLD (marker present = idempotent success).
-        #   * pool_credit_back: exactly-once credit-back — REMOVE marker + ADD
-        #     headroom, guarded on attribute_exists(applied.<hold_id>) so a second
-        #     call CCFs (no double credit).
-        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_reserve_update", "update_item"),
-        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_credit_back", "update_item"),
+        # PENDING protocol (docs/design/pending-protocol.md, PR-1) — the marker is
+        # now a SEPARATE fixed-size item (SK=MARKER#<hold_id>), written ATOMICALLY
+        # with the pool debit in a 2-item TransactWriteItems (the rejected
+        # marker-in-the-pool-item map bloated the hot item). The counter mutations
+        # are therefore TRANSACTIONAL again, but their idempotency comes from the
+        # MARKER conditions, not a ClientRequestToken (see EXPECTED_TOKEN_KIND "none"
+        # below): reserve is guarded by the marker Put's attribute_not_exists;
+        # credit-back is guarded by the marker's phase CAS (RESERVED->SETTLED). Both
+        # are inert until STRATOCLAVE_RESERVE_PROTOCOL=pending. Reviewed against A2
+        # (reserve: headroom-gated ADD; credit-back: exact +amount from the immutable
+        # marker, phase CAS makes it exactly-once) — A2/I1' OK.
+        #   * pool_credit_back: exactly-once credit-back — [pool ADD +amount, marker
+        #     phase CAS RESERVED->SETTLED + TTL]; the phase CAS is the arbiter, a
+        #     second credit CCFs on the marker and the whole txn cancels.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.pool_credit_back", "transact_write_items"),
+        # marker_settle_best_effort: cleanup-only RESERVED->SETTLED + TTL on the
+        # SEPARATE marker item (settle/release/reclaim already returned headroom in
+        # their own txn). Touches NO pool counter — only the marker item's phase/ttl
+        # — so it is a plain reviewed site, not a counter write. Guarded on
+        # marker_phase = RESERVED; money-neutral (see the method docstring).
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.marker_settle_best_effort", "update_item"),
         # PENDING status transitions: single-item conditional SET of `status`
         # only; NEVER name a pool counter (verified structurally — they are NOT in
         # COUNTER_FUNCTIONS). Put of a PENDING hold row (no counter, like
         # hold_put_txn_item's transactional sibling).
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_put_pending", "put_item"),
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository._status_transition", "update_item"),
-        # ensure_applied_map: seeds the `applied` marker map on a legacy pool row
-        # (SET applied = :empty, guarded attribute_not_exists(applied)). Touches
-        # NO protected counter — only the marker map — so it is a plain reviewed
-        # site, not a counter write. Idempotent, race-safe (never clobbers markers).
-        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.ensure_applied_map", "update_item"),
     },
     # backend/migrations/backfill_pool_headroom.py makes NO raw write of its own
     # (see COUNTER_FUNCTIONS note): it backfills by delegating to the reviewed
@@ -182,11 +190,12 @@ COUNTER_FUNCTIONS = {
         # write never names a protected counter (see READONLY_COUNTER_UPDATES).
         "TenantBudgetsRepository.reconcile_headroom",
         "TenantBudgetsRepository.pool_summary",
-        # PENDING protocol counter writers (docs/design/pending-protocol.md). Both
-        # are non-transactional by design; their no-oversell proof is the PENDING
-        # model, and each is in ALLOWED_SITES + PENDING_COUNTER_WRITES so the engine
-        # verifies a ConditionExpression is present. Reviewed against I1'.
-        "TenantBudgetsRepository.pool_reserve_update",
+        # PENDING protocol counter writers (docs/design/pending-protocol.md, PR-1).
+        # reserve_commit_txn_items BUILDS the pool-debit + marker-Put transact items;
+        # pool_credit_back executes the pool-return + marker-phase-CAS transact. Both
+        # transactional; idempotency is the marker conditions, not a token (see the
+        # "none" entries in EXPECTED_TOKEN_KIND). Reviewed against A2/I1'.
+        "TenantBudgetsRepository.reserve_commit_txn_items",
         "TenantBudgetsRepository.pool_credit_back",
         "<module>",  # module docstring names the counters
     },
@@ -227,12 +236,12 @@ COUNTER_FUNCTIONS = {
 # transactional axiom A2. The engine still requires each to carry a
 # ConditionExpression (a bare unconditional counter ADD is never allowed). See
 # docs/design/pending-protocol.md and billing_guards.check_pending_counter_write.
-PENDING_COUNTER_WRITES = {
-    "backend/dynamo/tenant_budgets.py": {
-        "TenantBudgetsRepository.pool_reserve_update",     # step-2 commit (headroom-gated)
-        "TenantBudgetsRepository.pool_credit_back",   # cold-path leak recovery (guarded)
-    },
-}
+# (PR-1) The PENDING counter writes are now TRANSACTIONAL (separate-item marker),
+# so they are governed by the transact-token discipline (A5) with a reviewed "none"
+# token kind — the marker conditions, not a token, provide idempotency — rather
+# than the non-transactional check_pending_counter_write path. Nothing remains
+# here.
+PENDING_COUNTER_WRITES: dict = {}
 
 # transact_write_items token discipline (A5). Keyed by (module -> qualname).
 EXPECTED_TOKEN_KIND = {
@@ -265,6 +274,21 @@ EXPECTED_TOKEN_KIND = {
         # token — a derived/stable token would need byte-identical payloads across
         # retries, which the ledger Put's per-attempt ts_ms breaks (A5 review).
         "_recover_spend_via_late_settle": "fresh",
+        # PENDING-protocol commit (PR-1): the 2-item pool-debit + marker-Put
+        # transact carries NO ClientRequestToken. Idempotency is the marker Put's
+        # attribute_not_exists (a re-issue of the SAME hold CCFs on the marker →
+        # RESERVE_ALREADY, no second debit), NOT the token — a stale token's 10-min
+        # dedup window would misfire against our own retry window (Fable PR-1
+        # Q4-item-1). A lost-ack retry re-issues the idempotent transact. Reviewed.
+        "_pending_commit_transact": "none",
+    },
+    "backend/dynamo/tenant_budgets.py": {
+        # PENDING-protocol credit-back (PR-1): the 2-item pool-return + marker
+        # phase-CAS transact carries NO token. The phase CAS (RESERVED->SETTLED) is
+        # the exactly-once arbiter — a second credit cancels on the marker
+        # condition, so a lost-ack retry cannot double-return headroom, WITHOUT a
+        # token. Reviewed against I1'.
+        "TenantBudgetsRepository.pool_credit_back": "none",
     },
     "backend/dynamo/user_tenants.py": {
         # tenant reassignment: idempotent SET (attribute_exists-guarded), not a

@@ -63,6 +63,30 @@ from .client import get_dynamodb_resource, tenant_budgets_table_name
 # bounded retry is plenty; exceeding it is a genuine anomaly worth surfacing.
 _SET_LIMIT_MAX_RETRIES = 8
 
+# A low-level (typed-value) DynamoDB client for the marker credit-back
+# TransactWriteItems. Constructed off the plain client, not the resource's
+# `.meta.client`, so the transact fragments' DynamoDB-JSON typed values pass
+# through untouched. Cached per process.
+_BUDGETS_LL_CLIENT = None
+
+
+def _budgets_low_level_client():
+    global _BUDGETS_LL_CLIENT
+    if _BUDGETS_LL_CLIENT is None:
+        import os
+
+        import boto3
+        _BUDGETS_LL_CLIENT = boto3.client(
+            "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"))
+    return _BUDGETS_LL_CLIENT
+
+
+def _reset_budgets_low_level_client() -> None:
+    """Test hook: drop the cached low-level client so a new moto region takes
+    effect (mirrors mvp._pipeline._reset_low_level_client)."""
+    global _BUDGETS_LL_CLIENT
+    _BUDGETS_LL_CLIENT = None
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -85,6 +109,54 @@ def hold_sk_prefix(period: str) -> str:
     """SK prefix that groups a period's per-reservation hold items under the
     tenant's partition (so they can be range-Queried)."""
     return f"HOLD#{period}#"
+
+
+# PENDING protocol marker item (docs/design/pending-protocol.md, PR-1). The
+# marker is the OBSERVABLE proof that a hold's pool debit committed, and the
+# idempotency anchor for the non-transactional reserve. The measured
+# marker-in-the-pool-item design (a per-hold entry in an `applied` MAP on the one
+# hot pool item) was REJECTED: DynamoDB write WCU is proportional to item size, so
+# the unbounded map bloated the single pool item and every debit's cost rose
+# super-linearly under load (bench/ledger-latency/bench_marker_shard_spike.py). The
+# corrected design puts each marker in its OWN fixed-size item, so its size — and
+# thus its write cost — is O(1) regardless of how many holds a tenant has. It still
+# shares the tenant partition (SK-scoped), which kills the growth blowup; the
+# single-partition WCU ceiling remains bounded by the pool item itself and is a
+# separate concern deferred to a sharded-pool PR.
+def marker_sk(hold_id: str) -> str:
+    """SK of a hold's separate marker item: ``MARKER#<hold_id>``. Keyed under the
+    tenant partition (same PK=tenant_id) but on its own item, so writing/reading a
+    marker never touches the pool item and never grows it."""
+    return f"MARKER#{hold_id}"
+
+
+# Marker lifecycle phases (Fable PR-1 review, Q2). The phase — NOT mere presence —
+# is the exactly-once credit-back arbiter: a credit-back is a phase CAS
+# RESERVED -> SETTLED, so a second credit of the same hold fails the CAS and cannot
+# double-return headroom. Presence alone would let a settle that keeps the marker
+# (for retry-dedup) be credited twice.
+MARKER_RESERVED = "RESERVED"   # debit committed, headroom still held out
+MARKER_SETTLED = "SETTLED"     # headroom returned exactly once; marker awaits TTL GC
+
+# All marker/terminal cleanup timers derive from ONE shared window (Fable PR-1
+# Q2/Q4-item-4): the marker must outlive every possible retry of its reserve so a
+# late retry cannot pass `attribute_not_exists` and double-debit, AND outlive the
+# reconcile window so a leak recovery is never GC'd before it runs. reconcile
+# window + a 7-day margin. DynamoDB TTL only ever deletes LATE, never early, so
+# this is a safe lower bound. Stamped ONLY at a terminal transition (settle / void
+# / reconcile), NEVER at marker creation (an active hold's marker must never
+# expire and reopen the double-debit window).
+_RECONCILE_WINDOW_SECONDS = 24 * 60 * 60          # 1 day
+_MARKER_TTL_MARGIN_SECONDS = 7 * 24 * 60 * 60      # 7 days
+_MARKER_TTL_SECONDS = _RECONCILE_WINDOW_SECONDS + _MARKER_TTL_MARGIN_SECONDS
+
+
+def _marker_ttl_epoch(now_epoch: Optional[int] = None) -> int:
+    """Absolute epoch at which a SETTLED marker becomes TTL-eligible."""
+    import time as _time
+
+    base = int(now_epoch) if now_epoch is not None else int(_time.time())
+    return base + _MARKER_TTL_SECONDS
 
 
 # Width of the zero-padded epoch-seconds field embedded in a hold's SK. Ten
@@ -158,6 +230,37 @@ class TenantBudgetsRepository:
             ConsistentRead=consistent_read,
         )
         return resp.get("Item")
+
+    @staticmethod
+    def _estimate_item_size_bytes(item: dict[str, Any]) -> int:
+        """Approximate a DynamoDB item's stored size in bytes (attribute-name bytes
+        + value bytes), the quantity WCU is charged on. Used by the PENDING-protocol
+        pool item-size metric (docs/design/pending-protocol.md, PR-1 canary item A′):
+        the WHOLE POINT of moving the marker out of the pool item is that the pool
+        item stays SMALL and FLAT — this lets an alarm fire the instant a code
+        regression reintroduces growth on the hot item. Rough by design (numbers are
+        counted as their UTF-8 string length, matching DynamoDB's own ~ accounting);
+        a monitoring signal, never a money quantity."""
+        def _val_bytes(v: Any) -> int:
+            if isinstance(v, dict):
+                return sum(len(str(k)) + _val_bytes(vv) for k, vv in v.items())
+            if isinstance(v, (list, tuple, set)):
+                return sum(_val_bytes(x) for x in v)
+            if isinstance(v, bool):
+                return 1
+            return len(str(v))
+        return sum(len(str(name)) + _val_bytes(val) for name, val in (item or {}).items())
+
+    def pool_item_size_bytes(self, tenant_id: str, period: str) -> Optional[int]:
+        """Estimated stored size of the pool item (or None if absent). The canary
+        detector for the item-growth regression the separate-item marker fixed: a
+        healthy pool item is a handful of fixed counters (< ~200 B) and MUST NOT
+        grow with the number of holds. Emit as a gauge; alarm above a small ceiling.
+        Eventually-consistent read (Fable E-phase review Q2): a monitoring gauge does
+        not need the current instant — an eventually-consistent GetItem halves RCU
+        and loses nothing for this signal."""
+        item = self.get(tenant_id, period, consistent_read=False)
+        return None if item is None else self._estimate_item_size_bytes(item)
 
     def get_hold(
         self, *, tenant_id: str, sk: str, consistent_read: bool = True
@@ -250,13 +353,13 @@ class TenantBudgetsRepository:
                             "pool_headroom_microusd": Decimal(headroom),
                             "pool_reserved_microusd": Decimal(0),
                             "pool_settled_microusd": Decimal(0),
-                            # PENDING protocol per-hold marker map (docs/design/
-                            # pending-protocol.md). Empty at creation; the
-                            # non-transactional reserve SETs applied.<hold_id> in
-                            # the same UpdateItem as the debit. Seeded here so the
-                            # nested SET has a map to write into. Inert while the
-                            # protocol flag is off (nothing writes it).
-                            "applied": {},
+                            # NOTE: the PENDING-protocol per-hold marker is NO LONGER
+                            # a map on this pool item (docs/design/pending-protocol.md,
+                            # PR-1). The map design was rejected — it bloated the hot
+                            # pool item and its write cost rose super-linearly. Markers
+                            # now live in separate fixed-size items (SK=MARKER#<hold_id>,
+                            # see marker_sk / reserve_commit_txn_items). Nothing seeds a
+                            # map here anymore.
                             "status": status,
                             "version": "2",
                             "updated_at": _now_iso(),
@@ -659,130 +762,280 @@ class TenantBudgetsRepository:
                 item["run_id_source"] = "hold_id_fallback"
         self._table.put_item(Item=item, ConditionExpression=Attr("sk").not_exists())
 
-    # Sentinel returned by pool_reserve_update to distinguish the three outcomes
-    # of the marker-carrying conditional UpdateItem.
+    # Sentinel returned by reserve_commit_transact to distinguish the three
+    # outcomes of the pool-debit + marker-Put transaction.
     RESERVE_APPLIED = "applied"        # the debit committed on THIS call (200)
     RESERVE_ALREADY = "already"        # this hold's marker already present (idempotent)
     RESERVE_EXHAUSTED = "exhausted"    # genuine budget exhaustion (402)
 
-    def pool_reserve_update(self, *, tenant_id: str, period: str, hold_id: str,
-                            amount_microusd: int, table=None) -> str:
-        """Step 2 of the PENDING protocol = THE COMMIT POINT. A single conditional
-        ``UpdateItem`` on the pool row (NOT a transaction) that ATOMICALLY debits
-        the counter AND records a per-hold marker ``applied.<hold_id> = amount``.
-        Multi-attribute updates to ONE item are unconditionally atomic in DynamoDB,
-        so this stays a single non-transactional write (the ~88 ms p99 property is
-        preserved) — no ``TransactionConflict`` failure mode.
+    def reserve_commit_txn_items(self, *, tenant_id: str, period: str, hold_id: str,
+                                 amount_microusd: int) -> list[dict[str, Any]]:
+        """The two low-level TransactWriteItems fragments for the PENDING-protocol
+        COMMIT POINT (docs/design/pending-protocol.md, PR-1):
 
-        The marker is what makes the debit LOCALLY OBSERVABLE and the write
-        IDEMPOTENT (docs/design/pending-protocol.md, Fable marker design). Returns
-        one of three outcomes, resolving the ambiguity that a bare ADD could not:
+          0. pool debit — ``ADD headroom :neg, reserved :amt`` guarded by
+             ``headroom >= amount AND status = active`` (genuine-exhaustion gate).
+          1. marker Put — a SEPARATE fixed-size item ``SK=MARKER#<hold_id>`` guarded
+             by ``attribute_not_exists(sk)`` (the idempotency anchor).
 
-          * RESERVE_APPLIED   — condition held, counter debited + marker written.
-          * RESERVE_ALREADY   — CCF but ALL_OLD shows this hold's marker already
-            present: a prior attempt of THIS hold committed (a retry / lost-ack).
-            The debit is a fact; treat as success, do NOT re-debit (I4 — the write
-            is idempotent by construction, so an SDK auto-retry is harmless).
-          * RESERVE_EXHAUSTED — CCF with no marker: genuine budget exhaustion (402).
-
-        Condition: ``headroom >= amount AND active AND attribute_not_exists(
-        applied.<hold_id>)``. On CCF we read ALL_OLD to pick ALREADY vs EXHAUSTED.
-        `table` (optional) is a no-retry table; the marker makes retries safe, but
-        an explicit single attempt keeps the ALL_OLD inspection deterministic."""
-        tbl = table if table is not None else self._table
-        try:
-            tbl.update_item(
-                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-                UpdateExpression=(
-                    "ADD pool_headroom_microusd :neg, pool_reserved_microusd :amt "
-                    "SET updated_at = :now, applied.#hid = :amt"
-                ),
-                ConditionExpression=(
-                    "attribute_exists(pool_headroom_microusd) AND #st = :active AND "
-                    "pool_headroom_microusd >= :amt AND attribute_not_exists(applied.#hid)"
-                ),
-                ExpressionAttributeNames={"#st": "status", "#hid": hold_id},
-                ExpressionAttributeValues={
-                    ":amt": int(amount_microusd),
-                    ":neg": -int(amount_microusd),
-                    ":active": "active",
-                    ":now": _now_iso(),
-                },
-                ReturnValuesOnConditionCheckFailure="ALL_OLD",
-            )
-            return self.RESERVE_APPLIED
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                raise
-            # ALL_OLD is on the exception under ReturnValuesOnConditionCheckFailure.
-            # NOTE: even from a resource Table, the CCF exception's `Item` is the
-            # LOW-LEVEL (DynamoDB-JSON) shape — `{"applied": {"M": {hid: {"N": ..}}}}`
-            # — not resource-deserialized. Read the marker at the low-level path.
-            old = e.response.get("Item", {}) or {}
-            applied = (old.get("applied") or {}).get("M") or {}
-            if hold_id in applied:
-                return self.RESERVE_ALREADY   # our debit is already a fact (idempotent)
-            return self.RESERVE_EXHAUSTED     # no marker -> genuine exhaustion (402)
-
-    def pool_credit_back(self, *, tenant_id: str, period: str, hold_id: str) -> bool:
-        """Exactly-once credit-back for the PENDING protocol: a single conditional
-        ``UpdateItem`` that ATOMICALLY removes this hold's ``applied`` marker and
-        returns its amount to the counter — conditional on the marker STILL being
-        present. The marker's existence is the exact same-value predicate for "this
-        hold's amount is currently debited from the pool", so double-credit is
-        structurally impossible (the second call CCFs on the absent marker).
-
-        Uses `applied.<hold_id>` as the amount source so it can never over/under-
-        return. Returns True if it credited, False if the marker was already gone
-        (already credited / never debited) — both leak-safe, never oversell. This
-        is the ONLY way credit-back happens under the PENDING protocol; crediting
-        by reading a hold's `amount_microusd` (the old path) is forbidden here
-        because it is not gated on the debit actually having happened."""
-        try:
-            self._table.update_item(
-                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-                UpdateExpression=(
-                    "SET pool_headroom_microusd = pool_headroom_microusd + applied.#hid, "
-                    "pool_reserved_microusd = pool_reserved_microusd - applied.#hid, "
-                    "updated_at = :now REMOVE applied.#hid"
-                ),
-                ConditionExpression="attribute_exists(applied.#hid)",
-                ExpressionAttributeNames={"#hid": hold_id},
-                ExpressionAttributeValues={":now": _now_iso()},
-            )
-            return True
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                return False
-            raise
-
-    def ensure_applied_map(self, *, tenant_id: str, period: str) -> None:
-        """Idempotently seed the ``applied`` marker map on a pool row that predates
-        the PENDING protocol (created before it was added to the create branch).
-        Conditional on the map being absent, so it never clobbers live markers and
-        is a no-op on rows that already have it. Called once per (tenant, period)
-        by the pending reserve path (cached), NOT on the hot path per request."""
-        try:
-            self._table.update_item(
-                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-                UpdateExpression="SET applied = :empty",
-                ConditionExpression="attribute_exists(tenant_id) AND attribute_not_exists(applied)",
-                ExpressionAttributeValues={":empty": {}},
-            )
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                return  # already has the map (or no pool row) — nothing to do
-            raise
+        Composed into ONE TransactWriteItems so the debit and its observable proof
+        are atomic. The marker item carries the amount (immutable once written — the
+        exactly-once credit-back reads it) and ``marker_phase=RESERVED``. Returned as
+        a list so the caller assigns positions and reads CancellationReasons by
+        index. Order is a CONTRACT: index 0 = pool (pool-side CCF ⇒ 402), index 1 =
+        marker (marker-side CCF ⇒ already applied ⇒ idempotent success)."""
+        return [
+            {
+                "Update": {
+                    "TableName": self._name,
+                    "Key": {"tenant_id": {"S": tenant_id}, "sk": {"S": budget_sk(period)}},
+                    "UpdateExpression": (
+                        "ADD pool_headroom_microusd :neg, pool_reserved_microusd :amt "
+                        "SET updated_at = :now"
+                    ),
+                    "ConditionExpression": (
+                        "attribute_exists(pool_headroom_microusd) AND #st = :active AND "
+                        "pool_headroom_microusd >= :amt"
+                    ),
+                    "ExpressionAttributeNames": {"#st": "status"},
+                    "ExpressionAttributeValues": {
+                        ":amt": {"N": str(int(amount_microusd))},
+                        ":neg": {"N": str(-int(amount_microusd))},
+                        ":active": {"S": "active"},
+                        ":now": {"S": _now_iso()},
+                    },
+                }
+            },
+            {
+                "Put": {
+                    "TableName": self._name,
+                    "Item": {
+                        "tenant_id": {"S": tenant_id},
+                        "sk": {"S": marker_sk(hold_id)},
+                        "hold_id": {"S": hold_id},
+                        "period": {"S": period},
+                        "amount_microusd": {"N": str(int(amount_microusd))},
+                        "marker_phase": {"S": MARKER_RESERVED},
+                        "created_at": {"S": _now_iso()},
+                    },
+                    "ConditionExpression": "attribute_not_exists(sk)",
+                }
+            },
+        ]
 
     def pool_marker_amount(self, *, tenant_id: str, period: str, hold_id: str) -> Optional[int]:
-        """ConsistentRead of this hold's `applied` marker amount, or None if absent.
-        The local, decisive answer to 'did this hold's debit commit?' (A1 restored
-        without a transaction). Used by replay + capture's helping path."""
+        """ConsistentRead of this hold's separate marker item's amount, or None if
+        the marker is absent. The local, decisive answer to 'did this hold's debit
+        commit?' (A1 restored without a transaction). Used by reserve replay + the
+        capture helping path + the ambiguous-failure resolution. A SETTLED marker
+        (awaiting TTL GC) still returns its amount — the debit DID commit — so the
+        caller must NOT read this as "still outstanding"; use `marker_phase` for
+        that. `period` is accepted for signature stability but the marker item is
+        period-independent (keyed by hold_id, which is period-namespaced)."""
         resp = self._table.get_item(
-            Key={"tenant_id": tenant_id, "sk": budget_sk(period)}, ConsistentRead=True)
-        applied = (resp.get("Item") or {}).get("applied") or {}
-        v = applied.get(hold_id)
+            Key={"tenant_id": tenant_id, "sk": marker_sk(hold_id)}, ConsistentRead=True)
+        item = resp.get("Item")
+        if not item:
+            return None
+        v = item.get("amount_microusd")
         return int(v) if v is not None else None
+
+    def marker_settle_best_effort(self, *, tenant_id: str, hold_id: str,
+                                  now_epoch: Optional[int] = None) -> None:
+        """Cleanup-only marker transition RESERVED -> SETTLED + TTL stamp, for the
+        settle / release / reclaim paths (docs/design/pending-protocol.md, PR-1).
+        Those paths already return the hold's headroom ATOMICALLY (pool item, in
+        their own transaction) and DELETE/expire the hold, so the marker plays NO
+        money role there — it only needs SETTLING so it (a) stops looking
+        outstanding and (b) becomes TTL-eligible. Money-safety does NOT depend on
+        this landing: exactly-once credit-back is enforced by `pool_credit_back`'s
+        phase CAS, and a settled/reclaimed hold is deleted/EXPIRED (never
+        EXPIRED_UNCREDITED), so the reconciler can never credit it. A marker this
+        misses is a bounded STORAGE orphan the reconcile audit sweep will settle.
+        Never raises; no-op if the marker is absent or already SETTLED."""
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": marker_sk(hold_id)},
+                UpdateExpression="SET marker_phase = :settled, #ttl = :ttl, settled_at = :now",
+                ConditionExpression="marker_phase = :reserved",
+                ExpressionAttributeNames={"#ttl": "ttl"},
+                ExpressionAttributeValues={
+                    ":settled": MARKER_SETTLED,
+                    ":reserved": MARKER_RESERVED,
+                    ":ttl": _marker_ttl_epoch(now_epoch),
+                    ":now": _now_iso(),
+                },
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return  # absent / already SETTLED — nothing to do
+            # Any other error is swallowed: this is cleanup, never money-critical.
+            return
+
+    def list_reserved_markers(self, *, tenant_id: str, limit: int = 50,
+                              max_pages: int = 20) -> list[dict[str, Any]]:
+        """Bounded strongly-consistent scan of a tenant's RESERVED markers (the
+        reconcile audit sweep's input — Fable PR-1 Q2 hole 3). Used to find markers
+        orphaned by a settle/reclaim whose best-effort transition was lost, so they
+        can be settled + TTL'd.
+
+        PAGINATES (Fable PR-1 review, medium): DynamoDB's ``Limit`` bounds items
+        EVALUATED, applied BEFORE the ``marker_phase = RESERVED`` filter. SETTLED
+        markers linger up to the TTL window (~8 days), so a single page could be
+        entirely SETTLED and hide RESERVED orphans behind them. We follow
+        ``LastEvaluatedKey`` until ``limit`` RESERVED markers are collected or
+        ``max_pages`` is reached (a cold-path safety bound; reconcile re-runs pick up
+        any remainder next pass). Range-Queries the ``MARKER#`` SK prefix under the
+        tenant partition."""
+        out: list[dict[str, Any]] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("tenant_id").eq(tenant_id) & Key("sk").begins_with("MARKER#")
+            ),
+            "FilterExpression": Attr("marker_phase").eq(MARKER_RESERVED),
+            "ConsistentRead": True,
+        }
+        for _ in range(int(max_pages)):
+            resp = self._table.query(**kwargs)
+            out.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if len(out) >= int(limit) or not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+        return out[: int(limit)]
+
+    def hold_exists_by_id(self, *, tenant_id: str, period: str, hold_id: str) -> bool:
+        """True iff a HOLD row of ANY status still exists for `hold_id` (Fable PR-1
+        review condition 2). Strongly-consistent range-Query of the period's
+        ``HOLD#`` prefix filtered to this hold_id — so the reconcile audit sweep can
+        confirm a marker is a genuine post-terminal orphan WITHOUT depending on the
+        completeness of a separate `list_holds` page. The hold's SK embeds the
+        expiry (unknown to the marker), so an exact GetItem is impossible; this
+        filtered Query is the cold-path equivalent. FULLY PAGINATES (a truncated
+        first page would falsely report absence — DynamoDB's Limit bounds items
+        evaluated BEFORE the FilterExpression), stopping as soon as the single
+        possible match is found."""
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("tenant_id").eq(tenant_id) & Key("sk").begins_with(hold_sk_prefix(period))
+            ),
+            "FilterExpression": Attr("hold_id").eq(hold_id),
+            "ConsistentRead": True,
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            if resp.get("Items"):
+                return True
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                return False
+            kwargs["ExclusiveStartKey"] = lek
+
+    def get_marker(self, *, tenant_id: str, hold_id: str) -> Optional[dict[str, Any]]:
+        """Strongly-consistent read of a hold's full marker item (amount + phase),
+        or None. `marker_phase == RESERVED` means the debit is committed AND its
+        headroom is still held out; `SETTLED` means it was already credited back and
+        the item is only alive for retry-dedup until TTL. Absent ⇒ no debit."""
+        resp = self._table.get_item(
+            Key={"tenant_id": tenant_id, "sk": marker_sk(hold_id)}, ConsistentRead=True)
+        return resp.get("Item")
+
+    def marker_credit_back_txn_item(self, *, tenant_id: str, hold_id: str,
+                                    now_epoch: Optional[int] = None) -> dict[str, Any]:
+        """TransactWriteItems fragment that flips a marker RESERVED -> SETTLED and
+        stamps its TTL, guarded by ``marker_phase = RESERVED``. Paired IN THE SAME
+        transaction with the pool credit-back (``headroom += amount``): the phase
+        CAS is the exactly-once arbiter, so a second credit of the same hold fails
+        this condition and the whole transaction cancels — no double-return of
+        headroom. The marker is NOT deleted here (it must survive to dedupe a late
+        reserve retry); TTL cleans it up after the window."""
+        return {
+            "Update": {
+                "TableName": self._name,
+                "Key": {"tenant_id": {"S": tenant_id}, "sk": {"S": marker_sk(hold_id)}},
+                "UpdateExpression": "SET marker_phase = :settled, #ttl = :ttl, settled_at = :now",
+                "ConditionExpression": "marker_phase = :reserved",
+                "ExpressionAttributeNames": {"#ttl": "ttl"},
+                "ExpressionAttributeValues": {
+                    ":settled": {"S": MARKER_SETTLED},
+                    ":reserved": {"S": MARKER_RESERVED},
+                    ":ttl": {"N": str(_marker_ttl_epoch(now_epoch))},
+                    ":now": {"S": _now_iso()},
+                },
+            }
+        }
+
+    def pool_credit_back(self, *, tenant_id: str, period: str, hold_id: str) -> bool:
+        """Exactly-once credit-back for the PENDING protocol, now a two-item
+        TransactWriteItems (Fable PR-1 Q2/Q4-item-3 — a lone UpdateItem is
+        forbidden here: a hold-delete that succeeds while a separate credit-back
+        UpdateItem fails would strand a RESERVED marker and leak headroom forever).
+        Atomically:
+
+          * pool: ``headroom += amount, reserved -= amount`` (amount read from the
+            marker item, passed in via a pre-read so the counter move is exact);
+          * marker: phase CAS RESERVED -> SETTLED + TTL stamp.
+
+        The phase CAS is the arbiter: a second credit of the same hold cancels on
+        the marker condition, so double-return is structurally impossible. Returns
+        True if it credited on THIS call, False if the marker was absent or already
+        SETTLED (already credited / never debited) — both leak-safe, never oversell.
+        This is the ONLY way credit-back happens under the PENDING protocol."""
+        marker = self.get_marker(tenant_id=tenant_id, hold_id=hold_id)
+        if not marker or str(marker.get("marker_phase")) != MARKER_RESERVED:
+            return False   # absent or already SETTLED — nothing to credit (leak-safe)
+        # Defensive period cross-check (Fable PR-1 review non-blocking note): the
+        # marker records the period its debit hit; hold_id is period-namespaced so a
+        # mismatch should be impossible, but crediting the WRONG period's pool would
+        # be silent corruption. Refuse rather than move money on inconsistent state.
+        m_period = marker.get("period")
+        if m_period is not None and str(m_period) != period:
+            raise ValueError(
+                f"pool_credit_back period mismatch: marker={m_period!r} arg={period!r} "
+                f"for hold {hold_id}")
+        amount = int(marker.get("amount_microusd", 0))
+        items = [
+            {
+                "Update": {
+                    "TableName": self._name,
+                    "Key": {"tenant_id": {"S": tenant_id}, "sk": {"S": budget_sk(period)}},
+                    "UpdateExpression": (
+                        "ADD pool_headroom_microusd :amt, pool_reserved_microusd :neg "
+                        "SET updated_at = :now"
+                    ),
+                    "ConditionExpression": "attribute_exists(tenant_id)",
+                    "ExpressionAttributeValues": {
+                        ":amt": {"N": str(amount)},
+                        ":neg": {"N": str(-amount)},
+                        ":now": {"S": _now_iso()},
+                    },
+                }
+            },
+            self.marker_credit_back_txn_item(tenant_id=tenant_id, hold_id=hold_id),
+        ]
+        try:
+            _budgets_low_level_client().transact_write_items(TransactItems=items)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            # Distinguish WHY it cancelled (Fable PR-1 review Bug 2 — a blanket
+            # `return False` conflates "already credited" with "nothing committed,
+            # retry me", so a transient made the reconciler retire the hold and
+            # strand the RESERVED marker = permanent leak). Items are [pool(0),
+            # marker(1)]. Only a MARKER-side ConditionalCheckFailed means the phase
+            # CAS lost (already SETTLED / absent) → definitively already credited →
+            # False (leak-safe, caller may retire). Anything else — a pool-side
+            # attribute_exists(tenant_id) failure (pool row vanished), a
+            # TransactionConflict on the hot pool item, or throttling — committed
+            # NOTHING and MUST be retried: raise so the reconciler leaves the hold
+            # EXPIRED_UNCREDITED for the next pass instead of retiring it.
+            reasons = [r.get("Code", "") for r in
+                       (e.response.get("CancellationReasons", []) or [])]
+            marker_ccf = len(reasons) > 1 and reasons[1] == "ConditionalCheckFailed"
+            if marker_ccf:
+                return False
+            raise
 
     def _status_transition(self, *, tenant_id: str, sk: str, frm: str, to: str) -> bool:
         """Conditional status transition ``frm -> to`` on a HOLD row. Returns True

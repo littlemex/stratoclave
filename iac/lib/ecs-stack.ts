@@ -37,6 +37,18 @@ export interface EcsStackProps extends cdk.StackProps {
   secrets?: { [key: string]: ecs.Secret };
 
   /**
+   * PENDING-protocol reserve canary (docs/design/pending-protocol.md, rollout
+   * Shadow->Canary->Full). A list of tenant ids that use the non-transactional
+   * separate-item-marker reserve path EVEN WHILE the global default stays
+   * "transaction", so a single tenant is flipped without a global switch. Wired to
+   * the backend as ``STRATOCLAVE_RESERVE_PROTOCOL_TENANTS`` (comma-separated).
+   * Empty/absent => every tenant stays transaction-mode (feature ships dark). The
+   * global ``STRATOCLAVE_RESERVE_PROTOCOL=pending`` override (all tenants) is set
+   * via ``environment`` when the canary graduates to Full.
+   */
+  reserveProtocolCanaryTenants?: string[];
+
+  /**
    * When true, create the per-tenant VSR config bucket (versioned, private,
    * TLS-enforced) and grant the backend task role Get/Put/Delete ONLY on the
    * ``vsr-config/*`` prefix, and inject ``VSR_CONFIG_BUCKET`` into the container
@@ -213,6 +225,87 @@ export class EcsStack extends cdk.Stack {
     // non-zero briefly after rollout, then drain to zero — operators watch it to
     // decide when to delete the legacy fallback, not to page on.
     mkFilter('LegacyHoldNoTerminal', 'LegacyHoldNoTerminal');
+
+    // PENDING-protocol canary observability (docs/design/pending-protocol.md,
+    // PR-1 item A′ + follow-up). The separate-item marker's WHOLE POINT is that
+    // the hot pool item stays small and FLAT; this is the live detector that a
+    // code regression reintroduced per-hold growth on it (the deductive
+    // WCU∝item-size argument assumes that away, so we watch for the assumption
+    // breaking). The backend logs `pool_item_size {size_bytes=N}` once per
+    // reconcile; emit N as a GAUGE and alarm above a small ceiling.
+    const poolSizeMf = logGroup.addMetricFilter('PoolItemSizeMF', {
+      filterName: `${prefix}-pool-item-size`,
+      filterPattern: logs.FilterPattern.stringValue('$.event', '=', 'pool_item_size'),
+      metricNamespace: METRIC_NS,
+      metricName: 'PoolItemSizeBytes',
+      metricValue: '$.size_bytes',
+      // no defaultValue: only emit on a real datapoint so the gauge is not
+      // polluted with zeros from unrelated log lines.
+    });
+    new cloudwatch.Alarm(this, 'PoolItemSizeGrowth', {
+      alarmName: `${prefix}-PoolItemSizeBytes`,
+      alarmDescription:
+        'PENDING protocol: the hot pool item exceeded its expected small/flat size — a code regression may have reintroduced per-hold growth on it (the rejected marker-in-pool-item design). Investigate before growth degrades write latency.',
+      metric: poolSizeMf.metric({ statistic: 'Maximum', period: cdk.Duration.minutes(5) }),
+      // A healthy pool item is a handful of fixed counters (<~200B). 2KB is a
+      // generous ceiling that still catches unbounded growth long before it bites.
+      threshold: 2048,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      // 1/1, NOT 3/3 (Fable E-phase review Bug-1): `pool_item_size` is emitted only
+      // once per reconcile, so on a fleet whose reconcile cadence is < 1/5-min there
+      // are rarely 3 consecutive 5-min buckets with a datapoint — 3/3 + missing=
+      // NOT_BREACHING would make the alarm structurally unable to reach ALARM.
+      // Item-size growth is monotonic and does not flap, so a single over-threshold
+      // datapoint IS the real regression: alarm immediately.
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // RESERVE ORACLE mismatch (golden-reference migration, docs/design/
+    // pending-protocol.md): the pending reserve's write-set diverged from what the
+    // FROZEN transaction golden predicted for the same input. This is the signal
+    // that the two money paths are NOT equivalent — it MUST be zero before
+    // transaction is deleted (the delete gate keys on it). The oracle is fail-open
+    // (it never rolls back), so this alarm is how a divergence is caught. Alarm on
+    // a single occurrence.
+    // Match + race counters (Fable review 2): the delete gate is "match >= N AND
+    // mismatch == 0", NOT merely "mismatch == 0" (which passes on ZERO samples —
+    // a vacuous gate). ReserveOracleMatch counts verified-equivalent reserves;
+    // ReserveOracleRace counts benign TOCTOU disagreements (pool moved concurrently
+    // between the pre-read and commit) — a metric only, NOT alarmed, so canary
+    // traffic near the ceiling does not flap the mismatch alarm.
+    mkFilter('reserve_oracle_match', 'ReserveOracleMatch');
+    mkFilter('reserve_oracle_race', 'ReserveOracleRace');
+    const reserveOracleMf = mkFilter('reserve_oracle_mismatch', 'ReserveOracleMismatch');
+    new cloudwatch.Alarm(this, 'ReserveOracleMismatch', {
+      alarmName: `${prefix}-ReserveOracleMismatch`,
+      alarmDescription:
+        'Reserve golden-oracle: the pending reserve write-set diverged from the transaction golden prediction. The two money paths are not equivalent — investigate before trusting/deleting the transaction path.',
+      metric: reserveOracleMf.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // PENDING-protocol reconcile invariant signal: a credit-back hit a
+    // non-transient defect (e.g. a marker/period mismatch) — the hold is left for
+    // a human, never auto-credited. Real state corruption → alarm on one.
+    const reconcileInvariantMf = mkFilter(
+      'pool_reconcile_credit_back_invariant', 'PoolReconcileCreditBackInvariant');
+    new cloudwatch.Alarm(this, 'PoolReconcileCreditBackInvariant', {
+      alarmName: `${prefix}-PoolReconcileCreditBackInvariant`,
+      alarmDescription:
+        'PENDING protocol: reconcile credit-back hit a non-transient invariant violation (marker/period mismatch); the hold is quarantined, needs investigation.',
+      metric: reconcileInvariantMf.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     // Unrecoverable spend / invariant-violation signals (Fable P2 review-2
     // R2-1/R2-4): because settle runs at the streaming tail with no client retry,
@@ -612,6 +705,14 @@ export class EcsStack extends cdk.Stack {
         }),
       );
       vsrEnv.VSR_CONFIG_BUCKET = bucket.bucketName;
+    }
+
+    // PENDING-protocol reserve canary allowlist (docs/design/pending-protocol.md).
+    // Injected only when non-empty, so the feature ships dark: no env var => the
+    // backend's default (transaction mode for every tenant) is unchanged.
+    if (props.reserveProtocolCanaryTenants && props.reserveProtocolCanaryTenants.length > 0) {
+      vsrEnv.STRATOCLAVE_RESERVE_PROTOCOL_TENANTS =
+        props.reserveProtocolCanaryTenants.join(',');
     }
 
     const container = this.taskDefinition.addContainer('BackendContainer', {
