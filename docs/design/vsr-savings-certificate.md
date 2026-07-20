@@ -109,6 +109,17 @@ signal lands (roadmap).
    behaviour change**. This is the wedge: "put Stratoclave behind your existing
    LiteLLM deployment in passthrough+shadow for two weeks and get an audited
    savings report on your own traffic."
+
+   **Implemented (litellm-wedge slice-2):** a minimal LOCAL rule judge
+   (`mvp.vsr.shadow`) is wired into all three model routes. When no real VSR or
+   pin decides routing, it attaches a `shadow-advised` decision to the
+   reserve-time decision record — advisory-only (never a routing pin, no response
+   header, no money effect). It is DARK BY DEFAULT (`STRATOCLAVE_SHADOW_VSR`):
+   off, the judge never runs and extracts no request features. The advice lands
+   in the certificate's `potential` (enacted=False) base only, never the realized
+   headline, with an explicit upper-bound caveat (quality unmeasurable — the
+   suggested model never ran). A stronger judge is a drop-in replacement for the
+   rule engine; the accounting boundary does not move.
 2. **Canary.** N% of traffic executes the VSR's choice; quality judged by the
    tenant eval + LLM-as-judge (dual — the judge alone is not trusted).
 3. **Full + monthly certificate.** With continuous audit.
@@ -124,6 +135,14 @@ the one asset (credibility) the whole strategy rests on.
 - `backend/mvp/learning/savings_cli.py` — `python -m mvp.learning.savings_cli
   --tenant <id> --day YYYYMMDD [--json] [--detail]`. Internal ops path, no
   request-path code, no new table.
+- `backend/mvp/vsr/shadow.py` — the local rule judge (`propose`) + request-path
+  seam (`shadow_vsr_decision`) + schema feature extractors. Dark by default,
+  advisory-only. Wired at the three model routes (`mvp/anthropic.py`,
+  `mvp/chat_completions.py`, `mvp/openai_responses.py`) just before the reserve
+  chokepoint; the decision rides `reserve_credit_for_model(vsr_decision=...)`.
+- Tests: `test_shadow_vsr.py` (rule judge + seam: dark/fail-open/classification/
+  mode-independence), `test_shadow_vsr_wiring.py` (per-route flag on/off: served
+  model unchanged, pin/tools suppression, propose-never-called when dark).
 - Tests: `test_savings.py` (unit + 300-example property: net = gross −
   escalation, no clipping, exhaustive classification), `test_savings_certificate.py`
   (end-to-end over moto: positive saving + surfaced escalation loss).
