@@ -67,15 +67,12 @@ router = APIRouter(tags=["mvp-openai-responses"])
 # `iac/bin/iac.ts`.
 
 def _shadow_tenant_pref(org_id: str):
-    """The tenant's per-tenant shadow_vsr preference (True/False/None) from the
-    60s-TTL-cached routing config. None => follow the global default. Fenced +
-    fail-open (advisory-only path must never break a request)."""
-    try:
-        from .routing.config import get_tenant_routing_config
+    """The tenant's per-tenant shadow_vsr preference (True/False/None) via the
+    single shared, cached, rate-limited-fail-open helper (routing.config.
+    tenant_shadow_pref). Thin wrapper kept so the call site reads locally."""
+    from .routing.config import tenant_shadow_pref
 
-        return get_tenant_routing_config(org_id).shadow_vsr
-    except Exception:  # noqa: BLE001
-        return None
+    return tenant_shadow_pref(org_id)
 
 
 def _codex_enabled() -> bool:
@@ -538,7 +535,10 @@ async def create_response(
     if model_pin is None and saar_hard is None:
         try:
             from .vsr import shadow as _shadow
-            _tenant_shadow = _shadow_tenant_pref(user.org_id)
+            # cheap env-only force-off before the per-tenant config read so a
+            # fleet-wide dark deploy pays no lookup (Fable per-tenant review Low).
+            _tenant_shadow = (None if _shadow.shadow_globally_forced_off()
+                              else _shadow_tenant_pref(user.org_id))
             if _shadow.shadow_enabled(_tenant_shadow):
                 _msgs = body.input if isinstance(body.input, list) else None
                 _shadow_vsr = _shadow.shadow_vsr_decision(

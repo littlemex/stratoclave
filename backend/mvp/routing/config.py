@@ -120,6 +120,41 @@ def _parse_user_config(item: dict) -> UserRoutingConfig:
         fallback=item.get("fallback"),
     )
 
+# Rate-limit the fail-open warn so a persistent config-read fault logs once a
+# minute per process instead of once a request (Fable per-tenant review Medium:
+# a silent `except: return None` hides a tenant that thinks it is ON but records
+# nothing). Module-level, no lock — a duplicate log under a race is harmless.
+_SHADOW_PREF_WARN_INTERVAL_S = 60.0
+_shadow_pref_last_warn = 0.0
+
+
+def tenant_shadow_pref(tenant_id: str) -> Optional[bool]:
+    """The tenant's per-tenant shadow_vsr preference (True/False/None) from the
+    60s-TTL-cached routing config (get_tenant_routing_config — NO extra DynamoDB
+    read on a warm cache). None => follow the global default.
+
+    Single home for the three route handlers (Fable per-tenant review Medium:
+    was copy-pasted three times, each swallowing errors silently). Fenced +
+    fail-open: any lookup failure yields None so the advisory shadow path can
+    never break a request, but a rate-limited warn is emitted so a persistent
+    fault is visible rather than silently degrading every tenant to the global
+    default."""
+    try:
+        return get_tenant_routing_config(tenant_id).shadow_vsr
+    except Exception as e:  # noqa: BLE001 — advisory only; never break the request.
+        global _shadow_pref_last_warn
+        now = time.monotonic()
+        if now - _shadow_pref_last_warn >= _SHADOW_PREF_WARN_INTERVAL_S:
+            _shadow_pref_last_warn = now
+            try:
+                from core.logging import get_logger
+                get_logger(__name__).warning(
+                    "shadow_pref_lookup_failed", tenant_id=tenant_id, error=str(e))
+            except Exception:
+                pass
+        return None
+
+
 def invalidate_routing_cache(tenant_id: str, user_id: Optional[str] = None) -> None:
     """Drop the cached routing config for a tenant (or one of its users).
 

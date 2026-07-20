@@ -285,17 +285,52 @@ def _read_config_item(pk: str, tenant_id: str) -> Optional[dict]:
 
 
 def provision_shadow_default_config(tenant_id: str, *, updated_by: str) -> None:
-    """Write an EXPLICIT shadow_vsr=True routing-config record for a freshly
-    created tenant so the Savings Certificate is populated from week one (the
-    litellm-wedge value prop). It lives here (the routing-config write home)
-    rather than in admin_tenants so the raw put stays in a module that only
-    touches the ROUTING config item — never the budgets table. Advisory-only:
-    shadow VSR never steers execution/routing/money, so this is money-neutral."""
-    item = tenant_config_to_item(
-        tenant_id, TenantRoutingConfigRequest(shadow_vsr=True), updated_by=updated_by
-    )
-    _table().put_item(Item=item)
+    """Set an EXPLICIT shadow_vsr=True on a freshly created tenant's routing-config
+    record so the Savings Certificate is populated from week one (the litellm-wedge
+    value prop). It lives here (the routing-config write home) rather than in
+    admin_tenants so the raw write stays in a module that only touches the ROUTING
+    config item — never the budgets table. Advisory-only: shadow VSR never steers
+    execution/routing/money, so this is money-neutral.
+
+    Non-clobbering by construction (Fable per-tenant review High/Medium): this is a
+    single-attribute UpdateItem guarded by attribute_not_exists(shadow_vsr), NOT a
+    full-replace put. If a config item already exists (creation retry, a racing
+    initial config write, or a re-provision) with shadow_vsr already present, the
+    condition fails and we leave every field — quotas / fallback / chain / an
+    existing explicit shadow_vsr — untouched. An audit event records the write so
+    the "explicit + visible/auditable" claim holds for the write itself, not just
+    the stored `updated_by`."""
+    from botocore.exceptions import ClientError
+
+    try:
+        # SET only shadow_vsr: on a config item that already carries quotas/chain
+        # (set by another admin) we must not rewrite its updated_by/updated_at
+        # provenance (Fable per-tenant review-2 Nit). The provision itself is
+        # recorded by the audit event below.
+        _table().update_item(
+            Key={"user_id": _TENANT_CONFIG_PK, "tenant_id": tenant_id},
+            UpdateExpression="SET shadow_vsr = :t",
+            ConditionExpression="attribute_not_exists(shadow_vsr)",
+            ExpressionAttributeValues={":t": True},
+        )
+    except ClientError as e:
+        # Match by error CODE (not a re-resolved exception class — Fable
+        # per-tenant review-2 Low: _table() rebuilds the client, so the class
+        # identity can differ from the one raised): shadow_vsr already present
+        # (existing/explicit) => never overwrite it. Re-raise anything else so
+        # the caller's fence logs a genuine provision failure.
+        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return
+        raise
     routing_config.invalidate_routing_cache(tenant_id)
+    log_audit_event(
+        event="tenant_shadow_vsr_provisioned_default",
+        actor_id=updated_by,
+        target_id=tenant_id,
+        target_type="tenant",
+        tenant_id=tenant_id,
+        details={"shadow_vsr": True, "source": "new_tenant_default"},
+    )
 
 
 def _require_tenant(tenant_id: str) -> None:
@@ -376,6 +411,18 @@ def put_tenant_routing(
     must resolve in the registry; chain/allowlist/free-tier coherence is checked
     so the enforcement layer can never load a config where no chain model is
     servable by construction.
+
+    Shadow-VSR full-replace caveat (deliberate; Fable per-tenant review-2 Medium):
+    because this is a full replace, a client that omits `shadow_vsr` resets it to
+    the tri-state None (= follow the global default), so a new tenant's provisioned
+    explicit True is dropped if a non-UI automation later PUTs a shadow_vsr-less
+    config. This is the SAME "send the complete desired state" contract as every
+    other field — the UI round-trips shadow_vsr from GET to preserve it. We accept
+    it rather than special-casing one field with PATCH semantics: shadow is
+    advisory-only, so the worst case is a tenant quietly reverting to the global
+    default (the Savings Certificate stops accruing potential) — never a
+    money/routing effect. Operators automating routing config should include
+    shadow_vsr in their payload, exactly as they must include chain/quotas.
 
     Note (Fable rev1 F4): shrinking the tenant chain can leave an existing
     per-user override chain that is no longer a subsequence. We do NOT cascade-

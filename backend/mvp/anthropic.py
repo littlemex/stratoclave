@@ -96,16 +96,12 @@ def _selected_bedrock_model(context, default_model_id: str) -> str:
 
 
 def _shadow_tenant_pref(org_id: str):
-    """The tenant's per-tenant shadow_vsr preference (True/False/None) from the
-    60s-TTL-cached routing config. None => follow the global default. Fenced +
-    fail-open: any lookup failure yields None (fall back to the global default),
-    so the advisory shadow path can never break a request."""
-    try:
-        from .routing.config import get_tenant_routing_config
+    """The tenant's per-tenant shadow_vsr preference (True/False/None) via the
+    single shared, cached, rate-limited-fail-open helper. Thin wrapper kept so the
+    call site reads locally; the logic lives in routing.config.tenant_shadow_pref."""
+    from .routing.config import tenant_shadow_pref
 
-        return get_tenant_routing_config(org_id).shadow_vsr
-    except Exception:  # noqa: BLE001 — advisory only; never break the request.
-        return None
+    return tenant_shadow_pref(org_id)
 
 
 def _saar_req_tool_result(body) -> bool:
@@ -710,9 +706,11 @@ def messages(
             from .vsr import shadow as _shadow
             # per-tenant toggle: read from the 60s-TTL-cached routing config the
             # reserve already loaded for this tenant (no extra hot-path read);
-            # None => global env default. shadow_enabled() is checked FIRST so a
-            # dark tenant extracts no features.
-            _tenant_shadow = _shadow_tenant_pref(user.org_id)
+            # None => global env default. The cheap env-only force-off is checked
+            # BEFORE the config read so a fleet-wide dark deploy pays no lookup;
+            # shadow_enabled() is then checked before feature extraction.
+            _tenant_shadow = (None if _shadow.shadow_globally_forced_off()
+                              else _shadow_tenant_pref(user.org_id))
             if _shadow.shadow_enabled(_tenant_shadow):
                 _shadow_vsr = _shadow.shadow_vsr_decision(
                     requested_model=body.model,

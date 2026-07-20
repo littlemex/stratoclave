@@ -271,7 +271,6 @@ def list_tenants(
     )
 
 
-@router.post("", response_model=TenantItem, status_code=201)
 def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
     """New tenants get shadow VSR ON by default so the Savings Certificate is
     populated from week one (the litellm-wedge value prop). This writes an
@@ -282,7 +281,11 @@ def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
     money-neutral)."""
     import os
 
-    if os.getenv("STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT", "true").lower() == "false":
+    # inverse-default (ON unless explicitly disabled): accept the common falsy
+    # spellings symmetrically so an operator's "0"/"no"/"off" also opts out
+    # (Fable per-tenant review-2 Low — do not regress to a literal "false").
+    if os.getenv("STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT", "true").strip().lower() in (
+            "false", "0", "no", "off"):
         return
     try:
         from . import admin_routing as _ar
@@ -297,6 +300,7 @@ def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
             pass
 
 
+@router.post("", response_model=TenantItem, status_code=201)
 def create_tenant(
     body: CreateTenantRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
@@ -311,7 +315,6 @@ def create_tenant(
         )
     except TenantLimitExceededError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    _provision_shadow_default(item["tenant_id"], actor_id=actor.user_id)
     log_audit_event(
         event="tenant_created",
         actor_id=actor.user_id,
@@ -320,6 +323,8 @@ def create_tenant(
         target_type="tenant",
         details={"name": body.name, "team_lead_user_id": body.team_lead_user_id},
     )
+    # after the create audit so the log reads create -> provision.
+    _provision_shadow_default(item["tenant_id"], actor_id=actor.user_id)
     return _to_tenant_item(item)
 
 

@@ -36,29 +36,61 @@ from typing import Callable, Optional
 _TIER_ORDER = ("haiku", "sonnet", "opus")
 
 
+def _env_true(name: str) -> bool:
+    """Truthy env parse, tolerant of the common spellings so operators are not
+    surprised by an asymmetric interpretation (Fable per-tenant review Low):
+    true/1/yes/on all count."""
+    return os.getenv(name, "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _global_force_off() -> bool:
+    """Operator kill-switch that sits ABOVE the per-tenant preference. Because a
+    tenant's explicit True (every new tenant is provisioned ON) otherwise beats
+    the env, an operator would have no single lever to stop the judge fleet-wide
+    if feature extraction started throwing or adding latency (Fable per-tenant
+    review High). STRATOCLAVE_SHADOW_VSR_FORCE_OFF=true forces the judge dark for
+    EVERY tenant regardless of stored preference, read per request so it takes
+    effect immediately without a redeploy or config rewrite."""
+    return _env_true("STRATOCLAVE_SHADOW_VSR_FORCE_OFF")
+
+
+def shadow_globally_forced_off() -> bool:
+    """Public cheap (env-only, no I/O) check of the operator kill-switch, so a
+    handler can skip the per-tenant config read entirely when the fleet is forced
+    dark (Fable per-tenant review Low: avoid a cold-cache DynamoDB read on a dark
+    deploy). Equivalent to the rank-0 branch of shadow_enabled()."""
+    return _global_force_off()
+
+
 def _global_shadow_default() -> bool:
     """The global fallback used when a tenant expresses no preference. Dark by
-    default (STRATOCLAVE_SHADOW_VSR=false) so the judge ships inert. Read PER
-    REQUEST (not memoised) so the env stays a live kill-switch."""
-    return os.getenv("STRATOCLAVE_SHADOW_VSR", "false").lower() == "true"
+    default (STRATOCLAVE_SHADOW_VSR unset/false) so the judge ships inert. Read
+    PER REQUEST (not memoised) so the env stays a live switch."""
+    return _env_true("STRATOCLAVE_SHADOW_VSR")
 
 
 def shadow_enabled(tenant_shadow: Optional[bool] = None) -> bool:
     """Resolve whether the shadow judge runs for THIS request.
 
-    Tri-state resolution (Fable per-tenant review): a tenant's explicit
-    preference wins; absence (None) falls back to the global env default. The
-    caller passes the tenant's resolved `shadow_vsr` value (read from the
+    Resolution order (Fable per-tenant review):
+      0. STRATOCLAVE_SHADOW_VSR_FORCE_OFF=true -> OFF, unconditionally. The
+         operator kill-switch outranks every per-tenant preference so the whole
+         fleet can be stopped with one env flip (no per-tenant config rewrite).
+      1. tenant_shadow is True   -> ON  (this tenant opted in / provisioned ON)
+      2. tenant_shadow is False  -> OFF (this tenant opted out)
+      3. tenant_shadow is None   -> the global env default (dark unless set)
+
+    The caller passes the tenant's resolved `shadow_vsr` value (read from the
     routing config it ALREADY loaded for the reserve — no extra DynamoDB read,
-    and shadow.py stays free of storage dependencies):
+    and shadow.py stays free of storage dependencies).
 
-        tenant_shadow is True   -> ON  (this tenant opted in / provisioned ON)
-        tenant_shadow is False  -> OFF (this tenant opted out)
-        tenant_shadow is None   -> the global env default (dark unless set)
-
-    A missing routing-config item yields None, so an existing tenant that never
-    touched its config behaves EXACTLY as before this change (dark unless the
-    env was set) — the dark-by-default shipping guarantee is preserved."""
+    Dark-by-default note: for a tenant that never touched its config (None), and
+    with no env set, this is False — an EXISTING tenant behaves exactly as before
+    this change. NEW tenants are shipped with an explicit stored True (see
+    admin_tenants._provision_shadow_default); the force-off env is the lever that
+    stops them without touching stored config."""
+    if _global_force_off():
+        return False
     if tenant_shadow is not None:
         return bool(tenant_shadow)
     return _global_shadow_default()
