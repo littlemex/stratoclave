@@ -173,6 +173,15 @@ class PendingLedger:
             # A retried/al ready-resolved commit is not modelled as re-applying
             # (I4: step 2 is never re-sent; max_attempts=1).
             return "noop"
+        # IDEMPOTENT COMMIT (faithful to production): the real commit is a marker
+        # Put guarded by attribute_not_exists, so a re-issued commit of a hold that
+        # ALREADY debited is a CCF → RESERVE_ALREADY, NOT a second debit. The model
+        # marks a committed hold with `committed_tick`; a re-commit of one that is
+        # already debited must therefore NOT _apply() again (the differential oracle
+        # exercises this replay; without this guard the model double-debits while
+        # production does not — a reference-model fidelity gap, Fable review 1).
+        if self._debited.get(hold_id, False):
+            return "committed"   # already applied once; idempotent replay
 
         def _condition_holds() -> bool:
             return self.active and self.headroom() >= h.amount
