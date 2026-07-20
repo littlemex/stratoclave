@@ -240,3 +240,56 @@ def test_cli_issue_requires_generated_at(dynamodb_mock, capsys):
     # issue without --generated-at-ms is refused (no implicit clock).
     assert cli.main(["issue", "--tenant", "acme", "--day", "20260717"]) == 2
     assert "generated-at-ms is required" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- scheduler handler
+
+def test_scheduler_derives_day_from_event_time_minus_window():
+    from mvp.learning import certificate_scheduler as sched
+    # event at 2026-07-17T03:00:00Z, settle window 2 days -> day 20260715.
+    gen_ms, day = sched._event_time_ms_and_day(
+        {"time": "2026-07-17T03:00:00Z"}, settle_window_days=2)
+    assert day == "20260715"
+    # generated_at_ms is the event time itself (2026-07-17T03:00:00Z), NOT the
+    # shifted day — the certificate is FOR day D-N but stamped when it was issued.
+    import datetime as _dt
+    expected_ms = int(_dt.datetime(2026, 7, 17, 3, 0, 0,
+                                   tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    assert gen_ms == expected_ms
+
+
+def test_scheduler_requires_event_time():
+    from mvp.learning import certificate_scheduler as sched
+    with pytest.raises(ValueError, match="no `time`"):
+        sched._event_time_ms_and_day({}, settle_window_days=2)
+
+
+def test_scheduler_explicit_tenant_list(monkeypatch):
+    from mvp.learning import certificate_scheduler as sched
+    monkeypatch.setenv("CERT_TENANT_IDS", "acme, globex ,")
+    assert sched._resolve_tenant_ids() == ["acme", "globex"]
+
+
+def test_scheduler_handler_emits_batch_metrics(dynamodb_mock, monkeypatch):
+    from structlog.testing import capture_logs
+
+    from mvp.learning import certificate_scheduler as sched
+    from mvp.learning import savings as sv
+    monkeypatch.setenv("CERT_TENANT_IDS", "ok,quiet")
+
+    # patch the DEFAULT certificate source the batch resolves to (issue_certificate
+    # falls back to savings.savings_certificate when certificate_fn is None).
+    def _fake(*, tenant_id, day, traffic):
+        c = dict(_cert(vsr_acted=(0 if tenant_id == "quiet" else 10)))
+        c["tenant_id"], c["day"], c["traffic"] = tenant_id, day, traffic
+        return c
+    monkeypatch.setattr(sv, "savings_certificate", _fake)
+
+    with capture_logs() as caps:
+        out = sched.handler({"time": "2026-07-17T03:00:00Z"})
+    assert out["day"] == "20260715"
+    assert out["expected"] == 2
+    # the batch metric line carries the outage/silent-skip signals.
+    line = next(c for c in caps if c.get("event") == "certificate_batch_issued")
+    assert line["issued"] == 1 and line["skip_no_traffic"] == 1
+    assert line["no_traffic_fraction"] == 0.5
