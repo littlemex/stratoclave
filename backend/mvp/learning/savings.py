@@ -218,13 +218,21 @@ def _bump(d: dict, k: str) -> None:
     d[k] = d.get(k, 0) + 1
 
 
-def savings_certificate(*, tenant_id: str, day: str) -> dict[str, Any]:
+def savings_certificate(*, tenant_id: str, day: str,
+                        traffic: str = "real") -> dict[str, Any]:
     """Assemble a (tenant, day) Savings Certificate: join VSR decisions against
     billed usage (`vsr_reconcile.reconcile_day`, which carries billed tokens),
     then fold the model-vs-model counterfactual. Stamps the rate-table version
     used so a re-run reproduces the number (Fable 1 reproducibility). INTERNAL ops
     path — same posture as vsr_reconcile (reads DynamoDB directly, no request
-    path, no new table)."""
+    path, no new table).
+
+    `traffic` is a PROVENANCE stamp carried on the certificate itself (Fable
+    savings-certificate review): "real" for a genuine tenant's traffic, "synthetic"
+    for a seeded demo/sample run. A product whose weapon is *honest proof* must
+    never let a synthetic sample be mistaken for a real audited number — so the
+    provenance lives in the certificate schema (and is surfaced by the CLI), not
+    only in a caller's memory."""
     from . import vsr_reconcile as vr
     from ..pricing import effective_rates
 
@@ -232,5 +240,6 @@ def savings_certificate(*, tenant_id: str, day: str) -> dict[str, Any]:
     savings = summarize_savings(report["rows"])
     rate_version, _, _ = effective_rates()
     return {"tenant_id": tenant_id, "day": day,
+            "traffic": traffic,
             "rate_version": rate_version or "builtin-defaults",
             "savings": savings, "reconcile": report["summary"]}

@@ -48,6 +48,15 @@ def test_certificate_counts_counterfactual_saving(dynamodb_mock):
     assert s["decomposition"]["negative_deltas_microusd"] == 0
     assert cert["rate_version"]                      # stamped for reproducibility
     assert s["quality"]["measured"] is False
+    assert cert["traffic"] == "real"                 # default provenance
+
+
+def test_certificate_stamps_synthetic_provenance(dynamodb_mock):
+    """A seeded/demo run stamps traffic=synthetic on the certificate itself so a
+    sample number can never be mistaken for a real audited one (Fable review)."""
+    day = dl._day(dl._now_ms())
+    cert = sv.savings_certificate(tenant_id="nobody", day=day, traffic="synthetic")
+    assert cert["traffic"] == "synthetic"
 
 
 def test_certificate_surfaces_escalation_loss(dynamodb_mock):

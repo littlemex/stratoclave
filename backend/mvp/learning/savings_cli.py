@@ -47,9 +47,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit raw JSON")
     ap.add_argument("--detail", action="store_true",
                     help="also list per-request counterfactual rows")
+    ap.add_argument("--traffic", choices=["real", "synthetic"], default="real",
+                    help="provenance stamped on the certificate: 'real' tenant "
+                         "traffic (default) or 'synthetic' (a seeded demo/sample). "
+                         "A synthetic certificate is loudly marked so it can never "
+                         "be mistaken for an audited number.")
     args = ap.parse_args(argv)
 
-    cert = sv.savings_certificate(tenant_id=args.tenant, day=args.day)
+    cert = sv.savings_certificate(tenant_id=args.tenant, day=args.day,
+                                  traffic=args.traffic)
     s = cert["savings"]
 
     if args.json:
@@ -59,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     decomp = s["decomposition"]
     base = s["billed_microusd_over_priced_base"]
     print(f"=== VSR Savings Certificate: tenant {args.tenant} day {args.day} ===")
+    traffic = cert.get("traffic", "real")
+    if traffic != "real":
+        # A synthetic sample must announce itself LOUDLY — the whole product is
+        # honest proof, so a demo number can never be mistaken for an audited one.
+        print(f"  *** TRAFFIC: {traffic.upper()} — SEEDED SAMPLE, NOT A REAL "
+              f"AUDITED TENANT NUMBER ***")
     print(f"  rate version:             {cert.get('rate_version', '-')}")
     print(f"  priced requests (base):   {s['priced_request_count']}")
     print(f"  billed over priced base:  {_fmt_usd(base)}")

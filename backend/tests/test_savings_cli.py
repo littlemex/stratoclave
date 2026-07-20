@@ -15,9 +15,10 @@ from mvp.learning import savings_cli
 from mvp.learning import savings as sv
 
 
-def _fake_cert(net, positive, negative, *, classes=None, rate="v-9"):
+def _fake_cert(net, positive, negative, *, classes=None, rate="v-9", traffic="real"):
     return {
         "tenant_id": "acme", "day": "20260720", "rate_version": rate,
+        "traffic": traffic,
         "savings": {
             "net_saving_microusd": net,
             "priced_request_count": 3,
@@ -72,3 +73,28 @@ def test_human_mode_reports_class_counts(monkeypatch, capsys):
     savings_cli.main(["--tenant", "acme", "--day", "20260720"])
     out = capsys.readouterr().out
     assert "unpriceable=1" in out and "counterfactual=3" in out
+
+
+def test_traffic_flag_reaches_engine_and_defaults_real(monkeypatch, capsys):
+    seen = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        return _fake_cert(net=1, positive=1, negative=0, traffic=kw.get("traffic", "real"))
+
+    monkeypatch.setattr(sv, "savings_certificate", _spy)
+    # default is real, and a real certificate shows NO synthetic banner.
+    savings_cli.main(["--tenant", "acme", "--day", "20260720"])
+    assert seen["traffic"] == "real"
+    assert "SEEDED SAMPLE" not in capsys.readouterr().out
+
+
+def test_synthetic_traffic_loudly_banners(monkeypatch, capsys):
+    monkeypatch.setattr(sv, "savings_certificate",
+                        lambda **kw: _fake_cert(net=1, positive=1, negative=0,
+                                                traffic=kw.get("traffic", "real")))
+    rc = savings_cli.main(["--tenant", "acme", "--day", "20260720", "--traffic", "synthetic"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # a synthetic sample can NEVER be mistaken for a real audited number.
+    assert "TRAFFIC: SYNTHETIC" in out and "NOT A REAL" in out
