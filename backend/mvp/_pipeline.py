@@ -2163,13 +2163,64 @@ def _pending_commit_transact(budgets, *, tenant_id, period, hold_id, amount) -> 
     a client whose debit already landed, and it would re-reserve under a new hold_id
     = a double debit. Only if the marker is fine and the POOL reason is CCF do we
     return RESERVE_EXHAUSTED (genuine budget exhaustion → 402)."""
+    # RESERVE ORACLE (docs/design/pending-protocol.md, golden-reference migration):
+    # when enabled, snapshot the pool's pre-state so we can compare the write-set
+    # pending is about to send against what the FROZEN transaction golden would
+    # produce. ONE strongly-consistent read (the same the golden path does), gated
+    # by the flag → zero cost when off. NEVER changes control flow.
+    _oracle_pool_row = None
+    _oracle_on = False
+    try:
+        from . import reserve_oracle as _ro
+        _oracle_on = _ro.oracle_enabled()
+        if _oracle_on:
+            _oracle_pool_row = budgets.get(tenant_id, period, consistent_read=True)
+    except Exception:  # noqa: BLE001 — the oracle must never break a reserve
+        _oracle_on = False
+
     items = budgets.reserve_commit_txn_items(
         tenant_id=tenant_id, period=period, hold_id=hold_id, amount_microusd=amount)
     client = _low_level_client()
+
+    def _oracle_check(outcome: str) -> None:
+        """Compare pending's actual write-set to the golden's prediction. Best-
+        effort, fail-open — logs a mismatch, never raises, never rolls back."""
+        if not _oracle_on:
+            return
+        # RESERVE_ALREADY is an IDEMPOTENT replay of a hold whose debit landed on a
+        # PRIOR call. The pool pre-state we snapshotted already reflects that debit,
+        # so the golden's fresh-reserve prediction is not apples-to-apples here
+        # (golden would 'reject a re-reserve' that pending idempotently admits).
+        # The oracle checks FRESH admission equivalence only; skip replays.
+        if outcome == budgets.RESERVE_ALREADY:
+            return
+        try:
+            golden = _ro.golden_predicted_writeset(
+                amount_microusd=amount, pool_row=_oracle_pool_row)
+            pending = _ro.pending_actual_writeset(
+                amount_microusd=amount, outcome=outcome,
+                exhausted_sentinel=budgets.RESERVE_EXHAUSTED,
+                applied_sentinel=budgets.RESERVE_APPLIED)
+            # First compare against the PRE-READ snapshot. Only if they disagree do
+            # we pay a SECOND read, to tell a genuine mismatch from a TOCTOU race
+            # (a concurrent reserve/release near the ceiling flipping the verdict).
+            if (golden.verdict == pending.verdict
+                    and golden.reserved_delta_int == pending.reserved_delta_int):
+                _ro.compare_and_log(tenant_id=tenant_id, period=period, hold_id=hold_id,
+                                    golden=golden, pending=pending)  # -> "match"
+            else:
+                pool_after = budgets.get(tenant_id, period, consistent_read=True)
+                _ro.compare_and_log(tenant_id=tenant_id, period=period, hold_id=hold_id,
+                                    golden=golden, pending=pending,
+                                    pool_before=_oracle_pool_row, pool_after=pool_after)
+        except Exception:  # noqa: BLE001 — a detector must never fail the reserve
+            pass
+
     try:
         # No ClientRequestToken: idempotency is the marker's attribute_not_exists,
         # not the 10-minute token dedup window.
         client.transact_write_items(TransactItems=items)
+        _oracle_check(budgets.RESERVE_APPLIED)
         return budgets.RESERVE_APPLIED
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
@@ -2182,8 +2233,10 @@ def _pending_commit_transact(budgets, *, tenant_id, period, hold_id, amount) -> 
             if marker_ccf:
                 # This hold's marker already exists → a prior attempt committed the
                 # debit. Idempotent success; do NOT re-debit (I4).
+                _oracle_check(budgets.RESERVE_ALREADY)
                 return budgets.RESERVE_ALREADY
             if pool_ccf:
+                _oracle_check(budgets.RESERVE_EXHAUSTED)
                 return budgets.RESERVE_EXHAUSTED   # genuine exhaustion → 402
             # A TransactionConflict (optimistic serialization collision on the hot
             # pool item) or throttle: retryable. Fall through to ambiguity handling

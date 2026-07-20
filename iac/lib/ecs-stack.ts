@@ -262,6 +262,34 @@ export class EcsStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    // RESERVE ORACLE mismatch (golden-reference migration, docs/design/
+    // pending-protocol.md): the pending reserve's write-set diverged from what the
+    // FROZEN transaction golden predicted for the same input. This is the signal
+    // that the two money paths are NOT equivalent — it MUST be zero before
+    // transaction is deleted (the delete gate keys on it). The oracle is fail-open
+    // (it never rolls back), so this alarm is how a divergence is caught. Alarm on
+    // a single occurrence.
+    // Match + race counters (Fable review 2): the delete gate is "match >= N AND
+    // mismatch == 0", NOT merely "mismatch == 0" (which passes on ZERO samples —
+    // a vacuous gate). ReserveOracleMatch counts verified-equivalent reserves;
+    // ReserveOracleRace counts benign TOCTOU disagreements (pool moved concurrently
+    // between the pre-read and commit) — a metric only, NOT alarmed, so canary
+    // traffic near the ceiling does not flap the mismatch alarm.
+    mkFilter('reserve_oracle_match', 'ReserveOracleMatch');
+    mkFilter('reserve_oracle_race', 'ReserveOracleRace');
+    const reserveOracleMf = mkFilter('reserve_oracle_mismatch', 'ReserveOracleMismatch');
+    new cloudwatch.Alarm(this, 'ReserveOracleMismatch', {
+      alarmName: `${prefix}-ReserveOracleMismatch`,
+      alarmDescription:
+        'Reserve golden-oracle: the pending reserve write-set diverged from the transaction golden prediction. The two money paths are not equivalent — investigate before trusting/deleting the transaction path.',
+      metric: reserveOracleMf.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // PENDING-protocol reconcile invariant signal: a credit-back hit a
     // non-transient defect (e.g. a marker/period mismatch) — the hold is left for
     // a human, never auto-credited. Real state corruption → alarm on one.

@@ -201,25 +201,67 @@ Observability shipped with this: `PoolItemSizeBytes` gauge + growth alarm (>2 KB
 `PoolReconcileCreditBackInvariant` alarm, and the reconcile summary now splits
 `retire_failures` from `credit_back_deferred`.
 
-**Status: SHIPPED, DORMANT (frozen by decision).** Z3-proven, 1164 tests green,
-Fable-approved, and canary-Shadow verified on live scverify (30 reserves kept the
-pool item at 217→223 B — the item-growth blowup is gone; money invariant,
-idempotent re-commit, and exactly-once credit-back all held on live DynamoDB). The
-per-tenant canary lever + observability are in place. With ZERO paying tenants and
-ZERO real load, flipping the prod default from `transaction` to `pending` yields NO
-observable benefit (the win is contention reduction at high concurrency), so the
-rollout is intentionally NOT completed — the code is left activation-ready and the
-work moves to the differentiators (Savings Certificate / VSR). Fable-confirmed:
-completing the rollout now is pure opportunity cost.
+**Status: MIGRATING to pending via a golden-reference differential oracle
+(un-frozen 2026-07-21).** The earlier "shipped, dormant" freeze is withdrawn: a
+permanent feature flag guarding two live money paths is itself a liability (bug
+surface + branch complexity for zero present benefit). Rather than keep the flag
+forever OR blind-delete one path, we adopt a **strangler-fig migration with a
+differential oracle** (Fable-designed): `transaction` is declared the GOLDEN
+reference and FROZEN; `pending` is exercised while an oracle checks it is
+equivalent; once the delete-gate criteria are met, `transaction` + the reference
+model + the oracle are all deleted together, leaving `pending` as the single path.
 
-ACTIVATION RUNBOOK (do these, in order, only when real/paying load arrives — do NOT
-pre-polish): (1) deploy the CDK (PITR + `ttl` on tenant-budgets); (2) redeploy ECS
-with `reserveProtocolCanaryTenants=[<one tenant>]`; (3) on scverify, drive
-authorize→capture→settle over HTTP ONCE (the one wiring gap Shadow did not cover —
-env-name typo / task-def flag / default-branch direction, none of which are money
-bugs); (4) watch that tenant's `PoolItemSizeBytes` (flat) + ledger drift alarms
-(zero) for a bake window; (5) set global `STRATOCLAVE_RESERVE_PROTOCOL=pending` and
-drop the allowlist.
+**The oracle (money-safe by construction).** Production executes ONE path
+(`pending` for a canary tenant). `transaction` becomes a PURE reference model that
+does NOT write. Before `pending` issues its `TransactWriteItems`, the oracle
+compares the **write-set it is about to send** (pool_reserved delta, hold-item
+transition, conditions) against the reference model's **predicted write-set** for
+the same input. Zero extra I/O, no TOCTOU (compared pre-write, not post-read
+state), overhead is pure µs computation, gated by `STRATOCLAVE_RESERVE_ORACLE`
+(dev default ON, prod OFF). A mismatch NEVER auto-rolls-back — it logs + emits a
+metric + alarms (fail-open); money safety is enforced by `pending`'s own condition
+expressions, the oracle only DETECTS drift. The write-set oracle proves "intent
+equivalence"; "effect equivalence" (retry behaviour on condition failure) is
+covered by a CI Hypothesis differential test that runs BOTH paths on moto and
+compares post-state. Two-tier by design; neither alone suffices.
+
+**formal (two roles, orthogonal).** (1) A Hypothesis DIFFERENTIAL stateful test:
+the same operation sequence is applied to both implementations on moto and
+compared via an abstraction α(state) = (pool_reserved, per-hold {reserved,
+captured, voided, debited}); operation success/failure verdicts must also match
+(observational equivalence). (2) A Z3 joint-transition proof: applying the same
+input to both abstract models preserves "α equal". formal proves the MODELS are
+equivalent over all inputs; the runtime oracle detects MODEL-vs-REALITY drift on
+real traffic. Both are required for the delete gate; neither replaces the other.
+
+**The runtime write-set oracle (mvp/reserve_oracle.py, wired into
+_pending_commit_transact).** It runs ONLY on the pending path — i.e. only for a
+canary tenant — so it is per-tenant by construction, not a global read on every
+reserve. It emits THREE signals (Fable review 2): `reserve_oracle_match`
+(verdict+reserved-delta agreed with the golden prediction), `reserve_oracle_race`
+(disagreed but the pool moved concurrently between the pre-read and the commit — a
+benign TOCTOU, a metric only, NOT alarmed), and `reserve_oracle_mismatch` (disagreed
+with NO concurrent move — a genuine inequivalence, alarmed, blocks the gate). The
+gate counts MATCHES, not just absence of mismatch, so it cannot pass on zero
+samples.
+
+**DELETE GATE (fixed up front — Fable requirement; not to be revised downward
+mid-migration).** `transaction` + reference model + oracle are deleted only when
+ALL hold:
+  1. live external authorize/capture/void with **`ReserveOracleMatch` ≥ 1000 AND
+     `ReserveOracleMismatch` == 0** (a match COUNT, not merely no mismatch —
+     zero-sample must not pass; `ReserveOracleRace` is excluded, it is benign);
+  2. **Z3 equivalence proof green AND Hypothesis differential test green** (the
+     latter covers the replay/marker-CCF paths the runtime oracle skips);
+  3. dev/staging **7 consecutive days with `ReserveOracleMismatch` == 0** while
+     matches accrue;
+  4. the planned **scenario-based bulk live verification completes with zero
+     mismatch across its whole run** (the practical final gate).
+
+**FREEZE (precondition).** From the moment `transaction` is declared golden it is
+FROZEN — no logic changes. The reference model is a copy of `transaction`'s logic,
+so any `transaction` change would drift the model and invalidate the whole oracle.
+If `transaction` must change, the migration is paused and the model re-derived.
 
 **Deferred by decision (NOT an oversight) — sharded-pool throughput.** The single
 pool item is still one item on one partition, so a single hot tenant is bounded by
