@@ -180,3 +180,102 @@ def test_oracle_mismatch_is_logged_not_raised(dynamodb_mock, monkeypatch):
     assert out == b.RESERVE_APPLIED
     assert b.pool_summary(tenant, period)["pool_reserved_microusd"] == 100_000
     assert "reserve_oracle_mismatch" in [c.get("event") for c in caps]
+
+
+# ---------------------------------------- log <-> CDK metric-filter contract
+#
+# Fable review-1 closure blocker: the ecs-stack.ts metric filters key on the
+# structlog `event` field (filterPattern `$.event = '<name>'`). If the oracle
+# ever renames an event, or the production JSON renderer stops emitting `event`
+# as a top-level key, the filter would silently match nothing and — because the
+# filter carries `defaultValue: 0` and the alarm is `treatMissingData:
+# NOT_BREACHING` — the mismatch alarm would go permanently deaf with NO visible
+# failure. These tests are the tripwire: rename either side and CI goes red.
+
+# The exact event strings the CDK metric filters depend on. Keep in lockstep
+# with iac/lib/ecs-stack.ts mkFilter('<event>', 'ReserveOracle<...>') calls.
+_ORACLE_EVENTS = ("reserve_oracle_match", "reserve_oracle_race",
+                  "reserve_oracle_mismatch")
+
+
+def _render_production_json(event_dict):
+    """Serialize one event dict through the PRODUCTION structlog processor chain
+    (the JSONRenderer that ships to CloudWatch), WITHOUT going through a cached
+    BoundLogger. structlog uses cache_logger_on_first_use=True, so a logger bound
+    earlier in the suite keeps the dev ConsoleRenderer even after a production
+    reconfigure — driving the cached logger would render console text, not JSON
+    (this test itself hit that failure under full-suite ordering). Running the
+    configured processor list directly is cache-independent and restores global
+    config afterwards so this test never pollutes suite-wide logging state."""
+    import json
+
+    import structlog
+
+    from core.logging import setup_logging
+
+    saved_cfg = structlog.get_config()
+    try:
+        setup_logging(environment="production")
+        processors = structlog.get_config()["processors"]
+
+        class _StubLogger:
+            name = "mvp.reserve_oracle"
+
+        out = dict(event_dict)
+        for proc in processors:
+            out = proc(_StubLogger(), "error", out)
+    finally:
+        structlog.configure(**saved_cfg)
+    assert isinstance(out, str), (
+        f"production chain did not render to a JSON string (last proc output {out!r})")
+    return json.loads(out)
+
+
+def test_production_json_emits_exact_oracle_event_names():
+    """Each oracle outcome must render a top-level JSON `event` equal to the exact
+    string the CDK filter matches — the contract CloudWatch depends on. Drive the
+    REAL oracle code via capture_logs to get the event dicts it actually emits,
+    then serialize each through the production JSONRenderer."""
+    from structlog.testing import capture_logs
+
+    g = ro.ReserveWriteSet(ro.VERDICT_ADMIT, 40)
+    rej = ro.ReserveWriteSet(ro.VERDICT_REJECT, 0)
+    with capture_logs() as caps:
+        # match: verdicts + deltas agree (no reread).
+        ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=g, pending=g,
+                           pool_before=_pool(100, 0))
+        # race: disagree AND pool moved beyond own delta (concurrent op).
+        ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=g, pending=rej,
+                           pool_before=_pool(100, 60), reread=lambda: _pool(100, 10))
+        # mismatch: disagree AND pool did NOT move -> genuine divergence.
+        ro.compare_and_log(tenant_id="t", period="p", hold_id="h", golden=g, pending=rej,
+                           pool_before=_pool(100, 60), reread=lambda: _pool(100, 60))
+
+    # the oracle code emits exactly the three contract event names, in order.
+    assert [c.get("event") for c in caps] == list(_ORACLE_EVENTS), (
+        f"oracle event names drifted from the CDK metric-filter contract: {caps}")
+    # and each, once serialized by the production JSONRenderer, keeps `event` as a
+    # top-level JSON key equal to that exact string (the filter is `$.event`).
+    for cap in caps:
+        # capture_logs adds log_level; mirror the real record shape for rendering.
+        rendered = _render_production_json({k: v for k, v in cap.items()
+                                            if k != "log_level"})
+        assert rendered.get("event") == cap["event"], (
+            f"production JSON dropped/renamed the event key: {rendered}")
+
+
+def test_cdk_stack_filters_on_the_exact_oracle_event_names():
+    """The other half of the contract: ecs-stack.ts must declare a metric filter
+    for each oracle event string. Rename in the CDK and this goes red."""
+    import pathlib
+
+    stack = (pathlib.Path(__file__).resolve().parent.parent.parent
+             / "iac" / "lib" / "ecs-stack.ts")
+    assert stack.exists(), f"CDK stack not found at {stack}"
+    src = stack.read_text(encoding="utf-8")
+    for event in _ORACLE_EVENTS:
+        assert f"'{event}'" in src, (
+            f"ecs-stack.ts has no metric filter for oracle event {event!r} — "
+            "the log<->filter contract is broken; the alarm would be deaf.")
+    # the mismatch filter must feed an alarm (not just a counter).
+    assert "ReserveOracleMismatch" in src and "cloudwatch.Alarm" in src
