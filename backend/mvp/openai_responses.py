@@ -513,11 +513,38 @@ async def create_response(
 
     reservation = _estimate_reservation_tokens(body)
     _multiplier = _reasoning_multiplier(body)
+    _input_est = max(reservation - body.max_output_tokens * _multiplier, 0)
+
+    # Shadow VSR (litellm wedge): no external-VSR consult on this route, so let the
+    # local rule judge propose a cheaper counterfactual UNLESS a real pin already
+    # decides routing (a deliberate pin is not a candidate for downgrade advice —
+    # Fable review-2 (a)/(d)). Dark by default + fail-open + advisory-only: no pin,
+    # no response header, decision-record only. The shadow_enabled() gate is read
+    # FIRST so a dark deploy does ZERO feature-extraction work on the hot path
+    # (Fable review-2 (e)); shadow_vsr_decision re-checks it (defence in depth).
+    _shadow_vsr = None
+    if model_pin is None and saar_hard is None:
+        try:
+            from .vsr import shadow as _shadow
+            if _shadow.shadow_enabled():
+                _msgs = body.input if isinstance(body.input, list) else None
+                _shadow_vsr = _shadow.shadow_vsr_decision(
+                    requested_model=body.model,
+                    features=_shadow.extract_features_openai(
+                        approx_input_tokens=_input_est,
+                        # The Responses API carries tools; a tool-bearing request
+                        # must NOT be advised down: the cheaper counterfactual might
+                        # not handle tool use, which would make the certificate lie.
+                        tools=getattr(body, "tools", None), messages=_msgs),
+                )
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            _shadow_vsr = None
+
     tenants_repo = reserve_credit_for_model(
         user,
         reservation,
         model_name=body.model,
-        input_tokens_est=max(reservation - body.max_output_tokens * _multiplier, 0),
+        input_tokens_est=_input_est,
         max_output_tokens=body.max_output_tokens,
         effort_multiplier=_multiplier,
         wire_protocol="responses",
@@ -529,6 +556,7 @@ async def create_response(
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        vsr_decision=_shadow_vsr,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the

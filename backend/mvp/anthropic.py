@@ -678,6 +678,32 @@ def messages(
         response.headers.update(vsr_headers)
 
     reservation = _estimate_reservation_tokens(body)
+
+    # Shadow VSR (litellm wedge): ONLY when the real external VSR said nothing
+    # actionable (vsr_decision is None) AND no pin decides routing do we let the
+    # local rule judge propose a cheaper counterfactual. Advisory-only + dark by
+    # default + fail-open: it never changes the pin/routing (it does NOT feed
+    # vsr_hard_model) and emits NO response header (observability-only; the
+    # x-sc-vsr-* echo stays real-VSR only). Kept in a SEPARATE variable (Fable
+    # review-2 (b)): the real `vsr_decision` is never reassigned, so no later read
+    # can mistake shadow for a real VSR decision; they merge only at the reserve
+    # kwarg. shadow_enabled() is checked FIRST so a dark deploy extracts no
+    # features on the hot path (Fable review-2 (e)). At most one vsr block is
+    # attached per request => no double-count into `potential`.
+    _shadow_vsr = None
+    if (vsr_decision is None and model_pin is None and saar_hard is None
+            and vsr_hard is None):
+        try:
+            from .vsr import shadow as _shadow
+            if _shadow.shadow_enabled():
+                _shadow_vsr = _shadow.shadow_vsr_decision(
+                    requested_model=body.model,
+                    features=_shadow.extract_features_anthropic(
+                        approx_input_tokens=max(reservation - body.max_tokens, 0),
+                        tools=getattr(body, "tools", None), messages=body.messages),
+                )
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            _shadow_vsr = None
     tenants_repo = _reserve_credit_for_model(
         user,
         reservation,
@@ -696,8 +722,12 @@ def messages(
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
         # Observability: the VSR consult decision, joined to the committed model
-        # on the reserve-time decision record (None when the feature is off).
-        vsr_decision=vsr_decision,
+        # on the reserve-time decision record (None when the feature is off). The
+        # real VSR wins; shadow only fills in when the real VSR was silent (the
+        # guard above guarantees at most one of the two is non-None). `is not None`
+        # (not `or`) so a real VSR decision that is falsy-but-present is never
+        # silently dropped in favour of shadow (Fable review-3 B).
+        vsr_decision=vsr_decision if vsr_decision is not None else _shadow_vsr,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
