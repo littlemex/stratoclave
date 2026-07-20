@@ -114,20 +114,26 @@ def _seed(tenant, limit=10_000_000):
     return tenant, period
 
 
-def test_oracle_on_agrees_on_normal_commit(dynamodb_mock, monkeypatch, capsys):
+def test_oracle_on_agrees_on_normal_commit(dynamodb_mock, monkeypatch):
+    from structlog.testing import capture_logs
+
     from mvp import _pipeline
     from dynamo.tenant_budgets import TenantBudgetsRepository
     monkeypatch.setenv("STRATOCLAVE_RESERVE_ORACLE", "true")
     _pipeline._reset_low_level_client()
     tenant, period = _seed("oracle-ok")
     b = TenantBudgetsRepository()
-    out = _pipeline._pending_commit_transact(
-        b, tenant_id=tenant, period=period, hold_id="h1", amount=100_000)
+    # capture_logs intercepts events at the structlog processor layer, independent
+    # of the global logging config (some suite ordering rebinds stdlib logging away
+    # from the live sys.stdout that capsys replaces — capsys is therefore flaky here).
+    with capture_logs() as caps:
+        out = _pipeline._pending_commit_transact(
+            b, tenant_id=tenant, period=period, hold_id="h1", amount=100_000)
     assert out == b.RESERVE_APPLIED
     # a matching write-set logs reserve_oracle_match, NEVER reserve_oracle_mismatch.
-    text = capsys.readouterr().out
-    assert "reserve_oracle_match" in text
-    assert "reserve_oracle_mismatch" not in text
+    events = [c.get("event") for c in caps]
+    assert "reserve_oracle_match" in events
+    assert "reserve_oracle_mismatch" not in events
     assert b.pool_summary(tenant, period)["pool_reserved_microusd"] == 100_000
 
 
@@ -152,9 +158,11 @@ def test_oracle_off_skips_the_extra_read(dynamodb_mock, monkeypatch):
     assert calls["get"] == 0                           # no oracle read
 
 
-def test_oracle_mismatch_is_logged_not_raised(dynamodb_mock, monkeypatch, capsys):
+def test_oracle_mismatch_is_logged_not_raised(dynamodb_mock, monkeypatch):
     """Inject a golden prediction that disagrees with pending; the commit still
     succeeds (fail-open) and a reserve_oracle_mismatch is logged."""
+    from structlog.testing import capture_logs
+
     from mvp import _pipeline, reserve_oracle
     from dynamo.tenant_budgets import TenantBudgetsRepository
     monkeypatch.setenv("STRATOCLAVE_RESERVE_ORACLE", "true")
@@ -164,9 +172,11 @@ def test_oracle_mismatch_is_logged_not_raised(dynamodb_mock, monkeypatch, capsys
     # force the golden to predict REJECT while pending will APPLY (a real divergence).
     monkeypatch.setattr(reserve_oracle, "golden_predicted_writeset",
                         lambda **kw: reserve_oracle.ReserveWriteSet(reserve_oracle.VERDICT_REJECT, 0))
-    out = _pipeline._pending_commit_transact(
-        b, tenant_id=tenant, period=period, hold_id="h1", amount=100_000)
+    # capture_logs is config-independent (see test_oracle_on_agrees_on_normal_commit).
+    with capture_logs() as caps:
+        out = _pipeline._pending_commit_transact(
+            b, tenant_id=tenant, period=period, hold_id="h1", amount=100_000)
     # control flow UNCHANGED: the debit still committed.
     assert out == b.RESERVE_APPLIED
     assert b.pool_summary(tenant, period)["pool_reserved_microusd"] == 100_000
-    assert "reserve_oracle_mismatch" in capsys.readouterr().out
+    assert "reserve_oracle_mismatch" in [c.get("event") for c in caps]
