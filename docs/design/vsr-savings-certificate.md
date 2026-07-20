@@ -203,6 +203,21 @@ Backend follow-ups (recorded, not silent): tune `DEFAULT_MAX_UNMATCHED_FRACTION`
 (0.10) from the observed unmatched distribution once the scheduler has run;
 persist skip rows for series-level auditing.
 
+Slice-4-CDK follow-ups (Fable close, handoff — not blockers):
+- **First-deploy smoke**: verify (a) the real EMF log line matches each metric
+  filter's `$.field` pattern (a mismatch silently zeroes the issued/failed/
+  no-traffic metrics — only `unaccounted` fails loud via MISSING=BREACHING), and
+  (b) the shared monitoring picks up the three new alarms (if it selects by name
+  prefix / explicit list rather than auto-collecting all).
+- **`expected` self-report blind spot**: `unaccounted` is the handler's own
+  count, so a bug in enumerating `expected` (pagination gap, filter error) passes
+  as `unaccounted==0`. Emit `expected` as its own metric and monitor a sudden
+  drop / 0, or add a periodic tenant-count reconcile.
+- Wire a DLQ + `retryAttempts` on the schedule target; note the fleet-NO_TRAFFIC
+  fraction is statistically meaningless at 2–3 tenants (add an absolute-count
+  compensating check while the fleet is small); persist skip rows to make
+  consecutive-skip-per-tenant alarmable.
+
 ## Still to build (this is the wedge, not the finish line)
 
 - The **quality signal** (tenant eval + judge) to make savings CLAIMABLE.
