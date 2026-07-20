@@ -488,11 +488,6 @@ if (app.node.tryGetContext('certificateScheduler') === true ||
       settleWindowDays: process.env.CERT_SETTLE_WINDOW_DAYS
         ? parseInt(process.env.CERT_SETTLE_WINDOW_DAYS, 10)
         : undefined,
-      // expected active-tenant count for the silent-skip alarm: the explicit list
-      // length when given, else an operator-set estimate (context certExpectedTenants).
-      expectedTenantCount: certTenantIds
-        ? certTenantIds.split(',').filter((s) => s.trim()).length
-        : parseInt(String(app.node.tryGetContext('certExpectedTenants') ?? '1'), 10),
       description: `[${prefix}] Daily Savings Certificate auto-issuer (slice-4)`,
     });
   certificateSchedulerStack.addDependency(ecrStack);

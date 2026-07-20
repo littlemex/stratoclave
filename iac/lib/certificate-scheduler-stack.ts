@@ -49,11 +49,6 @@ export interface CertificateSchedulerStackProps extends cdk.StackProps {
   certTenantIds?: string;
   /** Settle window in days: the run certifies event_day - N. Default 2. */
   settleWindowDays?: number;
-  /**
-   * Expected active-tenant count, for the silent-skip alarm ("issued < expected").
-   * When certTenantIds is set this is its length; otherwise an operator estimate.
-   */
-  expectedTenantCount: number;
   /** Hour (UTC) to run the daily rule. Default 3 (low-traffic). */
   scheduleHourUtc?: number;
 }
@@ -95,11 +90,14 @@ export class CertificateSchedulerStack extends cdk.Stack {
       logGroup,
       description: 'Daily Savings Certificate issuer: write-once certifies day D-N for each tenant.',
     });
-    // Least privilege: reconcile reads decisions + billed usage; the write-once
-    // Put of the CERT# item needs write on the signals table. Tenants table is
-    // read-only (enumeration). No access to any money-mutating table beyond the
-    // conditional certificate Put.
-    props.routingSignalsTable.grantReadWriteData(this.issuer);
+    // Least privilege: reconcile READS decisions; the certificate write is a
+    // write-once conditional Put, so the issuer needs read + PutItem ONLY — never
+    // Update/Delete/BatchWrite (grantReadWriteData would add those, contradicting
+    // the write-once posture — Fable slice-4-CDK review (c)). The
+    // attribute_not_exists condition (not expressible in IAM) enforces write-once
+    // at the app layer; IAM stops at PutItem. Budgets + tenants are read-only.
+    props.routingSignalsTable.grantReadData(this.issuer);
+    props.routingSignalsTable.grant(this.issuer, 'dynamodb:PutItem');
     props.tenantBudgetsTable.grantReadData(this.issuer);
     props.tenantsTable.grantReadData(this.issuer);
 
@@ -126,8 +124,9 @@ export class CertificateSchedulerStack extends cdk.Stack {
         // run at all" shows as MISSING data (which the alarms treat as breaching).
       });
 
-    const issuedMf = mkNumFilter('issued', 'CertificatesIssued');
+    mkNumFilter('issued', 'CertificatesIssued');
     mkNumFilter('failed', 'CertificatesFailed');
+    const unaccountedMf = mkNumFilter('unaccounted', 'CertificatesUnaccounted');
     const noTrafficFracMf = mkNumFilter('no_traffic_fraction', 'NoTrafficFraction');
 
     // (1) per-run failure: any tenant errored in the batch.
@@ -146,19 +145,24 @@ export class CertificateSchedulerStack extends cdk.Stack {
       alarmDescription: 'A tenant errored during daily certificate issuance.',
     });
 
-    // (2) silent-skip: issued < expected active tenants (also fires when the
-    // scheduler did not run at all — MISSING issued data is BREACHING). This is
-    // the "an audit series should not have unexplained holes" guard.
-    new cloudwatch.Alarm(this, 'CertificatesIssuedLowAlarm', {
-      alarmName: `${prefix}-certificate-issued-below-expected`,
-      metric: issuedMf.metric({ statistic: 'Minimum', period: cdk.Duration.days(1) }),
-      threshold: props.expectedTenantCount,
-      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+    // (2) unexplained hole: `unaccounted` = expected - issued - skipped - failed.
+    // Every tenant must end up issued, DOCUMENTED-skipped, or failed; a tenant
+    // that is none of those is a silent hole in the audit series. Alarming on
+    // `unaccounted > 0` (NOT `issued < tenant_count`) is what keeps this honest —
+    // a legitimately quiet tenant lands in `skipped`, so it does NOT trip this and
+    // operators are never trained to mute it (Fable slice-4-CDK review (b)).
+    // MISSING data is BREACHING so a scheduler that stopped emitting entirely
+    // (no batch line at all) also trips — the hole then is the whole run.
+    new cloudwatch.Alarm(this, 'CertificatesUnaccountedAlarm', {
+      alarmName: `${prefix}-certificate-unaccounted`,
+      metric: unaccountedMf.metric({ statistic: 'Maximum', period: cdk.Duration.days(1) }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       evaluationPeriods: 1,
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       alarmDescription:
-        'Fewer certificates issued than expected active tenants (silent skip), OR ' +
-        'the daily issuer stopped running — a hole in the audit series must page.',
+        'A tenant was neither issued, documented-skipped, nor failed (an unexplained ' +
+        'hole in the audit series), OR the daily issuer stopped running entirely.',
     });
 
     // (3) fleet-wide NO_TRAFFIC (outage vs quiet): a high fraction of tenants all

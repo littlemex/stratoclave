@@ -84,9 +84,15 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
         skip_by_reason[reason] = skip_by_reason.get(reason, 0) + 1
 
     expected = len(tenant_ids)
-    # The structured line the CDK metric filters read. `expected` vs `issued` is
-    # the silent-skip signal; `no_traffic_fraction` is the outage signal.
     no_traffic = skip_by_reason.get(cs.SKIP_NO_TRAFFIC, 0)
+    # `unaccounted` is the ONLY silent-skip signal that stays honest: every tenant
+    # must end up issued OR skipped (a DOCUMENTED absence) OR failed. A tenant that
+    # is none of those is an unexplained hole in the audit series — THAT is what
+    # must page, NOT "issued < tenant_count" (which fires on a legitimately quiet
+    # day and would train operators to mute the honesty alarm). Fable slice-4-CDK
+    # review (b). Normally 0; the alarm is `unaccounted > 0` with MISSING=BREACHING
+    # so a scheduler that stopped emitting entirely also trips it.
+    unaccounted = expected - len(report.issued) - len(report.skipped) - len(report.failed)
     logger.info(
         "certificate_batch_issued",
         day=day,
@@ -94,6 +100,7 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
         issued=len(report.issued),
         skipped=len(report.skipped),
         failed=len(report.failed),
+        unaccounted=unaccounted,
         skip_no_traffic=no_traffic,
         skip_unmatched_high=skip_by_reason.get(cs.SKIP_UNMATCHED_HIGH, 0),
         no_traffic_fraction=(round(no_traffic / expected, 4) if expected else 0.0),
@@ -105,4 +112,5 @@ def handler(event=None, context=None):  # noqa: ARG001 — Lambda signature
         "issued": report.issued,
         "skipped": report.skipped,
         "failed": report.failed,
+        "unaccounted": unaccounted,
     }

@@ -289,7 +289,33 @@ def test_scheduler_handler_emits_batch_metrics(dynamodb_mock, monkeypatch):
         out = sched.handler({"time": "2026-07-17T03:00:00Z"})
     assert out["day"] == "20260715"
     assert out["expected"] == 2
-    # the batch metric line carries the outage/silent-skip signals.
+    # the batch metric line carries the outage/hole signals.
     line = next(c for c in caps if c.get("event") == "certificate_batch_issued")
     assert line["issued"] == 1 and line["skip_no_traffic"] == 1
     assert line["no_traffic_fraction"] == 0.5
+    # every tenant was classified (issued OR skipped OR failed) -> no hole.
+    assert line["unaccounted"] == 0 and out["unaccounted"] == 0
+
+
+def test_scheduler_unaccounted_zero_even_with_a_failure(dynamodb_mock, monkeypatch):
+    """A tenant that ERRORS is `failed`, not unaccounted — unaccounted only counts
+    tenants that fell through every bucket (the honest silent-hole signal)."""
+    from structlog.testing import capture_logs
+
+    from mvp.learning import certificate_scheduler as sched
+    from mvp.learning import savings as sv
+    monkeypatch.setenv("CERT_TENANT_IDS", "ok,boom")
+
+    def _fake(*, tenant_id, day, traffic):
+        if tenant_id == "boom":
+            raise RuntimeError("reconcile down")
+        c = dict(_cert(vsr_acted=10))
+        c["tenant_id"], c["day"], c["traffic"] = tenant_id, day, traffic
+        return c
+    monkeypatch.setattr(sv, "savings_certificate", _fake)
+
+    with capture_logs() as caps:
+        sched.handler({"time": "2026-07-17T03:00:00Z"})
+    line = next(c for c in caps if c.get("event") == "certificate_batch_issued")
+    assert line["issued"] == 1 and line["failed"] == 1
+    assert line["unaccounted"] == 0    # failure is accounted, not a hole
