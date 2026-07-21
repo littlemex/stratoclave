@@ -1,0 +1,74 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="figA" name="VSR-trust-boundary">
+    <mxGraphModel dx="1200" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="640" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="図A: VSR は助言するだけ — 判断がお金と実行に触れない構造" style="text;html=1;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;fontColor=#1B5E20;" vertex="1" parent="1">
+          <mxGeometry x="60" y="20" width="980" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="boundary" value="" style="rounded=0;html=1;dashed=1;dashPattern=8 8;strokeWidth=4;strokeColor=#2E7D32;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="360" y="90" width="2" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="blabel" value="信頼境界（ここから右だけを信用する）" style="text;html=1;fontSize=13;fontStyle=2;align=center;fontColor=#2E7D32;rotation=-90;" vertex="1" parent="1">
+          <mxGeometry x="245" y="150" width="240" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vsr" value="VSR（助言者）&#10;判断だけを担当" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#EF6C00;fontSize=15;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="90" y="270" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gw" value="ゲートウェイ本体（信頼される側）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=15;fontStyle=1;verticalAlign=top;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="440" y="110" width="560" height="440" as="geometry" />
+        </mxCell>
+        <mxCell id="allow" value="allowlist フィルタ&#10;（テナントが使えるモデルだけ通す）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="470" y="160" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ledger" value="予算台帳&#10;reserve → settle&#10;（お金）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#A5D6A7;strokeColor=#1B5E20;fontSize=14;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="470" y="300" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="invoke" value="Bedrock 呼び出し&#10;（実行）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="470" y="440" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="pin" value="version-pin 検証&#10;不一致なら fail-closed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#EF6C00;fontSize=12;dashed=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="760" y="285" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_req" value="リクエストの特徴" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;fontSize=12;fontColor=#1B5E20;" edge="1" parent="1" source="gw" target="vsr">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="440" y="200" as="sourcePoint" />
+            <mxPoint x="310" y="230" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_adv" value="助言（推奨モデル）→ 必ず allowlist を通る" style="endArrow=classic;html=1;strokeColor=#EF6C00;strokeWidth=2;fontSize=12;fontColor=#EF6C00;" edge="1" parent="1" source="vsr" target="allow">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="310" y="320" as="sourcePoint" />
+            <mxPoint x="470" y="205" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_flow1" value="" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;" edge="1" parent="1" source="allow" target="ledger">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_flow2" value="" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;" edge="1" parent="1" source="ledger" target="invoke">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_forbid1" value="" style="endArrow=none;html=1;strokeColor=#9E9E9E;strokeWidth=2;dashed=1;dashPattern=6 6;endFill=0;" edge="1" parent="1" source="vsr" target="ledger">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="200" y="380" as="sourcePoint" />
+            <mxPoint x="470" y="350" as="targetPoint" />
+            <Array as="points"><mxPoint x="200" y="540" /><mxPoint x="440" y="540" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="xmark1" value="✕ お金・実行には触れない（線が禁止されている）" style="text;html=1;fontSize=13;fontStyle=1;fontColor=#C62828;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="150" y="548" width="340" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="note" value="VSR がバグっても乗っ取られても、灰色の破線（✕）の関係は存在しない。&#10;だから事故はお金・アクセス権に波及しない。" style="text;html=1;fontSize=13;align=left;fontColor=#424242;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="90" y="410" width="250" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

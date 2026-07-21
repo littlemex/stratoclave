@@ -1,0 +1,52 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="figB" name="unified-ledger">
+    <mxGraphModel dx="1200" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1120" pageHeight="600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="図B: 予約 → 実行 → 精算 — Bedrock も自前 GPU も、同じ1本の台帳に載る" style="text;html=1;fontSize=20;fontStyle=1;align=center;fontColor=#1B5E20;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1040" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="client" value="クライアント&#10;(Claude Code /&#10;CLI / API)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="150" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gw" value="ゲートウェイ（DynamoDB 台帳）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=15;fontStyle=1;verticalAlign=top;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="260" y="120" width="470" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="reserve" value="① reserve（予約）&#10;上限見積り・TransactWriteItems&#10;（足りなければ即拒否）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#A5D6A7;strokeColor=#1B5E20;fontSize=14;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="290" y="170" width="410" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="settle" value="② settle（精算）&#10;実額で確定・差額を返金" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#A5D6A7;strokeColor=#1B5E20;fontSize=14;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="290" y="380" width="410" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="seam" value="served_by = seam（差し替え点）" style="text;html=1;fontSize=13;fontStyle=2;align=center;fontColor=#EF6C00;" vertex="1" parent="1">
+          <mxGeometry x="290" y="285" width="410" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bedrock" value="Bedrock&#10;（公表料金）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#EF6C00;fontSize=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="820" y="170" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="vllm" value="OpenAI 互換 / 自前 vLLM&#10;（運用者が設定した単価）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#EF6C00;fontSize=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="820" y="290" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="audit" value="監査・チャージバックの根拠" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=13;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="340" y="520" width="310" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;" edge="1" parent="1" source="client" target="reserve"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" value="実行" style="endArrow=classic;html=1;strokeColor=#EF6C00;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="reserve" target="bedrock"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" value="実行" style="endArrow=classic;html=1;strokeColor=#EF6C00;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="reserve" target="vllm"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" value="精算は同じ台帳の1点に合流" style="endArrow=classic;html=1;strokeColor=#1B5E20;strokeWidth=2;fontSize=12;fontColor=#1B5E20;" edge="1" parent="1" source="bedrock" target="settle"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" value="" style="endArrow=classic;html=1;strokeColor=#1B5E20;strokeWidth=2;" edge="1" parent="1" source="vllm" target="settle"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" value="" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;" edge="1" parent="1" source="settle" target="audit"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="note" value="ポイント: 予約（①）が実行の「前」にあるから突き抜けない。&#10;Bedrock も自前 GPU も、精算（②）が同じ台帳の1点に合流する。" style="text;html=1;fontSize=13;align=left;fontColor=#424242;" vertex="1" parent="1">
+          <mxGeometry x="740" y="430" width="340" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

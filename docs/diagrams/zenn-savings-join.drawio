@@ -1,0 +1,46 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="figC" name="savings-span-join">
+    <mxGraphModel dx="1200" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1120" pageHeight="600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="図C: span_id で「影の助言」と「実際の請求」を突き合わせる" style="text;html=1;fontSize=20;fontStyle=1;align=center;fontColor=#1B5E20;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1040" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow" value="shadow VSR の記録&#10;（span_id / 推奨した安いモデル）&#10;実行には影響しない＝記録するだけ" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#EF6C00;fontSize=13;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="70" y="110" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="billing" value="課金台帳&#10;（span_id / 実請求トークン数 / 使ったモデル）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#A5D6A7;strokeColor=#1B5E20;fontSize=13;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="70" y="360" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="joinbox" value="日次バッチ&#10;span_id で JOIN（突合）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=14;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="480" y="240" width="220" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="cert" value="Savings Certificate（節約証明書）&#10;・potential（潜在。品質は未測定）&#10;・realized（実証済み）と厳密に分離&#10;・料金レートのバージョンを刻印&#10;・エスカレーション損失は差し引く" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=13;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="790" y="230" width="300" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="ejoin1" value="span_id で結合" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="shadow" target="joinbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ejoin2" value="span_id で結合" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;fontSize=12;" edge="1" parent="1" source="billing" target="joinbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ecert" value="" style="endArrow=classic;html=1;strokeColor=#2E7D32;strokeWidth=2;" edge="1" parent="1" source="joinbox" target="cert">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="execbox" value="実行パス（実際に走るモデル）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9E9E9E;fontSize=12;verticalAlign=middle;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="520" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="eforbid" value="" style="endArrow=none;html=1;strokeColor=#9E9E9E;strokeWidth=2;dashed=1;dashPattern=6 6;" edge="1" parent="1" source="shadow" target="execbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="forbidlabel" value="✕ 実行には影響しない" style="text;html=1;fontSize=12;fontStyle=1;fontColor=#C62828;align=left;" vertex="1" parent="1">
+          <mxGeometry x="400" y="300" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="note" value="「推計」ではなく「実際の請求」と鍵（span_id）で結合するのが、うさんくさい削減アピールとの決定的な違い。" style="text;html=1;fontSize=13;align=left;fontColor=#424242;" vertex="1" parent="1">
+          <mxGeometry x="480" y="400" width="450" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
