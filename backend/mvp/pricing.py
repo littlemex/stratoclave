@@ -371,14 +371,14 @@ def estimate_cost_microusd(
     )
 
 
-def saar_checkout_delta_microusd(
+def switch_cost_delta_microusd(
     *,
     pricing_key: str,
     warm_prefix_tokens: int,
     repo: Optional[PricingConfigRepository] = None,
 ) -> int:
     """The micro-USD *penalty* of discarding a warm prefix cache by switching
-    models (SAAR "cache checkout"). If the session stays on its warm model, the
+    models (a "cache checkout"). If the session stays on its warm model, the
     ``warm_prefix_tokens`` re-bill at the discounted cache-read rate; if it
     switches, that same prefix is cold on the new model and re-bills at the full
     input rate. The delta a switch costs is therefore:
@@ -387,13 +387,24 @@ def saar_checkout_delta_microusd(
 
     priced at ``pricing_key``'s current rate. Non-negative by construction (the
     cache-read rate is never above the input rate); clamped at 0 defensively so a
-    misconfigured rate table can never turn a switch into a fake saving. This is
-    the number SAAR adds to a switch candidate's expected cost and records as its
-    provable claim — computed from the same versioned rate table the ledger
-    charges from, so a replay recomputes it exactly (Fable SAAR design §4)."""
+    misconfigured rate table can never turn a switch into a fake saving.
+
+    SOURCE-AGNOSTIC (SR migration §S1-3): this is a pure ledger-side pricing
+    primitive. It takes only a `warm_prefix_tokens` hint and does NOT depend on
+    who supplied it — the legacy self-hosted SAAR router, or a future vLLM
+    Semantic Router decision. The reserve path adds this to a switch candidate's
+    expected cost and records it as the provable claim, computed from the same
+    versioned rate table the ledger charges from, so a replay recomputes it
+    exactly (Fable SAAR design §4)."""
     rate = _cache.get(pricing_key, repo)
     per_mtok = max(0, rate.input_per_mtok_microusd - rate.cache_read_per_mtok_microusd)
     return _mtok_cost(max(warm_prefix_tokens, 0), per_mtok)
+
+
+# Deprecated alias (SR migration §S1-3): the old SAAR-specific name is kept so
+# existing callers/tests/specs stay green while the rename lands incrementally.
+# Remove in stage 2 once all call sites reference the source-agnostic name.
+saar_checkout_delta_microusd = switch_cost_delta_microusd
 
 
 def actual_cost_microusd(
