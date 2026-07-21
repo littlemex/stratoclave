@@ -59,6 +59,13 @@ class RouteDecision:
     reason: str = "none"
     switched: bool = False
     origin: str = "none"
+    # The set of models the router might internally fall back to for this request
+    # (SR can silently pick a sibling in its pool). The reserve uses the MAX unit
+    # price over this pool ("pool-max reserve") so an internal fallback can never
+    # breach the reservation — every member is a Stratoclave registry model that
+    # passed the servability gate, and the response is whitelisted against it. An
+    # empty pool means "no internal fallback declared" (reserve on the pin alone).
+    candidate_pool: tuple[str, ...] = ()
 
     @property
     def acts(self) -> bool:
