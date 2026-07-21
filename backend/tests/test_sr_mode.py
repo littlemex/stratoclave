@@ -1,10 +1,10 @@
 """Tests for the per-tenant SR mode resolution (mvp.sr.adapter) and its parse
 through the routing config (SR migration stage 2 groundwork).
 
-Money is fail-closed in every mode; these tests only pin the routing-mode
-resolution (four-state + kill-switch + global default + fail-open) and the config
-round-trip. The SR HTTP consult itself is a fail-open no-op until a later
-sub-step, so `decide()` returns NO_DECISION here regardless of mode.
+Money is fail-closed in every mode (reserve precedes any SR forward); these tests
+only pin the routing-mode resolution (three-state off|canary|active + kill-switch
++ global default + fail-open) and the config round-trip. The SR consult itself is
+a fail-open no-op until a later sub-step, so `decide()` returns NO_DECISION here.
 """
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ from mvp.sr.port import NO_DECISION, RouteDecision, SwitchCostHint
 # --------------------------------------------------------------- kill-switch
 def test_force_off_outranks_everything(monkeypatch):
     monkeypatch.setenv("STRATOCLAVE_SR_FORCE_OFF", "true")
-    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "decide_route")
+    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "active")
     assert sr.sr_globally_forced_off() is True
     # even with a permissive global default, force-off wins.
-    assert sr._global_sr_mode_default() == "decide_route"
+    assert sr._global_sr_mode_default() == "active"
     # (force-off is applied in sr_mode_for, which needs a tenant config read;
     #  the unit-level guarantee here is that the kill-switch flag is honored.)
 
@@ -46,7 +46,7 @@ def test_global_default_garbage_falls_back_to_off(monkeypatch):
 
 
 def test_global_default_valid_modes(monkeypatch):
-    for m in ("off", "shadow", "route", "decide_route"):
+    for m in ("off", "canary", "active"):
         monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", m)
         assert sr._global_sr_mode_default() == m
 
@@ -60,11 +60,11 @@ def test_mode_for_forced_off(monkeypatch, dynamodb_mock):
 
 def test_mode_for_follows_global_when_tenant_none(monkeypatch, dynamodb_mock):
     monkeypatch.delenv("STRATOCLAVE_SR_FORCE_OFF", raising=False)
-    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "route")
+    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "canary")
     from mvp.routing import config as rc
     rc._cache.clear()
     # a tenant with no routing-config item resolves sr_mode=None -> global default.
-    assert sr.sr_mode_for("never-touched") == "route"
+    assert sr.sr_mode_for("never-touched") == "canary"
 
 
 def test_mode_for_tenant_explicit_wins(monkeypatch, dynamodb_mock):
@@ -74,9 +74,9 @@ def test_mode_for_tenant_explicit_wins(monkeypatch, dynamodb_mock):
     rc._cache.clear()
     from mvp import admin_routing as ar
     ar._table().put_item(Item=ar.tenant_config_to_item(
-        "acme", ar.TenantRoutingConfigRequest(), updated_by="op") | {"sr_mode": "decide_route"})
+        "acme", ar.TenantRoutingConfigRequest(), updated_by="op") | {"sr_mode": "active"})
     rc.invalidate_routing_cache("acme")
-    assert sr.sr_mode_for("acme") == "decide_route"
+    assert sr.sr_mode_for("acme") == "active"
     assert sr.sr_active_for("acme") is True
 
 
@@ -84,18 +84,18 @@ def test_mode_for_failopen_on_config_error(monkeypatch):
     # Force the routing-config read to raise; sr_mode_for must swallow it and
     # resolve to the global default (fail-open — never break the request).
     monkeypatch.delenv("STRATOCLAVE_SR_FORCE_OFF", raising=False)
-    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "route")
+    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "canary")
     from mvp.routing import config as rc
 
     def _boom(_tenant):
         raise RuntimeError("dynamodb unreachable")
     monkeypatch.setattr(rc, "get_tenant_routing_config", _boom)
-    assert sr.sr_mode_for("acme") == "route"
+    assert sr.sr_mode_for("acme") == "canary"
 
 
 # --------------------------------------------------------------- decide no-op
 def test_decide_is_failopen_noop_for_now(monkeypatch, dynamodb_mock):
-    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "decide_route")
+    monkeypatch.setenv("STRATOCLAVE_SR_MODE_DEFAULT", "active")
     from mvp.routing import config as rc
     rc._cache.clear()
     d = sr.decide(tenant_id="acme", session_key="s1",

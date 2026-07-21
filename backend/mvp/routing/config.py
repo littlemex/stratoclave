@@ -113,7 +113,7 @@ def _parse_tenant_config(item: dict) -> RoutingConfig:
         # Unknown/garbage values resolve to None so a bad write degrades to the
         # global default rather than an undefined mode.
         sr_mode=(str(item["sr_mode"])
-                 if item.get("sr_mode") in ("off", "shadow", "route", "decide_route")
+                 if item.get("sr_mode") in ("off", "canary", "active")
                  else None),
     )
 

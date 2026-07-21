@@ -53,17 +53,18 @@ class RoutingConfig:
     # env default (STRATOCLAVE_SHADOW_VSR, dark unless set). A tenant with no
     # routing-config item resolves to None, so existing tenants are unchanged.
     shadow_vsr: Optional[bool] = None
-    # Per-tenant vLLM Semantic Router mode (SR migration). Four-state, mirroring
-    # the shadow tri-state pattern above:
-    #   "off"          — SR is not consulted (dark; the default).
-    #   "shadow"       — SR is consulted and its decision is recorded on the
-    #                    decision log ONLY; it never changes the pin/preference.
-    #   "route"        — SR's soft preference is honored (candidate reorder only).
-    #   "decide_route" — SR's hard pin is honored too (disables the cascade for
-    #                    correctness locks), routed through the SAME reserve path.
+    # Per-tenant vLLM Semantic Router mode (SR migration). SR is an EXECUTING
+    # gateway (no decision-only endpoint), so a request either flows through it
+    # (reserve→forward→settle) or does not — there is no "observe without
+    # executing" shadow. Three-state:
+    #   "off"    — SR is not used for this tenant (direct Bedrock; the default).
+    #   "canary" — a sampled fraction of this tenant's traffic goes through SR
+    #              (full reserve→forward→settle); the rest uses the direct path.
+    #   "active" — all of this tenant's eligible traffic goes through SR.
     # None = follow the global default (STRATOCLAVE_SR_MODE_DEFAULT, "off" unless
     # set). A tenant with no routing-config item resolves to None ⇒ unchanged.
-    # Money is fail-closed in every mode; only routing behaviour differs.
+    # Money is fail-closed in every mode (reserve precedes any SR forward); only
+    # whether/how much traffic is routed through SR differs.
     sr_mode: Optional[str] = None
 
 

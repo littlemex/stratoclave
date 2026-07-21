@@ -7,8 +7,13 @@ vLLM transport) is unchanged — SR only ever hands back a `RouteDecision` (a mo
 name + hints), which flows through the SAME `vsr_hard_model`/`prefer_model` reserve
 path and the SAME servability gate. SR never executes and never touches money.
 
-Mode is a per-tenant four-state (`sr_mode`), resolved here with the exact
-tri-state pattern the shadow judge uses:
+SR is an EXECUTING gateway (no decision-only endpoint), so Stratoclave sits in
+front: it reserves (candidate-set pool-max) BEFORE forwarding to SR, which then
+decides+executes; settle uses the router-replay evidence. There is no "observe
+without executing" shadow mode — a request either flows through SR or it does not.
+
+Mode is a per-tenant three-state (`sr_mode`: off | canary | active), resolved
+here with the exact pattern the shadow judge's tri-state uses:
 
   * STRATOCLAVE_SR_FORCE_OFF=true  → OFF for everyone (operator kill-switch,
     outranks per-tenant config; the same pattern as shadow's force-off).
@@ -31,7 +36,7 @@ from .port import NO_DECISION, RouteDecision
 
 logger = get_logger(__name__)
 
-_MODES = ("off", "shadow", "route", "decide_route")
+_MODES = ("off", "canary", "active")
 
 
 def _env_true(name: str) -> bool:
