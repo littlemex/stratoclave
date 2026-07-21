@@ -232,6 +232,10 @@ export interface TenantRoutingConfig {
   fallback_mode: string
   fallback_default: string
   free_tier_model?: string | null
+  // Advisory-only: does NOT affect execution, billing, or routing. Controls
+  // whether the shadow judge records a potential-saving advisory (for the
+  // Savings Certificate). Tri-state: true/false explicit, null = global default.
+  shadow_vsr?: boolean | null
 }
 export interface UserRoutingConfig {
   tenant_id: string
@@ -656,6 +660,7 @@ export const api = {
         fallback_mode?: string
         fallback_default?: 'on' | 'off'
         free_tier_model?: string | null
+        shadow_vsr?: boolean | null
       },
     ) =>
       jsonRequest<TenantRoutingConfig>(

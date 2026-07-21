@@ -104,7 +104,40 @@ jobs:
         # `npm audit` exits non-zero on vulnerabilities at "moderate" or
         # higher; --audit-level=high keeps low-severity dev-only findings
         # out of the merge gate while still failing on anything serious.
-        run: npm audit --audit-level=high
+        #
+        # Deferral (npm has no native per-advisory --ignore, so we filter the
+        # JSON and re-fail on anything NOT on the allowlist — same triage policy
+        # as cli/audit.toml's cargo --ignore):
+        #   GHSA-3jxr-9vmj-r5cp  brace-expansion DoS (high). The vulnerable
+        #   5.0.6 is BUNDLED inside aws-cdk-lib (a bundledDependency under its
+        #   own minimatch), so a root `overrides` pin cannot reach it and even
+        #   the latest aws-cdk-lib (2.261.0) still ships 5.0.6. It is reachable
+        #   only via minimatch on CDK-internal asset globs at SYNTH time (build
+        #   tooling), never on attacker-controlled input at runtime. Re-evaluate
+        #   at every aws-cdk-lib bump; delete this once CDK bundles >=5.0.7.
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          ALLOW = {"GHSA-3jxr-9vmj-r5cp"}  # bundled in aws-cdk-lib; synth-time only
+          out = subprocess.run(
+              ["npm", "audit", "--audit-level=high", "--json"],
+              capture_output=True, text=True).stdout
+          report = json.loads(out)
+          blocking = []
+          for name, v in report.get("vulnerabilities", {}).items():
+              if v.get("severity") not in ("high", "critical"):
+                  continue
+              ids = {via.get("url", "").rsplit("/", 1)[-1]
+                     for via in v.get("via", []) if isinstance(via, dict)}
+              if ids - ALLOW:
+                  blocking.append((name, v.get("severity"), sorted(ids)))
+          if blocking:
+              print("Blocking high/critical advisories (not on allowlist):")
+              for n, sev, ids in blocking:
+                  print(f"  {n} [{sev}] {ids}")
+              sys.exit(1)
+          print(f"npm audit: only allowlisted advisories present ({sorted(ALLOW)}); OK.")
+          PY
 
   npm-audit-frontend:
     name: frontend / npm audit

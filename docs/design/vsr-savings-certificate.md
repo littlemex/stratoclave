@@ -114,12 +114,30 @@ signal lands (roadmap).
    (`mvp.vsr.shadow`) is wired into all three model routes. When no real VSR or
    pin decides routing, it attaches a `shadow-advised` decision to the
    reserve-time decision record — advisory-only (never a routing pin, no response
-   header, no money effect). It is DARK BY DEFAULT (`STRATOCLAVE_SHADOW_VSR`):
-   off, the judge never runs and extracts no request features. The advice lands
-   in the certificate's `potential` (enacted=False) base only, never the realized
-   headline, with an explicit upper-bound caveat (quality unmeasurable — the
-   suggested model never ran). A stronger judge is a drop-in replacement for the
-   rule engine; the accounting boundary does not move.
+   header, no money effect). The advice lands in the certificate's `potential`
+   (enacted=False) base only, never the realized headline, with an explicit
+   upper-bound caveat (quality unmeasurable — the suggested model never ran). A
+   stronger judge is a drop-in replacement for the rule engine; the accounting
+   boundary does not move.
+
+   **Per-tenant, default-on for new tenants (later slice):** the judge is a
+   per-tenant tri-state toggle resolved by `shadow.shadow_enabled(tenant_shadow)`:
+
+   - operator kill-switch `STRATOCLAVE_SHADOW_VSR_FORCE_OFF` (truthy) — OFF for
+     every tenant, unconditionally, read per request (rank 0);
+   - tenant explicit `shadow_vsr=true/false` on the routing config — wins next;
+   - tenant `null` — follows the global default `STRATOCLAVE_SHADOW_VSR` (dark
+     unless set to a truthy value).
+
+   New tenants are provisioned with an explicit, audited, non-clobbering
+   `shadow_vsr=true` (opt out fleet-wide with a falsy
+   `STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT`) so the certificate accrues from
+   week one. When resolved OFF the judge never runs and extracts no request
+   features (dark = the judge does not run, not "runs and is discarded"). The
+   per-tenant preference is read from the routing config the reserve already
+   loaded (no extra hot-path read) via the shared `routing.config.tenant_shadow_pref`
+   helper; a fleet-wide force-off is checked first, before that read. See
+   `docs/ADMIN_GUIDE.md` (Shadow VSR) for the operator surface.
 2. **Canary.** N% of traffic executes the VSR's choice; quality judged by the
    tenant eval + LLM-as-judge (dual — the judge alone is not trusted).
 3. **Full + monthly certificate.** With continuous audit.

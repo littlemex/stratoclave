@@ -205,6 +205,24 @@ stratoclave admin tenant delete <tenant_id>
 
 Archiving is soft: the row is flagged `status=archived`, but usage logs and user-tenant history are preserved. The `default-org` tenant cannot be archived. Users who had the tenant as their active tenant are not automatically reassigned; archive only tenants that already have zero active members.
 
+### Shadow VSR (Savings Certificate advisory)
+
+**Shadow VSR** is a local, rule-based judge that, for each request, records whether a cheaper same-family model would plausibly have sufficed. It is **advisory only**: it never changes which model runs, how the request is routed, or what is billed — the client's model is always what executes and what is charged. The advisory is written to the decision log so the offline **Savings Certificate** can report the *potential* saving of having followed it. Because it never acts, it cannot overspend, mis-route, or corrupt the ledger.
+
+It is a **per-tenant** setting with a tri-state value:
+
+| Stored value | Behaviour |
+| ------------ | --------- |
+| `true`       | Shadow judge runs for this tenant (advisories recorded). |
+| `false`      | Shadow judge is off for this tenant. |
+| unset (`null`) | Follow the global default (`STRATOCLAVE_SHADOW_VSR`, dark unless set to a truthy value). |
+
+**New tenants are provisioned with `shadow_vsr = true` by default**, so a Savings Certificate begins accruing from week one. Set `STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT` to a falsy value (`false`/`0`/`no`/`off`) to disable that default fleet-wide. The provisioning write is an explicit, audited, non-clobbering single-attribute update — it never overwrites an existing routing config.
+
+Toggle it per tenant on the tenant's routing config (web UI **Tenant → Routing config**, or the routing-config PUT). The routing-config editor round-trips `shadow_vsr`, so saving other routing changes does not drop it; a **non-UI** automation that PUTs a routing config **without** `shadow_vsr` resets it to `null` (follow-the-global-default) — include `shadow_vsr` in scripted payloads exactly as you include `chain`/`quotas`.
+
+**Operator kill-switch.** `STRATOCLAVE_SHADOW_VSR_FORCE_OFF` set to a truthy value (`true`/`1`/`yes`/`on`) forces the judge dark for **every** tenant regardless of stored preference. It is read per request, so it stops the fleet immediately with no redeploy or per-tenant config rewrite — use it if the judge ever misbehaves.
+
 ---
 
 ## SSO: trusted AWS accounts
@@ -405,6 +423,7 @@ fields @timestamp, event, actor_email, target_email, tenant_id
 | ------------------------------------------------------------------------------- | ---------- |
 | `admin_created`, `user_created`, `user_deleted`                                 | `POST /DELETE /api/mvp/admin/users` |
 | `tenant_created`, `tenant_updated`, `tenant_archived`, `tenant_owner_changed`   | `/api/mvp/admin/tenants[*]` |
+| `tenant_shadow_vsr_provisioned_default`                                         | tenant creation (new-tenant shadow default) |
 | `user_tenant_switched`, `credit_overwritten`                                    | user mutation endpoints |
 | `sso_login_success`, `sso_login_denied`, `sso_user_provisioned`                 | `POST /api/mvp/auth/sso-exchange` |
 | `sso_invite_created`, `sso_invite_deleted`                                      | `/api/mvp/admin/sso-invites[*]` |

@@ -271,6 +271,35 @@ def list_tenants(
     )
 
 
+def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
+    """New tenants get shadow VSR ON by default so the Savings Certificate is
+    populated from week one (the litellm-wedge value prop). This writes an
+    EXPLICIT shadow_vsr=True routing-config record (not an implicit default), so
+    existing tenants are untouched and the state is visible/auditable. An OSS
+    operator can opt the default out with STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT
+    =false. Best-effort + fenced: never fails tenant creation (shadow is advisory,
+    money-neutral)."""
+    import os
+
+    # inverse-default (ON unless explicitly disabled): accept the common falsy
+    # spellings symmetrically so an operator's "0"/"no"/"off" also opts out
+    # (Fable per-tenant review-2 Low — do not regress to a literal "false").
+    if os.getenv("STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT", "true").strip().lower() in (
+            "false", "0", "no", "off"):
+        return
+    try:
+        from . import admin_routing as _ar
+
+        _ar.provision_shadow_default_config(tenant_id, updated_by=actor_id)
+    except Exception as e:  # noqa: BLE001 — advisory default; never break creation.
+        try:
+            from core.logging import get_logger
+            get_logger(__name__).warning("shadow_default_provision_failed",
+                                         tenant_id=tenant_id, error=str(e))
+        except Exception:
+            pass
+
+
 @router.post("", response_model=TenantItem, status_code=201)
 def create_tenant(
     body: CreateTenantRequest,
@@ -294,6 +323,8 @@ def create_tenant(
         target_type="tenant",
         details={"name": body.name, "team_lead_user_id": body.team_lead_user_id},
     )
+    # after the create audit so the log reads create -> provision.
+    _provision_shadow_default(item["tenant_id"], actor_id=actor.user_id)
     return _to_tenant_item(item)
 
 

@@ -71,6 +71,15 @@ class ChatCompletionsRequest(BaseModel):
 # Conversion: OpenAI Chat → Bedrock Converse kwargs
 # ---------------------------------------------------------------------------
 
+def _shadow_tenant_pref(org_id: str):
+    """The tenant's per-tenant shadow_vsr preference (True/False/None) via the
+    single shared, cached, rate-limited-fail-open helper (routing.config.
+    tenant_shadow_pref). Thin wrapper kept so the call site reads locally."""
+    from .routing.config import tenant_shadow_pref
+
+    return tenant_shadow_pref(org_id)
+
+
 def _convert_chat_messages(
     messages: list[ChatMessage],
 ) -> tuple[list[dict[str, Any]], Optional[list[dict[str, str]]]]:
@@ -296,9 +305,14 @@ def chat_completions(
     if model_pin is None:
         try:
             from .vsr import shadow as _shadow
-            if _shadow.shadow_enabled():
+            # cheap env-only force-off before the per-tenant config read so a
+            # fleet-wide dark deploy pays no lookup (Fable per-tenant review Low).
+            _tenant_shadow = (None if _shadow.shadow_globally_forced_off()
+                              else _shadow_tenant_pref(user.org_id))
+            if _shadow.shadow_enabled(_tenant_shadow):
                 _shadow_vsr = _shadow.shadow_vsr_decision(
                     requested_model=body.model,
+                    tenant_shadow=_tenant_shadow,
                     features=_shadow.extract_features_openai(
                         approx_input_tokens=input_est,
                         tools=getattr(body, "tools", None), messages=body.messages),

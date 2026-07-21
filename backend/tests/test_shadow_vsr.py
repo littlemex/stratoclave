@@ -188,3 +188,96 @@ def test_savings_classification_is_mode_independent(monkeypatch):
     row = counterfactual_row(base)
     # classified by `decision` (shadow-advised) => advice only, never realized.
     assert row["enacted"] is False
+
+
+# --------------------------------------------------- per-tenant shadow toggle
+# (Fable per-tenant review): shadow_enabled resolves tri-state — tenant explicit
+# wins; None falls back to the global env default. shadow.py stays free of any
+# storage dependency (the caller passes the resolved bool).
+
+def test_shadow_enabled_tenant_true_overrides_env_off(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "false")   # global OFF
+    assert shadow.shadow_enabled(True) is True             # tenant opted in
+
+
+def test_shadow_enabled_tenant_false_overrides_env_on(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")    # global ON
+    assert shadow.shadow_enabled(False) is False           # tenant opted out
+
+
+def test_shadow_enabled_none_follows_global_default(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")
+    assert shadow.shadow_enabled(None) is True
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "false")
+    assert shadow.shadow_enabled(None) is False
+    monkeypatch.delenv("STRATOCLAVE_SHADOW_VSR", raising=False)
+    assert shadow.shadow_enabled(None) is False            # dark by default
+    # legacy no-arg call (existing callers) still resolves to the global default.
+    assert shadow.shadow_enabled() is False
+
+
+def test_shadow_vsr_decision_respects_tenant_off(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")    # global ON...
+    # ...but this tenant is explicitly OFF -> no advisory even for a downgradable req.
+    assert shadow.shadow_vsr_decision(
+        requested_model="claude-opus-4-7", features=_simple(),
+        tenant_shadow=False) is None
+
+
+def test_shadow_vsr_decision_tenant_on_beats_env_off(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "false")   # global OFF...
+    # ...tenant explicitly ON -> advisory is produced.
+    d = shadow.shadow_vsr_decision(
+        requested_model="claude-opus-4-7", features=_simple(), tenant_shadow=True)
+    assert d is not None and d["decision"]
+
+
+# ------------------------------------------------ operator kill-switch (force-off)
+# (Fable per-tenant review High): a tenant explicit True — every new tenant is
+# provisioned ON — otherwise beats the env, leaving the operator no single lever to
+# stop the fleet. FORCE_OFF outranks the per-tenant preference.
+
+def test_force_off_outranks_tenant_true(monkeypatch):
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR_FORCE_OFF", "true")
+    # even a tenant that explicitly opted in is forced dark.
+    assert shadow.shadow_enabled(True) is False
+    assert shadow.shadow_globally_forced_off() is True
+    # and the decision seam produces nothing for a downgradable request.
+    assert shadow.shadow_vsr_decision(
+        requested_model="claude-opus-4-7", features=_simple(), tenant_shadow=True) is None
+
+
+def test_force_off_absent_or_false_does_not_disable(monkeypatch):
+    monkeypatch.delenv("STRATOCLAVE_SHADOW_VSR_FORCE_OFF", raising=False)
+    assert shadow.shadow_globally_forced_off() is False
+    assert shadow.shadow_enabled(True) is True
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR_FORCE_OFF", "false")
+    assert shadow.shadow_globally_forced_off() is False
+    assert shadow.shadow_enabled(True) is True
+
+
+def test_env_truthy_spellings_are_symmetric(monkeypatch):
+    # Fable per-tenant review Low: the global default accepts the common truthy
+    # spellings, not just the literal "true".
+    for val in ("true", "1", "yes", "on", "TRUE", "On"):
+        monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", val)
+        assert shadow.shadow_enabled(None) is True, val
+    for val in ("false", "0", "no", "off", ""):
+        monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", val)
+        assert shadow.shadow_enabled(None) is False, val
+
+
+def test_force_off_truthy_spellings(monkeypatch):
+    # Fable per-tenant review-2 Low: the KILL-SWITCH must honour the same truthy
+    # spellings — an operator setting FORCE_OFF=1 and finding it inert cannot stop
+    # the fleet. Tenant is explicit True throughout so only force-off can disable.
+    monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR", "true")
+    for val in ("true", "1", "yes", "on", "TRUE", "On"):
+        monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR_FORCE_OFF", val)
+        assert shadow.shadow_globally_forced_off() is True, val
+        assert shadow.shadow_enabled(True) is False, val
+    for val in ("false", "0", "no", "off", ""):
+        monkeypatch.setenv("STRATOCLAVE_SHADOW_VSR_FORCE_OFF", val)
+        assert shadow.shadow_globally_forced_off() is False, val
+        assert shadow.shadow_enabled(True) is True, val

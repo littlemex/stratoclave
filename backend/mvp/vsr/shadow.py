@@ -36,11 +36,64 @@ from typing import Callable, Optional
 _TIER_ORDER = ("haiku", "sonnet", "opus")
 
 
-def shadow_enabled() -> bool:
-    """Master switch. Dark by default — the judge is inert (propose() returns None)
-    unless STRATOCLAVE_SHADOW_VSR=true, so it ships without touching any request.
-    Read PER REQUEST (not memoised at import) so the flag is a live kill-switch."""
-    return os.getenv("STRATOCLAVE_SHADOW_VSR", "false").lower() == "true"
+def _env_true(name: str) -> bool:
+    """Truthy env parse, tolerant of the common spellings so operators are not
+    surprised by an asymmetric interpretation (Fable per-tenant review Low):
+    true/1/yes/on all count."""
+    return os.getenv(name, "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _global_force_off() -> bool:
+    """Operator kill-switch that sits ABOVE the per-tenant preference. Because a
+    tenant's explicit True (every new tenant is provisioned ON) otherwise beats
+    the env, an operator would have no single lever to stop the judge fleet-wide
+    if feature extraction started throwing or adding latency (Fable per-tenant
+    review High). STRATOCLAVE_SHADOW_VSR_FORCE_OFF=true forces the judge dark for
+    EVERY tenant regardless of stored preference, read per request so it takes
+    effect immediately without a redeploy or config rewrite."""
+    return _env_true("STRATOCLAVE_SHADOW_VSR_FORCE_OFF")
+
+
+def shadow_globally_forced_off() -> bool:
+    """Public cheap (env-only, no I/O) check of the operator kill-switch, so a
+    handler can skip the per-tenant config read entirely when the fleet is forced
+    dark (Fable per-tenant review Low: avoid a cold-cache DynamoDB read on a dark
+    deploy). Equivalent to the rank-0 branch of shadow_enabled()."""
+    return _global_force_off()
+
+
+def _global_shadow_default() -> bool:
+    """The global fallback used when a tenant expresses no preference. Dark by
+    default (STRATOCLAVE_SHADOW_VSR unset/false) so the judge ships inert. Read
+    PER REQUEST (not memoised) so the env stays a live switch."""
+    return _env_true("STRATOCLAVE_SHADOW_VSR")
+
+
+def shadow_enabled(tenant_shadow: Optional[bool] = None) -> bool:
+    """Resolve whether the shadow judge runs for THIS request.
+
+    Resolution order (Fable per-tenant review):
+      0. STRATOCLAVE_SHADOW_VSR_FORCE_OFF=true -> OFF, unconditionally. The
+         operator kill-switch outranks every per-tenant preference so the whole
+         fleet can be stopped with one env flip (no per-tenant config rewrite).
+      1. tenant_shadow is True   -> ON  (this tenant opted in / provisioned ON)
+      2. tenant_shadow is False  -> OFF (this tenant opted out)
+      3. tenant_shadow is None   -> the global env default (dark unless set)
+
+    The caller passes the tenant's resolved `shadow_vsr` value (read from the
+    routing config it ALREADY loaded for the reserve — no extra DynamoDB read,
+    and shadow.py stays free of storage dependencies).
+
+    Dark-by-default note: for a tenant that never touched its config (None), and
+    with no env set, this is False — an EXISTING tenant behaves exactly as before
+    this change. NEW tenants are shipped with an explicit stored True (see
+    admin_tenants._provision_shadow_default); the force-off env is the lever that
+    stops them without touching stored config."""
+    if _global_force_off():
+        return False
+    if tenant_shadow is not None:
+        return bool(tenant_shadow)
+    return _global_shadow_default()
 
 
 # Version of THIS local rule set. Rides every shadow decision record (Fable
@@ -198,13 +251,18 @@ def _default_cheapest_for_tier(pricing_key: str) -> Optional[str]:
 
 
 def shadow_vsr_decision(*, requested_model: str,
-                        features: "RequestFeatures") -> Optional[dict]:
+                        features: "RequestFeatures",
+                        tenant_shadow: Optional[bool] = None) -> Optional[dict]:
     """Return the shadow VSR decision dict to attach to the reserve-time decision
     record, or None to attach nothing. Dark by default, fail-open, side-effect and
     money free. See module note above. `mode` is the informational literal
     "shadow"; the AUTHORITATIVE classifier downstream is `decision`
-    (DECISION_SHADOW_ADVISED ∈ SHADOW_DECISIONS), never `mode`."""
-    if not shadow_enabled():
+    (DECISION_SHADOW_ADVISED ∈ SHADOW_DECISIONS), never `mode`.
+
+    `tenant_shadow` is the calling tenant's resolved per-tenant preference
+    (True/False/None) from the routing config the caller already loaded; None
+    falls back to the global env default. See shadow_enabled()."""
+    if not shadow_enabled(tenant_shadow):
         return None
     try:
         from .client import DECISION_SHADOW_ADVISED
