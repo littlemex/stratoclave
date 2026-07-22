@@ -37,6 +37,18 @@ def _canonical(proof: ConsumedProof, tenant_id: str) -> bytes:
     # bind the signature to the exact reservation identity + amount + pool + cap,
     # so a signature cannot be replayed onto a different reservation or a larger
     # cap/amount.
+    #
+    # P3: length-prefixed framing, NOT "|".join. reservation_id / tenant_id can
+    # contain arbitrary characters; a plain delimiter lets ("a|b","c") and
+    # ("a","b|c") collide onto the same canonical bytes (a field-boundary slide).
+    # Encoding each field as len(bytes)\x00<bytes> makes the framing injective, so
+    # no two distinct field tuples share a signature.
+    #
+    # SCOPE: this binds reservation IDENTITY (id, tenant, cap, amount, pool_hash),
+    # NOT the request body or span_id. Swapping the body within the same
+    # reservation is signature-valid; the idempotency key + single-consume proof
+    # are what prevent re-use, so the residual risk is low. If body binding is ever
+    # required, add a body hash as a further length-prefixed field here.
     parts = [
         proof.reservation_id,
         tenant_id,
@@ -44,7 +56,12 @@ def _canonical(proof: ConsumedProof, tenant_id: str) -> bytes:
         str(proof.reserve_amount_microusd),
         proof.pool.pool_hash,
     ]
-    return "|".join(parts).encode("utf-8")
+    buf = bytearray()
+    for p in parts:
+        b = p.encode("utf-8")
+        buf += f"{len(b)}\x00".encode("utf-8")
+        buf += b
+    return bytes(buf)
 
 
 def sign_reservation(proof: ConsumedProof, tenant_id: str) -> Optional[str]:

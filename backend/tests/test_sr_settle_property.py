@@ -76,6 +76,26 @@ def test_settle_is_deterministic(scn):
     assert a.basis == b.basis and a.billed_model == b.billed_model
 
 
+@given(
+    st.integers(min_value=0, max_value=100_000_000),   # input rate
+    st.integers(min_value=0, max_value=100_000_000),   # output rate
+    st.integers(min_value=0, max_value=5_000_000),      # input tokens
+    st.integers(min_value=0, max_value=5_000_000),      # output tokens
+)
+@settings(max_examples=300)
+def test_from_rates_single_rate_upper_bounds_two_column_cost(in_rate, out_rate, inp, out):
+    # P2-3: the conservative single rate = max(input, output) must upper-bound the
+    # true two-column cost for EVERY token split, so a single-rate pool-max reserve
+    # can never under-estimate an output-heavy response into a silent operator loss.
+    from mvp.sr.reservation import PricedCandidate
+    pc = PricedCandidate.from_rates("m", input_per_mtok=in_rate,
+                                    output_per_mtok=out_rate, price_version="v")
+    single = pc.unit_price_microusd_per_mtok * (inp + out) // 1_000_000
+    two_column = (inp * in_rate) // 1_000_000 + (out * out_rate) // 1_000_000
+    assert single >= two_column
+    assert pc.unit_price_microusd_per_mtok == max(in_rate, out_rate)
+
+
 @given(_scenario())
 @settings(max_examples=200)
 def test_in_snapshot_measured_is_at_most_poolmax_times_cap(scn):

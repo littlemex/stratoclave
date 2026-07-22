@@ -1,85 +1,131 @@
-# vLLM Semantic Router — integration contract (verified from upstream)
+# vLLM Semantic Router — integration contract (verified from upstream + live)
 
-Source of truth for the SR adapter (stage 2) and the observability join (stage 3).
+Source of truth for the SR adapter (decide layer) and the observability join.
 Facts below are taken from the upstream project (github.com/vllm-project/semantic-router,
-vllm-sr.ai) as of this migration; re-verify at each SR version bump.
+vllm-sr.ai) AND from a live run of vllm-sr v0.3.0; re-verify at each SR version bump.
 
-## What SR is — an EXECUTING gateway (decisive fact)
+## What SR exposes — TWO surfaces (corrected by live verification)
 
-- SR is an **executing gateway**, not a decision service. Per the upstream API
-  docs (vllm-sr.ai/docs/api/router): "The router is the data-plane HTTP surface",
-  `/v1/chat/completions` is "the main router ingress for routed inference". There
-  is **no decision-only endpoint** (classify/route/dry-run — 記載なし). Sending a
-  request to SR **starts a billable inference** on SR's own backend pool.
-- Consequence: "Stratoclave asks SR which model, then executes itself" is
-  IMPOSSIBLE. The money gate cannot come *after* asking SR. So Stratoclave sits
-  in FRONT and reserves BEFORE forwarding — SR is a `served_by="semantic-router"`
-  execute backend (Fable pivot decision, option B). Order:
-  **reserve(candidate-set pool-max) → forward(SR decides+executes) → settle
-  (replay evidence)**. "If you can't extract the decision before execution, put
-  the money gate before the decision."
-- A routing layer that exposes **one OpenAI-compatible endpoint** and dispatches
-  each request to the best model pool ("The app calls one model. The router
-  builds the team.").
-- Classifies with **16 signal families** (Domain, PII, Jailbreak, Preference,
-  Embedding, Complexity, History, Tool use, …) — heuristic + learned detectors.
-- **CPU-only**, downloads ~1.5GB of BERT models once. `vllm-sr serve` brings up
-  the OpenAI-compatible listener. Deployable as Envoy ExtProc / K8s Operator /
-  local sidecar / Gateway API — "Same router, any infrastructure".
-- Session-aware routing (the vLLM "SAAR" blog, 2026-06-02) is a routing-policy
-  layer inside SR ("SAAR adds a session-control layer around that result").
+An earlier revision of this document asserted, from the API docs alone, that SR
+has **no decision-only endpoint** and is therefore a pure executing gateway. **A
+live run disproved that.** The `vllm-sr eval` CLI issues `POST /api/v1/eval`
+against the management API (:8080), documented as "Evaluate a prompt/messages
+against the router" — it returns the routing decision **without running
+inference**. So SR has two distinct surfaces:
 
-## Config keys (config/config.yaml)
+1. **Decide surface** — `POST /api/v1/eval` on the management API (:8080).
+   Returns the routing decision (chosen model / decision name, the signals used,
+   confidences) for a prompt/messages. Requires auth (401 without). **No billable
+   inference is started.** This is the surface Stratoclave uses.
+2. **Execute surface** — `/v1/chat/completions` on the data-plane listener
+   (envoy ingress :8899), routed by the `x-selected-model` header. Sending a
+   request here **starts a billable inference** on SR's own backend pool.
 
-- `providers.models[].backend_refs[]`: real backends — `{name, endpoint,
-  protocol, provider, api_key_env|api_key, auth_header, base_url}`.
-- `providers.defaults.default_model`, `providers.models[].{name,
-  provider_model_id, api_format}`.
-- `routing.modelCards[]`: `{name, param_size, capabilities:[chat,reasoning,tools]}`.
-- `global.router.auto_model_names`: logical names clients send — e.g.
-  `vllm-sr/auto`, `auto`. `external_model_ids.openai` = external-facing name.
-- `global.services.observability.tracing`: `{enabled, provider: opentelemetry,
-  exporter: {type: otlp, endpoint}}`.
-- `router_replay`: `{store_backend: postgres, postgres: {...}}`.
-- Ports: listener `listeners[0].port: 8899` (docs quickstart also cites 8888),
-  management API `management_api.port: 8080`.
+The 16 signal families (Domain, PII, Jailbreak, Preference, Embedding,
+Complexity, History, Tool use, …) and the session-aware policy (the vLLM "SAAR"
+blog, 2026-06-02 — "SAAR adds a session-control layer around that result") drive
+the decide surface. SR is **CPU-only** (~1.5GB of BERT models downloaded once).
 
-## Observability outputs (stage-3 receptacle)
+## Chosen architecture — A' (eval-decide, Stratoclave executes)
 
-- Response header **`x-vsr-replay-id`** — "operators can jump to the exact
-  routing record".
-- **Router replay** record per request: signals, model selection (chosen +
-  candidates not taken), token usage, cost — "Replay records decision metadata
-  and usage/cost — summaries for browsing, detail on demand".
-- **OpenTelemetry** spans exported via OTLP.
+**"SR chooses, Stratoclave accounts — and Stratoclave also executes."**
 
-## Stratoclave integration invariants (Fable pivot, option B)
+Because a decision-only endpoint exists, Stratoclave does NOT need to put itself
+in front of an executing SR and reserve at a whole-pool maximum. Instead:
 
-- **Reserve before forward. Stratoclave accounts.** Because SR executes,
-  Stratoclave reserves FIRST — at the **candidate-set pool-max** unit price
-  (`max_{m ∈ tenant_allowlist ∩ SR_backend_pool} unit_price(m) × (est_input +
-  max_tokens_cap)`) — then forwards. Over-reserve errs fail-closed and is refunded
-  at settle. The atomic reserve→settle ledger is the sole charge-of-record and
-  the sole gate on spend.
-- **`max_tokens` is force-injected** into the forwarded request equal to the cap
-  used in the reserve, so reserve ≥ real cost holds identically.
-- **Routing fail-open, money fail-closed.** SR down/slow ⇒ fall back to the
-  default path (direct Bedrock); the default model ∈ candidate set so the pool-max
-  reserve already covers it. No path reaches SR without a reservation token
-  (enforced three ways: code requires the token by type; SR ingress is
-  mTLS/service-token only, never public; backend_refs provider keys live ONLY on
-  SR so nothing spends them except via Stratoclave).
-- **charge-of-record = Stratoclave ledger unit price × replay-measured tokens.**
-  SR's usage/cost are **evidence** joined by span_id ↔ `x-vsr-replay-id`, never
-  the charge. settle is two-phase: provisional from the OpenAI-compatible
-  response `model`/`usage`; final async from router replay. Replay missing within
-  window T ⇒ settle at the reserve amount (fail-closed) + alert. The number shown
-  to customers is always the ledger's.
-- **backend_refs ↔ registry is a CI gate**: every SR `backend_ref` must have a
-  Stratoclave registry unit-price entry or deploy is rejected; pool-max is
-  precomputed from this mapping. An unknown model in replay ⇒ settle at reserve +
-  quarantine that backend + P1 alert.
-- Integration point: `_pipeline.py:1343` `served_by` seam gains a
-  `"semantic-router"` sibling; `decision_log.build_decision_item(vsr=...)` (keyed
-  by run_id, span_id) is the observability receptacle, extended to carry the SR
-  replay id + signals + the SR-vs-ledger cost divergence.
+    consult SR /api/v1/eval  →  RouteDecision (a single chosen model)
+    →  reserve that ONE model at its exact registry price  (fail-closed)
+    →  execute on Stratoclave's OWN transport (bedrock / self-hosted vLLM)
+    →  settle from Stratoclave's OWN first-party usage
+
+Why A' over the earlier option B (reserve pool-max → forward → replay-settle):
+
+- **Money is far simpler and safer.** The reserve is the exact price of the
+  single chosen model, not a pool-max over-reserve. Usage is first-party, not
+  SR-reported. The whole "distrust SR's money" apparatus — pool-max reserve,
+  two-phase settle, replay-evidence dependence, the 15-minute replay deadline,
+  reservation HMAC, mTLS-only ingress — becomes UNNECESSARY. Fewer money failure
+  modes, smaller attack surface.
+- **Observability is synchronous.** The eval response (chosen model, used
+  signals, confidences) is available in-request, so the decision_log join needs
+  no async replay worker. Divergence becomes "SR-suggested model vs the model we
+  actually billed", computed inline.
+- **The only thing B does better is execute-breadth** (using providers that live
+  only behind SR's pool). That is not worth trading away first-party money
+  control. If a model exists only behind SR and is genuinely needed, the correct
+  answer is to add that provider to Stratoclave's own `serving/` layer as a
+  separate workstream — NOT to route money through SR's execution.
+
+This is faithful to the original intent: the user always meant "delegate the
+**judgement** to SR". Breadth splits into *decide breadth* (SR's model space + 16
+signals, which we delegate) and *execute breadth* (transport, which we keep under
+first-party money control). A' delegates the former and retains the latter.
+
+### Preconditions before turning A' on (must pass)
+
+- **`/api/v1/eval` hot-path fitness.** It is a management-API endpoint that looks
+  built for the CLI. Confirm with upstream that it is committed as a per-request
+  production decision API (rate, latency, backward-compat). BERT on CPU should be
+  tens of ms; measure live p99 and set an adapter deadline (~300ms) after which
+  `decide()` returns `NO_DECISION` (fail-open to the normal resolver).
+- **Decision→registry surjection is a CI gate.** The `routing_decision` /
+  `decision_name` namespace SR returns must map onto Stratoclave registry
+  `model_id`s. An unmapped decision ⇒ deploy rejected (reuse of the existing
+  pricing CI gate). At runtime an unmapped decision ⇒ `NO_DECISION` + alert.
+- **SAAR/session note.** Execute traffic does NOT flow through SR, so SR's
+  internal session state does not grow from our traffic. As long as we send the
+  conversation history in `messages`, the History signal still functions —
+  confirm live.
+
+## Money contract under A'
+
+- **charge-of-record = Stratoclave ledger unit price × first-party measured
+  tokens.** Same atomic reserve→settle ledger as every other served_by path; the
+  SR decision only picks *which* single model to reserve+execute.
+- **Routing fail-open, money fail-closed.** SR down / slow / garbage ⇒
+  `NO_DECISION` ⇒ the normal resolver picks the model, reserve+execute proceed
+  unchanged. No new money path is created by SR; the reserve gate is exactly
+  today's.
+- SR's self-reported cost (if surfaced via eval) is **evidence** joined into
+  `decision_log.build_decision_item(vsr=...)`, never the charge.
+
+## Config keys (config/config.yaml) — for the deploy/CI gate
+
+- `providers.models[].backend_refs[]`, `providers.defaults.default_model`,
+  `routing.modelCards[]`, `global.router.auto_model_names` (logical names clients
+  send, e.g. `auto`), `external_model_ids.openai`.
+- `global.services.observability.tracing` (otlp exporter), `router_replay`
+  (postgres) — used only for evidence, not money.
+- Ports: management API `management_api.port: 8080` (the eval/decide surface);
+  data-plane listener `:8899` (the execute surface, which A' does NOT use).
+
+## Frozen (option-B) assets — kept dark, do NOT delete
+
+The option-B money apparatus is preserved but inert (`sr_is_servable()` returns
+False; nothing on the hot path constructs it). It is frozen, not deleted, so a
+future "execute-breadth" workstream can reopen it — but only after re-verifying,
+because A' is the shipping path.
+
+| Asset | State under A' |
+|---|---|
+| `port.py` (RouteDecision/RoutePort/NO_DECISION) | **ACTIVE** — the decide-layer type; eval → RouteDecision maps straight in. |
+| `adapter.py` (sr_mode tri-state, kill-switch, `decide()`) | **ACTIVE** — `decide()` gains the eval client. |
+| `canary.py` (deterministic sampling + per-process breaker) | **ACTIVE** — canary control is path-agnostic. |
+| `observability.py` (SR-vs-ledger divergence) | **ACTIVE** — join source becomes eval signals; divergence = suggested vs billed. |
+| pricing CI gate | **ACTIVE (repurposed)** — "eval decision space ↔ registry map". |
+| `reservation.py` (PoolReservation/ConsumedProof/CandidatePool) | **FROZEN** — A' reserves a single model at exact price via the existing `reserve_credit_for_model`. |
+| `settle.py` (two-phase SR settle) | **FROZEN** — first-party usage means the existing settle applies. |
+| `hardening.py` (reservation HMAC) | **FROZEN** — no money-bearing forward to sign; eval auth is a normal service token. |
+| `serving/semantic_router.py` `forward_to_sr` | **FROZEN** — only unfrozen if the Q4 execute-forward compromise is ever built. |
+
+The P1/P2/P3 review findings on the frozen modules were **fixed before freezing**
+(immutable reservation + thread-safe consume + partial-usage fail-closed settle +
+proof↔request tenant/pool binding + honest per-process breaker docstring +
+conservative max(input,output) pool pricing + length-prefixed HMAC framing), so a
+future unfreeze inherits corrected code, not a "verified" label over latent bugs.
+
+## Unfreeze condition (explicit)
+
+Reopen the option-B forward path ONLY when there is measured demand for a model
+that exists solely behind SR's pool and not in Stratoclave's own transport. Until
+then B stays dark at `sr_is_servable() == False`.

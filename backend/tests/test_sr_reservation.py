@@ -7,6 +7,8 @@ price lookup close the reserve->forward TOCTOU.
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from mvp.sr.reservation import (
@@ -73,6 +75,62 @@ def test_double_consume_raises():
     r.consume()
     with pytest.raises(ReservationAlreadyConsumed):
         r.consume()
+
+
+# --------------------------------------------------------------- P1-1 immutability
+def test_reservation_is_immutable_after_mint():
+    # P1-1: a minted reservation cannot have its money-bearing fields rewritten,
+    # and a consumed latch cannot be reset to forge a second consume.
+    r = PoolReservation._mint(reservation_id="rimm", pool=_pool(),
+                              max_tokens_cap=1024, reserve_amount_microusd=999)
+    with pytest.raises(AttributeError):
+        r.reserve_amount_microusd = 0
+    with pytest.raises(AttributeError):
+        r.max_tokens_cap = 10 ** 9
+    r.consume()
+    with pytest.raises(AttributeError):
+        r._consumed = False          # cannot "un-consume" to double-mint
+    with pytest.raises(AttributeError):
+        del r.reserve_amount_microusd
+
+
+def test_consumed_proof_is_immutable():
+    # P1-1: the proof the forward trusts cannot be tampered post-mint (cap/amount).
+    proof = PoolReservation._mint(reservation_id="pimm", pool=_pool(),
+                                  max_tokens_cap=8, reserve_amount_microusd=120).consume()
+    with pytest.raises(AttributeError):
+        proof.max_tokens_cap = 10 ** 9
+    with pytest.raises(AttributeError):
+        proof.reserve_amount_microusd = 0
+    with pytest.raises(AttributeError):
+        del proof.pool
+
+
+# --------------------------------------------------------------- P1-2 thread-safe consume
+def test_concurrent_consume_yields_exactly_one_proof():
+    # P1-2: N threads race to consume the SAME reservation; exactly one must win a
+    # ConsumedProof and the rest must raise. Without the lock the check-then-set
+    # TOCTOU could mint two proofs (two forwards on one reserve = double spend).
+    r = PoolReservation._mint(reservation_id="rrace", pool=_pool(),
+                              max_tokens_cap=256, reserve_amount_microusd=42)
+    proofs: list[ConsumedProof] = []
+    errors: list[Exception] = []
+    barrier = threading.Barrier(16)
+
+    def worker():
+        barrier.wait()               # maximize contention on the check-then-set
+        try:
+            proofs.append(r.consume())
+        except ReservationAlreadyConsumed as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(proofs) == 1
+    assert len(errors) == 15
 
 
 def test_reserve_amount_covers_pool_max_times_cap():

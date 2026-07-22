@@ -1,5 +1,11 @@
 # 配置B 実装仕様レビュー(money-path 着手直前版)
 
+> **【重要・凍結】この文書は配置B(SRを実行バックエンドとして前段でpool-max予約)の実装仕様である。実機検証で `POST /api/v1/eval`(decision-only)の実在が判明したため、出荷経路は配置B'(A')= 「eval で判断だけ取得 → Strato が単一モデルを正確額で予約 → 自前トランスポートで実行 → 一次情報で settle」に切り替わった。正本は `CONTRACT.md`。**
+>
+> 本文書は**凍結された配置Bの参照仕様**として残す。B の money 機構(`reservation.py` の PoolReservation/ConsumedProof、`settle.py` の二段settle、`hardening.py` の HMAC、`serving/semantic_router.py` の forward_to_sr)は `sr_is_servable()==False` でダーク。凍結前に P1/P2/P3 のレビュー指摘は全て修正済み(将来解凍時に「検証済み」の看板ごと欠陥を復活させないため)。**解凍条件**: 「Strato の serving 層に無く SR プールにのみ存在するモデルへの実需要が計測された時」のみ(`CONTRACT.md` 参照)。それまで着手しない。
+>
+> A' で活きる資産: `port.py`(RouteDecision)/ `adapter.py`(sr_mode三態+kill-switch、`decide()`をeval clientに配線)/ `canary.py`(経路非依存)/ `observability.py`(join元をeval signalへ、divergence=推奨モデルvs実課金)/ pricing CIゲート(「eval decision空間↔registry写像」へ転用)。
+
 ---
 
 ## 1. served_by="semantic-router" の seam 設計

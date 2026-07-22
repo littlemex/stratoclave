@@ -22,16 +22,35 @@ the hot path (SR is unservable until a later substep), so behaviour is unchanged
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import final
 
 
 @dataclass(frozen=True)
 class PricedCandidate:
-    """One member of a candidate pool with its reserve-time snapshot price."""
+    """One member of a candidate pool with its reserve-time snapshot price.
+
+    `unit_price_microusd_per_mtok` is a SINGLE rate applied to (input+output)
+    tokens alike. Because real models bill output at 3–5× input, a rate taken from
+    the input column would make the pool-max reserve UNDER-estimate an
+    output-heavy response, and the settle clamp would then quietly hold the
+    operator's loss inside the reserve. P2-3 contract: this rate MUST be the
+    conservative per-model max(input_rate, output_rate). Build it via
+    `from_rates(...)` so the guarantee is enforced at construction, not by
+    convention — then `unit × total_tokens ≥ input×in_rate + output×out_rate` for
+    any token split, i.e. the measured charge is a true upper bound of real cost."""
     model_id: str
     unit_price_microusd_per_mtok: int
     price_version: str
+
+    @classmethod
+    def from_rates(cls, model_id: str, *, input_per_mtok: int, output_per_mtok: int,
+                   price_version: str) -> "PricedCandidate":
+        """Construct with the conservative single rate = max(input, output). This is
+        the ONLY sanctioned way to price a pool member from a two-column rate table,
+        so the pool-max upper bound holds for any input/output token split."""
+        return cls(model_id, max(int(input_per_mtok), int(output_per_mtok)), price_version)
 
 
 @dataclass(frozen=True)
@@ -77,6 +96,15 @@ class ConsumedProof:
     def __init__(self, *args, **kwargs) -> None:  # noqa: D401
         raise TypeError("ConsumedProof is minted by PoolReservation.consume()")
 
+    # TRULY immutable (P1-1): block all attribute writes/deletes after minting, so
+    # a consumed proof's cap/amount cannot be forged post-hoc. Minting uses
+    # object.__setattr__ to bypass this guard exactly once.
+    def __setattr__(self, name, value):  # noqa: D401
+        raise AttributeError("ConsumedProof is immutable")
+
+    def __delattr__(self, name):  # noqa: D401
+        raise AttributeError("ConsumedProof is immutable")
+
     @classmethod
     def _mint(cls, reservation: "PoolReservation") -> "ConsumedProof":
         self = object.__new__(cls)
@@ -94,11 +122,23 @@ class PoolReservation:
     pool snapshot + reserve amount; `consume()` yields the `ConsumedProof` the SR
     forward requires. No public constructor: `PoolReservation(...)` raises."""
 
+    # `_consumed`/`_lock` are the only mutable internals; every other attribute is
+    # write-protected by __setattr__ so cap/amount/pool cannot be forged and a
+    # consumed token cannot be "un-consumed" by resetting _consumed (P1-1).
     __slots__ = ("reservation_id", "pool", "max_tokens_cap",
-                 "reserve_amount_microusd", "_consumed")
+                 "reserve_amount_microusd", "_consumed", "_lock")
+    _MUTABLE = frozenset({"_consumed"})
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: D401
         raise TypeError("use mvp.sr.reservation.reserve_credit_for_pool()")
+
+    def __setattr__(self, name, value):  # noqa: D401
+        # only the internal consume-latch may change, and only via consume()'s
+        # lock-held object.__setattr__; direct attribute writes are refused.
+        raise AttributeError("PoolReservation is immutable (use consume())")
+
+    def __delattr__(self, name):  # noqa: D401
+        raise AttributeError("PoolReservation is immutable")
 
     @classmethod
     def _mint(cls, *, reservation_id: str, pool: CandidatePool,
@@ -109,10 +149,15 @@ class PoolReservation:
         object.__setattr__(self, "max_tokens_cap", max_tokens_cap)
         object.__setattr__(self, "reserve_amount_microusd", reserve_amount_microusd)
         object.__setattr__(self, "_consumed", False)
+        object.__setattr__(self, "_lock", threading.Lock())
         return self
 
     def consume(self) -> ConsumedProof:
-        if self._consumed:
-            raise ReservationAlreadyConsumed(self.reservation_id)
-        object.__setattr__(self, "_consumed", True)
+        # single-use, thread-safe (P1-2): the check-and-set is under a lock so two
+        # concurrent callers cannot both mint a ConsumedProof. Pairs with the
+        # ledger's (reservation_id, phase) unique constraint as defence in depth.
+        with self._lock:
+            if self._consumed:
+                raise ReservationAlreadyConsumed(self.reservation_id)
+            object.__setattr__(self, "_consumed", True)
         return ConsumedProof._mint(self)

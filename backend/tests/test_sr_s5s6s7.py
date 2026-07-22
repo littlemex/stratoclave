@@ -54,6 +54,19 @@ def test_sig_bound_to_amount_and_cap(monkeypatch):
     assert hardening.verify_reservation_sig(big, "acme", sig_small) is False
 
 
+def test_sig_canonical_no_field_boundary_collision(monkeypatch):
+    # P3: length-prefixed framing must NOT let a field-boundary slide collide.
+    # ("res|x", tenant "acme") and ("res", tenant "x|acme") would share bytes under
+    # a plain "|".join; the signatures must differ.
+    monkeypatch.setenv("STRATO_SR_RESERVATION_HMAC_KEY", "k")
+    a = _proof(rid="res|x")
+    b = _proof(rid="res")
+    sig_a = hardening.sign_reservation(a, "acme")
+    # a sig for (rid="res|x", tenant="acme") must not verify against
+    # (rid="res", tenant="x|acme").
+    assert hardening.verify_reservation_sig(b, "x|acme", sig_a) is False
+
+
 # ------------------------------------------------------------------ S6 canary
 def test_canary_deterministic(monkeypatch):
     a = canary.in_canary("acme", "conv-1", canary_bps=5000)

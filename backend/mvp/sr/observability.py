@@ -4,7 +4,14 @@ observability to Stratoclave's ledger).
 
 The receptacle already exists: decision_log.build_decision_item(vsr=...) stores an
 open dict keyed by (run_id, span_id). SR rides it by adding keys — no schema
-change. The join key is span_id ↔ SR's x-vsr-replay-id.
+change.
+
+Under architecture A' (decide-only consult, see CONTRACT.md) the join is
+SYNCHRONOUS: the eval response is available in-request, so no async replay worker
+is needed. The meaningful divergence becomes "SR-suggested model vs the model
+Stratoclave actually billed" and "SR's suggested cost vs the ledger charge". (If
+the option-B execute-forward path is ever unfrozen, the same block also carries
+the async x-vsr-replay-id join — the fields are a superset.)
 
 The one number that is charge-of-record is the LEDGER's. SR's own cost is
 EVIDENCE. This module computes the divergence between them so a persistent gap is
@@ -49,7 +56,9 @@ class SrEvidence:
         if self.divergence_microusd is not None:
             d["divergence_microusd"] = self.divergence_microusd
         if self.divergence_ratio is not None:
-            # round for a stable, low-cardinality metric dimension.
+            # rounded for a stable evidence record. NB this is a measured VALUE
+            # (emit it as a histogram/gauge), NOT a metric label — its cardinality
+            # is unbounded, so it must never become a dimension.
             d["divergence_ratio"] = round(self.divergence_ratio, 4)
         return d
 

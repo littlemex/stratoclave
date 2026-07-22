@@ -7,11 +7,18 @@ matter:
   * DETERMINISTIC, session-sticky sampling — a conversation is either entirely on
     SR or entirely off it, so a session's model does not flip mid-conversation
     (UX + clean evidence). We hash (tenant_id, conversation_id), never random.
-  * a CIRCUIT BREAKER that trips the whole SR path off (fleet-wide, fail-open to
-    direct) when SR misbehaves — forward error rate, replay-miss rate, or ANY
-    out-of-snapshot model. Tripping is the safe default; recovery is manual /
-    time-based. This is the automated sibling of the STRATOCLAVE_SR_FORCE_OFF
-    kill-switch.
+  * a CIRCUIT BREAKER that trips the SR path off (fail-open to direct) when SR
+    misbehaves — forward error rate, replay-miss rate, or ANY out-of-snapshot
+    model. Tripping is the safe default; recovery is time-based.
+
+    SCOPE (P2-2, be honest): the breaker state is PER-PROCESS in-memory. In a
+    multi-replica deployment a trip stops SR on the tripping pod only; sibling
+    pods keep routing until they each independently observe the fault and trip.
+    That is acceptable because money stays fail-closed regardless of the breaker
+    (a still-routing pod still reserves before forwarding), and the fleet-wide
+    hard stop is the STRATOCLAVE_SR_FORCE_OFF kill-switch, which every process
+    reads. A shared-store (config push / Redis) breaker for true fleet-wide auto
+    trip is deferred; until then do NOT claim fleet-wide from a single trip.
 
 Pure/deterministic where it can be: `in_canary` is a pure function of its inputs,
 so a decision is reproducible for incident forensics.
@@ -69,14 +76,16 @@ def _now() -> float:
 
 
 def circuit_open() -> bool:
-    """True while the breaker is tripped — SR path is skipped (fail-open to direct)."""
+    """True while the breaker is tripped (this process) — SR path is skipped
+    (fail-open to direct)."""
     with _lock:
         return _now() < _state.open_until
 
 
 def trip(reason: str) -> None:
-    """Trip the breaker: SR off for the whole fleet for _OPEN_SECONDS. Idempotent;
-    called on out-of-snapshot model / elevated error or replay-miss rate."""
+    """Trip the breaker: SR off in THIS process for _OPEN_SECONDS (see module
+    docstring on per-process scope). Idempotent; called on out-of-snapshot model /
+    elevated error or replay-miss rate. Fleet-wide hard stop = STRATOCLAVE_SR_FORCE_OFF."""
     from core.logging import get_logger
     with _lock:
         _state.open_until = _now() + _OPEN_SECONDS

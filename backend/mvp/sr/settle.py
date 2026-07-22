@@ -50,7 +50,9 @@ def settle_charge(
       1. billed_model_raw missing/unnormalizable → reserve amount.
       2. model not in the reserve snapshot pool → reserve amount (SR executed a
          model outside the priced candidate set; quarantine handled by caller).
-      3. usage missing → reserve amount (cannot measure).
+      3. usage missing OR only one side reported → reserve amount (cannot measure a
+         complete bill; a partial usage would under-charge and silently eat the
+         gap as operator loss — fail-closed to the reserve instead).
       4. otherwise → snapshot_unit_price(model) × tokens, CLAMPED to the reserve
          amount so a mis-set rate or token overrun can never exceed the hold.
     """
@@ -63,8 +65,15 @@ def settle_charge(
     unit = proof.pool.price_of(model)
     if unit is None:
         return SrCharge(reserve, model, "reserve-fallback:out-of-snapshot", reserve)
+    # P1-3: fail-closed on ANY missing side, not only when both are absent. A
+    # one-sided usage report (e.g. prompt_tokens present but completion_tokens
+    # absent, which real backends do emit) must NOT be billed as output=0 — that
+    # under-charges the tenant and the operator silently eats the difference.
+    # Distinct basis labels so the divergence metric can tell the two apart.
     if input_tokens is None and output_tokens is None:
         return SrCharge(reserve, model, "reserve-fallback:no-usage", reserve)
+    if input_tokens is None or output_tokens is None:
+        return SrCharge(reserve, model, "reserve-fallback:partial-usage", reserve)
     measured = _measured(unit, input_tokens or 0, output_tokens or 0)
     # clamp: final ≤ reserve, always (pool-max makes this hold, but assert-by-clamp
     # so a rate/token anomaly degrades fail-closed instead of over-charging).

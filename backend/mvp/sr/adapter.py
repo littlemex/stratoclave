@@ -1,16 +1,20 @@
 """vLLM Semantic Router adapter — the decide-layer RoutePort implementation.
 
-"The SR chooses, Stratoclave accounts." This adapter is the ONLY place that talks
-to the real vLLM Semantic Router. It sits at the *decide* axis (which model to
-pick), called just before the reserve; the *execute* axis (bedrock vs self-hosted
-vLLM transport) is unchanged — SR only ever hands back a `RouteDecision` (a model
-name + hints), which flows through the SAME `vsr_hard_model`/`prefer_model` reserve
-path and the SAME servability gate. SR never executes and never touches money.
+"The SR chooses, Stratoclave accounts — and Stratoclave also executes."
+(architecture A', see mvp/sr/CONTRACT.md). This adapter is the ONLY place that
+talks to the real vLLM Semantic Router, and it talks to the DECIDE surface only:
+`POST /api/v1/eval` on the management API, which returns a routing decision
+WITHOUT running inference. SR hands back a `RouteDecision` (a single model name +
+hints); that flows through the SAME `vsr_hard_model`/`prefer_model` reserve path,
+and Stratoclave then reserves that one model at its exact price and executes it on
+its OWN transport (bedrock / self-hosted vLLM). **SR never executes our traffic
+and never touches money** — the fail-closed reserve is entirely first-party.
 
-SR is an EXECUTING gateway (no decision-only endpoint), so Stratoclave sits in
-front: it reserves (candidate-set pool-max) BEFORE forwarding to SR, which then
-decides+executes; settle uses the router-replay evidence. There is no "observe
-without executing" shadow mode — a request either flows through SR or it does not.
+A live run of vllm-sr established that `/api/v1/eval` is decision-only, which is
+why A' (decide-only consult) is the shipping path rather than the earlier
+option B (front an executing SR and reserve at pool-max). The option-B money
+apparatus (reservation.py / settle.py two-phase / hardening.py / forward_to_sr) is
+FROZEN and dark (`sr_is_servable()` is False); it is not on this path.
 
 Mode is a per-tenant three-state (`sr_mode`: off | canary | active), resolved
 here with the exact pattern the shadow judge's tri-state uses:
@@ -90,15 +94,23 @@ def decide(
     requested_model: str,
     has_tool_result: bool,
 ) -> RouteDecision:
-    """Consult the vLLM Semantic Router and return a source-agnostic RouteDecision.
+    """Consult the vLLM Semantic Router DECIDE surface (`POST /api/v1/eval`) and
+    return a source-agnostic RouteDecision.
 
-    Stage-2 groundwork: the HTTP client + handshake + response whitelist land in a
-    following sub-step (see mvp/sr/CONTRACT.md). Until then this is a
-    fully-fail-open no-op: it returns NO_DECISION, so wiring it into the handlers
-    is byte-neutral (the request flows through the normal resolver). The mode
-    plumbing above (sr_mode_for / kill-switch) is already live and testable."""
+    Groundwork: the eval HTTP client + auth + latency deadline + decision→registry
+    whitelist land in the live-E2E sub-step (see mvp/sr/CONTRACT.md "Preconditions
+    before turning A' on"). Until then this is a fully-fail-open no-op returning
+    NO_DECISION, so wiring it into the handlers is byte-neutral (the request flows
+    through the normal resolver). The mode plumbing above (sr_mode_for /
+    kill-switch) is already live and testable.
+
+    When wired: consult eval → map `routing_decision`/`decision_name` to a registry
+    model_id (unmapped ⇒ NO_DECISION + alert) → return it as `prefer_model` (or
+    `hard_model` under an explicit tenant policy). Fail-open on ANY error, timeout
+    past the deadline, or unmapped decision — a router problem is never a money
+    problem; money is gated by the fail-closed reserve downstream."""
     if not sr_active_for(tenant_id):
         return NO_DECISION
-    # TODO(stage-2 SR client): VERIFIED-gated OpenAI-compatible consult with
-    # span-id propagation + candidate-pool whitelist. Fail-open on any error.
+    # TODO(live-E2E eval client): auth'd /api/v1/eval consult with a latency
+    # deadline + decision→registry whitelist. Fail-open on any error/timeout.
     return NO_DECISION

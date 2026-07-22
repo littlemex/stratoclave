@@ -1,27 +1,27 @@
-"""vLLM Semantic Router transport branch (SR integration, option B).
+"""vLLM Semantic Router transport branch — FROZEN option-B execute-forward path.
 
 Mirrors the structure of ``serving/vllm.py``: this module is the ENTIRE SR
-transport surface, reachable only under an explicit flag and a committed
-``served_by == "semantic-router"`` target. SR is an EXECUTING gateway, so — unlike
-the decision-only shape first assumed — Stratoclave reserves BEFORE forwarding and
-settles from router-replay evidence (see mvp/sr/CONTRACT.md, IMPLEMENTATION_PLAN.md).
+execute-forward surface for the option-B design (Stratoclave reserves pool-max,
+forwards to an executing SR, settles from router-replay evidence).
 
-STAGE S1 (this commit): stub only. ``sr_is_servable`` returns False for every
-input, so an SR virtual entry can exist in the type system but can NEVER be
-selected — the request path is byte-identical to today. The reserve→forward→settle
-machinery (PoolReservation, forward_to_sr, two-phase settle) lands in later
-substeps (S2–S6). Nothing here constructs an HTTP client yet.
+STATUS: FROZEN and dark under architecture A' (see mvp/sr/CONTRACT.md). A live run
+established that SR exposes a decision-only endpoint (`POST /api/v1/eval`), so the
+shipping path is A' — consult eval, then reserve+execute on Stratoclave's own
+transport — which does NOT forward money-bearing traffic to SR. This module is
+therefore never reached: ``sr_is_servable`` returns False for every input, so a
+``served_by == "semantic-router"`` virtual entry can carry the type but can NEVER
+be selected, and the request path is byte-identical to today. Its P1/P2/P3 review
+findings were fixed BEFORE freezing, so a future unfreeze (only on measured demand
+for a model that exists solely behind SR's pool — see CONTRACT.md "Unfreeze
+condition") inherits corrected code, not a stale "verified" label.
 
-INVARIANT (holds from S1 onward): money is fail-closed — no code path forwards to
-SR without a consumed reservation token; routing is fail-open — SR unservable ⇒
+INVARIANT (still holds while frozen): money is fail-closed — no code path forwards
+to SR without a consumed reservation token; routing is fail-open — SR unservable ⇒
 the candidate chain falls back to the direct Bedrock default.
 """
 from __future__ import annotations
 
-import json
 import os
-import threading
-import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -51,17 +51,17 @@ def semantic_router_enabled() -> bool:
 
 
 def sr_is_servable(entry, tenant_id: str, now: float) -> bool:
-    """Whether an SR virtual pool entry is servable for this tenant right now.
+    """Whether an SR virtual pool entry is servable (i.e. whether the option-B
+    execute-forward path may run) for this tenant right now.
 
-    STAGE S1: always False — SR is never selected yet, so a "semantic-router"
-    entry in the registry (there are none) or a candidate chain can carry the
-    type without ever routing through SR. This keeps the hot path byte-identical
-    while the money-path substeps are built and verified against a fake SR.
-
-    Later substeps replace this with the real gate (Fable IMPLEMENTATION_PLAN §1):
-    SR /healthz freshness, candidate-pool non-empty, every pool model enabled +
-    priced + registry-known, SR /v1/models sync freshness, and a servable
-    Bedrock fail-open default. Until then, returning False is the safe stub."""
+    Under architecture A' this is ALWAYS False and stays that way: A' never
+    forwards money-bearing traffic to SR (it consults eval and executes on its own
+    transport), so the execute-forward path is frozen. A "semantic-router" virtual
+    entry can carry the type but can NEVER be selected, keeping the hot path
+    byte-identical. This returns True only if the option-B forward is ever
+    unfrozen (see CONTRACT.md "Unfreeze condition"), at which point the real gate
+    lands here (SR /healthz freshness, non-empty priced candidate pool, /v1/models
+    sync, servable Bedrock fail-open default)."""
     return False
 
 
@@ -135,11 +135,20 @@ def forward_to_sr(proof: ConsumedProof, request: SrForwardRequest) -> SrForwardR
       * fail-open: any transport/protocol error raises SrForwardError, which the
         caller turns into a direct-path fallback (covered by the pool-max reserve).
     """
+    # P2-1: bind the proof to THIS request on all three money-relevant axes, not
+    # only the cap. A ConsumedProof carries no tenant_id of its own, but its pool
+    # snapshot does — so a tenant-A proof paired with a tenant-B request (a mix-up
+    # that the type system alone cannot catch) is refused here. Likewise a
+    # pool_hash mismatch means the request was priced against a different snapshot
+    # than the one reserved, breaking the reserve>=cost upper bound.
     if proof.max_tokens_cap != request.max_tokens_cap:
-        # defence in depth: the forwarded cap MUST equal the reserved cap, else
-        # the upper-bound (reserve >= cost) no longer holds. Refuse rather than
-        # forward a request that could exceed its reservation.
+        # the forwarded cap MUST equal the reserved cap, else the upper-bound
+        # (reserve >= cost) no longer holds.
         raise SrForwardError("max_tokens_cap mismatch between reservation and request")
+    if proof.pool.tenant_id != request.tenant_id:
+        raise SrForwardError("tenant mismatch between reservation and request")
+    if proof.pool.pool_hash != request.pool_hash:
+        raise SrForwardError("pool_hash mismatch between reservation and request")
     if _transport_hook is not None:
         return _transport_hook(request)
     # Real transport lands in a later substep together with mTLS/service-token

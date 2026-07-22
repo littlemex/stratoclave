@@ -60,6 +60,28 @@ def test_forward_requires_matching_cap():
         forward_to_sr(proof, _req(cap=2048))
 
 
+def test_forward_refuses_tenant_mismatch():
+    # P2-1: a proof reserved for tenant "acme" cannot be paired with a request for
+    # another tenant. The pool snapshot carries the tenant; the forward enforces it.
+    srv.set_transport_hook(fake_sr.normal())
+    proof = _reservation().consume()   # pool.tenant_id == "acme"
+    bad = SrForwardRequest(tenant_id="evil-corp", span_id="s", logical_model="auto",
+                           messages=(), max_tokens_cap=1024, pool_hash="hp")
+    with pytest.raises(SrForwardError):
+        forward_to_sr(proof, bad)
+
+
+def test_forward_refuses_pool_hash_mismatch():
+    # P2-1: a request priced against a different pool snapshot than the one reserved
+    # is refused — the reserve>=cost upper bound was computed for a specific snapshot.
+    srv.set_transport_hook(fake_sr.normal())
+    proof = _reservation().consume()   # pool.pool_hash == "hp"
+    bad = SrForwardRequest(tenant_id="acme", span_id="s", logical_model="auto",
+                           messages=(), max_tokens_cap=1024, pool_hash="DIFFERENT")
+    with pytest.raises(SrForwardError):
+        forward_to_sr(proof, bad)
+
+
 def test_forward_propagates_span_id():
     captured: list = []
     srv.set_transport_hook(fake_sr.echoes_span_id(captured))
@@ -107,6 +129,22 @@ def test_settle_no_usage_falls_back_to_reserve():
                            normalize=_normalize, input_tokens=None, output_tokens=None)
     assert charge.basis == "reserve-fallback:no-usage"
     assert charge.charge_microusd == proof.reserve_amount_microusd
+
+
+def test_settle_partial_usage_falls_back_to_reserve():
+    # P1-3: a one-sided usage report (input present, output absent — which real
+    # backends do emit) must NOT be billed as output=0. That would under-charge
+    # the tenant and the operator would silently eat the gap. Fail-closed to the
+    # reserve, with a basis distinct from the both-missing case.
+    proof = _reservation().consume()
+    only_in = settle_charge(proof, billed_model_raw="claude-haiku-4-5",
+                            normalize=_normalize, input_tokens=100, output_tokens=None)
+    assert only_in.basis == "reserve-fallback:partial-usage"
+    assert only_in.charge_microusd == proof.reserve_amount_microusd
+    only_out = settle_charge(proof, billed_model_raw="claude-haiku-4-5",
+                             normalize=_normalize, input_tokens=None, output_tokens=50)
+    assert only_out.basis == "reserve-fallback:partial-usage"
+    assert only_out.charge_microusd == proof.reserve_amount_microusd
 
 
 def test_settle_no_model_falls_back_to_reserve():
