@@ -65,22 +65,25 @@ def settle_charge(
     unit = proof.pool.price_of(model)
     if unit is None:
         return SrCharge(reserve, model, "reserve-fallback:out-of-snapshot", reserve)
-    # P1-3: fail-closed on ANY missing side, not only when both are absent. A
-    # one-sided usage report (e.g. prompt_tokens present but completion_tokens
-    # absent, which real backends do emit) must NOT be billed as output=0 — that
-    # under-charges the tenant and the operator silently eats the difference.
-    # Distinct basis labels so the divergence metric can tell the cases apart.
+    # P1-3: fail-closed on ANY untrustworthy usage. All three rungs settle at the
+    # reserve; the distinct basis labels exist only so the divergence metric can
+    # tell the cases apart. Order matters for that labelling:
+    #   1. invalid FIRST — any PRESENT side that is negative is a garbage report;
+    #      check it before the None rungs so a (None, -5) pair is labelled
+    #      "invalid", not hidden under "partial". (Money is identical either way.)
+    #   2. no-usage — both sides absent (cannot measure at all).
+    #   3. partial — exactly one side absent; must NOT be billed as the-other-side
+    #      + 0, which would under-charge and make the operator eat the difference.
+    if (input_tokens is not None and input_tokens < 0) or \
+       (output_tokens is not None and output_tokens < 0):
+        return SrCharge(reserve, model, "reserve-fallback:invalid-usage", reserve)
     if input_tokens is None and output_tokens is None:
         return SrCharge(reserve, model, "reserve-fallback:no-usage", reserve)
     if input_tokens is None or output_tokens is None:
         return SrCharge(reserve, model, "reserve-fallback:partial-usage", reserve)
-    # A negative token count is not measurable usage — it is a garbage report, and
-    # treating it as 0 (via max(...,0) below) would under-charge just like a
-    # missing side. Same fail-closed principle: a bill we cannot trust settles at
-    # the reserve, never below.
-    if input_tokens < 0 or output_tokens < 0:
-        return SrCharge(reserve, model, "reserve-fallback:invalid-usage", reserve)
-    measured = _measured(unit, input_tokens or 0, output_tokens or 0)
+    # both sides are now present and non-negative ints, so _measured sees clean
+    # values (no None, no negatives); it applies max(...,0) purely defensively.
+    measured = _measured(unit, input_tokens, output_tokens)
     # clamp: final ≤ reserve, always (pool-max makes this hold, but assert-by-clamp
     # so a rate/token anomaly degrades fail-closed instead of over-charging).
     charge = min(measured, reserve)

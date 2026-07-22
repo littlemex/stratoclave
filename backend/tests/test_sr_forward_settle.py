@@ -161,6 +161,12 @@ def test_settle_negative_usage_falls_back_to_reserve():
                            normalize=_normalize, input_tokens=-1_000_000, output_tokens=50)
     assert neg_in.basis == "reserve-fallback:invalid-usage"
     assert neg_in.charge_microusd == proof.reserve_amount_microusd
+    # a present-but-negative side wins over a missing side: labelled invalid, not
+    # partial (money identical; the label must not hide the garbage report).
+    none_and_neg = settle_charge(proof, billed_model_raw="claude-haiku-4-5",
+                                 normalize=_normalize, input_tokens=None, output_tokens=-5)
+    assert none_and_neg.basis == "reserve-fallback:invalid-usage"
+    assert none_and_neg.charge_microusd == proof.reserve_amount_microusd
 
 
 def test_settle_no_model_falls_back_to_reserve():

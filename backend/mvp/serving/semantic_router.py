@@ -135,15 +135,17 @@ def forward_to_sr(proof: ConsumedProof, request: SrForwardRequest) -> SrForwardR
       * fail-open: any transport/protocol error raises SrForwardError, which the
         caller turns into a direct-path fallback (covered by the pool-max reserve).
 
-    NOT guaranteed here (documented so it is not mistaken for closed): a
-    ConsumedProof is single-MINT (one reservation → one proof) but this function
+    NOT guaranteed here — an OPEN gap, documented so it is not mistaken for closed:
+    a ConsumedProof is single-MINT (one reservation → one proof) but this function
     does NOT burn the proof, so the same proof could be forwarded twice with two
     distinct-but-consistent requests — a 1-reserve → 2-execute double-spend path.
-    That is fenced OUTSIDE this function by the idempotency key =
-    reservation_id carried on the forward (SR-side dedupe) plus the ledger's
-    (reservation_id, phase) unique settle constraint; a future real transport must
-    set that key. This module being frozen under A' (no money-bearing forward),
-    the residual risk is inert; the note exists so an unfreeze restores the fence.
+    The pieces that would fence it DO NOT YET EXIST: `SrForwardRequest` carries no
+    reservation_id/idempotency-key field, and the ledger's (reservation_id, phase)
+    unique constraint stops double-CHARGE but NOT double-EXECUTION (the 2nd run's
+    provider cost falls outside the reserve; only SR-side dedupe would stop it, and
+    that upstream capability is unverified). This module is frozen under A' (no
+    money-bearing forward), so the gap is inert — but it is listed in CONTRACT.md's
+    unfreeze checklist as a MUST-implement-and-verify item, not a solved problem.
     """
     # P2-1: bind the proof to THIS request on all three money-relevant axes, not
     # only the cap. A ConsumedProof carries no tenant_id of its own, but its pool

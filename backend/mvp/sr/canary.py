@@ -8,8 +8,12 @@ matter:
     SR or entirely off it, so a session's model does not flip mid-conversation
     (UX + clean evidence). We hash (tenant_id, conversation_id), never random.
   * a CIRCUIT BREAKER that trips the SR path off (fail-open to direct) when SR
-    misbehaves — forward error rate, replay-miss rate, or ANY out-of-snapshot
-    model. Tripping is the safe default; recovery is time-based.
+    misbehaves. Under architecture A' (the shipping path — SR is consulted via
+    the decision-only /api/v1/eval, see CONTRACT.md) the trip conditions are the
+    eval timeout/error rate and the unmapped-decision rate. (The forward error /
+    replay-miss / out-of-snapshot vocabulary belonged to the frozen option-B
+    execute-forward path and is not what trips this under A'.) Tripping is the
+    safe default; recovery is time-based.
 
     SCOPE (P2-2, be honest): the breaker state is PER-PROCESS in-memory. In a
     multi-replica deployment a trip stops SR on the tripping pod only; sibling

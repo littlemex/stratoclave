@@ -22,6 +22,7 @@ the hot path (SR is unservable until a later substep), so behaviour is unchanged
 """
 from __future__ import annotations
 
+import operator
 import threading
 from dataclasses import dataclass
 from typing import final
@@ -41,22 +42,33 @@ class PricedCandidate:
     (proven as a property test), so the measured charge is a true upper bound of
     real cost.
 
-    The bare constructor still accepts any single value (it cannot validate a
-    two-column bound from one number), so the contract is a CONVENTION backed by a
-    property test — NOT enforced at construction. Price pool members via
-    `from_rates(...)`, which computes the conservative max, to honour it."""
+    The bare constructor cannot validate the TWO-COLUMN bound from one number, so
+    that part of the contract (rate == max(input, output)) is a CONVENTION backed
+    by a property test — NOT enforced at construction; price members via
+    `from_rates(...)` to honour it. What the constructor DOES enforce is
+    non-negativity (below): a negative unit price would produce a negative charge
+    (paying the tenant), which the upper-only settle clamp cannot catch."""
     model_id: str
     unit_price_microusd_per_mtok: int
     price_version: str
+
+    def __post_init__(self):
+        # strict int (operator.index rejects float/bool-lookalikes so a silent
+        # int(-0.9)->0 cannot smuggle a negative past the check) + non-negativity.
+        rate = operator.index(self.unit_price_microusd_per_mtok)
+        if rate < 0:
+            raise ValueError(f"negative unit rate for {self.model_id}: {rate}")
 
     @classmethod
     def from_rates(cls, model_id: str, *, input_per_mtok: int, output_per_mtok: int,
                    price_version: str) -> "PricedCandidate":
         """Construct with the conservative single rate = max(input, output) — the
         sanctioned way to price a pool member from a two-column rate table, so the
-        pool-max upper bound holds for any input/output token split. Negative rates
-        are rejected (a negative price would break the upper-bound guarantee)."""
-        i, o = int(input_per_mtok), int(output_per_mtok)
+        pool-max upper bound holds for any input/output token split. Rejects a
+        negative rate in EITHER column: a negative entry means a corrupt rate table,
+        even if max() would mask it (e.g. (-1, 100)). __post_init__ is the final
+        backstop on the stored rate."""
+        i, o = operator.index(input_per_mtok), operator.index(output_per_mtok)
         if i < 0 or o < 0:
             raise ValueError(f"negative unit rate for {model_id}: input={i} output={o}")
         return cls(model_id, max(i, o), price_version)

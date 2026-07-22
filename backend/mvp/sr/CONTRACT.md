@@ -156,5 +156,11 @@ then B stays dark at `sr_is_servable() == False`.
 An unfreeze PR is REQUIRED to (not merely encouraged): (a) re-run the full P-level
 money-path review on the modules being unfrozen; (b) re-run the live verification
 and update the "live" facts in this document; (c) re-confirm every Precondition
-above. A "verified" label older than the freeze does not carry over — the freeze
-snapshot's guarantees are void until re-established.
+above; (d) IMPLEMENT AND VERIFY the re-forward fence that does not yet exist —
+add a reservation_id / idempotency-key field to `SrForwardRequest`, burn the
+ConsumedProof on forward (a proof is single-MINT today but not single-FORWARD),
+and verify SR-side dedupe upstream, because the ledger's (reservation_id, phase)
+unique constraint stops double-CHARGE but not double-EXECUTION (the 2nd run's
+provider cost lands outside the reserve). A "verified" label older than the freeze
+does not carry over — the freeze snapshot's guarantees are void until
+re-established.
