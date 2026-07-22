@@ -311,9 +311,7 @@ def chat_completions(
                     tenant_id=user.org_id,
                     session_key=(ctx.session_key() if ctx else None),
                     requested_model=body.model,
-                    has_tool_result=False,
-                    messages=[m.model_dump() if hasattr(m, "model_dump") else dict(m)
-                              for m in body.messages],
+                    messages=_sr.prepare_eval_messages(body.messages),
                 )
                 sr_hard = _sr_d.hard_model
                 sr_prefer = _sr_d.prefer_model
@@ -328,8 +326,11 @@ def chat_completions(
     # Suppressed when a pin decides routing (a deliberate pin is not a downgrade
     # candidate); shadow_enabled() checked FIRST so a dark deploy extracts no
     # features on the hot path (Fable review-2 (d)/(e)).
+    # Suppressed only by a HARD pin/lock (client pin or SR hard) — a soft prefer
+    # still allows the advisory downgrade judgment, matching the anthropic /
+    # responses surfaces (Fable 3: one consistent suppression rule across handlers).
     _shadow_vsr = None
-    if model_pin is None and sr_hard is None and sr_prefer is None:
+    if model_pin is None and sr_hard is None:
         try:
             from .vsr import shadow as _shadow
             # cheap env-only force-off before the per-tenant config read so a

@@ -115,15 +115,60 @@ def sr_should_consult(tenant_id: str, conversation_id: Optional[str]) -> bool:
         return False
 
 
+# Dedicated concurrency cap for offloading the blocking SR consult from async
+# handlers, so a slow SR cannot starve Starlette's shared sync-handler threadpool
+# (Fable round2 b). Small: consults are short; saturation ⇒ the caller skips the
+# consult (fail-open), never queues. Lazily built on first use (anyio limiters must
+# be created inside a running loop context to be safe to reuse).
+_sr_limiter = None
+_sr_limiter_lock = None
+
+
+def sr_thread_limiter():
+    """The anyio CapacityLimiter for SR consult offload. Created once, reused."""
+    global _sr_limiter, _sr_limiter_lock
+    import threading as _t
+
+    import anyio
+
+    if _sr_limiter_lock is None:
+        _sr_limiter_lock = _t.Lock()
+    with _sr_limiter_lock:
+        if _sr_limiter is None:
+            _sr_limiter = anyio.CapacityLimiter(8)
+        return _sr_limiter
+
+
+def sr_eval_deadline_s() -> float:
+    """The eval consult deadline (seconds), mirrored from the eval client so the
+    async handler's fail_after can bound the offloaded call."""
+    from . import eval_client
+
+    return eval_client._deadline_s()
+
+
 def _default_is_known_model(model_id: str) -> bool:
-    """True iff `model_id` resolves to a registry entry (the identity-mapping
-    membership test decision_map uses). Never raises."""
+    """True iff `model_id` resolves to a registry entry AND is priced (the
+    identity-mapping membership test). Fable 5: this MUST match the CI gate's
+    priced+enabled predicate, so an SR decision can only identity-map to a model
+    the ledger can actually price — never one the reserve could not cost. Never
+    raises (unknown/unpriced ⇒ False ⇒ NO_DECISION, fail-open)."""
+    if not model_id:
+        return False  # empty would resolve to DEFAULT_MODEL — never identity-map it
     try:
         from ..models import resolve_model
+        from ..pricing import estimate_cost_microusd
 
-        resolve_model(model_id)
+        entry = resolve_model(model_id)
+        if entry is None:
+            return False
+        # a model the rater cannot price would break the reserve upper bound; treat
+        # it as unmappable. A trivial (1,1) estimate just proves pricing resolves
+        # for this model's pricing_key (raises otherwise).
+        estimate_cost_microusd(
+            pricing_key=entry.pricing_key, input_tokens_est=1, max_output_tokens=1)
         return True
-    except Exception:  # noqa: BLE001 — unknown model ⇒ not identity-mappable.
+    except Exception:  # noqa: BLE001 — unknown/unpriced ⇒ not identity-mappable.
         return False
 
 
@@ -132,8 +177,8 @@ def decide(
     tenant_id: str,
     session_key: Optional[str],
     requested_model: str,
-    has_tool_result: bool,
     messages: Optional[list] = None,
+    has_tool_result: bool = False,   # accepted for the RoutePort shape; unused here
     is_known_model: Optional[Callable[[str], bool]] = None,
 ) -> RouteDecision:
     """Consult the vLLM Semantic Router DECIDE surface (`POST /api/v1/eval`) and
@@ -163,7 +208,97 @@ def decide(
         from .decision_map import make_normalizer
 
         normalizer = make_normalizer(is_known_model or _default_is_known_model)
-        return eval_client.consult_eval(messages=messages, normalize=normalizer)
+        # ALWAYS soft (hard=False): an SR decision may only REORDER the servable
+        # candidate chain, never disable the cascade — so it can never turn a
+        # servable request into a 402/403 (Fable 1). A future hard-pin mode must be
+        # gated behind an explicit per-tenant policy checked HERE, not by flipping
+        # consult_eval's arg; until that policy exists, SR is soft-only.
+        return eval_client.consult_eval(messages=messages, normalize=normalizer, hard=False)
     except Exception as e:  # noqa: BLE001 — fail-open; a decide error never breaks a request.
         logger.warning("sr_decide_failed", tenant_id=tenant_id, error=str(e))
         return NO_DECISION
+
+
+# How much of a conversation to send to /api/v1/eval. The classifier only needs
+# recent context; sending the whole history bloats the POST (⇒ write-timeout ⇒
+# permanent fail-open) and widens the prompt egress. Cap to the last N messages
+# and a total char budget, and drop non-text / non-dict items (Fable 4).
+_EVAL_MAX_MESSAGES = 12
+_EVAL_MAX_CHARS = 24_000
+
+
+# Only conversational roles are sent to SR. A `tool`/`function` message's content
+# is a STRING (tool output) and would otherwise pass the str-content check, leaking
+# tool results into the prompt egress — so role is allowlisted (Fable 4 blocker).
+_EVAL_ROLES = frozenset({"user", "assistant", "system"})
+# text-part type tags across Anthropic (`text`) and OpenAI Responses (`input_text`
+# / `output_text`). Only these part types' text is extracted; everything else
+# (images, tool_use/tool_result blocks, audio) is dropped.
+_EVAL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
+
+
+def _extract_text(content) -> Optional[str]:
+    """Pull plain text from a message's content, dropping non-text parts. Accepts a
+    str (⇒ itself) or an Anthropic/OpenAI parts list (⇒ concatenated text-part
+    text). Returns None if no text (⇒ the message is skipped). Never str()-coerces
+    an unknown object (Fable 4: no arbitrary object into the prompt egress)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in _EVAL_TEXT_PART_TYPES:
+                t = part.get("text")
+                if isinstance(t, str) and t:
+                    texts.append(t)
+        return "\n".join(texts) if texts else None
+    return None
+
+
+def prepare_eval_messages(raw) -> list:
+    """Build a compact, text-only OpenAI-shaped message list for the eval consult
+    from a handler's message/input container. PURE, defensive, never raises:
+
+      * accepts a str (⇒ one user message), a list of dicts / pydantic models, or
+        anything else (⇒ []);
+      * keeps only conversational roles (user/assistant/system) — a `tool`/
+        `function` message is dropped even though its content is a string, so tool
+        outputs never reach SR (Fable 4);
+      * extracts plain text from str OR Anthropic/OpenAI text-part lists, dropping
+        images / tool blocks / arbitrary objects;
+      * keeps the LAST _EVAL_MAX_MESSAGES and trims to _EVAL_MAX_CHARS total.
+    Returns [] when nothing usable remains (⇒ decide() no-ops, fail-open)."""
+    try:
+        if isinstance(raw, str):
+            raw = [{"role": "user", "content": raw}]
+        if not isinstance(raw, list):
+            return []
+        norm = []
+        for m in raw:
+            if hasattr(m, "model_dump"):
+                m = m.model_dump()
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            if role not in _EVAL_ROLES:
+                continue  # drop tool/function/unknown roles (no tool-output egress)
+            text = _extract_text(m.get("content"))
+            if not text:
+                continue  # skip images / tool blocks / empty
+            norm.append({"role": role, "content": text})
+        norm = norm[-_EVAL_MAX_MESSAGES:]
+        # drop from the FRONT until under the char budget (keep the most recent);
+        # but if a SINGLE (last) message alone exceeds the budget, TRUNCATE its tail
+        # rather than dropping it — a lone huge user prompt is the most common case
+        # and must still reach SR (Fable round3: drop-all made SR silent there).
+        total = sum(len(m["content"]) for m in norm)
+        while len(norm) > 1 and total > _EVAL_MAX_CHARS:
+            total -= len(norm[0]["content"])
+            norm = norm[1:]
+        if norm and len(norm[0]["content"]) > _EVAL_MAX_CHARS:
+            norm[0] = {**norm[0], "content": norm[0]["content"][:_EVAL_MAX_CHARS]}
+        return norm
+    except Exception:  # noqa: BLE001 — prep must never break a request.
+        return []

@@ -74,6 +74,45 @@ def test_parse_falls_back_to_decision_name_without_recommended():
     assert parse_eval_response(body).decision_name == "reasoning"
 
 
+def test_parse_returns_ordered_deduped_candidates():
+    # recommended_models[0], decision_name, routing_decision all present + distinct
+    # ⇒ ordered candidate list; a repeat is deduped.
+    body = {"recommended_models": ["m-rec"], "decision_result": {"decision_name": "rule-x"},
+            "routing_decision": "rule-x", "model": "m-legacy"}
+    assert parse_eval_response(body).candidates == ("m-rec", "rule-x", "m-legacy")
+
+
+def test_parse_caps_candidate_length():
+    huge = "x" * 5000
+    assert len(parse_eval_response({"recommended_models": [huge]}).candidates[0]) == 256
+
+
+# ------------------------------------------------------------------ candidate fallback
+def test_consult_tries_each_candidate_until_one_maps():
+    # LIVE shape: recommended_models "sim-default" is UNmapped, but the rule name
+    # "default-route" IS mapped. consult must fall through to the rule name — the
+    # earlier "first candidate only" behaviour silently returned NO_DECISION here.
+    eval_client.set_transport_hook(lambda m, u, t: {
+        "recommended_models": ["sim-default"],
+        "decision_result": {"decision_name": "default-route"},
+        "routing_decision": "default-route"})
+    dm = {"default-route": "claude-haiku-4-5"}
+    d = eval_client.consult_eval(
+        messages=[{"role": "user", "content": "hi"}],
+        normalize=lambda n: dm.get(n))
+    assert d.prefer_model == "claude-haiku-4-5"
+
+
+def test_consult_body_size_cap_fails_open(monkeypatch):
+    # a hostile oversized body must not be processed — fail open.
+    def _huge(m, u, t):
+        raise RuntimeError("eval body exceeds size cap")
+    eval_client.set_transport_hook(_huge)
+    d = eval_client.consult_eval(messages=[{"role": "user", "content": "hi"}],
+                                 normalize=lambda n: "claude-haiku-4-5")
+    assert d is NO_DECISION
+
+
 # ------------------------------------------------------------------ decision_map
 def _known(name):
     return name in {"claude-haiku-4-5", "claude-opus-4-7"}
@@ -187,3 +226,116 @@ def test_decide_no_messages_is_noop(monkeypatch):
     d = adapter.decide(tenant_id="acme", session_key=None, requested_model="claude-opus-4-7",
                        has_tool_result=False)
     assert d is NO_DECISION
+
+
+# ------------------------------------------------------------------ prepare_eval_messages
+def test_prepare_from_string():
+    assert adapter.prepare_eval_messages("hi") == [{"role": "user", "content": "hi"}]
+
+
+def test_prepare_drops_non_text_content():
+    # tool_result / image blocks (list content) and non-dict items are dropped;
+    # only {role, str-content} survive — no base64/tool payload reaches SR.
+    raw = [
+        {"role": "user", "content": "text ok"},
+        {"role": "user", "content": [{"type": "image", "data": "AAAA"}]},  # dropped
+        {"role": "tool", "content": {"toolResult": 1}},                      # dropped
+        "not a dict",                                                          # dropped
+    ]
+    out = adapter.prepare_eval_messages(raw)
+    assert out == [{"role": "user", "content": "text ok"}]
+
+
+def test_prepare_caps_message_count_and_chars():
+    raw = [{"role": "user", "content": f"m{i}"} for i in range(50)]
+    out = adapter.prepare_eval_messages(raw)
+    assert len(out) <= 12                    # last-N cap
+    assert out[-1]["content"] == "m49"       # keeps the most recent
+
+
+def test_prepare_char_budget_trims_from_front():
+    raw = [{"role": "user", "content": "x" * 20_000},
+           {"role": "user", "content": "recent"}]
+    out = adapter.prepare_eval_messages(raw)
+    # the huge older message is trimmed so the total is under budget; recent kept.
+    assert {"role": "user", "content": "recent"} in out
+
+
+def test_prepare_garbage_is_empty():
+    assert adapter.prepare_eval_messages(12345) == []
+    assert adapter.prepare_eval_messages(None) == []
+
+
+def test_prepare_lone_huge_message_is_truncated_not_dropped():
+    # a single user prompt over the char budget must be TRUNCATED (SR still sees it),
+    # not dropped to [] (which would make SR silent on the most common case).
+    out = adapter.prepare_eval_messages([{"role": "user", "content": "x" * 100_000}])
+    assert len(out) == 1
+    assert 0 < len(out[0]["content"]) <= 24_000
+
+
+def test_prepare_drops_tool_role_even_with_string_content():
+    # a tool/function message's content is a STRING (tool output) — role allowlist
+    # must still drop it so tool results never reach SR (PII egress).
+    out = adapter.prepare_eval_messages([
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "content": "SECRET TOOL OUTPUT", "tool_call_id": "c1"},
+        {"role": "function", "content": "SECRET FN OUTPUT"},
+    ])
+    assert out == [{"role": "user", "content": "hi"}]
+
+
+def test_prepare_extracts_text_parts():
+    # Anthropic/OpenAI text-part lists are extracted; image/tool parts dropped.
+    out = adapter.prepare_eval_messages([
+        {"role": "user", "content": [
+            {"type": "text", "text": "part one"},
+            {"type": "image", "source": {"data": "BASE64"}},   # dropped
+            {"type": "input_text", "text": "part two"},
+        ]},
+    ])
+    assert out == [{"role": "user", "content": "part one\npart two"}]
+
+
+# ------------------------------------------------------------------ hard deadline (real socket)
+def test_hard_deadline_fires_on_header_slow_drip(monkeypatch):
+    """A server that accepts the connection but never sends a response must NOT
+    hang the caller past the deadline — the hard future timeout fails open.
+    Uses a real listening socket that goes silent after accept (header slow-drip /
+    stuck-before-headers is the case per-phase read timeouts cannot catch)."""
+    import socket
+    import threading as _t
+    import time as _time
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    stop = _t.Event()
+
+    def _accept_and_stall():
+        try:
+            conn, _ = srv.accept()
+            # never send anything; just hold the connection until told to stop.
+            while not stop.is_set():
+                _time.sleep(0.05)
+            conn.close()
+        except OSError:
+            pass
+
+    th = _t.Thread(target=_accept_and_stall, daemon=True)
+    th.start()
+    monkeypatch.setenv("SEMANTIC_ROUTER_BASE_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("SEMANTIC_ROUTER_EVAL_TIMEOUT_S", "0.3")
+    eval_client.reset_for_test()   # ensure a real client (no transport hook)
+
+    t0 = _time.monotonic()
+    d = eval_client.consult_eval(messages=[{"role": "user", "content": "hi"}],
+                                 normalize=lambda n: "claude-haiku-4-5")
+    elapsed = _time.monotonic() - t0
+    stop.set()
+    srv.close()
+
+    assert d is NO_DECISION                 # failed open
+    assert elapsed < 2.0, f"deadline not enforced: took {elapsed:.2f}s"

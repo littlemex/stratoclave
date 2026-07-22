@@ -640,10 +640,10 @@ def messages(
                     tenant_id=user.org_id,
                     session_key=(ctx.session_key() if ctx else None),
                     requested_model=body.model,
-                    has_tool_result=False,
-                    messages=[m.model_dump() if hasattr(m, "model_dump") else dict(m)
-                              for m in body.messages],
+                    messages=_sr.prepare_eval_messages(body.messages),
                 )
+                # SR only fills a slot SAAR left empty (SAAR先着): a hard decision
+                # takes an empty hard lock; else a prefer takes an empty prefer.
                 if _sr_decision.hard_model and saar_hard is None:
                     saar_hard = _sr_decision.hard_model
                 elif _sr_decision.prefer_model and saar_prefer is None:
@@ -651,17 +651,18 @@ def messages(
         except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
             pass
 
-    # External VSR consult (task #13). Runs ONLY when the client sent no explicit
-    # pin AND SAAR produced no hard lock (both are stronger, local signals). It
-    # is off by default (EXTERNAL_VSR_ENABLED) and version-pinned + fail-open:
-    # a missing/slow/version-skewed VSR yields no advice, routing = today. The
-    # suggestion is fed into the SAME resolver inputs as an x-sc-model-pin, so it
-    # passes the SAME allowlist/servability enforcement — the VSR is an untrusted
-    # advisor, never a bypass.
+    # External VSR consult (task #13, home-grown interim). Runs ONLY when the
+    # client sent no explicit pin AND nothing upstream (SAAR or the real SR) already
+    # decided routing (both hard AND prefer must be empty — the real SR supersedes
+    # this advisor, so if SR spoke we do NOT also consult the legacy advisor: avoids
+    # double-consult latency + a prefer conflict). Off by default
+    # (EXTERNAL_VSR_ENABLED), version-pinned, fail-open. The suggestion is fed into
+    # the SAME resolver inputs as an x-sc-model-pin, so it passes the SAME
+    # allowlist/servability enforcement — an untrusted advisor, never a bypass.
     vsr_hard = None
     vsr_decision = None   # dict attached to the reserve-time decision record
     vsr_headers = {}      # x-sc-vsr-* observational response headers
-    if model_pin is None and saar_hard is None:
+    if model_pin is None and saar_hard is None and saar_prefer is None:
         try:
             from .vsr import client as _vsr
 

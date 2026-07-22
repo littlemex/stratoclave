@@ -531,28 +531,33 @@ async def create_response(
     # servability path as a client pin; never touches money). Fail-open on all.
     if model_pin is None and saar_hard is None:
         try:
+            import anyio
+
             from .sr import adapter as _sr
 
-            if _sr.sr_should_consult(user.org_id,
-                                     ctx.session_key() if ctx else None):
-                if isinstance(body.input, str):
-                    _sr_msgs = [{"role": "user", "content": body.input}]
-                elif isinstance(body.input, list):
-                    _sr_msgs = [i if isinstance(i, dict) else {"role": "user", "content": str(i)}
-                                for i in body.input]
-                else:
-                    _sr_msgs = []
-                _sr_d = _sr.decide(
-                    tenant_id=user.org_id,
-                    session_key=(ctx.session_key() if ctx else None),
-                    requested_model=body.model,
-                    has_tool_result=False,
-                    messages=_sr_msgs,
-                )
-                if _sr_d.hard_model and saar_hard is None:
-                    saar_hard = _sr_d.hard_model
-                elif _sr_d.prefer_model and saar_prefer is None:
-                    saar_prefer = _sr_d.prefer_model
+            _sr_msgs = _sr.prepare_eval_messages(body.input)
+            if _sr_msgs and _sr.sr_should_consult(
+                    user.org_id, ctx.session_key() if ctx else None):
+                _sess = ctx.session_key() if ctx else None
+                # decide() does BLOCKING (sync httpx) I/O; this handler is async, so
+                # run it in a worker thread — calling it inline would block the event
+                # loop for up to the eval deadline and stall EVERY concurrent request
+                # on this worker (Fable 2b). Use a DEDICATED CapacityLimiter (not the
+                # shared to_thread pool, which Starlette's sync handlers also use — a
+                # slow SR would otherwise starve them, Fable round2 (b)); when the SR
+                # limiter is saturated, skip the consult rather than queue.
+                _lim = _sr.sr_thread_limiter()
+                if _lim.borrowed_tokens < _lim.total_tokens:
+                    with anyio.fail_after(_sr.sr_eval_deadline_s() + 0.5):
+                        _sr_d = await anyio.to_thread.run_sync(
+                            lambda: _sr.decide(
+                                tenant_id=user.org_id, session_key=_sess,
+                                requested_model=body.model, messages=_sr_msgs),
+                            limiter=_lim)
+                    if _sr_d.hard_model and saar_hard is None:
+                        saar_hard = _sr_d.hard_model
+                    elif _sr_d.prefer_model and saar_prefer is None:
+                        saar_prefer = _sr_d.prefer_model
         except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
             pass
 
