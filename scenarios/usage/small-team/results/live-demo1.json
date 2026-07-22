@@ -1,0 +1,372 @@
+{
+  "cost": {
+    "note": "real Bedrock token usage priced by the shipped pricer.",
+    "total_billed_microusd": 1686
+  },
+  "mode": "live-baseline",
+  "perf": {
+    "n_calls": 30,
+    "note": "N=30 raw client-side measurements; with small N we do NOT name percentiles beyond p50. LIVE BASELINE \u2014 gateway NOT in the path; a gateway-routed TTFT would be diffed against this.",
+    "ttft_ms_max": 1431.7,
+    "ttft_ms_min": 873.9,
+    "ttft_ms_p50": 1074.5,
+    "ttft_ms_raw": [
+      873.9,
+      901.0,
+      923.2,
+      937.6,
+      943.7,
+      968.3,
+      971.2,
+      977.1,
+      979.6,
+      993.7,
+      1002.1,
+      1017.8,
+      1023.0,
+      1045.4,
+      1063.8,
+      1085.2,
+      1110.0,
+      1146.2,
+      1150.4,
+      1172.6,
+      1205.9,
+      1210.6,
+      1247.3,
+      1249.3,
+      1298.3,
+      1303.9,
+      1318.2,
+      1373.3,
+      1374.3,
+      1431.7
+    ]
+  },
+  "provenance": {
+    "gateway_in_path": false,
+    "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "region": "us-east-1",
+    "reps_per_task": 3,
+    "run_id": "demo1",
+    "source": "real",
+    "timestamp": "2026-07-22T12:41:02Z"
+  },
+  "quality": {
+    "accuracy": 1.0,
+    "caveat": "workshop task set, N=10 \u2014 a mechanism demo, NOT a quality benchmark. No judge model, no similarity score.",
+    "correct": 10,
+    "graded": 10,
+    "method": "exact-match, conservative (ambiguous=not-correct)",
+    "n": 10,
+    "normalize": "norm-v1: strip + strip<=1 trailing punctuation + casefold",
+    "tap_gap": {
+      "gap": "not-implemented",
+      "issue": "scenarios/GAPS.md#quality-eval-tap",
+      "note": "This scores a checked-in task set. Feeding it from a team's REAL request/response traffic needs an eval tap (JSONL of prompt+response by span_id) the gateway does not emit yet."
+    }
+  },
+  "raw_runs": [
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 0,
+      "task_id": "arith-1",
+      "text": "391",
+      "total_ms": 1468.1,
+      "ttft_ms": 1374.3
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 1,
+      "task_id": "arith-1",
+      "text": "391",
+      "total_ms": 975.0,
+      "ttft_ms": 901.0
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 2,
+      "task_id": "arith-1",
+      "text": "391",
+      "total_ms": 1388.0,
+      "ttft_ms": 1318.2
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 0,
+      "task_id": "arith-2",
+      "text": "12",
+      "total_ms": 1124.7,
+      "ttft_ms": 1045.4
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 1,
+      "task_id": "arith-2",
+      "text": "12",
+      "total_ms": 1108.4,
+      "ttft_ms": 979.6
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 2,
+      "task_id": "arith-2",
+      "text": "12",
+      "total_ms": 970.1,
+      "ttft_ms": 873.9
+    },
+    {
+      "cost_microusd": 66,
+      "input_tokens": 36,
+      "output_tokens": 6,
+      "rep": 0,
+      "task_id": "extract-1",
+      "text": "2026",
+      "total_ms": 1337.7,
+      "ttft_ms": 1247.3
+    },
+    {
+      "cost_microusd": 66,
+      "input_tokens": 36,
+      "output_tokens": 6,
+      "rep": 1,
+      "task_id": "extract-1",
+      "text": "2026",
+      "total_ms": 1216.4,
+      "ttft_ms": 1017.8
+    },
+    {
+      "cost_microusd": 66,
+      "input_tokens": 36,
+      "output_tokens": 6,
+      "rep": 2,
+      "task_id": "extract-1",
+      "text": "2026",
+      "total_ms": 1158.1,
+      "ttft_ms": 1063.8
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 0,
+      "task_id": "extract-2",
+      "text": "Not Found",
+      "total_ms": 1304.3,
+      "ttft_ms": 1110.0
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 1,
+      "task_id": "extract-2",
+      "text": "Not Found",
+      "total_ms": 1177.1,
+      "ttft_ms": 1085.2
+    },
+    {
+      "cost_microusd": 52,
+      "input_tokens": 27,
+      "output_tokens": 5,
+      "rep": 2,
+      "task_id": "extract-2",
+      "text": "Not Found",
+      "total_ms": 1060.0,
+      "ttft_ms": 968.3
+    },
+    {
+      "cost_microusd": 59,
+      "input_tokens": 24,
+      "output_tokens": 7,
+      "rep": 0,
+      "task_id": "format-1",
+      "text": "STRATOCLAVE",
+      "total_ms": 1212.7,
+      "ttft_ms": 1205.9
+    },
+    {
+      "cost_microusd": 59,
+      "input_tokens": 24,
+      "output_tokens": 7,
+      "rep": 1,
+      "task_id": "format-1",
+      "text": "STRATOCLAVE",
+      "total_ms": 992.7,
+      "ttft_ms": 937.6
+    },
+    {
+      "cost_microusd": 59,
+      "input_tokens": 24,
+      "output_tokens": 7,
+      "rep": 2,
+      "task_id": "format-1",
+      "text": "STRATOCLAVE",
+      "total_ms": 1007.7,
+      "ttft_ms": 923.2
+    },
+    {
+      "cost_microusd": 59,
+      "input_tokens": 29,
+      "output_tokens": 6,
+      "rep": 0,
+      "task_id": "arith-3",
+      "text": "1024",
+      "total_ms": 1138.3,
+      "ttft_ms": 971.2
+    },
+    {
+      "cost_microusd": 59,
+      "input_tokens": 29,
+      "output_tokens": 6,
+      "rep": 1,
+      "task_id": "arith-3",
+      "text": "1024",
+      "total_ms": 1437.9,
+      "ttft_ms": 1303.9
+    },
+    {
+      "cost_microusd": 59,
+      "input_tokens": 29,
+      "output_tokens": 6,
+      "rep": 2,
+      "task_id": "arith-3",
+      "text": "1024",
+      "total_ms": 1572.4,
+      "ttft_ms": 1431.7
+    },
+    {
+      "cost_microusd": 61,
+      "input_tokens": 31,
+      "output_tokens": 6,
+      "rep": 0,
+      "task_id": "extract-3",
+      "text": "example.com",
+      "total_ms": 1171.6,
+      "ttft_ms": 1023.0
+    },
+    {
+      "cost_microusd": 61,
+      "input_tokens": 31,
+      "output_tokens": 6,
+      "rep": 1,
+      "task_id": "extract-3",
+      "text": "example.com",
+      "total_ms": 1270.3,
+      "ttft_ms": 1146.2
+    },
+    {
+      "cost_microusd": 61,
+      "input_tokens": 31,
+      "output_tokens": 6,
+      "rep": 2,
+      "task_id": "extract-3",
+      "text": "example.com",
+      "total_ms": 1305.5,
+      "ttft_ms": 1210.6
+    },
+    {
+      "cost_microusd": 51,
+      "input_tokens": 26,
+      "output_tokens": 5,
+      "rep": 0,
+      "task_id": "format-2",
+      "text": "cba",
+      "total_ms": 1344.1,
+      "ttft_ms": 1249.3
+    },
+    {
+      "cost_microusd": 51,
+      "input_tokens": 26,
+      "output_tokens": 5,
+      "rep": 1,
+      "task_id": "format-2",
+      "text": "cba",
+      "total_ms": 1089.4,
+      "ttft_ms": 977.1
+    },
+    {
+      "cost_microusd": 51,
+      "input_tokens": 26,
+      "output_tokens": 5,
+      "rep": 2,
+      "task_id": "format-2",
+      "text": "cba",
+      "total_ms": 1053.0,
+      "ttft_ms": 943.7
+    },
+    {
+      "cost_microusd": 55,
+      "input_tokens": 25,
+      "output_tokens": 6,
+      "rep": 0,
+      "task_id": "arith-4",
+      "text": "5040",
+      "total_ms": 1087.1,
+      "ttft_ms": 1002.1
+    },
+    {
+      "cost_microusd": 55,
+      "input_tokens": 25,
+      "output_tokens": 6,
+      "rep": 1,
+      "task_id": "arith-4",
+      "text": "5040",
+      "total_ms": 1390.4,
+      "ttft_ms": 1298.3
+    },
+    {
+      "cost_microusd": 55,
+      "input_tokens": 25,
+      "output_tokens": 6,
+      "rep": 2,
+      "task_id": "arith-4",
+      "text": "5040",
+      "total_ms": 1515.5,
+      "ttft_ms": 1373.3
+    },
+    {
+      "cost_microusd": 55,
+      "input_tokens": 30,
+      "output_tokens": 5,
+      "rep": 0,
+      "task_id": "extract-4",
+      "text": "sleeps",
+      "total_ms": 1247.0,
+      "ttft_ms": 1150.4
+    },
+    {
+      "cost_microusd": 55,
+      "input_tokens": 30,
+      "output_tokens": 5,
+      "rep": 1,
+      "task_id": "extract-4",
+      "text": "sleeps",
+      "total_ms": 1085.3,
+      "ttft_ms": 993.7
+    },
+    {
+      "cost_microusd": 55,
+      "input_tokens": 30,
+      "output_tokens": 5,
+      "rep": 2,
+      "task_id": "extract-4",
+      "text": "sleeps",
+      "total_ms": 1255.1,
+      "ttft_ms": 1172.6
+    }
+  ],
+  "scenario": "usage/small-team"
+}

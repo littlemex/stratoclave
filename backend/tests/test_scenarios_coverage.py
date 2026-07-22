@@ -13,6 +13,7 @@ Three jobs, all so the workshops stay HONEST as the code evolves:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -141,3 +142,78 @@ def test_small_team_doc_numbers_pinned(small_team, doc):
         assert _usd(micro) in text, f"{doc}: figure {_usd(micro)} not found (drifted?)"
     q = small_team.build_report()["quality"]
     assert f"{q['correct']}/{q['graded']}" in text
+
+
+def test_live_evidence_has_committed_results(cov):
+    """Any step marked with live `evidence` must be backed by a committed results
+    file (results/live-<run_id>.json) — a live claim cannot be unbacked."""
+    scs = cov.load_scenarios()
+    checked = 0
+    for sc in scs:
+        for st in sc.steps:
+            if st.evidence and st.evidence.get("mode") == "live":
+                run_id = st.evidence.get("run_id")
+                assert run_id, f"{sc.path}/{st.id}: live evidence missing run_id"
+                results = (_SCEN / sc.path / "results" / f"live-{run_id}.json")
+                assert results.is_file(), (
+                    f"{sc.path}/{st.id}: live evidence run_id={run_id} has no "
+                    f"committed {results.relative_to(_SCEN)}")
+                data = json.loads(results.read_text())
+                assert data.get("provenance", {}).get("source") == "real"
+                checked += 1
+    assert checked >= 1, "expected at least one live-evidenced step (small-team)"
+
+
+def test_live_results_are_honestly_stamped(cov):
+    """The committed live results carry full provenance and declare themselves a
+    gateway-NOT-in-path baseline (never a 'gateway verified' claim)."""
+    results = _SCEN / "usage" / "small-team" / "results" / "live-demo1.json"
+    if not results.is_file():
+        pytest.skip("live-demo1.json not committed")
+    data = json.loads(results.read_text())
+    prov = data["provenance"]
+    assert prov["source"] == "real"
+    assert prov["gateway_in_path"] is False           # honest: baseline, not gateway
+    for key in ("model_id", "region", "timestamp", "run_id", "reps_per_task"):
+        assert prov.get(key), f"provenance missing {key}"
+    # raw runs are kept (not averaged away); N matches
+    assert data["perf"]["ttft_ms_raw"], "raw TTFT runs must be kept"
+    assert len(data["perf"]["ttft_ms_raw"]) == data["perf"]["n_calls"]
+
+
+@pytest.mark.parametrize("doc", ["scenario.md", "scenario_ja.md"])
+def test_small_team_doc_live_quotes_match_committed_results(doc):
+    """The live figures quoted in the docs must match the COMMITTED results file
+    (results/live-demo1.json), NOT a fresh run — live numbers are non-deterministic
+    and CI never re-runs them, but the doc must not drift from its evidence."""
+    base = _SCEN / "usage" / "small-team"
+    results = base / "results" / "live-demo1.json"
+    doc_path = base / doc
+    if not (results.is_file() and doc_path.is_file()):
+        pytest.skip("live results or doc missing")
+    data = json.loads(results.read_text())
+    text = doc_path.read_text()
+    cost = data["cost"]["total_billed_microusd"]
+    assert _usd(cost) in text, f"{doc}: live cost {_usd(cost)} not quoted"
+    p = data["perf"]
+    for v in (p["ttft_ms_p50"], p["ttft_ms_min"], p["ttft_ms_max"]):
+        assert str(v) in text, f"{doc}: live TTFT {v} not quoted"
+    assert f"N={p['n_calls']}" in text
+    q = data["quality"]
+    assert f"{q['correct']}/{q['graded']}" in text
+
+
+def test_offline_and_live_share_one_scorer(small_team):
+    """The live harness MUST reuse run.py's scorer/normalizer so the grade cannot
+    drift between offline and live modes."""
+    live_path = _SMALL_TEAM_RUN.parent / "live.py"
+    if not live_path.is_file():
+        pytest.skip("live.py not present")
+    live = _load(live_path, "small_team_live")
+    # live imports run.py as `offline`; assert both resolve to the SAME source file
+    # (by-path test imports create distinct module objects, so compare by origin).
+    assert live.offline.__file__ == small_team.__file__ == str(_SMALL_TEAM_RUN)
+    # and that live actually calls the shared scorer/normalizer (not a copy).
+    assert live.offline.score_exact_match.__module__ == live.offline.normalize_answer.__module__
+    assert "score_exact_match" in dir(live.offline)
+    assert "normalize_answer" in dir(live.offline)

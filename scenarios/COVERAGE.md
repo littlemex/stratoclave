@@ -8,24 +8,26 @@ What each workshop scenario exercises, and — honestly — which steps run on s
 
 | State | Steps | Meaning |
 |---|---|---|
-| `covered` | 2 | runs today on shipped, all-green artifacts |
+| `covered` | 4 | runs today on shipped, all-green artifacts |
 | `covered-elsewhere` | 0 | shipped; a unit/formal test owns the assertion |
 | `not-implemented` | 2 | a gap — carries a tracking issue (see below) |
 | `user-responsibility` | 2 | out of scope by the responsibility boundary |
-| **total** | **6** | |
+| **total** | **8** | |
 
 ## By scenario
 
 ### `usage/small-team` — A small team on one shared budget pool (user)
 
-| Step | Axis | Capability | State | Notes |
-|---|---|---|---|---|
-| cost-savings | cost | savings-certificate | `covered` | Real Savings Certificate engine folds the team's VSR-acted traffic into a counterfactual net saving (escalation subtracted, potential kept separate, quality.measured=false). Runs offline today. |
-| cost-per-user-attribution | cost | per-user-cost-split | `user-responsibility` | Splitting the shared-pool spend per team member for chargeback is the operator's accounting choice; the ledger records span_id + tenant, the per-user rollup policy is theirs to define. |
-| perf-ttft-tpot | perf | token-timing | `not-implemented` | TTFT / TPOT are not emitted. The gateway surfaces only ledger_transact_latency (the billing write). The scenario shows this gap rather than inventing a number. (scenarios/GAPS.md#perf-token-timing) |
-| quality-exact-match | quality | exact-match-scorer | `covered` | A tiny, deterministic exact-match scorer runs in run.py — conservative (ambiguous = not-correct), N stamped, no judge model, no similarity. It scores a CHECKED-IN task set (the scoring mechanism, not a benchmark). |
-| quality-eval-tap | quality | eval-tap | `not-implemented` | Feeding the scorer from a team's REAL request/response traffic needs an eval tap (prompt+response JSONL by span_id) the gateway does not emit yet. (scenarios/GAPS.md#quality-eval-tap) |
-| quality-acceptance-bar | quality | quality-judgement | `user-responsibility` | Deciding whether the routed traffic is good ENOUGH (the acceptance bar, the representative task set) is the operator's eval — Stratoclave provides the scoring fold, never the quality claim. |
+| Step | Axis | Capability | State | Evidence | Notes |
+|---|---|---|---|---|---|
+| cost-savings | cost | savings-certificate | `covered` | — | Real Savings Certificate engine folds the team's VSR-acted traffic into a counterfactual net saving (escalation subtracted, potential kept separate, quality.measured=false). Runs offline today. |
+| cost-live-billing | cost | real-token-pricing | `covered` | live 2026-07-22 (N=30, run=demo1) | live.py prices REAL Bedrock token usage (from message_delta, not estimated) with the shipped pricer. Verified live: $0.001686 over 30 calls. LIVE BASELINE — gateway not in path. |
+| cost-per-user-attribution | cost | per-user-cost-split | `user-responsibility` | — | Splitting the shared-pool spend per team member for chargeback is the operator's accounting choice; the ledger records span_id + tenant, the per-user rollup policy is theirs to define. |
+| perf-ttft-client | perf | client-side-token-timing | `covered` | live 2026-07-22 (N=30, run=demo1) | TTFT / TPOT ARE measurable client-side from the streaming response. Verified live against real Bedrock: TTFT p50=1074.5ms (N=30, raw kept). LIVE BASELINE, gateway not in path. |
+| perf-ttft-gateway-telemetry | perf | gateway-token-timing | `not-implemented` | — | The GATEWAY does not emit first-token / inter-token timing as telemetry (only ledger_transact_latency, the billing write). Diffing client-observed TTFT against a gateway-observed one — to attribute gateway overhead — needs that hook. This is the real gap the live baseline makes concrete. (scenarios/GAPS.md#perf-token-timing) |
+| quality-exact-match | quality | exact-match-scorer | `covered` | live 2026-07-22 (N=10, run=demo1) | A tiny, deterministic exact-match scorer (conservative, N stamped, no judge model, no similarity, norm-v1). Offline it scores a checked-in set (8/10); live.py scores REAL haiku output (10/10, N=10) — same shared scorer. The offline/live gap (8 vs 10) is itself the lesson: the real model formatted "1024" without the comma the canned fixture assumed. |
+| quality-eval-tap | quality | eval-tap | `not-implemented` | — | Feeding the scorer from a team's REAL request/response traffic needs an eval tap (prompt+response JSONL by span_id) the gateway does not emit yet. (scenarios/GAPS.md#quality-eval-tap) |
+| quality-acceptance-bar | quality | quality-judgement | `user-responsibility` | — | Deciding whether the routed traffic is good ENOUGH (the acceptance bar, the representative task set) is the operator's eval — Stratoclave provides the scoring fold, never the quality claim. |
 
 ## Roadmap (from `not-implemented` gaps)
 
@@ -34,5 +36,5 @@ Gaps ranked by how many scenarios hit them (shared gaps are highest-leverage to 
 | Capability | Hit by | Scenarios |
 |---|---|---|
 | eval-tap | 1 | usage/small-team/quality-eval-tap |
-| token-timing | 1 | usage/small-team/perf-ttft-tpot |
+| gateway-token-timing | 1 | usage/small-team/perf-ttft-gateway-telemetry |
 

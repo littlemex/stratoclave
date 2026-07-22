@@ -102,22 +102,37 @@ def perf_axis() -> dict:
 # ---------------------------------------------------------------------------
 # QUALITY axis — a tiny EXACT-MATCH scorer (honest by construction).
 # ---------------------------------------------------------------------------
+# Versioned, ANSWER-INDEPENDENT normalization (Fable live-verify review): the ONLY
+# three operations allowed before exact-match, fixed as part of the task spec so
+# scoring is identical offline and live. Anything beyond these (substring match,
+# regex extraction, LLM judge) is a proxy — forbidden. Both run.py (offline) and
+# live.py MUST import THIS function so the grade never drifts between modes.
+NORMALIZE_VERSION = "norm-v1: strip + strip<=1 trailing punctuation + casefold"
+
+
+def normalize_answer(s: str) -> str:
+    s = (s or "").strip()
+    if s and s[-1] in ".!?,;:":       # strip at most ONE trailing punctuation mark
+        s = s[:-1].strip()
+    return s.casefold()               # case-insensitive (answer-independent)
+
+
 def score_exact_match(records: list[dict]) -> dict:
     """Pure, conservative accuracy fold over a deterministic task set. `expected`
-    is the exact string; `answer` is what a model returned (checked-in here so the
-    scenario is reproducible offline). Conservative bias: a blank/ambiguous answer
-    is counted NOT correct, never given the benefit of the doubt. N and the method
-    are stamped so this can never be read as a quality benchmark."""
+    is the exact string; `answer` is what a model returned (checked-in here for the
+    offline mode; supplied live by live.py). Conservative bias: a blank/ambiguous
+    answer is counted NOT correct, never given the benefit of the doubt. N and the
+    method are stamped so this can never be read as a quality benchmark."""
     n = len(records)
     correct = 0
     graded = 0
     for r in records:
-        ans = (r.get("answer") or "").strip()
-        exp = (r.get("expected") or "").strip()
+        ans = normalize_answer(r.get("answer") or "")
+        exp = normalize_answer(r.get("expected") or "")
         if not exp:
             continue                    # not a gradable item
         graded += 1
-        # exact match only; ambiguity falls to NOT correct (conservative).
+        # exact match (post-normalization) only; ambiguity falls to NOT correct.
         if ans and ans == exp:
             correct += 1
     return {
@@ -126,6 +141,7 @@ def score_exact_match(records: list[dict]) -> dict:
         "correct": correct,
         "accuracy": (correct / graded) if graded else None,
         "method": "exact-match, conservative (ambiguous=not-correct)",
+        "normalize": NORMALIZE_VERSION,
         "caveat": (f"workshop task set, N={graded} — a mechanism demo, NOT a "
                    "quality benchmark. No judge model, no similarity score."),
         "tap_gap": {

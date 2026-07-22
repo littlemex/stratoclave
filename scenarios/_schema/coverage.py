@@ -55,6 +55,11 @@ class Step:
     note: str = ""
     issue: Optional[str] = None
     measures: bool = False    # does the step's prose claim a measurement?
+    # `evidence` is ORTHOGONAL to `state` (Fable live-verify review): state is what
+    # the scenario is DESIGNED to cover; evidence records that a LIVE run actually
+    # exercised it. A dict like {mode: live, date, region, n, run_id}. Never a 5th
+    # state — live-ness is a separate axis from coverage design.
+    evidence: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,10 @@ def _parse_scenario(path: str, raw: dict[str, Any]) -> Scenario:
             raise CoverageError(
                 f"{path}: step {s.get('id', i)} has invalid state {state!r} "
                 f"(valid: {sorted(VALID_STATES)})")
+        ev = s.get("evidence")
+        if ev is not None and not isinstance(ev, dict):
+            raise CoverageError(
+                f"{path}: step {s.get('id', i)} evidence must be a mapping")
         steps.append(Step(
             id=str(s.get("id", f"step-{i}")),
             axis=str(s.get("axis", "")),
@@ -97,6 +106,7 @@ def _parse_scenario(path: str, raw: dict[str, Any]) -> Scenario:
             note=str(s.get("note", "")),
             issue=(str(s["issue"]) if s.get("issue") else None),
             measures=bool(s.get("measures", False)),
+            evidence=ev,
         ))
     if not steps:
         raise CoverageError(f"{path}: scenario {sid!r} has no steps")
@@ -193,16 +203,20 @@ def render_matrix(scenarios: list[Scenario]) -> str:
     for sc in scenarios:
         lines.append(f"### `{sc.path}` — {sc.title} ({sc.audience})")
         lines.append("")
-        lines.append("| Step | Axis | Capability | State | Notes |")
-        lines.append("|---|---|---|---|---|")
+        lines.append("| Step | Axis | Capability | State | Evidence | Notes |")
+        lines.append("|---|---|---|---|---|---|")
         for st in sc.steps:
             # collapse any internal newlines (folded YAML notes) so the markdown
             # table cell stays on one line.
             note = " ".join(st.note.split())
             if st.issue:
                 note = (note + " " if note else "") + f"({st.issue})"
+            ev = "—"
+            if st.evidence:
+                ev = (f"live {st.evidence.get('date', '?')} "
+                      f"(N={st.evidence.get('n', '?')}, run={st.evidence.get('run_id', '?')})")
             lines.append(
-                f"| {st.id} | {st.axis} | {st.capability} | `{st.state}` | {note} |")
+                f"| {st.id} | {st.axis} | {st.capability} | `{st.state}` | {ev} | {note} |")
         lines.append("")
     # Roadmap: every not-implemented gap, grouped by capability so a gap hit by
     # multiple scenarios sorts to the top (highest-leverage to implement).

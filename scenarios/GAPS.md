@@ -15,18 +15,23 @@ coverage, not listed here.
 
 ## perf-token-timing
 
-**Wanted:** per-request **TTFT** (time to first token) and **TPOT** (time per
-output token), emitted as telemetry the way `ledger_transact_latency` already is.
+**Already shown (live baseline):** TTFT/TPOT *are* measurable **client-side** —
+`scenarios/usage/small-team/live.py` measures them against real Bedrock (committed
+evidence: `results/live-demo1.json`, TTFT p50≈1075ms, N=30). So the workshop does
+NOT lack a perf number.
 
-**Today:** the streaming path (`backend/mvp/anthropic.py::_stream_messages`)
-yields frames but timestamps neither the first token nor inter-token gaps. The
-only latency the gateway emits is `ledger_transact_latency` — the billing write,
-not token timing. A perf workshop therefore cannot report TTFT/TPOT; it can only
-show the billing-write latency and name this gap.
+**The actual gap — gateway-side timing telemetry:** the streaming path
+(`backend/mvp/anthropic.py::_stream_messages`) yields frames but timestamps neither
+the first token nor inter-token gaps, so the GATEWAY cannot emit its own TTFT. The
+only latency it emits is `ledger_transact_latency` (the billing write). Without a
+gateway-observed TTFT you cannot compute **gateway overhead = gateway-TTFT −
+client-TTFT** — the number that would justify (or indict) putting the proxy in the
+path.
 
 **Smallest honest first step:** a token-timing hook on the stream generator that
 records first-token wall-clock and an inter-token histogram onto the existing
-span, behind the same telemetry seam. Load generation, SLO judgement, and
+span, behind the same telemetry seam as `ledger_transact_latency`. The client
+baseline already exists to diff against. Load generation, SLO judgement, and
 availability targets remain the operator's responsibility.
 
 ## quality-eval-tap

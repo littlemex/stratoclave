@@ -1,0 +1,5 @@
+# Live-run outputs are non-deterministic real-Bedrock measurements. One sample
+# run is committed as evidence (see each scenario's results/); further runs are
+# ignored so re-running the harness never dirties the tree.
+usage/small-team/results/live-*.json
+!usage/small-team/results/live-demo1.json
