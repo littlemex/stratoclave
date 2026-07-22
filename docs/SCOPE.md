@@ -142,12 +142,18 @@ error:
   formally-proven charge of record is a different category of capability.
 
 The three **weapons** LiteLLM does not have, all deriving from the strength of
-"fact confirmation":
+"fact confirmation". For a claim-by-claim map of **how far each is verified today**
+(formal proof / gateway-live / direct baseline / moto·in-process / unverified),
+with commit SHAs and the exact limits of each measurement, see
+[EVIDENCE.md](EVIDENCE.md):
 
 1. **A formally-proven billing ledger.** LiteLLM's cost tracking is approximate
    observability that cannot stand as a charge of record. A pre-authorized,
    exact, Z3-proven ledger is the "buy" side of build-vs-buy for any product
-   that bills tenants for LLM usage.
+   that bills tenants for LLM usage. Its in-flight migration (the PENDING
+   protocol, which removes a permanent two-path flag) is being landed under a
+   Z3 joint-transition **equivalence** proof — the old and new money paths are
+   proven to move money identically before the old one is deleted (`27d86db`).
 2. **The decision log as a first-class data product.** LiteLLM's logs are
    operational logs, not schema'd, trainable decision records with a defined
    export contract.
@@ -182,7 +188,14 @@ CLAIMED until it is measured. See
 [docs/design/vsr-savings-certificate.md](./design/vsr-savings-certificate.md).
 This is how Stratoclave attacks LiteLLM **head-on**: not by matching its provider
 breadth (absorbed via the shim below), but by turning "cheaper routing" from a
-claim into a certificate.
+claim into a certificate. The loop has been exercised **through the gateway on real
+Bedrock traffic** (`/v1/messages`: auth → reserve → real Bedrock → settle →
+ledger): the gateway settled a **charge-of-record of $0.000492** read back from the
+ledger, against a client-side estimate of $0.000562 — the number only a gateway
+with a real ledger can produce. That run is `gateway-live` but **in-process + moto**
+(real DynamoDB and a deployed path are not yet exercised); see
+[EVIDENCE.md](EVIDENCE.md) and a runnable offline demo in
+[demo/savings-vs-litellm.md](demo/savings-vs-litellm.md).
 
 **The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a thin
 compatibility shim for the non-OpenAI-compatible providers (weeks–months), and

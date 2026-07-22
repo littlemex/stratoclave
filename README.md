@@ -576,6 +576,11 @@ credentials and the client calls Bedrock directly. **LiteLLM** is a
 general-purpose proxy across 100+ providers. **Stratoclave** is a focused,
 AWS-native gateway that trades breadth for depth of per-tenant control.
 
+> For **how far each differentiating claim below is actually verified today**
+> (formal proof / gateway-live / direct baseline / moto·in-process / unverified),
+> with commit SHAs and the exact limits of every measurement, see the reach-map:
+> [`docs/EVIDENCE.md`](./docs/EVIDENCE.md).
+
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
@@ -672,6 +677,7 @@ Surface the router's savings to customers only *after* the rating layer lands �
 |-----------------------------------------------------------------|--------------------------------------------------------------|
 | [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | First run: install the CLI, sign in, make a call.            |
 | [`docs/SCOPE.md`](./docs/SCOPE.md)                              | What Stratoclave is / is NOT, and the rules for deciding whether a feature belongs. |
+| [`docs/EVIDENCE.md`](./docs/EVIDENCE.md)                        | Reach-map: each differentiating claim, its strongest evidence today, and what that evidence does not cover (with commit SHAs). |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)                | Components, data model, auth flows, invariants.              |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)                    | CDK stacks, environment variables, day-2 operations.         |
 | [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md)                  | Tenant / user / credit / trusted-account management.         |
