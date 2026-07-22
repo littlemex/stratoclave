@@ -213,7 +213,7 @@ def render_matrix(scenarios: list[Scenario]) -> str:
                 note = (note + " " if note else "") + f"({st.issue})"
             ev = "—"
             if st.evidence:
-                ev = (f"live {st.evidence.get('date', '?')} "
+                ev = (f"{st.evidence.get('mode', 'live')} {st.evidence.get('date', '?')} "
                       f"(N={st.evidence.get('n', '?')}, run={st.evidence.get('run_id', '?')})")
             lines.append(
                 f"| {st.id} | {st.axis} | {st.capability} | `{st.state}` | {ev} | {note} |")

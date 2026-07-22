@@ -29,7 +29,7 @@ the next capabilities to build (see [`GAPS.md`](GAPS.md)).
 
 | Path | Audience | Axes | Read |
 |---|---|---|---|
-| [`usage/small-team`](usage/small-team/scenario.md) ([日本語](usage/small-team/scenario_ja.md)) | user | cost · perf · quality — offline + a real-Bedrock `--live` baseline | A three-person team on one shared budget pool |
+| [`usage/small-team`](usage/small-team/scenario.md) ([日本語](usage/small-team/scenario_ja.md)) | user | cost · perf · quality — offline + real-Bedrock **through the gateway** (charge-of-record, paired overhead) + a direct baseline | A three-person team on one shared budget pool |
 
 Planned (folders to come, same four-file shape): `admin/setup-tenant` (build-out),
 more `usage/*`, `perf/*`, `quality/*`.

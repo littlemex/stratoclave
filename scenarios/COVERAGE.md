@@ -8,11 +8,11 @@ What each workshop scenario exercises, and — honestly — which steps run on s
 
 | State | Steps | Meaning |
 |---|---|---|
-| `covered` | 4 | runs today on shipped, all-green artifacts |
+| `covered` | 5 | runs today on shipped, all-green artifacts |
 | `covered-elsewhere` | 0 | shipped; a unit/formal test owns the assertion |
 | `not-implemented` | 2 | a gap — carries a tracking issue (see below) |
 | `user-responsibility` | 2 | out of scope by the responsibility boundary |
-| **total** | **8** | |
+| **total** | **9** | |
 
 ## By scenario
 
@@ -21,11 +21,12 @@ What each workshop scenario exercises, and — honestly — which steps run on s
 | Step | Axis | Capability | State | Evidence | Notes |
 |---|---|---|---|---|---|
 | cost-savings | cost | savings-certificate | `covered` | — | Real Savings Certificate engine folds the team's VSR-acted traffic into a counterfactual net saving (escalation subtracted, potential kept separate, quality.measured=false). Runs offline today. |
-| cost-live-billing | cost | real-token-pricing | `covered` | live 2026-07-22 (N=30, run=demo1) | live.py prices REAL Bedrock token usage (from message_delta, not estimated) with the shipped pricer. Verified live: $0.001686 over 30 calls. LIVE BASELINE — gateway not in path. |
+| cost-gateway-charge-of-record | cost | gateway-charge-of-record | `covered` | live-gateway 2026-07-22 (N=10, run=gw1) | THE gateway-path number: /v1/messages ran auth -> reserve -> real Bedrock -> settle -> ledger, and the CHARGE-OF-RECORD the gateway settled was read back from the ledger ($0.000492 over 10 reqs, vs $0.000562 client-side estimate). transport=in-process-asgi, ledger=moto (real DynamoDB behaviour not exercised). |
+| cost-baseline-billing | cost | real-token-pricing | `covered` | live 2026-07-22 (N=30, run=demo1) | baseline_direct.py prices REAL Bedrock token usage (message_delta, not estimated) with the shipped pricer — the DIRECT-path measuring stick ($0.001686 over 30 calls). Gateway NOT in path; verifies the pricer, not Stratoclave. Diffed against the gateway charge-of-record above. |
 | cost-per-user-attribution | cost | per-user-cost-split | `user-responsibility` | — | Splitting the shared-pool spend per team member for chargeback is the operator's accounting choice; the ledger records span_id + tenant, the per-user rollup policy is theirs to define. |
-| perf-ttft-client | perf | client-side-token-timing | `covered` | live 2026-07-22 (N=30, run=demo1) | TTFT / TPOT ARE measurable client-side from the streaming response. Verified live against real Bedrock: TTFT p50=1074.5ms (N=30, raw kept). LIVE BASELINE, gateway not in path. |
-| perf-ttft-gateway-telemetry | perf | gateway-token-timing | `not-implemented` | — | The GATEWAY does not emit first-token / inter-token timing as telemetry (only ledger_transact_latency, the billing write). Diffing client-observed TTFT against a gateway-observed one — to attribute gateway overhead — needs that hook. This is the real gap the live baseline makes concrete. (scenarios/GAPS.md#perf-token-timing) |
-| quality-exact-match | quality | exact-match-scorer | `covered` | live 2026-07-22 (N=10, run=demo1) | A tiny, deterministic exact-match scorer (conservative, N stamped, no judge model, no similarity, norm-v1). Offline it scores a checked-in set (8/10); live.py scores REAL haiku output (10/10, N=10) — same shared scorer. The offline/live gap (8 vs 10) is itself the lesson: the real model formatted "1024" without the comma the canned fixture assumed. |
+| perf-ttft-gateway-path | perf | gateway-path-token-timing | `covered` | live-gateway 2026-07-22 (N=10, run=gw1) | TTFT/TPOT measured on the GATEWAY path (/v1/messages SSE) vs the direct path, PAIRED in the same run: gateway p50=2384ms, direct p50=2089ms, paired overhead median 248.7ms (N=10, point estimate; auth+reserve+ASGI, network excluded — transport=in-process-asgi). N is small: no distribution/significance claim. |
+| perf-ttft-gateway-telemetry | perf | gateway-emitted-token-timing | `not-implemented` | — | We measured gateway TTFT from the CLIENT. The gateway itself does not EMIT first-token / inter-token timing as telemetry (only ledger_transact_latency). Attributing overhead from the gateway's own metrics (not a client stopwatch) needs that hook — the concrete gap this run makes visible. (scenarios/GAPS.md#perf-token-timing) |
+| quality-exact-match | quality | exact-match-scorer | `covered` | live-gateway 2026-07-22 (N=10, run=gw1) | A tiny, deterministic exact-match scorer (conservative, N stamped, no judge model, no similarity, norm-v1). Offline it scores a checked-in set (8/10); the GATEWAY-path response scores 10/10 (N=10) — same shared scorer. The offline/live gap (8 vs 10) is itself the lesson: the real model formatted "1024" without the comma the canned fixture assumed. |
 | quality-eval-tap | quality | eval-tap | `not-implemented` | — | Feeding the scorer from a team's REAL request/response traffic needs an eval tap (prompt+response JSONL by span_id) the gateway does not emit yet. (scenarios/GAPS.md#quality-eval-tap) |
 | quality-acceptance-bar | quality | quality-judgement | `user-responsibility` | — | Deciding whether the routed traffic is good ENOUGH (the acceptance bar, the representative task set) is the operator's eval — Stratoclave provides the scoring fold, never the quality claim. |
 
@@ -36,5 +37,5 @@ Gaps ranked by how many scenarios hit them (shared gaps are highest-leverage to 
 | Capability | Hit by | Scenarios |
 |---|---|---|
 | eval-tap | 1 | usage/small-team/quality-eval-tap |
-| gateway-token-timing | 1 | usage/small-team/perf-ttft-gateway-telemetry |
+| gateway-emitted-token-timing | 1 | usage/small-team/perf-ttft-gateway-telemetry |
 

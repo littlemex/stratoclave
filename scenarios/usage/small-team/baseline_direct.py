@@ -1,9 +1,16 @@
-"""LIVE (real-Bedrock) baseline verification for the small-team workshop.
+"""DIRECT-Bedrock BASELINE for the small-team workshop — the measuring stick.
 
-This is the `--live` companion to run.py's offline mode. It drives the SAME 10
-tasks and the SAME conservative exact-match scorer (imported from run.py, so the
-grade can never drift between modes) against REAL Bedrock, measuring all three
-axes on real traffic:
+    path: direct-bedrock-no-gateway
+
+*** This alone verifies NOTHING about Stratoclave. *** It calls Bedrock DIRECTLY,
+with the gateway NOT in the path, so it measures only the measurement method and
+the pricer against real tokens. Its ONLY purpose is to be the baseline that
+`live_gateway.py` diffs against, so "gateway overhead = gateway-path − direct-path"
+has a meaning. Anyone reading a number from here as a Stratoclave result is reading
+it wrong (the CLI prints a stderr warning to that effect).
+
+It drives the SAME 10 tasks and the SAME conservative exact-match scorer (imported
+from run.py, so the grade can never drift between modes) against REAL Bedrock:
 
   COST     real token usage (from Bedrock's own message_delta usage — never
            estimated) priced by the shipped pricer -> micro-USD.
@@ -12,9 +19,7 @@ axes on real traffic:
   QUALITY  the real model output, scored by the shared conservative exact-match.
 
 HONESTY (Fable live-verify review — enforced, not just documented):
-  * This is a LIVE BASELINE, gateway NOT in the path. It verifies the measurement
-    method and the pricer against real tokens — NOT "Stratoclave gateway verified".
-    The value is that a gateway-routed TTFT can later be diffed against THIS.
+  * DIRECT path, gateway NOT involved — a measuring stick, not a verification.
   * Non-determinism is kept honest: every raw run is saved, N is stamped, and with
     small N we do NOT name percentiles — we print the raw values and p50 only.
   * Provenance (source=real, model_id, region, timestamp, N, run_id) is stamped on
@@ -23,7 +28,7 @@ HONESTY (Fable live-verify review — enforced, not just documented):
   * NEVER run in CI. Opt-in only, and it costs real (tiny) money.
 
     AWS_PROFILE=... AWS_REGION=us-east-1 \
-        python scenarios/usage/small-team/live.py --run-id demo1
+        python scenarios/usage/small-team/baseline_direct.py --run-id demo1
 
 Requires AWS credentials with Bedrock access. Output: prints a report and writes
 results/live-<run_id>.json (git-ignored) next to this file.
@@ -151,6 +156,8 @@ def run_live(run_id: str, now_iso: str, region: str) -> dict:
     return {
         "scenario": "usage/small-team",
         "mode": "live-baseline",
+        "path": "direct-bedrock-no-gateway",
+        "transport": "boto3-direct",
         "provenance": {
             "source": "real", "model_id": MODEL_ID, "region": region,
             "timestamp": now_iso, "run_id": run_id, "reps_per_task": REPS,
@@ -172,7 +179,10 @@ def _usd(micro: int) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="small-team-live")
+    print("WARNING: this is the DIRECT-Bedrock baseline (gateway NOT in path). It "
+          "verifies nothing about Stratoclave on its own — it is the measuring "
+          "stick that live_gateway.py diffs against.", file=sys.stderr)
+    ap = argparse.ArgumentParser(prog="small-team-baseline-direct")
     ap.add_argument("--run-id", required=True, help="label stamped on results")
     ap.add_argument("--region", default="us-east-1")
     ap.add_argument("--json", action="store_true")

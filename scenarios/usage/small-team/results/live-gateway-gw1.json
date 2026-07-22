@@ -1,0 +1,163 @@
+{
+  "cost": {
+    "charge_of_record_microusd": 492,
+    "client_side_estimate_microusd": 562,
+    "note": "charge_of_record is the ledger's settled delta the GATEWAY wrote (moto ledger, real Bedrock usage); the client estimate is the direct-path pricing for comparison."
+  },
+  "excluded": [
+    "network",
+    "ALB",
+    "TLS",
+    "process-boundary",
+    "CloudFront/WAN"
+  ],
+  "ledger": "moto (not real DynamoDB)",
+  "mode": "live-gateway",
+  "pairs": [
+    {
+      "client_estimate_microusd": 52,
+      "direct_text": "391",
+      "direct_ttft_ms": 1859.0,
+      "gateway_text": "391",
+      "gateway_ttft_ms": 2377.8,
+      "ledger_charge_microusd": 37,
+      "order": "direct-first",
+      "overhead_ms": 518.8,
+      "task_id": "arith-1"
+    },
+    {
+      "client_estimate_microusd": 52,
+      "direct_text": "12",
+      "direct_ttft_ms": 2425.0,
+      "gateway_text": "12",
+      "gateway_ttft_ms": 2124.9,
+      "ledger_charge_microusd": 37,
+      "order": "gateway-first",
+      "overhead_ms": -300.0,
+      "task_id": "arith-2"
+    },
+    {
+      "client_estimate_microusd": 66,
+      "direct_text": "2026",
+      "direct_ttft_ms": 2188.2,
+      "gateway_text": "2026",
+      "gateway_ttft_ms": 2420.1,
+      "ledger_charge_microusd": 56,
+      "order": "direct-first",
+      "overhead_ms": 231.9,
+      "task_id": "extract-1"
+    },
+    {
+      "client_estimate_microusd": 52,
+      "direct_text": "Not Found",
+      "direct_ttft_ms": 2101.0,
+      "gateway_text": "Not Found",
+      "gateway_ttft_ms": 2060.5,
+      "ledger_charge_microusd": 52,
+      "order": "gateway-first",
+      "overhead_ms": -40.5,
+      "task_id": "extract-2"
+    },
+    {
+      "client_estimate_microusd": 59,
+      "direct_text": "STRATOCLAVE",
+      "direct_ttft_ms": 2215.5,
+      "gateway_text": "STRATOCLAVE",
+      "gateway_ttft_ms": 2474.1,
+      "ledger_charge_microusd": 59,
+      "order": "direct-first",
+      "overhead_ms": 258.7,
+      "task_id": "format-1"
+    },
+    {
+      "client_estimate_microusd": 59,
+      "direct_text": "1024",
+      "direct_ttft_ms": 2007.2,
+      "gateway_text": "1024",
+      "gateway_ttft_ms": 1686.9,
+      "ledger_charge_microusd": 44,
+      "order": "gateway-first",
+      "overhead_ms": -320.2,
+      "task_id": "arith-3"
+    },
+    {
+      "client_estimate_microusd": 61,
+      "direct_text": "example.com",
+      "direct_ttft_ms": 2077.9,
+      "gateway_text": "example.com",
+      "gateway_ttft_ms": 2391.0,
+      "ledger_charge_microusd": 61,
+      "order": "direct-first",
+      "overhead_ms": 313.0,
+      "task_id": "extract-3"
+    },
+    {
+      "client_estimate_microusd": 51,
+      "direct_text": "cba",
+      "direct_ttft_ms": 2015.7,
+      "gateway_text": "cba",
+      "gateway_ttft_ms": 2332.1,
+      "ledger_charge_microusd": 51,
+      "order": "gateway-first",
+      "overhead_ms": 316.4,
+      "task_id": "format-2"
+    },
+    {
+      "client_estimate_microusd": 55,
+      "direct_text": "5040",
+      "direct_ttft_ms": 2278.2,
+      "gateway_text": "5040",
+      "gateway_ttft_ms": 2516.9,
+      "ledger_charge_microusd": 40,
+      "order": "direct-first",
+      "overhead_ms": 238.7,
+      "task_id": "arith-4"
+    },
+    {
+      "client_estimate_microusd": 55,
+      "direct_text": "sleeps",
+      "direct_ttft_ms": 1674.6,
+      "gateway_text": "sleeps",
+      "gateway_ttft_ms": 2453.2,
+      "ledger_charge_microusd": 55,
+      "order": "gateway-first",
+      "overhead_ms": 778.6,
+      "task_id": "extract-4"
+    }
+  ],
+  "path": "gateway (/v1/messages: auth -> reserve -> Bedrock -> settle -> ledger)",
+  "perf": {
+    "direct_ttft_ms_p50": 2089.4,
+    "gateway_ttft_ms_p50": 2384.4,
+    "n_pairs": 10,
+    "note": "paired direct-vs-gateway, N=10 \u2014 POINT ESTIMATE only, no distribution/significance claim. overhead = gateway TTFT - direct TTFT in the same run (auth+reserve+ASGI dispatch; no network/ALB \u2014 see transport/excluded).",
+    "overhead_ms_max": 778.6,
+    "overhead_ms_min": -320.2,
+    "overhead_ms_paired_median": 248.7
+  },
+  "provenance": {
+    "gateway_in_path": true,
+    "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "region": "us-east-1",
+    "run_id": "gw1",
+    "source": "real",
+    "timestamp": "2026-07-22T14:16:31Z"
+  },
+  "quality": {
+    "accuracy": 1.0,
+    "caveat": "workshop task set, N=10 \u2014 a mechanism demo, NOT a quality benchmark. No judge model, no similarity score.",
+    "correct": 10,
+    "graded": 10,
+    "method": "exact-match, conservative (ambiguous=not-correct)",
+    "n": 10,
+    "normalize": "norm-v1: strip + strip<=1 trailing punctuation + casefold",
+    "scored": "gateway-path response",
+    "tap_gap": {
+      "gap": "not-implemented",
+      "issue": "scenarios/GAPS.md#quality-eval-tap",
+      "note": "This scores a checked-in task set. Feeding it from a team's REAL request/response traffic needs an eval tap (JSONL of prompt+response by span_id) the gateway does not emit yet."
+    }
+  },
+  "scenario": "usage/small-team",
+  "transport": "in-process-asgi"
+}

@@ -15,24 +15,26 @@ coverage, not listed here.
 
 ## perf-token-timing
 
-**Already shown (live baseline):** TTFT/TPOT *are* measurable **client-side** —
-`scenarios/usage/small-team/live.py` measures them against real Bedrock (committed
-evidence: `results/live-demo1.json`, TTFT p50≈1075ms, N=30). So the workshop does
-NOT lack a perf number.
+**Already shown (gateway path, client-measured):** gateway-path TTFT/TPOT and the
+**gateway overhead** vs a direct call are measured in
+`scenarios/usage/small-team/live_gateway.py` (committed evidence:
+`results/live-gateway-gw1.json` — gateway TTFT p50≈2384ms, paired overhead median
+≈249ms, N=10). So the workshop does NOT lack a gateway perf number.
 
-**The actual gap — gateway-side timing telemetry:** the streaming path
-(`backend/mvp/anthropic.py::_stream_messages`) yields frames but timestamps neither
-the first token nor inter-token gaps, so the GATEWAY cannot emit its own TTFT. The
-only latency it emits is `ledger_transact_latency` (the billing write). Without a
-gateway-observed TTFT you cannot compute **gateway overhead = gateway-TTFT −
-client-TTFT** — the number that would justify (or indict) putting the proxy in the
-path.
+**The actual gap — the gateway EMITTING its own timing telemetry:** the above is
+measured with a client stopwatch around `/v1/messages`. The gateway's streaming
+path (`backend/mvp/anthropic.py::_stream_messages`) yields frames but timestamps
+neither the first token nor inter-token gaps, so the gateway cannot emit its OWN
+TTFT as telemetry (it emits only `ledger_transact_latency`, the billing write).
+Attributing overhead from the gateway's own metrics — in production, without a
+client harness in front — needs that hook.
 
 **Smallest honest first step:** a token-timing hook on the stream generator that
 records first-token wall-clock and an inter-token histogram onto the existing
 span, behind the same telemetry seam as `ledger_transact_latency`. The client
-baseline already exists to diff against. Load generation, SLO judgement, and
-availability targets remain the operator's responsibility.
+baseline + gateway paired measurement already exist to validate it against. Load
+generation, SLO judgement, and availability targets remain the operator's
+responsibility.
 
 ## quality-eval-tap
 

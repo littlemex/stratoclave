@@ -146,21 +146,28 @@ def test_small_team_doc_numbers_pinned(small_team, doc):
 
 def test_live_evidence_has_committed_results(cov):
     """Any step marked with live `evidence` must be backed by a committed results
-    file (results/live-<run_id>.json) — a live claim cannot be unbacked."""
+    file — a live claim cannot be unbacked. `mode: live` -> results/live-<run_id>,
+    `mode: live-gateway` -> results/live-gateway-<run_id>."""
     scs = cov.load_scenarios()
     checked = 0
     for sc in scs:
         for st in sc.steps:
-            if st.evidence and st.evidence.get("mode") == "live":
-                run_id = st.evidence.get("run_id")
-                assert run_id, f"{sc.path}/{st.id}: live evidence missing run_id"
-                results = (_SCEN / sc.path / "results" / f"live-{run_id}.json")
-                assert results.is_file(), (
-                    f"{sc.path}/{st.id}: live evidence run_id={run_id} has no "
-                    f"committed {results.relative_to(_SCEN)}")
-                data = json.loads(results.read_text())
-                assert data.get("provenance", {}).get("source") == "real"
-                checked += 1
+            mode = (st.evidence or {}).get("mode", "")
+            if mode not in ("live", "live-gateway"):
+                continue
+            run_id = st.evidence.get("run_id")
+            assert run_id, f"{sc.path}/{st.id}: live evidence missing run_id"
+            prefix = "live-gateway" if mode == "live-gateway" else "live"
+            results = (_SCEN / sc.path / "results" / f"{prefix}-{run_id}.json")
+            assert results.is_file(), (
+                f"{sc.path}/{st.id}: {mode} evidence run_id={run_id} has no "
+                f"committed {results.relative_to(_SCEN)}")
+            data = json.loads(results.read_text())
+            assert data.get("provenance", {}).get("source") == "real"
+            # gateway evidence must actually be gateway-in-path (not a mislabelled baseline)
+            if mode == "live-gateway":
+                assert data["provenance"]["gateway_in_path"] is True
+            checked += 1
     assert checked >= 1, "expected at least one live-evidenced step (small-team)"
 
 
@@ -194,26 +201,58 @@ def test_small_team_doc_live_quotes_match_committed_results(doc):
     data = json.loads(results.read_text())
     text = doc_path.read_text()
     cost = data["cost"]["total_billed_microusd"]
-    assert _usd(cost) in text, f"{doc}: live cost {_usd(cost)} not quoted"
+    assert _usd(cost) in text, f"{doc}: baseline cost {_usd(cost)} not quoted"
     p = data["perf"]
     for v in (p["ttft_ms_p50"], p["ttft_ms_min"], p["ttft_ms_max"]):
-        assert str(v) in text, f"{doc}: live TTFT {v} not quoted"
+        assert str(v) in text, f"{doc}: baseline TTFT {v} not quoted"
     assert f"N={p['n_calls']}" in text
     q = data["quality"]
     assert f"{q['correct']}/{q['graded']}" in text
 
+    # the GATEWAY-path figures (the headline) must also match their committed file
+    gw = base / "results" / "live-gateway-gw1.json"
+    if gw.is_file():
+        gwd = json.loads(gw.read_text())
+        assert _usd(gwd["cost"]["charge_of_record_microusd"]) in text, (
+            f"{doc}: gateway charge-of-record not quoted")
+        assert _usd(gwd["cost"]["client_side_estimate_microusd"]) in text
+        gp = gwd["perf"]
+        for v in (gp["gateway_ttft_ms_p50"], gp["direct_ttft_ms_p50"],
+                  gp["overhead_ms_paired_median"], gp["overhead_ms_min"],
+                  gp["overhead_ms_max"]):
+            assert str(v) in text, f"{doc}: gateway perf figure {v} not quoted"
 
-def test_offline_and_live_share_one_scorer(small_team):
-    """The live harness MUST reuse run.py's scorer/normalizer so the grade cannot
-    drift between offline and live modes."""
-    live_path = _SMALL_TEAM_RUN.parent / "live.py"
-    if not live_path.is_file():
-        pytest.skip("live.py not present")
-    live = _load(live_path, "small_team_live")
-    # live imports run.py as `offline`; assert both resolve to the SAME source file
+
+def test_gateway_results_honestly_labelled(cov):
+    """The committed gateway-path result must carry the honesty labels Fable
+    required: gateway IN path, but in-process transport, moto ledger, and the
+    excluded list — so it can never be read as a deployed-environment SLO."""
+    results = _SCEN / "usage" / "small-team" / "results" / "live-gateway-gw1.json"
+    if not results.is_file():
+        pytest.skip("live-gateway-gw1.json not committed")
+    d = json.loads(results.read_text())
+    assert d["provenance"]["gateway_in_path"] is True
+    assert d["provenance"]["source"] == "real"
+    assert d["transport"] == "in-process-asgi"
+    assert "moto" in d["ledger"]
+    assert "network" in d["excluded"] and "ALB" in d["excluded"]
+    # the gateway actually settled a charge-of-record and answered
+    assert d["cost"]["charge_of_record_microusd"] > 0
+    assert d["quality"]["graded"] == 10
+    # paired overhead is a point estimate at small N (no percentile/CI claim)
+    assert d["perf"]["n_pairs"] == 10
+
+
+@pytest.mark.parametrize("harness", ["baseline_direct.py", "live_gateway.py"])
+def test_live_harnesses_share_the_offline_scorer(small_team, harness):
+    """Both live harnesses MUST reuse run.py's scorer/normalizer so the grade cannot
+    drift between offline, direct-baseline, and gateway modes."""
+    hpath = _SMALL_TEAM_RUN.parent / harness
+    if not hpath.is_file():
+        pytest.skip(f"{harness} not present")
+    mod = _load(hpath, f"small_team_{harness.replace('.py', '')}")
+    # each imports run.py as `offline`; assert both resolve to the SAME source file
     # (by-path test imports create distinct module objects, so compare by origin).
-    assert live.offline.__file__ == small_team.__file__ == str(_SMALL_TEAM_RUN)
-    # and that live actually calls the shared scorer/normalizer (not a copy).
-    assert live.offline.score_exact_match.__module__ == live.offline.normalize_answer.__module__
-    assert "score_exact_match" in dir(live.offline)
-    assert "normalize_answer" in dir(live.offline)
+    assert mod.offline.__file__ == small_team.__file__ == str(_SMALL_TEAM_RUN)
+    assert "score_exact_match" in dir(mod.offline)
+    assert "normalize_answer" in dir(mod.offline)
