@@ -41,8 +41,10 @@ def _scenario(draw):
     # reserve at pool-max × cap — the upper bound the reserve path always uses.
     reserve = pool.max_unit_price() * cap // 1_000_000
     billed = draw(st.one_of(st.none(), st.sampled_from(_MODELS)))
-    inp = draw(st.one_of(st.none(), st.integers(min_value=0, max_value=5_000_000)))
-    out = draw(st.one_of(st.none(), st.integers(min_value=0, max_value=5_000_000)))
+    # include NEGATIVE token counts so the invariant is proven across the
+    # invalid-usage fail-closed path too (Fable round 2).
+    inp = draw(st.one_of(st.none(), st.integers(min_value=-1_000_000, max_value=5_000_000)))
+    out = draw(st.one_of(st.none(), st.integers(min_value=-1_000_000, max_value=5_000_000)))
     return pool, cap, reserve, billed, inp, out
 
 

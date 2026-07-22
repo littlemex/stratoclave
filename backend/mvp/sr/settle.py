@@ -69,11 +69,17 @@ def settle_charge(
     # one-sided usage report (e.g. prompt_tokens present but completion_tokens
     # absent, which real backends do emit) must NOT be billed as output=0 — that
     # under-charges the tenant and the operator silently eats the difference.
-    # Distinct basis labels so the divergence metric can tell the two apart.
+    # Distinct basis labels so the divergence metric can tell the cases apart.
     if input_tokens is None and output_tokens is None:
         return SrCharge(reserve, model, "reserve-fallback:no-usage", reserve)
     if input_tokens is None or output_tokens is None:
         return SrCharge(reserve, model, "reserve-fallback:partial-usage", reserve)
+    # A negative token count is not measurable usage — it is a garbage report, and
+    # treating it as 0 (via max(...,0) below) would under-charge just like a
+    # missing side. Same fail-closed principle: a bill we cannot trust settles at
+    # the reserve, never below.
+    if input_tokens < 0 or output_tokens < 0:
+        return SrCharge(reserve, model, "reserve-fallback:invalid-usage", reserve)
     measured = _measured(unit, input_tokens or 0, output_tokens or 0)
     # clamp: final ≤ reserve, always (pool-max makes this hold, but assert-by-clamp
     # so a rate/token anomaly degrades fail-closed instead of over-charging).

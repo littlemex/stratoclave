@@ -15,10 +15,14 @@ matter:
     multi-replica deployment a trip stops SR on the tripping pod only; sibling
     pods keep routing until they each independently observe the fault and trip.
     That is acceptable because money stays fail-closed regardless of the breaker
-    (a still-routing pod still reserves before forwarding), and the fleet-wide
-    hard stop is the STRATOCLAVE_SR_FORCE_OFF kill-switch, which every process
-    reads. A shared-store (config push / Redis) breaker for true fleet-wide auto
-    trip is deferred; until then do NOT claim fleet-wide from a single trip.
+    (a still-routing pod still reserves before forwarding). The nearest thing to a
+    fleet-wide hard stop is the STRATOCLAVE_SR_FORCE_OFF env kill-switch, but note
+    it too is only as fleet-wide as the deploy mechanism that propagates it: env
+    vars are fixed at process start, so flipping it takes effect as each process
+    restarts / re-reads config, NOT instantly across a running fleet. A
+    shared-store (config push / Redis) breaker for true instant fleet-wide auto
+    trip is deferred; until then do NOT claim instant fleet-wide from either the
+    breaker or the env switch.
 
 Pure/deterministic where it can be: `in_canary` is a pure function of its inputs,
 so a decision is reproducible for incident forensics.
@@ -84,8 +88,11 @@ def circuit_open() -> bool:
 
 def trip(reason: str) -> None:
     """Trip the breaker: SR off in THIS process for _OPEN_SECONDS (see module
-    docstring on per-process scope). Idempotent; called on out-of-snapshot model /
-    elevated error or replay-miss rate. Fleet-wide hard stop = STRATOCLAVE_SR_FORCE_OFF."""
+    docstring on per-process scope). Idempotent. Under A' the trip conditions are
+    eval timeout/error rate and unmapped-decision rate (the out-of-snapshot /
+    replay-miss vocabulary belonged to the frozen option-B forward path). Nearest
+    fleet-wide stop = STRATOCLAVE_SR_FORCE_OFF, itself only as fast as config
+    propagation (see module docstring)."""
     from core.logging import get_logger
     with _lock:
         _state.open_until = _now() + _OPEN_SECONDS

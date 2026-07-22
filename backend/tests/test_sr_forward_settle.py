@@ -147,6 +147,22 @@ def test_settle_partial_usage_falls_back_to_reserve():
     assert only_out.charge_microusd == proof.reserve_amount_microusd
 
 
+def test_settle_negative_usage_falls_back_to_reserve():
+    # P1-3 (round 2, Fable): a negative token count is garbage, not measurable
+    # usage. max(...,0) would silently treat it as 0 and under-charge — same
+    # operator loss as a missing side. Fail-closed to the reserve with a distinct
+    # basis so the anomaly is observable.
+    proof = _reservation().consume()
+    neg_out = settle_charge(proof, billed_model_raw="claude-haiku-4-5",
+                            normalize=_normalize, input_tokens=100, output_tokens=-5)
+    assert neg_out.basis == "reserve-fallback:invalid-usage"
+    assert neg_out.charge_microusd == proof.reserve_amount_microusd
+    neg_in = settle_charge(proof, billed_model_raw="claude-haiku-4-5",
+                           normalize=_normalize, input_tokens=-1_000_000, output_tokens=50)
+    assert neg_in.basis == "reserve-fallback:invalid-usage"
+    assert neg_in.charge_microusd == proof.reserve_amount_microusd
+
+
 def test_settle_no_model_falls_back_to_reserve():
     proof = _reservation().consume()
     charge = settle_charge(proof, billed_model_raw=None, normalize=_normalize,

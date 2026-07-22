@@ -68,10 +68,33 @@ first-party money control). A' delegates the former and retains the latter.
   production decision API (rate, latency, backward-compat). BERT on CPU should be
   tens of ms; measure live p99 and set an adapter deadline (~300ms) after which
   `decide()` returns `NO_DECISION` (fail-open to the normal resolver).
+- **Management-plane exposure (Fable).** `/api/v1/eval` lives on the management
+  API (:8080), which very likely also mutates router config. Putting it on the
+  request hot path means: (a) the eval token MUST be scoped to eval-only, never a
+  config-write token; (b) :8080 needs a network policy so only the money-path
+  service can reach it; (c) the management API's own rate limits / redeploys now
+  couple to every routing decision — budget and alarm for that coupling. "Upstream
+  committed it as a production API" is necessary but not sufficient.
+- **Pre-reserve eval consumption (Fable).** eval runs BEFORE the money gate, so a
+  request that will fail to reserve (insufficient balance, etc.) still spends SR
+  CPU + ships its prompt — a free amplification surface. Gate eval behind a cheap
+  balance pre-check, or rate-limit eval per tenant, before enabling.
+- **Prompt data-flow / PII (Fable).** A' sends the full prompt to a new component
+  (SR) on every decided request. Record the data-flow change in the PII/data
+  governance review before enabling; it is a new egress of customer content.
+- **eval↔data-plane fidelity (Fable).** eval need not reproduce the ExtProc /
+  data-plane pipeline exactly (esp. the SAAR session layer). The divergence metric
+  (suggested vs billed) CANNOT catch this drift — there is no data-plane baseline
+  to compare against. Require a per-SR-version eval regression test in CI.
 - **Decision→registry surjection is a CI gate.** The `routing_decision` /
   `decision_name` namespace SR returns must map onto Stratoclave registry
   `model_id`s. An unmapped decision ⇒ deploy rejected (reuse of the existing
   pricing CI gate). At runtime an unmapped decision ⇒ `NO_DECISION` + alert.
+- **NO_DECISION SLO (Fable).** fail-open is correct, but silent degradation is
+  not: the timeout/error-driven NO_DECISION rate needs an SLO + alert, else
+  routing quality rots invisibly. The A' circuit-breaker trip conditions are eval
+  timeout/error rate and unmapped-decision rate (NOT the option-B out-of-snapshot
+  / replay-miss vocabulary).
 - **SAAR/session note.** Execute traffic does NOT flow through SR, so SR's
   internal session state does not grow from our traffic. As long as we send the
   conversation history in `messages`, the History signal still functions —
@@ -124,8 +147,14 @@ proof↔request tenant/pool binding + honest per-process breaker docstring +
 conservative max(input,output) pool pricing + length-prefixed HMAC framing), so a
 future unfreeze inherits corrected code, not a "verified" label over latent bugs.
 
-## Unfreeze condition (explicit)
+## Unfreeze condition (explicit, binding)
 
 Reopen the option-B forward path ONLY when there is measured demand for a model
 that exists solely behind SR's pool and not in Stratoclave's own transport. Until
 then B stays dark at `sr_is_servable() == False`.
+
+An unfreeze PR is REQUIRED to (not merely encouraged): (a) re-run the full P-level
+money-path review on the modules being unfrozen; (b) re-run the live verification
+and update the "live" facts in this document; (c) re-confirm every Precondition
+above. A "verified" label older than the freeze does not carry over — the freeze
+snapshot's guarantees are void until re-established.

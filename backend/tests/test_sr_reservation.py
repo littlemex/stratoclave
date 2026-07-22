@@ -77,6 +77,20 @@ def test_double_consume_raises():
         r.consume()
 
 
+# --------------------------------------------------------------- P2-3 from_rates
+def test_from_rates_picks_conservative_max():
+    pc = PricedCandidate.from_rates("m", input_per_mtok=800_000,
+                                    output_per_mtok=4_000_000, price_version="v")
+    assert pc.unit_price_microusd_per_mtok == 4_000_000  # output-heavy dominates
+
+
+def test_from_rates_rejects_negative_rate():
+    # a negative price would break the pool-max upper bound; refuse at construction.
+    with pytest.raises(ValueError):
+        PricedCandidate.from_rates("m", input_per_mtok=-1,
+                                   output_per_mtok=100, price_version="v")
+
+
 # --------------------------------------------------------------- P1-1 immutability
 def test_reservation_is_immutable_after_mint():
     # P1-1: a minted reservation cannot have its money-bearing fields rewritten,

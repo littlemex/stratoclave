@@ -36,10 +36,15 @@ class PricedCandidate:
     the input column would make the pool-max reserve UNDER-estimate an
     output-heavy response, and the settle clamp would then quietly hold the
     operator's loss inside the reserve. P2-3 contract: this rate MUST be the
-    conservative per-model max(input_rate, output_rate). Build it via
-    `from_rates(...)` so the guarantee is enforced at construction, not by
-    convention — then `unit × total_tokens ≥ input×in_rate + output×out_rate` for
-    any token split, i.e. the measured charge is a true upper bound of real cost."""
+    conservative per-model max(input_rate, output_rate) — then
+    `unit × total_tokens ≥ input×in_rate + output×out_rate` for any token split
+    (proven as a property test), so the measured charge is a true upper bound of
+    real cost.
+
+    The bare constructor still accepts any single value (it cannot validate a
+    two-column bound from one number), so the contract is a CONVENTION backed by a
+    property test — NOT enforced at construction. Price pool members via
+    `from_rates(...)`, which computes the conservative max, to honour it."""
     model_id: str
     unit_price_microusd_per_mtok: int
     price_version: str
@@ -47,10 +52,14 @@ class PricedCandidate:
     @classmethod
     def from_rates(cls, model_id: str, *, input_per_mtok: int, output_per_mtok: int,
                    price_version: str) -> "PricedCandidate":
-        """Construct with the conservative single rate = max(input, output). This is
-        the ONLY sanctioned way to price a pool member from a two-column rate table,
-        so the pool-max upper bound holds for any input/output token split."""
-        return cls(model_id, max(int(input_per_mtok), int(output_per_mtok)), price_version)
+        """Construct with the conservative single rate = max(input, output) — the
+        sanctioned way to price a pool member from a two-column rate table, so the
+        pool-max upper bound holds for any input/output token split. Negative rates
+        are rejected (a negative price would break the upper-bound guarantee)."""
+        i, o = int(input_per_mtok), int(output_per_mtok)
+        if i < 0 or o < 0:
+            raise ValueError(f"negative unit rate for {model_id}: input={i} output={o}")
+        return cls(model_id, max(i, o), price_version)
 
 
 @dataclass(frozen=True)
@@ -124,17 +133,21 @@ class PoolReservation:
 
     # `_consumed`/`_lock` are the only mutable internals; every other attribute is
     # write-protected by __setattr__ so cap/amount/pool cannot be forged and a
-    # consumed token cannot be "un-consumed" by resetting _consumed (P1-1).
+    # consumed token cannot be "un-consumed" by resetting _consumed (P1-1). The
+    # latch is flipped ONLY by consume() via object.__setattr__ under the lock.
     __slots__ = ("reservation_id", "pool", "max_tokens_cap",
                  "reserve_amount_microusd", "_consumed", "_lock")
-    _MUTABLE = frozenset({"_consumed"})
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: D401
         raise TypeError("use mvp.sr.reservation.reserve_credit_for_pool()")
 
     def __setattr__(self, name, value):  # noqa: D401
-        # only the internal consume-latch may change, and only via consume()'s
-        # lock-held object.__setattr__; direct attribute writes are refused.
+        # ALL direct attribute writes are refused, including _consumed: the latch
+        # changes only through consume()'s lock-held object.__setattr__. NB _mint
+        # is a module-internal classmethod (leading nothing enforces privacy, but
+        # only reserve_credit_for_pool() calls it); it is the sole minting path and
+        # the ledger reserve is the true money gate — this immutability is defence
+        # in depth on top of that, not a substitute for it.
         raise AttributeError("PoolReservation is immutable (use consume())")
 
     def __delattr__(self, name):  # noqa: D401

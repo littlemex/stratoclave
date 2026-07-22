@@ -134,6 +134,16 @@ def forward_to_sr(proof: ConsumedProof, request: SrForwardRequest) -> SrForwardR
       * span_id propagated so settle can join SR's replay by (run_id, span_id).
       * fail-open: any transport/protocol error raises SrForwardError, which the
         caller turns into a direct-path fallback (covered by the pool-max reserve).
+
+    NOT guaranteed here (documented so it is not mistaken for closed): a
+    ConsumedProof is single-MINT (one reservation → one proof) but this function
+    does NOT burn the proof, so the same proof could be forwarded twice with two
+    distinct-but-consistent requests — a 1-reserve → 2-execute double-spend path.
+    That is fenced OUTSIDE this function by the idempotency key =
+    reservation_id carried on the forward (SR-side dedupe) plus the ledger's
+    (reservation_id, phase) unique settle constraint; a future real transport must
+    set that key. This module being frozen under A' (no money-bearing forward),
+    the residual risk is inert; the note exists so an unfreeze restores the fence.
     """
     # P2-1: bind the proof to THIS request on all three money-relevant axes, not
     # only the cap. A ConsumedProof carries no tenant_id of its own, but its pool
