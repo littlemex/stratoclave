@@ -136,7 +136,7 @@ def _saar_finalize(sctx, response, context, committed_model_id, content_blocks, 
         # delta is therefore 0 and is honestly recorded as such in the claim.
         warm = int(sctx.decision.warm_prefix_tokens)
         try:
-            delta = _pricing.saar_checkout_delta_microusd(
+            delta = _pricing.switch_cost_delta_microusd(
                 pricing_key=pk, warm_prefix_tokens=warm
             )
         except Exception:  # noqa: BLE001 — pricing miss ⇒ claim delta 0.
@@ -1031,7 +1031,7 @@ async def _stream_messages(
                 had_tool_use = str(getattr(acc, "stop_reason", "")) == "tool_use"
                 warm = int(sctx.decision.warm_prefix_tokens)
                 try:
-                    delta = _pricing.saar_checkout_delta_microusd(
+                    delta = _pricing.switch_cost_delta_microusd(
                         pricing_key=pk, warm_prefix_tokens=warm
                     )
                 except Exception:  # noqa: BLE001

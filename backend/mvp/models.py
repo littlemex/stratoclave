@@ -60,8 +60,18 @@ class ModelEntry:
     # is on AND the key is in the allowlist; its pricing fields are an
     # operator-set micro-USD cost-recovery rate, and its cache rates MUST be 0
     # (vLLM reports no Bedrock cache-token split). Enforced at registry load.
-    served_by: Literal["bedrock", "vllm"] = "bedrock"
+    served_by: Literal["bedrock", "vllm", "semantic-router"] = "bedrock"
     endpoint_key: Optional[str] = None
+    # SR integration (option B). A "semantic-router" entry is a VIRTUAL pool
+    # entry: it names the SR pool (`sr_pool_ref`) rather than a concrete model,
+    # and it is used ONLY as a candidate-chain / reservation entry point. It is
+    # NEVER a charge-of-record model — at settle the real model that SR executed
+    # is normalized from the router-replay evidence and charged at the ledger's
+    # snapshot price. `virtual=True` marks entries that must never appear as the
+    # billed model. No registry entry uses these yet (SR ships dark); they are
+    # the seam types the SR adapter fills in a later substep.
+    virtual: bool = False
+    sr_pool_ref: Optional[str] = None
 
 
 # Source of truth. To add a model: append an entry, redeploy. There is no

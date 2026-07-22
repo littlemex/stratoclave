@@ -109,6 +109,12 @@ def _parse_tenant_config(item: dict) -> RoutingConfig:
         saar_user_scoped=bool(item.get("saar_user_scoped", False)),
         # tri-state: present -> bool; absent -> None (follow global default).
         shadow_vsr=(bool(item["shadow_vsr"]) if "shadow_vsr" in item else None),
+        # four-state: present -> str; absent -> None (follow global default).
+        # Unknown/garbage values resolve to None so a bad write degrades to the
+        # global default rather than an undefined mode.
+        sr_mode=(str(item["sr_mode"])
+                 if item.get("sr_mode") in ("off", "canary", "active")
+                 else None),
     )
 
 
