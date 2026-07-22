@@ -1,0 +1,70 @@
+# Machine-readable coverage for the small-team workshop scenario.
+# Aggregated into scenarios/COVERAGE.md by backend/tests/test_scenarios_coverage.py.
+# States: covered | covered-elsewhere | not-implemented | user-responsibility
+# Rules enforced in CI: not-implemented needs an `issue:`; a step with
+# measures:true must not be not-implemented / user-responsibility.
+id: usage-small-team
+title: A small team on one shared budget pool
+audience: user
+
+steps:
+  - id: cost-savings
+    axis: cost
+    capability: savings-certificate
+    state: covered
+    measures: true
+    note: >
+      Real Savings Certificate engine folds the team's VSR-acted traffic into a
+      counterfactual net saving (escalation subtracted, potential kept separate,
+      quality.measured=false). Runs offline today.
+
+  - id: cost-per-user-attribution
+    axis: cost
+    capability: per-user-cost-split
+    state: user-responsibility
+    measures: false
+    note: >
+      Splitting the shared-pool spend per team member for chargeback is the
+      operator's accounting choice; the ledger records span_id + tenant, the
+      per-user rollup policy is theirs to define.
+
+  - id: perf-ttft-tpot
+    axis: perf
+    capability: token-timing
+    state: not-implemented
+    measures: false
+    issue: scenarios/GAPS.md#perf-token-timing
+    note: >
+      TTFT / TPOT are not emitted. The gateway surfaces only
+      ledger_transact_latency (the billing write). The scenario shows this gap
+      rather than inventing a number.
+
+  - id: quality-exact-match
+    axis: quality
+    capability: exact-match-scorer
+    state: covered
+    measures: true
+    note: >
+      A tiny, deterministic exact-match scorer runs in run.py — conservative
+      (ambiguous = not-correct), N stamped, no judge model, no similarity. It
+      scores a CHECKED-IN task set (the scoring mechanism, not a benchmark).
+
+  - id: quality-eval-tap
+    axis: quality
+    capability: eval-tap
+    state: not-implemented
+    measures: false
+    issue: scenarios/GAPS.md#quality-eval-tap
+    note: >
+      Feeding the scorer from a team's REAL request/response traffic needs an
+      eval tap (prompt+response JSONL by span_id) the gateway does not emit yet.
+
+  - id: quality-acceptance-bar
+    axis: quality
+    capability: quality-judgement
+    state: user-responsibility
+    measures: false
+    note: >
+      Deciding whether the routed traffic is good ENOUGH (the acceptance bar,
+      the representative task set) is the operator's eval — Stratoclave provides
+      the scoring fold, never the quality claim.

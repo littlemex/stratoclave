@@ -32,3 +32,9 @@ ruff==0.8.4
 # billing/ledger.py (the executable spec of the DynamoDB money logic).
 z3-solver==4.13.0.0
 hypothesis==6.112.1
+
+# Parses the machine-readable coverage.yaml each workshop scenario carries
+# (scenarios/_schema/coverage.py). Dev/CI only — the workshop tooling never
+# runs in the production image. Present transitively already; pinned here so
+# the scenarios coverage aggregation has a declared dependency.
+PyYAML>=6.0
