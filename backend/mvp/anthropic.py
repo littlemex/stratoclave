@@ -621,6 +621,36 @@ def messages(
             saar_prefer = sctx.decision.prefer_model
             saar_warm = int(sctx.decision.warm_prefix_tokens)
 
+    # Real vLLM Semantic Router consult (architecture A'). Runs ONLY when the
+    # client sent no explicit pin AND SAAR produced no hard lock, and only when the
+    # per-tenant sr_mode gate (off/canary/active + circuit breaker) says so — all
+    # default OFF, so a dark deploy touches nothing here. decide() POSTs the
+    # messages to the router's decision-only /api/v1/eval, maps the returned
+    # decision to a registry model, and yields a SOFT prefer_model (fed into the
+    # SAME resolver input as a client pin, so it passes the SAME allowlist /
+    # servability enforcement and can never expand access or touch money). Fail-
+    # open: any error/timeout/unmapped decision → NO_DECISION → normal resolver.
+    if model_pin is None and saar_hard is None:
+        try:
+            from .sr import adapter as _sr
+
+            if _sr.sr_should_consult(user.org_id,
+                                     ctx.session_key() if ctx else None):
+                _sr_decision = _sr.decide(
+                    tenant_id=user.org_id,
+                    session_key=(ctx.session_key() if ctx else None),
+                    requested_model=body.model,
+                    has_tool_result=False,
+                    messages=[m.model_dump() if hasattr(m, "model_dump") else dict(m)
+                              for m in body.messages],
+                )
+                if _sr_decision.hard_model and saar_hard is None:
+                    saar_hard = _sr_decision.hard_model
+                elif _sr_decision.prefer_model and saar_prefer is None:
+                    saar_prefer = _sr_decision.prefer_model
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            pass
+
     # External VSR consult (task #13). Runs ONLY when the client sent no explicit
     # pin AND SAAR produced no hard lock (both are stronger, local signals). It
     # is off by default (EXTERNAL_VSR_ENABLED) and version-pinned + fail-open:

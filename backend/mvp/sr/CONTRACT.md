@@ -61,7 +61,39 @@ This is faithful to the original intent: the user always meant "delegate the
 signals, which we delegate) and *execute breadth* (transport, which we keep under
 first-party money control). A' delegates the former and retains the latter.
 
-### Preconditions before turning A' on (must pass)
+### Implementation status (wired, gated off by default)
+
+The A' decide path is IMPLEMENTED and wired into all three request handlers
+(`anthropic.py`, `chat_completions.py`, `openai_responses.py`), gated off by
+default so a default deploy is byte-identical:
+
+- `mvp/sr/eval_client.py` — POSTs `{messages, evaluate_all_signals:true}` to the
+  router's `/api/v1/eval`, parses the response (prefers `recommended_models[0]`,
+  then `decision_result.decision_name`, then `routing_decision`; the ~300ms
+  deadline + any error/timeout ⇒ `NO_DECISION`, fail-open).
+- `mvp/sr/decision_map.py` — maps the returned decision to a registry model
+  (explicit `SEMANTIC_ROUTER_DECISION_MAP` entry, else identity if already a
+  registry model, else `NO_DECISION` + alert). The `validate_map_against_registry`
+  helper is the CI gate (every mapped value must be priced+enabled).
+- `adapter.decide()` returns a SOFT `prefer_model` fed into the SAME
+  `saar_prefer_model` reserve input as a client pin — so it passes the SAME
+  allowlist/servability enforcement and can never expand access or touch money.
+- `adapter.sr_should_consult()` is the one gate: `sr_mode` off ⇒ never; active ⇒
+  always; canary ⇒ the deterministic session-sticky slice, breaker permitting.
+
+Flags default off: `SEMANTIC_ROUTER_ENABLED` (unused by the decide path directly),
+`SEMANTIC_ROUTER_BASE_URL` (empty ⇒ no-op), per-tenant `sr_mode` default `off`,
+plus `STRATOCLAVE_SR_FORCE_OFF` kill-switch.
+
+**Live-verified (2026-07):** a real vLLM SR v0.3 router with a runnable config
+(semantic_cache disabled to drop the Milvus dep) returns a 200 from
+`/api/v1/eval` with `auth_mode: disabled` on the management port — e.g.
+`{"decision_result":{"decision_name":"default-route"}, "recommended_models":["sim-default"], "routing_decision":"default-route", "metrics":{...18 signal families}}`.
+The parser handles this exact shape. The earlier 401 was setup-mode (no runnable
+config), NOT an auth requirement — so production auth is a NETWORK-boundary
+concern (netpol on :8080), not a bearer token.
+
+### Preconditions before turning A' on in production (must pass)
 
 - **`/api/v1/eval` hot-path fitness.** It is a management-API endpoint that looks
   built for the CLI. Confirm with upstream that it is committed as a per-request
@@ -132,7 +164,7 @@ because A' is the shipping path.
 | Asset | State under A' |
 |---|---|
 | `port.py` (RouteDecision/RoutePort/NO_DECISION) | **ACTIVE** — the decide-layer type; eval → RouteDecision maps straight in. |
-| `adapter.py` (sr_mode tri-state, kill-switch, `decide()`) | **ACTIVE** — `decide()` gains the eval client. |
+| `adapter.py` (sr_mode tri-state, kill-switch, `decide()`) | **ACTIVE + WIRED** — `decide()` consults `eval_client` and is called from all three handlers via `sr_should_consult`. |
 | `canary.py` (deterministic sampling + per-process breaker) | **ACTIVE** — canary control is path-agnostic. |
 | `observability.py` (SR-vs-ledger divergence) | **ACTIVE** — join source becomes eval signals; divergence = suggested vs billed. |
 | pricing CI gate | **ACTIVE (repurposed)** — "eval decision space ↔ registry map". |

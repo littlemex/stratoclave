@@ -524,6 +524,38 @@ async def create_response(
     _multiplier = _reasoning_multiplier(body)
     _input_est = max(reservation - body.max_output_tokens * _multiplier, 0)
 
+    # Real vLLM Semantic Router consult (architecture A'), same discipline as the
+    # other surfaces. Only when no client pin AND no SAAR hard lock AND the
+    # per-tenant sr_mode gate (default off) allows. decide() maps the router's
+    # decision to a registry model and yields a SOFT prefer (same allowlist /
+    # servability path as a client pin; never touches money). Fail-open on all.
+    if model_pin is None and saar_hard is None:
+        try:
+            from .sr import adapter as _sr
+
+            if _sr.sr_should_consult(user.org_id,
+                                     ctx.session_key() if ctx else None):
+                if isinstance(body.input, str):
+                    _sr_msgs = [{"role": "user", "content": body.input}]
+                elif isinstance(body.input, list):
+                    _sr_msgs = [i if isinstance(i, dict) else {"role": "user", "content": str(i)}
+                                for i in body.input]
+                else:
+                    _sr_msgs = []
+                _sr_d = _sr.decide(
+                    tenant_id=user.org_id,
+                    session_key=(ctx.session_key() if ctx else None),
+                    requested_model=body.model,
+                    has_tool_result=False,
+                    messages=_sr_msgs,
+                )
+                if _sr_d.hard_model and saar_hard is None:
+                    saar_hard = _sr_d.hard_model
+                elif _sr_d.prefer_model and saar_prefer is None:
+                    saar_prefer = _sr_d.prefer_model
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            pass
+
     # Shadow VSR (litellm wedge): no external-VSR consult on this route, so let the
     # local rule judge propose a cheaper counterfactual UNLESS a real pin already
     # decides routing (a deliberate pin is not a candidate for downgrade advice —

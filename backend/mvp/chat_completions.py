@@ -293,6 +293,33 @@ def chat_completions(
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
 
+    # Real vLLM Semantic Router consult (architecture A'), same discipline as the
+    # Anthropic path. Only when no client pin AND the per-tenant sr_mode gate
+    # (default off) allows. decide() maps the router's decision to a registry model
+    # and yields a SOFT prefer (fed into the SAME allowlist/servability path as a
+    # client pin; never touches money). Fail-open on everything. `sr_hard` disables
+    # the cascade only under an explicit hard decision (none today).
+    sr_prefer = None
+    sr_hard = None
+    if model_pin is None:
+        try:
+            from .sr import adapter as _sr
+
+            if _sr.sr_should_consult(user.org_id,
+                                     ctx.session_key() if ctx else None):
+                _sr_d = _sr.decide(
+                    tenant_id=user.org_id,
+                    session_key=(ctx.session_key() if ctx else None),
+                    requested_model=body.model,
+                    has_tool_result=False,
+                    messages=[m.model_dump() if hasattr(m, "model_dump") else dict(m)
+                              for m in body.messages],
+                )
+                sr_hard = _sr_d.hard_model
+                sr_prefer = _sr_d.prefer_model
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            sr_prefer = sr_hard = None
+
     # Shadow VSR (litellm wedge): this endpoint has no external-VSR consult, so the
     # local rule judge is the only advisory. Dark by default + fail-open +
     # advisory-only: it never sets a pin (no vsr_hard_model) and emits no response
@@ -302,7 +329,7 @@ def chat_completions(
     # candidate); shadow_enabled() checked FIRST so a dark deploy extracts no
     # features on the hot path (Fable review-2 (d)/(e)).
     _shadow_vsr = None
-    if model_pin is None:
+    if model_pin is None and sr_hard is None and sr_prefer is None:
         try:
             from .vsr import shadow as _shadow
             # cheap env-only force-off before the per-tenant config read so a
@@ -326,7 +353,10 @@ def chat_completions(
         input_tokens_est=input_est,
         max_output_tokens=max_out,
         wire_protocol="messages",
-        vsr_hard_model=model_pin,
+        # Hard-pin precedence: explicit client pin > SR hard decision. SR's soft
+        # preference reorders the cascade head (never removes a servable model).
+        vsr_hard_model=model_pin or sr_hard,
+        saar_prefer_model=sr_prefer,
         # L5-d: per-run billing attribution.
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,

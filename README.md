@@ -598,7 +598,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover (demonstrated end-to-end on real Bedrock via fault injection: a throttled primary commits to a healthy failover region), **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock); Bedrock cross-region inference profiles give free geography-level failover |
 | Guardrails / prompt caching / embeddings | Not built-in (roadmap) | **Guardrails hooks, prompt caching, embeddings/rerank/batch** | Delegated to Bedrock (Guardrails usable directly) |
 | Observability integrations | CloudWatch Logs + dual-track span/`workflow_run` cost telemetry (no third-party exporters yet) | **Langfuse / Datadog / Prometheus / OTEL** callbacks, dashboard | OTEL |
-| Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming), all live. **Semantic routing** is being delegated to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (its 16-signal classifier is the meaning-based decide layer) rather than re-implemented; the integration (architecture A': consult SR's decision-only `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its own transport) is **built but dark** — the eval client is not yet wired (see "Semantic routing via the real SR" below). Routing is fail-open, which means **when SR is unreachable the cost optimization silently degrades** to the normal resolver — visible only via the coverage metric. A home-grown session-sticky router (SAAR) and an external advisor also ship dark as the superseded interim | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win today | None (client → Bedrock; CRIS only) |
+| Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming), all live. **Semantic routing** is being delegated to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (its 16-signal classifier is the meaning-based decide layer) rather than re-implemented; the integration (architecture A': consult SR's decision-only `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its own transport) is **implemented and wired into all three handlers, gated off by default** — enable with `SEMANTIC_ROUTER_ENABLED` + a per-tenant `sr_mode` (see "Semantic routing via the real SR" below). Routing is fail-open, which means **when SR is unreachable the cost optimization silently degrades** to the normal resolver — visible only via the coverage metric. A home-grown session-sticky router (SAAR) and an external advisor also ship dark as the superseded interim | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win today | None (client → Bedrock; CRIS only) |
 | Routing-savings **proof** | **Savings Certificate** (`mvp.learning.savings`): a per-`(tenant, day)` **counterfactual** "if you'd followed the routing advice" figure — both models priced at ONE rate snapshot over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted, rate version stamped for reproducibility. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change | LiteLLM logs spend per request, but there is **no decision↔charge join contract** to make a routing counterfactual auditable (which cheaper model would have sufficed, priced against the *same* request's real billed tokens) | None |
 | Proxy latency overhead | One in-region hop (ALB → Fargate) + a synchronous DynamoDB reserve per call — the cost of a hard pre-flight budget | One proxy hop (+ cache/DB lookups) | **Zero** (no proxy in the path) |
 | License | **Apache 2.0 — all features OSS**, incl. the Vouch-by-STS identity path and JSON audit logging (framed honestly: identity *attestation* + *logging*, not a SAML-terminating SSO + an immutable audit store) | MIT core **+ Commercial** — SSO/SAML and audit logs are paid Enterprise | MIT (AWS Solutions sample) |
@@ -654,7 +654,7 @@ money proofs are built and dark; the remaining step is wiring the eval client.
 | **Rating engine** (usage → money) | Layer 5 front | Pins "which price, when" so a price change never breaks past invoices; also the basis for "how much the router saved" | Versioned per-model micro-USD config; rate frozen at reserve, versioned rating on the terminal | **Shipped** |
 | **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture non-LLM actions inside their own workflows | `TransactWriteItems` reserve = authorize; the unmodified settle = capture | **Shipped** |
 | **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box | `resolve_model` is deterministic; the routing-signals append log is the sink | **Shipped** |
-| **Semantic routing via the real vLLM Semantic Router** (architecture A') | The meaning/difficulty decide axis | Delegate *which model* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (16-signal classifier, incl. its own session-aware policy) via its **decision-only** `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its **own** transport and settles from first-party usage. SR decides; the ledger stays the sole charge of record; routing fails open, money fails closed | Source-agnostic `RouteDecision` port (`mvp/sr/`), per-tenant `sr_mode` tri-state (off/canary/active), deterministic session-sticky canary + breaker, SR-vs-ledger divergence evidence; money invariants proven (Z3 + Hypothesis) against a fake-SR harness | **Built, dark** — the `/api/v1/eval` client is **not yet wired** (`decide()` returns `NO_DECISION`); ships behind `SEMANTIC_ROUTER_ENABLED` + `sr_mode`, both default off. See [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md) for the preconditions before enabling |
+| **Semantic routing via the real vLLM Semantic Router** (architecture A') | The meaning/difficulty decide axis | Delegate *which model* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (16-signal classifier, incl. its own session-aware policy) via its **decision-only** `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its **own** transport and settles from first-party usage. SR decides; the ledger stays the sole charge of record; routing fails open, money fails closed | Source-agnostic `RouteDecision` port (`mvp/sr/`) wired into all three handlers, per-tenant `sr_mode` tri-state (off/canary/active), deterministic session-sticky canary + breaker, SR-vs-ledger divergence evidence; money invariants proven (Z3 + Hypothesis) against a fake-SR harness | **Wired, gated off** — the `/api/v1/eval` client is implemented and end-to-end verified against a live vLLM SR router (returns a real routing decision; the chosen model flows through the same allowlist/reserve as a client pin). Ships behind `SEMANTIC_ROUTER_ENABLED` + per-tenant `sr_mode`, **both default off**, so a default deploy is byte-identical. See [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md) for the preconditions before enabling in production |
 | **Session-aware routing (SAAR, home-grown interim)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch-cost gated at reserve. Superseded by the real SR's own session-aware policy above, kept as the interim until the SR eval client lands | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve; blog-scenario harness runs per commit | **Shipped, dark** (`SAAR_ENABLED`) |
 | **Hybrid serving (self-hosted vLLM)** | Transport axis | Route selected models to an internal vLLM endpoint instead of Bedrock, priced as operator cost-recovery, so the *same* budget/rating/settle path covers self-hosted inference | `served_by` seam on the target; one transport binding at `_attempt_invoke`; SSE→converse translation | **Shipped, dark** (`HYBRID_SERVING_ENABLED`) |
 | **External advisor consult** (version-pinned, home-grown interim) | Router's central-advice axis | A central, external advisor can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money. Predates the real-SR integration; the eval-decide path above replaces it | Fail-open consult (150 ms); version-pin handshake; per-tenant opaque config in S3, validated by the advisor itself | **Shipped, dark** (`EXTERNAL_VSR_ENABLED`) |
@@ -808,13 +808,15 @@ execution-affecting ones the flag defaults off, and with it off the invoke path
 is byte-behaviour-identical to Bedrock-only; the one advisory-only judge that
 touches neither execution nor money is default-on for new tenants):**
 
-> **Current state in one line:** the only routing features that *do something* when
-> enabled today are **home-grown**: SAAR and the external advisor (both flag-gated,
-> default off) and the shadow judge (default-on for new tenants — but *advisory
-> only*: it records a counterfactual and never steers execution, routing, or
-> money). The flagship **real vLLM Semantic Router** integration is *built but
-> dark*: flipping `SEMANTIC_ROUTER_ENABLED` currently changes nothing because
-> `decide()` returns `NO_DECISION` until the `/api/v1/eval` client is wired.
+> **Current state in one line:** every routing feature here is **gated off by
+> default** (the shadow judge is the one exception — default-on for new tenants,
+> but *advisory only*: it never steers execution, routing, or money). The flagship
+> **real vLLM Semantic Router** integration is now fully **wired** into all three
+> handlers and end-to-end verified against a live router — turning on
+> `SEMANTIC_ROUTER_ENABLED` + a per-tenant `sr_mode` makes Stratoclave consult
+> SR's `/api/v1/eval` and route to the chosen model (through the same
+> allowlist/reserve as a client pin). The home-grown SAAR + external advisor
+> remain as the superseded interim.
 
 - **Session-aware routing (SAAR — home-grown interim)** (`SAAR_ENABLED`). Sticky
   per-session model choice with a tool-loop hard-lock, switch-cost gated at
@@ -888,12 +890,17 @@ touches neither execution nor money is default-on for new tenants):**
   deterministic session-sticky canary + circuit breaker, and an SR-vs-ledger
   divergence evidence block; the money invariants (no forward without a reserve,
   final ≤ reserve, single settle) are proven with Z3 and Hypothesis against a
-  fake-SR harness. **Status: built but dark — the `/api/v1/eval` client is not yet
-  wired** (`decide()` returns `NO_DECISION`, so the request path is
-  byte-identical), and the option-B "execute through SR" machinery is frozen (see
-  the honest freeze/unfreeze rationale and the enable-preconditions —
-  management-plane token scope, latency SLO, decision→registry CI gate, PII
-  data-flow — in [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md)).
+  fake-SR harness. **Status: wired into all three handlers (`mvp/sr/eval_client.py`
+  consults `/api/v1/eval`, `mvp/sr/decision_map.py` maps the returned decision to a
+  registry model), gated off by default** (`SEMANTIC_ROUTER_ENABLED` +
+  `sr_mode` both default off, so the request path is byte-identical until enabled).
+  End-to-end verified against a live vLLM SR router: it returns a real routing
+  decision (`recommended_models` / `decision_name`) with `auth_mode: disabled` on
+  the management port, and the chosen model flows through the same allowlist/reserve
+  as a client pin. The option-B "execute through SR" machinery stays frozen (see the
+  freeze/unfreeze rationale and the production enable-preconditions —
+  management-plane netpol, latency SLO, decision→registry CI gate, PII data-flow —
+  in [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md)).
 
 **On the roadmap (designed, not yet wired into the request path):**
 

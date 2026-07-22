@@ -32,7 +32,7 @@ never a money problem — money is gated by the fail-closed reserve elsewhere.
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 from core.logging import get_logger
 
@@ -87,30 +87,83 @@ def sr_active_for(tenant_id: str) -> bool:
     return sr_mode_for(tenant_id) != "off"
 
 
+def sr_should_consult(tenant_id: str, conversation_id: Optional[str]) -> bool:
+    """The single gate the request handlers call before consulting SR. Combines
+    the per-tenant mode with canary sampling so every surface shares one rule:
+
+      * mode "off"    → never (dark).
+      * mode "active" → always.
+      * mode "canary" → only for the deterministic, session-sticky canary slice
+        (a whole conversation is either in or out, so a session never straddles),
+        AND only while the circuit breaker is not tripped.
+
+    Cheap and fail-safe: any error resolves to False (do not consult), so a
+    config/canary hiccup degrades to the normal resolver, never an exception."""
+    try:
+        mode = sr_mode_for(tenant_id)
+        if mode == "off":
+            return False
+        if mode == "active":
+            return True
+        # canary
+        from . import canary as _canary
+
+        if _canary.circuit_open():
+            return False
+        return _canary.in_canary(tenant_id, conversation_id or "")
+    except Exception:  # noqa: BLE001 — a gate error must not break a request.
+        return False
+
+
+def _default_is_known_model(model_id: str) -> bool:
+    """True iff `model_id` resolves to a registry entry (the identity-mapping
+    membership test decision_map uses). Never raises."""
+    try:
+        from ..models import resolve_model
+
+        resolve_model(model_id)
+        return True
+    except Exception:  # noqa: BLE001 — unknown model ⇒ not identity-mappable.
+        return False
+
+
 def decide(
     *,
     tenant_id: str,
     session_key: Optional[str],
     requested_model: str,
     has_tool_result: bool,
+    messages: Optional[list] = None,
+    is_known_model: Optional[Callable[[str], bool]] = None,
 ) -> RouteDecision:
     """Consult the vLLM Semantic Router DECIDE surface (`POST /api/v1/eval`) and
     return a source-agnostic RouteDecision.
 
-    Groundwork: the eval HTTP client + auth + latency deadline + decision→registry
-    whitelist land in the live-E2E sub-step (see mvp/sr/CONTRACT.md "Preconditions
-    before turning A' on"). Until then this is a fully-fail-open no-op returning
-    NO_DECISION, so wiring it into the handlers is byte-neutral (the request flows
-    through the normal resolver). The mode plumbing above (sr_mode_for /
-    kill-switch) is already live and testable.
+    Flow (architecture A'): if SR is active for this tenant AND `messages` were
+    supplied, POST them to the router's decision-only endpoint, map the returned
+    `decision_name` to a registry model_id (via `mvp.sr.decision_map`), and return
+    it as a SOFT `prefer_model` — it only reorders the servable candidate chain and
+    can never turn a servable request into a 402/403, so it passes the SAME
+    allowlist/servability gate as a client pin. Money is never touched here.
 
-    When wired: consult eval → map `routing_decision`/`decision_name` to a registry
-    model_id (unmapped ⇒ NO_DECISION + alert) → return it as `prefer_model` (or
-    `hard_model` under an explicit tenant policy). Fail-open on ANY error, timeout
-    past the deadline, or unmapped decision — a router problem is never a money
-    problem; money is gated by the fail-closed reserve downstream."""
+    Fail-open on EVERYTHING: SR off for the tenant, no messages, no base URL,
+    transport error, timeout past the deadline, a bad body, or an unmapped
+    decision → NO_DECISION (the normal resolver runs). This never raises on the hot
+    path — a router outage is a routing problem, not a money problem.
+
+    `messages` defaults to None so a caller that has not wired it (or a unit test)
+    is byte-neutral. `is_known_model` is injectable for tests; production uses the
+    registry membership test."""
     if not sr_active_for(tenant_id):
         return NO_DECISION
-    # TODO(live-E2E eval client): auth'd /api/v1/eval consult with a latency
-    # deadline + decision→registry whitelist. Fail-open on any error/timeout.
-    return NO_DECISION
+    if not messages:
+        return NO_DECISION
+    try:
+        from . import eval_client
+        from .decision_map import make_normalizer
+
+        normalizer = make_normalizer(is_known_model or _default_is_known_model)
+        return eval_client.consult_eval(messages=messages, normalize=normalizer)
+    except Exception as e:  # noqa: BLE001 — fail-open; a decide error never breaks a request.
+        logger.warning("sr_decide_failed", tenant_id=tenant_id, error=str(e))
+        return NO_DECISION
