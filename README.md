@@ -584,15 +584,15 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
-| Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the _same_ reserve/rating/settle ledger** (ships dark). Fewer raw adapters than LiteLLM, but any bound backend flows through the formally-proven charge of record | 100+ (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — more adapters, but their billing is best-effort | Amazon Bedrock, Anthropic models only |
+| Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Fewer providers than LiteLLM — a clear breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). A **hard** limit. | **No client bypass**, but the pre-call budget check reads a **cached spend counter**, so it is not atomic — a check-then-act (TOCTOU) window remains under concurrency. A **soft** limit at the margin | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
+| Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). A **hard** limit. | **No client bypass**; the pre-call budget check reads a **cached spend value** (LiteLLM's own `max_budget` docs describe async spend updates + an in-memory cache), so under concurrency a check-then-act (TOCTOU) window can remain at the margin. Not a bypass, and fine for most workloads — a **soft** ceiling rather than a hard one. Verify against the version you deploy | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
 | Budget granularity | Dollar pool **+** per-user token **+** per-model micro-USD quota, priced per model | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter |
 | Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via an *inline lazy* sweep on the reserve path (no separate reaper). Not instant: reclaim happens on the next reserve (≥ a 1800s TTL floor before a hold is sweep-eligible), so an idle tenant with no further traffic reclaims late, and a burst of crashes drains a few holds per reserve | Durable via its Postgres/Redis (more ops, but a real datastore) | N/A (no server-side reservation) |
 | Resilience / routing | **Streaming:** retry + cross-region failover, first-event commit, staged breaker, and per-model fallback driven by the *same atomic budget reservation* (LiteLLM has budget-aware routing too; the distinctive part is the cascade being inside the pre-flight reserve). **Non-streaming: single-region, no failover** | Retries, fallbacks, latency/usage load-balancing, cooldowns — on **all** paths, across deployments *and* providers; battle-tested | None (client calls Bedrock; Bedrock CRIS only) |
 | OpenAI codex on Bedrock | **Yes** — `stratoclave codex`, under the *same* budget/quota transaction (`responses:send` scope) | Via generic OpenAI routing (not budget-integrated the same way) | **No** |
-| Per-request attribution / model pin | **Yes** — `x-sc-group-id` / `x-sc-workflow-run-id` correlation + hard `x-sc-model-pin` (VSR), on wrappers *and* pipe/chat; surfaced in usage as requested-vs-effective model | Tags/metadata + routing model choice | No (no request-time hook) |
+| Per-request attribution / model pin | **Yes** — `x-sc-group-id` / `x-sc-workflow-run-id` correlation + hard `x-sc-model-pin`, on wrappers *and* pipe/chat; surfaced in usage as requested-vs-effective model | Tags/metadata + routing model choice | No (no request-time hook) |
 | Model / capability policy | App-layer allowlist + per-tenant/user fallback chains (+ effort/tool caps on roadmap) | Per-key model list | IAM model-ARN allow/deny only |
 | Identity (OSS, no paywall) | Cognito email/password + **Vouch-by-STS** (aws sso / saml2aws / IAM user): your existing AWS SSO / IdP federation authenticates the user, in the **OSS** build — AWS *identity attestation*, not a SAML assertion terminated by Stratoclave, but it does satisfy "only IdP-authenticated users may call". Plus `sk-stratoclave-*` keys | **SAML/OIDC SSO is Enterprise (paid)** — the OSS proxy has no SSO, only API keys | **Native OIDC/SAML federation**, free (this is the broker's core job) |
 | Audit | **Structured JSON to CloudWatch** (correlation-id keyed, PII-hashed; queryable via Logs Insights) — not yet an immutable, purpose-built audit store (dedicated table on the roadmap) | Commercial tier: dedicated audit logs | **CloudTrail + Bedrock invocation logging** — AWS-native, tamper-evident, compliance-grade (every InvokeModel is recorded by the platform; strong for regulated audits) |
@@ -601,11 +601,10 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Fleet distribution (MDM, Claude Desktop) | Not built-in | Not built-in | **Yes** — MDM (Jamf/Intune/GPO), bootstrap server |
 | Data residency / GovCloud | **Deploy region is operator-chosen** (`STRATOCLAVE_REGION`; only the CLOUDFRONT-scope WAF is pinned to us-east-1). **Bedrock model region is independent** (`BEDROCK_PRIMARY_REGION`). Streaming failover is configurable (`STRATOCLAVE_FAILOVER_REGIONS`), and the default set is jurisdiction-filtered so a non-US primary never back-doors to the US. `STRATOCLAVE_RESIDENCY=strict` fails the synth if any Bedrock call region (model + failover + codex) leaves the deploy region, or if the model is a geo inference profile. **aws partition only** (GovCloud/China rejected) | Wherever you host it | **US / EU / AU inference profiles, GovCloud** |
 | Availability of inference | Multi-task, multi-AZ gateway in **one region** (no single-task/single-AZ SPOF); **streaming** calls also get cross-region Bedrock failover (demonstrated end-to-end on real Bedrock via fault injection: a throttled primary commits to a healthy failover region), **non-streaming do not** — still an in-path SPOF at the regional level | Depends on the proxy you run | **No added SPOF** (direct to Bedrock); Bedrock cross-region inference profiles give free geography-level failover |
-| Providers | **Amazon Bedrock** (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle), plus an optional **self-hosted vLLM** transport for selected models (ships dark; billed on the same reserve/rating/settle path) | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear win if you need breadth | Bedrock (Anthropic models, Claude Code context) |
 | Guardrails / prompt caching / embeddings | Not built-in (roadmap) | **Guardrails hooks, prompt caching, embeddings/rerank/batch** | Delegated to Bedrock (Guardrails usable directly) |
 | Observability integrations | CloudWatch Logs + dual-track span/`workflow_run` cost telemetry (no third-party exporters yet) | **Langfuse / Datadog / Prometheus / OTEL** callbacks, dashboard | OTEL |
-| Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming); **session-aware sticky routing** and an **external version-pinned VSR advisor** ship dark (flags off by default). Semantic (meaning-based) routing itself is roadmap (the VSR is its forward-compatible seam) | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win | None (client → Bedrock; CRIS only) |
-| Routing-savings **proof** | **Savings Certificate** (`mvp.learning.savings`): a per-`(tenant, day)` **counterfactual** "if you'd followed the VSR" figure — both models priced at ONE rate snapshot over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted, rate version stamped for reproducibility. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md) | Cost tracking is a **dashboard estimate** off cached counters — not reconciled to the charge of record, and no decision↔charge join contract to make a counterfactual auditable | None |
+| Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming), all live. **Semantic routing** is being delegated to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (its 16-signal classifier is the meaning-based decide layer) rather than re-implemented; the integration (architecture A': consult SR's decision-only `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its own transport) is **built but dark** — the eval client is not yet wired (see "Semantic routing via the real SR" below). Routing is fail-open, which means **when SR is unreachable the cost optimization silently degrades** to the normal resolver — visible only via the coverage metric. A home-grown session-sticky router (SAAR) and an external advisor also ship dark as the superseded interim | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win today | None (client → Bedrock; CRIS only) |
+| Routing-savings **proof** | **Savings Certificate** (`mvp.learning.savings`): a per-`(tenant, day)` **counterfactual** "if you'd followed the routing advice" figure — both models priced at ONE rate snapshot over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted, rate version stamped for reproducibility. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md) | LiteLLM logs spend per request, but there is **no decision↔charge join contract** to make a routing counterfactual auditable (which cheaper model would have sufficed, priced against the *same* request's real billed tokens) | None |
 | Proxy latency overhead | One in-region hop (ALB → Fargate) + a synchronous DynamoDB reserve per call — the cost of a hard pre-flight budget | One proxy hop (+ cache/DB lookups) | **Zero** (no proxy in the path) |
 | License | **Apache 2.0 — all features OSS**, incl. the Vouch-by-STS identity path and JSON audit logging (framed honestly: identity *attestation* + *logging*, not a SAML-terminating SSO + an immutable audit store) | MIT core **+ Commercial** — SSO/SAML and audit logs are paid Enterprise | MIT (AWS Solutions sample) |
 
@@ -646,6 +645,13 @@ remaining router work (P1/P2) turns "converts usage to money" into "steers cost
 per request". The gating insight held: **semantic routing only *proves* a cost
 saving once the ledger and rating layers exist** — an un-provable saving cannot
 be billed — so the ledger/rating work was P0 and shipped first; the router is P1.
+For the router itself the strategy shifted from *build* to *delegate*: rather than
+grow a home-grown classifier, Stratoclave adopts the real
+[vLLM Semantic Router](https://github.com/vllm-project/semantic-router) as the
+decide layer (architecture A' — consult its decision-only `/api/v1/eval`, then
+reserve + execute the chosen model first-party) and keeps only the money. The
+port, `sr_mode` plumbing, canary/breaker, divergence evidence, and the Z3/property
+money proofs are built and dark; the remaining step is wiring the eval client.
 
 | Feature | Layer / router role | Why it matters (cost control) | Foundation | Status |
 | --- | --- | --- | --- | --- |
@@ -653,23 +659,38 @@ be billed — so the ledger/rating work was P0 and shipped first; the router is 
 | **Rating engine** (usage → money) | Layer 5 front | Pins "which price, when" so a price change never breaks past invoices; also the basis for "how much the router saved" | Versioned per-model micro-USD config; rate frozen at reserve, versioned rating on the terminal | **Shipped** |
 | **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture non-LLM actions inside their own workflows | `TransactWriteItems` reserve = authorize; the unmodified settle = capture | **Shipped** |
 | **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box | `resolve_model` is deterministic; the routing-signals append log is the sink | **Shipped** |
-| **Session-aware routing (SAAR)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch-cost gated at reserve | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve; blog-scenario harness runs per commit | **Shipped, dark** (`SAAR_ENABLED`) |
+| **Semantic routing via the real vLLM Semantic Router** (architecture A') | The meaning/difficulty decide axis | Delegate *which model* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (16-signal classifier, incl. its own session-aware policy) via its **decision-only** `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its **own** transport and settles from first-party usage. SR decides; the ledger stays the sole charge of record; routing fails open, money fails closed | Source-agnostic `RouteDecision` port (`mvp/sr/`), per-tenant `sr_mode` tri-state (off/canary/active), deterministic session-sticky canary + breaker, SR-vs-ledger divergence evidence; money invariants proven (Z3 + Hypothesis) against a fake-SR harness | **Built, dark** — the `/api/v1/eval` client is **not yet wired** (`decide()` returns `NO_DECISION`); ships behind `SEMANTIC_ROUTER_ENABLED` + `sr_mode`, both default off. See [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md) for the preconditions before enabling |
+| **Session-aware routing (SAAR, home-grown interim)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch-cost gated at reserve. Superseded by the real SR's own session-aware policy above, kept as the interim until the SR eval client lands | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve; blog-scenario harness runs per commit | **Shipped, dark** (`SAAR_ENABLED`) |
 | **Hybrid serving (self-hosted vLLM)** | Transport axis | Route selected models to an internal vLLM endpoint instead of Bedrock, priced as operator cost-recovery, so the *same* budget/rating/settle path covers self-hosted inference | `served_by` seam on the target; one transport binding at `_attempt_invoke`; SSE→converse translation | **Shipped, dark** (`HYBRID_SERVING_ENABLED`) |
-| **External VSR consult** (version-pinned advisor) | Router's central-advice axis | A central, external Value/Session Router can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money | Fail-open consult (150 ms); version-pin handshake; per-tenant opaque config in S3, validated by the VSR itself | **Shipped, dark** (`EXTERNAL_VSR_ENABLED`) |
-| **VSR billing reconciliation** | Boundary observability | Joins each VSR-acted request's decision record to its billed usage by `span_id` — what it cost, whether a hard pin was honored against the *billed* model, coverage — without re-implementing the VSR's own routing metrics | `vsr_consult_decision` log + `x-sc-vsr-*` headers + config-skew echo; offline join in `mvp.learning.vsr_reconcile` | **Shipped** (internal ops CLI) |
+| **External advisor consult** (version-pinned, home-grown interim) | Router's central-advice axis | A central, external advisor can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money. Predates the real-SR integration; the eval-decide path above replaces it | Fail-open consult (150 ms); version-pin handshake; per-tenant opaque config in S3, validated by the advisor itself | **Shipped, dark** (`EXTERNAL_VSR_ENABLED`) |
+| **Shadow judge** (local advisory, home-grown) | Feeds the Savings Certificate | A local, rule-based judge records whether a cheaper same-family model would have sufficed — advisory only, never steering execution/routing/money — so the certificate reports a *potential* saving with no behaviour change | Per-tenant tri-state toggle (UI + routing config), **on by default for new tenants**; per-request operator kill-switch (`STRATOCLAVE_SHADOW_VSR_FORCE_OFF`); advisory logged to the decision record, classified potential-only | **Shipped**, per-tenant (default-on for new tenants) |
+| **Routing billing reconciliation** | Boundary observability | Joins each routing-acted request's decision record to its billed usage by `span_id` — what it cost, whether a hard pin was honored against the *billed* model, coverage — without re-implementing the router's own quality metrics | `vsr_consult_decision` log + `x-sc-vsr-*` headers + config-skew echo; offline join in `mvp.learning.vsr_reconcile` | **Shipped** (internal ops CLI) |
 | **Latency/SLO-driven routing** (signals consumer) | Router's latency axis | Without a latency feedback loop, semantic routing collapses onto the cheap model and breaks SLOs | `attempt_facts.latency_ms` per attempt; signals writer already live | **P1** |
-| **Semantic routing** (meaning/difficulty → model) | The 4th routing axis | The "cheaper the more you use" curve — route the easy 60–80% to a 1/10-cost model; classify with embeddings + rules, and **meter the classifier's own cost** | `resolve_model` is the single decision point; `cost_tier` + fallback chain = a difficulty ladder | **P1** |
+| **Semantic routing** (meaning/difficulty → model) | The 4th routing axis | The "cheaper the more you use" curve — route the easy 60–80% to a 1/10-cost model. **Now delegated to the real vLLM Semantic Router** (see the row above) rather than a home-grown classifier: SR classifies, Stratoclave reserves + executes + settles | Source-agnostic `RouteDecision` port + `sr_mode` (`mvp/sr/`); wiring the `/api/v1/eval` client is the remaining step | **P1 (built, dark)** |
 | **Prompt-cache passthrough** | Layer 5 cost side | Bedrock prompt-cache reads are heavily discounted; direct margin win when tenants share a system prompt | Micro-USD pricing config; per-attempt token stats | **P1** |
 | **External billing export** (Lago/Metronome/Stripe) | Layer 5 revenue recognition | Invoicing/tax/collection is best delegated; the ledger's idempotent events export as usage events | Ledger (P0) + `workflow_run` rollup as the invoice-line grain | **P1** |
 | **Per-tenant cost / margin dashboard** | Layer 5 visibility | Makes "this tenant is unprofitable" and "the router saved $X" visible for pricing and upsell | Dual-track observability; read-only pricing UI skeleton | **P2** |
 | **Bedrock Guardrails integration** | Enterprise procurement | Tenant-scoped guardrails; guardrail invocations are themselves billable (feed rating) | RBAC/allowlist tenant config; all I/O already proxied | **P2** |
 
-**Semantic-router MVP (the minimum to make it real, not a demo):**
-1. **Routing decision record** — externalize `resolve_model`'s choice (candidates, pick, reason, cost delta) to the signals log *before* routing, so savings are attributable.
-2. **Embedding classification → `cost_tier`** — one embedding + nearest-neighbor `easy/hard` split swapping the head of the existing fallback chain; per-tenant opt-in; classify-failure falls back to today's chain; **meter the classification's own token cost** so the reported saving isn't inflated.
-3. **Budget-remaining × latency as routing inputs** — implement the signals consumer as a p95-latency sliding window and add a "semantic tier cap" alongside the existing breaker tier cap, so meaning × budget × latency resolve at the single `resolve_model` point.
+**Semantic routing — delegate, don't re-implement (architecture A'):**
+The earlier plan was a home-grown embedding classifier at `resolve_model`. That is
+superseded: rather than build (and forever maintain) a classifier, Stratoclave
+delegates the *decide* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router)
+and keeps only the money. The steps to make it real (not a demo):
+1. **Consult the decision-only surface** — call SR's `/api/v1/eval` (returns the
+   chosen model + signals *without* running inference), map its decision namespace
+   to a Stratoclave registry `model_id` (unmapped ⇒ `NO_DECISION` + alert), with a
+   latency deadline after which `decide()` fails open to the normal resolver.
+2. **Reserve + execute the single chosen model on Stratoclave's own transport** —
+   at the model's exact price via the existing atomic reserve; no pool-max, no
+   money-bearing forward to SR. The ledger is the sole charge of record.
+3. **Join SR's decision to the ledger by `span_id`** for the divergence metric and
+   the Savings Certificate — SR's cost figure is evidence, never the charge.
 
-Surface the router's savings to customers only *after* the rating layer lands — a saving without a ledger behind it is a billing dispute waiting to happen.
+Money invariants for this path are already proven (Z3 + Hypothesis) against a
+fake-SR harness; the remaining work is the eval client + the decision→registry CI
+gate. Surface any routing savings to customers only after they are joined to the
+ledger — a saving without a ledger behind it is a billing dispute waiting to happen.
 
 ## Documentation
 
@@ -788,22 +809,34 @@ observability** (per-request span records + per-workflow-run rollups, with a
 `canceled_by_client` flag) and a **write-only routing-signals log** for offline
 routing evaluation — all three fire-and-forget, DynamoDB-only, and money-neutral.
 
-**Shipped dark (wired into the request path, but behind a feature flag that
-defaults off — with the flag off the invoke path is byte-behaviour-identical
-to Bedrock-only):**
+**Shipped dark (wired into the request path, gated by a feature flag — for the
+execution-affecting ones the flag defaults off, and with it off the invoke path
+is byte-behaviour-identical to Bedrock-only; the one advisory-only judge that
+touches neither execution nor money is default-on for new tenants):**
 
-- **Session-aware routing (SAAR)** (`SAAR_ENABLED`). Sticky per-session model
-  choice with a tool-loop hard-lock, switch-cost gated at reserve; backed by a
-  DynamoDB session-memory table. Per-tenant opt-in on top of the flag. Beyond
-  the sticky/tool-loop core, SAAR also implements **idle-timeout reset**,
-  **decision-drift reset**, and a **provider-state lock** — a request carrying
-  a non-portable continuation id (an OpenAI Responses `previous_response_id`) is
-  hard-locked to the backend that minted it, verified against the id the session
-  actually minted (a forged/foreign id never locks) and bounded by a hard cap so
-  a retired backend can never strand a session. Coverage against every scenario
-  in the vLLM SAAR blog is pinned by a deterministic scenario harness
-  (`backend/tests/scenarios/saar/`, `pytest -m saar_scenario`) that runs each
-  commit.
+> **Current state in one line:** the only routing features that *do something* when
+> enabled today are **home-grown**: SAAR and the external advisor (both flag-gated,
+> default off) and the shadow judge (default-on for new tenants — but *advisory
+> only*: it records a counterfactual and never steers execution, routing, or
+> money). The flagship **real vLLM Semantic Router** integration is *built but
+> dark*: flipping `SEMANTIC_ROUTER_ENABLED` currently changes nothing because
+> `decide()` returns `NO_DECISION` until the `/api/v1/eval` client is wired.
+
+- **Session-aware routing (SAAR — home-grown interim)** (`SAAR_ENABLED`). Sticky
+  per-session model choice with a tool-loop hard-lock, switch-cost gated at
+  reserve; backed by a DynamoDB session-memory table. Per-tenant opt-in on top of
+  the flag. Beyond the sticky/tool-loop core, SAAR also implements
+  **idle-timeout reset**, **decision-drift reset**, and a **provider-state lock**
+  — a request carrying a non-portable continuation id (an OpenAI Responses
+  `previous_response_id`) is hard-locked to the backend that minted it, verified
+  against the id the session actually minted (a forged/foreign id never locks) and
+  bounded by a hard cap so a retired backend can never strand a session. Coverage
+  against every scenario in the vLLM SAAR blog is pinned by a deterministic
+  scenario harness (`backend/tests/scenarios/saar/`, `pytest -m saar_scenario`)
+  that runs each commit. **Note:** the real vLLM Semantic Router already has a
+  session-aware policy of its own; this home-grown SAAR was built when "VSR" was
+  mis-read as a self-hosted "Value/Session Router". It is the interim that the
+  eval-decide integration below is designed to supersede.
 - **Hybrid serving — self-hosted vLLM** (`HYBRID_SERVING_ENABLED`). A registry
   entry can declare `served_by="vllm"` + an `endpoint_key`; the target then
   routes to an internal vLLM endpoint (from an operator allowlist, `VLLM_ENDPOINTS`)
@@ -815,31 +848,58 @@ to Bedrock-only):**
   endpoint is allowlisted (otherwise it resolves like an unknown model). Note:
   Fargate has no GPU, so the *self-hosted GPU backend itself* is not part of
   this deployment — this ships the client-side seam and its billing integration.
-- **External VSR consult** (`EXTERNAL_VSR_ENABLED`). An optional, external,
-  version-pinned Value/Session Router can be consulted for a routing suggestion
-  (fail-open, 150 ms, no retry). The suggestion is fed into the **same** resolver
-  inputs as a client `x-sc-model-pin`, so it passes the same tenant allowlist +
-  servability enforcement and can never expand model access or touch money. A
-  version-pin handshake (UNVERIFIED/VERIFIED/REFUSED) gates every consult; an
-  unreachable or unpinned VSR degrades to normal Bedrock routing. Per-tenant VSR
-  configuration is stored as an **opaque** S3 blob that Stratoclave never parses
-  — save-time validation is delegated to the VSR's own `/v1/config/validate`
-  (see [`docs/VSR_CONFIG_CONTRACT.md`](./docs/VSR_CONFIG_CONTRACT.md)). The
-  semantic routing logic itself lives in the external VSR, not in Stratoclave.
+- **External advisor consult (home-grown interim)** (`EXTERNAL_VSR_ENABLED`). An
+  optional, external, version-pinned advisor can be consulted for a routing
+  suggestion (fail-open, 150 ms, no retry). The suggestion is fed into the
+  **same** resolver inputs as a client `x-sc-model-pin`, so it passes the same
+  tenant allowlist + servability enforcement and can never expand model access or
+  touch money. A version-pin handshake (UNVERIFIED/VERIFIED/REFUSED) gates every
+  consult; an unreachable or unpinned advisor degrades to normal Bedrock routing.
+  Per-tenant config is stored as an **opaque** S3 blob that Stratoclave never
+  parses — save-time validation is delegated to the advisor's own
+  `/v1/config/validate` (see [`docs/VSR_CONFIG_CONTRACT.md`](./docs/VSR_CONFIG_CONTRACT.md)).
+  This advisor predates the decision to adopt the real vLLM Semantic Router and is
+  the interim the eval-decide integration below replaces.
 
-  Observability keeps to the same boundary — **routing quality is the VSR's own
-  Prometheus/Grafana; Stratoclave records only what happened to the advice at
+  Observability keeps to the same boundary — **routing quality is the advisor's
+  own Prometheus/Grafana; Stratoclave records only what happened to the advice at
   its trust boundary and what it billed.** Per consult it logs a structured
   `vsr_consult_decision`, echoes `x-sc-vsr-decision` / `x-sc-vsr-suggested` /
   `x-sc-vsr-config-version` response headers, and detects validate/serve config
-  skew from the VSR's echoed effective-config id. An internal **offline billing
-  reconciliation** (`mvp.learning.vsr_reconcile`, run via `vsr_reconcile_cli`)
-  joins each VSR-acted request's decision record to its billed UsageLogs row by
-  `span_id`, answering the three boundary questions Stratoclave owns: what it
-  cost, whether a hard pin was honored **against the actually-billed model** (a
-  hard pin whose billed model differs is flagged as a violation), and coverage.
-  The VSR's own metrics are converged onto the same CloudWatch pane via an ADOT
-  sidecar co-located in the VSR task (dark-safe: absent when the VSR is off).
+  skew from the advisor's echoed effective-config id. An internal **offline
+  billing reconciliation** (`mvp.learning.vsr_reconcile`, run via
+  `vsr_reconcile_cli`) joins each advised request's decision record to its billed
+  UsageLogs row by `span_id`, answering the three boundary questions Stratoclave
+  owns: what it cost, whether a hard pin was honored **against the actually-billed
+  model** (a hard pin whose billed model differs is flagged as a violation), and
+  coverage. The advisor's own metrics are converged onto the same CloudWatch pane
+  via an ADOT sidecar co-located in its task (dark-safe: absent when off).
+
+- **Semantic routing via the real vLLM Semantic Router — architecture A'**
+  (`SEMANTIC_ROUTER_ENABLED` + per-tenant `sr_mode`, both default off). This is
+  the intended replacement for the two home-grown pieces above. "VSR" throughout
+  this project has always meant the real
+  [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) — a
+  16-signal classifier (domain, PII, jailbreak, complexity, tool-use, a
+  session-aware policy, …) that decides *which model* a request should use.
+  Stratoclave consults its **decision-only** `/api/v1/eval` endpoint (which
+  returns the routing decision **without** running inference), maps the decision
+  to a registry `model_id`, then **reserves and executes that single model on its
+  own transport** and settles from **first-party** usage. SR decides; Stratoclave
+  accounts and executes; the atomic ledger stays the sole charge of record.
+  Routing fails open (SR down/slow ⇒ the normal resolver), money fails closed
+  (no new spend path is created — the reserve gate is exactly today's). The
+  package (`backend/mvp/sr/`) ships the source-agnostic `RouteDecision` port, the
+  `sr_mode` tri-state (off/canary/active) with an operator kill-switch, a
+  deterministic session-sticky canary + circuit breaker, and an SR-vs-ledger
+  divergence evidence block; the money invariants (no forward without a reserve,
+  final ≤ reserve, single settle) are proven with Z3 and Hypothesis against a
+  fake-SR harness. **Status: built but dark — the `/api/v1/eval` client is not yet
+  wired** (`decide()` returns `NO_DECISION`, so the request path is
+  byte-identical), and the option-B "execute through SR" machinery is frozen (see
+  the honest freeze/unfreeze rationale and the enable-preconditions —
+  management-plane token scope, latency SLO, decision→registry CI gate, PII
+  data-flow — in [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md)).
 
 **On the roadmap (designed, not yet wired into the request path):**
 

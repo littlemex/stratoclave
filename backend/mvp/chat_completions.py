@@ -71,6 +71,15 @@ class ChatCompletionsRequest(BaseModel):
 # Conversion: OpenAI Chat → Bedrock Converse kwargs
 # ---------------------------------------------------------------------------
 
+def _shadow_tenant_pref(org_id: str):
+    """The tenant's per-tenant shadow_vsr preference (True/False/None) via the
+    single shared, cached, rate-limited-fail-open helper (routing.config.
+    tenant_shadow_pref). Thin wrapper kept so the call site reads locally."""
+    from .routing.config import tenant_shadow_pref
+
+    return tenant_shadow_pref(org_id)
+
+
 def _convert_chat_messages(
     messages: list[ChatMessage],
 ) -> tuple[list[dict[str, Any]], Optional[list[dict[str, str]]]]:
@@ -284,6 +293,33 @@ def chat_completions(
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
 
+    # Shadow VSR (litellm wedge): this endpoint has no external-VSR consult, so the
+    # local rule judge is the only advisory. Dark by default + fail-open +
+    # advisory-only: it never sets a pin (no vsr_hard_model) and emits no response
+    # header; it only attaches a shadow-advised block to the decision record so the
+    # offline savings certificate can show the POTENTIAL saving. Never on money path.
+    # Suppressed when a pin decides routing (a deliberate pin is not a downgrade
+    # candidate); shadow_enabled() checked FIRST so a dark deploy extracts no
+    # features on the hot path (Fable review-2 (d)/(e)).
+    _shadow_vsr = None
+    if model_pin is None:
+        try:
+            from .vsr import shadow as _shadow
+            # cheap env-only force-off before the per-tenant config read so a
+            # fleet-wide dark deploy pays no lookup (Fable per-tenant review Low).
+            _tenant_shadow = (None if _shadow.shadow_globally_forced_off()
+                              else _shadow_tenant_pref(user.org_id))
+            if _shadow.shadow_enabled(_tenant_shadow):
+                _shadow_vsr = _shadow.shadow_vsr_decision(
+                    requested_model=body.model,
+                    tenant_shadow=_tenant_shadow,
+                    features=_shadow.extract_features_openai(
+                        approx_input_tokens=input_est,
+                        tools=getattr(body, "tools", None), messages=body.messages),
+                )
+        except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
+            _shadow_vsr = None
+
     tenants_repo = reserve_credit_for_model(
         user, reservation,
         model_name=body.model,
@@ -295,6 +331,7 @@ def chat_completions(
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        vsr_decision=_shadow_vsr,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point

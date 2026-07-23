@@ -109,6 +109,35 @@ signal lands (roadmap).
    behaviour change**. This is the wedge: "put Stratoclave behind your existing
    LiteLLM deployment in passthrough+shadow for two weeks and get an audited
    savings report on your own traffic."
+
+   **Implemented (litellm-wedge slice-2):** a minimal LOCAL rule judge
+   (`mvp.vsr.shadow`) is wired into all three model routes. When no real VSR or
+   pin decides routing, it attaches a `shadow-advised` decision to the
+   reserve-time decision record — advisory-only (never a routing pin, no response
+   header, no money effect). The advice lands in the certificate's `potential`
+   (enacted=False) base only, never the realized headline, with an explicit
+   upper-bound caveat (quality unmeasurable — the suggested model never ran). A
+   stronger judge is a drop-in replacement for the rule engine; the accounting
+   boundary does not move.
+
+   **Per-tenant, default-on for new tenants (later slice):** the judge is a
+   per-tenant tri-state toggle resolved by `shadow.shadow_enabled(tenant_shadow)`:
+
+   - operator kill-switch `STRATOCLAVE_SHADOW_VSR_FORCE_OFF` (truthy) — OFF for
+     every tenant, unconditionally, read per request (rank 0);
+   - tenant explicit `shadow_vsr=true/false` on the routing config — wins next;
+   - tenant `null` — follows the global default `STRATOCLAVE_SHADOW_VSR` (dark
+     unless set to a truthy value).
+
+   New tenants are provisioned with an explicit, audited, non-clobbering
+   `shadow_vsr=true` (opt out fleet-wide with a falsy
+   `STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT`) so the certificate accrues from
+   week one. When resolved OFF the judge never runs and extracts no request
+   features (dark = the judge does not run, not "runs and is discarded"). The
+   per-tenant preference is read from the routing config the reserve already
+   loaded (no extra hot-path read) via the shared `routing.config.tenant_shadow_pref`
+   helper; a fleet-wide force-off is checked first, before that read. See
+   `docs/ADMIN_GUIDE.md` (Shadow VSR) for the operator surface.
 2. **Canary.** N% of traffic executes the VSR's choice; quality judged by the
    tenant eval + LLM-as-judge (dual — the judge alone is not trusted).
 3. **Full + monthly certificate.** With continuous audit.
@@ -124,9 +153,88 @@ the one asset (credibility) the whole strategy rests on.
 - `backend/mvp/learning/savings_cli.py` — `python -m mvp.learning.savings_cli
   --tenant <id> --day YYYYMMDD [--json] [--detail]`. Internal ops path, no
   request-path code, no new table.
+- `backend/mvp/vsr/shadow.py` — the local rule judge (`propose`) + request-path
+  seam (`shadow_vsr_decision`) + schema feature extractors. Dark by default,
+  advisory-only. Wired at the three model routes (`mvp/anthropic.py`,
+  `mvp/chat_completions.py`, `mvp/openai_responses.py`) just before the reserve
+  chokepoint; the decision rides `reserve_credit_for_model(vsr_decision=...)`.
+- Tests: `test_shadow_vsr.py` (rule judge + seam: dark/fail-open/classification/
+  mode-independence), `test_shadow_vsr_wiring.py` (per-route flag on/off: served
+  model unchanged, pin/tools suppression, propose-never-called when dark).
 - Tests: `test_savings.py` (unit + 300-example property: net = gross −
   escalation, no clipping, exhaustive classification), `test_savings_certificate.py`
   (end-to-end over moto: positive saving + surfaced escalation loss).
+
+## Auto-issue (litellm-wedge slice-4)
+
+The certificate computation is a fold; slice-4 makes it a **durable, auto-issued
+artifact** so a tenant gets an audited record without an operator running the CLI.
+
+- `backend/mvp/learning/certificate_store.py` — `issue_certificate` (pure: decide
+  if the day is honestly certifiable), `store_certificate` (WRITE-ONCE via
+  `attribute_not_exists`; a re-run is a no-op, a genuine recompute is a NEW
+  `revision` that `supersedes` the old, never an overwrite), `issue_and_store`,
+  and `issue_for_tenants` (the scheduler body — per-tenant try/except isolation).
+  Stored on the routing-signals table under a `CERT#<tenant>` / `cert#D#<day>#r#<rev>`
+  key namespace (no new table).
+- `backend/mvp/learning/certificate_cli.py` — `issue` / `get` ops face.
+
+Honesty guards are runtime invariants, not tests (Fable slice-4 design):
+  - **data-absent != $0.** A day with no VSR-acted traffic is a documented SKIP
+    (`SKIP_NO_TRAFFIC`), never a $0 certificate (which would lie "we saved
+    nothing" about a day we could not measure).
+  - **coverage gate.** A day whose reconcile is >10% unsettled is skipped
+    (`SKIP_UNMATCHED_HIGH`) rather than stamped `final` at an understated number.
+  - **no synthetic in the store.** `store_certificate` refuses any provenance
+    other than `real`.
+  - **caveats are load-bearing.** It refuses a certificate that dropped its
+    honesty caveats (quality unmeasured, potential is an upper-bound estimate).
+  - **injected clock.** No module here reads a clock; `generated_at_ms` is passed
+    by the caller (the Lambda handler, from the EventBridge event `time`).
+
+Deploy leg (CDK, wired separately): a daily EventBridge rule → Lambda that calls
+`issue_for_tenants` for the previous settled day (**D+N**, N = a settle window;
+the backend coverage gate then refuses to finalize any day that is STILL under-
+settled after N — the two are complementary: D+N gives settle time, the gate
+refuses to stamp `final` on a day that never settled). Shadow-stage certificates
+are an INTERNAL artifact; the tenant-facing HTTP surface is a later slice (per the
+rollout rule — no external claim before Shadow numbers exist).
+
+Alarms the Lambda must emit (honesty depends on them, not just on the backend):
+
+- **per-run failure**: `BatchIssueReport.failed` non-empty → a tenant errored.
+- **silent-skip / issued < expected**: issued count < active-tenant count.
+- **fleet-wide NO_TRAFFIC (outage vs quiet)**: SKIP_NO_TRAFFIC cannot itself tell
+  "the VSR genuinely acted on nothing" from "the decision-log ingestion was down"
+  (backend note on SKIP_NO_TRAFFIC). A SINGLE tenant's quiet day is normal; ALL /
+  most tenants skipping NO_TRAFFIC on the same day is an ingestion outage — alarm
+  on that separately so honest-absence never masks an outage.
+- **consecutive-skip series**: a tenant skipping many days in a row (e.g. a
+  mis-config stuck at UNMATCHED_HIGH) is healthy per-day but anomalous as a
+  series. The daily batch report looks fine, so this must be tracked across runs.
+  To count it, the scheduler must PERSIST skips (a `skip` row per tenant/day, or a
+  CloudWatch metric per skip_reason) — a skipped day should be auditable too, so
+  a gap in the certificate series is explained, never a silent hole. **Follow-up:
+  persist skip rows; until then the Lambda emits a per-skip_reason metric.**
+
+Backend follow-ups (recorded, not silent): tune `DEFAULT_MAX_UNMATCHED_FRACTION`
+(0.10) from the observed unmatched distribution once the scheduler has run;
+persist skip rows for series-level auditing.
+
+Slice-4-CDK follow-ups (Fable close, handoff — not blockers):
+- **First-deploy smoke**: verify (a) the real EMF log line matches each metric
+  filter's `$.field` pattern (a mismatch silently zeroes the issued/failed/
+  no-traffic metrics — only `unaccounted` fails loud via MISSING=BREACHING), and
+  (b) the shared monitoring picks up the three new alarms (if it selects by name
+  prefix / explicit list rather than auto-collecting all).
+- **`expected` self-report blind spot**: `unaccounted` is the handler's own
+  count, so a bug in enumerating `expected` (pagination gap, filter error) passes
+  as `unaccounted==0`. Emit `expected` as its own metric and monitor a sudden
+  drop / 0, or add a periodic tenant-count reconcile.
+- Wire a DLQ + `retryAttempts` on the schedule target; note the fleet-NO_TRAFFIC
+  fraction is statistically meaningless at 2–3 tenants (add an absolute-count
+  compensating check while the fleet is small); persist skip rows to make
+  consecutive-skip-per-tenant alarmable.
 
 ## Still to build (this is the wedge, not the finish line)
 

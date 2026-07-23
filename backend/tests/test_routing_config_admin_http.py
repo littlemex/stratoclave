@@ -88,6 +88,35 @@ class TestTenantRoutingConfig:
         assert live.fallback_default == "on"
         assert int(live.quotas["claude-sonnet-4-6"].limit) == 5000000
 
+    def test_shadow_vsr_tristate_round_trips(self, client):
+        from mvp.routing.config import get_tenant_routing_config
+        # explicit True persists and enforcement reads it.
+        r = client.put(f"/api/mvp/admin/tenants/{TENANT}/routing-config",
+                       json={"shadow_vsr": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["shadow_vsr"] is True
+        assert get_tenant_routing_config(TENANT).shadow_vsr is True
+        # explicit False persists.
+        client.put(f"/api/mvp/admin/tenants/{TENANT}/routing-config",
+                   json={"shadow_vsr": False})
+        assert client.get(f"/api/mvp/admin/tenants/{TENANT}/routing-config"
+                          ).json()["shadow_vsr"] is False
+        # omitting the field = tri-state None (follow global default), NOT a
+        # silent regression to a hard value (Fable per-tenant review (b)).
+        client.put(f"/api/mvp/admin/tenants/{TENANT}/routing-config", json={})
+        assert client.get(f"/api/mvp/admin/tenants/{TENANT}/routing-config"
+                          ).json()["shadow_vsr"] is None
+
+    def test_shadow_vsr_not_dropped_by_a_routing_only_update(self, client):
+        # set shadow ON, then do a routing-only PUT that also carries shadow_vsr
+        # (the UI round-trips it); it must NOT silently revert to None.
+        from mvp.routing.config import get_tenant_routing_config
+        client.put(f"/api/mvp/admin/tenants/{TENANT}/routing-config",
+                   json={"shadow_vsr": True})
+        client.put(f"/api/mvp/admin/tenants/{TENANT}/routing-config",
+                   json={"chain": ["claude-sonnet-4-6"], "shadow_vsr": True})
+        assert get_tenant_routing_config(TENANT).shadow_vsr is True
+
     def test_unknown_model_400(self, client):
         r = client.put(f"/api/mvp/admin/tenants/{TENANT}/routing-config",
                        json={"chain": ["no-such-model"]})

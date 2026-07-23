@@ -11,6 +11,7 @@ import { FrontendStack } from '../lib/frontend-stack';
 import { CognitoStack } from '../lib/cognito-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
 import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
+import { CertificateSchedulerStack } from '../lib/certificate-scheduler-stack';
 import { WafStack } from '../lib/waf-stack';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -465,6 +466,34 @@ if (app.node.tryGetContext('ledgerProjector') === true ||
   ledgerProjectorStack.addDependency(dynamoDBStack);
 }
 
+// Daily Savings Certificate auto-issuer (litellm wedge slice-4). Same posture as
+// the projector: a scheduled Lambda gated behind the `certificateScheduler`
+// context flag, inert to a normal deploy until the image exists and the flag is
+// set. Read-mostly + write-once (no request/money path). `certTenantIds` declares
+// the coverage set explicitly (Fable slice-4 (a)); unset = enumerate tenants.
+let certificateSchedulerStack: CertificateSchedulerStack | undefined;
+if (app.node.tryGetContext('certificateScheduler') === true ||
+    app.node.tryGetContext('certificateScheduler') === 'true') {
+  const certTenantIds = app.node.tryGetContext('certTenantIds') as string | undefined;
+  certificateSchedulerStack = new CertificateSchedulerStack(
+    app, stackName(prefix, 'certificate-scheduler'), {
+      env,
+      prefix,
+      lambdaRepository: ecrStack.repository,
+      lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+      routingSignalsTable: dynamoDBStack.routingSignalsTable,
+      tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+      tenantsTable: dynamoDBStack.tenantsTable,
+      certTenantIds,
+      settleWindowDays: process.env.CERT_SETTLE_WINDOW_DAYS
+        ? parseInt(process.env.CERT_SETTLE_WINDOW_DAYS, 10)
+        : undefined,
+      description: `[${prefix}] Daily Savings Certificate auto-issuer (slice-4)`,
+    });
+  certificateSchedulerStack.addDependency(ecrStack);
+  certificateSchedulerStack.addDependency(dynamoDBStack);
+}
+
 // --- 8. Backend Config (static Parameter Store values) ---
 class BackendConfigStack extends Stack {
   constructor(scope: Construct, id: string, stackProps: cdk.StackProps) {
@@ -644,6 +673,9 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   }
   if (ledgerProjectorStack) {
     NagSuppressions.addStackSuppressions(ledgerProjectorStack, appLevelSuppressions);
+  }
+  if (certificateSchedulerStack) {
+    NagSuppressions.addStackSuppressions(certificateSchedulerStack, appLevelSuppressions);
   }
 }
 
