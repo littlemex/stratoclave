@@ -23,7 +23,7 @@ moto[dynamodb,cognitoidp,sts]==5.2.2
 joserfc==1.7.1
 
 # Linting / formatting
-ruff==0.8.4
+ruff==0.15.22
 
 # Formal / property-based tests for the pooled-billing logic.
 # test_billing_formal_z3.py proves the concurrency invariants with an SMT
