@@ -1,0 +1,10 @@
+{"id": "arith-1", "task": "What is 17 * 23?", "expected": "391", "answer": "391", "note": "correct exact match"}
+{"id": "arith-2", "task": "What is 144 / 12?", "expected": "12", "answer": "12", "note": "correct"}
+{"id": "extract-1", "task": "Return only the year in: 'shipped on 2026-07-22'", "expected": "2026", "answer": "2026", "note": "correct"}
+{"id": "extract-2", "task": "Return only the HTTP status word for 404", "expected": "Not Found", "answer": "Not Found", "note": "correct"}
+{"id": "format-1", "task": "Uppercase: stratoclave", "expected": "STRATOCLAVE", "answer": "STRATOCLAVE", "note": "correct"}
+{"id": "arith-3", "task": "What is 2 to the power 10?", "expected": "1024", "answer": "1,024", "note": "WRONG under exact-match (comma) — conservative bias counts it not-correct, no partial credit"}
+{"id": "extract-3", "task": "Return only the domain in 'user@example.com'", "expected": "example.com", "answer": "", "note": "blank answer -> not-correct (conservative)"}
+{"id": "format-2", "task": "Reverse the string 'abc'", "expected": "cba", "answer": "cba", "note": "correct"}
+{"id": "arith-4", "task": "What is 7 factorial?", "expected": "5040", "answer": "5040", "note": "correct"}
+{"id": "extract-4", "task": "Return only the verb in 'the cat sleeps'", "expected": "sleeps", "answer": "sleeps", "note": "correct"}

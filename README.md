@@ -576,6 +576,11 @@ credentials and the client calls Bedrock directly. **LiteLLM** is a
 general-purpose proxy across 100+ providers. **Stratoclave** is a focused,
 AWS-native gateway that trades breadth for depth of per-tenant control.
 
+> For **how far each differentiating claim below is actually verified today**
+> (formal proof / gateway-live / direct baseline / moto·in-process / unverified),
+> with commit SHAs and the exact limits of every measurement, see the reach-map:
+> [`docs/EVIDENCE.md`](./docs/EVIDENCE.md).
+
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
@@ -599,7 +604,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Guardrails / prompt caching / embeddings | Not built-in (roadmap) | **Guardrails hooks, prompt caching, embeddings/rerank/batch** | Delegated to Bedrock (Guardrails usable directly) |
 | Observability integrations | CloudWatch Logs + dual-track span/`workflow_run` cost telemetry (no third-party exporters yet) | **Langfuse / Datadog / Prometheus / OTEL** callbacks, dashboard | OTEL |
 | Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming), all live. **Semantic routing** is being delegated to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (its 16-signal classifier is the meaning-based decide layer) rather than re-implemented; the integration (architecture A': consult SR's decision-only `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its own transport) is **built but dark** — the eval client is not yet wired (see "Semantic routing via the real SR" below). Routing is fail-open, which means **when SR is unreachable the cost optimization silently degrades** to the normal resolver — visible only via the coverage metric. A home-grown session-sticky router (SAAR) and an external advisor also ship dark as the superseded interim | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win today | None (client → Bedrock; CRIS only) |
-| Routing-savings **proof** | **Savings Certificate** (`mvp.learning.savings`): a per-`(tenant, day)` **counterfactual** "if you'd followed the routing advice" figure — both models priced at ONE rate snapshot over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted, rate version stamped for reproducibility. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change | LiteLLM logs spend per request, but there is **no decision↔charge join contract** to make a routing counterfactual auditable (which cheaper model would have sufficed, priced against the *same* request's real billed tokens) | None |
+| Routing-savings **proof** | **Savings Certificate** (`mvp.learning.savings`): a per-`(tenant, day)` **counterfactual** "if you'd followed the routing advice" figure — both models priced at ONE rate snapshot over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted, rate version stamped for reproducibility. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md) | LiteLLM logs spend per request, but there is **no decision↔charge join contract** to make a routing counterfactual auditable (which cheaper model would have sufficed, priced against the *same* request's real billed tokens) | None |
 | Proxy latency overhead | One in-region hop (ALB → Fargate) + a synchronous DynamoDB reserve per call — the cost of a hard pre-flight budget | One proxy hop (+ cache/DB lookups) | **Zero** (no proxy in the path) |
 | License | **Apache 2.0 — all features OSS**, incl. the Vouch-by-STS identity path and JSON audit logging (framed honestly: identity *attestation* + *logging*, not a SAML-terminating SSO + an immutable audit store) | MIT core **+ Commercial** — SSO/SAML and audit logs are paid Enterprise | MIT (AWS Solutions sample) |
 
@@ -693,6 +698,7 @@ ledger — a saving without a ledger behind it is a billing dispute waiting to h
 |-----------------------------------------------------------------|--------------------------------------------------------------|
 | [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | First run: install the CLI, sign in, make a call.            |
 | [`docs/SCOPE.md`](./docs/SCOPE.md)                              | What Stratoclave is / is NOT, and the rules for deciding whether a feature belongs. |
+| [`docs/EVIDENCE.md`](./docs/EVIDENCE.md)                        | Reach-map: each differentiating claim, its strongest evidence today, and what that evidence does not cover (with commit SHAs). |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)                | Components, data model, auth flows, invariants.              |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)                    | CDK stacks, environment variables, day-2 operations.         |
 | [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md)                  | Tenant / user / credit / trusted-account management.         |

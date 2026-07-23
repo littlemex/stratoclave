@@ -225,14 +225,24 @@ equivalence"; "effect equivalence" (retry behaviour on condition failure) is
 covered by a CI Hypothesis differential test that runs BOTH paths on moto and
 compares post-state. Two-tier by design; neither alone suffices.
 
-**formal (two roles, orthogonal).** (1) A Hypothesis DIFFERENTIAL stateful test:
-the same operation sequence is applied to both implementations on moto and
-compared via an abstraction α(state) = (pool_reserved, per-hold {reserved,
-captured, voided, debited}); operation success/failure verdicts must also match
-(observational equivalence). (2) A Z3 joint-transition proof: applying the same
-input to both abstract models preserves "α equal". formal proves the MODELS are
-equivalent over all inputs; the runtime oracle detects MODEL-vs-REALITY drift on
-real traffic. Both are required for the delete gate; neither replaces the other.
+**formal (two roles, orthogonal).** (1) A Hypothesis DIFFERENTIAL stateful test
+(`backend/tests/test_billing_differential_oracle.py`): the same operation sequence
+is applied to both implementations and compared via an abstraction α(state) =
+(pool_reserved, admission verdict), including PENDING's in-flight intermediate
+states; operation success/failure verdicts must also match (observational
+equivalence). (2) A Z3 joint-transition proof
+(`backend/tests/test_pending_golden_equivalence_z3.py`, landed 2026-07-22):
+applying the same input to both abstract models preserves the coupling
+**J: (pool_reserved == reserved) ∧ (pending.limit == limit − settled)** for EVERY
+symbolic state — reserve/settle/release/reap/fence/reconcile/set_limit — and
+verdict parity follows algebraically from J (proved, with a vacuity guard that
+drops the settled-injection and shows Z3 then finds diverging verdicts). A
+model-fidelity cross-check in the same file drives those exact transitions through
+the REAL `BillingLedger`/`PendingLedger` objects, so a change to either model that
+breaks a transition equation fails the suite (enforcing the FREEZE clause below).
+formal proves the MODELS are equivalent over all inputs; the runtime oracle detects
+MODEL-vs-REALITY drift on real traffic. Both are required for the delete gate;
+neither replaces the other.
 
 **The runtime write-set oracle (mvp/reserve_oracle.py, wired into
 _pending_commit_transact).** It runs ONLY on the pending path — i.e. only for a
@@ -252,7 +262,11 @@ ALL hold:
      `ReserveOracleMismatch` == 0** (a match COUNT, not merely no mismatch —
      zero-sample must not pass; `ReserveOracleRace` is excluded, it is benign);
   2. **Z3 equivalence proof green AND Hypothesis differential test green** (the
-     latter covers the replay/marker-CCF paths the runtime oracle skips);
+     latter covers the replay/marker-CCF paths the runtime oracle skips)
+     — **MET as of 2026-07-22**: both `test_pending_golden_equivalence_z3.py`
+     (16 tests: 14 symbolic obligations incl. vacuity guards + 2 model-fidelity
+     cross-checks) and `test_billing_differential_oracle.py` are green in CI.
+     This leg re-opens automatically if either model changes (the freeze clause);
   3. dev/staging **7 consecutive days with `ReserveOracleMismatch` == 0** while
      matches accrue;
   4. the planned **scenario-based bulk live verification completes with zero
