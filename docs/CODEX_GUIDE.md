@@ -240,10 +240,19 @@ reservation already accounts for them via a multiplier (1× / 2× / 4× / 8×).
 
 ## Choosing a model and region
 
-| Model            | Bedrock region    | Stratoclave aliases                  |
-|------------------|-------------------|--------------------------------------|
-| `openai.gpt-5.4` | `us-west-2`       | `gpt-5.4`, `openai.gpt-5.4`          |
-| `openai.gpt-5.5` | `us-east-2`       | `gpt-5.5`, `openai.gpt-5.5`          |
+| Model                 | Bedrock region | Stratoclave aliases                       |
+|-----------------------|----------------|-------------------------------------------|
+| `openai.gpt-5.4`      | `us-west-2`    | `gpt-5.4`, `openai.gpt-5.4`               |
+| `openai.gpt-5.5`      | `us-east-2`    | `gpt-5.5`, `openai.gpt-5.5`               |
+| `openai.gpt-5.6-luna` | `us-west-2`    | `gpt-5.6-luna`, `openai.gpt-5.6-luna`     |
+| `openai.gpt-5.6-terra`| `us-west-2`    | `gpt-5.6-terra`, `openai.gpt-5.6-terra`   |
+| `openai.gpt-5.6-sol`  | `us-east-2`    | `gpt-5.6-sol`, `openai.gpt-5.6-sol`       |
+
+The GPT-5.6 family also serves the Responses API on bedrock-mantle.
+`luna` and `terra` are available in both us-west-2 and us-east-2 (pinned to
+us-west-2 in the registry to colocate with the default `gpt-5.4` path); `sol`
+is us-east-2 only. To use one, pass it explicitly, e.g.
+`stratoclave codex --model openai.gpt-5.6-terra -- "…"`.
 
 The region is per-model, not per-deployment. The Stratoclave control
 plane runs in us-east-1 and makes a cross-region HTTPS call to
