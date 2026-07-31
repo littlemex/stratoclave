@@ -186,7 +186,7 @@ _REGISTRY: tuple[ModelEntry, ...] = (
     # ---- OpenAI family on Bedrock (bedrock-mantle, us-east-2 / us-west-2) ----
     # GPT-5.4 is GA in us-east-2 and us-west-2; verified working in us-west-2
     # against the existing operator's codex config. GPT-5.5 is currently
-    # us-east-2 only.
+    # us-east-2 only. GPT-5.6 (luna/terra/sol) added below.
     ModelEntry(
         provider="openai",
         bedrock_model_id="openai.gpt-5.4",
@@ -200,6 +200,37 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         bedrock_model_id="openai.gpt-5.5",
         bedrock_region="us-east-2",
         aliases=("gpt-5.5", "openai.gpt-5.5"),
+        wire_protocol="responses",
+        pricing_key="gpt-5",
+    ),
+    # GPT-5.6 family. Verified against the live bedrock-mantle catalog and a
+    # `POST /openai/v1/responses` probe (all return status="completed"):
+    #   - gpt-5.6-luna / gpt-5.6-terra: available in BOTH us-west-2 and
+    #     us-east-2. Pinned to us-west-2 here to keep the default codex path
+    #     colocated with gpt-5.4 (single-region residency for the common case).
+    #   - gpt-5.6-sol: us-east-2 ONLY (not listed in us-west-2).
+    # All three share the "gpt-5" price tier until a 5.6-specific rate is set.
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.6-luna",
+        bedrock_region="us-west-2",
+        aliases=("gpt-5.6-luna", "openai.gpt-5.6-luna"),
+        wire_protocol="responses",
+        pricing_key="gpt-5",
+    ),
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.6-terra",
+        bedrock_region="us-west-2",
+        aliases=("gpt-5.6-terra", "openai.gpt-5.6-terra"),
+        wire_protocol="responses",
+        pricing_key="gpt-5",
+    ),
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.6-sol",
+        bedrock_region="us-east-2",
+        aliases=("gpt-5.6-sol", "openai.gpt-5.6-sol"),
         wire_protocol="responses",
         pricing_key="gpt-5",
     ),

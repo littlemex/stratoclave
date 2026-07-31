@@ -385,6 +385,9 @@ pub(crate) fn codex_context_window_for(model: &str) -> u64 {
     match model {
         "openai.gpt-5.4" | "gpt-5.4" => 400_000,
         "openai.gpt-5.5" | "gpt-5.5" => 400_000,
+        "openai.gpt-5.6-luna" | "gpt-5.6-luna" => 400_000,
+        "openai.gpt-5.6-terra" | "gpt-5.6-terra" => 400_000,
+        "openai.gpt-5.6-sol" | "gpt-5.6-sol" => 400_000,
         _ => 200_000,
     }
 }
@@ -467,6 +470,29 @@ mod tests {
             "expected model_context_window = 400000 for openai.gpt-5.5; got:\n{}",
             body
         );
+    }
+
+    #[test]
+    fn context_window_known_for_gpt_5_6_family() {
+        // Every GPT-5.6 id (both the raw `openai.` form and the short alias)
+        // must map to the explicit 400k window, or codex falls back to the
+        // 200k default and prints the "Model metadata ... not found" warning.
+        for model in [
+            "openai.gpt-5.6-luna",
+            "gpt-5.6-luna",
+            "openai.gpt-5.6-terra",
+            "gpt-5.6-terra",
+            "openai.gpt-5.6-sol",
+            "gpt-5.6-sol",
+        ] {
+            assert_eq!(
+                codex_context_window_for(model),
+                400_000,
+                "expected explicit 400k context window for {model}, not the fallback"
+            );
+        }
+        // An unknown id still falls back to the 200k default.
+        assert_eq!(codex_context_window_for("openai.gpt-9.9-nope"), 200_000);
     }
 
     // P4: for any validated ScHeaders, the generated config.toml parses and
