@@ -28,6 +28,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
   team_lead: [
     'tenants:create',
     'tenants:read-own',
+    'users:update-own-tenant',
     'usage:read-own-tenant',
     'usage:read-self',
     'apikeys:read-self',
