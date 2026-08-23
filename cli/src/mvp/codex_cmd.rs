@@ -1,11 +1,16 @@
 //! `stratoclave codex -- [args]` subcommand.
 //!
-//! Launches OpenAI codex as a child process with `CODEX_HOME` pointing
-//! at a fresh temp dir we own. That dir contains exactly one file —
-//! `config.toml` — describing a `stratoclave` model provider that
-//! targets the deployment's `/openai/v1/responses` endpoint. The user's
-//! persistent `~/.codex/config.toml` is therefore **never** loaded for
-//! this invocation.
+//! Launches OpenAI codex as a child process with `CODEX_HOME` pointing at a
+//! directory we own, containing a `config.toml` we generate: a `stratoclave`
+//! model provider targeting the deployment's `/openai/v1/responses` endpoint.
+//! The user's persistent `~/.codex/config.toml` is therefore **never** loaded
+//! for this invocation.
+//!
+//! That directory is durable by default (`~/.stratoclave/codex-state`, see
+//! `codex_home`), because `CODEX_HOME` also holds the sessions `codex resume`
+//! reads and the directory-trust answers codex records. `config.toml` is the only
+//! file the wrapper owns there and is rewritten per run;
+//! `--ephemeral-codex-state` goes back to a temp dir that is deleted on exit.
 //!
 //! Why a temp `CODEX_HOME` rather than `-c key=value` overrides? codex
 //! resolves model providers as nested TOML; expressing
@@ -31,12 +36,10 @@
 //! because `~/.codex` is no longer the resolved home.
 
 use anyhow::{bail, Context, Result};
-use std::fs;
 use std::process::{Command, ExitCode};
 
-use tempfile::TempDir;
-
 use super::child_launcher::ChildLauncher;
+use super::codex_home::{CodexHome, PreservedConfig};
 use super::config::MvpConfig;
 use super::ephemeral_key::mint_ephemeral_key_scoped;
 use super::sc_headers::ScHeaders;
@@ -46,6 +49,8 @@ pub async fn run(
     args: &[String],
     model_override: Option<&str>,
     headers: &ScHeaders,
+    state_dir: Option<&str>,
+    ephemeral_state: bool,
 ) -> Result<ExitCode> {
     let config = MvpConfig::load()?;
     let tokens = load_tokens()?;
@@ -76,16 +81,38 @@ pub async fn run(
     // filesystem failure here never leaves a live ephemeral key un-revoked
     // (Fable #64 rev1 L1: nothing fallible must sit between mint and
     // run_with_revoke).
-    let codex_home = build_temp_codex_home(&base_url, &model, headers)
-        .context("Failed to write temporary codex config")?;
+    // No extra `.context` here: the errors from `prepare` already name the
+    // directory and the reason, and only the outermost message is printed.
+    let codex_home = CodexHome::prepare(state_dir, ephemeral_state)?;
+    // The renderer receives the keys codex owns in an existing config (trust
+    // answers first among them); they are carried across the rewrite while the
+    // wrapper regenerates only its own.
+    codex_home
+        .write_config(|preserved| codex_config_body(&base_url, &model, headers, preserved))?;
+    if codex_home.is_durable() {
+        eprintln!(
+            "[INFO] codex state (sessions, history, directory trust) persists in {}; \
+             resume with `stratoclave codex -- resume --last` (plain `codex resume` \
+             reads ~/.codex and will not find it), or pass --ephemeral-codex-state \
+             to keep nothing.",
+            codex_home.path().display()
+        );
+    }
 
     if !headers.is_empty() {
         eprintln!(
             "[INFO] Injecting x-sc-* headers: {}",
-            headers.iter().map(|(n, _)| n).collect::<Vec<_>>().join(", ")
+            headers
+                .iter()
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
-    if headers.iter().any(|(n, _)| n == super::sc_headers::H_MODEL_PIN) {
+    if headers
+        .iter()
+        .any(|(n, _)| n == super::sc_headers::H_MODEL_PIN)
+    {
         eprintln!(
             "[WARN] --model-pin is a hard, no-cascade pin applied to every request; \
              codex's prompt-budget window is still derived from --model, so pin and \
@@ -156,7 +183,12 @@ pub async fn run(
         .env("CODEX_HOME", codex_home.path())
         .env("STRATOCLAVE_OPENAI_KEY", &key.plaintext_key)
         .scrub_stratoclave_tokens()
-        .scrub_aws_identity();
+        .scrub_aws_identity()
+        .bypass_hint(
+            "Check that codex is still resolving the `stratoclave` model provider: \
+             a `-c model_provider=...` override, a profile, or an OPENAI_* key in \
+             the environment will send the run straight to the provider.",
+        );
     if let Some(ws) = &escape_workspace {
         launcher = launcher.cwd(ws.path());
     }
@@ -170,10 +202,11 @@ pub async fn run(
         )
         .await;
 
-    // Drop the temp dirs deterministically so they do not survive the wrapper
-    // exit. `TempDir::drop` auto-deletes and SWALLOWS any FS error (use
-    // `.close()` if surfacing that error ever matters); the explicit drops just
-    // pin the lifetime past `run_with_revoke` so the child could read them.
+    // Drop deterministically so an ephemeral CODEX_HOME and the escape workspace
+    // do not survive the wrapper exit. `TempDir::drop` auto-deletes and SWALLOWS
+    // any FS error (use `.close()` if surfacing that error ever matters); the
+    // explicit drops just pin the lifetime past `run_with_revoke` so the child
+    // could read them. A durable CODEX_HOME holds no TempDir, so it stays.
     drop(escape_workspace);
     drop(codex_home);
     result
@@ -320,15 +353,23 @@ pub(crate) fn sc_http_headers_toml(headers: &ScHeaders) -> String {
     }
 }
 
-pub(crate) fn build_temp_codex_home(
+/// Render the `config.toml` the wrapper owns.
+///
+/// `preserved` carries the keys codex wrote that the wrapper does not manage (see
+/// `codex_home`). Its two halves land on opposite sides of the provider table:
+/// bare keys must precede the first table header, or TOML binds them to that
+/// table and a preserved `approval_policy` silently becomes
+/// `model_providers.stratoclave.approval_policy`.
+pub(crate) fn codex_config_body(
     base_url: &str,
     model: &str,
     headers: &ScHeaders,
-) -> Result<TempDir> {
-    let dir = TempDir::new().context("TempDir::new for CODEX_HOME")?;
-    let body = format!(
-        r#"# Auto-generated by `stratoclave codex` — do not edit.
-# Lives in a temp `CODEX_HOME` that is deleted when the wrapper exits.
+    preserved: &PreservedConfig,
+) -> String {
+    format!(
+        r#"# Auto-generated by `stratoclave codex` — do not edit above the carried-over
+# section: this file is rewritten on every proxied run. Directory-trust answers
+# and other codex-owned keys are preserved.
 
 model_provider = "stratoclave"
 model = "{model}"
@@ -356,7 +397,7 @@ project_root_markers = []
 # context window suppresses the fallback and pins the value the
 # OpenAI Responses route advertises for the GPT-5 family.
 model_context_window = {context_window}
-
+{preserved_top}
 [model_providers.stratoclave]
 name                   = "Stratoclave (OpenAI via Bedrock)"
 base_url               = "{base_url}"
@@ -365,15 +406,12 @@ env_key                = "STRATOCLAVE_OPENAI_KEY"
 request_max_retries    = 3
 stream_max_retries     = 5
 stream_idle_timeout_ms = 600000
-{http_headers}"#,
+{http_headers}{preserved_tables}"#,
         context_window = codex_context_window_for(model),
         http_headers = sc_http_headers_toml(headers),
-    );
-    let cfg_path = dir.path().join("config.toml");
-    fs::write(&cfg_path, body).with_context(|| {
-        format!("write temp codex config to {}", cfg_path.display())
-    })?;
-    Ok(dir)
+        preserved_top = preserved.top_level,
+        preserved_tables = preserved.tables,
+    )
 }
 
 /// Codex needs an explicit `model_context_window` for any model id
@@ -411,9 +449,8 @@ mod tests {
     //! they are easy to break by accident and the only consumer is the
     //! external codex binary. A behavioral test would need to spawn
     //! codex itself, which the test harness deliberately avoids.
-    use super::*;
     use super::super::sc_headers::ScHeaders;
-    use std::fs;
+    use super::*;
 
     // Dependency-free deterministic xorshift64* PRNG (see sc_headers tests).
     struct Rng(u64);
@@ -439,13 +476,12 @@ mod tests {
 
     #[test]
     fn temp_config_disables_project_root_markers() {
-        let dir = build_temp_codex_home(
+        let body = codex_config_body(
             "https://example.test/openai/v1",
             "openai.gpt-5.4",
             &ScHeaders::none(),
-        )
-        .expect("build_temp_codex_home");
-        let body = fs::read_to_string(dir.path().join("config.toml")).expect("read config");
+            &PreservedConfig::default(),
+        );
         assert!(
             body.contains("project_root_markers = []"),
             "expected project_root_markers = [] to short-circuit ~/.codex walk; got:\n{}",
@@ -455,13 +491,12 @@ mod tests {
 
     #[test]
     fn temp_config_pins_model_context_window() {
-        let dir = build_temp_codex_home(
+        let body = codex_config_body(
             "https://example.test/openai/v1",
             "openai.gpt-5.5",
             &ScHeaders::none(),
-        )
-        .expect("build_temp_codex_home");
-        let body = fs::read_to_string(dir.path().join("config.toml")).expect("read config");
+            &PreservedConfig::default(),
+        );
         assert!(
             body.contains("model_context_window = 400000"),
             "expected model_context_window = 400000 for openai.gpt-5.5; got:\n{}",
@@ -475,8 +510,7 @@ mod tests {
     // grammar closes TOML injection (no escaping needed).
     #[test]
     fn prop_codex_toml_roundtrip() {
-        const ID_SET: &[u8] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-";
+        const ID_SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-";
         let mut rng = Rng::new(0x70_11);
         for _ in 0..200 {
             let mut gen = |max: usize, slash: bool| -> String {
@@ -494,9 +528,12 @@ mod tests {
             let (g, w, p) = (gen(64, false), gen(64, false), gen(128, true));
             let h = ScHeaders::validated(Some(g.clone()), Some(w.clone()), Some(p.clone()))
                 .expect("generated values must validate");
-            let dir = build_temp_codex_home("https://example.test/openai/v1", "openai.gpt-5.4", &h)
-                .expect("build_temp_codex_home");
-            let body = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+            let body = codex_config_body(
+                "https://example.test/openai/v1",
+                "openai.gpt-5.4",
+                &h,
+                &PreservedConfig::default(),
+            );
             let parsed: toml::Value = toml::from_str(&body).expect("generated TOML must parse");
             let ht = parsed["model_providers"]["stratoclave"]["http_headers"]
                 .as_table()
@@ -513,7 +550,10 @@ mod tests {
         assert_eq!(parse_codex_version("codex-cli 0.141.0"), Some((0, 141, 0)));
         assert_eq!(parse_codex_version("codex-cli 0.136.2"), Some((0, 136, 2)));
         assert_eq!(parse_codex_version("codex 1.2"), Some((1, 2, 0)));
-        assert_eq!(parse_codex_version("codex-cli 0.142.0-beta.1"), Some((0, 142, 0)));
+        assert_eq!(
+            parse_codex_version("codex-cli 0.142.0-beta.1"),
+            Some((0, 142, 0))
+        );
         assert_eq!(parse_codex_version("no version here"), None);
         // Gate: 0.141.0 is the floor; 0.140.x is too old, 0.141+/1.x are fine.
         assert!((0, 141, 0) >= CODEX_HTTP_HEADERS_MIN);
@@ -533,21 +573,26 @@ mod tests {
         );
         // Property this pins: banner tokens before the codex anchor are ignored.
         let old = parse_codex_version("node v22.1.0\ncodex-cli 0.140.0").unwrap();
-        assert!(!(old >= CODEX_HTTP_HEADERS_MIN), "old codex must fail the gate despite the node banner");
+        assert!(
+            !(old >= CODEX_HTTP_HEADERS_MIN),
+            "old codex must fail the gate despite the node banner"
+        );
         // A colon after the name is tolerated.
         assert_eq!(parse_codex_version("codex: 0.141.0"), Some((0, 141, 0)));
     }
 
     #[test]
     fn no_http_headers_table_when_no_flags() {
-        let dir = build_temp_codex_home(
+        let body = codex_config_body(
             "https://example.test/openai/v1",
             "openai.gpt-5.4",
             &ScHeaders::none(),
-        )
-        .unwrap();
-        let body = fs::read_to_string(dir.path().join("config.toml")).unwrap();
-        assert!(!body.contains("http_headers"), "unexpected http_headers:\n{body}");
+            &PreservedConfig::default(),
+        );
+        assert!(
+            !body.contains("http_headers"),
+            "unexpected http_headers:\n{body}"
+        );
     }
 
     #[test]

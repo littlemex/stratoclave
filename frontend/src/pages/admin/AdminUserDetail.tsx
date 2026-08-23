@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/table'
 import { useError } from '@/contexts/ErrorContext'
 import { api, type ApiKeySummary, type Role, type UserSummary } from '@/lib/api'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 function fmt(n: number): string {
   return n.toLocaleString()
@@ -611,7 +612,7 @@ function AssignTenantDialog({
                 id="assign-credit"
                 type="number"
                 min={0}
-                max={10_000_000}
+                max={MAX_TOKEN_CREDIT}
                 value={totalCredit}
                 onChange={(e) => setTotalCredit(e.target.value)}
                 placeholder={t('admin_user_detail.assign_credit_placeholder')}
@@ -750,7 +751,7 @@ function SetCreditDialog({
               id="credit-value"
               type="number"
               min={0}
-              max={10_000_000}
+              max={MAX_TOKEN_CREDIT}
               value={value}
               onChange={(e) => setValue(e.target.value)}
             />

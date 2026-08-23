@@ -88,6 +88,16 @@ enum Commands {
         /// Pins every request to exactly this model — no cascade. Before child args.
         #[arg(long)]
         model_pin: Option<String>,
+        /// Directory used as CODEX_HOME, where codex keeps sessions, history, and
+        /// directory-trust answers. Default: $STRATOCLAVE_CODEX_STATE_DIR, else
+        /// ~/.stratoclave/codex-state. Never the user's ~/.codex.
+        #[arg(long)]
+        codex_state_dir: Option<String>,
+        /// Use a temp CODEX_HOME deleted on exit: sessions, history, and trust
+        /// answers are not kept, and `codex resume` cannot find the run.
+        /// Mutually exclusive with --codex-state-dir, which it would silently ignore.
+        #[arg(long, conflicts_with = "codex_state_dir")]
+        ephemeral_codex_state: bool,
         /// Extra args passed to codex
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -631,8 +641,21 @@ async fn main() -> ExitCode {
             group_id,
             workflow_run_id,
             model_pin,
+            codex_state_dir,
+            ephemeral_codex_state,
             args,
-        }) => dispatch_codex(model, group_id, workflow_run_id, model_pin, args).await,
+        }) => {
+            dispatch_codex(
+                model,
+                group_id,
+                workflow_run_id,
+                model_pin,
+                codex_state_dir,
+                ephemeral_codex_state,
+                args,
+            )
+            .await
+        }
         Some(Commands::Usage { action }) => dispatch_usage(action).await,
         Some(Commands::Billing { action }) => dispatch_billing(action).await,
         Some(Commands::Admin { action }) => dispatch_admin(action).await,
@@ -690,37 +713,48 @@ async fn dispatch_claude(
     let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             return ExitCode::from(2);
         }
     };
     match mvp::claude_cmd::run(&args, model.as_deref(), &headers).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_codex(
     model: Option<String>,
     group_id: Option<String>,
     workflow_run_id: Option<String>,
     model_pin: Option<String>,
+    codex_state_dir: Option<String>,
+    ephemeral_codex_state: bool,
     args: Vec<String>,
 ) -> ExitCode {
     let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             return ExitCode::from(2);
         }
     };
-    match mvp::codex_cmd::run(&args, model.as_deref(), &headers).await {
+    match mvp::codex_cmd::run(
+        &args,
+        model.as_deref(),
+        &headers,
+        codex_state_dir.as_deref(),
+        ephemeral_codex_state,
+    )
+    .await
+    {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -940,7 +974,7 @@ async fn dispatch_ui(action: &str) -> ExitCode {
     let cfg = match crate::config::AppConfig::load(None) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             return ExitCode::from(1);
         }
     };
@@ -955,7 +989,7 @@ async fn dispatch_ui(action: &str) -> ExitCode {
     match commands::ui::run(cmd, &cfg).await {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -997,7 +1031,7 @@ async fn run_pipe() -> ExitCode {
     match commands::pipe::run(OutputFormat::Human, None).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -1007,7 +1041,7 @@ fn wrap(res: anyhow::Result<()>) -> ExitCode {
     match res {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }

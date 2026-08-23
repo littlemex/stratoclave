@@ -427,3 +427,82 @@ def test_ephemeral_key_revocation_round_trip(api_keys_table):
     # place — but also a sanity check that revoke doesn't blow up on
     # ephemeral rows.
     assert repo.count_active("user-1") == 0
+
+
+# ---------------------------------------------------------------
+# GET /api/mvp/me/api-keys/by-key-id/{key_id}
+# ---------------------------------------------------------------
+def _me_client(monkeypatch, user_id: str = "u-1"):
+    """A TestClient for the me/api-keys router with auth and authz stubbed out.
+
+    Same shape as the other route tests: override `get_current_user`, and patch
+    `authz.user_has_permission` so the permission table is not part of what these
+    tests exercise.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from mvp import authz
+    from mvp.deps import AuthenticatedUser, get_current_user
+    from mvp.me_api_keys import router
+
+    monkeypatch.setattr(
+        authz, "user_has_permission", lambda user, scope: scope == "apikeys:read-self"
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        user_id=user_id,
+        email="me@example",
+        org_id="default-org",
+        roles=["user"],
+        raw_claims={},
+        auth_kind="cognito",
+    )
+    return TestClient(app)
+
+
+def test_read_own_key_by_key_id_reports_last_used(api_keys_table, monkeypatch):
+    """The wrapper's gateway-usage check reads exactly one key, not the listing.
+
+    Reading the listing made the answer depend on the key being on the first
+    page, so the check went quiet for anyone holding many keys.
+    """
+    repo = ApiKeysRepository()
+    created, _plain = repo.create(
+        user_id="u-1",
+        name="wrapper",
+        scopes=["messages:send"],
+        expires_at=None,
+        created_by="u-1",
+        ephemeral=True,
+    )
+    key_id = created["key_id"]
+
+    client = _me_client(monkeypatch)
+    resp = client.get(f"/api/mvp/me/api-keys/by-key-id/{key_id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["key_id"] == key_id
+    # Never used yet: an explicit null is what tells the wrapper "no requests".
+    assert body["last_used_at"] is None
+
+    repo.touch_last_used(created["key_hash"])
+    body = client.get(f"/api/mvp/me/api-keys/by-key-id/{key_id}").json()
+    assert body["last_used_at"] is not None
+
+
+def test_read_key_by_key_id_is_scoped_to_the_owner(api_keys_table, monkeypatch):
+    """Another user's key is a 404, not a 403: the id must not be enumerable."""
+    repo = ApiKeysRepository()
+    other, _plain = repo.create(
+        user_id="u-2",
+        name="theirs",
+        scopes=["messages:send"],
+        expires_at=None,
+        created_by="u-2",
+    )
+
+    client = _me_client(monkeypatch, user_id="u-1")
+    assert client.get(f"/api/mvp/me/api-keys/by-key-id/{other['key_id']}").status_code == 404
+    assert client.get("/api/mvp/me/api-keys/by-key-id/sk-stratoclave-nope").status_code == 404

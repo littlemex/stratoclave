@@ -16,6 +16,7 @@ pub mod auth;
 pub mod child_launcher;  // Shared spawner used by claude_cmd and codex_cmd.
 pub mod claude_cmd;
 pub mod codex_cmd;
+pub mod codex_home;      // CODEX_HOME placement: durable state vs --ephemeral-codex-state.
 pub mod config;
 pub mod ephemeral_key;   // Scope-parameterized ephemeral sk-stratoclave-* mint/revoke.
 pub mod sc_headers;      // Validation + carrier for x-sc-* attribution/pin headers.

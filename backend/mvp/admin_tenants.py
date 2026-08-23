@@ -31,6 +31,7 @@ from dynamo import (
     UsageLogsRepository,
     current_period,
 )
+from limits import MAX_POOL_BUDGET_USD_CENTS, MAX_TOKEN_CREDIT
 
 from .authz import log_audit_event, require_permission
 from .deps import DEFAULT_ORG_ID, AuthenticatedUser
@@ -72,7 +73,7 @@ class CreateTenantRequest(BaseModel):
         max_length=64,
         description="sub of a user with team_lead role, or 'admin-owned'",
     )
-    default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    default_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
 
 
 class UpdateTenantRequest(BaseModel):
@@ -81,7 +82,7 @@ class UpdateTenantRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
-    default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    default_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
 
 
 class SetOwnerRequest(BaseModel):
@@ -126,7 +127,7 @@ class SetPoolBudgetRequest(BaseModel):
 
     limit_usd_cents: int = Field(
         ge=0,
-        le=100_000_000,  # up to $1,000,000.00 per period
+        le=MAX_POOL_BUDGET_USD_CENTS,
         description="Pool ceiling for the period, in whole USD cents.",
     )
     period: Optional[str] = Field(

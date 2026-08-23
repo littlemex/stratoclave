@@ -34,6 +34,7 @@ from dynamo import (
     UsersRepository,
     UserTenantsRepository,
 )
+from limits import MAX_TOKEN_CREDIT
 from dynamo.user_tenants import CreditExhaustedError, is_unlimited
 from .credit_ops import CreditAction
 from dynamo.client import get_dynamodb_resource
@@ -64,7 +65,7 @@ class CreateUserRequest(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     role: Role = "user"
     tenant_id: Optional[str] = Field(default=None, max_length=64)
-    total_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    total_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
     # i18n: admin can pre-set the new user's UI locale. Omit = server
     # default ("ja"). The new user can change it later via PATCH /me.
     locale: Optional[Locale] = None
@@ -702,7 +703,7 @@ def admin_set_user_role(
 class AssignTenantRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tenant_id: str = Field(min_length=1, max_length=64)
-    total_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    total_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
     new_role: Role = "user"
 
 

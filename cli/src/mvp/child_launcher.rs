@@ -20,7 +20,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
-use super::ephemeral_key::revoke_ephemeral_key;
+use super::ephemeral_key::{key_was_used, revoke_ephemeral_key};
 
 /// Cognito bearer material stripped by `scrub_stratoclave_tokens`. Deliberately
 /// does NOT include `STRATOCLAVE_OPENAI_KEY` (the child's only credential) —
@@ -86,6 +86,25 @@ const WRAPPER_OVERRIDE_KEYS: &[&str] = &[
     "AWS_EC2_METADATA_DISABLED",
 ];
 
+/// The finding half of the bypass warning: what the backend reported, in terms
+/// that hold for any child. Agent-specific advice arrives via `bypass_hint`.
+fn bypass_finding(binary: &str) -> String {
+    format!(
+        "Stratoclave recorded no requests for this session's key. If `{binary}` did \
+         answer, its traffic did not go through the gateway, so it was not metered, \
+         attributed, or budget-checked."
+    )
+}
+
+/// How long a child must run before "no requests recorded" says anything. Below
+/// this it is far more likely the user asked for `--version` or quit immediately.
+const MIN_SESSION_FOR_USAGE_CHECK: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Second generic line: not every zero-usage run is a bypass.
+const BYPASS_UPSTREAM_NOTE: &str =
+    "If the agent reported an error instead of answering, look upstream of the \
+     application as well: a WAF or CDN 403 never reaches the ledger either.";
+
 /// Optional groups of env vars to remove from the child environment.
 #[derive(Default, Debug, Clone, Copy)]
 struct ScrubFlags {
@@ -106,6 +125,11 @@ pub struct ChildLauncher {
     /// child is spawned with `Command::current_dir(...)` instead of
     /// inheriting the parent's `cwd`.
     cwd: Option<PathBuf>,
+    /// Agent-specific advice appended to the gateway-usage warning. The launcher
+    /// is shared, so it states the finding ("no requests recorded") and leaves
+    /// the "here is where to look in *your* agent" part to the caller — a codex
+    /// user must not be handed Claude Code troubleshooting.
+    bypass_hint: Option<String>,
 }
 
 impl ChildLauncher {
@@ -116,7 +140,15 @@ impl ChildLauncher {
             env_removes: Vec::new(),
             scrub: ScrubFlags::default(),
             cwd: None,
+            bypass_hint: None,
         }
+    }
+
+    /// Agent-specific advice printed when the gateway recorded no requests for
+    /// this run's key (see `run_with_revoke`).
+    pub fn bypass_hint(mut self, hint: &str) -> Self {
+        self.bypass_hint = Some(hint.to_string());
+        self
     }
 
     pub fn env(mut self, key: &str, value: impl AsRef<OsStr>) -> Self {
@@ -218,11 +250,47 @@ impl ChildLauncher {
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
 
+        let started = std::time::Instant::now();
         let spawn_result = cmd.status();
+        let child_ran_for = started.elapsed();
+
+        // Did the child actually go through the gateway? Asked BEFORE the revoke,
+        // while the key record still exists. Env scrubbing cannot stop an agent
+        // that re-applies a direct-provider mode from its own configuration after
+        // launch; such a session answers normally while nothing is metered,
+        // attributed, or budget-checked, and today there is no way to notice.
+        //
+        // Only worth asking when the child both started and lived long enough to
+        // have said something: `--version`, `--help`, and a session the user quits
+        // before typing all make zero requests legitimately, and accusing them of
+        // bypassing the gateway would train everyone to ignore the warning.
+        let worth_checking = spawn_result.is_ok() && child_ran_for >= MIN_SESSION_FOR_USAGE_CHECK;
+        let usage_check = if worth_checking {
+            Some(key_was_used(base_url, bearer, key_id).await)
+        } else {
+            None
+        };
 
         // Best-effort revoke regardless of how the child exited; the
         // backend TTL is the safety net if this call fails.
         let revoke_result = revoke_ephemeral_key(base_url, bearer, key_id).await;
+
+        match &usage_check {
+            Some(Ok(false)) => {
+                eprintln!("[WARN] {}", bypass_finding(&self.binary));
+                if let Some(hint) = &self.bypass_hint {
+                    eprintln!("[WARN] {hint}");
+                }
+                eprintln!("[WARN] {BYPASS_UPSTREAM_NOTE}");
+            }
+            // Staying silent on failure is deliberate (no false accusations), but a
+            // detector that dies unnoticed is worthless, so leave a trail for
+            // anyone debugging why the warning never fires.
+            Some(Err(e)) if std::env::var_os("STRATOCLAVE_DEBUG").is_some() => {
+                eprintln!("[DEBUG] gateway-usage check did not complete: {e:#}");
+            }
+            _ => {}
+        }
 
         match spawn_result {
             Ok(status) => {
@@ -276,6 +344,33 @@ fn find_binary(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The launcher is shared by both wrappers, so the agent-specific half of the
+    // bypass warning must come from the caller. A hard-coded Claude hint here
+    // would be handed to codex users (and vice versa).
+    #[test]
+    fn bypass_hint_is_supplied_by_the_caller_not_the_launcher() {
+        // The generic text must stay agent-neutral; naming a Claude setting here
+        // would hand that advice to codex users too.
+        let generic = format!("{} {}", bypass_finding("codex"), BYPASS_UPSTREAM_NOTE);
+        for needle in ["CLAUDE_CODE_USE_BEDROCK", "settings.json", "model_provider"] {
+            assert!(
+                !generic.contains(needle),
+                "{needle} belongs in claude_cmd/codex_cmd, not the shared launcher"
+            );
+        }
+        assert!(
+            generic.contains("`codex`"),
+            "the finding names the child: {generic}"
+        );
+
+        let launcher = ChildLauncher::new("codex").bypass_hint("agent specific advice");
+        assert_eq!(
+            launcher.bypass_hint.as_deref(),
+            Some("agent specific advice")
+        );
+        assert!(ChildLauncher::new("codex").bypass_hint.is_none());
+    }
 
     /// L3 (Fable #64 rev1): env_remove runs after the .env() overrides and
     /// clears explicitly-set values, so a scrub list must never name a key the

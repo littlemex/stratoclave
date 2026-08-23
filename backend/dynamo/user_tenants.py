@@ -32,6 +32,7 @@ from botocore.exceptions import ClientError
 from .client import get_dynamodb_resource, user_tenants_table_name
 
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

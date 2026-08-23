@@ -15,6 +15,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { api } from '@/lib/api'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 export default function TeamLeadTenantNew() {
   const { t } = useTranslation()
@@ -106,7 +107,7 @@ export default function TeamLeadTenantNew() {
                 id="tl-default-credit"
                 type="number"
                 min={0}
-                max={10_000_000}
+                max={MAX_TOKEN_CREDIT}
                 value={defaultCredit}
                 onChange={(e) => setDefaultCredit(e.target.value)}
                 placeholder={t('team_lead_tenant_new.default_credit_placeholder')}
