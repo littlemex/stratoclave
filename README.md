@@ -318,6 +318,18 @@ For a detailed walkthrough of components, data model, and invariants, see
 Prerequisites: AWS CLI with an administrator profile, Node.js 20 LTS, Docker,
 and Bedrock model access enabled for the Claude family in your region.
 
+One-line install. The AWS account id is derived from your current credentials
+(`aws sts get-caller-identity`), so the admin email is the only required input:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-infra.sh \
+  | STRATOCLAVE_ADMIN_EMAIL=admin@example.com bash
+```
+
+This clones, deploys all stacks, builds and pushes the backend image, bootstraps
+the first admin, and prints the CloudFront URL. Override the region/prefix with
+`STRATOCLAVE_REGION` / `STRATOCLAVE_PREFIX`. Or run the steps manually:
+
 ```bash
 # Clone
 git clone https://github.com/littlemex/stratoclave.git
@@ -348,8 +360,20 @@ for day-2 operations.
 
 ### Use it from the CLI
 
+One-line install. Given only the deployment URL, this builds the CLI, installs
+it as both `stratoclave` and the short alias `sclv`, adds it to your PATH, and
+runs `setup` (so the default models come from the deployment):
+
 ```bash
-# Build the Rust CLI (pre-built releases will follow)
+curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-cli.sh \
+  | STRATOCLAVE_URL=https://d111111abcdef8.cloudfront.net bash
+```
+
+Then open a new shell (or `source ~/.zshrc`) and sign in with `sclv auth login`.
+Or build and configure manually:
+
+```bash
+# Build the Rust CLI (or use the one-line installer above)
 cd cli
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
