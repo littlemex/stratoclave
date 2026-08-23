@@ -23,6 +23,119 @@ export interface WafStackProps extends cdk.StackProps {
    * `ipAllowlistEnabled` is true. Default: `/${prefix}/waf/ip-allowlist`.
    */
   readonly ipAllowlistParamName?: string;
+  /**
+   * URI prefixes that carry LLM traffic rather than browser traffic. Managed
+   * rules are applied differently on either side of this line — see
+   * `KNOWN_BAD_INPUTS_BODY_RULES_COUNTED`. Defaults to the Messages route (`/v1/`)
+   * and the OpenAI Responses route (`/openai/`).
+   */
+  readonly dataPlanePathPrefixes?: string[];
+}
+
+/** Default URI prefixes treated as the LLM data plane. */
+const DEFAULT_DATA_PLANE_PREFIXES = ['/v1/', '/openai/'];
+
+/**
+ * Managed sub-rules that inspect the REQUEST BODY for injection patterns, run in
+ * Count mode on the data plane only.
+ *
+ * An agent's request body legitimately contains relative paths
+ * (`../../lib/foo.ts`), HTML and JavaScript, shell commands, and cloud metadata
+ * endpoints, because those are the files and questions the user is working on.
+ * Every one of those trips a body-scoped injection rule, and the caller sees
+ * CloudFront's generic 403 page with nothing to suggest that WAF, not the
+ * gateway, said no.
+ *
+ * Measured against a deployed distribution with an identical key, path, and
+ * headers (the account was out of credit, so "reached the application" shows up
+ * as HTTP 402):
+ *
+ *   body "hi"                        -> 402  (reached the app)
+ *   body "cat ../../etc/passwd"      -> 403  (GenericLFI_BODY)
+ *   body "<script>alert(1)</script>" -> 403  (CrossSiteScripting_BODY)
+ *   body "' OR 1=1 --"               -> 402  (no SQLi group enabled)
+ *
+ * A real coding session dies on its first turn: the agent's system prompt embeds
+ * the project's own file paths.
+ *
+ * Body inspection also protects nothing on this route. These rules exist for an
+ * application that interpolates the body into HTML, a filesystem path, or a
+ * shell; Stratoclave forwards the body to Bedrock as an opaque prompt, so a
+ * `<script>` tag is data and never executes. Count (rather than removal) keeps
+ * the CloudWatch metric, so the signal survives without the false positives.
+ *
+ * The relaxation is deliberately confined to the data plane. The console and the
+ * management API are browser-facing, where markup in a body *is* dangerous, so
+ * they keep the managed groups at full strength.
+ *
+ * Be honest about what the data plane gives up. Because CommonRuleSet is not
+ * applied there at all, that route also loses the group's non-body checks —
+ * `GenericLFI_QUERYARGUMENTS`, `CrossSiteScripting_URIPATH`,
+ * `SizeRestrictions_QUERYSTRING`, `NoUserAgent_HEADER`, and the rest. WAF applies
+ * sub-rule overrides per group rather than per path, so keeping the group with
+ * only its body rules counted requires a second instance, and that costs another
+ * 700 WCU against a default 1500 WCU WebACL budget. What remains on the data
+ * plane: KnownBadInputs (bad methods, host-header abuse, known-bad URIs), the IP
+ * reputation list, the rate limit, and the application's own contract — JSON on a
+ * handful of paths, every request carrying a scoped `sk-stratoclave-*` key.
+ *
+ * Rule names are verbatim from the group, not guessed. AWS silently ignores an
+ * override that names a rule the group does not have, so a typo would leave the
+ * data plane blocking while every test still passed. Verify with:
+ *
+ *   aws wafv2 describe-managed-rule-group --vendor-name AWS \
+ *     --name AWSManagedRulesKnownBadInputsRuleSet --scope CLOUDFRONT \
+ *     --region us-east-1 --query 'Rules[].Name'
+ *
+ * CommonRuleSet needs no override list here because it is not applied to the
+ * data plane at all (its `SizeRestrictions_BODY`, `GenericLFI_BODY`,
+ * `GenericRFI_BODY`, `CrossSiteScripting_BODY`, and `EC2MetaDataSSRF_BODY` are
+ * the rules the measurements above tripped). KnownBadInputs *is* applied there,
+ * for its method / host / URI checks, so its two body-content sub-rules are the
+ * ones that need downgrading.
+ */
+const KNOWN_BAD_INPUTS_BODY_RULES_COUNTED = [
+  // `${jndi:...}` and Java gadget strings show up in security-related prompts.
+  'Log4JRCE_BODY',
+  'JavaDeserializationRCE_BODY',
+  // React/JS payload shapes appear whenever the user is working on a frontend.
+  'ReactJSRCE_BODY',
+] as const;
+
+/**
+ * Matches a request whose URI path is on the data plane.
+ *
+ * Two details matter more than they look:
+ *
+ * The path is decoded and normalised before matching. Without that,
+ * `/openai/../api/admin/...` and `%2e%2e` variants classify as data plane —
+ * skipping CommonRuleSet — while anything downstream that folds dot segments
+ * still routes them at the management API. `URL_DECODE` then `NORMALIZE_PATH` is
+ * the standard pairing for that.
+ *
+ * A regex rather than a byte match, because `searchString` is a blob: the API
+ * takes it base64-encoded, so a plain string passed through the CLI or an SDK is
+ * decoded into three junk bytes and the rule matches nothing — silently, since a
+ * scope-down that never matches simply widens the rule (measured against a live
+ * distribution). `regexString` has no such ambiguity.
+ */
+function uriOnDataPlane(prefixes: string[]): wafv2.CfnWebACL.StatementProperty {
+  if (prefixes.length === 0) {
+    throw new Error('dataPlanePathPrefixes must not be empty');
+  }
+  const alternatives = prefixes
+    .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  return {
+    regexMatchStatement: {
+      fieldToMatch: { uriPath: {} },
+      regexString: `^(${alternatives})`,
+      textTransformations: [
+        { priority: 0, type: 'URL_DECODE' },
+        { priority: 1, type: 'NORMALIZE_PATH' },
+      ],
+    },
+  };
 }
 
 /**
@@ -88,16 +201,21 @@ export class WafStack extends cdk.Stack {
       });
     }
 
-    // 2. AWS Managed — CommonRuleSet (OWASP basics).
-    //
-    // Stratoclave proxies the Anthropic Messages API. Legitimate
-    // `/v1/messages` payloads routinely exceed the 8 KB body cap that
-    // `SizeRestrictions_BODY` enforces (system prompt + tool definitions
-    // + chat history all end up in the body), so we downgrade that single
-    // sub-rule to Count. Everything else in CommonRuleSet stays in Block
-    // mode. `GenericRFI_BODY` is similarly noisy because the LLM payload
-    // is *expected* to contain user-provided strings that look like RFI
-    // attempts; count-only is the accepted AWS guidance for LLM proxies.
+    // Browser traffic vs LLM traffic. The console and management API are
+    // browser-facing and keep the managed groups at full strength; the data
+    // plane runs the body-injection sub-rules in Count mode (see
+    // KNOWN_BAD_INPUTS_BODY_RULES_COUNTED for the measurements behind that).
+    const dataPlanePrefixes =
+      props.dataPlanePathPrefixes ?? DEFAULT_DATA_PLANE_PREFIXES;
+    const onDataPlane = uriOnDataPlane(dataPlanePrefixes);
+    const offDataPlane: wafv2.CfnWebACL.StatementProperty = {
+      notStatement: { statement: onDataPlane },
+    };
+
+    // 2. AWS Managed — CommonRuleSet (OWASP basics), console / management API.
+    //    Not applied to the data plane: its body sub-rules are the false-positive
+    //    source, and a second full instance would push the WebACL past the
+    //    default 1500 WCU budget (this group alone costs 700).
     rules.push({
       name: 'AWSManagedRulesCommonRuleSet',
       priority: priority++,
@@ -106,16 +224,7 @@ export class WafStack extends cdk.Stack {
         managedRuleGroupStatement: {
           vendorName: 'AWS',
           name: 'AWSManagedRulesCommonRuleSet',
-          ruleActionOverrides: [
-            {
-              name: 'SizeRestrictions_BODY',
-              actionToUse: { count: {} },
-            },
-            {
-              name: 'GenericRFI_BODY',
-              actionToUse: { count: {} },
-            },
-          ],
+          scopeDownStatement: offDataPlane,
         },
       },
       visibilityConfig: {
@@ -125,7 +234,7 @@ export class WafStack extends cdk.Stack {
       },
     });
 
-    // 3. AWS Managed — KnownBadInputs.
+    // 3. AWS Managed — KnownBadInputs, console / management API (full strength).
     rules.push({
       name: 'AWSManagedRulesKnownBadInputsRuleSet',
       priority: priority++,
@@ -134,6 +243,7 @@ export class WafStack extends cdk.Stack {
         managedRuleGroupStatement: {
           vendorName: 'AWS',
           name: 'AWSManagedRulesKnownBadInputsRuleSet',
+          scopeDownStatement: offDataPlane,
         },
       },
       visibilityConfig: {
@@ -143,7 +253,33 @@ export class WafStack extends cdk.Stack {
       },
     });
 
-    // 4. AWS Managed — IP reputation.
+    // 4. AWS Managed — KnownBadInputs on the data plane, with the body-content
+    //    sub-rules counted. Keeps the non-body protections (bad methods, host
+    //    header abuse, known-bad URIs) blocking for `/v1/*` and `/openai/*`
+    //    while letting a prompt contain whatever the user is working on.
+    rules.push({
+      name: 'KnownBadInputsDataPlane',
+      priority: priority++,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesKnownBadInputsRuleSet',
+          scopeDownStatement: onDataPlane,
+          ruleActionOverrides: KNOWN_BAD_INPUTS_BODY_RULES_COUNTED.map((name) => ({
+            name,
+            actionToUse: { count: {} },
+          })),
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'KnownBadInputsDataPlane',
+      },
+    });
+
+    // 5. AWS Managed — IP reputation.
     rules.push({
       name: 'AWSManagedRulesAmazonIpReputationList',
       priority: priority++,
@@ -161,7 +297,7 @@ export class WafStack extends cdk.Stack {
       },
     });
 
-    // 5. Rate-based rule (5-minute window, per IP). Last rule in the
+    // 6. Rate-based rule (5-minute window, per IP). Last rule in the
     // chain — no further `priority++` is needed after this one.
     rules.push({
       name: 'RateLimitPerIp',

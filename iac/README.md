@@ -35,6 +35,50 @@ Client → CloudFront (TLS, WAFv2) → ALB (internal) → ECS Fargate → Bedroc
 | **FrontendCodeBuildStack** | Frontend build | S3 source bucket, CodeBuild project, IAM role |
 | **WafStack** | Edge protection | WAFv2 WebACL (CloudFront scope) |
 
+### WAF: browser traffic and LLM traffic are not the same thing
+
+One CloudFront distribution serves both the web console and the LLM data plane,
+but a request body means something different on each side, so the WebACL treats
+them differently.
+
+Off the data plane (console, management API) the AWS managed groups run at full
+strength: `CommonRuleSet` and `KnownBadInputs`, every sub-rule in Block mode.
+
+On the data plane (`/v1/*`, `/openai/*`) the rules are deliberately narrower:
+
+| | Off the data plane | On the data plane |
+|---|---|---|
+| `CommonRuleSet` (700 WCU) | Block | **not applied** |
+| `KnownBadInputs` (200 WCU) | Block | Block, except its body-content sub-rules `Log4JRCE_BODY`, `JavaDeserializationRCE_BODY`, `ReactJSRCE_BODY` (Count) |
+| IP reputation, rate limit | Block | Block |
+
+The reason is the request body. An agent's prompt legitimately contains relative
+paths (`../../lib/foo.ts`), HTML and JavaScript, shell commands, and cloud
+metadata endpoints, because those are the files and questions the user is working
+on. `GenericLFI_BODY` and `CrossSiteScripting_BODY` therefore reject ordinary
+sessions on the first turn, and the caller sees only CloudFront's generic 403 page
+with nothing to indicate that WAF, not the gateway, said no. Body inspection also
+protects nothing on that route: Stratoclave forwards the body to Bedrock as an
+opaque prompt, so a `<script>` tag is data and never executes.
+
+Be precise about the cost of dropping `CommonRuleSet` there, because it is more
+than its body rules: the data plane also loses that group's URI, query-string,
+cookie, and user-agent checks (`GenericLFI_QUERYARGUMENTS`,
+`CrossSiteScripting_URIPATH`, `SizeRestrictions_QUERYSTRING`, `NoUserAgent_HEADER`
+and friends). The trade is deliberate — WAF applies sub-rule overrides per rule
+group, not per path, so keeping the group on the data plane with only its body
+sub-rules counted needs a second instance, and a second instance costs another
+700 WCU on a WebACL whose default budget is 1500. On that route the mitigations
+are the application itself: the API accepts only JSON on a handful of paths,
+every request carries a scoped `sk-stratoclave-*` key, and `KnownBadInputs` still
+blocks bad methods, host-header abuse, and known-bad URIs.
+
+Set `dataPlanePathPrefixes` on `WafStack` if your deployment serves the LLM routes
+under different prefixes.
+
+If you replace `WafStack` with your own WebACL, apply the same split or agent
+traffic will fail on its first turn.
+
 ## Prerequisites
 
 - Node.js 20 LTS or later

@@ -1,0 +1,19 @@
+{
+  "_source": "aws wafv2 describe-managed-rule-group --vendor-name AWS --name AWSManagedRulesKnownBadInputsRuleSet --scope CLOUDFRONT --region us-east-1 --query 'Rules[].Name'",
+  "_why": "AWS silently ignores a ruleActionOverride that names a rule the group does not ship, so the override list has to be checked against the group's real rules rather than against a hand-written copy of itself.",
+  "_captured": "2026-08-24",
+  "rules": [
+    "ExploitablePaths_URIPATH",
+    "Host_localhost_HEADER",
+    "JavaDeserializationRCE_BODY",
+    "JavaDeserializationRCE_HEADER",
+    "JavaDeserializationRCE_QUERYSTRING",
+    "JavaDeserializationRCE_URIPATH",
+    "Log4JRCE_BODY",
+    "Log4JRCE_HEADER",
+    "Log4JRCE_QUERYSTRING",
+    "Log4JRCE_URIPATH",
+    "PROPFIND_METHOD",
+    "ReactJSRCE_BODY"
+  ]
+}
