@@ -428,6 +428,58 @@ def _convert_system(system: Any) -> Optional[list[dict[str, str]]]:
     return None
 
 
+# Anthropic tool entries that the API executes on its own side. They carry a
+# versioned `type` and no `input_schema`, because the caller never runs them.
+_SERVER_SIDE_TOOL_PREFIXES = (
+    "web_search",
+    "web_fetch",
+    "code_execution",
+    "computer_",
+    "bash_",
+    "text_editor_",
+)
+
+
+def _reject_server_side_tools(tools: Any) -> None:
+    """Refuse a request whose `tools` cannot be expressed on the Bedrock route.
+
+    Bedrock's Converse API takes only client tools: `toolSpec` with a name and an
+    input schema, invoked by the caller. Anthropic's server-side tools (web search
+    first among them) have no input schema because Anthropic runs them, so the
+    translation produced `inputSchema: {json: {}}`, Bedrock rejected it, and the
+    caller got a bare `500 Internal Server Error` — which reads as "the gateway
+    broke, retry later" when the truth is "this route cannot do that at all".
+
+    Naming the tool in a 400 is the difference between a user disabling web search
+    and a user waiting for a fix that is never coming.
+    """
+    unsupported: list[str] = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        t_type = str(t.get("type") or "")
+        if not t_type or "input_schema" in t:
+            continue
+        if t_type.startswith(_SERVER_SIDE_TOOL_PREFIXES):
+            unsupported.append(t_type)
+    if not unsupported:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "type": "unsupported_tool",
+            "tools": sorted(set(unsupported)),
+            "message": (
+                "This route proxies Bedrock's Converse API, which executes only "
+                "client-side tools. Anthropic's server-side tools "
+                f"({', '.join(sorted(set(unsupported)))}) cannot run here — disable "
+                "them in your client (for Claude Code: deny the WebSearch tool) and "
+                "retry."
+            ),
+        },
+    )
+
+
 def _build_bedrock_kwargs(
     body: AnthropicMessagesRequest, model_id: str
 ) -> dict[str, Any]:
@@ -461,6 +513,7 @@ def _build_bedrock_kwargs(
 
     tools = getattr(body, "tools", None)
     if tools:
+        _reject_server_side_tools(tools)
         tool_config: dict[str, Any] = {
             "tools": [
                 {
