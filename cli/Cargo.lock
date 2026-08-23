@@ -2701,6 +2701,7 @@ dependencies = [
  "configparser",
  "dirs",
  "http 1.4.0",
+ "libc",
  "open",
  "predicates",
  "rand",

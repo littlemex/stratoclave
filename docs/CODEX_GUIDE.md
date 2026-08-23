@@ -73,15 +73,61 @@ What `stratoclave codex` does under the hood:
 1. Mints an ephemeral `sk-stratoclave-*` key with **only** the
    `responses:send` scope, expiring in 30 minutes, marked `ephemeral=true`
    so it does not count against your 5-active-key cap.
-2. Creates a temporary directory and writes a `config.toml` describing
-   a `stratoclave` model provider that targets `<your>.cloudfront.net/openai/v1`.
-3. Runs `codex` with `CODEX_HOME=<tempdir>` and
-   `STRATOCLAVE_OPENAI_KEY=<plaintext>` in the child environment. The
-   user's persistent `~/.codex/config.toml` is **never read** during
-   this invocation.
+2. Writes a `config.toml` describing a `stratoclave` model provider that targets
+   `<your>.cloudfront.net/openai/v1` into the state directory it will use as
+   `CODEX_HOME` (`~/.stratoclave/codex-state` by default — see below).
+3. Runs `codex` with that `CODEX_HOME` and `STRATOCLAVE_OPENAI_KEY=<plaintext>`
+   in the child environment. The user's persistent `~/.codex/config.toml` is
+   **never read** during this invocation.
 4. On exit (success, failure, or `Ctrl-C`), revokes the ephemeral key
    via `DELETE /api/mvp/me/api-keys/by-key-id/{key_id}`. The 30-minute
    TTL is the safety net if revoke fails.
+
+### Session persistence and `codex resume`
+
+`CODEX_HOME` holds two different things: the configuration codex reads, and the
+state codex writes — `sessions/` (the rollout transcripts `codex resume` reads),
+`history.jsonl`, `log/`, and the per-directory trust answers it records in
+`config.toml`. Keeping your `~/.codex/config.toml` out of a proxied run must not
+mean throwing the conversation away with it, so the directory is durable and
+`config.toml` is the only file the wrapper owns there, rewritten per run. Trust
+answers and any other codex-owned keys are carried across that rewrite. Setting
+`CODEX_HOME` yourself has no effect: the wrapper owns that variable.
+
+The default is `~/.stratoclave/codex-state`, never `~/.codex`, so proxied sessions
+and direct-OpenAI sessions never show up in each other's `resume` picker. On Unix
+the directory is restricted to `0700`, because rollouts contain the conversation;
+if that cannot be applied the run stops rather than writing transcripts into a
+directory whose permissions are unknown. On platforms without Unix permission
+bits the wrapper says so instead of claiming a guarantee it cannot make.
+
+```bash
+# Resume the most recent proxied session.
+stratoclave codex -- resume --last
+
+# Keep state per project instead of one shared directory.
+stratoclave codex --codex-state-dir ./.codex-state -- "continue where we left off"
+
+# Keep nothing: temp CODEX_HOME, deleted on exit. `codex resume` cannot find it.
+stratoclave codex --ephemeral-codex-state -- exec "one-off question"
+```
+
+`STRATOCLAVE_CODEX_STATE_DIR` sets the same directory by environment variable,
+and `--ephemeral-codex-state` is rejected together with `--codex-state-dir`
+rather than silently ignoring it.
+
+Pointing the flag at your own `~/.codex` is refused: the wrapper rewrites
+`config.toml` in whatever directory it is given, which would drop your custom
+`model_providers`, your `model`, and every comment in the file. If you point it at
+some other directory that already holds a codex config, that file is copied to
+`config.toml.bak` first, and the run stops if the copy cannot be made.
+
+One run at a time owns a state directory. `config.toml` carries the run's model
+and its `x-sc-*` attribution headers and codex reads it at startup, so sharing it
+could hand one run's billing group to another's child. A second concurrent run in
+the same directory therefore keeps no state — it says so and falls back to a temp
+`CODEX_HOME` — and a lock left by a crashed run is taken over after 24 hours. Give
+concurrent work separate `--codex-state-dir` values to keep both resumable.
 
 Sensitive env vars (`AWS_PROFILE`, `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`,
 `CLAUDE_CODE_USE_BEDROCK`, `STRATOCLAVE_*`) are scrubbed before spawning

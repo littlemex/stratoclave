@@ -399,7 +399,7 @@ subprocess sees:
 
 | Environment variable | Value |
 |----------------------|-------|
-| `CODEX_HOME` | A temp dir whose `config.toml` points codex at Stratoclave. |
+| `CODEX_HOME` | The state dir whose generated `config.toml` points codex at Stratoclave (`~/.stratoclave/codex-state` by default; a temp dir with `--ephemeral-codex-state`). |
 | `STRATOCLAVE_OPENAI_KEY` | The ephemeral `sk-stratoclave-*` key (`responses:send` only). |
 
 The user's persistent `~/.codex/config.toml` is **not loaded** during this

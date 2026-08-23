@@ -17,6 +17,9 @@ toml = "1.1"
 # the user's ~/.codex/config.toml. Persistent enough that the spawned
 # child can read it during its lifetime.
 tempfile = "3"
+# flock(2) for the codex state-directory lock: a lock tied to an open fd is
+# released by the kernel when the process dies, which a lock *file* is not.
+libc = "0.2"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "form"] }
 serde = { version = "1", features = ["derive"] }
