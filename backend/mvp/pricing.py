@@ -189,11 +189,30 @@ class RatingRecord:
 # so an unpriced model never under-charges a budget.
 _DEFAULT_RATES: dict[str, Rate] = {
     "opus": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
+    # Claude Fable 5 — $10/$50 per MTok, above the Opus tier. Cache rates follow
+    # the Anthropic ratio used for Opus (read = 0.1x input, write = 1.25x input).
+    "fable": Rate(10_000_000, 50_000_000, 1_000_000, 12_500_000),
     "sonnet": Rate(3_000_000, 15_000_000, 300_000, 3_750_000),
     "haiku": Rate(1_000_000, 5_000_000, 100_000, 1_250_000),
     # GPT-5.x on bedrock-mantle. Output priced at the Opus tier as a
     # conservative default until an admin sets an exact rate.
     "gpt-5": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
+    # GPT-5.6 Sol / Terra on bedrock-mantle — exact In-Region/Geo list prices from
+    # the AWS Bedrock model cards (Aug 2026). Sol (flagship): $4.40/$22.00 in/out,
+    # $0.44/$5.50 cache read/write. Terra (balanced): $2.20/$13.20, $0.22/$2.75.
+    "gpt-5.6-sol": Rate(4_400_000, 22_000_000, 440_000, 5_500_000),
+    "gpt-5.6-terra": Rate(2_200_000, 13_200_000, 220_000, 2_750_000),
+    # xAI Grok 4.6 on bedrock-mantle — In-Region/Geo list price: $2.20/$6.60 in/out,
+    # $0.55 cache read. Bedrock's card does not publish a cache-WRITE rate; assume
+    # the 1.25x-input premium the Anthropic tiers use ($2.75) as an UPPER-BOUND so
+    # the ledger never under-charges (adjust down if the real rate is published).
+    "grok": Rate(2_200_000, 6_600_000, 550_000, 2_750_000),
+    # Google Gemma 4 — Bedrock publishes no per-token list price on the model card.
+    # Per this module's "unpriced models must never under-charge" rule, gemma
+    # DEFAULTS to the Opus tier (deliberate OVER-charge). An admin lowers it to the
+    # real Gemma rate via the PricingConfig table — the safe direction is a
+    # deliberate reduction, not an accidental low default.
+    "gemma": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
     # Self-hosted vLLM (hybrid serving). An operator-set cost-recovery rate,
     # NOT a Bedrock price. Cache rates MUST be 0 — vLLM reports no Bedrock
     # cache-token split, so any nonzero cache rate would be dead pricing that

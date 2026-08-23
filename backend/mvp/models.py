@@ -41,7 +41,7 @@ class ModelEntry:
     `responses` → `mvp.openai_responses`.
     """
 
-    provider: Literal["anthropic", "openai"]
+    provider: Literal["anthropic", "openai", "xai", "google"]
     bedrock_model_id: str
     bedrock_region: str
     aliases: tuple[str, ...]
@@ -79,6 +79,31 @@ class ModelEntry:
 # can audit every reachable model in the diff.
 _REGISTRY: tuple[ModelEntry, ...] = (
     # ---- Anthropic / Claude family (us-east-1) ----
+    # Claude Opus 5 lists at the same $5/$25 per MTok as the Opus 4.x tier (AWS
+    # Bedrock model card, Jul 2026), so it shares pricing_key="opus" — confirmed,
+    # not assumed.
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-opus-5",
+        bedrock_region="us-east-1",
+        aliases=("claude-opus-5",),
+        wire_protocol="messages",
+        pricing_key="opus",
+    ),
+    # Claude Fable 5 — Anthropic's most capable model. Priced above the Opus tier
+    # ($10/$50 per MTok), so it carries its OWN pricing_key rather than sharing
+    # "opus". Bedrock offering requires the account to opt into the
+    # `provider_data_share` data-retention mode and has a higher refusal rate
+    # (stop_reason="refusal") than prior Claude models — both are Bedrock/account
+    # concerns, not gateway concerns, but see docs/CLI_GUIDE.md before relying on it.
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-fable-5",
+        bedrock_region="us-east-1",
+        aliases=("claude-fable-5",),
+        wire_protocol="messages",
+        pricing_key="fable",
+    ),
     ModelEntry(
         provider="anthropic",
         bedrock_model_id="us.anthropic.claude-opus-4-7",
@@ -202,6 +227,56 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         aliases=("gpt-5.5", "openai.gpt-5.5"),
         wire_protocol="responses",
         pricing_key="gpt-5",
+    ),
+    # GPT-5.6 is a family of tiers on bedrock-mantle (OpenAI-compatible Responses
+    # endpoint). "Sol" is the flagship tier, "Terra" the balanced/cost-efficient
+    # one; each is a distinct Bedrock model card with its own price, so each
+    # carries its own pricing_key. Both are available on bedrock-mantle in
+    # us-east-1 and us-east-2 (Terra also us-west-2); this registry PINS us-east-2
+    # to reuse the same mantle region already proven by the gpt-5.5 entry.
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.6-sol",
+        bedrock_region="us-east-2",
+        aliases=("gpt-5.6-sol", "openai.gpt-5.6-sol"),
+        wire_protocol="responses",
+        pricing_key="gpt-5.6-sol",
+    ),
+    ModelEntry(
+        provider="openai",
+        bedrock_model_id="openai.gpt-5.6-terra",
+        bedrock_region="us-east-2",
+        aliases=("gpt-5.6-terra", "openai.gpt-5.6-terra"),
+        wire_protocol="responses",
+        pricing_key="gpt-5.6-terra",
+    ),
+    # ---- xAI Grok on Bedrock (bedrock-mantle OpenAI-compatible, us-west-2) ----
+    # Grok 4.6 is served on bedrock-mantle's OpenAI-compatible surface, so it rides
+    # the SAME Responses transport as the OpenAI family — no new transport, just a
+    # registry entry. In-region mantle is us-west-2 only.
+    ModelEntry(
+        provider="xai",
+        bedrock_model_id="xai.grok-4.6",
+        bedrock_region="us-west-2",
+        aliases=("grok-4.6", "xai.grok-4.6"),
+        wire_protocol="responses",
+        pricing_key="grok",
+    ),
+    # ---- Google Gemma on Bedrock (bedrock-mantle only) ----
+    # Gemma 4 is served ONLY on the bedrock-mantle OpenAI-compatible endpoint (no
+    # Converse/bedrock-runtime), so it too rides the Responses transport. It is
+    # available on mantle in us-east-1/us-east-2/us-west-2/eu-central-1; this
+    # registry PINS us-east-2 (reusing the mantle region proven by gpt-5.5). NOTE:
+    # Bedrock publishes no per-token list price for Gemma, so `pricing_key="gemma"`
+    # DEFAULTS to the Opus tier (deliberate over-charge, never under-charge); an
+    # admin lowers it to the real rate via the PricingConfig table (see docs).
+    ModelEntry(
+        provider="google",
+        bedrock_model_id="google.gemma-4-31b",
+        bedrock_region="us-east-2",
+        aliases=("gemma-4", "gemma-4-31b", "google.gemma-4-31b"),
+        wire_protocol="responses",
+        pricing_key="gemma",
     ),
 )
 

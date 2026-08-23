@@ -1,5 +1,5 @@
 {
-  "version": "2026-06-02.1",
+  "version": "2026-08-23.1",
   "roles": {
     "admin": {
       "description": "Root: manages all tenants, users, SSO trusted accounts, and API keys.",
@@ -20,6 +20,7 @@
       "permissions": [
         "tenants:create",
         "tenants:read-own",
+        "users:update-own-tenant",
         "usage:read-own-tenant",
         "usage:read-self",
         "apikeys:read-self",

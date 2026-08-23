@@ -607,6 +607,11 @@ async def create_response(
 
     # Non-streaming path.
     payload = body.model_dump(exclude_none=True)
+    # Forward the RESOLVED Bedrock model id, not the client-facing alias: mantle
+    # only knows ids like "xai.grok-4.6" / "openai.gpt-5.6-sol", so passing an
+    # alias ("grok-4.6") through verbatim makes mantle 404 with "model does not
+    # exist". This also charges/serves the model the cascade actually selected.
+    payload["model"] = entry.bedrock_model_id
     payload["stream"] = False
     try:
         async with _mantle_client(entry.bedrock_region) as client:
@@ -723,6 +728,9 @@ async def _stream_response(
     minted_id: Optional[str] = None
 
     payload = body.model_dump(exclude_none=True)
+    # Forward the RESOLVED Bedrock model id, not the client-facing alias (mantle
+    # only knows ids like "xai.grok-4.6"); see the non-streaming path.
+    payload["model"] = entry.bedrock_model_id
     payload["stream"] = True
 
     try:

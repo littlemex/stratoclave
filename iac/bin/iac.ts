@@ -407,7 +407,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // codex "off" at synth while the container runs it "on" (NEW-8). The backend
     // parses it as `.lower() == "true"`, so 'true'/'false' are exact. (NEW-8/NEW-11)
     CODEX_ENABLED: String(codexEnabled),
-    DEFAULT_CODEX_MODEL: process.env.DEFAULT_CODEX_MODEL || 'openai.gpt-5.4',
+    DEFAULT_CODEX_MODEL: process.env.DEFAULT_CODEX_MODEL || 'openai.gpt-5.6-sol',
     OPENAI_BEDROCK_REGIONS:
       process.env.OPENAI_BEDROCK_REGIONS || 'us-east-2,us-west-2',
     OPENAI_BASE_PATH: process.env.OPENAI_BASE_PATH || '/openai/v1',

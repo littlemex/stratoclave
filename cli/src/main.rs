@@ -388,14 +388,21 @@ enum AdminUserAction {
         #[arg(long)]
         total_credit: Option<u64>,
     },
-    /// Overwrite a user's credit budget
-    #[command(name = "set-credit")]
+    /// Overwrite a user's credit/token budget. Provide --total N, or --unlimited
+    /// to lift the per-user token cap (tenant pool + per-model quota still apply),
+    /// or neither with --reset-used to just clear the used-counter.
+    #[command(
+        name = "set-credit",
+        group(clap::ArgGroup::new("credit_action").required(true).args(["total", "unlimited", "reset_used"]))
+    )]
     SetCredit {
         user_id: String,
-        #[arg(long)]
-        total: u64,
+        #[arg(long, conflicts_with = "unlimited")]
+        total: Option<u64>,
         #[arg(long, default_value_t = false)]
         reset_used: bool,
+        #[arg(long, default_value_t = false)]
+        unlimited: bool,
     },
     /// Promote/demote a user (replaces role). Backend enforces last-admin
     /// protection and blocks demoting a team_lead who still owns a tenant.
@@ -545,6 +552,23 @@ enum TeamLeadTenantAction {
     Show { tenant_id: String },
     /// List members of own tenant (email + credit only, user_id is NOT shown)
     Members { tenant_id: String },
+    /// Set/clear a member's token limit (by email). --total N, or --unlimited to
+    /// lift the cap, or neither with --reset-used to just clear the used-counter.
+    #[command(
+        name = "set-member-credit",
+        group(clap::ArgGroup::new("member_credit_action").required(true).args(["total", "unlimited", "reset_used"]))
+    )]
+    SetMemberCredit {
+        tenant_id: String,
+        #[arg(long)]
+        email: String,
+        #[arg(long, conflicts_with = "unlimited")]
+        total: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        reset_used: bool,
+        #[arg(long, default_value_t = false)]
+        unlimited: bool,
+    },
     /// Own tenant usage summary
     Usage {
         tenant_id: String,
@@ -771,7 +795,8 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 user_id,
                 total,
                 reset_used,
-            } => wrap(mvp::admin::user_set_credit(&user_id, total, reset_used).await),
+                unlimited,
+            } => wrap(mvp::admin::user_set_credit(&user_id, total, reset_used, unlimited).await),
             AdminUserAction::SetRole { user_id, role } => {
                 wrap(mvp::admin::user_set_role(&user_id, &role).await)
             }
@@ -891,6 +916,18 @@ async fn dispatch_team_lead(action: TeamLeadAction) -> ExitCode {
             TeamLeadTenantAction::Members { tenant_id } => {
                 wrap(mvp::team_lead::tenant_members(&tenant_id).await)
             }
+            TeamLeadTenantAction::SetMemberCredit {
+                tenant_id,
+                email,
+                total,
+                reset_used,
+                unlimited,
+            } => wrap(
+                mvp::team_lead::tenant_set_member_credit(
+                    &tenant_id, &email, total, reset_used, unlimited,
+                )
+                .await,
+            ),
             TeamLeadTenantAction::Usage {
                 tenant_id,
                 since_days,

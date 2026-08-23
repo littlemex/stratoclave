@@ -27,16 +27,26 @@ if [ -z "$AWS_REGION" ]; then
     log_warn "AWS_REGION not set. Using default: $AWS_REGION"
 fi
 
-# Fetch ECR repository name
+# Fetch ECR repository name from the ECR stack ("<prefix>-ecr"; prefix defaults
+# to "stratoclave"). Falls back to describing the repo directly by its
+# conventional name so a renamed/absent stack output does not block the push.
+PREFIX="${STRATOCLAVE_PREFIX:-stratoclave}"
 ECR_REPO_NAME=$(aws cloudformation describe-stacks \
-    --stack-name StratoclaveEcrStack \
+    --stack-name "${PREFIX}-ecr" \
     --query 'Stacks[0].Outputs[?OutputKey==`RepositoryName`].OutputValue' \
     --output text \
-    --region $AWS_REGION 2>/dev/null)
+    --region $AWS_REGION 2>/dev/null || true)
 
-if [ -z "$ECR_REPO_NAME" ]; then
-    log_error "ECR repository not found. Please deploy StratoclaveEcrStack first:"
-    log_error "  cd iac && npx cdk deploy StratoclaveEcrStack"
+if [ -z "$ECR_REPO_NAME" ] || [ "$ECR_REPO_NAME" = "None" ]; then
+    ECR_REPO_NAME=$(aws ecr describe-repositories \
+        --repository-names "${PREFIX}-backend" \
+        --query 'repositories[0].repositoryName' --output text \
+        --region $AWS_REGION 2>/dev/null || true)
+fi
+
+if [ -z "$ECR_REPO_NAME" ] || [ "$ECR_REPO_NAME" = "None" ]; then
+    log_error "ECR repository not found. Deploy the infrastructure first:"
+    log_error "  cd iac && ./scripts/deploy-all.sh"
     exit 1
 fi
 

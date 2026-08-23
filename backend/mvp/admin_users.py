@@ -34,6 +34,8 @@ from dynamo import (
     UsersRepository,
     UserTenantsRepository,
 )
+from dynamo.user_tenants import CreditExhaustedError, is_unlimited
+from .credit_ops import CreditAction
 from dynamo.client import get_dynamodb_resource
 
 from .authz import (
@@ -262,6 +264,9 @@ class UserSummary(BaseModel):
     total_credit: int = 0
     credit_used: int = 0
     remaining_credit: int = 0
+    # True when the per-user token cap is the effectively-unbounded sentinel;
+    # clients should render "unlimited" instead of the raw total_credit/remaining.
+    unlimited: bool = False
     created_at: Optional[str] = None
     # Phase S: SSO / auth method metadata
     auth_method: Optional[str] = None
@@ -315,6 +320,7 @@ def _enrich_user_with_credit(user_item: dict, repo: UserTenantsRepository) -> Us
         total_credit=summary["total_credit"],
         credit_used=summary["credit_used"],
         remaining_credit=summary["remaining_credit"],
+        unlimited=is_unlimited(summary["total_credit"]),
         created_at=user_item.get("created_at"),
         auth_method=user_item.get("auth_method"),
         sso_account_id=user_item.get("sso_account_id"),
@@ -797,10 +803,11 @@ def assign_tenant(
 # -----------------------------------------------------------------------
 # Credit overwrite
 # -----------------------------------------------------------------------
-class SetCreditRequest(BaseModel):
+class SetCreditRequest(CreditAction):
+    """Admin set/clear of a user's per-user TOKEN quota. Semantics live in
+    `CreditAction` (shared with the Team-Lead endpoint)."""
+
     model_config = ConfigDict(extra="forbid")
-    total_credit: int = Field(ge=0, le=10_000_000)
-    reset_used: bool = False
 
 
 @router.patch("/users/{user_id}/credit", response_model=UserSummary)
@@ -817,15 +824,19 @@ def set_credit(
 
     user_tenants_repo = UserTenantsRepository()
     prev = user_tenants_repo.credit_summary(user_id, tenant_id)
+    # `resolved_total()` is None for reset-only -> partial update that does NOT
+    # re-write the cap (no read-modify-write, so no lost update on a concurrent
+    # cap change).
     try:
         user_tenants_repo.overwrite_credit(
             user_id=user_id,
             tenant_id=tenant_id,
-            total_credit=body.total_credit,
+            total_credit=body.resolved_total(),
             reset_used=body.reset_used,
         )
-    except Exception as e:
-        raise HTTPException(status_code=409, detail=f"Credit update conflict: {e}")
+    except CreditExhaustedError:
+        # Row not active (archived / never provisioned in this tenant).
+        raise HTTPException(status_code=409, detail="credit_update_conflict")
 
     log_audit_event(
         event="credit_overwritten",
@@ -834,8 +845,12 @@ def set_credit(
         target_id=user_id,
         target_type="user",
         tenant_id=tenant_id,
-        before=prev,
-        after={"total_credit": body.total_credit, "reset_used": body.reset_used},
+        before={**prev, "unlimited": is_unlimited(prev["total_credit"])},
+        after={
+            "total_credit": body.resolved_total(),
+            "unlimited": body.unlimited,
+            "reset_used": body.reset_used,
+        },
     )
 
     return _enrich_user_with_credit(user_item, user_tenants_repo)

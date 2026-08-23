@@ -36,6 +36,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# "Unlimited" per-user token quota. Represented as an effectively-unbounded
+# integer cap rather than a real bypass so the atomic reserve/settle path
+# (and its Z3-proven money invariants) stay BYTE-IDENTICAL: reserve still does
+# `credit_used <= total_credit - tokens`, it just never exhausts in practice.
+# The tenant dollar pool and per-model quota still apply on top. 1e15 tokens is
+# ~9 orders of magnitude beyond any real reservation (real reservations are
+# 1e5–1e6 tokens), well under both DynamoDB's 38-digit Number and JS's
+# Number.MAX_SAFE_INTEGER (~9e15), so clients that read the raw value do not
+# lose precision.
+UNLIMITED_CREDIT = 1_000_000_000_000_000  # 10**15
+
+
+def is_unlimited(total_credit: int) -> bool:
+    """True when a cap is the effectively-unbounded sentinel (or above). Used by
+    API serializers / CLI to render "unlimited" instead of leaking the raw 1e15,
+    and to exclude the sentinel from any cross-tenant cap/remaining aggregation."""
+    return int(total_credit) >= UNLIMITED_CREDIT
+
+
 # A single-item UpdateItem can be transiently cancelled with
 # TransactionConflictException when a concurrent TransactWriteItems is touching
 # the same row (e.g. a pooled reserve on this user's balance while a settle
@@ -444,37 +463,65 @@ class UserTenantsRepository:
         }
 
     def overwrite_credit(
-        self, *, user_id: str, tenant_id: str, total_credit: int, reset_used: bool = False
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        total_credit: Optional[int] = None,
+        reset_used: bool = False,
+        require_role: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Admin credit overwrite (marks the record as user_override)."""
-        update_expr_parts = [
-            "total_credit = :total",
-            "credit_source = :src",
-            "updated_at = :now",
-        ]
+        """Overwrite the per-user token cap and/or reset the used-counter atomically.
+
+        `total_credit=None` performs a PARTIAL update that touches ONLY
+        `credit_used` (reset-only). This avoids the read-modify-write of
+        re-writing a previously-read cap, which would otherwise clobber a
+        concurrent cap change (lost update) — the whole point of "clear the used
+        counter but keep the cap". `reset_used=False` with `total_credit=None`
+        is a no-op the caller must not issue (validated upstream).
+
+        `require_role` (optional) folds a role guard INTO the conditional write so
+        a check-then-write TOCTOU cannot let a target that was just promoted to
+        admin/team_lead be modified: the write only lands if the row's `role`
+        still equals `require_role`. A lost condition raises `CreditExhaustedError`
+        (mapped to 404/409 by the caller).
+        """
+        if total_credit is None and not reset_used:
+            raise ValueError("overwrite_credit is a no-op: set total_credit or reset_used")
+
+        set_parts = ["credit_source = :src", "updated_at = :now"]
         values: dict[str, Any] = {
-            ":total": Decimal(total_credit),
             ":src": "user_override",
             ":now": _now_iso(),
             ":active": "active",
         }
+        if total_credit is not None:
+            set_parts.append("total_credit = :total")
+            values[":total"] = Decimal(total_credit)
         if reset_used:
-            update_expr_parts.append("credit_used = :zero")
+            set_parts.append("credit_used = :zero")
             values[":zero"] = Decimal(0)
+
+        names = {"#s": "status"}
+        condition = "attribute_exists(user_id) AND (attribute_not_exists(#s) OR #s = :active)"
+        if require_role is not None:
+            condition += " AND #role = :require_role"
+            names["#role"] = "role"
+            values[":require_role"] = require_role
 
         try:
             resp = self._table.update_item(
                 Key={"user_id": user_id, "tenant_id": tenant_id},
-                UpdateExpression="SET " + ", ".join(update_expr_parts),
-                ExpressionAttributeNames={"#s": "status"},
-                ConditionExpression="attribute_exists(user_id) AND (attribute_not_exists(#s) OR #s = :active)",
+                UpdateExpression="SET " + ", ".join(set_parts),
+                ExpressionAttributeNames=names,
+                ConditionExpression=condition,
                 ExpressionAttributeValues=values,
                 ReturnValues="ALL_NEW",
             )
         except ClientError as e:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
                 raise CreditExhaustedError(
-                    f"UserTenant not active for user_id={user_id} tenant_id={tenant_id}"
+                    f"UserTenant not active/role-matched for user_id={user_id} tenant_id={tenant_id}"
                 )
             raise
         return resp.get("Attributes", {})

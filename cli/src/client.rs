@@ -19,7 +19,7 @@ use crate::CliError;
 /// validated against the live `/v1/messages` allowlist (see the CLI live E2E).
 /// MUST be a real registry alias — the backend rejects unknown model ids with
 /// HTTP 400, which would make the CLI dead-on-arrival for users without config.
-const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_MODEL: &str = "claude-opus-5";
 /// Output cap for pipe/chat one-shot turns. The backend also bills input
 /// tokens; this only bounds generation.
 const DEFAULT_MAX_TOKENS: u32 = 4096;

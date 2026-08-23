@@ -365,6 +365,8 @@ stratoclave claude -- --print "List files"
 
 | CLI value | Bedrock inference profile |
 |-----------|---------------------------|
+| `claude-opus-5` | `us.anthropic.claude-opus-5` |
+| `claude-fable-5` | `us.anthropic.claude-fable-5` |
 | `claude-opus-4-7` | `us.anthropic.claude-opus-4-7` |
 | `claude-opus-4-6` | `us.anthropic.claude-opus-4-6-v1` |
 | `claude-opus-4-5` | `us.anthropic.claude-opus-4-5-20251101-v1:0` |
@@ -423,15 +425,32 @@ stratoclave codex --model openai.gpt-5.5 -- "Plan a refactor"
 
 ### Supported model IDs
 
-| CLI value         | Bedrock model     | Region    |
-|-------------------|-------------------|-----------|
-| `openai.gpt-5.4`  | `openai.gpt-5.4`  | us-west-2 |
-| `openai.gpt-5.5`  | `openai.gpt-5.5`  | us-east-2 |
+| CLI value            | Bedrock model         | Region    |
+|----------------------|-----------------------|-----------|
+| `openai.gpt-5.4`     | `openai.gpt-5.4`      | us-west-2 |
+| `openai.gpt-5.5`     | `openai.gpt-5.5`      | us-east-2 |
+| `openai.gpt-5.6-sol` | `openai.gpt-5.6-sol`  | us-east-2 |
+| `openai.gpt-5.6-terra` | `openai.gpt-5.6-terra` | us-east-2 |
+| `xai.grok-4.6`       | `xai.grok-4.6`        | us-west-2 |
+| `google.gemma-4-31b` | `google.gemma-4-31b`  | us-east-2 |
 
-Aliases without the `openai.` prefix (`gpt-5.4`, `gpt-5.5`) are also
-accepted. The deployment's ECS task makes the cross-region HTTPS call to
-`bedrock-mantle.{region}.api.aws/openai/v1/responses`. To add a new model,
-append a `ModelEntry` to `backend/mvp/models.py` and redeploy.
+Aliases without the provider prefix (`gpt-5.4`, `gpt-5.6-sol`, `grok-4.6`,
+`gemma-4`, …) are also accepted. All of these are reached through the same
+OpenAI-compatible Responses transport — the deployment's ECS task makes the
+cross-region HTTPS call to `bedrock-mantle.{region}.api.aws/openai/v1/responses`,
+so xAI Grok and Google Gemma need no new transport, only a registry entry. Gemma
+is served on bedrock-mantle only (no Converse). To add a new model, append a
+`ModelEntry` to `backend/mvp/models.py` (with a `pricing_key`) and redeploy.
+
+> **Gemma pricing.** Bedrock publishes no per-token list price for Gemma, so its
+> built-in rate defaults to the Opus tier (a deliberate over-charge so the ledger
+> never under-charges). Set the real Gemma rate in the PricingConfig table before
+> relying on Gemma billing.
+
+> **Claude Fable 5.** Requires the Bedrock account to opt into the
+> `provider_data_share` data-retention mode, and its content classifier refuses
+> more often than prior Claude models (responses can carry `stop_reason:
+> "refusal"`). Both are Bedrock/account prerequisites, not gateway settings.
 
 For the full setup walk-through (including the Path B long-lived key flow
 for CI / remote agents), see [`CODEX_GUIDE.md`](./CODEX_GUIDE.md).
@@ -665,13 +684,21 @@ stratoclave admin user assign-tenant <user_id> \
 
 ### `admin user set-credit`
 
-Overwrite a user's credit budget.
+Set or clear a user's per-user token budget (`UserTenants.total_credit`/`credit_used`). Provide exactly one cap action; `--reset-used` may accompany any of them.
 
 ```bash
-stratoclave admin user set-credit <user_id> --total N [--reset-used]
+stratoclave admin user set-credit <user_id> --total N        # set the cap to N tokens
+stratoclave admin user set-credit <user_id> --unlimited      # lift the per-user cap
+stratoclave admin user set-credit <user_id> --reset-used     # keep the cap, clear usage
 ```
 
-`--reset-used` zeroes `credit_used` so the user starts fresh, for example at the start of a new billing period.
+| Flag | Description |
+|------|-------------|
+| `--total N` | Set the per-user token cap to `N` (0–10,000,000). Mutually exclusive with `--unlimited`. |
+| `--unlimited` | Lift the per-user token cap. The tenant dollar pool and per-model quota still apply, so this is not an unlimited spend grant. |
+| `--reset-used` | Zero `credit_used` so the user starts fresh (for example at the start of a new billing period). Keeps the current cap when given alone. |
+
+At least one of `--total` / `--unlimited` / `--reset-used` is required; `--total` and `--unlimited` cannot be combined.
 
 ### `admin tenant create`
 
@@ -810,6 +837,18 @@ List members of a tenant you own. Unlike `admin tenant members`, `user_id` is no
 ```bash
 stratoclave team-lead tenant members <tenant_id>
 ```
+
+### `team-lead tenant set-member-credit`
+
+Set or clear the per-user token budget of a plain `user`-role member of a tenant you own. The member is addressed by email (team leads do not see `user_id`). Same cap actions as `admin user set-credit`.
+
+```bash
+stratoclave team-lead tenant set-member-credit <tenant_id> --email user@example.com --total N
+stratoclave team-lead tenant set-member-credit <tenant_id> --email user@example.com --unlimited
+stratoclave team-lead tenant set-member-credit <tenant_id> --email user@example.com --reset-used
+```
+
+Only members whose role is `user` can be modified; targeting an admin or another team lead returns `403`. An email that is not an active member of the tenant returns `404` (the same response as a tenant you do not own, so membership in other tenants is not disclosed). `--unlimited` lifts only the per-user token cap; the tenant dollar pool and per-model quota still apply.
 
 ### `team-lead tenant usage`
 
