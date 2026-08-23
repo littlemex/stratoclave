@@ -30,8 +30,9 @@ endpoint at `/v1/messages` (for the Anthropic SDKs, Claude Code, and Claude
 Desktop Cowork), an OpenAI `Chat Completions`-compatible endpoint at
 `/v1/chat/completions` (for the OpenAI SDK, on the same Bedrock converse
 backend), and an OpenAI Responses API-compatible endpoint at
-`/openai/v1/responses` (for the `codex` CLI, backed by GPT-5.x on Amazon
-Bedrock via the bedrock-mantle service). Every route enforces per-user token
+`/openai/v1/responses` (for the `codex` CLI, backed by the OpenAI-compatible
+models on Amazon Bedrock's bedrock-mantle service — OpenAI GPT-5.x, xAI Grok,
+and Google Gemma). Every route enforces per-user token
 quotas and optional per-tenant **dollar pool** and **per-model** budgets with
 atomic DynamoDB reservations; **streaming** Bedrock calls additionally get
 retry + cross-region failover with quota-driven per-model fallback (the
@@ -141,8 +142,11 @@ for where a broker is the better choice.
   list.
 - **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
   `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
-  them to GPT-5.x models on Amazon Bedrock via the bedrock-mantle service
-  (GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). The `stratoclave codex` CLI
+  them to the OpenAI-compatible models on Amazon Bedrock's bedrock-mantle
+  service — OpenAI GPT-5.x (`gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`),
+  xAI Grok (`grok-4.6`), and Google Gemma (`gemma-4-31b`). Because all of these
+  speak the same mantle wire shape, adding one is a registry entry, not a new
+  transport. The `stratoclave codex` CLI
   subcommand wraps the `codex` binary against this endpoint with an ephemeral
   key; the `--codex` flag on `stratoclave setup` patches `~/.codex/config.toml`
   for direct use. Controlled by the `CODEX_ENABLED` ECS env flag, which
@@ -266,7 +270,10 @@ single Bedrock `converse` / `converseStream` backend against an
 inference-profile allowlist — different wire shapes, one control core. OpenAI
 Responses calls (`/openai/v1/responses`) are forwarded by httpx to the
 bedrock-mantle service at `bedrock-mantle.{region}.api.aws/openai/v1`, where the
-region is per-model (GPT-5.4 → us-west-2, GPT-5.5 → us-east-2). All Bedrock calls
+region is per-model (GPT-5.4 and Grok 4.6 → us-west-2; GPT-5.5, GPT-5.6 Sol/Terra,
+and Gemma 4 → us-east-2). The gateway forwards the resolved Bedrock model id (not
+the client-facing alias), so both `grok-4.6` and `xai.grok-4.6` route correctly.
+All Bedrock calls
 originate from the single Fargate task; no second control-plane region is
 deployed. When the deploy region differs from `us-east-1`, the WAF WebACL is
 consumed cross-region by the CloudFront distribution via CDK
@@ -311,6 +318,18 @@ For a detailed walkthrough of components, data model, and invariants, see
 Prerequisites: AWS CLI with an administrator profile, Node.js 20 LTS, Docker,
 and Bedrock model access enabled for the Claude family in your region.
 
+One-line install. The AWS account id is derived from your current credentials
+(`aws sts get-caller-identity`), so the admin email is the only required input:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-infra.sh \
+  | STRATOCLAVE_ADMIN_EMAIL=admin@example.com bash
+```
+
+This clones, deploys all stacks, builds and pushes the backend image, bootstraps
+the first admin, and prints the CloudFront URL. Override the region/prefix with
+`STRATOCLAVE_REGION` / `STRATOCLAVE_PREFIX`. Or run the steps manually:
+
 ```bash
 # Clone
 git clone https://github.com/littlemex/stratoclave.git
@@ -341,8 +360,20 @@ for day-2 operations.
 
 ### Use it from the CLI
 
+One-line install. Given only the deployment URL, this builds the CLI, installs
+it as both `stratoclave` and the short alias `sclv`, adds it to your PATH, and
+runs `setup` (so the default models come from the deployment):
+
 ```bash
-# Build the Rust CLI (pre-built releases will follow)
+curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-cli.sh \
+  | STRATOCLAVE_URL=https://d111111abcdef8.cloudfront.net bash
+```
+
+Then open a new shell (or `source ~/.zshrc`) and sign in with `sclv auth login`.
+Or build and configure manually:
+
+```bash
+# Build the Rust CLI (or use the one-line installer above)
 cd cli
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
@@ -402,9 +433,10 @@ print(resp.output_text)
 ```
 
 The `responses:send` scope is required; all three roles (`admin`, `team_lead`,
-`user`) carry it by default. GPT-5.4 is served from us-west-2 and GPT-5.5
-from us-east-2 via the bedrock-mantle service; both are gated by the
-`CODEX_ENABLED` feature flag on the ECS task. See
+`user`) carry it by default. GPT-5.x, xAI Grok, and Google Gemma are served via
+the bedrock-mantle service and gated by the `CODEX_ENABLED` feature flag on the
+ECS task. The default codex model is `openai.gpt-5.6-sol` (override per call with
+`--model`, or per deployment with the `DEFAULT_CODEX_MODEL` env). See
 [`docs/CODEX_GUIDE.md`](./docs/CODEX_GUIDE.md) for the full codex setup.
 
 For a complete walkthrough including the web console, administrative
@@ -584,7 +616,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
-| Providers | Amazon Bedrock (Claude via `converse`; OpenAI GPT-5.x via bedrock-mantle) **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Fewer providers than LiteLLM — a clear breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
+| Providers | Amazon Bedrock — Claude (incl. Opus 5 / Fable 5) via `converse`; and, via bedrock-mantle, OpenAI GPT-5.x (incl. GPT-5.6 Sol/Terra), xAI Grok 4.6, and Google Gemma 4 **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Still fewer providers than LiteLLM — a breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
 | Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). A **hard** limit. | **No client bypass**; the pre-call budget check reads a **cached spend value** (LiteLLM's own `max_budget` docs describe async spend updates + an in-memory cache), so under concurrency a check-then-act (TOCTOU) window can remain at the margin. Not a bypass, and fine for most workloads — a **soft** ceiling rather than a hard one. Verify against the version you deploy | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |

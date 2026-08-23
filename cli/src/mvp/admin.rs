@@ -184,9 +184,19 @@ pub async fn user_assign_tenant(
     Ok(())
 }
 
-pub async fn user_set_credit(user_id: &str, total_credit: u64, reset_used: bool) -> Result<()> {
+pub async fn user_set_credit(
+    user_id: &str,
+    total: Option<u64>,
+    reset_used: bool,
+    unlimited: bool,
+) -> Result<()> {
     let client = ApiClient::new()?;
-    let body = json!({"total_credit": total_credit, "reset_used": reset_used});
+    let mut body = json!({"reset_used": reset_used});
+    if unlimited {
+        body["unlimited"] = Value::Bool(true);
+    } else if let Some(t) = total {
+        body["total_credit"] = Value::Number(t.into());
+    }
     let path = format!("/api/mvp/admin/users/{user_id}/credit");
     let res: Value = client.patch_json(&path, &body).await?;
     println!("[OK] Credit updated for user {user_id}");
@@ -194,6 +204,9 @@ pub async fn user_set_credit(user_id: &str, total_credit: u64, reset_used: bool)
         &res,
         &["email", "org_id", "total_credit", "credit_used", "remaining_credit"],
     );
+    if res.get("unlimited").and_then(|v| v.as_bool()).unwrap_or(false) {
+        println!("  (per-user token cap: unlimited; tenant dollar pool and per-model quota still apply)");
+    }
     Ok(())
 }
 

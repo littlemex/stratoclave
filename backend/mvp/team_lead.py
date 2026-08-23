@@ -33,6 +33,8 @@ from dynamo import (
     UserTenantsRepository,
     UsageLogsRepository,
 )
+from dynamo.user_tenants import CreditExhaustedError, is_unlimited
+from .credit_ops import CreditAction
 
 from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser
@@ -83,6 +85,9 @@ class TenantMemberPublic(BaseModel):
     total_credit: int
     credit_used: int
     remaining_credit: int
+    # True when total_credit is the effectively-unbounded sentinel; render
+    # "unlimited" instead of the raw 1e15.
+    unlimited: bool = False
 
 
 class TenantMembersResponse(BaseModel):
@@ -234,9 +239,129 @@ def list_members(
                 total_credit=total,
                 credit_used=used,
                 remaining_credit=max(total - used, 0),
+                unlimited=is_unlimited(total),
             )
         )
     return TenantMembersResponse(tenant_id=tenant_id, members=members)
+
+
+class SetMemberCreditRequest(CreditAction):
+    """Team-Lead set/clear of a member's per-user TOKEN quota. Cap semantics are
+    shared with the Admin endpoint via `CreditAction`; the member is addressed by
+    `email` (Team Leads never see user_id)."""
+
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=1, max_length=320)
+
+
+_PRIVILEGED_ROLES = {"admin", "team_lead"}
+
+
+@router.patch("/{tenant_id}/members/credit", response_model=TenantMemberPublic)
+def set_member_credit(
+    tenant_id: str,
+    body: SetMemberCreditRequest,
+    actor: AuthenticatedUser = Depends(require_permission("users:update-own-tenant")),
+) -> TenantMemberPublic:
+    """Set/clear a member's per-user token quota within the caller's own tenant.
+
+    Authorization is defense-in-depth: the `users:update-own-tenant` scope gate,
+    plus `_require_owner` (the caller must own this tenant, or be an admin), plus
+    a target guard that the member is an ACTIVE, plain-`user` member of THIS
+    tenant — checked on BOTH the tenant-membership role AND the user's global
+    roles, so a global admin who happens to be assigned here as `user` still
+    cannot be touched. The role guard is also folded into the conditional write
+    (`require_role="user"`) so a promote-during-request race cannot slip through.
+    Non-owner / non-existent tenant and unknown / cross-tenant member all return a
+    unified 404 (enumeration defense); a privileged target returns 403 and is
+    audited (a denied escalation attempt is the signal worth keeping)."""
+    _require_owner(tenant_id, actor)
+
+    # Normalize the email for lookup: strip whitespace, and if the exact spelling
+    # misses, retry lowercased (copy-paste and casing are the usual causes of a
+    # "visible in `members` but 404" surprise).
+    email = body.email.strip()
+    users_repo = UsersRepository()
+    user = users_repo.get_by_email(email) or users_repo.get_by_email(email.lower())
+    if not user:
+        raise HTTPException(status_code=404, detail="Member not found")
+    user_id = str(user.get("user_id") or "")
+
+    # Global-role guard (defense in depth vs the membership-role guard below): a
+    # user who is admin/team_lead ANYWHERE is off-limits to a Team Lead.
+    global_roles = user.get("roles") or []
+    if isinstance(global_roles, str):
+        global_roles = [global_roles]
+    is_privileged_global = any(str(r) in _PRIVILEGED_ROLES for r in global_roles)
+
+    user_tenants_repo = UserTenantsRepository()
+    membership = user_tenants_repo.get(user_id, tenant_id)
+    if not membership:
+        # Not an active member of THIS tenant — unified 404 (do not reveal that
+        # the email exists in another tenant).
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    membership_role = str(membership.get("role") or "user")
+    if membership_role != "user" or is_privileged_global:
+        # A Team Lead may only adjust plain users, never another admin/team_lead.
+        log_audit_event(
+            event="team_lead_member_credit_denied",
+            actor_id=actor.user_id,
+            actor_email=actor.email,
+            target_id=user_id,
+            target_type="user",
+            tenant_id=tenant_id,
+            details={"reason": "privileged_target", "email": email},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="cannot modify the quota of a privileged member",
+        )
+
+    prev = user_tenants_repo.credit_summary(user_id, tenant_id)
+    try:
+        # require_role="user" closes the check-then-write TOCTOU atomically; a
+        # target promoted between the read above and this write fails the
+        # condition and is rejected rather than silently modified.
+        attrs = user_tenants_repo.overwrite_credit(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            total_credit=body.resolved_total(),
+            reset_used=body.reset_used,
+            require_role="user",
+        )
+    except CreditExhaustedError:
+        # Row not active, or role changed out from under us -> unified 404.
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    log_audit_event(
+        event="team_lead_member_credit_overwritten",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=user_id,
+        target_type="user",
+        tenant_id=tenant_id,
+        before={**prev, "unlimited": is_unlimited(prev["total_credit"])},
+        after={
+            "total_credit": body.resolved_total(),
+            "unlimited": body.unlimited,
+            "reset_used": body.reset_used,
+            "email": email,
+        },
+    )
+
+    # Build the response from the write's returned attributes (avoids an
+    # eventually-consistent read-after-write).
+    total = int(attrs.get("total_credit", 0))
+    used = int(attrs.get("credit_used", 0))
+    return TenantMemberPublic(
+        email=email,
+        role=membership_role,
+        total_credit=total,
+        credit_used=used,
+        remaining_credit=max(total - used, 0),
+        unlimited=is_unlimited(total),
+    )
 
 
 @router.get("/{tenant_id}/usage", response_model=UsageBucket)

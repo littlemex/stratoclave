@@ -32,7 +32,7 @@ CONCRETE = [
     "tenants:update",
     "usage:read-all", "usage:read-own-tenant", "usage:read-self",
     "users:assign-tenant", "users:create", "users:delete", "users:read",
-    "users:update",
+    "users:update", "users:update-own-tenant",
 ]
 # Per-resource wildcards a role/scope could plausibly hold.
 WILDCARDS = sorted({p.split(":", 1)[0] + ":*" for p in CONCRETE})

@@ -138,10 +138,28 @@ The backend:
 ### Adjusting a user's credit
 
 ```bash
-stratoclave admin user set-credit <user_id> --total N [--reset-used]
+stratoclave admin user set-credit <user_id> --total N        # set the per-user token cap
+stratoclave admin user set-credit <user_id> --unlimited      # lift the per-user token cap
+stratoclave admin user set-credit <user_id> --reset-used     # keep the cap, clear usage
 ```
 
-`--reset-used` zeros `credit_used`, which is useful at the start of a new billing period. The change is immediate; the user's next request is evaluated against the new values.
+Exactly one of `--total` / `--unlimited` / `--reset-used` is required (`--total` and `--unlimited` are mutually exclusive); `--reset-used` may accompany a cap change. `--reset-used` zeros `credit_used`, which is useful at the start of a new billing period. The change is immediate; the user's next request is evaluated against the new values.
+
+**What `--unlimited` does — and does not — do.** It lifts only the *per-user token cap*. The **tenant dollar pool** and the **per-model quota** still apply, so an unlimited user can still be stopped with `402 tenant_pool_exhausted` or `402 model_quota_exhausted`. It is not an unlimited-spend grant. If a tenant has no dollar pool configured, the per-user cap is that tenant's only per-user guardrail — grant `--unlimited` there deliberately. In the CLI and API the lifted cap surfaces as `unlimited: true` rather than the raw sentinel integer.
+
+Team leads can perform the same operation for plain `user`-role members of tenants they own — see [Team-lead delegation](#team-lead-delegation).
+
+### Team-lead delegation
+
+A team lead can set, reset, or lift the token cap of the plain users in a tenant they own, without admin involvement:
+
+```bash
+stratoclave team-lead tenant set-member-credit <tenant_id> --email user@example.com [--total N | --unlimited | --reset-used]
+```
+
+This is gated by a dedicated permission, `users:update-own-tenant`, held by the `team_lead` role (and by `admin` via the `users:*` wildcard). A team lead can only touch members whose role is `user`; targeting an admin or another team lead returns `403` (audited as `team_lead_member_credit_denied`), and an email that is not an active member of the owned tenant returns `404`. Successful changes are audited as `team_lead_member_credit_overwritten`; the admin equivalent is `credit_overwritten`.
+
+Because `users:update-own-tenant` is new, the permissions seed version in `backend/permissions.json` was bumped; the backend re-seeds the `stratoclave-permissions` table for the `team_lead` role automatically on the next startup after deploy (no manual DynamoDB step).
 
 ### Removing a user
 

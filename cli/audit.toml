@@ -20,4 +20,10 @@ ignore = [
     "RUSTSEC-2026-0098",  # rustls-webpki name-constraint URI bypass
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard-name constraint bypass
     "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic
+    # h2 empty-DATA-frame DoS. The MODERN client path is fixed (h2 bumped to
+    # 0.4.16 in Cargo.lock, >= the advisory's fix). The only residual match is
+    # h2 0.3.27, pulled in exclusively via the legacy hyper-014 path of the AWS
+    # SDK (same legacy chain as the rustls deferrals above), which the runtime
+    # HTTPS client does not use. Delete once the AWS SDK drops hyper-014.
+    "RUSTSEC-2026-0258",  # h2 0.3.27 (legacy hyper-014 path only; modern path is 0.4.16)
 ]

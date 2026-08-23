@@ -182,7 +182,7 @@ ALL_SCOPES: tuple[str, ...] = (
     "tenants:update",
     "usage:read-all", "usage:read-own-tenant", "usage:read-self",
     "users:assign-tenant", "users:create", "users:delete", "users:read",
-    "users:update",
+    "users:update", "users:update-own-tenant",
 )
 
 

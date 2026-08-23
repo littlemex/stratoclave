@@ -67,17 +67,63 @@ pub async fn tenant_members(tenant_id: &str) -> Result<()> {
         "email", "role", "total", "used", "remaining"
     );
     for m in &members {
+        let unlimited = m.get("unlimited").and_then(|v| v.as_bool()).unwrap_or(false);
+        let total = fmt_credit(m.get("total_credit").and_then(|v| v.as_i64()).unwrap_or(0), unlimited);
+        let remaining =
+            fmt_credit(m.get("remaining_credit").and_then(|v| v.as_i64()).unwrap_or(0), unlimited);
         println!(
             "{:<40} {:<10} {:>12} {:>12} {:>12}",
             m.get("email").and_then(|v| v.as_str()).unwrap_or(""),
             m.get("role").and_then(|v| v.as_str()).unwrap_or(""),
-            m.get("total_credit").and_then(|v| v.as_i64()).unwrap_or(0),
+            total,
             m.get("credit_used").and_then(|v| v.as_i64()).unwrap_or(0),
-            m.get("remaining_credit").and_then(|v| v.as_i64()).unwrap_or(0),
+            remaining,
         );
     }
     println!("({} members)", members.len());
     Ok(())
+}
+
+pub async fn tenant_set_member_credit(
+    tenant_id: &str,
+    email: &str,
+    total: Option<u64>,
+    reset_used: bool,
+    unlimited: bool,
+) -> Result<()> {
+    let client = ApiClient::new()?;
+    let mut body = json!({"email": email, "reset_used": reset_used});
+    if unlimited {
+        body["unlimited"] = Value::Bool(true);
+    } else if let Some(t) = total {
+        body["total_credit"] = Value::Number(t.into());
+    }
+    let path = format!("/api/mvp/team-lead/tenants/{tenant_id}/members/credit");
+    let res: Value = client.patch_json(&path, &body).await?;
+    println!("[OK] Member token limit updated: {email}");
+    let unlimited = res.get("unlimited").and_then(|v| v.as_bool()).unwrap_or(false);
+    for k in ["email", "role", "total_credit", "credit_used", "remaining_credit"] {
+        if let Some(v) = res.get(k) {
+            if unlimited && (k == "total_credit" || k == "remaining_credit") {
+                println!("  {k}: unlimited");
+            } else {
+                println!("  {k}: {}", fmt_value(v));
+            }
+        }
+    }
+    if unlimited {
+        println!("  (per-user token cap lifted; tenant dollar pool and per-model quota still apply)");
+    }
+    Ok(())
+}
+
+/// Render a credit token value, or "unlimited" when the cap is the sentinel.
+fn fmt_credit(v: i64, unlimited: bool) -> String {
+    if unlimited {
+        "unlimited".to_string()
+    } else {
+        v.to_string()
+    }
 }
 
 pub async fn tenant_usage(tenant_id: &str, since_days: u32) -> Result<()> {

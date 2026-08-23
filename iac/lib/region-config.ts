@@ -136,7 +136,7 @@ export function resolveRegionConfig(env: Env): RegionConfig {
   assertRegion('BEDROCK_PRIMARY_REGION', bedrockPrimaryRegion);
 
   const defaultBedrockModel =
-    env.DEFAULT_BEDROCK_MODEL || 'us.anthropic.claude-opus-4-7';
+    env.DEFAULT_BEDROCK_MODEL || 'us.anthropic.claude-opus-5';
 
   const failoverRegionsEnv = env.STRATOCLAVE_FAILOVER_REGIONS;
   // Match the backend for every EXPLICIT value: mvp/openai_responses.py treats

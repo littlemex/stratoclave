@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from dynamo.tenant_budgets import current_period
 from mvp.deps import AuthenticatedUser, get_current_user
 
 
@@ -91,7 +92,10 @@ def _reserve_and_settle(tenant_id: str, period: str, cost: int, actual: int) -> 
 
 
 ADMIN_SCOPES = {"tenants:read-all"}
-PERIOD = "2026-07"
+# Must be the SAME period the pipeline reserves against (reserve_credit keys off
+# current_period()). A hardcoded month made this test pass only during that
+# calendar month and silently break once the month rolled over.
+PERIOD = current_period()
 
 
 def test_reconciliation_in_sync_after_reserve_and_settle(monkeypatch, dynamodb_mock):
