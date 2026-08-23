@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/table'
 import { api, type TenantItem } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 function fmt(n: number): string {
   return n.toLocaleString()
@@ -416,7 +417,7 @@ function EditButton({
                 id="tl-edit-default"
                 type="number"
                 min={0}
-                max={10_000_000}
+                max={MAX_TOKEN_CREDIT}
                 value={defaultCredit}
                 onChange={(e) => setDefaultCredit(e.target.value)}
               />

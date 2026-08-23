@@ -33,6 +33,7 @@ from dynamo import (
     UserTenantsRepository,
     UsageLogsRepository,
 )
+from limits import MAX_TOKEN_CREDIT
 from dynamo.user_tenants import CreditExhaustedError, is_unlimited
 from .credit_ops import CreditAction
 
@@ -65,7 +66,7 @@ class CreateTenantTeamLeadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=128)
-    default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    default_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
 
 
 class UpdateTenantTeamLeadRequest(BaseModel):
@@ -74,7 +75,7 @@ class UpdateTenantTeamLeadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
-    default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    default_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
 
 
 class TenantMemberPublic(BaseModel):

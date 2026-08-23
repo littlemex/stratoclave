@@ -34,6 +34,7 @@ import {
 import { api, type PoolBudget, type TenantItem, type TenantRoutingConfig } from '@/lib/api'
 import { currentPeriodUtc, fmtMicroUsd, parseUsdToCents } from '@/lib/money'
 import { cn } from '@/lib/utils'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 function fmt(n: number): string {
   return n.toLocaleString()
@@ -733,7 +734,7 @@ function EditDialog({
               id="edit-default"
               type="number"
               min={0}
-              max={10_000_000}
+              max={MAX_TOKEN_CREDIT}
               value={defaultCredit}
               onChange={(e) => setDefaultCredit(e.target.value)}
             />

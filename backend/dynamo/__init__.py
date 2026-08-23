@@ -17,7 +17,6 @@ Tables used in Phase S (AWS SSO / STS login):
 """
 from .client import get_dynamodb_resource
 from .users import UsersRepository
-from .user_tenants import UserTenantsRepository, CreditExhaustedError
 from .usage_logs import UsageLogsRepository
 from .tenants import (
     TenantsRepository,
@@ -35,6 +34,7 @@ from .sso_pre_registrations import (
     SsoInviteNotFoundError,
     build_iam_user_lookup_key,
 )
+from .user_tenants import CreditExhaustedError, UserTenantsRepository
 from .api_keys import (
     ApiKeysRepository,
     ApiKeyLimitExceededError,

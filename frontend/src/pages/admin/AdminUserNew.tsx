@@ -18,6 +18,7 @@ import { TempPasswordDialog } from '@/components/admin/TempPasswordDialog'
 import { api, type CreateUserResponse, type Locale, type Role } from '@/lib/api'
 import { SUPPORTED_LOCALES } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 interface RoleOption {
   value: Role
@@ -238,7 +239,7 @@ export default function AdminUserNew() {
                 inputMode="numeric"
                 value={totalCredit}
                 min={0}
-                max={10_000_000}
+                max={MAX_TOKEN_CREDIT}
                 onChange={(e) => setTotalCredit(e.target.value)}
                 placeholder={t('admin_user_new.credit_placeholder')}
               />

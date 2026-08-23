@@ -32,6 +32,7 @@ import {
 } from '@/components/ui/table'
 import { api, type ProvisioningPolicy } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 function fmt(n: number | null | undefined): string {
   return n == null ? '—' : n.toLocaleString()
@@ -398,7 +399,7 @@ function CreateAccountDialog({
                 id="ta-credit"
                 type="number"
                 min={0}
-                max={10_000_000}
+                max={MAX_TOKEN_CREDIT}
                 value={defaultCredit}
                 onChange={(e) => setDefaultCredit(e.target.value)}
                 placeholder={t('admin_trusted_accounts.default_credit_placeholder')}

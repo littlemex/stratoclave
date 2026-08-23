@@ -21,6 +21,7 @@ from dynamo import (
     SsoPreRegistrationsRepository,
     TrustedAccountsRepository,
 )
+from limits import MAX_TOKEN_CREDIT
 
 from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser
@@ -58,7 +59,7 @@ class CreateSsoInviteRequest(BaseModel):
     account_id: str = Field(min_length=12, max_length=12, pattern=r"^\d{12}$")
     invited_role: InvitedRole = "user"
     tenant_id: Optional[str] = Field(default=None, max_length=64)
-    total_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    total_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
     iam_user_name: Optional[str] = Field(default=None, max_length=64)
 
 

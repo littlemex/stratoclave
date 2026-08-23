@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 import {
   Table,
   TableBody,
@@ -439,7 +440,7 @@ function EditDialog({
               value={defaultCredit}
               onChange={(e) => setDefaultCredit(e.target.value)}
               min={0}
-              max={10_000_000}
+              max={MAX_TOKEN_CREDIT}
             />
           </div>
         </div>
@@ -671,7 +672,7 @@ function InviteDialog({
                 value={totalCredit}
                 onChange={(e) => setTotalCredit(e.target.value)}
                 min={0}
-                max={10_000_000}
+                max={MAX_TOKEN_CREDIT}
               />
             </div>
           </div>

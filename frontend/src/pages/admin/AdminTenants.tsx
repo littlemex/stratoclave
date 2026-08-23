@@ -32,6 +32,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { api } from '@/lib/api'
+import { MAX_TOKEN_CREDIT } from '@/lib/limits'
 
 function fmt(n: number): string {
   return n.toLocaleString()
@@ -279,7 +280,7 @@ function CreateTenantDialog({
               id="tenant-default-credit"
               type="number"
               min={0}
-              max={10_000_000}
+              max={MAX_TOKEN_CREDIT}
               value={defaultCredit}
               onChange={(e) => setDefaultCredit(e.target.value)}
               placeholder={t('admin_tenants.create_default_placeholder')}

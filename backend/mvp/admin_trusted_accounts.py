@@ -19,6 +19,7 @@ from dynamo import (
     TrustedAccountNotFoundError,
     TrustedAccountsRepository,
 )
+from limits import MAX_TOKEN_CREDIT
 
 from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser
@@ -61,7 +62,7 @@ class CreateTrustedAccountRequest(BaseModel):
     allow_iam_user: bool = False
     allow_instance_profile: bool = False
     default_tenant_id: Optional[str] = Field(default=None, max_length=64)
-    default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    default_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
 
 
 class UpdateTrustedAccountRequest(BaseModel):
@@ -72,7 +73,7 @@ class UpdateTrustedAccountRequest(BaseModel):
     allow_iam_user: Optional[bool] = None
     allow_instance_profile: Optional[bool] = None
     default_tenant_id: Optional[str] = Field(default=None, max_length=64)
-    default_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    default_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
 
 
 # ------------------------------------------------------------------

@@ -12,7 +12,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+
 from dynamo.user_tenants import UNLIMITED_CREDIT
+from limits import MAX_TOKEN_CREDIT
 
 
 class CreditAction(BaseModel):
@@ -27,7 +29,7 @@ class CreditAction(BaseModel):
     `reset_used` clears `credit_used` to 0 alongside any of the above.
     """
 
-    total_credit: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    total_credit: Optional[int] = Field(default=None, ge=0, le=MAX_TOKEN_CREDIT)
     reset_used: bool = False
     unlimited: bool = False
 
