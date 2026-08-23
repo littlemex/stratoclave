@@ -232,6 +232,30 @@ def create_my_api_key(
     )
 
 
+@router.get("/by-key-id/{key_id:path}", response_model=ApiKeySummary)
+def get_my_api_key_by_key_id(
+    key_id: str,
+    user: AuthenticatedUser = Depends(require_permission("apikeys:read-self")),
+) -> ApiKeySummary:
+    """Read one of the caller's own keys by its masked `key_id`.
+
+    The wrapper subcommands use this to answer "did this session reach the
+    gateway at all" from `last_used_at`. Reading the whole listing for that made
+    the answer depend on the key being on the first page, so the check would go
+    quiet for anyone holding many keys — and quietly, since a detector that
+    cannot find its key has nothing to report.
+
+    Scoped to the caller and 404 for anything else, matching the revoke route:
+    the masked id is safe to log, unlike the SHA-256 hash.
+    """
+    repo = ApiKeysRepository()
+    item = repo.find_by_user_and_key_id(user.user_id, key_id)
+    if not item:
+        # Unify with 404 for non-owners (enumeration defense).
+        raise HTTPException(status_code=404, detail="api key not found")
+    return ApiKeySummary(**api_key_to_public_dict(item))
+
+
 @router.delete("/by-key-id/{key_id:path}")
 def revoke_my_api_key_by_key_id(
     key_id: str,

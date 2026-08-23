@@ -713,14 +713,14 @@ async fn dispatch_claude(
     let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             return ExitCode::from(2);
         }
     };
     match mvp::claude_cmd::run(&args, model.as_deref(), &headers).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -739,7 +739,7 @@ async fn dispatch_codex(
     let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             return ExitCode::from(2);
         }
     };
@@ -754,7 +754,7 @@ async fn dispatch_codex(
     {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -974,7 +974,7 @@ async fn dispatch_ui(action: &str) -> ExitCode {
     let cfg = match crate::config::AppConfig::load(None) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             return ExitCode::from(1);
         }
     };
@@ -989,7 +989,7 @@ async fn dispatch_ui(action: &str) -> ExitCode {
     match commands::ui::run(cmd, &cfg).await {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -1031,7 +1031,7 @@ async fn run_pipe() -> ExitCode {
     match commands::pipe::run(OutputFormat::Human, None).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }
@@ -1041,7 +1041,7 @@ fn wrap(res: anyhow::Result<()>) -> ExitCode {
     match res {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("[ERROR] {e}");
+            eprintln!("[ERROR] {e:#}");
             ExitCode::from(1)
         }
     }

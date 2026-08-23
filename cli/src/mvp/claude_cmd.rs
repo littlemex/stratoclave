@@ -197,6 +197,13 @@ pub async fn run(
     launcher
         .scrub_stratoclave_tokens()
         .scrub_aws_identity()
+        .bypass_hint(
+            "Check the `env` block in ~/.claude/settings.json, and any managed \
+             settings your organisation ships, for CLAUDE_CODE_USE_BEDROCK / \
+             CLAUDE_CODE_USE_VERTEX. In Bedrock or Vertex mode Claude Code ignores \
+             ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY and calls the provider \
+             directly with your cloud credentials.",
+        )
         .run_with_revoke(args, &base_url, &tokens.access_token, &key.key_id)
         .await
 }

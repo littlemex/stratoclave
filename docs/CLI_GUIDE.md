@@ -351,6 +351,50 @@ the child. Stratoclave also unsets `CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`,
 `STRATOCLAVE_{ACCESS,ID,REFRESH}_TOKEN` so Claude Code cannot bypass the
 proxy or pivot back into the user's AWS / Cognito session.
 
+### Gateway-usage check
+
+Env scrubbing is necessary but not sufficient. Claude Code re-reads its own
+configuration after launch, so a managed distribution — or a plain
+`~/.claude/settings.json` with an `env` block — can set
+`CLAUDE_CODE_USE_BEDROCK=1` back on itself. In Bedrock mode Claude Code ignores
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` and calls Bedrock directly with the
+caller's AWS credentials. The agent answers normally, so nothing looks wrong, yet
+none of that traffic is metered, attributed, or budget-checked.
+
+After the child exits, both wrappers ask the backend whether the key they minted
+was ever used, and report it when the answer is no:
+
+```
+[WARN] Stratoclave recorded no requests for this session's key. If `claude` did
+       answer, its traffic did not go through the gateway, so it was not metered,
+       attributed, or budget-checked.
+[WARN] Check the `env` block in ~/.claude/settings.json, and any managed settings
+       your organisation ships, for CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX.
+[WARN] If the agent reported an error instead of answering, look upstream of the
+       application as well: a WAF or CDN 403 never reaches the ledger either.
+```
+
+The middle line is agent-specific: `stratoclave codex` points at codex's own
+provider resolution instead.
+
+What the check does **not** do matters as much as what it does:
+
+- It answers "did anything from this session reach the gateway", not "was every
+  request metered". A session that makes one early request through the gateway
+  and then routes the rest around it looks clean. It catches whole-session
+  bypass, which is the common accident, not selective bypass.
+- A run whose requests were rejected before reaching the application (a WAF or
+  CDN 403) also produces no records — hence the third line.
+- It stays silent when it cannot tell: the backend unreachable, the listing in an
+  unexpected shape, or the key absent from it. Set `STRATOCLAVE_DEBUG=1` to see
+  why the check did not complete.
+- Runs shorter than three seconds are not checked at all, because `--version`,
+  `--help`, and a session quit before the first prompt legitimately make zero
+  requests, and warning about those would train everyone to ignore the warning.
+
+It is a detector, not an enforcement mechanism; enforcement is network and IAM
+policy.
+
 ### Examples
 
 ```bash

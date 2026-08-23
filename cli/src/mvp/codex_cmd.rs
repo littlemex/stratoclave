@@ -183,7 +183,12 @@ pub async fn run(
         .env("CODEX_HOME", codex_home.path())
         .env("STRATOCLAVE_OPENAI_KEY", &key.plaintext_key)
         .scrub_stratoclave_tokens()
-        .scrub_aws_identity();
+        .scrub_aws_identity()
+        .bypass_hint(
+            "Check that codex is still resolving the `stratoclave` model provider: \
+             a `-c model_provider=...` override, a profile, or an OPENAI_* key in \
+             the environment will send the run straight to the provider.",
+        );
     if let Some(ws) = &escape_workspace {
         launcher = launcher.cwd(ws.path());
     }
