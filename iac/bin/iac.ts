@@ -5,6 +5,7 @@ import {
   capacityPlan,
   getPrefix,
   impliedRatePer5Min,
+  workersForCpuUnits,
   optionalPositiveIntFromEnv,
   stackName,
   paramPath,
@@ -257,9 +258,19 @@ cognitoStack.addDependency(frontendStack);
 // Per-task ceilings are read here so they can be cross-checked before synth: a
 // set that admits more requests than it can carry connections for does not fail,
 // it just queues in a place nobody is looking at.
-const backendSyncRouteThreads = positiveIntFromEnv('GATEWAY_SYNC_ROUTE_THREADS', 128);
-const backendOffloadThreads = positiveIntFromEnv('GATEWAY_OFFLOAD_THREADS', 128);
+// Per process. 32 is near the knee of the measured latency curve; 128 admitted the
+// traffic at 7.7 s p50, which is not serving it.
+const backendSyncRouteThreads = positiveIntFromEnv('GATEWAY_SYNC_ROUTE_THREADS', 32);
+const backendOffloadThreads = positiveIntFromEnv('GATEWAY_OFFLOAD_THREADS', 32);
 const backendMantleConnections = positiveIntFromEnv('MANTLE_MAX_CONNECTIONS', 256);
+// One worker per vCPU by default. 1024 CPU units is one vCPU, so a 1 vCPU task
+// stays single-process (which is what it was) and a larger task gets the workers
+// its cores can actually run.
+const backendTaskCpu = positiveIntFromEnv('BACKEND_TASK_CPU', 1024);
+const backendUvicornWorkers = positiveIntFromEnv(
+  'GATEWAY_UVICORN_WORKERS',
+  workersForCpuUnits(backendTaskCpu),
+);
 if (backendMantleConnections < backendSyncRouteThreads) {
   cdk.Annotations.of(app).addWarning(
     `MANTLE_MAX_CONNECTIONS (${backendMantleConnections}) is below ` +
@@ -280,7 +291,8 @@ const backendCapacity = capacityPlan({
   target: positiveIntFromEnv('BACKEND_CONCURRENCY_TARGET', 1024),
   minTasks: backendMinTasks,
   maxTasks: backendMaxTasks,
-  perTaskRequests: backendSyncRouteThreads,
+  perProcessRequests: backendSyncRouteThreads,
+  workersPerTask: backendUvicornWorkers,
   requestsPerTarget: backendRequestsPerTarget,
 });
 for (const note of backendCapacity.notes) {
@@ -307,7 +319,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   // that have no CPU behind them queue instead of serving. Both are overridable
   // so a deployment can be sized for its own concurrency target without a code
   // change.
-  cpu: positiveIntFromEnv('BACKEND_TASK_CPU', 1024),
+  cpu: backendTaskCpu,
   memory: positiveIntFromEnv('BACKEND_TASK_MEMORY', 2048),
   // Two tasks so the ECS service spreads across both AZs (the VPC has
   // maxAzs=2): no single task or AZ is a SPOF, and rolling deploys keep
@@ -368,6 +380,11 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // answer when a request is slow while every dependency is fast; switchable
     // because one log line per request is a real cost at this concurrency.
     GATEWAY_REQUEST_TIMING: process.env.GATEWAY_REQUEST_TIMING || 'true',
+    // uvicorn processes per task. Sized WITH the task's CPU, never instead of it:
+    // workers beyond the task's vCPU count share one core and gain nothing, since
+    // what they exist to escape is one GIL per process rather than a shortage of
+    // threads. Defaults to one CPU unit worth of vCPU per worker.
+    GATEWAY_UVICORN_WORKERS: String(backendUvicornWorkers),
 
     // Cognito
     COGNITO_USER_POOL_ID: cognitoStack.userPoolId,

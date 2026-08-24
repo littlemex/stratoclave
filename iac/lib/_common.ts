@@ -148,7 +148,10 @@ export interface CapacityPlanInput {
   target: number;
   minTasks: number;
   maxTasks: number;
-  perTaskRequests: number;
+  /** In-flight requests one server PROCESS admits. */
+  perProcessRequests: number;
+  /** Server processes per task (uvicorn workers). */
+  workersPerTask: number;
   /** Requests/min/task budget for the ALB policy, or undefined when unset. */
   requestsPerTarget?: number;
 }
@@ -163,20 +166,27 @@ export interface CapacityPlan {
 }
 
 export function capacityPlan(input: CapacityPlanInput): CapacityPlan {
-  const immediate = input.minTasks * input.perTaskRequests;
-  const sustained = input.maxTasks * input.perTaskRequests;
+  // Processes are the unit that matters, not tasks: latency tracks requests in
+  // flight per process, so a task with four workers admits four times what one
+  // with a single worker does at the same per-process ceiling.
+  const perTask = input.workersPerTask * input.perProcessRequests;
+  const immediate = input.minTasks * perTask;
+  const sustained = input.maxTasks * perTask;
   const notes: string[] = [
     `concurrency target ${input.target}: ${immediate} in flight immediately ` +
-      `(${input.minTasks} x ${input.perTaskRequests}), ${sustained} after scale-out ` +
-      `(${input.maxTasks} x ${input.perTaskRequests})`,
+      `(${input.minTasks} tasks x ${input.workersPerTask} workers x ` +
+      `${input.perProcessRequests}), ${sustained} after scale-out ` +
+      `(${input.maxTasks} tasks)`,
   ];
   const warnings: string[] = [];
 
   if (sustained < input.target) {
     warnings.push(
       `the fleet cannot reach its concurrency target: ${input.maxTasks} tasks x ` +
-        `${input.perTaskRequests} requests = ${sustained}, target ${input.target}. ` +
-        'Raise BACKEND_MAX_TASKS or GATEWAY_SYNC_ROUTE_THREADS.',
+        `${input.workersPerTask} workers x ${input.perProcessRequests} requests = ` +
+        `${sustained}, target ${input.target}. Raise BACKEND_MAX_TASKS, or the task ` +
+        'CPU so it can run more workers. Raising GATEWAY_SYNC_ROUTE_THREADS instead ' +
+        'buys admission at the cost of latency, which is what it was measured to do.',
     );
   }
   if (input.maxTasks > input.minTasks && input.requestsPerTarget === undefined) {
@@ -214,4 +224,21 @@ export function impliedRatePer5Min(
 ): number {
   const windowSeconds = 300;
   return Math.ceil((target * windowSeconds) / fastestRequestSeconds);
+}
+
+/** Fargate CPU units in one vCPU. */
+export const CPU_UNITS_PER_VCPU = 1024;
+
+/**
+ * How many server processes a task of this size can actually run.
+ *
+ * Each process has its own GIL, which is what makes more than one worthwhile:
+ * measured on 2026-08-25, latency tracked requests in flight per PROCESS (390 ms
+ * at 4, 1331 ms at 32, 7706 ms at 128) while task CPU stayed under 70%. But a
+ * worker with no core to run on gains nothing — N processes on one vCPU still
+ * execute one bytecode stream at a time — so the count follows the task's vCPU
+ * rather than the concurrency target.
+ */
+export function workersForCpuUnits(cpuUnits: number): number {
+  return Math.max(1, Math.floor(cpuUnits / CPU_UNITS_PER_VCPU));
 }
