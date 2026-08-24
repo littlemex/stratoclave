@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
-import { getPrefix, stackName, paramPath, putStringParameter } from '../lib/_common';
+import {
+  capacityPlan,
+  getPrefix,
+  optionalPositiveIntFromEnv,
+  stackName,
+  paramPath,
+  positiveIntFromEnv,
+  putStringParameter,
+} from '../lib/_common';
 import { resolveRegionConfig } from '../lib/region-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
@@ -222,6 +230,41 @@ const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
 cognitoStack.addDependency(frontendStack);
 
 // --- 7. ECS (placed directly in the Public Subnet, region R) ---
+// Per-task ceilings are read here so they can be cross-checked before synth: a
+// set that admits more requests than it can carry connections for does not fail,
+// it just queues in a place nobody is looking at.
+const backendSyncRouteThreads = positiveIntFromEnv('GATEWAY_SYNC_ROUTE_THREADS', 128);
+const backendOffloadThreads = positiveIntFromEnv('GATEWAY_OFFLOAD_THREADS', 128);
+const backendMantleConnections = positiveIntFromEnv('MANTLE_MAX_CONNECTIONS', 256);
+if (backendMantleConnections < backendSyncRouteThreads) {
+  cdk.Annotations.of(app).addWarning(
+    `MANTLE_MAX_CONNECTIONS (${backendMantleConnections}) is below ` +
+      `GATEWAY_SYNC_ROUTE_THREADS (${backendSyncRouteThreads}): a task can admit more ` +
+      'mantle requests than it holds connections for, so the surplus waits on the ' +
+      'connection pool rather than on the model.',
+  );
+}
+// What this configuration can hold, against what it was asked to hold. Stated at
+// synth because the target is a product decision and the knobs are three numbers
+// that multiply: a fleet nominally sized for 1024 that has no policy to grow it,
+// or a floor that absorbs a quarter of it, is a configuration mistake worth
+// seeing before the deploy rather than during an incident.
+const backendMinTasks = positiveIntFromEnv('BACKEND_MIN_TASKS', 2);
+const backendMaxTasks = positiveIntFromEnv('BACKEND_MAX_TASKS', 8);
+const backendRequestsPerTarget = optionalPositiveIntFromEnv('BACKEND_REQUESTS_PER_TARGET');
+const backendCapacity = capacityPlan({
+  target: positiveIntFromEnv('BACKEND_CONCURRENCY_TARGET', 1024),
+  minTasks: backendMinTasks,
+  maxTasks: backendMaxTasks,
+  perTaskRequests: backendSyncRouteThreads,
+  requestsPerTarget: backendRequestsPerTarget,
+});
+for (const note of backendCapacity.notes) {
+  cdk.Annotations.of(app).addInfo(note);
+}
+for (const warning of backendCapacity.warnings) {
+  cdk.Annotations.of(app).addWarning(warning);
+}
 const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   env,
   prefix,
@@ -236,15 +279,38 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   // 404s and no bucket/grant/env is created (feature ships dark). The bucket
   // name is injected as VSR_CONFIG_BUCKET into the container by EcsStack.
   enableVsrConfigBucket: (process.env.EXTERNAL_VSR_ENABLED || 'false') === 'true',
-  cpu: 256,
-  memory: 512,
+  // Task size and the per-task concurrency ceilings are one decision: threads
+  // that have no CPU behind them queue instead of serving. Both are overridable
+  // so a deployment can be sized for its own concurrency target without a code
+  // change.
+  cpu: positiveIntFromEnv('BACKEND_TASK_CPU', 1024),
+  memory: positiveIntFromEnv('BACKEND_TASK_MEMORY', 2048),
   // Two tasks so the ECS service spreads across both AZs (the VPC has
   // maxAzs=2): no single task or AZ is a SPOF, and rolling deploys keep
   // a task serving. Safe now that per-IP rate limits live in DynamoDB
   // (no in-memory state that a second task would diverge on); budget
   // reserve/settle was already atomic in DynamoDB, and the InfraRouter
   // cooldown map / config cache are per-task advisory by design.
-  desiredCount: 2,
+  // The floor, not just the multi-AZ baseline: autoscaling is reactive, so a
+  // burst is served by the tasks already running while the scaler catches up. A
+  // deployment that must absorb its full concurrency target instantly raises this
+  // to the ceiling and pays for the idle capacity; two tasks absorb 256 in flight
+  // and grow from there.
+  desiredCount: backendMinTasks,
+  // Fleet concurrency is the per-task ceiling times the running task count, so
+  // the ceiling below and this maximum are what the concurrency target is made
+  // of: 8 tasks admitting 128 requests each hold 1024 in flight.
+  autoScaling: {
+    maxCapacity: backendMaxTasks,
+    // No default on purpose. The only honest source for this number is a sweep
+    // against the deployed task size and request path, and the measurement that
+    // exists (~135 requests/min/task) predates both the 4x larger task and
+    // connection pooling — carrying it over would size the fleet from a number
+    // this very change invalidated. Until `BACKEND_REQUESTS_PER_TARGET` is set
+    // from a fresh sweep, the request policy is not registered and CPU tracking
+    // is the only signal.
+    requestsPerTarget: backendRequestsPerTarget,
+  },
   containerPort: 8000,
   // A-01-ecr follow-through: with the repo IMMUTABLE, every deploy
   // must point at a content-addressed tag. Operators export
@@ -258,6 +324,22 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // Backend runtime mode
     DATABASE_TYPE: 'dynamodb',
     AUTH_MODE: 'cognito',
+
+    // How many requests one task may hold at once. The framework defaults
+    // (anyio's 40 worker threads, and a loop executor sized from the HOST's core
+    // count) capped a task far below what its CPU could serve, so both are set
+    // explicitly here next to the task size and the scaling ceiling they have to
+    // agree with. The mantle connection ceiling matches: a pooled client left at
+    // httpx's default of 100 would queue while threads and CPU were still free.
+    GATEWAY_OFFLOAD_THREADS: String(backendOffloadThreads),
+    GATEWAY_SYNC_ROUTE_THREADS: String(backendSyncRouteThreads),
+    MANTLE_MAX_CONNECTIONS: String(backendMantleConnections),
+    // The Converse transport's equivalent. botocore defaults this to 10, which
+    // would put a TLS handshake back on every request past the tenth however many
+    // threads the task has.
+    BEDROCK_MAX_POOL_CONNECTIONS: String(
+      positiveIntFromEnv('BEDROCK_MAX_POOL_CONNECTIONS', 128),
+    ),
 
     // Cognito
     COGNITO_USER_POOL_ID: cognitoStack.userPoolId,

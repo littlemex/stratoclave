@@ -16,7 +16,12 @@ export interface EcsStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
   securityGroup: ec2.ISecurityGroup;
   repository: ecr.IRepository;
-  targetGroup: elbv2.IApplicationTargetGroup;
+  /**
+   * Concrete rather than `IApplicationTargetGroup`: request-count scaling needs
+   * the group's own resource label to build the ALB metric dimension, which an
+   * imported group cannot supply.
+   */
+  targetGroup: elbv2.ApplicationTargetGroup;
 
   /** Cognito User Pool ARN (used to scope Task Role permissions) */
   userPoolArn: string;
@@ -32,6 +37,33 @@ export interface EcsStackProps extends cdk.StackProps {
   desiredCount?: number;
   /** container port @default 8000 */
   containerPort?: number;
+
+  /**
+   * Horizontal scaling policy for the backend service.
+   *
+   * The primary signal is ALB requests per target, not CPU. CPU is a poor proxy
+   * here: a request spends most of its life waiting on Bedrock, so a task can be
+   * saturated — every worker thread held, latency climbing — while average CPU
+   * still reads well under any sane target. Measured on 2026-08-24, average task
+   * CPU sat at 25-29% while throughput had already flattened and p50 latency had
+   * grown 18x. Requests per target moves with offered load, so it reacts to the
+   * queue the CPU metric cannot see.
+   *
+   * CPU tracking stays configured as a second, slower signal for the case where
+   * work is genuinely compute-bound rather than upstream-bound.
+   */
+  autoScaling?: {
+    /** ceiling on task count @default max(desiredCount * 2, 4) */
+    maxCapacity?: number;
+    /**
+     * Requests per target per minute to hold. Derive it from measured per-task
+     * capacity and keep headroom: a target set AT saturation keeps every task at
+     * the point where latency has already degraded.
+     */
+    requestsPerTarget?: number;
+    /** CPU target for the secondary policy @default 70 */
+    cpuTargetPercent?: number;
+  };
 
   environment?: { [key: string]: string };
   secrets?: { [key: string]: ecs.Secret };
@@ -790,14 +822,45 @@ export class EcsStack extends cdk.Stack {
     // Auto scaling. Floor tracks the desired count so we never scale below
     // the multi-task/multi-AZ baseline; ceiling gives headroom under load.
     const baseCount = props.desiredCount ?? 1;
+    const maxCapacity =
+      props.autoScaling?.maxCapacity ?? (baseCount > 1 ? Math.max(baseCount * 2, 4) : 1);
+    if (maxCapacity < baseCount) {
+      // Application Auto Scaling would accept `minCapacity > maxCapacity` as a
+      // template and then behave in a way nobody intended. A fleet whose floor is
+      // above its ceiling is a configuration mistake, not a policy.
+      throw new Error(
+        `autoScaling.maxCapacity (${maxCapacity}) must be >= desiredCount (${baseCount}); ` +
+          'the scaling floor tracks the desired count',
+      );
+    }
     const scaling = this.service.autoScaleTaskCount({
       minCapacity: baseCount,
-      maxCapacity: baseCount > 1 ? Math.max(baseCount * 2, 4) : 1,
+      maxCapacity,
     });
+
+    // Cooldowns are deliberately asymmetric. Scaling out has to answer a burst,
+    // so it is short; scaling in on this workload would otherwise pull tasks out
+    // from under a load that is still arriving, and the replacement task costs a
+    // cold start before it serves anything.
+    const scaleOutCooldown = cdk.Duration.seconds(60);
+    const scaleInCooldown = cdk.Duration.seconds(300);
+
+    // Primary signal: offered load per task. Only registered when the ceiling is
+    // above the floor — a policy on a fixed-size service can never act, and one
+    // that cannot act still reports as configured, which is worse than absent.
+    if (maxCapacity > baseCount && props.autoScaling?.requestsPerTarget !== undefined) {
+      scaling.scaleOnRequestCount('RequestCountScaling', {
+        requestsPerTarget: props.autoScaling.requestsPerTarget,
+        targetGroup: props.targetGroup,
+        scaleInCooldown,
+        scaleOutCooldown,
+      });
+    }
+
     scaling.scaleOnCpuUtilization('CpuScaling', {
-      targetUtilizationPercent: 70,
-      scaleInCooldown: cdk.Duration.seconds(60),
-      scaleOutCooldown: cdk.Duration.seconds(60),
+      targetUtilizationPercent: props.autoScaling?.cpuTargetPercent ?? 70,
+      scaleInCooldown,
+      scaleOutCooldown,
     });
 
     // When Application Auto Scaling manages the task count, a `DesiredCount`

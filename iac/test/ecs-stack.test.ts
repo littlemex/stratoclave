@@ -10,7 +10,7 @@ describe('EcsStack', () => {
   let vpc: ec2.IVpc;
   let securityGroup: ec2.ISecurityGroup;
   let repository: ecr.IRepository;
-  let targetGroup: elbv2.IApplicationTargetGroup;
+  let targetGroup: elbv2.ApplicationTargetGroup;
   let stack: EcsStack;
   let template: Template;
 
@@ -155,7 +155,14 @@ describe('EcsStack', () => {
 // DesiredCount (so deploys don't reset the count / snap the fleet down
 // mid-incident) and floor the scalable target at MinCapacity=baseCount.
 describe('EcsStack multi-task/autoscaling', () => {
-  function synth(desiredCount: number): Template {
+  function synth(
+    desiredCount: number,
+    autoScaling?: {
+      maxCapacity?: number;
+      requestsPerTarget?: number;
+      cpuTargetPercent?: number;
+    },
+  ): Template {
     const app = new cdk.App();
     const net = new cdk.Stack(app, 'Net', { env: { account: '123456789012', region: 'us-west-2' } });
     const vpc = new ec2.Vpc(net, 'Vpc', { maxAzs: 2 });
@@ -164,12 +171,19 @@ describe('EcsStack multi-task/autoscaling', () => {
     const tg = new elbv2.ApplicationTargetGroup(net, 'Tg', {
       vpc, port: 8000, protocol: elbv2.ApplicationProtocol.HTTP, targetType: elbv2.TargetType.IP,
     });
-    const stack = new EcsStack(app, `Ecs${desiredCount}`, {
+    // Request-count scaling reads the ALB dimension off the target group, which
+    // only exists once a listener has attached it — as the real stack does.
+    const alb = new elbv2.ApplicationLoadBalancer(net, 'Alb', { vpc, internetFacing: true });
+    alb.addListener('Listener', {
+      port: 80,
+      defaultAction: elbv2.ListenerAction.forward([tg]),
+    });
+    const stack = new EcsStack(app, `Ecs${desiredCount}${autoScaling ? 'Scaled' : ''}`, {
       env: { account: '123456789012', region: 'us-west-2' },
       prefix: 'stratoclave', vpc, securityGroup: sg, repository: repo, targetGroup: tg,
       userPoolArn: 'arn:aws:cognito-idp:us-west-2:123456789012:userpool/us-west-2_t',
       dynamoDbTableArns: ['arn:aws:dynamodb:us-west-2:123456789012:table/stratoclave-users'],
-      cpu: 256, memory: 512, desiredCount,
+      cpu: 256, memory: 512, desiredCount, autoScaling,
       environment: { DATABASE_TYPE: 'dynamodb', AUTH_MODE: 'cognito' },
     });
     return Template.fromStack(stack);
@@ -193,5 +207,75 @@ describe('EcsStack multi-task/autoscaling', () => {
   test('desiredCount=1 keeps DesiredCount (no override, pinned 1..1)', () => {
     const t = synth(1);
     t.hasResourceProperties('AWS::ECS::Service', { DesiredCount: 1 });
+  });
+
+  test('request-count tracking is the primary policy when a budget is given', () => {
+    // CPU average stays low on this workload while tasks are already saturated
+    // waiting upstream, so offered load per target is the signal that reacts.
+    const t = synth(2, { maxCapacity: 8, requestsPerTarget: 120 });
+    t.hasResourceProperties('AWS::ApplicationAutoScaling::ScalingPolicy', {
+      TargetTrackingScalingPolicyConfiguration: Match.objectLike({
+        TargetValue: 120,
+        PredefinedMetricSpecification: Match.objectLike({
+          PredefinedMetricType: 'ALBRequestCountPerTarget',
+        }),
+      }),
+    });
+  });
+
+  test('scaling in is slower than scaling out', () => {
+    // Pulling a task while load is still arriving costs a cold start before the
+    // replacement serves anything, so the two cooldowns must not be equal.
+    const t = synth(2, { maxCapacity: 8, requestsPerTarget: 120 });
+    const policies = Object.values(
+      t.findResources('AWS::ApplicationAutoScaling::ScalingPolicy'),
+    );
+    expect(policies.length).toBeGreaterThan(0);
+    for (const policy of policies) {
+      const config = policy.Properties.TargetTrackingScalingPolicyConfiguration;
+      expect(config.ScaleInCooldown).toBeGreaterThan(config.ScaleOutCooldown);
+    }
+  });
+
+  test('a request budget on a fixed-size service registers no request policy', () => {
+    // A policy that cannot act still reports as configured, which reads as
+    // protection that is not there.
+    const t = synth(1, { maxCapacity: 1, requestsPerTarget: 120 });
+    const policies = Object.values(
+      t.findResources('AWS::ApplicationAutoScaling::ScalingPolicy'),
+    );
+    for (const policy of policies) {
+      const spec =
+        policy.Properties.TargetTrackingScalingPolicyConfiguration
+          ?.PredefinedMetricSpecification;
+      expect(spec?.PredefinedMetricType).not.toBe('ALBRequestCountPerTarget');
+    }
+  });
+
+  test('cpu tracking remains as the secondary signal', () => {
+    const t = synth(2, { maxCapacity: 8, requestsPerTarget: 120 });
+    t.hasResourceProperties('AWS::ApplicationAutoScaling::ScalingPolicy', {
+      TargetTrackingScalingPolicyConfiguration: Match.objectLike({
+        PredefinedMetricSpecification: Match.objectLike({
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization',
+        }),
+      }),
+    });
+  });
+
+  test('the task ceiling is what the concurrency target is made of', () => {
+    const t = synth(2, { maxCapacity: 8, requestsPerTarget: 120 });
+    t.hasResourceProperties('AWS::ApplicationAutoScaling::ScalableTarget', {
+      MinCapacity: 2,
+      MaxCapacity: 8,
+    });
+  });
+
+  test('a ceiling below the floor is a configuration error, not a policy', () => {
+    // Application Auto Scaling would accept the template and then behave in a way
+    // nobody intended, so this has to fail at synth.
+    expect(() => synth(2, { maxCapacity: 1, requestsPerTarget: 120 })).toThrow(
+      /maxCapacity .* must be >= desiredCount/,
+    );
   });
 });

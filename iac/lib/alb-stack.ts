@@ -56,6 +56,13 @@ export class AlbStack extends cdk.Stack {
       protocol: elbv2.ApplicationProtocol.HTTP,
       targetType: elbv2.TargetType.IP,
       targetGroupName: `${prefix}-backend-tg`,
+      // Round robin sends the next request to the next target regardless of how
+      // much work each is already carrying, which is wrong for a gateway whose
+      // requests last from milliseconds to minutes: a target holding several long
+      // streams keeps receiving its share. Least-outstanding-requests routes by
+      // in-flight count instead, which is the quantity that saturates a task here.
+      loadBalancingAlgorithmType:
+        elbv2.TargetGroupLoadBalancingAlgorithmType.LEAST_OUTSTANDING_REQUESTS,
       healthCheck: {
         path: props.healthCheckPath || '/health',
         interval: cdk.Duration.seconds(30),
