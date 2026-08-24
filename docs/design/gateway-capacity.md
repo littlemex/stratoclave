@@ -150,6 +150,48 @@ the ceiling; and the target group now routes by least outstanding requests rathe
 than round robin, because with request durations from milliseconds to minutes the
 in-flight count is what saturates a task.
 
+## What the change measured
+
+The same sweep, re-run against the deployed change on 2026-08-24 with eight tasks
+of 1024 CPU units:
+
+| Concurrency | Before | After | Direct, same run |
+| --- | --- | --- | --- |
+| 1 | 1.4 req/s, p50 547 ms | 1.6 req/s, p50 597 ms | 3.4 req/s, p50 306 ms |
+| 64 | 4.2 req/s, p50 1663 ms | 61.7 req/s, p50 628 ms | 49.2 req/s, p50 442 ms |
+| 256 | 4.6 req/s, p50 6223 ms | 64.4 req/s, p50 1479 ms | 27.5 req/s, p50 525 ms |
+| 512 | 3.6 req/s, p50 9903 ms | 48.4 req/s, p50 2741 ms | 8.5 req/s, p50 954 ms |
+
+Fourteen times the throughput, and at 64 concurrent the gateway now serves more
+than the direct arm managed in the same window, so at that level it is no longer
+what limits the caller. Low concurrency looks unchanged for a reason: with eight
+tasks and least-outstanding-requests routing, a handful of requests land on
+different tasks and each pays its task's first handshake. Pooling shows up once
+there are more requests than tasks.
+
+`BACKEND_REQUESTS_PER_TARGET` follows from those numbers. Per task it is 7.7 req/s
+at 64 concurrent with latency still at its unloaded value, 8.0 req/s at 256 with
+latency 2.4x higher, and 6.0 req/s at 512 with latency worse again — saturation is
+around 8 req/s per task. Holding **300 requests per minute per task** (5 req/s)
+keeps a task at about 62% of that, which is where latency is still flat.
+
+## Two limits that are not capacity
+
+The sweep could not reach 1024, and what stopped it was policy rather than
+capacity — worth knowing before sizing anything against this gateway:
+
+* **The WAF rate rule.** `WAF_RATE_LIMIT_PER_5MIN` defaults to 300 requests per
+  five minutes per source IP, which is one request per second sustained. The 1024
+  stage returned 403 for 1018 of its requests because earlier stages had used the
+  window up. Any single-IP client — a benchmark harness, a router in front of the
+  gateway — meets this long before it meets the concurrency ceiling.
+* **The caller's own token budget.** The 256 and 512 stages returned 402
+  `personal_budget_exhausted` for some requests. That is the accounting working,
+  but it caps a sustained run just as effectively.
+
+Both have to be raised deliberately for a load test, and neither says anything
+about how many requests a task can hold.
+
 ## Why scaling tracks requests, not CPU
 
 The service already had CPU target tracking at 70% and it never fired during the
