@@ -364,6 +364,10 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     BEDROCK_MAX_POOL_CONNECTIONS: String(
       positiveIntFromEnv('BEDROCK_MAX_POOL_CONNECTIONS', 128),
     ),
+    // Per-phase request timing. On by default because the alternative is having no
+    // answer when a request is slow while every dependency is fast; switchable
+    // because one log line per request is a real cost at this concurrency.
+    GATEWAY_REQUEST_TIMING: process.env.GATEWAY_REQUEST_TIMING || 'true',
 
     // Cognito
     COGNITO_USER_POOL_ID: cognitoStack.userPoolId,
