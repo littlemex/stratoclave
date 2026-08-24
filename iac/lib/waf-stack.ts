@@ -7,11 +7,35 @@ import { applyCommonTags, paramPath, putStringParameter } from './_common';
 export interface WafStackProps extends cdk.StackProps {
   prefix: string;
   /**
-   * Maximum requests per IP per 5-minute window. IPs that exceed this are automatically BLOCKed.
-   * Stratoclave is an LLM proxy, so individual requests are large (on the order of seconds).
-   * 300 req / 5 min = 1 req/s is the ceiling — a value that does not impede normal usage.
+   * Maximum AUTHENTICATED requests per IP per 5-minute window.
+   *
+   * This used to be 300 for all traffic, on the reasoning that an LLM request
+   * takes seconds so 1 req/s per IP could not impede normal usage. Measured on
+   * 2026-08-24 that is false for the clients this gateway exists to serve: a
+   * concurrency sweep from one host had 1018 of 1024 requests blocked with 403
+   * while the service itself was serving 60 req/s comfortably. An aggregator in
+   * front of the gateway — a semantic router, a benchmark harness, a CI fleet
+   * behind one NAT — is one IP carrying many users' traffic.
+   *
+   * A per-IP rate rule is the wrong instrument for that traffic, and the gateway
+   * already has the right one: per-user token quotas and per-tenant dollar pools,
+   * which bound cost per identity rather than per address. So this ceiling is set
+   * from the concurrency target, high enough that legitimate traffic at the target
+   * never meets it, and its remaining job is to bound a pathological flood.
+   *
+   * Unauthenticated traffic keeps a tight limit of its own — see
+   * `unauthenticatedRateLimitPer5Min`.
    */
   readonly rateLimitPer5Min?: number;
+  /**
+   * Maximum UNAUTHENTICATED requests per IP per 5-minute window.
+   *
+   * Requests arriving without a non-empty `Authorization` header cannot be
+   * attributed to a user, so no token quota bounds them and the IP is the only
+   * key available. This keeps the original tight ceiling for exactly that
+   * traffic.
+   */
+  readonly unauthenticatedRateLimitPer5Min?: number;
   /**
    * Whether to read IP CIDRs from an SSM Parameter Store path (string list, comma-separated)
    * and use them as an allowlist. When enabled, IPs not on the allowlist are BLOCKed.
@@ -149,7 +173,8 @@ function uriOnDataPlane(prefixes: string[]): wafv2.CfnWebACL.StatementProperty {
  *   - AWSManagedRulesCommonRuleSet (OWASP top 10 basics)
  *   - AWSManagedRulesKnownBadInputsRuleSet (SSRF / RFI / known bad payloads)
  *   - AWSManagedRulesAmazonIpReputationList (known bad IPs)
- *   - RateBasedRule (per IP; BLOCKs when `rateLimitPer5Min` is exceeded)
+ *   - RateBasedRule x2 (per IP; a high ceiling for authenticated traffic, a tight
+ *     one for requests with no usable `Authorization` header)
  *   - (Optional) IP allowlist — driven by a CIDR list stored in an SSM parameter
  */
 export class WafStack extends cdk.Stack {
@@ -161,6 +186,23 @@ export class WafStack extends cdk.Stack {
     applyCommonTags(this, props.prefix, 'WAF');
 
     const rateLimit = props.rateLimitPer5Min ?? 300;
+    const unauthenticatedRateLimit = props.unauthenticatedRateLimitPer5Min ?? 300;
+
+    // Requests that carry a non-empty Authorization header. Used as a scope-down
+    // on both rate rules so the two classes of traffic are counted separately:
+    // authenticated traffic is bounded per identity by token quotas and only
+    // loosely per IP, while unattributable traffic has nothing but the IP.
+    const isAuthenticated: wafv2.CfnWebACL.StatementProperty = {
+      sizeConstraintStatement: {
+        // `singleHeader` is typed `any` in the L1 construct, so it is passed to
+        // CloudFormation verbatim and has to use CloudFormation's casing. Written
+        // in camelCase it synthesises cleanly and is rejected at deploy.
+        fieldToMatch: { singleHeader: { Name: 'authorization' } },
+        comparisonOperator: 'GT',
+        size: 0,
+        textTransformations: [{ priority: 0, type: 'NONE' }],
+      },
+    };
 
     const rules: wafv2.CfnWebACL.RuleProperty[] = [];
     let priority = 0;
@@ -297,22 +339,45 @@ export class WafStack extends cdk.Stack {
       },
     });
 
-    // 6. Rate-based rule (5-minute window, per IP). Last rule in the
-    // chain — no further `priority++` is needed after this one.
+    // 6. Rate-based rules (5-minute window, per IP), one per class of traffic.
+    // Authenticated traffic first: a high ceiling whose job is to bound a flood,
+    // because cost is already bounded per identity by the token quota.
     rules.push({
       name: 'RateLimitPerIp',
-      priority: priority,
+      priority: priority++,
       action: { block: {} },
       statement: {
         rateBasedStatement: {
           aggregateKeyType: 'IP',
           limit: rateLimit,
+          scopeDownStatement: isAuthenticated,
         },
       },
       visibilityConfig: {
         sampledRequestsEnabled: true,
         cloudWatchMetricsEnabled: true,
         metricName: 'RateLimit',
+      },
+    });
+
+    // Unattributable traffic keeps the tight ceiling: with no user to charge, the
+    // address is the only key, so this is the only thing bounding it. Last rule in
+    // the chain — no further `priority++` is needed after this one.
+    rules.push({
+      name: 'RateLimitPerIpUnauthenticated',
+      priority: priority,
+      action: { block: {} },
+      statement: {
+        rateBasedStatement: {
+          aggregateKeyType: 'IP',
+          limit: unauthenticatedRateLimit,
+          scopeDownStatement: { notStatement: { statement: isAuthenticated } },
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'RateLimitUnauthenticated',
       },
     });
 

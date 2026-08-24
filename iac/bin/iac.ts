@@ -1,7 +1,17 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
-import { getPrefix, stackName, paramPath, putStringParameter } from '../lib/_common';
+import {
+  capacityPlan,
+  getPrefix,
+  impliedRatePer5Min,
+  workersForCpuUnits,
+  optionalPositiveIntFromEnv,
+  stackName,
+  paramPath,
+  positiveIntFromEnv,
+  putStringParameter,
+} from '../lib/_common';
 import { resolveRegionConfig } from '../lib/region-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
@@ -115,7 +125,15 @@ const enableEcsExec = ecsExecExplicit !== undefined
 // P1-2 WAF: set ENABLE_WAF=false only for throwaway stacks. Default is on —
 // without WAF, /api/* is exposed with no rate limit or managed-rule coverage.
 const enableWaf = (process.env.ENABLE_WAF || 'true').toLowerCase() !== 'false';
-const wafRateLimit = Number(process.env.WAF_RATE_LIMIT_PER_5MIN || 300);
+// The per-IP ceiling for AUTHENTICATED traffic. Derived from the concurrency
+// target rather than fixed: at 300 req / 5 min a single host driving the target
+// was blocked with 403 on 1018 of 1024 requests while the service itself served
+// 60 req/s comfortably, because an aggregator in front of the gateway is one IP
+// carrying many users' traffic. Cost for that traffic is bounded per identity by
+// the token quota; this rule's remaining job is to bound a flood.
+const wafConcurrencyTarget = positiveIntFromEnv('BACKEND_CONCURRENCY_TARGET', 1024);
+const wafRateFloor = impliedRatePer5Min(wafConcurrencyTarget);
+const wafRateLimit = Number(process.env.WAF_RATE_LIMIT_PER_5MIN || wafRateFloor);
 // AWS WAF rate-based rule minimum is 100 req / 5 min; a typo like "3oo" yields
 // NaN and fails at CFN deploy with an unhelpful message. Fail at synth instead.
 // (Fable review L-3)
@@ -124,6 +142,20 @@ if (!Number.isInteger(wafRateLimit) || wafRateLimit < 100) {
     `WAF_RATE_LIMIT_PER_5MIN must be an integer >= 100 (got "${process.env.WAF_RATE_LIMIT_PER_5MIN}").`
   );
 }
+if (wafRateLimit < wafRateFloor) {
+  cdk.Annotations.of(app).addWarning(
+    `WAF_RATE_LIMIT_PER_5MIN (${wafRateLimit}) is below the ${wafRateFloor} a single ` +
+      `client at BACKEND_CONCURRENCY_TARGET (${wafConcurrencyTarget}) can produce: ` +
+      'traffic the gateway is sized to serve will be blocked with 403 before it ' +
+      'reaches the service.',
+  );
+}
+// Unattributable requests keep the original tight ceiling: with no user to charge,
+// the address is the only key available.
+const wafUnauthenticatedRateLimit = positiveIntFromEnv(
+  'WAF_UNAUTH_RATE_LIMIT_PER_5MIN',
+  300,
+);
 const wafIpAllowlistEnabled =
   (process.env.WAF_IP_ALLOWLIST_ENABLED || 'false').toLowerCase() === 'true';
 
@@ -180,6 +212,7 @@ if (enableWaf) {
     crossRegionReferences: true,
     prefix,
     rateLimitPer5Min: wafRateLimit,
+    unauthenticatedRateLimitPer5Min: wafUnauthenticatedRateLimit,
     ipAllowlistEnabled: wafIpAllowlistEnabled,
     description: `[${prefix}] WAFv2 WebACL for CloudFront (rate-limit + managed rules)`,
   });
@@ -222,6 +255,52 @@ const cognitoStack = new CognitoStack(app, stackName(prefix, 'cognito'), {
 cognitoStack.addDependency(frontendStack);
 
 // --- 7. ECS (placed directly in the Public Subnet, region R) ---
+// Per-task ceilings are read here so they can be cross-checked before synth: a
+// set that admits more requests than it can carry connections for does not fail,
+// it just queues in a place nobody is looking at.
+// Per process. 32 is near the knee of the measured latency curve; 128 admitted the
+// traffic at 7.7 s p50, which is not serving it.
+const backendSyncRouteThreads = positiveIntFromEnv('GATEWAY_SYNC_ROUTE_THREADS', 32);
+const backendOffloadThreads = positiveIntFromEnv('GATEWAY_OFFLOAD_THREADS', 32);
+const backendMantleConnections = positiveIntFromEnv('MANTLE_MAX_CONNECTIONS', 256);
+// One worker per vCPU by default. 1024 CPU units is one vCPU, so a 1 vCPU task
+// stays single-process (which is what it was) and a larger task gets the workers
+// its cores can actually run.
+const backendTaskCpu = positiveIntFromEnv('BACKEND_TASK_CPU', 1024);
+const backendUvicornWorkers = positiveIntFromEnv(
+  'GATEWAY_UVICORN_WORKERS',
+  workersForCpuUnits(backendTaskCpu),
+);
+if (backendMantleConnections < backendSyncRouteThreads) {
+  cdk.Annotations.of(app).addWarning(
+    `MANTLE_MAX_CONNECTIONS (${backendMantleConnections}) is below ` +
+      `GATEWAY_SYNC_ROUTE_THREADS (${backendSyncRouteThreads}): a task can admit more ` +
+      'mantle requests than it holds connections for, so the surplus waits on the ' +
+      'connection pool rather than on the model.',
+  );
+}
+// What this configuration can hold, against what it was asked to hold. Stated at
+// synth because the target is a product decision and the knobs are three numbers
+// that multiply: a fleet nominally sized for 1024 that has no policy to grow it,
+// or a floor that absorbs a quarter of it, is a configuration mistake worth
+// seeing before the deploy rather than during an incident.
+const backendMinTasks = positiveIntFromEnv('BACKEND_MIN_TASKS', 2);
+const backendMaxTasks = positiveIntFromEnv('BACKEND_MAX_TASKS', 8);
+const backendRequestsPerTarget = optionalPositiveIntFromEnv('BACKEND_REQUESTS_PER_TARGET');
+const backendCapacity = capacityPlan({
+  target: positiveIntFromEnv('BACKEND_CONCURRENCY_TARGET', 1024),
+  minTasks: backendMinTasks,
+  maxTasks: backendMaxTasks,
+  perProcessRequests: backendSyncRouteThreads,
+  workersPerTask: backendUvicornWorkers,
+  requestsPerTarget: backendRequestsPerTarget,
+});
+for (const note of backendCapacity.notes) {
+  cdk.Annotations.of(app).addInfo(note);
+}
+for (const warning of backendCapacity.warnings) {
+  cdk.Annotations.of(app).addWarning(warning);
+}
 const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   env,
   prefix,
@@ -236,15 +315,38 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   // 404s and no bucket/grant/env is created (feature ships dark). The bucket
   // name is injected as VSR_CONFIG_BUCKET into the container by EcsStack.
   enableVsrConfigBucket: (process.env.EXTERNAL_VSR_ENABLED || 'false') === 'true',
-  cpu: 256,
-  memory: 512,
+  // Task size and the per-task concurrency ceilings are one decision: threads
+  // that have no CPU behind them queue instead of serving. Both are overridable
+  // so a deployment can be sized for its own concurrency target without a code
+  // change.
+  cpu: backendTaskCpu,
+  memory: positiveIntFromEnv('BACKEND_TASK_MEMORY', 2048),
   // Two tasks so the ECS service spreads across both AZs (the VPC has
   // maxAzs=2): no single task or AZ is a SPOF, and rolling deploys keep
   // a task serving. Safe now that per-IP rate limits live in DynamoDB
   // (no in-memory state that a second task would diverge on); budget
   // reserve/settle was already atomic in DynamoDB, and the InfraRouter
   // cooldown map / config cache are per-task advisory by design.
-  desiredCount: 2,
+  // The floor, not just the multi-AZ baseline: autoscaling is reactive, so a
+  // burst is served by the tasks already running while the scaler catches up. A
+  // deployment that must absorb its full concurrency target instantly raises this
+  // to the ceiling and pays for the idle capacity; two tasks absorb 256 in flight
+  // and grow from there.
+  desiredCount: backendMinTasks,
+  // Fleet concurrency is the per-task ceiling times the running task count, so
+  // the ceiling below and this maximum are what the concurrency target is made
+  // of: 8 tasks admitting 128 requests each hold 1024 in flight.
+  autoScaling: {
+    maxCapacity: backendMaxTasks,
+    // No default on purpose. The only honest source for this number is a sweep
+    // against the deployed task size and request path, and the measurement that
+    // exists (~135 requests/min/task) predates both the 4x larger task and
+    // connection pooling — carrying it over would size the fleet from a number
+    // this very change invalidated. Until `BACKEND_REQUESTS_PER_TARGET` is set
+    // from a fresh sweep, the request policy is not registered and CPU tracking
+    // is the only signal.
+    requestsPerTarget: backendRequestsPerTarget,
+  },
   containerPort: 8000,
   // A-01-ecr follow-through: with the repo IMMUTABLE, every deploy
   // must point at a content-addressed tag. Operators export
@@ -258,6 +360,31 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // Backend runtime mode
     DATABASE_TYPE: 'dynamodb',
     AUTH_MODE: 'cognito',
+
+    // How many requests one task may hold at once. The framework defaults
+    // (anyio's 40 worker threads, and a loop executor sized from the HOST's core
+    // count) capped a task far below what its CPU could serve, so both are set
+    // explicitly here next to the task size and the scaling ceiling they have to
+    // agree with. The mantle connection ceiling matches: a pooled client left at
+    // httpx's default of 100 would queue while threads and CPU were still free.
+    GATEWAY_OFFLOAD_THREADS: String(backendOffloadThreads),
+    GATEWAY_SYNC_ROUTE_THREADS: String(backendSyncRouteThreads),
+    MANTLE_MAX_CONNECTIONS: String(backendMantleConnections),
+    // The Converse transport's equivalent. botocore defaults this to 10, which
+    // would put a TLS handshake back on every request past the tenth however many
+    // threads the task has.
+    BEDROCK_MAX_POOL_CONNECTIONS: String(
+      positiveIntFromEnv('BEDROCK_MAX_POOL_CONNECTIONS', 128),
+    ),
+    // Per-phase request timing. On by default because the alternative is having no
+    // answer when a request is slow while every dependency is fast; switchable
+    // because one log line per request is a real cost at this concurrency.
+    GATEWAY_REQUEST_TIMING: process.env.GATEWAY_REQUEST_TIMING || 'true',
+    // uvicorn processes per task. Sized WITH the task's CPU, never instead of it:
+    // workers beyond the task's vCPU count share one core and gain nothing, since
+    // what they exist to escape is one GIL per process rather than a shortage of
+    // threads. Defaults to one CPU unit worth of vCPU per worker.
+    GATEWAY_UVICORN_WORKERS: String(backendUvicornWorkers),
 
     // Cognito
     COGNITO_USER_POOL_ID: cognitoStack.userPoolId,

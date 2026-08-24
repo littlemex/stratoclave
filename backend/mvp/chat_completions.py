@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import _mantle_transport
 from ._bedrock_clients import deployment_client
+from ._timing import RequestTiming, phase as _timed_phase
 from .anthropic import _selected_bedrock_model
 from ._pipeline import (
     release_pool as _release_pool,
@@ -384,19 +385,25 @@ def chat_completions(
         except Exception:  # noqa: BLE001 — advisory + fail-open; never break a request.
             _shadow_vsr = None
 
-    tenants_repo = reserve_credit_for_model(
-        user, reservation,
-        model_name=body.model,
-        input_tokens_est=input_est,
-        max_output_tokens=max_out,
-        wire_protocol=entry.wire_protocol,
-        vsr_hard_model=model_pin,
-        # L5-d: per-run billing attribution.
-        workflow_run_id=ctx.workflow_run_id if ctx else None,
-        group_id=ctx.group_id if ctx else None,
-        request_id=ctx.request_id if ctx else None,
-        vsr_decision=_shadow_vsr,
-    )
+    # Phase timing for this request. See `_timing`: the load balancer can see that
+    # a request was slow but not which part of it waited, and that is the only
+    # question worth asking when CPU is idle and every dependency is fast.
+    timing = RequestTiming()
+
+    with _timed_phase(timing, "reserve"):
+        tenants_repo = reserve_credit_for_model(
+            user, reservation,
+            model_name=body.model,
+            input_tokens_est=input_est,
+            max_output_tokens=max_out,
+            wire_protocol=entry.wire_protocol,
+            vsr_hard_model=model_pin,
+            # L5-d: per-run billing attribution.
+            workflow_run_id=ctx.workflow_run_id if ctx else None,
+            group_id=ctx.group_id if ctx else None,
+            request_id=ctx.request_id if ctx else None,
+            vsr_decision=_shadow_vsr,
+        )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point
     # both the invoke target and the pre-built kwargs at the model actually
@@ -425,6 +432,7 @@ def chat_completions(
             body=body, entry=entry, user=user, tenants_repo=tenants_repo,
             reservation=reservation, corr=corr,
             request_id=ctx.request_id if ctx else None,
+            timing=timing,
         )
 
     selected_id = _selected_bedrock_model(tenants_repo, model_id)
@@ -447,7 +455,8 @@ def chat_completions(
         return StreamingResponse(
             _stream_chat(body, model_id, user, tenants_repo, reservation, kwargs,
                          entry=entry,
-                         request_id=ctx.request_id if ctx else None),
+                         request_id=ctx.request_id if ctx else None,
+                         timing=timing),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -459,10 +468,13 @@ def chat_completions(
 
     # Non-streaming path
     try:
-        resp = deployment_client().converse(**kwargs)
+        with _timed_phase(timing, "upstream"):
+            resp = deployment_client().converse(**kwargs)
     except Exception as e:
         tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
         _release_pool(tenants_repo)
+        timing.emit(route="chat_completions", transport="converse", model=body.model,
+                    outcome="upstream_error")
         from core.error_handler import sanitize_exception_message
         raise HTTPException(status_code=502, detail={"error": {"message": sanitize_exception_message(str(e)), "type": "api_error"}})
 
@@ -472,14 +484,17 @@ def chat_completions(
     from ._converse_core import cache_tokens_from_usage
     cache_read, cache_write = cache_tokens_from_usage(usage)
 
-    _settle_reservation_and_log(
-        user=user, tenants_repo=tenants_repo, reservation=reservation,
-        actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
-        model_id=model_id, context=tenants_repo,
-        actual_cache_read_tokens=cache_read, actual_cache_write_tokens=cache_write,
-        # Key the UsageLogs row on the request id for the offline VSR reconcile join.
-        request_id=ctx.request_id if ctx else None,
-    )
+    with _timed_phase(timing, "settle"):
+        _settle_reservation_and_log(
+            user=user, tenants_repo=tenants_repo, reservation=reservation,
+            actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
+            model_id=model_id, context=tenants_repo,
+            actual_cache_read_tokens=cache_read, actual_cache_write_tokens=cache_write,
+            # Key the UsageLogs row on the request id for the offline VSR reconcile join.
+            request_id=ctx.request_id if ctx else None,
+        )
+    timing.emit(route="chat_completions", transport="converse", model=body.model,
+                outcome="ok", input_tokens=input_tokens, output_tokens=output_tokens)
 
     content_blocks = resp.get("output", {}).get("message", {}).get("content", [])
     text_parts = []
@@ -557,6 +572,7 @@ def _mantle_chat_completion(
     reservation: int,
     corr: dict[str, str],
     request_id: Optional[str] = None,
+    timing: Optional[RequestTiming] = None,
 ):
     """Forward an OpenAI Chat Completions request to bedrock-mantle unchanged.
 
@@ -627,26 +643,45 @@ def _mantle_chat_completion(
     if not body.stream:
         from core.error_handler import sanitize_exception_message
 
+        # Pooled, process-wide client: not closed here, and auth travels with the
+        # request rather than with the client (see `_mantle_transport`).
         client = _mantle_transport.sync_client(entry.bedrock_region)
+        auth = _mantle_transport.auth_headers(entry.bedrock_region)
         try:
-            try:
-                resp = client.post(_MANTLE_CHAT_PATH, json=payload)
-            except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
-                raise _fail(502, sanitize_exception_message(str(e)))
-            if resp.status_code >= 400:
-                raise _fail(_mantle_status(resp.status_code), _mantle_transport.format_error(resp))
-            # A 200 with an unparseable body is still an invoke-time failure: without
-            # a usage block there is nothing to settle against, and letting the
-            # exception escape would strand the hold and the pool slot.
-            try:
-                data = resp.json()
-                input_tokens, output_tokens = _mantle_transport.extract_usage(data.get("usage") or {})
-            except Exception as e:  # noqa: BLE001
-                raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
-        finally:
-            client.close()
+            with _timed_phase(timing, "upstream"):
+                # Deadline per request, below the CDN's, so a slow upstream becomes
+                # our JSON 502 rather than the CDN's HTML 504.
+                resp = client.post(
+                    _MANTLE_CHAT_PATH, json=payload, headers=auth,
+                    timeout=_mantle_transport.nonstream_timeout(),
+                )
+        except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
+            if timing is not None:
+                timing.emit(route="chat_completions", transport="mantle",
+                            model=body.model, outcome="upstream_error")
+            raise _fail(502, sanitize_exception_message(str(e)))
+        if resp.status_code >= 400:
+            # 401/403 mean OUR bearer was rejected, so the cached one must go: it
+            # would otherwise be handed to every request in this region until its
+            # TTL ran out.
+            if resp.status_code in (401, 403):
+                _mantle_transport.invalidate_token(entry.bedrock_region, auth)
+            raise _fail(_mantle_status(resp.status_code), _mantle_transport.format_error(resp))
+        # A 200 with an unparseable body is still an invoke-time failure: without
+        # a usage block there is nothing to settle against, and letting the
+        # exception escape would strand the hold and the pool slot.
+        try:
+            data = resp.json()
+            input_tokens, output_tokens = _mantle_transport.extract_usage(data.get("usage") or {})
+        except Exception as e:  # noqa: BLE001
+            raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
 
-        _settle(input_tokens, output_tokens)
+        with _timed_phase(timing, "settle"):
+            _settle(input_tokens, output_tokens)
+        if timing is not None:
+            timing.emit(route="chat_completions", transport="mantle", model=body.model,
+                        outcome="ok", input_tokens=input_tokens,
+                        output_tokens=output_tokens)
         # Echo the client-facing alias, not the Bedrock ID: the caller asked for
         # `body.model` and an OpenAI client may compare the two.
         data["model"] = body.model
@@ -662,11 +697,18 @@ def _mantle_chat_completion(
         import asyncio
 
         input_tokens = output_tokens = 0
+        # Pooled and process-wide, so it outlives this stream and is not closed
+        # here; only the stream itself is scoped by `async with`.
         client = _mantle_transport.async_client(entry.bedrock_region)
         try:
             try:
-                async with client.stream("POST", _MANTLE_CHAT_PATH, json=payload) as resp:
+                auth = await _mantle_transport.auth_headers_async(entry.bedrock_region)
+                async with client.stream(
+                    "POST", _MANTLE_CHAT_PATH, json=payload, headers=auth,
+                ) as resp:
                     if resp.status_code >= 400:
+                        if resp.status_code in (401, 403):
+                            _mantle_transport.invalidate_token(entry.bedrock_region, auth)
                         await resp.aread()
                         msg = _mantle_transport.format_error(resp)
                         await asyncio.to_thread(_refund_and_release)
@@ -721,10 +763,10 @@ def _mantle_chat_completion(
                 raise
             await asyncio.to_thread(_settle, input_tokens, output_tokens)
         finally:
-            await client.aclose()
             # Backstop for a client disconnect (GeneratorExit) or any path above
             # that neither refunded nor settled. `_settle` is latched, so this
-            # cannot double-account.
+            # cannot double-account. The client is pooled, so nothing is closed
+            # here — only the accounting has to be finished.
             await asyncio.to_thread(_settle, input_tokens, output_tokens)
 
     return StreamingResponse(
@@ -748,6 +790,7 @@ async def _stream_chat(
     *,
     entry: Any,
     request_id: Optional[str] = None,
+    timing: Optional[RequestTiming] = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE stream via the shared _budget_flow.run_stream + ChatAdapter.
 

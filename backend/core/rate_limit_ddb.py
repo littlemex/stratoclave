@@ -70,11 +70,19 @@ _TTL_GRACE_SECONDS = 60
 # the event loop (and every co-located SSE stream) on a slow table. 0.5s with a
 # single attempt bounds the worst case; a check that can't answer in time is
 # treated per the failure policy above, quickly.
-_RL_CLIENT_CONFIG = Config(
-    connect_timeout=0.5,
-    read_timeout=0.5,
-    retries={"max_attempts": 1, "mode": "standard"},
-)
+# Timeouts stay tight on purpose (the limiter must never be the slow part) and the
+# pool is sized like every other AWS client here: this one is on the path of every
+# authenticated request, so a pool of 10 would make it churn connections under
+# exactly the load it exists to police. See `core.aws_pool`.
+def _rl_client_config() -> Config:
+    from core.aws_pool import boto_config
+
+    return boto_config(
+        "RATELIMIT_MAX_POOL_CONNECTIONS",
+        connect_timeout=0.5,
+        read_timeout=0.5,
+        retries={"max_attempts": 1, "mode": "standard"},
+    )
 
 # Throttle of the counter write → fail CLOSED. On an on-demand table this is
 # USUALLY a per-partition signal (the hot RL#scope#ip#window key being
@@ -208,7 +216,7 @@ def _client():
                 import boto3
                 region = os.getenv("AWS_REGION", "us-east-1")
                 _rl_client = boto3.client(
-                    "dynamodb", region_name=region, config=_RL_CLIENT_CONFIG
+                    "dynamodb", region_name=region, config=_rl_client_config()
                 )
     return _rl_client
 

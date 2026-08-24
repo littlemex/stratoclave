@@ -213,9 +213,18 @@ class TestMantlePassThrough:
         repo.refund.assert_called_once()
         release.assert_called_once()
 
-    def test_the_http_client_is_always_closed(self):
+    def test_the_pooled_client_is_never_closed(self):
+        """The client is process-wide. Closing it after a request would drop the
+        connections every other in-flight request is using — and put the TLS
+        handshake back on the hot path for the next one."""
         out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, MANTLE_OK))
-        client.close.assert_called_once()
+        client.close.assert_not_called()
+
+    def test_auth_travels_with_the_request(self):
+        """Pinning the bearer to the client would tie the connection pool's
+        lifetime to the token's TTL."""
+        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, MANTLE_OK))
+        assert client.post.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
     def test_client_targets_the_entrys_own_mantle_region(self):
         """Gemma 4 is pinned to us-east-2 and Grok to us-west-2; the base URL has to
@@ -277,8 +286,10 @@ class _FakeAsyncClient:
         self._resp, self.capture, self._raise_mid = resp, capture, raise_mid
         self.closed = False
 
-    def stream(self, method, url, json=None):
+    def stream(self, method, url, json=None, headers=None):
         self.capture["payload"] = json
+        # Auth travels with the request, not with the pooled client.
+        self.capture["headers"] = headers
         if self._raise_mid:
             raise RuntimeError("connection reset")
         return _FakeStreamCtx(self._resp)
@@ -399,10 +410,18 @@ class TestMantleStreaming:
         assert settle.call_count == 1
         repo.refund.assert_not_called()
 
-    def test_client_is_closed_on_the_happy_path(self):
+    def test_the_pooled_client_outlives_the_stream(self):
+        """Only the stream is scoped to the request; the client is process-wide.
+        Closing it at the end of one stream would tear down connections other
+        streams are still reading."""
         _, _, _, _, _, client = self._run(
             _body(stream=True), _stream(_sse(CONTENT_CHUNK), _sse(USAGE_CHUNK), "data: [DONE]"))
-        assert client.closed
+        assert not client.closed
+
+    def test_streamed_request_carries_the_auth_header(self):
+        _, capture, _, _, _, _ = self._run(
+            _body(stream=True), _stream(_sse(CONTENT_CHUNK), _sse(USAGE_CHUNK), "data: [DONE]"))
+        assert capture["headers"] == {"Authorization": "Bearer tok"}
 
 
 class TestRouteServabilityGuard:
