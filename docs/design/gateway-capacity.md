@@ -120,10 +120,12 @@ idle capacity.
 | `BACKEND_MIN_TASKS` | 2 | floor, so also the burst the fleet absorbs immediately |
 | `BACKEND_MAX_TASKS` | 8 | ceiling the autoscaler may reach |
 | `BACKEND_REQUESTS_PER_TARGET` | unset | requests/min/task the scaler holds; see below |
-| `GATEWAY_SYNC_ROUTE_THREADS` | 128 | in-flight sync-route requests per task |
-| `GATEWAY_OFFLOAD_THREADS` | 128 | concurrent offloaded blocking calls per task |
-| `MANTLE_MAX_CONNECTIONS` | 256 | pooled connections per task to bedrock-mantle |
-| `BEDROCK_MAX_POOL_CONNECTIONS` | 128 | pooled connections per task to Bedrock |
+| `GATEWAY_UVICORN_WORKERS` | one per vCPU | server processes per task |
+| `GATEWAY_SYNC_ROUTE_THREADS` | 32 | in-flight sync-route requests per PROCESS |
+| `GATEWAY_OFFLOAD_THREADS` | 32 | concurrent offloaded blocking calls per process |
+| `MANTLE_MAX_CONNECTIONS` | 256 | pooled connections per process to bedrock-mantle |
+| `BEDROCK_MAX_POOL_CONNECTIONS` | request ceiling | pooled connections per process to Bedrock |
+| `DYNAMODB_MAX_POOL_CONNECTIONS` | request ceiling | pooled connections per process to DynamoDB |
 
 **Beyond the ceiling, requests still queue rather than being refused.** This
 change raises the ceiling; it does not add admission control. `anyio`'s limiter has
@@ -197,25 +199,47 @@ at 8, 1331 ms at 32, 2791 ms at 64, 7706 ms at 128. Admitting a request and serv
 it at the upstream's own latency are different things, and the ceiling bounds the
 first.
 
-**Where the time goes at that level is our own accounting, not the model.** The
-per-phase timing over 3,006 requests: reserve p50 1201 ms and p95 3623 ms, settle
-p50 285 ms, upstream p50 317 ms, and 4.9 ms unaccounted. Restricted to requests
-slower than 5 s, reserve is p50 3844 ms and upstream p50 487 ms.
+**Where the time went was our own accounting, and the reason was a pool of ten.**
+The per-phase timing said reserve p50 1201 ms and p95 3623 ms against an upstream
+p50 of 317 ms, while DynamoDB's own UpdateItem latency was 3-4 ms with no
+throttling and no conditional-check failures. What closed the gap was the log: 1,010
+instances of `Connection pool is full, discarding connection:
+dynamodb.us-east-1.amazonaws.com. Connection pool size: 10`.
 
-DynamoDB is not the queue: UpdateItem averaged 3-4 ms with no conditional-check
-failures, no throttling and 82 WCU/s at peak. Task CPU averaged 32% and peaked at
-69%. So the wait is neither the database's service time nor raw CPU — it is 128
-threads in one Python process taking turns at the GIL, each request needing several
-short bursts of CPU for signing and serialization across reserve, invoke and
-settle. That is why latency scales with threads per process while CPU does not
-saturate.
+The shared DynamoDB resource had no `Config`, so it kept botocore's default of ten
+connections while up to 128 requests per process used it. Past the tenth concurrent
+call, urllib3 opened a connection and discarded it on release, so every reservation
+and settlement paid a fresh TLS handshake. Throughput collapsing from 91.9 req/s at
+512 concurrent to 31.7 at 1024, rather than plateauing, is that: per-request cost
+growing with concurrency. This was the same defect already fixed for the Bedrock and
+mantle clients, missed on the client that carries twice the traffic.
 
-The consequence for sizing: **scale processes, not threads.** A per-process ceiling
-around 8 keeps latency at the upstream's own; 32 is a defensible compromise at p50
-1.3 s; 128 admits the traffic but at 7.7 s. Reaching 1024 at low latency means
-roughly 32 processes — `uvicorn --workers` within a task, or more tasks — rather
-than a higher thread ceiling. `GATEWAY_SYNC_ROUTE_THREADS` is an admission ceiling
-and this document should not be read as claiming it is a latency budget.
+An earlier revision of this document blamed the GIL. That was wrong, and worth
+recording as wrong: on a one-vCPU task, GIL serialization and CPU saturation are the
+same phenomenon and cannot be told apart, and the observation the diagnosis rested
+on — latency scaling with threads per process — is equally consistent with a
+per-process connection pool being oversubscribed, which is what it was.
+
+With the pools sized, the same sweep on eight 4-vCPU tasks running four workers each
+with a 32-request ceiling per process:
+
+| Concurrency | Before pools | After pools | Direct, same run |
+| --- | --- | --- | --- |
+| 64 | 42.3 req/s, p50 549 ms | 80.6 req/s, p50 435 ms | 114.4 req/s, p50 344 ms |
+| 256 | 81.1 req/s, p50 1331 ms | 183.9 req/s, p50 811 ms | 36.1 req/s, p50 605 ms |
+| 1024 | 31.7 req/s, p50 7706 ms | 226.6 req/s, p50 3326 ms | 151.1 req/s, p50 1853 ms |
+
+1018 of 1024 requests returned 200 at the target, no pool-full warnings remain, and
+throughput is fifty times where this started. Per phase: total p50 705 ms, reserve
+341 ms, upstream 266 ms, settle 38 ms, unaccounted 0.6 ms.
+
+Two things stay true from the wrong diagnosis, because they were measured rather
+than inferred. Latency does track requests in flight per process, so the ceiling
+sits near the knee of that curve — 32, which is below anyio's own default of 40 —
+and the fleet grows by processes rather than by threads: `GATEWAY_UVICORN_WORKERS`,
+one per vCPU, because workers beyond the core count escape nothing. And reserve at
+341 ms is still two orders above DynamoDB's service time, so it is where to look
+next.
 
 ## Three limits that are not capacity
 
