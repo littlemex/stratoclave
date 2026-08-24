@@ -329,8 +329,9 @@ def _bedrock_client():
     Responses route consults `client_for_model(entry)` directly when it
     needs the bedrock-mantle endpoint in us-east-2/us-west-2.
     """
-    region = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION", "us-east-1")
-    return bedrock_runtime_client(region)
+    from ._bedrock_clients import deployment_client
+
+    return deployment_client()
 
 
 def _decode_image_source(source: dict[str, Any]) -> dict[str, Any]:

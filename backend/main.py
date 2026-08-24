@@ -136,6 +136,14 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # Fail the deployment on a misconfigured price source rather than letting live
+    # traffic be charged at the bundled floor. The request path degrades on pricing
+    # failures by design, so startup is the only place this can be a hard error.
+    from mvp.price_sources import validate_configuration as _validate_price_source
+
+    _active_price_source = _validate_price_source()
+    logger.info("price_source_active", source=_active_price_source)
+
     # External VSR (task #13): perform the version-pin handshake at startup so a
     # consult can be honored only after the running VSR's contract+build match
     # the pinned set. INERT unless EXTERNAL_VSR_ENABLED — handshake() checks the

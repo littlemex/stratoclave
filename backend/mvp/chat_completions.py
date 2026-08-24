@@ -8,10 +8,11 @@ Two upstream transports sit behind the one wire shape, selected by the
 resolved entry's `wire_protocol` — the route adds no third transport:
 
   - `messages`  → Bedrock `converse` / `converse_stream` via the shared
-                  budget-flow layer, exactly as /v1/messages does. The client is
-                  bound to `entry.bedrock_region`, because this route now serves
-                  entries outside the Claude family's us-east-1 (Nemotron and
-                  Qwen3 are us-west-2).
+                  budget-flow layer, in the DEPLOYMENT's Converse region, exactly
+                  as /v1/messages does. `ModelEntry.bedrock_region` is authoritative
+                  only for the mantle leg: the Converse chain is built from the
+                  operator's primary + failover regions (see routing/chains.py), so
+                  a Converse model must be offered there or not be registered.
   - `responses` → bedrock-mantle's NATIVE OpenAI Chat Completions surface at
                   `/openai/v1/chat/completions`. Mantle speaks Chat Completions
                   directly, so this is a pass-through: no Responses-API
@@ -34,8 +35,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import _mantle_transport
+from ._bedrock_clients import deployment_client
 from .anthropic import _selected_bedrock_model
-from ._bedrock_clients import client_for_model
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit_for_model,
@@ -458,7 +459,7 @@ def chat_completions(
 
     # Non-streaming path
     try:
-        resp = client_for_model(entry).converse(**kwargs)
+        resp = deployment_client().converse(**kwargs)
     except Exception as e:
         tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
         _release_pool(tenants_repo)
@@ -823,7 +824,7 @@ async def _stream_chat(
         # (today they always match — this path does not go through InfraRouter,
         # so there is no model failover — but keeping model_id load-bearing
         # avoids a silent same-model re-invoke if that ever changes).
-        client = client_for_model(entry)
+        client = deployment_client()
         return client.converse_stream(**{**kwargs, "modelId": model_id})
 
     async for frame in _budget_flow.run_stream(

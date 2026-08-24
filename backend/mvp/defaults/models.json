@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "$comment": [
+    "Model registry for the Bedrock proxy. This file is the allowlist: a model id absent",
+    "here is rejected with HTTP 400 before any credit reservation, because an unlisted model",
+    "would reach Bedrock with no token-accounting policy attached.",
+    "",
+    "To add a model: append an entry and redeploy. Fields:",
+    "  provider          vendor family (anthropic|openai|xai|google|nvidia|qwen)",
+    "  bedrock_model_id  the id sent upstream (inference-profile id or foundation-model id)",
+    "  bedrock_region    the region this model is invoked in",
+    "  aliases           client-facing names that resolve to this entry; must be globally unique",
+    "  wire_protocol     messages = Bedrock Converse, responses = bedrock-mantle OpenAI surface",
+    "  pricing_key       row in the pricing table; models sharing a price tier share a key",
+    "  served_by         bedrock (default) | vllm | semantic-router",
+    "  endpoint_key      required when served_by=vllm (an allowlist token, never a URL)",
+    "  virtual           true marks a pool placeholder that must never be a billed model",
+    "  sr_pool_ref       names the semantic-router pool a virtual entry stands for",
+    "  notes             why this entry looks the way it does; carried in the data on purpose",
+    "",
+    "A Converse entry also needs bedrock:Converse on its model ARN in the task role",
+    "(iac/lib/ecs-stack.ts). Adding one here without that fails loudly at invoke time.",
+    "bedrock_region is asymmetric by design: it is AUTHORITATIVE for wire_protocol",
+    "\"responses\" (each mantle model is offered in specific regions), and ADVISORY for",
+    "\"messages\" — the Converse chain is built from the deployment's BEDROCK_REGION plus",
+    "STRATOCLAVE_FAILOVER_REGIONS, so a Converse model must be offered in those regions",
+    "or it should not be registered at all. That is why the Qwen entry is",
+    "qwen3-next-80b-a3b and not qwen3-235b-a22b-2507, which Bedrock offers only in us-west-2."
+  ],
+  "models": [
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-5",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-opus-5"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus",
+      "notes": "Lists at the same rate as the Opus 4.x tier (AWS model card, Jul 2026), so it shares pricing_key \"opus\" — confirmed, not assumed."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-fable-5",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-fable-5"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "fable",
+      "notes": "Priced above the Opus tier ($10/$50 per MTok), so it carries its own pricing_key rather than sharing \"opus\". The Bedrock offering requires the account to opt into provider_data_share and has a higher refusal rate than prior Claude models."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-4-7",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-opus-4-7"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-4-6-v1",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-opus-4-6"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-opus-4-5",
+        "claude-opus-4-5-20251101"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-4-1-20250805-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-opus-4-1",
+        "claude-opus-4-1-20250805"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-4-20250514-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-opus-4",
+        "claude-opus-4-20250514"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-sonnet-5",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-sonnet-5"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "sonnet",
+      "notes": "Lists at the Sonnet tier, so it shares pricing_key \"sonnet\"."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-sonnet-4-6",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-sonnet-4-6"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "sonnet"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "sonnet"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "haiku"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-3-7-sonnet",
+        "claude-3-7-sonnet-20250219"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "sonnet"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-3-5-haiku",
+        "claude-3-5-haiku-20241022"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "haiku"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-3-haiku-20240307-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-3-haiku"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "haiku"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-3-opus-20240229-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-3-opus"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "opus"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-3-sonnet-20240229-v1:0",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-3-sonnet"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "sonnet"
+    },
+    {
+      "provider": "openai",
+      "bedrock_model_id": "openai.gpt-5.4",
+      "bedrock_region": "us-west-2",
+      "aliases": [
+        "gpt-5.4",
+        "openai.gpt-5.4"
+      ],
+      "wire_protocol": "responses",
+      "pricing_key": "gpt-5"
+    },
+    {
+      "provider": "openai",
+      "bedrock_model_id": "openai.gpt-5.5",
+      "bedrock_region": "us-east-2",
+      "aliases": [
+        "gpt-5.5",
+        "openai.gpt-5.5"
+      ],
+      "wire_protocol": "responses",
+      "pricing_key": "gpt-5"
+    },
+    {
+      "provider": "openai",
+      "bedrock_model_id": "openai.gpt-5.6-sol",
+      "bedrock_region": "us-east-2",
+      "aliases": [
+        "gpt-5.6-sol",
+        "openai.gpt-5.6-sol"
+      ],
+      "wire_protocol": "responses",
+      "pricing_key": "gpt-5.6-sol",
+      "notes": "Flagship GPT-5.6 tier on bedrock-mantle; its own pricing_key because each tier is a distinct model card with its own price. Region is PINNED to us-east-2 to reuse the mantle region already proven by the earlier gpt-5.5 entry, even though the model is also offered elsewhere."
+    },
+    {
+      "provider": "openai",
+      "bedrock_model_id": "openai.gpt-5.6-terra",
+      "bedrock_region": "us-east-2",
+      "aliases": [
+        "gpt-5.6-terra",
+        "openai.gpt-5.6-terra"
+      ],
+      "wire_protocol": "responses",
+      "pricing_key": "gpt-5.6-terra",
+      "notes": "Balanced GPT-5.6 tier on bedrock-mantle; its own pricing_key for the same reason as sol. Region is PINNED to us-east-2 for the same reason as sol."
+    },
+    {
+      "provider": "xai",
+      "bedrock_model_id": "xai.grok-4.6",
+      "bedrock_region": "us-west-2",
+      "aliases": [
+        "grok-4.6",
+        "xai.grok-4.6"
+      ],
+      "wire_protocol": "responses",
+      "pricing_key": "grok",
+      "notes": "Served on bedrock-mantle's OpenAI-compatible surface, so it rides the same transport as the OpenAI family — no new transport, just an entry. In-region mantle is us-west-2 only."
+    },
+    {
+      "provider": "google",
+      "bedrock_model_id": "google.gemma-4-31b",
+      "bedrock_region": "us-east-2",
+      "aliases": [
+        "gemma-4",
+        "gemma-4-31b",
+        "google.gemma-4-31b"
+      ],
+      "wire_protocol": "responses",
+      "pricing_key": "gemma",
+      "notes": "Served ONLY on the bedrock-mantle OpenAI-compatible endpoint (no Converse/InvokeModel). Bedrock publishes no per-token list price, so pricing_key \"gemma\" defaults to the Opus tier — a deliberate over-charge, never an under-charge. An admin lowers it via the pricing table. Offered on mantle in us-east-1/us-east-2/us-west-2/eu-central-1; PINNED to us-east-2, reusing the region already proven for the OpenAI family."
+    },
+    {
+      "provider": "nvidia",
+      "bedrock_model_id": "nvidia.nemotron-super-3-120b",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "nemotron-super-3-120b",
+        "nvidia.nemotron-super-3-120b"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "nemotron",
+      "notes": "Served by Converse, so it rides the same transport as the Claude family. Not Claude, so resolve_bedrock_model() keeps it out of /v1/messages; reachable only via /v1/chat/completions. Bedrock publishes no list price, so pricing_key \"nemotron\" defaults to the Opus tier."
+    },
+    {
+      "provider": "qwen",
+      "bedrock_model_id": "qwen.qwen3-next-80b-a3b",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "qwen3-next-80b",
+        "qwen.qwen3-next-80b-a3b"
+      ],
+      "wire_protocol": "messages",
+      "pricing_key": "qwen",
+      "notes": "Chosen over qwen3-235b-a22b-2507 because Bedrock offers that one only in us-west-2, outside a us-east-1 residency policy. Converse transport; same /v1/messages exclusion and same unpriced-defaults-high rule as nemotron."
+    }
+  ]
+}

@@ -693,7 +693,7 @@ transports, selected by the resolved `ModelEntry.wire_protocol`
 
 | `wire_protocol` | Upstream | Models |
 |---|---|---|
-| `messages` | Bedrock `converse` / `converse_stream`, client bound to `ModelEntry.bedrock_region` | Claude family, Nemotron, Qwen3 |
+| `messages` | Bedrock `converse` / `converse_stream`, in the deployment's Converse region | Claude family, Nemotron, Qwen3 |
 | `responses` | bedrock-mantle `/openai/v1/chat/completions`, a native pass-through | GPT-5.x, Grok, Gemma 4 |
 
 The route exists so that an OpenAI-compatible client which cannot speak the
@@ -738,14 +738,33 @@ formatting, usage parsing — so the endpoint exists in exactly one place.
 - Converse has no equivalent for `response_format` or `top_logprobs`, so those are
   rejected on the `messages` branch only — mantle serves both natively.
 
-**Registry regions and residency.** Every Converse target is built from the
-operator's configured primary plus `STRATOCLAVE_FAILOVER_REGIONS`
-(`backend/mvp/routing/chains.py`), never from a region named by the entry. An
-entry that pinned its own region would inject one the residency configuration
-excluded. A model offered only outside that policy therefore must not be
-registered at all — which is why the Qwen entry is `qwen3-next-80b-a3b`, offered
-in us-east-1 and us-west-2, and not `qwen3-235b-a22b-2507`, which Bedrock offers
-only in us-west-2.
+**Registry regions and residency.** `ModelEntry.bedrock_region` is asymmetric by
+design. For `responses` entries it is authoritative — each bedrock-mantle model is
+offered in specific regions. For `messages` entries it is advisory: every Converse
+target is built from the operator's configured primary plus
+`STRATOCLAVE_FAILOVER_REGIONS` (`backend/mvp/routing/chains.py`), and the invoke
+uses that same deployment region, so the catalogue and the client cannot disagree.
+A Converse model offered only outside the policy must therefore not be registered
+— which is why the Qwen entry is `qwen3-next-80b-a3b`, offered in us-east-1 and
+us-west-2, and not `qwen3-235b-a22b-2507`, which Bedrock offers only in us-west-2.
+
+**The registry and the rate table are data.** `backend/mvp/defaults/models.json` is the
+allowlist and `backend/mvp/defaults/pricing.json` the baseline rates; both are validated
+at import, so a malformed or self-inconsistent document fails process start rather
+than a request. `STRATOCLAVE_MODEL_REGISTRY_PATH` and `STRATOCLAVE_PRICING_PATH`
+point at alternatives. Rationale that used to live in Python comments is carried in
+a per-entry `notes` field, which is accepted and inert.
+
+**Price resolution has three layers**, each degrading to the one below: the bundled
+`pricing.json` floor, then the active price source, then admin overrides in the
+PricingConfig table. `STRATOCLAVE_PRICE_SOURCE` names a source registered through
+`backend/mvp/price_sources.py`, so a deployment can fetch live prices — from the AWS
+Price List API or an internal rate service — without touching the charging code. A
+source returns a whole table (a partly-refreshed one could charge input at old rates
+and output at new), is consulted only on the pricing cache's refresh interval, and is
+fail-static: if it raises, the previous good table stays in force. An unknown source
+name raises rather than falling back, because quietly charging the floor when the
+operator asked for live prices is a billing error.
 
 **Cost tiers.** `_tier_for` derives a target's tier from its built-in price, and
 `_tier_for_model` resolves a client-facing model name through the registry first.

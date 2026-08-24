@@ -63,6 +63,21 @@ def bedrock_runtime_client(region: str, *, config: Optional[Config] = None):
     )
 
 
+def deployment_client():
+    """A `bedrock-runtime` client for the deployment's Converse region.
+
+    This is the PRIMARY of the region policy the Converse chain is built from
+    (`routing.chains` puts it first), so a route that invokes Converse without a
+    chosen failover target must use it — otherwise the request is charged against a
+    target in one region and invoked in another. It does NOT follow a failover
+    selection: a caller that has picked an alternate target must build a client for
+    that target's region. `ModelEntry.bedrock_region` is authoritative only for the
+    bedrock-mantle surface.
+    """
+    region = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1"
+    return bedrock_runtime_client(region)
+
+
 def client_for_model(entry):
     """Return a `bedrock-runtime` client for the region bound to `entry`.
 

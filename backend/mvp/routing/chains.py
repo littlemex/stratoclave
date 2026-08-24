@@ -9,6 +9,7 @@ Resolution pipeline:
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import Optional
 
 from .clients import default_region
@@ -175,8 +176,12 @@ _TIER_ABOVE_BOUNDARIES = 3
 _UNKNOWN_KEY_TIER = 2
 
 
+@lru_cache(maxsize=None)
 def _tier_for(pricing_key: str) -> int:
     """Cost tier from the key's BUILT-IN price, not from its name.
+
+    Memoised: the catalog asks for a tier once per target, and the built-in floor is
+    an import-time snapshot, so the answer cannot change within a process.
 
     The breaker's DOWNGRADE stage keeps only targets whose tier is at or below a
     cap, so a tier that disagrees with the price makes an expensive model look
@@ -193,13 +198,14 @@ def _tier_for(pricing_key: str) -> int:
     DynamoDB call inside catalog construction and let a pricing edit silently
     re-tier the routing topology.
     """
-    from mvp.pricing import _DEFAULT_RATES
+    from mvp.pricing import baseline_rates
 
-    rate = _DEFAULT_RATES.get(pricing_key)
+    rates = baseline_rates()
+    rate = rates.get(pricing_key)
     if rate is None:
         return _UNKNOWN_KEY_TIER
     for tier, boundary_key in _TIER_BOUNDARY_KEYS:
-        boundary = _DEFAULT_RATES.get(boundary_key)
+        boundary = rates.get(boundary_key)
         if boundary is None:
             continue
         if rate.output_per_mtok_microusd <= boundary.output_per_mtok_microusd:

@@ -34,10 +34,9 @@ class TestRegistryWidening:
     def test_new_entries_resolve_with_their_own_region(self, name, expected_id, expected_region):
         entry = resolve_model(name)
         assert entry.bedrock_model_id == expected_id
-        # The region must stay inside the operator's residency policy: the chain
-        # catalogue builds Converse targets from the configured primary + failover
-        # regions, so an entry naming a region of its own would inject one the
-        # policy never allowed.
+        # Converse entries declare the region the model is offered in, which must
+        # be one the deployment's region policy already covers — the chain catalogue
+        # builds Converse targets from that policy, not from this field.
         assert entry.bedrock_region == expected_region
         assert entry.wire_protocol == "messages"
 
