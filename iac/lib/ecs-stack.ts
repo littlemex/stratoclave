@@ -781,7 +781,18 @@ export class EcsStack extends cdk.Stack {
 
     const container = this.taskDefinition.addContainer('BackendContainer', {
       image: ecs.ContainerImage.fromEcrRepository(props.repository, props.imageTag || 'latest'),
-      logging: ecs.LogDriver.awsLogs({ logGroup, streamPrefix: 'backend' }),
+      // Non-blocking on purpose. The awslogs driver defaults to blocking, so a
+      // slow or throttled PutLogEvents stops the container's stdout write — and
+      // Python's logging holds a per-handler lock across that write, so every
+      // thread in the process waits on CloudWatch. A request path must not be able
+      // to stall on the log sink; losing a line under pressure is the better
+      // failure, and the buffer size bounds how much can be in flight.
+      logging: ecs.LogDriver.awsLogs({
+        logGroup,
+        streamPrefix: 'backend',
+        mode: ecs.AwsLogDriverMode.NON_BLOCKING,
+        maxBufferSize: cdk.Size.mebibytes(25),
+      }),
       environment: { ...(props.environment || {}), ...vsrEnv },
       secrets: props.secrets || {},
       portMappings: [{ containerPort: props.containerPort || 8000, protocol: ecs.Protocol.TCP }],
