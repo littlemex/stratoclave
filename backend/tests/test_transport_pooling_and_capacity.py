@@ -606,6 +606,22 @@ class TestMantleClientPooling:
         assert pool_timeout is not None, "an unbounded pool wait holds a reservation"
         assert pool_timeout <= 30
 
+    def test_the_nonstreaming_deadline_sits_below_the_cdn_timeout(self):
+        """A request that outlives the CDN's patience reaches the caller as a
+        CloudFront 504 with an HTML body — an unparseable failure for a problem that
+        is neither the caller's nor the gateway's. Failing first means the caller
+        gets the JSON 502 this surface returns everywhere else."""
+        from mvp import _mantle_transport
+
+        CDN_ORIGIN_TIMEOUT_SECONDS = 60
+        timeout = _mantle_transport.nonstream_timeout()
+        assert timeout.read < CDN_ORIGIN_TIMEOUT_SECONDS
+        assert timeout.read > 30, "must still allow a slow-but-real completion"
+        assert timeout.pool is not None and timeout.pool <= 30
+        # The streaming window stays long: bytes flow, so the CDN times each read
+        # rather than the whole stream.
+        assert _mantle_transport._DEFAULT_TIMEOUT.read > CDN_ORIGIN_TIMEOUT_SECONDS
+
     def test_a_closed_client_is_rebuilt(self):
         """One stray `close()` must not poison the region for the life of the
         process. The old per-request construction made any such mistake cost a

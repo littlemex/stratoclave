@@ -47,6 +47,36 @@ DEFAULT_TOKEN_TTL = timedelta(seconds=900)
 # contract and distinct from the bare `/v1` some models are served under.
 _ENDPOINT_TEMPLATE = "https://bedrock-mantle.{region}.api.aws/openai/v1"
 
+# The non-streaming read window is bounded BELOW the CDN's origin timeout (60 s)
+# on purpose. A request that outlives the CDN's patience reaches the caller as a
+# CloudFront 504 with an HTML body: an unparseable failure for a problem that is
+# neither the caller's nor the gateway's. Failing first, ourselves, means the caller
+# gets the JSON 502 the rest of this surface returns. Measured on 2026-08-25, 21
+# such 504s appeared in one open-loop run whose slowest upstream calls took 15-28 s.
+#
+# Streaming keeps the long window: bytes flow, so the CDN's timeout applies to each
+# read rather than to the whole stream, and a reasoning model may legitimately stay
+# quiet for a while before its first token.
+NONSTREAM_READ_TIMEOUT_ENV = "MANTLE_NONSTREAM_READ_TIMEOUT_SECONDS"
+DEFAULT_NONSTREAM_READ_TIMEOUT = 50.0
+
+
+def nonstream_timeout() -> httpx.Timeout:
+    """Per-request timeout for a non-streaming call.
+
+    Passed per request rather than baked into the client, so the pooled connection
+    is shared while the deadline stays specific to the call.
+    """
+    from ._concurrency import capacity_env_int
+
+    seconds = float(
+        capacity_env_int(
+            NONSTREAM_READ_TIMEOUT_ENV, int(DEFAULT_NONSTREAM_READ_TIMEOUT)
+        )
+    )
+    return httpx.Timeout(seconds, connect=10.0, pool=10.0)
+
+
 # Long read window: a reasoning model can stay silent for a while before its first
 # token. Connect stays tight because a slow TLS handshake is never the model.
 #

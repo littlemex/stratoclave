@@ -194,6 +194,23 @@ export class FrontendStack extends cdk.Stack {
               httpPort: 80,
               originProtocolPolicy: 'http-only',
               originSslProtocols: ['TLSv1.2'],
+              // CloudFront gives up on an origin response after 30 s by default,
+              // and the gateway's own upstream read window is far longer, so an
+              // upstream that took longer than 30 s reached the caller as a
+              // CloudFront 504 with an HTML body — an unparseable failure for a
+              // problem that is neither the caller's nor the gateway's. Measured
+              // on 2026-08-25: 21 such responses across an open-loop run whose
+              // slowest upstream calls took 15-28 s.
+              //
+              // 60 s is the maximum without a service-quota increase. The gateway
+              // caps its own non-streaming read below this (see
+              // `_mantle_transport`), so a slow upstream produces our JSON 502
+              // rather than the CDN's HTML.
+              originReadTimeout: 60,
+              // Reuse the origin connection between requests; the default is 5 s,
+              // which throws it away between bursts for the same reason the client
+              // pools did.
+              originKeepaliveTimeout: 60,
             },
           },
         ],

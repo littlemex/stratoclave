@@ -241,6 +241,44 @@ one per vCPU, because workers beyond the core count escape nothing. And reserve 
 341 ms is still two orders above DynamoDB's service time, so it is where to look
 next.
 
+## The invariant that actually matters
+
+"Hold N requests" is a proxy for what a gateway in front of Bedrock owes its
+callers: **it must not be what limits them.** That is a comparative statement, so it
+is measured comparatively — the same offered rate to the gateway and to the upstream
+directly, latency and failures compared. A closed-loop sweep cannot answer it,
+because fixing concurrency measures how long a burst takes to drain rather than
+which side is the constraint.
+
+Measured 2026-08-25, twenty seconds at each rate:
+
+| Offered | Gateway p50 | Direct p50 | Added | Gateway p95 | Direct p95 |
+| --- | --- | --- | --- | --- | --- |
+| 25 req/s | 314 ms | 230 ms | +84 ms | 847 ms | 1062 ms |
+| 50 req/s | 297 ms | 222 ms | +75 ms | 900 ms | 988 ms |
+| 100 req/s | 304 ms | 225 ms | +79 ms | 822 ms | 681 ms |
+| 200 req/s | 391 ms | 227 ms | +164 ms | 1071 ms | 575 ms |
+
+Eight times the offered rate leaves p50 flat between 300 and 390 ms. A component
+that is the constraint gets slower as the rate rises; this one does not, in this
+range. What it adds is the accounting — five DynamoDB round trips per request,
+about 18 ms of service time between them — and that cost is roughly constant rather
+than growing with load.
+
+Above 200 req/s is unmeasured: the load generator saturated first, with the direct
+arm's own achieved throughput flattening near 99 req/s. Measuring further needs load
+from more than one host.
+
+**A CDN timeout shorter than ours turned upstream tails into gateway-shaped
+failures.** Every failure in the gateway arm was a 504 and the direct arm had none.
+CloudFront gives up on an origin after 30 s by default while the gateway's own
+upstream read window was 600 s, so an upstream that took longer reached the caller
+as a CloudFront HTML 504 — unparseable, and attributable to neither the caller nor
+the gateway. The origin timeout is now 60 s, and the non-streaming read window is
+capped below it so the gateway fails first and returns the JSON 502 this surface
+returns everywhere else. Streaming keeps its long window, because bytes flowing mean
+the CDN times each read rather than the whole stream.
+
 ## Three limits that are not capacity
 
 The sweep could not reach 1024, and what stopped it was policy rather than

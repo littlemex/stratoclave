@@ -649,7 +649,12 @@ def _mantle_chat_completion(
         auth = _mantle_transport.auth_headers(entry.bedrock_region)
         try:
             with _timed_phase(timing, "upstream"):
-                resp = client.post(_MANTLE_CHAT_PATH, json=payload, headers=auth)
+                # Deadline per request, below the CDN's, so a slow upstream becomes
+                # our JSON 502 rather than the CDN's HTML 504.
+                resp = client.post(
+                    _MANTLE_CHAT_PATH, json=payload, headers=auth,
+                    timeout=_mantle_transport.nonstream_timeout(),
+                )
         except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
             if timing is not None:
                 timing.emit(route="chat_completions", transport="mantle",

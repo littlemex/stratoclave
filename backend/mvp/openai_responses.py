@@ -577,7 +577,10 @@ async def create_response(
     try:
         client = _mantle_client(entry.bedrock_region)
         auth = await _mantle_auth(entry.bedrock_region)
-        resp = await client.post("/responses", json=payload, headers=auth)
+        resp = await client.post(
+            "/responses", json=payload, headers=auth,
+            timeout=_mantle_transport.nonstream_timeout(),
+        )
     except httpx.HTTPError as e:
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
