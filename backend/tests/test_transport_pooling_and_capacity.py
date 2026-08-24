@@ -584,6 +584,19 @@ class TestMantleClientPooling:
             == _mantle_transport._DEFAULT_MAX_CONNECTIONS
         )
 
+    def test_idle_connections_outlive_a_gap_between_bursts(self):
+        """httpx expires an idle pooled connection after 5 s by default, which
+        throws the pool away between bursts. Measured: 400 requests in four bursts
+        a few seconds apart produced 131 TLS handshakes — the cost pooling exists
+        to remove, reappearing whenever traffic is not continuous."""
+        from mvp import _mantle_transport
+
+        limits = _mantle_transport._limits()
+        assert limits.keepalive_expiry is not None
+        assert limits.keepalive_expiry >= 60, (
+            "a few seconds of idle must not discard the pool"
+        )
+
     def test_pool_wait_is_bounded(self):
         """A pooled connection is acquired AFTER the budget reservation is taken,
         so an unbounded pool wait would hold a customer's balance on a queue that

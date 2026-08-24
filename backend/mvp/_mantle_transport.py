@@ -141,12 +141,34 @@ def mantle_connection_ceiling() -> int:
     return capacity_env_int(_MAX_CONNECTIONS_ENV, _DEFAULT_MAX_CONNECTIONS)
 
 
+# How long an idle pooled connection is kept. httpx defaults to 5 s, which throws
+# the pool away between bursts: measured on 2026-08-25, 400 requests sent in four
+# bursts a few seconds apart produced 131 TLS handshakes, because every connection
+# had expired in the gaps. Five minutes keeps a bursty client's pool warm while
+# staying well inside the idle timeouts of the load balancers in front of the
+# upstream, so we do not hand out a connection the peer has already dropped.
+_KEEPALIVE_EXPIRY_ENV = "MANTLE_KEEPALIVE_EXPIRY_SECONDS"
+_DEFAULT_KEEPALIVE_EXPIRY = 300.0
+
+
+def _keepalive_expiry() -> float:
+    from ._concurrency import capacity_env_int
+
+    return float(
+        capacity_env_int(_KEEPALIVE_EXPIRY_ENV, int(_DEFAULT_KEEPALIVE_EXPIRY))
+    )
+
+
 def _limits() -> httpx.Limits:
-    # Keepalive matches the connection ceiling: a connection that is closed
-    # between requests would put the TLS handshake back on the hot path, which is
-    # the cost this pool exists to remove.
+    # Keepalive matches the connection ceiling: a connection closed between
+    # requests puts the TLS handshake back on the hot path, which is the cost this
+    # pool exists to remove.
     ceiling = mantle_connection_ceiling()
-    return httpx.Limits(max_connections=ceiling, max_keepalive_connections=ceiling)
+    return httpx.Limits(
+        max_connections=ceiling,
+        max_keepalive_connections=ceiling,
+        keepalive_expiry=_keepalive_expiry(),
+    )
 
 
 def auth_headers(region: str) -> dict[str, str]:
