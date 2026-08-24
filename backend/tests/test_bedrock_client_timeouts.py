@@ -44,14 +44,19 @@ def test_default_client_retries_are_capped():
     )
 
 
-def test_factory_returns_fresh_client_each_call():
-    """ECS task-role credentials rotate via IMDS every ~6 hours; caching
-    a single client snapshots the credential provider and starts emitting
-    `ExpiredTokenException` after rotation. The factory must hand back a
-    new instance on every call.
-    """
-    from mvp._bedrock_clients import bedrock_runtime_client
+def test_factory_pools_per_region():
+    """The factory hands back one client per region.
 
+    An earlier version built a fresh client per call so that rotating ECS
+    task-role credentials could not be snapshotted. That cost a new connection
+    pool — and a new TLS handshake — on every request, and it was unnecessary:
+    the signer holds the credentials object, which refreshes itself. Pooling and
+    its rotation invariant are covered in
+    `test_transport_pooling_and_capacity.py`.
+    """
+    from mvp._bedrock_clients import bedrock_runtime_client, reset_client_cache
+
+    reset_client_cache()
     a = bedrock_runtime_client("us-east-1")
     b = bedrock_runtime_client("us-east-1")
-    assert a is not b
+    assert a is b

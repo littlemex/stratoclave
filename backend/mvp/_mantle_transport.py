@@ -13,9 +13,22 @@ region or path and only one route breaks.
 The bearer TTL is deliberately short: it lives in the ECS task heap as a plain
 string, so a smaller window bounds the blast radius after a task compromise. A
 SigV4-from-task-role migration is tracked as a follow-up.
+
+Clients are pooled per region and the bearer is cached under its own TTL, and the
+two are kept SEPARATE on purpose. An earlier version baked the Authorization
+header into the client at construction, which tied the connection pool's lifetime
+to the token's: refreshing the token meant discarding the pool, and reusing the
+pool meant holding a token past its TTL. Pooling the connection and passing the
+auth header per request lets each rotate on its own schedule, and it takes the
+TLS handshake and the token mint off every request — both of which the
+2026-08-24 concurrency measurement showed dominating this route's overhead.
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -36,7 +49,13 @@ _ENDPOINT_TEMPLATE = "https://bedrock-mantle.{region}.api.aws/openai/v1"
 
 # Long read window: a reasoning model can stay silent for a while before its first
 # token. Connect stays tight because a slow TLS handshake is never the model.
-_DEFAULT_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
+#
+# `pool` is set explicitly and SHORT. Waiting for a free connection happens after
+# the budget reservation is taken, so a long pool wait holds a customer's balance
+# hostage on a queue that is our own saturation rather than the model's work. Ten
+# seconds is long enough to ride out a burst and short enough that the caller gets
+# a 502 it can retry instead of a minutes-long hang.
+_DEFAULT_TIMEOUT = httpx.Timeout(600.0, connect=10.0, pool=10.0)
 
 
 def base_url(region: str) -> str:
@@ -73,28 +92,363 @@ def mint_bearer_token(region: str) -> str:
         return provide_token(region=region)
 
 
-def _auth_headers(region: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {mint_bearer_token(region)}"}
+# How early a cached bearer is refreshed. Inside this window the cached token is
+# still served — mantle validates the credential when it admits the request, so a
+# token that expires mid-stream does not interrupt one already accepted — while a
+# single background refresh replaces it. That is what the margin is for: without
+# it, every in-flight request in a region misses the cache at the same instant and
+# they all queue behind one mint, which puts a periodic latency spike on the money
+# path (settle and refund share the same offload threads).
+#
+# It is NOT a guarantee that a token outlives the request it is given to: the read
+# window is 600 s and this is 120 s. Admission-time validation is the assumption
+# that makes that acceptable; if mantle ever revalidates mid-stream, this has to
+# grow past the longest request instead.
+_TOKEN_REFRESH_MARGIN = timedelta(seconds=120)
+
+# Connection ceiling per pooled client. This is the per-task in-flight limit for
+# the mantle surface, so it has to be raised alongside the task count when the
+# concurrency target moves; httpx would otherwise queue at its default of 100
+# while the task still had CPU and threads to spare.
+_MAX_CONNECTIONS_ENV = "MANTLE_MAX_CONNECTIONS"
+_DEFAULT_MAX_CONNECTIONS = 256
+
+def _now() -> float:
+    """Monotonic seconds. Indirected so a test can control the clock without
+    patching the stdlib module for everything else running in the process."""
+    return time.monotonic()
 
 
-def async_client(region: str, *, timeout: Optional[httpx.Timeout] = None) -> httpx.AsyncClient:
-    """An async mantle client for `region`. Use for streaming: a sync client would
-    hold a threadpool worker for the life of the stream."""
-    return httpx.AsyncClient(
-        base_url=base_url(region),
-        headers=_auth_headers(region),
-        timeout=timeout or _DEFAULT_TIMEOUT,
+_tokens: dict[str, tuple[str, float]] = {}
+# Regions with a refresh already scheduled, so a burst of callers inside the
+# window queues one mint rather than one per caller.
+_refreshing: set[str] = set()
+_refresh_guard = threading.Lock()
+_refresher: Optional["ThreadPoolExecutor"] = None
+# Per region. A single lock would make one region's mint block every other
+# region's requests — including async streams, whose event loop waits on it.
+_tokens_locks: dict[str, threading.Lock] = {}
+_tokens_locks_guard = threading.Lock()
+_sync_clients: dict[str, httpx.Client] = {}
+_async_clients: dict[str, httpx.AsyncClient] = {}
+_clients_lock = threading.Lock()
+
+
+def mantle_connection_ceiling() -> int:
+    """Connections this task may hold to mantle. Validated at startup."""
+    from ._concurrency import capacity_env_int
+
+    return capacity_env_int(_MAX_CONNECTIONS_ENV, _DEFAULT_MAX_CONNECTIONS)
+
+
+def _limits() -> httpx.Limits:
+    # Keepalive matches the connection ceiling: a connection that is closed
+    # between requests would put the TLS handshake back on the hot path, which is
+    # the cost this pool exists to remove.
+    ceiling = mantle_connection_ceiling()
+    return httpx.Limits(max_connections=ceiling, max_keepalive_connections=ceiling)
+
+
+def auth_headers(region: str) -> dict[str, str]:
+    """The Authorization header for `region`, minting only when the cache is cold.
+
+    Passed per request rather than pinned to a client, so the token's TTL and the
+    connection pool's lifetime stay independent.
+    """
+    hit = _cached_headers(region)
+    if hit is not None:
+        headers, due_for_refresh = hit
+        if due_for_refresh:
+            _schedule_refresh(region)
+        return headers
+    with _token_lock(region):
+        # The clock is read again HERE, not before the lock: waiting for another
+        # thread's mint can outlast the remaining life of the token this thread
+        # arrived with, and a stale reading would hand back an expired bearer.
+        cached = _tokens.get(region)
+        if cached is None or cached[1] <= _now():
+            cached = _mint_and_store(region)
+    return {"Authorization": f"Bearer {cached[0]}"}
+
+
+def _cached_headers(region: str) -> Optional[tuple[dict[str, str], bool]]:
+    """`(headers, due_for_refresh)` for a usable cached token, else None.
+
+    One decision for both the sync and the async caller. Duplicating it let the
+    async path skip the refresh window entirely, which is exactly the case the
+    window exists for — streams are the traffic that arrives in bulk.
+    """
+    cached = _tokens.get(region)
+    if cached is None:
+        return None
+    remaining = cached[1] - _now()
+    if remaining <= 0:
+        return None
+    return (
+        {"Authorization": f"Bearer {cached[0]}"},
+        remaining <= _TOKEN_REFRESH_MARGIN.total_seconds(),
     )
 
 
-def sync_client(region: str, *, timeout: Optional[httpx.Timeout] = None) -> httpx.Client:
-    """A blocking mantle client for `region`. Use from a sync route that is already
-    running in a threadpool."""
-    return httpx.Client(
-        base_url=base_url(region),
-        headers=_auth_headers(region),
-        timeout=timeout or _DEFAULT_TIMEOUT,
-    )
+def _mint_and_store(region: str) -> tuple[str, float]:
+    """Mint, store and return the entry. Caller holds the region's lock."""
+    token = mint_bearer_token(region)
+    entry = (token, _now() + DEFAULT_TOKEN_TTL.total_seconds())
+    _tokens[region] = entry
+    return entry
+
+
+def _schedule_refresh(region: str) -> None:
+    """Replace the region's token on a background thread, at most once at a time.
+
+    The caller returns immediately with the token it already has. Doing the mint
+    inline would mean the first caller inside the refresh window pays for it while
+    holding a budget reservation, and doing it per caller would put every in-flight
+    request in the region behind one mint at the moment of expiry — a periodic
+    latency spike that lands on the money path, since settle and refund share the
+    offload threads.
+
+    Single-flight is by the `_refreshing` set rather than by the executor's queue:
+    a one-worker executor would still accumulate one queued job per caller.
+    """
+    with _refresh_guard:
+        if region in _refreshing:
+            return
+        _refreshing.add(region)
+    try:
+        _refresh_executor().submit(_refresh_now, region)
+    except Exception:  # noqa: BLE001 — refusal to schedule must not fail a request
+        with _refresh_guard:
+            _refreshing.discard(region)
+        raise
+
+
+def _refresh_now(region: str) -> None:
+    """Body of the background refresh. Runs on the refresher thread."""
+    try:
+        with _token_lock(region):
+            cached = _tokens.get(region)
+            if cached is not None and (
+                cached[1] - _now() > _TOKEN_REFRESH_MARGIN.total_seconds()
+            ):
+                return  # somebody already replaced it
+            _mint_and_store(region)
+    except Exception:  # noqa: BLE001 — the cached token is still usable
+        logger.warning(
+            "mantle_bearer_background_refresh_failed",
+            region=region,
+            note="serving the cached token for the rest of its life",
+        )
+    finally:
+        with _refresh_guard:
+            _refreshing.discard(region)
+
+
+async def auth_headers_async(region: str) -> dict[str, str]:
+    """`auth_headers` for an async caller.
+
+    A cache hit answers inline. A miss mints, and minting takes a lock and does
+    signing work, so it goes to a thread: on the event loop it would stall every
+    other in-flight request — including the streams this route exists for — for the
+    duration of one mint, and the loop would block on `threading.Lock.acquire`
+    behind whichever worker thread happens to be minting.
+    """
+    hit = _cached_headers(region)
+    if hit is not None:
+        headers, due_for_refresh = hit
+        if due_for_refresh:
+            _schedule_refresh(region)
+        return headers
+    import asyncio
+
+    return await asyncio.to_thread(auth_headers, region)
+
+
+def invalidate_token(region: str, used: Optional[dict[str, str]] = None) -> None:
+    """Drop the cached bearer for `region` when the upstream rejected it.
+
+    Under per-request minting a dead token cost one request, because the next one
+    minted again. A cached token would instead be handed to every request in the
+    region until its TTL ran out, and independently per task, so a credential that
+    stops working takes the whole mantle surface down for a refresh interval rather
+    than for one request. The money path is unaffected either way — those responses
+    refund — but the outage is real.
+
+    Two deliberate details:
+
+    * No lock. `dict.pop` is atomic, and this is called from the event loop on
+      three of its four paths. The region's lock is held for the whole of a mint,
+      and a credential service that is returning 401 is exactly the one whose mint
+      is slow, so taking that lock here would block the loop — every stream, and
+      `/health` with them — during the failure this function exists to handle.
+    * `used` is the header the caller actually sent. Without comparing it, a burst
+      of 401s carrying the OLD token would each discard whatever is in the cache,
+      including a good token a refresh had just installed, and every discard costs
+      another mint. Passing it makes this a compare-and-pop.
+    """
+    cached = _tokens.get(region)
+    if cached is None:
+        return
+    if used is not None and used.get("Authorization") != f"Bearer {cached[0]}":
+        return  # already replaced; the rejected token is gone anyway
+    _tokens.pop(region, None)
+
+
+def _drain_refresher() -> None:
+    """Wait for any scheduled refresh, then discard the refresher.
+
+    Tests assert on what the refresh produced, so they need a point where it has
+    certainly finished; leaving a live refresher between tests also lets one test's
+    mint land in another's cache.
+    """
+    global _refresher
+    with _refresh_guard:
+        refresher, _refresher = _refresher, None
+    if refresher is not None:
+        refresher.shutdown(wait=True)
+    with _refresh_guard:
+        _refreshing.clear()
+
+
+def _refresh_executor() -> "ThreadPoolExecutor":
+    """The one thread that renews bearers.
+
+    Its own thread on purpose: the offload executor carries settle and refund, and
+    a token renewal must not queue behind — or ahead of — accounting work.
+    """
+    global _refresher
+    if _refresher is not None:
+        return _refresher
+    with _refresh_guard:
+        if _refresher is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _refresher = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="mantle-token-refresh"
+            )
+    return _refresher
+
+
+def _token_lock(region: str) -> threading.Lock:
+    lock = _tokens_locks.get(region)
+    if lock is not None:
+        return lock
+    with _tokens_locks_guard:
+        return _tokens_locks.setdefault(region, threading.Lock())
+
+
+def async_client(region: str) -> httpx.AsyncClient:
+    """The pooled async mantle client for `region`.
+
+    Use for streaming: a sync client would hold a threadpool worker for the life
+    of the stream. Process-wide and NOT to be closed by the caller — closing it
+    would drop connections that other in-flight requests are using. Callers pass
+    `auth_headers(region)` per request.
+
+    There is deliberately no per-call override: a factory that returns a pooled
+    client for one caller and a caller-owned client for another inverts the
+    ownership rule behind one name, which is how a pooled connection ends up
+    closed by whoever thought they owned it.
+    """
+    client = _async_clients.get(region)
+    if client is not None and not client.is_closed:
+        return client
+    with _clients_lock:
+        client = _async_clients.get(region)
+        if client is None or client.is_closed:
+            # Rebuilt rather than trusted. Under the old per-request construction
+            # any mistake cost one request; with a pooled client, one stray close
+            # would otherwise fail every request for this region until the task is
+            # replaced. The comment asking callers not to close it is not a
+            # guarantee, so this does not depend on one.
+            client = httpx.AsyncClient(
+                base_url=base_url(region), timeout=_DEFAULT_TIMEOUT, limits=_limits()
+            )
+            _async_clients[region] = client
+    return client
+
+
+def sync_client(region: str) -> httpx.Client:
+    """The pooled blocking mantle client for `region`.
+
+    Same ownership rule as `async_client`: process-wide, not closed by the caller,
+    auth passed per request, and no per-call override.
+    """
+    client = _sync_clients.get(region)
+    if client is not None and not client.is_closed:
+        return client
+    with _clients_lock:
+        client = _sync_clients.get(region)
+        if client is None or client.is_closed:
+            # See `async_client`: a closed pooled client must heal, not poison the
+            # region for the life of the process.
+            client = httpx.Client(
+                base_url=base_url(region), timeout=_DEFAULT_TIMEOUT, limits=_limits()
+            )
+            _sync_clients[region] = client
+    return client
+
+
+def reset_transport_cache_for_tests() -> None:
+    """Drop the pooled clients and cached bearers. TESTS ONLY.
+
+    Deliberately not offered as an operational tool: closing a pooled client while
+    requests are in flight severs their connections, so "force reconstruction" is
+    not a safe thing to expose on a running service. Use `aclose_all()` from the
+    application lifespan for an orderly shutdown instead.
+    """
+    with _clients_lock:
+        sync_clients = list(_sync_clients.values())
+        async_clients = list(_async_clients.values())
+        _sync_clients.clear()
+        _async_clients.clear()
+    _drain_refresher()
+    for sync in sync_clients:
+        sync.close()
+    # The async clients need a loop to close on. `aclose_all` is the orderly path;
+    # this helper exists for sync tests, so it borrows a loop rather than dropping
+    # the clients unclosed — the very leak `aclose_all` was added to avoid.
+    if async_clients:
+        import asyncio
+
+        async def _close_them() -> None:
+            for client in async_clients:
+                await client.aclose()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(_close_them())
+        else:
+            loop.create_task(_close_them())
+    with _tokens_locks_guard:
+        for region in list(_tokens_locks):
+            with _tokens_locks[region]:
+                _tokens.pop(region, None)
+
+
+async def aclose_all() -> None:
+    """Close every pooled client and stop the token refresher. Application shutdown.
+
+    The async clients need `await`, which is why this exists separately from the
+    test helper: dropping them from the dict without closing them leaks their
+    connections for as long as the process lives.
+    """
+    with _clients_lock:
+        sync_clients = list(_sync_clients.values())
+        async_clients = list(_async_clients.values())
+        _sync_clients.clear()
+        _async_clients.clear()
+    global _refresher
+    with _refresh_guard:
+        refresher, _refresher = _refresher, None
+        _refreshing.clear()
+    if refresher is not None:
+        refresher.shutdown(wait=False)
+    for sync in sync_clients:
+        sync.close()
+    for client in async_clients:
+        await client.aclose()
 
 
 def format_error(resp: httpx.Response) -> str:

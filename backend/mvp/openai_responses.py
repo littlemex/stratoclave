@@ -247,14 +247,23 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
 _DEFAULT_TOKEN_TTL = _mantle_transport.DEFAULT_TOKEN_TTL
 
 
-def _mint_bearer_token(region: str) -> str:
-    """Mint a short-lived bearer for mantle in `region` (see `_mantle_transport`)."""
-    return _mantle_transport.mint_bearer_token(region)
-
-
 def _mantle_client(region: str) -> httpx.AsyncClient:
-    """An async mantle client for `region` (see `_mantle_transport`)."""
+    """The pooled async mantle client for `region` (see `_mantle_transport`).
+
+    Process-wide: do NOT wrap it in `async with`, which would close the shared
+    connection pool out from under every other in-flight request. Auth travels
+    per request via `_mantle_auth`.
+    """
     return _mantle_transport.async_client(region)
+
+
+async def _mantle_auth(region: str) -> dict[str, str]:
+    """The Authorization header for `region` (cached under its own TTL).
+
+    Async because a cache miss mints, and minting must not happen on the event
+    loop: see `_mantle_transport.auth_headers_async`.
+    """
+    return await _mantle_transport.auth_headers_async(region)
 
 
 # ---------------------------------------------------------------------------
@@ -566,8 +575,9 @@ async def create_response(
     payload["model"] = entry.bedrock_model_id
     payload["stream"] = False
     try:
-        async with _mantle_client(entry.bedrock_region) as client:
-            resp = await client.post("/responses", json=payload)
+        client = _mantle_client(entry.bedrock_region)
+        auth = await _mantle_auth(entry.bedrock_region)
+        resp = await client.post("/responses", json=payload, headers=auth)
     except httpx.HTTPError as e:
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
@@ -585,6 +595,11 @@ async def create_response(
         raise
 
     if resp.status_code >= 400:
+        # 401/403 mean OUR bearer was rejected. Dropping it here is what keeps a
+        # dead credential from being served to every request in this region for
+        # the rest of the token's life.
+        if resp.status_code in (401, 403):
+            _mantle_transport.invalidate_token(entry.bedrock_region, auth)
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
@@ -685,137 +700,140 @@ async def _stream_response(
     payload["model"] = entry.bedrock_model_id
     payload["stream"] = True
 
+    client = _mantle_client(entry.bedrock_region)
     try:
-        async with _mantle_client(entry.bedrock_region) as client:
-            try:
-                async with client.stream(
-                    "POST", "/responses", json=payload
-                ) as resp:
-                    if resp.status_code >= 400:
-                        # Read the body so the sanitizer has something to chew on.
-                        body_text = (await resp.aread()).decode("utf-8", "replace")
-                        sanitized = sanitize_exception_message(body_text[:500])
-                        # Server-side audit: also log the upstream status +
-                        # sanitized message so we can diagnose stream
-                        # failures from the backend logs (the SSE error
-                        # event reaches the client but their TUI usually
-                        # only surfaces "stream disconnected").
-                        logger.warning(
-                            "bedrock_mantle_stream_4xx_5xx",
-                            status_code=resp.status_code,
-                            region=entry.bedrock_region,
-                            model_id=entry.bedrock_model_id,
-                            message=sanitized,
-                        )
-                        yield _sse_event(
-                            "error",
-                            {
-                                "type": "error",
-                                "error": {
-                                    "type": "api_error",
-                                    "message": f"Bedrock OpenAI error: {sanitized}",
-                                },
+        try:
+            auth = await _mantle_auth(entry.bedrock_region)
+            async with client.stream(
+                "POST", "/responses", json=payload, headers=auth,
+            ) as resp:
+                if resp.status_code >= 400:
+                    if resp.status_code in (401, 403):
+                        _mantle_transport.invalidate_token(entry.bedrock_region, auth)
+                    # Read the body so the sanitizer has something to chew on.
+                    body_text = (await resp.aread()).decode("utf-8", "replace")
+                    sanitized = sanitize_exception_message(body_text[:500])
+                    # Server-side audit: also log the upstream status +
+                    # sanitized message so we can diagnose stream
+                    # failures from the backend logs (the SSE error
+                    # event reaches the client but their TUI usually
+                    # only surfaces "stream disconnected").
+                    logger.warning(
+                        "bedrock_mantle_stream_4xx_5xx",
+                        status_code=resp.status_code,
+                        region=entry.bedrock_region,
+                        model_id=entry.bedrock_model_id,
+                        message=sanitized,
+                    )
+                    yield _sse_event(
+                        "error",
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": f"Bedrock OpenAI error: {sanitized}",
                             },
-                        )
-                        tenants_repo.refund(
-                            user_id=user.user_id,
-                            tenant_id=user.org_id,
-                            tokens=reservation,
-                        )
-                        _release_pool(tenants_repo)
-                        settled = True
-                        return
+                        },
+                    )
+                    tenants_repo.refund(
+                        user_id=user.user_id,
+                        tenant_id=user.org_id,
+                        tokens=reservation,
+                    )
+                    _release_pool(tenants_repo)
+                    settled = True
+                    return
 
-                    buffer = bytearray()
-                    async for chunk in resp.aiter_bytes():
-                        if not chunk:
-                            continue
-                        buffer.extend(chunk)
-                        for raw_event in _drain_events(buffer):
-                            out_bytes, usage, ev_id = _handle_sse_event(raw_event)
-                            yield out_bytes
-                            if usage is not None:
-                                input_tokens, output_tokens = usage
-                            if ev_id is not None:
-                                minted_id = ev_id
-
-                    # Flush any trailing bytes that were not terminated
-                    # by a blank line. bedrock-mantle (or any hop in
-                    # between) sometimes closes the chunked-transfer
-                    # body before the final `\\n\\n` is flushed —
-                    # that's the exact symptom of the codex
-                    # "stream closed before response.completed" report.
-                    # If the buffer still contains an SSE-shaped event
-                    # (an `event:` and/or `data:` line), append a
-                    # blank-line terminator so the client's SSE parser
-                    # actually fires the terminal event before tearing
-                    # down the connection. We only synthesize the
-                    # terminator when one is missing — well-formed
-                    # streams flow through unchanged.
-                    if buffer:
-                        trailing = bytes(buffer)
-                        out_bytes, usage, ev_id = _handle_sse_event(trailing)
-                        if ev_id is not None:
-                            minted_id = ev_id
-                        if out_bytes:
-                            if not (
-                                out_bytes.endswith(b"\n\n")
-                                or out_bytes.endswith(b"\r\n\r\n")
-                            ) and (
-                                b"event:" in out_bytes or b"data:" in out_bytes
-                            ):
-                                # Choose the line ending the upstream
-                                # already used; default to `\n` if we
-                                # cannot tell. This keeps the byte
-                                # mix consistent with what the client
-                                # has been parsing all along.
-                                if b"\r\n" in out_bytes:
-                                    if out_bytes.endswith(b"\r\n"):
-                                        out_bytes = out_bytes + b"\r\n"
-                                    else:
-                                        out_bytes = out_bytes + b"\r\n\r\n"
-                                else:
-                                    if out_bytes.endswith(b"\n"):
-                                        out_bytes = out_bytes + b"\n"
-                                    else:
-                                        out_bytes = out_bytes + b"\n\n"
-                                logger.warning(
-                                    "bedrock_mantle_stream_unterminated_final_event",
-                                    region=entry.bedrock_region,
-                                    model_id=entry.bedrock_model_id,
-                                    note=(
-                                        "upstream closed before final "
-                                        "blank-line terminator; "
-                                        "synthesizing one to unblock "
-                                        "the SSE client"
-                                    ),
-                                )
-                            yield out_bytes
+                buffer = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    if not chunk:
+                        continue
+                    buffer.extend(chunk)
+                    for raw_event in _drain_events(buffer):
+                        out_bytes, usage, ev_id = _handle_sse_event(raw_event)
+                        yield out_bytes
                         if usage is not None:
                             input_tokens, output_tokens = usage
-                        buffer.clear()
-            except httpx.HTTPError as e:
-                yield _sse_event(
-                    "error",
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": (
-                                f"Bedrock OpenAI error: "
-                                f"{sanitize_exception_message(str(e))}"
-                            ),
-                        },
+                        if ev_id is not None:
+                            minted_id = ev_id
+
+                # Flush any trailing bytes that were not terminated
+                # by a blank line. bedrock-mantle (or any hop in
+                # between) sometimes closes the chunked-transfer
+                # body before the final `\\n\\n` is flushed —
+                # that's the exact symptom of the codex
+                # "stream closed before response.completed" report.
+                # If the buffer still contains an SSE-shaped event
+                # (an `event:` and/or `data:` line), append a
+                # blank-line terminator so the client's SSE parser
+                # actually fires the terminal event before tearing
+                # down the connection. We only synthesize the
+                # terminator when one is missing — well-formed
+                # streams flow through unchanged.
+                if buffer:
+                    trailing = bytes(buffer)
+                    out_bytes, usage, ev_id = _handle_sse_event(trailing)
+                    if ev_id is not None:
+                        minted_id = ev_id
+                    if out_bytes:
+                        if not (
+                            out_bytes.endswith(b"\n\n")
+                            or out_bytes.endswith(b"\r\n\r\n")
+                        ) and (
+                            b"event:" in out_bytes or b"data:" in out_bytes
+                        ):
+                            # Choose the line ending the upstream
+                            # already used; default to `\n` if we
+                            # cannot tell. This keeps the byte
+                            # mix consistent with what the client
+                            # has been parsing all along.
+                            if b"\r\n" in out_bytes:
+                                if out_bytes.endswith(b"\r\n"):
+                                    out_bytes = out_bytes + b"\r\n"
+                                else:
+                                    out_bytes = out_bytes + b"\r\n\r\n"
+                            else:
+                                if out_bytes.endswith(b"\n"):
+                                    out_bytes = out_bytes + b"\n"
+                                else:
+                                    out_bytes = out_bytes + b"\n\n"
+                            logger.warning(
+                                "bedrock_mantle_stream_unterminated_final_event",
+                                region=entry.bedrock_region,
+                                model_id=entry.bedrock_model_id,
+                                note=(
+                                    "upstream closed before final "
+                                    "blank-line terminator; "
+                                    "synthesizing one to unblock "
+                                    "the SSE client"
+                                ),
+                            )
+                        yield out_bytes
+                    if usage is not None:
+                        input_tokens, output_tokens = usage
+                    buffer.clear()
+        except httpx.HTTPError as e:
+            yield _sse_event(
+                "error",
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": (
+                            f"Bedrock OpenAI error: "
+                            f"{sanitize_exception_message(str(e))}"
+                        ),
                     },
-                )
-                tenants_repo.refund(
-                    user_id=user.user_id,
-                    tenant_id=user.org_id,
-                    tokens=reservation,
-                )
-                _release_pool(tenants_repo)
-                settled = True
-                return
+                },
+            )
+            tenants_repo.refund(
+                user_id=user.user_id,
+                tenant_id=user.org_id,
+                tokens=reservation,
+            )
+            _release_pool(tenants_repo)
+            settled = True
+            return
 
         settle_reservation_and_log(
             user=user,

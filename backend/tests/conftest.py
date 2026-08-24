@@ -126,6 +126,21 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
         _chains.reset_catalog()
     except Exception:  # noqa: BLE001
         pass
+    # The mantle transport now pools its clients and caches a bearer per region as
+    # module globals, with expiry measured in monotonic seconds. Without a reset a
+    # token minted by one test is served to the next — and whether that happens
+    # depends on the machine's uptime, which is the worst kind of flake.
+    try:
+        from mvp import _mantle_transport as _mantle
+        _mantle.reset_transport_cache_for_tests()
+    except Exception:  # noqa: BLE001 — transport import optional in minimal envs
+        pass
+    # Bedrock clients are pooled per region for the same reason.
+    try:
+        from mvp import _bedrock_clients as _bedrock
+        _bedrock.reset_client_cache()
+    except Exception:  # noqa: BLE001
+        pass
     # External VSR client caches a process-local pin state + httpx client.
     try:
         from mvp.vsr import client as _vsr

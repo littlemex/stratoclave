@@ -627,24 +627,29 @@ def _mantle_chat_completion(
     if not body.stream:
         from core.error_handler import sanitize_exception_message
 
+        # Pooled, process-wide client: not closed here, and auth travels with the
+        # request rather than with the client (see `_mantle_transport`).
         client = _mantle_transport.sync_client(entry.bedrock_region)
+        auth = _mantle_transport.auth_headers(entry.bedrock_region)
         try:
-            try:
-                resp = client.post(_MANTLE_CHAT_PATH, json=payload)
-            except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
-                raise _fail(502, sanitize_exception_message(str(e)))
-            if resp.status_code >= 400:
-                raise _fail(_mantle_status(resp.status_code), _mantle_transport.format_error(resp))
-            # A 200 with an unparseable body is still an invoke-time failure: without
-            # a usage block there is nothing to settle against, and letting the
-            # exception escape would strand the hold and the pool slot.
-            try:
-                data = resp.json()
-                input_tokens, output_tokens = _mantle_transport.extract_usage(data.get("usage") or {})
-            except Exception as e:  # noqa: BLE001
-                raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
-        finally:
-            client.close()
+            resp = client.post(_MANTLE_CHAT_PATH, json=payload, headers=auth)
+        except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
+            raise _fail(502, sanitize_exception_message(str(e)))
+        if resp.status_code >= 400:
+            # 401/403 mean OUR bearer was rejected, so the cached one must go: it
+            # would otherwise be handed to every request in this region until its
+            # TTL ran out.
+            if resp.status_code in (401, 403):
+                _mantle_transport.invalidate_token(entry.bedrock_region, auth)
+            raise _fail(_mantle_status(resp.status_code), _mantle_transport.format_error(resp))
+        # A 200 with an unparseable body is still an invoke-time failure: without
+        # a usage block there is nothing to settle against, and letting the
+        # exception escape would strand the hold and the pool slot.
+        try:
+            data = resp.json()
+            input_tokens, output_tokens = _mantle_transport.extract_usage(data.get("usage") or {})
+        except Exception as e:  # noqa: BLE001
+            raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
 
         _settle(input_tokens, output_tokens)
         # Echo the client-facing alias, not the Bedrock ID: the caller asked for
@@ -662,11 +667,18 @@ def _mantle_chat_completion(
         import asyncio
 
         input_tokens = output_tokens = 0
+        # Pooled and process-wide, so it outlives this stream and is not closed
+        # here; only the stream itself is scoped by `async with`.
         client = _mantle_transport.async_client(entry.bedrock_region)
         try:
             try:
-                async with client.stream("POST", _MANTLE_CHAT_PATH, json=payload) as resp:
+                auth = await _mantle_transport.auth_headers_async(entry.bedrock_region)
+                async with client.stream(
+                    "POST", _MANTLE_CHAT_PATH, json=payload, headers=auth,
+                ) as resp:
                     if resp.status_code >= 400:
+                        if resp.status_code in (401, 403):
+                            _mantle_transport.invalidate_token(entry.bedrock_region, auth)
                         await resp.aread()
                         msg = _mantle_transport.format_error(resp)
                         await asyncio.to_thread(_refund_and_release)
@@ -721,10 +733,10 @@ def _mantle_chat_completion(
                 raise
             await asyncio.to_thread(_settle, input_tokens, output_tokens)
         finally:
-            await client.aclose()
             # Backstop for a client disconnect (GeneratorExit) or any path above
             # that neither refunded nor settled. `_settle` is latched, so this
-            # cannot double-account.
+            # cannot double-account. The client is pooled, so nothing is closed
+            # here — only the accounting has to be finished.
             await asyncio.to_thread(_settle, input_tokens, output_tokens)
 
     return StreamingResponse(
