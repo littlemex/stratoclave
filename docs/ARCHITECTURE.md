@@ -31,6 +31,8 @@ repository lives at [`https://github.com/littlemex/stratoclave`](https://github.
 - [Authentication flows](#authentication-flows)
 - [Authorization (RBAC)](#authorization-rbac)
 - [Credit model](#credit-model)
+- [OpenAI Responses API (bedrock-mantle path)](#openai-responses-api-bedrock-mantle-path)
+- [OpenAI Chat Completions API (both transports)](#openai-chat-completions-api-both-transports)
 - [Audit logging](#audit-logging)
 - [Well-known configuration](#well-known-configuration)
 - [Data model](#data-model)
@@ -679,6 +681,77 @@ the task role's policy uses `Resource: '*'` for that action only.
 `arn:aws:bedrock-mantle:{us-east-2,us-west-2}:<account>:project/*`.
 
 For the user-facing setup, see [`CODEX_GUIDE.md`](./CODEX_GUIDE.md).
+
+---
+
+## OpenAI Chat Completions API (both transports)
+
+`POST /v1/chat/completions` accepts an OpenAI Chat Completions payload and
+serves **any** model in the registry. It is one wire shape over two upstream
+transports, selected by the resolved `ModelEntry.wire_protocol`
+(`backend/mvp/chat_completions.py`):
+
+| `wire_protocol` | Upstream | Models |
+|---|---|---|
+| `messages` | Bedrock `converse` / `converse_stream`, client bound to `ModelEntry.bedrock_region` | Claude family, Nemotron, Qwen3 |
+| `responses` | bedrock-mantle `/openai/v1/chat/completions`, a native pass-through | GPT-5.x, Grok, Gemma 4 |
+
+The route exists so that an OpenAI-compatible client which cannot speak the
+Responses API still reaches the mantle-served models through the gateway, with
+the same reserve/settle accounting as every other route. vLLM Semantic Router is
+the motivating case: its only upstream formats are `openai` and `anthropic`
+(`APIFormatOpenAI` / `APIFormatAnthropic`), and it has no SigV4 signer.
+
+Both transports share the mantle plumbing in `backend/mvp/_mantle_transport.py`
+— endpoint template, bearer minting and TTL, client construction, error
+formatting, usage parsing — so the endpoint exists in exactly one place.
+
+**Behaviour specific to this route:**
+
+- Non-Claude Converse entries are reachable here only. `resolve_bedrock_model()`
+  filters the registry on `provider == "anthropic"`, so `/v1/messages` cannot see
+  Nemotron or Qwen3 and never has to answer for a non-Anthropic wire shape.
+- Entries the route cannot serve are rejected before the reservation:
+  `served_by != "bedrock"` (self-hosted vLLM has no Bedrock region) and
+  `virtual` pool placeholders (never a charge-of-record model) return HTTP 400,
+  and an unknown `wire_protocol` returns 500 rather than defaulting to a
+  transport.
+- On a streamed mantle request the gateway forces
+  `stream_options.include_usage`. Without it an OpenAI-compatible stream carries
+  no usage block, so every streamed request would settle at zero — a full refund
+  of the hold. When the gateway injects the option it also swallows the terminal
+  usage-only event, so a caller that never asked for usage does not start seeing
+  it. SSE is forwarded a whole event at a time, preserving multi-line events and
+  `:` comment keepalives.
+- Refund and settle are latched to be mutually exclusive and run at most once, so
+  an upstream 4xx mid-stream cannot both refund the hold and settle it again.
+- Upstream statuses that describe the caller's request or ask it to back off
+  (400, 404, 408, 409, 413, 422, 429) are preserved; everything else becomes 502.
+  401/403 from mantle mean the gateway's own credential is wrong and are therefore
+  not passed through.
+- The reservation cascade is honoured on both transports: the model actually
+  invoked is re-resolved from the reservation's selection, so the Bedrock region
+  and the pricing key follow the model that was charged.
+- `max_completion_tokens` wins over `max_tokens`. The latter carries a default, so
+  its presence says nothing about intent; taking it would truncate the response and
+  under-reserve the hold.
+- Converse has no equivalent for `response_format` or `top_logprobs`, so those are
+  rejected on the `messages` branch only — mantle serves both natively.
+
+**Registry regions and residency.** Every Converse target is built from the
+operator's configured primary plus `STRATOCLAVE_FAILOVER_REGIONS`
+(`backend/mvp/routing/chains.py`), never from a region named by the entry. An
+entry that pinned its own region would inject one the residency configuration
+excluded. A model offered only outside that policy therefore must not be
+registered at all — which is why the Qwen entry is `qwen3-next-80b-a3b`, offered
+in us-east-1 and us-west-2, and not `qwen3-235b-a22b-2507`, which Bedrock offers
+only in us-west-2.
+
+**Cost tiers.** `_tier_for` derives a target's tier from its built-in price, and
+`_tier_for_model` resolves a client-facing model name through the registry first.
+The two are distinct because the breaker's DOWNGRADE stage keeps candidates whose
+tier is at or below a cap: a tier that disagreed with the price would let a
+"downgrade" move to a costlier model.
 
 ---
 

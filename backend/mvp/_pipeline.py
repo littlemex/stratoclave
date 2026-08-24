@@ -1414,8 +1414,11 @@ def _resolve_candidate_chain(
     if tenant_cfg.allowlist:
         candidates = [m for m in candidates if m in tenant_cfg.allowlist] or [selection.selected_model]
     if breaker_max_tier is not None:
-        from .routing.chains import _tier_for
-        capped = [m for m in candidates if _tier_for(m) <= breaker_max_tier]
+        # Candidates are model NAMES here, not pricing keys — use the name-aware
+        # tier lookup so an alias is resolved through the registry rather than
+        # string-matched.
+        from .routing.chains import _tier_for_model
+        capped = [m for m in candidates if _tier_for_model(m) <= breaker_max_tier]
         candidates = capped or candidates
     if not fallback_allowed:
         candidates = candidates[:1]

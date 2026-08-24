@@ -330,15 +330,47 @@ def test_unlimited_lets_a_large_reserve_succeed(dynamodb_mock):
 # ---------------------------------------------------------------------------
 # 5. Registry invariant + pricing conversion + permission wildcard
 # ---------------------------------------------------------------------------
-def test_messages_protocol_implies_anthropic_provider():
-    """The Converse transport is verified only for Anthropic; chains.py filters on
-    provider=="anthropic". Lock the invariant so a future non-anthropic Converse
-    entry can't silently ship without revisiting that filter."""
-    from mvp.models import registry_entries
+def test_messages_protocol_entries_are_region_and_price_correct_in_the_catalog():
+    """The Converse transport is no longer Anthropic-only — Nemotron and Qwen3 ride
+    it too — so the old "messages implies anthropic" rule is replaced by the thing
+    that rule was actually protecting.
 
-    for e in registry_entries():
-        if e.wire_protocol == "messages":
-            assert e.provider == "anthropic", f"{e.bedrock_model_id} is messages but not anthropic"
+    `chains._build_catalog` gives the Claude family a cross-region fan-out keyed on
+    one global region. A non-anthropic Converse entry must therefore be catalogued
+    explicitly on its OWN region: left uncatalogued it falls through to
+    `chain_for`'s unregistered-alias path, which resolves through the Claude-only
+    `resolve_bedrock_model` (which raises for these models) and otherwise pins the
+    Claude region and the sonnet price tier — wrong region and wrong price."""
+    from mvp.models import registry_entries
+    from mvp.routing import chains
+
+    chains.reset_catalog()
+    try:
+        catalog = chains.get_catalog()
+        for e in registry_entries():
+            if e.wire_protocol != "messages":
+                continue
+            if getattr(e, "served_by", "bedrock") != "bedrock":
+                continue
+            targets = catalog.get(e.bedrock_model_id)
+            assert targets, f"{e.bedrock_model_id} is messages but not catalogued"
+            assert all(t.price_key == e.pricing_key for t in targets), (
+                f"{e.bedrock_model_id} catalogued at the wrong price key"
+            )
+            for alias in e.aliases:
+                assert catalog.get(alias), f"alias '{alias}' is not catalogued"
+            # Every Converse entry — Anthropic or not — is catalogued from the
+            # operator's configured primary + failover regions, never from a region
+            # of its own. An entry naming a region outside that policy would leak
+            # prompts to a jurisdiction the residency configuration excluded.
+            allowed = {chains.default_region(), *chains.failover_regions()}
+            assert {t.region for t in targets} <= allowed, (
+                f"{e.bedrock_model_id} catalogued outside the residency policy: "
+                f"{[t.region for t in targets]} not within {sorted(allowed)}"
+            )
+            assert targets[0].region == chains.default_region()
+    finally:
+        chains.reset_catalog()
 
 
 def test_pricing_conversion_gpt56_sol_exact():

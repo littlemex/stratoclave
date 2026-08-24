@@ -41,7 +41,7 @@ class ModelEntry:
     `responses` → `mvp.openai_responses`.
     """
 
-    provider: Literal["anthropic", "openai", "xai", "google"]
+    provider: Literal["anthropic", "openai", "xai", "google", "nvidia", "qwen"]
     bedrock_model_id: str
     bedrock_region: str
     aliases: tuple[str, ...]
@@ -143,6 +143,15 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         aliases=("claude-opus-4", "claude-opus-4-20250514"),
         wire_protocol="messages",
         pricing_key="opus",
+    ),
+    # Claude Sonnet 5 lists at the Sonnet tier, so it shares pricing_key="sonnet".
+    ModelEntry(
+        provider="anthropic",
+        bedrock_model_id="us.anthropic.claude-sonnet-5",
+        bedrock_region="us-east-1",
+        aliases=("claude-sonnet-5",),
+        wire_protocol="messages",
+        pricing_key="sonnet",
     ),
     ModelEntry(
         provider="anthropic",
@@ -277,6 +286,41 @@ _REGISTRY: tuple[ModelEntry, ...] = (
         aliases=("gemma-4", "gemma-4-31b", "google.gemma-4-31b"),
         wire_protocol="responses",
         pricing_key="gemma",
+    ),
+    # ---- NVIDIA Nemotron and Alibaba Qwen3 on Bedrock (Converse) ----
+    # Both are served by bedrock-runtime's Converse API, so they ride the SAME
+    # `messages` transport as the Claude family and need no new client. They are
+    # NOT Claude, so `resolve_bedrock_model()` — which filters the registry on
+    # `provider == "anthropic"` — keeps them out of the /v1/messages route by
+    # construction. They are reachable only through /v1/chat/completions, which
+    # resolves via `resolve_model()` and dispatches on `wire_protocol`.
+    # bedrock-runtime also exposes both on its OpenAI-compatible
+    # /openai/v1/chat/completions surface, but routing them through Converse keeps
+    # one transport for every `messages` entry instead of adding a third.
+    #
+    # Both are pinned to the Claude family's us-east-1 rather than to a region of
+    # their own. `chains._build_catalog` builds every Converse target from the
+    # operator's configured primary + failover regions, so an entry that named a
+    # region outside that policy would inject one the residency configuration
+    # never allowed. A model only offered elsewhere must therefore NOT be
+    # registered: that is why the Qwen entry is `qwen3-next-80b-a3b` (offered in
+    # us-east-1 and us-west-2) and not `qwen3-235b-a22b-2507`, which Bedrock
+    # offers only in us-west-2.
+    ModelEntry(
+        provider="nvidia",
+        bedrock_model_id="nvidia.nemotron-super-3-120b",
+        bedrock_region="us-east-1",
+        aliases=("nemotron-super-3-120b", "nvidia.nemotron-super-3-120b"),
+        wire_protocol="messages",
+        pricing_key="nemotron",
+    ),
+    ModelEntry(
+        provider="qwen",
+        bedrock_model_id="qwen.qwen3-next-80b-a3b",
+        bedrock_region="us-east-1",
+        aliases=("qwen3-next-80b", "qwen.qwen3-next-80b-a3b"),
+        wire_protocol="messages",
+        pricing_key="qwen",
     ),
 )
 

@@ -1,12 +1,26 @@
 """OpenAI Chat Completions compatibility endpoint.
 
 POST /v1/chat/completions
-    Accepts an OpenAI-shaped request, calls Bedrock `converse` / `converse_stream`
-    via the shared budget-flow layer, and returns an OpenAI-shaped response.
+    Accepts an OpenAI-shaped request and returns an OpenAI-shaped response for
+    ANY model in the registry, not just the Claude family.
 
-This is NOT a new backend — it is the SAME Bedrock Converse backend as
-/v1/messages, with a different request/response wire shape. The shared
-converse core + budget-flow layer eliminate all duplication.
+Two upstream transports sit behind the one wire shape, selected by the
+resolved entry's `wire_protocol` — the route adds no third transport:
+
+  - `messages`  → Bedrock `converse` / `converse_stream` via the shared
+                  budget-flow layer, exactly as /v1/messages does. The client is
+                  bound to `entry.bedrock_region`, because this route now serves
+                  entries outside the Claude family's us-east-1 (Nemotron and
+                  Qwen3 are us-west-2).
+  - `responses` → bedrock-mantle's NATIVE OpenAI Chat Completions surface at
+                  `/openai/v1/chat/completions`. Mantle speaks Chat Completions
+                  directly, so this is a pass-through: no Responses-API
+                  round-trip and no shape translation to drift.
+
+Widening this route is what lets an OpenAI-compatible client that cannot speak
+the Responses API — vLLM Semantic Router, for one, whose only upstream formats
+are `openai` and `anthropic` — reach the mantle-served models through the
+gateway, with the same reserve/settle accounting as every other route.
 """
 from __future__ import annotations
 
@@ -19,7 +33,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .anthropic import _bedrock_client, _selected_bedrock_model
+from . import _mantle_transport
+from .anthropic import _selected_bedrock_model
+from ._bedrock_clients import client_for_model
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit_for_model,
@@ -28,7 +44,7 @@ from ._pipeline import (
 from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_request_context
 from .observability.context import RequestContext, response_headers as _corr_headers
-from .models import resolve_bedrock_model
+from .models import ModelEntry, resolve_model
 
 router = APIRouter(tags=["mvp-chat-completions"])
 
@@ -48,13 +64,17 @@ class ChatMessage(BaseModel):
 
 _MAX_CHAT_MESSAGES = 500
 _MAX_CHAT_CONTENT_CHARS = 200_000
+# One source for the output cap default: the request-model field default, the
+# reservation estimate and the Converse inferenceConfig all read it, and a second
+# copy would let them disagree about what the caller asked for.
+_DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class ChatCompletionsRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     model: str = Field(min_length=1, max_length=256)
     messages: list[ChatMessage] = Field(max_length=_MAX_CHAT_MESSAGES)
-    max_tokens: Optional[int] = Field(default=4096, ge=1, le=65536)
+    max_tokens: Optional[int] = Field(default=_DEFAULT_MAX_OUTPUT_TOKENS, ge=1, le=65536)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     stop: Optional[list[str]] = None
@@ -65,6 +85,19 @@ class ChatCompletionsRequest(BaseModel):
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
     response_format: Optional[dict[str, Any]] = None
+
+
+def _requested_max_output(body: ChatCompletionsRequest) -> int:
+    """The caller's intended output cap, preferring the modern spelling.
+
+    `max_tokens` has a non-None default on the request model, so its presence
+    says nothing about intent. `max_completion_tokens` only appears when the
+    caller actually sent it, so an explicit value there wins.
+    """
+    explicit = getattr(body, "max_completion_tokens", None)
+    if isinstance(explicit, int) and explicit > 0:
+        return explicit
+    return body.max_tokens or _DEFAULT_MAX_OUTPUT_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +210,7 @@ def _build_chat_bedrock_kwargs(
     """Build Bedrock Converse kwargs from an OpenAI Chat Completions request."""
     messages, system = _convert_chat_messages(body.messages)
 
-    inference_config: dict[str, Any] = {"maxTokens": body.max_tokens or 4096}
+    inference_config: dict[str, Any] = {"maxTokens": _requested_max_output(body)}
     if body.temperature is not None:
         inference_config["temperature"] = min(body.temperature, 1.0)
     if body.top_p is not None:
@@ -249,14 +282,26 @@ def chat_completions(
         raise HTTPException(status_code=400, detail={"error": {"message": "n > 1 is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
     if body.logprobs:
         raise HTTPException(status_code=400, detail={"error": {"message": "logprobs is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
-    if body.top_logprobs is not None:
-        raise HTTPException(status_code=400, detail={"error": {"message": "top_logprobs is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
-    if body.response_format is not None:
-        raise HTTPException(status_code=400, detail={"error": {"message": "response_format is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
+    # Resolve against the WHOLE registry (not the Claude-only legacy resolver) and
+    # keep the entry: its `wire_protocol` picks the upstream transport below and
+    # its `bedrock_region` binds the Converse client, so a us-west-2 model is never
+    # invoked against the Claude family's us-east-1.
     try:
-        model_id = resolve_bedrock_model(body.model)
+        entry = resolve_model(body.model)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "invalid_model"}})
+    # `resolve_model` resolves the WHOLE registry, including entries this route
+    # cannot serve: self-hosted vLLM entries (`served_by="vllm"`) have no Bedrock
+    # region or mantle endpoint, and virtual semantic-router pool entries are
+    # candidate-chain placeholders that must never be a charge-of-record model.
+    # The old Claude-only resolver excluded both by accident; now it is explicit.
+    if getattr(entry, "served_by", "bedrock") != "bedrock" or getattr(entry, "virtual", False):
+        raise HTTPException(status_code=400, detail={"error": {"message": f"model '{body.model}' is not servable by this route", "type": "invalid_request_error", "code": "invalid_model"}})
+    if entry.wire_protocol not in ("messages", "responses"):
+        # Fail fast rather than defaulting to a transport: a new wire_protocol that
+        # silently fell through to one of these two would be misrouted.
+        raise HTTPException(status_code=500, detail={"error": {"message": f"unsupported transport for model '{body.model}'", "type": "api_error"}})
+    model_id = entry.bedrock_model_id
 
     char_count = 0
     for m in body.messages:
@@ -278,7 +323,11 @@ def chat_completions(
     if char_count > _MAX_CHAT_CONTENT_CHARS:
         raise HTTPException(status_code=400, detail={"error": {"message": f"content exceeds {_MAX_CHAT_CONTENT_CHARS} char cap", "type": "invalid_request_error", "code": "content_too_large"}})
     input_est = max(char_count // 3, 0)
-    max_out = body.max_tokens or 4096
+    # `max_tokens` defaults to 4096, so it is ALWAYS set; a caller using the modern
+    # OpenAI spelling sends `max_completion_tokens`, which arrives as an extra
+    # (the request model allows extras). Taking the default over an explicit
+    # caller value would both truncate the response and under-reserve the hold.
+    max_out = _requested_max_output(body)
     reservation = max(max_out + input_est, 1024)
 
     # Build the Bedrock kwargs BEFORE the reserve. `_build_chat_bedrock_kwargs`
@@ -288,10 +337,24 @@ def chat_completions(
     # hold, and removes the twin-validation drift hazard (no separate pre-check
     # that can diverge from the converter). The same kwargs are reused by both
     # the streaming and non-streaming paths below.
-    try:
-        kwargs = _build_chat_bedrock_kwargs(body, model_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
+    # Only the Converse transport needs Bedrock kwargs. The mantle transport
+    # forwards the client's OpenAI body verbatim, so building (and its content
+    # restrictions) would be dead work that also wrongly rejects payloads mantle
+    # accepts natively.
+    kwargs: dict[str, Any] = {}
+    if entry.wire_protocol == "messages":
+        # Converse has no equivalent for these two, so they are rejected here
+        # rather than route-wide: mantle serves both natively and rejecting them
+        # for every transport would deny structured output to the models that
+        # support it.
+        if body.top_logprobs is not None:
+            raise HTTPException(status_code=400, detail={"error": {"message": "top_logprobs is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
+        if body.response_format is not None:
+            raise HTTPException(status_code=400, detail={"error": {"message": "response_format is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
+        try:
+            kwargs = _build_chat_bedrock_kwargs(body, model_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
 
     # Shadow VSR (litellm wedge): this endpoint has no external-VSR consult, so the
     # local rule judge is the only advisory. Dark by default + fail-open +
@@ -325,7 +388,7 @@ def chat_completions(
         model_name=body.model,
         input_tokens_est=input_est,
         max_output_tokens=max_out,
-        wire_protocol="messages",
+        wire_protocol=entry.wire_protocol,
         vsr_hard_model=model_pin,
         # L5-d: per-run billing attribution.
         workflow_run_id=ctx.workflow_run_id if ctx else None,
@@ -339,14 +402,50 @@ def chat_completions(
     # priced/quota-charged so the Bedrock call agrees with the pool + quota.
     # The cascade only selects registry-resolvable `messages`-protocol models,
     # so a cross-protocol / typo'd chain entry can never win here.
+    # The mantle transport forks here, AFTER the reservation, so it inherits the
+    # identical reserve/settle/refund accounting as the Converse path — and, like
+    # the Converse path, it must invoke whatever the reservation actually selected.
+    # `reserve_credit_for_model` cascades and honours a hard pin WITHIN a protocol,
+    # so a `responses` request whose quota cascaded to another mantle model would
+    # otherwise charge one model and invoke another.
+    if entry.wire_protocol == "responses":
+        selected_id = _selected_bedrock_model(tenants_repo, entry.bedrock_model_id)
+        if selected_id != entry.bedrock_model_id:
+            try:
+                selected_entry = resolve_model(selected_id)
+            except ValueError:
+                selected_entry = None
+            # Only follow a selection that is still mantle-served: a cross-protocol
+            # selection cannot be invoked here, and invoking the originally
+            # validated model is safer than guessing a transport.
+            if selected_entry is not None and selected_entry.wire_protocol == "responses":
+                entry = selected_entry
+        return _mantle_chat_completion(
+            body=body, entry=entry, user=user, tenants_repo=tenants_repo,
+            reservation=reservation, corr=corr,
+            request_id=ctx.request_id if ctx else None,
+        )
+
     selected_id = _selected_bedrock_model(tenants_repo, model_id)
     if selected_id != model_id:
         model_id = selected_id
         kwargs["modelId"] = model_id
+        # Re-resolve so the Bedrock client follows the model the cascade actually
+        # chose. Before this route served non-Claude Converse models every entry
+        # shared us-east-1 and `entry` could safely go stale; now a cascade across
+        # entries would otherwise invoke a us-west-2 model on a us-east-1 client.
+        try:
+            entry = resolve_model(selected_id)
+        except ValueError:
+            # An unresolvable selection means the cascade produced something the
+            # registry does not know. Keep the entry we validated up front rather
+            # than invoking against a guessed region.
+            pass
 
     if body.stream:
         return StreamingResponse(
             _stream_chat(body, model_id, user, tenants_repo, reservation, kwargs,
+                         entry=entry,
                          request_id=ctx.request_id if ctx else None),
             media_type="text/event-stream",
             headers={
@@ -359,7 +458,7 @@ def chat_completions(
 
     # Non-streaming path
     try:
-        resp = _bedrock_client().converse(**kwargs)
+        resp = client_for_model(entry).converse(**kwargs)
     except Exception as e:
         tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
         _release_pool(tenants_repo)
@@ -429,6 +528,212 @@ def chat_completions(
 
 
 # ---------------------------------------------------------------------------
+# bedrock-mantle pass-through (entries whose wire_protocol is not "messages")
+# ---------------------------------------------------------------------------
+
+# Upstream statuses that describe the CALLER's request (or ask it to back off) and
+# are therefore worth preserving. Anything else collapses to 502: it describes the
+# gateway's own upstream problem, not something the caller can act on.
+# 401/403 are deliberately absent: from mantle they mean the GATEWAY's credential
+# is wrong, which the caller can do nothing about, so they surface as 502.
+_MANTLE_PASSTHROUGH_STATUSES = frozenset({400, 404, 408, 409, 413, 422, 429})
+
+# mantle's Chat Completions path, relative to the transport's `/openai/v1` base.
+_MANTLE_CHAT_PATH = "/chat/completions"
+
+
+def _mantle_status(upstream: int) -> int:
+    """Map an upstream status onto the one the caller should see."""
+    return upstream if upstream in _MANTLE_PASSTHROUGH_STATUSES else 502
+
+
+def _mantle_chat_completion(
+    *,
+    body: ChatCompletionsRequest,
+    entry: "ModelEntry",
+    user: AuthenticatedUser,
+    tenants_repo: Any,
+    reservation: int,
+    corr: dict[str, str],
+    request_id: Optional[str] = None,
+):
+    """Forward an OpenAI Chat Completions request to bedrock-mantle unchanged.
+
+    mantle serves `/openai/v1/chat/completions` natively, so there is no shape
+    translation. Three rewrites are applied and all are mechanical: the `model`
+    field carries the resolved Bedrock model ID (mantle 404s on our client-facing
+    aliases); `max_tokens` becomes `max_completion_tokens`, the spelling mantle's
+    reasoning-capable tiers accept; and on a streamed request
+    `stream_options.include_usage` is forced on.
+
+    That last one is an accounting requirement, not a nicety. An OpenAI-compatible
+    stream carries no usage block unless the caller asks for it, so without the
+    injection every streamed request would settle at zero — a full refund of the
+    hold, i.e. free tokens. When we inject it ourselves the terminal usage-only
+    chunk is swallowed instead of forwarded, so a caller that did not ask for
+    usage sees the stream it expected.
+
+    Accounting is exclusive by construction: `_account_once` runs either the
+    refund-and-release path or the settle path, never both, and only once. An
+    invoke-time failure refunds with NO settle; a response that arrived settles
+    against reported usage.
+    """
+    payload = body.model_dump(exclude_none=True)
+    payload["model"] = entry.bedrock_model_id
+    # Collapse to the modern spelling without letting `max_tokens`'s default
+    # overwrite a value the caller actually asked for.
+    payload.pop("max_tokens", None)
+    payload["max_completion_tokens"] = _requested_max_output(body)
+
+    # Inject usage reporting only when the caller did not already ask for it, so
+    # we know whether the terminal usage chunk is ours to swallow or theirs to see.
+    injected_usage = False
+    if body.stream:
+        opts = payload.get("stream_options")
+        opts = dict(opts) if isinstance(opts, dict) else {}
+        if not opts.get("include_usage"):
+            opts["include_usage"] = True
+            injected_usage = True
+        payload["stream_options"] = opts
+
+    # One latch for both terminal paths. Whichever fires first wins; the other is a
+    # no-op. This is what keeps a 4xx on a streamed request from being refunded by
+    # the error branch and then settled again by the generator's cleanup.
+    accounted = {"done": False}
+
+    def _refund_and_release() -> None:
+        if accounted["done"]:
+            return
+        accounted["done"] = True
+        tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
+        _release_pool(tenants_repo)
+
+    def _settle(input_tokens: int, output_tokens: int) -> None:
+        if accounted["done"]:
+            return
+        accounted["done"] = True
+        _settle_reservation_and_log(
+            user=user, tenants_repo=tenants_repo, reservation=reservation,
+            actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
+            model_id=entry.bedrock_model_id, context=tenants_repo,
+            requested_model=body.model, request_id=request_id,
+        )
+
+    def _fail(status: int, message: str) -> HTTPException:
+        _refund_and_release()
+        return HTTPException(status_code=status, detail={"error": {"message": message, "type": "api_error"}})
+
+    if not body.stream:
+        from core.error_handler import sanitize_exception_message
+
+        client = _mantle_transport.sync_client(entry.bedrock_region)
+        try:
+            try:
+                resp = client.post(_MANTLE_CHAT_PATH, json=payload)
+            except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
+                raise _fail(502, sanitize_exception_message(str(e)))
+            if resp.status_code >= 400:
+                raise _fail(_mantle_status(resp.status_code), _mantle_transport.format_error(resp))
+            # A 200 with an unparseable body is still an invoke-time failure: without
+            # a usage block there is nothing to settle against, and letting the
+            # exception escape would strand the hold and the pool slot.
+            try:
+                data = resp.json()
+                input_tokens, output_tokens = _mantle_transport.extract_usage(data.get("usage") or {})
+            except Exception as e:  # noqa: BLE001
+                raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
+        finally:
+            client.close()
+
+        _settle(input_tokens, output_tokens)
+        # Echo the client-facing alias, not the Bedrock ID: the caller asked for
+        # `body.model` and an OpenAI client may compare the two.
+        data["model"] = body.model
+        return Response(content=json.dumps(data, ensure_ascii=False),
+                        media_type="application/json", headers=corr)
+
+    async def _proxy() -> AsyncGenerator[bytes, None]:
+        # Async client on purpose. A sync generator would hold an anyio worker for
+        # the whole stream (up to the 600 s timeout), and the workload this route
+        # exists for is many concurrent streams — that starves every other sync
+        # route, Converse included. The blocking DynamoDB accounting calls are the
+        # part that must not run on the event loop, so they go to a thread.
+        import asyncio
+
+        input_tokens = output_tokens = 0
+        client = _mantle_transport.async_client(entry.bedrock_region)
+        try:
+            try:
+                async with client.stream("POST", _MANTLE_CHAT_PATH, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        msg = _mantle_transport.format_error(resp)
+                        await asyncio.to_thread(_refund_and_release)
+                        yield f"data: {json.dumps({'error': {'message': msg, 'type': 'api_error'}})}\n\n".encode()
+                        return
+                    # Buffer whole SSE events (lines up to a blank separator) rather
+                    # than forwarding line by line. An event can carry several
+                    # `data:` lines plus `event:`/`id:`/`retry:` fields, and a `:`
+                    # comment is a valid keepalive; re-framing per line would split
+                    # or drop those. Buffering also gives the granularity needed to
+                    # drop a usage event we asked for on the caller's behalf.
+                    event: list[str] = []
+
+                    def _render(lines: list[str]) -> bytes:
+                        return ("\n".join(lines) + "\n\n").encode()
+
+                    def _is_ours(lines: list[str]) -> bool:
+                        """True when this event is the terminal usage-only chunk that
+                        exists solely because we injected `include_usage`."""
+                        nonlocal input_tokens, output_tokens
+                        ours = False
+                        for line in lines:
+                            if not line.startswith("data:"):
+                                continue
+                            chunk = line[5:].strip()
+                            if not chunk or chunk == "[DONE]":
+                                continue
+                            try:
+                                parsed = json.loads(chunk) or {}
+                            except json.JSONDecodeError:
+                                continue
+                            usage = parsed.get("usage")
+                            if usage:
+                                input_tokens, output_tokens = _mantle_transport.extract_usage(usage)
+                                if injected_usage and not parsed.get("choices"):
+                                    ours = True
+                        return ours
+
+                    async for raw in resp.aiter_lines():
+                        if raw:
+                            event.append(raw)
+                            continue
+                        if event and not _is_ours(event):
+                            yield _render(event)
+                        event = []
+                    if event and not _is_ours(event):
+                        yield _render(event)
+            except Exception:  # noqa: BLE001 — transport/read failure mid-stream
+                # Settle what the model already produced rather than refunding it
+                # all; a partial stream is not a free request.
+                await asyncio.to_thread(_settle, input_tokens, output_tokens)
+                raise
+            await asyncio.to_thread(_settle, input_tokens, output_tokens)
+        finally:
+            await client.aclose()
+            # Backstop for a client disconnect (GeneratorExit) or any path above
+            # that neither refunded nor settled. `_settle` is latched, so this
+            # cannot double-account.
+            await asyncio.to_thread(_settle, input_tokens, output_tokens)
+
+    return StreamingResponse(
+        _proxy(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no", **corr},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Streaming
 # ---------------------------------------------------------------------------
 
@@ -439,6 +744,8 @@ async def _stream_chat(
     tenants_repo: Any,
     reservation: int,
     kwargs: dict,
+    *,
+    entry: Any,
     request_id: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE stream via the shared _budget_flow.run_stream + ChatAdapter.
@@ -516,7 +823,7 @@ async def _stream_chat(
         # (today they always match — this path does not go through InfraRouter,
         # so there is no model failover — but keeping model_id load-bearing
         # avoids a silent same-model re-invoke if that ever changes).
-        client = _bedrock_client()
+        client = client_for_model(entry)
         return client.converse_stream(**{**kwargs, "modelId": model_id})
 
     async for frame in _budget_flow.run_stream(

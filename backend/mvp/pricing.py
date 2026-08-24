@@ -213,6 +213,15 @@ _DEFAULT_RATES: dict[str, Rate] = {
     # real Gemma rate via the PricingConfig table — the safe direction is a
     # deliberate reduction, not an accidental low default.
     "gemma": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
+    # NVIDIA Nemotron and Alibaba Qwen3 on Bedrock (Converse transport). Bedrock
+    # publishes no per-token list price on either model card, so both follow the
+    # same rule as gemma above and DEFAULT to the Opus tier (deliberate
+    # OVER-charge). Neither model reports a Bedrock cache-token split today, but
+    # the cache rates are left at the Opus ratio rather than 0 so that a future
+    # upstream that does report cache tokens cannot silently bill them at zero.
+    # An admin lowers both to the real rate via the PricingConfig table.
+    "nemotron": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
+    "qwen": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
     # Self-hosted vLLM (hybrid serving). An operator-set cost-recovery rate,
     # NOT a Bedrock price. Cache rates MUST be 0 — vLLM reports no Bedrock
     # cache-token split, so any nonzero cache rate would be dead pricing that

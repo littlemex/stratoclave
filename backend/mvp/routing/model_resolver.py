@@ -123,8 +123,10 @@ def resolve_model(
 
     # 3. Apply breaker tier cap
     if breaker_max_tier is not None:
-        from .chains import _tier_for
-        filtered = [m for m in chain if _tier_for(m) <= breaker_max_tier]
+        # The chain holds model NAMES, not pricing keys — resolve each through the
+        # registry rather than string-matching it.
+        from .chains import _tier_for_model
+        filtered = [m for m in chain if _tier_for_model(m) <= breaker_max_tier]
         if filtered:
             chain = filtered
 

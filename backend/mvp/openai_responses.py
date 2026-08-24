@@ -42,6 +42,7 @@ from core.error_handler import sanitize_exception_message
 from core.logging import get_logger
 from dynamo import UserTenantsRepository
 
+from . import _mantle_transport
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit,
@@ -243,48 +244,17 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
 # compromise. A SigV4-from-task-role migration is tracked as a P1
 # follow-up — see plan's Out of scope.
 
-_DEFAULT_TOKEN_TTL = timedelta(seconds=900)
+_DEFAULT_TOKEN_TTL = _mantle_transport.DEFAULT_TOKEN_TTL
 
 
 def _mint_bearer_token(region: str) -> str:
-    """Mint a short-lived bearer token for `bedrock-mantle.{region}.api.aws`."""
-    # Imported lazily so that the module loads even when the dependency is
-    # not yet installed (e.g. dev environments running just the Anthropic
-    # tests). The route-time check below ensures the import error surfaces
-    # as an HTTP 503 rather than crashing the whole worker.
-    try:
-        from aws_bedrock_token_generator import provide_token  # type: ignore
-    except ImportError as exc:  # pragma: no cover — covered at deploy time
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "OpenAI Responses route is enabled but "
-                "aws-bedrock-token-generator is not installed. "
-                "Add it to backend/requirements.txt."
-            ),
-        ) from exc
-    try:
-        return provide_token(region=region, expiry=_DEFAULT_TOKEN_TTL)
-    except TypeError:
-        # Older versions of the library may not support `expiry` kwarg.
-        # Falling back keeps us functional, but the bearer then defaults
-        # to 1 h — the SigV4 migration follow-up addresses this case too.
-        logger.warning(
-            "bedrock_token_generator_no_expiry",
-            region=region,
-            note="library version does not support expiry kwarg; using default TTL",
-        )
-        return provide_token(region=region)
+    """Mint a short-lived bearer for mantle in `region` (see `_mantle_transport`)."""
+    return _mantle_transport.mint_bearer_token(region)
 
 
 def _mantle_client(region: str) -> httpx.AsyncClient:
-    """Build an httpx async client targeting bedrock-mantle in `region`."""
-    token = _mint_bearer_token(region)
-    return httpx.AsyncClient(
-        base_url=f"https://bedrock-mantle.{region}.api.aws/openai/v1",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=httpx.Timeout(600.0, connect=10.0),
-    )
+    """An async mantle client for `region` (see `_mantle_transport`)."""
+    return _mantle_transport.async_client(region)
 
 
 # ---------------------------------------------------------------------------
@@ -296,20 +266,12 @@ def _mantle_client(region: str) -> httpx.AsyncClient:
 # is safer than relying on either name being present.
 
 def _extract_usage(usage: dict[str, Any]) -> tuple[int, int]:
-    """Return `(input_tokens, output_tokens)` from a Responses `usage` block.
+    """Return `(input_tokens, output_tokens)` from a usage block.
 
-    `output_tokens_details.reasoning_tokens` is a SUBSET of `output_tokens`
-    in the Responses API contract; do not add it separately.
+    Delegates to `_mantle_transport`, which accepts both the Responses and Chat
+    Completions spellings — the two mantle routes share one parser.
     """
-    if not isinstance(usage, dict):
-        return 0, 0
-    input_tokens = int(
-        usage.get("input_tokens") or usage.get("prompt_tokens", 0) or 0
-    )
-    output_tokens = int(
-        usage.get("output_tokens") or usage.get("completion_tokens", 0) or 0
-    )
-    return input_tokens, output_tokens
+    return _mantle_transport.extract_usage(usage)
 
 
 def _previous_response_id(body: OpenAIResponsesRequest) -> Optional[str]:
@@ -341,18 +303,8 @@ def _response_id(data: dict[str, Any]) -> Optional[str]:
 # request IDs that bedrock-mantle's error envelopes can include.
 
 def _format_mantle_error(resp: httpx.Response) -> str:
-    """Extract and sanitize an error message from a non-2xx mantle response."""
-    try:
-        body = resp.json()
-        if isinstance(body, dict):
-            err = body.get("error")
-            if isinstance(err, dict):
-                msg = err.get("message")
-                if isinstance(msg, str) and msg:
-                    return sanitize_exception_message(msg)
-    except Exception:
-        pass
-    return sanitize_exception_message(resp.text[:500])
+    """A sanitized error message from a non-2xx mantle response."""
+    return _mantle_transport.format_error(resp)
 
 
 def _sanitize_sse_error_line(line: str) -> str:
