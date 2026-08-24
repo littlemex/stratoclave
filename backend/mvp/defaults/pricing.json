@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "$comment": [
+    "Built-in list prices in micro-USD per million tokens (1 USD = 1_000_000 micro-USD).",
+    "This is the BASELINE layer. Effective pricing is resolved in three layers:",
+    "  1. this document — the floor, always present, never fails to load",
+    "  2. the active price source (STRATOCLAVE_PRICE_SOURCE; \"json\" reads this file)",
+    "     — a plugin may fetch live prices, e.g. from the AWS Price List API",
+    "  3. admin overrides in the PricingConfig table — highest precedence",
+    "A key absent from every layer falls back to \"default\", which is Opus-priced:",
+    "an unpriced model must over-charge, never under-charge.",
+    "Models reference a key via `pricing_key` in defaults/models.json; models that share",
+    "a price tier share a key, so re-pricing a tier is one edit here.",
+    "A rate object may also carry `notes`; any other key is rejected as a typo."
+  ],
+  "rates": {
+    "opus": {
+      "input_per_mtok_microusd": 5000000,
+      "output_per_mtok_microusd": 25000000,
+      "cache_read_per_mtok_microusd": 500000,
+      "cache_write_per_mtok_microusd": 6250000
+    },
+    "fable": {
+      "input_per_mtok_microusd": 10000000,
+      "output_per_mtok_microusd": 50000000,
+      "cache_read_per_mtok_microusd": 1000000,
+      "cache_write_per_mtok_microusd": 12500000,
+      "notes": "Claude Fable 5 — $10/$50 per MTok, above the Opus tier. Cache rates follow the Anthropic ratio used for Opus (read = 0.1x input, write = 1.25x input)."
+    },
+    "sonnet": {
+      "input_per_mtok_microusd": 3000000,
+      "output_per_mtok_microusd": 15000000,
+      "cache_read_per_mtok_microusd": 300000,
+      "cache_write_per_mtok_microusd": 3750000
+    },
+    "haiku": {
+      "input_per_mtok_microusd": 1000000,
+      "output_per_mtok_microusd": 5000000,
+      "cache_read_per_mtok_microusd": 100000,
+      "cache_write_per_mtok_microusd": 1250000
+    },
+    "gpt-5": {
+      "input_per_mtok_microusd": 5000000,
+      "output_per_mtok_microusd": 25000000,
+      "cache_read_per_mtok_microusd": 500000,
+      "cache_write_per_mtok_microusd": 6250000,
+      "notes": "GPT-5.x on bedrock-mantle. Output priced at the Opus tier as a conservative default until an admin sets an exact rate."
+    },
+    "gpt-5.6-sol": {
+      "input_per_mtok_microusd": 4400000,
+      "output_per_mtok_microusd": 22000000,
+      "cache_read_per_mtok_microusd": 440000,
+      "cache_write_per_mtok_microusd": 5500000,
+      "notes": "Exact In-Region/Geo list price from the AWS Bedrock model card (Aug 2026): $4.40/$22.00 in/out, $0.44/$5.50 cache read/write."
+    },
+    "gpt-5.6-terra": {
+      "input_per_mtok_microusd": 2200000,
+      "output_per_mtok_microusd": 13200000,
+      "cache_read_per_mtok_microusd": 220000,
+      "cache_write_per_mtok_microusd": 2750000,
+      "notes": "Exact In-Region/Geo list price from the AWS Bedrock model card (Aug 2026): $2.20/$13.20 in/out, $0.22/$2.75 cache read/write."
+    },
+    "grok": {
+      "input_per_mtok_microusd": 2200000,
+      "output_per_mtok_microusd": 6600000,
+      "cache_read_per_mtok_microusd": 550000,
+      "cache_write_per_mtok_microusd": 2750000,
+      "notes": "xAI Grok 4.6 In-Region/Geo list price: $2.20/$6.60 in/out, $0.55 cache read. Bedrock publishes no cache-WRITE rate; the 1.25x-input premium the Anthropic tiers use is assumed as an UPPER BOUND so the ledger never under-charges."
+    },
+    "gemma": {
+      "input_per_mtok_microusd": 5000000,
+      "output_per_mtok_microusd": 25000000,
+      "cache_read_per_mtok_microusd": 500000,
+      "cache_write_per_mtok_microusd": 6250000,
+      "notes": "Bedrock publishes no per-token list price for Gemma. Per the never-under-charge rule this DEFAULTS to the Opus tier — a deliberate over-charge. An admin lowers it to the real rate via the pricing table."
+    },
+    "nemotron": {
+      "input_per_mtok_microusd": 5000000,
+      "output_per_mtok_microusd": 25000000,
+      "cache_read_per_mtok_microusd": 500000,
+      "cache_write_per_mtok_microusd": 6250000,
+      "notes": "Bedrock publishes no list price. Defaults to the Opus tier for the same reason as gemma."
+    },
+    "qwen": {
+      "input_per_mtok_microusd": 5000000,
+      "output_per_mtok_microusd": 25000000,
+      "cache_read_per_mtok_microusd": 500000,
+      "cache_write_per_mtok_microusd": 6250000,
+      "notes": "Bedrock publishes no list price. Defaults to the Opus tier for the same reason as gemma."
+    },
+    "vllm": {
+      "input_per_mtok_microusd": 200000,
+      "output_per_mtok_microusd": 200000,
+      "cache_read_per_mtok_microusd": 0,
+      "cache_write_per_mtok_microusd": 0
+    },
+    "default": {
+      "input_per_mtok_microusd": 5000000,
+      "output_per_mtok_microusd": 25000000,
+      "cache_read_per_mtok_microusd": 500000,
+      "cache_write_per_mtok_microusd": 6250000,
+      "notes": "Conservative fallback (Opus-priced) so a model with no row never under-charges a budget."
+    }
+  }
+}

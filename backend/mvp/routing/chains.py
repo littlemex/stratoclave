@@ -9,6 +9,7 @@ Resolution pipeline:
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import Optional
 
 from .clients import default_region
@@ -137,7 +138,13 @@ def _build_catalog() -> dict[str, list[Target]]:
                 catalog[alias] = [target]
                 catalog[entry.bedrock_model_id] = [target]
             continue
-        if entry.provider != "anthropic":
+        # Every Converse entry is catalogued the same way, Anthropic or not. The
+        # filter used to be `provider == "anthropic"` because Converse only carried
+        # Claude; Nemotron and Qwen3 ride it now, and giving them a special branch
+        # pinned to their own region would inject a region the operator's residency
+        # policy never allowed. Residency wins: a model that is not offered in the
+        # configured primary/failover regions must not be registered at all.
+        if entry.wire_protocol != "messages":
             continue
         for alias in entry.aliases:
             targets = [
@@ -161,14 +168,68 @@ def _build_catalog() -> dict[str, list[Target]]:
     return catalog
 
 
+# The tier boundaries are expressed as the reference keys that DEFINE each tier,
+# not as literal rates: a repricing of Haiku or Sonnet then moves the boundary with
+# it instead of leaving a stale threshold behind. Ordered cheapest tier first.
+_TIER_BOUNDARY_KEYS: tuple[tuple[int, str], ...] = ((1, "haiku"), (2, "sonnet"))
+_TIER_ABOVE_BOUNDARIES = 3
+_UNKNOWN_KEY_TIER = 2
+
+
+@lru_cache(maxsize=None)
 def _tier_for(pricing_key: str) -> int:
-    if "haiku" in pricing_key:
-        return 1
-    if "sonnet" in pricing_key:
-        return 2
-    if "opus" in pricing_key:
-        return 3
-    return 2
+    """Cost tier from the key's BUILT-IN price, not from its name.
+
+    Memoised: the catalog asks for a tier once per target, and the built-in floor is
+    an import-time snapshot, so the answer cannot change within a process.
+
+    The breaker's DOWNGRADE stage keeps only targets whose tier is at or below a
+    cap, so a tier that disagrees with the price makes an expensive model look
+    like a cheap fallback. Name matching did exactly that: `fable` is priced ABOVE
+    the Opus tier and `gemma` at the Opus tier, yet both matched none of the
+    substrings and scored 2 — the Sonnet tier — so a downgrade could "save money"
+    by moving to a costlier model.
+
+    A key lands in the cheapest tier whose reference model it does not out-price.
+    That reproduces the Claude tiers exactly (haiku 1, sonnet 2, opus 3) while
+    placing every other key by its actual rate.
+
+    Only the built-in table is consulted: reading live admin overrides would put a
+    DynamoDB call inside catalog construction and let a pricing edit silently
+    re-tier the routing topology.
+    """
+    from mvp.pricing import baseline_rates
+
+    rates = baseline_rates()
+    rate = rates.get(pricing_key)
+    if rate is None:
+        return _UNKNOWN_KEY_TIER
+    for tier, boundary_key in _TIER_BOUNDARY_KEYS:
+        boundary = rates.get(boundary_key)
+        if boundary is None:
+            continue
+        if rate.output_per_mtok_microusd <= boundary.output_per_mtok_microusd:
+            return tier
+    return _TIER_ABOVE_BOUNDARIES
+
+
+def _tier_for_model(model: str) -> int:
+    """Cost tier for a client-facing MODEL name (alias or Bedrock id).
+
+    Distinct from `_tier_for`, which takes a pricing KEY. The two are easy to
+    confuse and were once the same function: because it matched substrings of its
+    argument, passing a model name happened to work for Claude (`claude-opus-4-6`
+    contains "opus") and silently mis-tiered everything else — `gemma-4` and
+    `fable` are priced at or above the Opus rate but contained none of the
+    substrings, so a breaker downgrade could "save money" by moving to a costlier
+    model. Resolving the name to its registry entry removes the coincidence.
+    """
+    from mvp.models import resolve_model
+
+    try:
+        return _tier_for(resolve_model(model).pricing_key)
+    except Exception:  # noqa: BLE001 — an unresolvable name is not a routing error
+        return _UNKNOWN_KEY_TIER
 
 
 def get_catalog() -> dict[str, list[Target]]:

@@ -28,6 +28,8 @@ from typing import Optional
 from core.logging import get_logger
 from dynamo.pricing_config import PricingConfigRepository
 
+from .rates import RATE_FIELDS, Rate as Rate, validate_rate_table
+
 
 logger = get_logger(__name__)
 
@@ -35,14 +37,11 @@ MICRO_USD_PER_USD = 1_000_000
 _TOKENS_PER_MTOK = 1_000_000
 
 
-@dataclass(frozen=True)
-class Rate:
-    """Per-MTok rates in micro-USD for one pricing key."""
-
-    input_per_mtok_microusd: int
-    output_per_mtok_microusd: int
-    cache_read_per_mtok_microusd: int
-    cache_write_per_mtok_microusd: int
+# `Rate` is re-exported from `mvp.rates` (imported above). It lives there because
+# that module imports nothing from this package, so a price source can be typed and
+# validated without importing the charging module; keeping it here made the source
+# module reach back into a half-initialised `pricing`. Callers and tests have always
+# imported it from `pricing`, so the name stays available here.
 
 
 # Sentinel version used when NO admin override is active and charging falls back
@@ -65,12 +64,18 @@ SNAPSHOT_FAILED_SENTINEL = "snapshot-failed"
 # sentinel per cause (Fable N2/N3, authcap review-1 M-4) — a dispute must tell an
 # external fixed-amount charge apart from a legacy snapshot-less inline one.
 EXTERNAL_AMOUNT_SENTINEL = "external-fixed-amount"
+#   PRICE_SOURCE_SENTINEL: no admin override was active, but the effective rate came
+#     from a non-bundled price source (a live rate feed) rather than the built-in
+#     table. Distinct from BUILTIN_VERSION so a dispute can tell "charged at the
+#     shipped defaults" apart from "charged at whatever the feed said at the time";
+#     the source's identity is in the logs, the rates themselves are frozen here.
+PRICE_SOURCE_SENTINEL = "price-source"
 
 # Version strings admins may never create (they collide with the sentinels /
 # built-in tag and would make dispute labels ambiguous).
 RESERVED_VERSIONS = frozenset(
     {BUILTIN_VERSION, UNVERSIONED_SENTINEL, SNAPSHOT_FAILED_SENTINEL,
-     EXTERNAL_AMOUNT_SENTINEL}
+     EXTERNAL_AMOUNT_SENTINEL, PRICE_SOURCE_SENTINEL}
 )
 
 
@@ -184,49 +189,26 @@ class RatingRecord:
         return d
 
 
-# Built-in list prices (micro-USD per MTok). Sourced from published on-demand
-# Bedrock/Anthropic rates. `default` is a conservative fallback (Opus-priced)
-# so an unpriced model never under-charges a budget.
-_DEFAULT_RATES: dict[str, Rate] = {
-    "opus": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
-    # Claude Fable 5 — $10/$50 per MTok, above the Opus tier. Cache rates follow
-    # the Anthropic ratio used for Opus (read = 0.1x input, write = 1.25x input).
-    "fable": Rate(10_000_000, 50_000_000, 1_000_000, 12_500_000),
-    "sonnet": Rate(3_000_000, 15_000_000, 300_000, 3_750_000),
-    "haiku": Rate(1_000_000, 5_000_000, 100_000, 1_250_000),
-    # GPT-5.x on bedrock-mantle. Output priced at the Opus tier as a
-    # conservative default until an admin sets an exact rate.
-    "gpt-5": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
-    # GPT-5.6 Sol / Terra on bedrock-mantle — exact In-Region/Geo list prices from
-    # the AWS Bedrock model cards (Aug 2026). Sol (flagship): $4.40/$22.00 in/out,
-    # $0.44/$5.50 cache read/write. Terra (balanced): $2.20/$13.20, $0.22/$2.75.
-    "gpt-5.6-sol": Rate(4_400_000, 22_000_000, 440_000, 5_500_000),
-    "gpt-5.6-terra": Rate(2_200_000, 13_200_000, 220_000, 2_750_000),
-    # xAI Grok 4.6 on bedrock-mantle — In-Region/Geo list price: $2.20/$6.60 in/out,
-    # $0.55 cache read. Bedrock's card does not publish a cache-WRITE rate; assume
-    # the 1.25x-input premium the Anthropic tiers use ($2.75) as an UPPER-BOUND so
-    # the ledger never under-charges (adjust down if the real rate is published).
-    "grok": Rate(2_200_000, 6_600_000, 550_000, 2_750_000),
-    # Google Gemma 4 — Bedrock publishes no per-token list price on the model card.
-    # Per this module's "unpriced models must never under-charge" rule, gemma
-    # DEFAULTS to the Opus tier (deliberate OVER-charge). An admin lowers it to the
-    # real Gemma rate via the PricingConfig table — the safe direction is a
-    # deliberate reduction, not an accidental low default.
-    "gemma": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
-    # Self-hosted vLLM (hybrid serving). An operator-set cost-recovery rate,
-    # NOT a Bedrock price. Cache rates MUST be 0 — vLLM reports no Bedrock
-    # cache-token split, so any nonzero cache rate would be dead pricing that
-    # also biases SAAR's warm-prefix delta (enforced by
-    # models.assert_vllm_cache_rates_zero). The input/output defaults here are
-    # a placeholder an operator overrides per deployment.
-    "vllm": Rate(200_000, 200_000, 0, 0),
-    "default": Rate(5_000_000, 25_000_000, 500_000, 6_250_000),
-}
+# The bundled rate document is the FLOOR: read from disk, no network, no
+# credentials, so it cannot fail at runtime. `_DEFAULT_RATES` keeps its name and
+# role — the map every other layer degrades to — but its values now live in
+# defaults/pricing.json so an operator edits data, not code. See mvp/price_sources.py
+# for the three-layer resolution (floor -> active source -> admin overrides).
+def _load_floor_rates() -> dict[str, Rate]:
+    from .price_sources import load_rate_document
+
+    return load_rate_document()
 
 
-# ---------------------------------------------------------------------------
-# Hot-reloaded rate cache
-# ---------------------------------------------------------------------------
+_DEFAULT_RATES: dict[str, Rate] = _load_floor_rates()
+
+
+def baseline_rates() -> dict[str, Rate]:
+    """A copy of the built-in floor. Public so callers that need a price-derived
+    fact (routing cost tiers, for one) do not reach for a private map."""
+    return dict(_DEFAULT_RATES)
+
+
 _CACHE_TTL_SECONDS = 60.0
 
 
@@ -247,12 +229,124 @@ class _RateCache:
         # an operator what's customized without re-reading the table.
         self._override_keys: frozenset[str] = frozenset()
         self._loaded_at: float = 0.0
+        # Overrides kept verbatim so a refresh can re-merge them over a fresh source
+        # table without re-reading the table when the version has not moved.
+        self._overrides: dict[str, Rate] = {}
+        # Last table the active source returned. Held so a later failure keeps
+        # charging at real prices instead of regressing to the bundled floor.
+        self._source_table: Optional[dict[str, Rate]] = None
+        # Which keys the active source actually supplied. The snapshot label needs
+        # per-key provenance: "the source is configured" is not the same fact as
+        # "this key's rate came from it".
+        self._source_keys: frozenset[str] = frozenset()
+        # Events already logged, so a standing condition does not repeat every refresh.
+        self._warned: set[str] = set()
         # Serializes refreshes so concurrent requests don't stampede the table
         # or interleave a half-swapped rate map. The method really is locked now
         # (the name previously lied).
         self._lock = threading.Lock()
 
+    def _baseline(self) -> dict[str, Rate]:
+        """The active price source's table, layered over the bundled floor.
+
+        Three failure modes, deliberately not the same:
+
+        - the source NAME is unknown: a configuration error, so it propagates.
+          Charging the floor because someone typo'd `STRATOCLAVE_PRICE_SOURCE` is a
+          billing error, not something to log and continue through.
+        - `load()` raises or returns something malformed: transient or a bad
+          deployment of a source, so the LAST GOOD table stays in force. Falling
+          back to the floor here would be worse than doing nothing — a source that
+          supplies higher real-world prices than the bundled defaults would start
+          under-charging the moment it blipped.
+        - it has never succeeded: the floor, which is the only table guaranteed to
+          exist.
+
+        The floor is merged underneath either way, so a source that omits keys
+        cannot make a model unpriceable. `default` is the one key a source may not
+        lower: it is the rate an unregistered pricing key is charged at, and the
+        standing rule is that an unpriced model over-charges rather than under.
+        """
+        table = self._source_table if self._source_table is not None else {}
+
+        merged = dict(_DEFAULT_RATES)
+        merged.update(table)
+        self._source_keys = frozenset(table)
+        merged["default"] = self._floored_default(merged["default"])
+        return merged
+
+    def _floored_default(self, candidate: Rate) -> Rate:
+        """`default` is what an UNREGISTERED pricing key is charged at, so it may only
+        move up. Clamped per field, not judged on one of them: a source that matched
+        the floor's output rate while lowering input or cache rates would otherwise
+        slip past and under-charge every unpriced model.
+        """
+        floor = _DEFAULT_RATES["default"]
+        clamped = Rate(**{
+            field: max(getattr(candidate, field), getattr(floor, field))
+            for field in RATE_FIELDS
+        })
+        if clamped != candidate:
+            self._warn_once(
+                "price_source_default_key_floored",
+                note="a source may not lower any field of the 'default' rate",
+            )
+        else:
+            self._clear_warning("price_source_default_key_floored")
+        return clamped
+
+    def _with_vllm_cache_rates_zeroed(self, merged: dict[str, Rate]) -> dict[str, Rate]:
+        """vLLM reports no Bedrock cache-token split, so a nonzero cache rate on a
+        key a vLLM entry uses is dead pricing that also skews SAAR's warm-prefix
+        delta. The registry enforces this for the bundled floor, but a source is
+        re-read on every refresh and could reintroduce it after that check, so it is
+        clamped here — on the money path, every refresh.
+        """
+        from .models import registry_entries
+
+        keys = {e.pricing_key for e in registry_entries()
+                if getattr(e, "served_by", "bedrock") == "vllm"}
+        clamped_any = False
+        for key in keys & set(merged):
+            rate = merged[key]
+            if rate.cache_read_per_mtok_microusd or rate.cache_write_per_mtok_microusd:
+                clamped_any = True
+                self._warn_once(
+                    "vllm_cache_rate_zeroed",
+                    note=f"pricing key {key!r} is used by a vLLM entry and must price cache at 0",
+                )
+                merged[key] = Rate(
+                    rate.input_per_mtok_microusd, rate.output_per_mtok_microusd, 0, 0,
+                )
+        if not clamped_any:
+            self._clear_warning("vllm_cache_rate_zeroed")
+        return merged
+
+    def _warn_once(self, event: str, **fields) -> None:
+        """Log a persistent condition on transition, not on every 60 s refresh."""
+        if event in self._warned:
+            return
+        self._warned.add(event)
+        logger.warning(event, source=self._active_source_name(), **fields)
+
+    def _clear_warning(self, event: str) -> None:
+        """Arm `_warn_once` again for `event`.
+
+        Suppressing a standing condition and detecting its recurrence are different
+        jobs: without this, a source that lowered a rate once, was fixed, and did it
+        again months later would never be logged a second time.
+        """
+        self._warned.discard(event)
+
+    @staticmethod
+    def _active_source_name() -> str:
+        from .price_sources import active_source_name
+
+        return active_source_name()
+
     def _refresh_locked(self, repo: PricingConfigRepository) -> None:
+        from .price_sources import PriceSourceConfigError
+
         # Fail-static across the ENTIRE refresh (Fable #66 rev1 BUG1): a throw
         # from EITHER current_version() OR load_rates() (throttle, transient
         # Dynamo error, malformed item) must keep the previous map and bump
@@ -263,19 +357,46 @@ class _RateCache:
             if version is None:
                 # Overrides removed (CURRENT pointer gone). Fall back to built-in
                 # defaults rather than keeping the last-loaded set alive forever.
-                self._rates = dict(_DEFAULT_RATES)
+                self._rates = self._with_vllm_cache_rates_zeroed(self._baseline())
                 self._version = None
+                self._overrides = {}
                 self._override_keys = frozenset()
-            elif version != self._version:
-                overrides = repo.load_rates(version)
-                merged = dict(_DEFAULT_RATES)
+            else:
+                # Re-read the source on EVERY refresh, not only when the override
+                # version moves. Gating it on the version froze live prices for as
+                # long as an operator left the override set alone — the opposite of
+                # what "refreshed on the cache interval" promises.
+                overrides = (
+                    repo.load_rates(version) if version != self._version
+                    else dict(self._overrides)
+                )
+                merged = self._baseline()
                 merged.update(overrides)
+                # AFTER the overrides, not before: an admin row can reintroduce a
+                # nonzero cache rate that the source clamp already removed, and the
+                # invariant is about what is actually charged.
+                merged = self._with_vllm_cache_rates_zeroed(merged)
                 self._rates = merged
                 self._version = version
+                self._overrides = dict(overrides)
                 self._override_keys = frozenset(overrides)
+        except PriceSourceConfigError:
+            # A misconfigured price source is not a transient. It must reach the
+            # caller: absorbing it here would charge the bundled floor for as long as
+            # nobody reads the logs, which is the silent fallback this module forbids.
+            # Re-raised BEFORE the catch-all because it is a ValueError and would
+            # otherwise be swallowed by it.
+            raise
         except Exception:  # noqa: BLE001 — table missing / transient: keep last-good map.
             pass
-        finally:
+        except PriceSourceConfigError:
+            # Deliberately BEFORE the timestamp update below: advancing it would let
+            # the next 60 s of requests skip the refresh entirely and charge whatever
+            # table is currently held — the initial floor on a cold cache. One request
+            # erroring per interval while the rest silently under-charge is the same
+            # silent fallback, moved onto the time axis.
+            raise
+        else:
             self._loaded_at = time.time()
 
     def _ensure_fresh(self, repo: Optional[PricingConfigRepository]) -> None:
@@ -283,9 +404,38 @@ class _RateCache:
         # either wait briefly and see the fresh map, or skip if it was just
         # loaded. A refresh failure keeps the previous map (fail-static).
         if time.time() - self._loaded_at >= _CACHE_TTL_SECONDS:
+            # The price source is fetched OUTSIDE the lock. A live feed can be slow,
+            # and holding the lock across it would stall every concurrent get() and
+            # snapshot read behind one network call — turning "the source is never on
+            # the request path" into "every request waits for it". Readers keep
+            # serving the previous table while this runs.
+            self._prefetch_source()
             with self._lock:
                 if time.time() - self._loaded_at >= _CACHE_TTL_SECONDS:
                     self._refresh_locked(repo or PricingConfigRepository())
+
+    def _prefetch_source(self) -> None:
+        """Refresh `_source_table` from the active source, off the lock.
+
+        A configuration error propagates (see `_baseline`); a load failure leaves the
+        last good table in place and is logged. Only the assignment touches shared
+        state, and it is a single reference swap.
+        """
+        from .price_sources import PriceSourceConfigError, load_from_active_source
+
+        try:
+            self._source_table = load_from_active_source()
+            self._clear_warning("price_source_load_failed")
+        except PriceSourceConfigError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — transient: keep the last good table.
+            self._warn_once(
+                "price_source_load_failed",
+                error=str(exc),
+                note=("keeping the last good source table"
+                      if self._source_table is not None else
+                      "no source table has ever loaded; using the bundled floor"),
+            )
 
     def get(self, pricing_key: str, repo: Optional[PricingConfigRepository] = None) -> Rate:
         self._ensure_fresh(repo)
@@ -307,12 +457,40 @@ class _RateCache:
         with self._lock:
             return self._version, dict(self._rates), set(self._override_keys)
 
+    def snapshot_inputs(
+        self, repo: Optional[PricingConfigRepository] = None
+    ) -> tuple[Optional[str], dict[str, Rate], set[str], frozenset[str]]:
+        """`(version, rates, override_keys, source_keys)` read in ONE locked pass.
+
+        The refresh assigns those fields on separate lines, so reading them in
+        separate locked calls can mix generations — a rate from the new table with a
+        provenance label from the old one. The amount charged would still be
+        self-consistent (reserve and settle share the frozen snapshot), but the
+        dispute label would describe a table that never priced it.
+        """
+        self._ensure_fresh(repo)
+        with self._lock:
+            return (self._version, dict(self._rates), set(self._override_keys),
+                    self._source_keys)
+
+    @staticmethod
+    def _tag_for(pricing_key: str, source_keys: frozenset[str]) -> str:
+        from .price_sources import DEFAULT_SOURCE_NAME, active_source_name
+
+        if active_source_name() == DEFAULT_SOURCE_NAME:
+            return BUILTIN_VERSION
+        return PRICE_SOURCE_SENTINEL if pricing_key in source_keys else BUILTIN_VERSION
+
     def reset(self) -> None:
         """Test hook: drop cached state so the next get() reloads. Not locked —
         call only from single-threaded tests."""
         self._rates = dict(_DEFAULT_RATES)
         self._version = None
+        self._overrides = {}
         self._override_keys = frozenset()
+        self._source_table = None
+        self._source_keys = frozenset()
+        self._warned = set()
         self._loaded_at = 0.0
 
 
@@ -320,8 +498,19 @@ _cache = _RateCache()
 
 
 def reset_cache() -> None:
-    """Reset the module-level rate cache (used by tests)."""
+    """Reset the module-level rate cache (used by tests).
+
+    Also drops the memoised routing cost tiers. NOTE: the bundled floor itself is an
+    import-time snapshot and is NOT re-read, so swapping STRATOCLAVE_PRICING_PATH
+    after import changes what the active source returns but not the floor.
+    """
     _cache.reset()
+    try:
+        from .routing.chains import _tier_for
+
+        _tier_for.cache_clear()
+    except Exception:  # noqa: BLE001 — a test-only convenience, never load-bearing.
+        pass
 
 
 def effective_rates() -> tuple[Optional[str], dict[str, Rate], set[str]]:
@@ -479,7 +668,7 @@ def snapshot_rates(
     between (we read the row for the version CURRENT named, which is fully
     written and frozen).
     """
-    version, merged, override_keys = _cache.effective_rates(repo)
+    version, merged, override_keys, source_keys = _cache.snapshot_inputs(repo)
     if version is not None and pricing_key in override_keys:
         # An admin override is active for this key: freeze the versioned row's
         # exact values (+ any cost_* fields) from the immutable per-version cache.
@@ -533,11 +722,22 @@ def snapshot_rates(
             f"pricing version {version!r} is active but its {pricing_key!r} row "
             f"is missing (consistency violation)"
         )
-    # No override: built-in default, tagged BUILTIN_VERSION.
-    rate = (merged.get(pricing_key) if version else None) or _DEFAULT_RATES.get(
-        pricing_key
-    ) or _DEFAULT_RATES["default"]
-    return _snapshot_from_rate(BUILTIN_VERSION, pricing_key, rate)
+    # No admin override. The rate still comes from the EFFECTIVE table, which
+    # includes whatever the active price source supplied — reading the bundled floor
+    # here instead would freeze a different rate than the one the reservation was
+    # admitted at, and a dearer feed would then settle below what it reserved.
+    # `merged` already contains the floor, so it is the single place to read: taking
+    # the floor's `default` when the key is unknown would freeze a different rate
+    # than the reservation was admitted at, which is the same under-charge shape as
+    # reading the floor instead of the source.
+    rate = merged.get(pricing_key)
+    # An unknown key is charged at `default`, so the dispute label must describe
+    # where `default` came from — labelling it by the unknown key would read as
+    # "charged at the shipped defaults" while actually charging a feed's rate.
+    label_key = pricing_key if rate is not None else "default"
+    if rate is None:
+        rate = merged["default"]
+    return _snapshot_from_rate(_cache._tag_for(label_key, source_keys), pricing_key, rate)
 
 
 def _opt_int(v):

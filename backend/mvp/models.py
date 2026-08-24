@@ -16,9 +16,12 @@ Bedrock with no token-accounting policy attached.
 """
 from __future__ import annotations
 
+import json
 import os
+
+from .rates import no_duplicate_keys as _no_duplicate_keys
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, NoReturn, Optional
 
 
 # MVP default for the Anthropic Messages route. OpenAI route uses its own
@@ -35,13 +38,16 @@ class ModelEntry:
 
     `aliases` is the set of client-facing identifiers (Anthropic SDK names,
     short codex-style names, raw Bedrock IDs) that map to this entry.
-    `bedrock_region` is the per-model AWS region — Claude family is in
-    us-east-1; OpenAI family lives in bedrock-mantle in us-east-2/us-west-2.
+    `bedrock_region` is asymmetric on purpose. For `wire_protocol="responses"` it
+    is authoritative: each bedrock-mantle model is offered in specific regions
+    (us-east-2 / us-west-2). For `"messages"` it is advisory — the Converse chain
+    is built from the deployment's region policy (`routing.chains`), so a Converse
+    model must be offered there or it should not be registered.
     `wire_protocol` selects the route handler: `messages` → `mvp.anthropic`,
     `responses` → `mvp.openai_responses`.
     """
 
-    provider: Literal["anthropic", "openai", "xai", "google"]
+    provider: Literal["anthropic", "openai", "xai", "google", "nvidia", "qwen"]
     bedrock_model_id: str
     bedrock_region: str
     aliases: tuple[str, ...]
@@ -74,222 +80,50 @@ class ModelEntry:
     sr_pool_ref: Optional[str] = None
 
 
-# Source of truth. To add a model: append an entry, redeploy. There is no
-# runtime override; the registry is intentionally code-resident so reviewers
-# can audit every reachable model in the diff.
-_REGISTRY: tuple[ModelEntry, ...] = (
-    # ---- Anthropic / Claude family (us-east-1) ----
-    # Claude Opus 5 lists at the same $5/$25 per MTok as the Opus 4.x tier (AWS
-    # Bedrock model card, Jul 2026), so it shares pricing_key="opus" — confirmed,
-    # not assumed.
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-opus-5",
-        bedrock_region="us-east-1",
-        aliases=("claude-opus-5",),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    # Claude Fable 5 — Anthropic's most capable model. Priced above the Opus tier
-    # ($10/$50 per MTok), so it carries its OWN pricing_key rather than sharing
-    # "opus". Bedrock offering requires the account to opt into the
-    # `provider_data_share` data-retention mode and has a higher refusal rate
-    # (stop_reason="refusal") than prior Claude models — both are Bedrock/account
-    # concerns, not gateway concerns, but see docs/CLI_GUIDE.md before relying on it.
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-fable-5",
-        bedrock_region="us-east-1",
-        aliases=("claude-fable-5",),
-        wire_protocol="messages",
-        pricing_key="fable",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-opus-4-7",
-        bedrock_region="us-east-1",
-        aliases=("claude-opus-4-7",),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-opus-4-6-v1",
-        bedrock_region="us-east-1",
-        aliases=("claude-opus-4-6",),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-opus-4-5-20251101-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-opus-4-5", "claude-opus-4-5-20251101"),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-opus-4-1-20250805-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-opus-4-1", "claude-opus-4-1-20250805"),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-opus-4-20250514-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-opus-4", "claude-opus-4-20250514"),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-sonnet-4-6",
-        bedrock_region="us-east-1",
-        aliases=("claude-sonnet-4-6",),
-        wire_protocol="messages",
-        pricing_key="sonnet",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"),
-        wire_protocol="messages",
-        pricing_key="sonnet",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
-        wire_protocol="messages",
-        pricing_key="haiku",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-3-7-sonnet", "claude-3-7-sonnet-20250219"),
-        wire_protocol="messages",
-        pricing_key="sonnet",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-3-5-haiku", "claude-3-5-haiku-20241022"),
-        wire_protocol="messages",
-        pricing_key="haiku",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-3-haiku-20240307-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-3-haiku",),
-        wire_protocol="messages",
-        pricing_key="haiku",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-3-opus-20240229-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-3-opus",),
-        wire_protocol="messages",
-        pricing_key="opus",
-    ),
-    ModelEntry(
-        provider="anthropic",
-        bedrock_model_id="us.anthropic.claude-3-sonnet-20240229-v1:0",
-        bedrock_region="us-east-1",
-        aliases=("claude-3-sonnet",),
-        wire_protocol="messages",
-        pricing_key="sonnet",
-    ),
-    # ---- OpenAI family on Bedrock (bedrock-mantle, us-east-2 / us-west-2) ----
-    # GPT-5.4 is GA in us-east-2 and us-west-2; verified working in us-west-2
-    # against the existing operator's codex config. GPT-5.5 is currently
-    # us-east-2 only.
-    ModelEntry(
-        provider="openai",
-        bedrock_model_id="openai.gpt-5.4",
-        bedrock_region="us-west-2",
-        aliases=("gpt-5.4", "openai.gpt-5.4"),
-        wire_protocol="responses",
-        pricing_key="gpt-5",
-    ),
-    ModelEntry(
-        provider="openai",
-        bedrock_model_id="openai.gpt-5.5",
-        bedrock_region="us-east-2",
-        aliases=("gpt-5.5", "openai.gpt-5.5"),
-        wire_protocol="responses",
-        pricing_key="gpt-5",
-    ),
-    # GPT-5.6 is a family of tiers on bedrock-mantle (OpenAI-compatible Responses
-    # endpoint). "Sol" is the flagship tier, "Terra" the balanced/cost-efficient
-    # one; each is a distinct Bedrock model card with its own price, so each
-    # carries its own pricing_key. Both are available on bedrock-mantle in
-    # us-east-1 and us-east-2 (Terra also us-west-2); this registry PINS us-east-2
-    # to reuse the same mantle region already proven by the gpt-5.5 entry.
-    ModelEntry(
-        provider="openai",
-        bedrock_model_id="openai.gpt-5.6-sol",
-        bedrock_region="us-east-2",
-        aliases=("gpt-5.6-sol", "openai.gpt-5.6-sol"),
-        wire_protocol="responses",
-        pricing_key="gpt-5.6-sol",
-    ),
-    ModelEntry(
-        provider="openai",
-        bedrock_model_id="openai.gpt-5.6-terra",
-        bedrock_region="us-east-2",
-        aliases=("gpt-5.6-terra", "openai.gpt-5.6-terra"),
-        wire_protocol="responses",
-        pricing_key="gpt-5.6-terra",
-    ),
-    # ---- xAI Grok on Bedrock (bedrock-mantle OpenAI-compatible, us-west-2) ----
-    # Grok 4.6 is served on bedrock-mantle's OpenAI-compatible surface, so it rides
-    # the SAME Responses transport as the OpenAI family — no new transport, just a
-    # registry entry. In-region mantle is us-west-2 only.
-    ModelEntry(
-        provider="xai",
-        bedrock_model_id="xai.grok-4.6",
-        bedrock_region="us-west-2",
-        aliases=("grok-4.6", "xai.grok-4.6"),
-        wire_protocol="responses",
-        pricing_key="grok",
-    ),
-    # ---- Google Gemma on Bedrock (bedrock-mantle only) ----
-    # Gemma 4 is served ONLY on the bedrock-mantle OpenAI-compatible endpoint (no
-    # Converse/bedrock-runtime), so it too rides the Responses transport. It is
-    # available on mantle in us-east-1/us-east-2/us-west-2/eu-central-1; this
-    # registry PINS us-east-2 (reusing the mantle region proven by gpt-5.5). NOTE:
-    # Bedrock publishes no per-token list price for Gemma, so `pricing_key="gemma"`
-    # DEFAULTS to the Opus tier (deliberate over-charge, never under-charge); an
-    # admin lowers it to the real rate via the PricingConfig table (see docs).
-    ModelEntry(
-        provider="google",
-        bedrock_model_id="google.gemma-4-31b",
-        bedrock_region="us-east-2",
-        aliases=("gemma-4", "gemma-4-31b", "google.gemma-4-31b"),
-        wire_protocol="responses",
-        pricing_key="gemma",
-    ),
-)
+# Source of truth: an external JSON document, not a Python literal. Operators add
+# models by editing data and redeploying — no code change, no Python syntax to get
+# wrong, and the file is reviewable as a table. The default lives next to this
+# module; STRATOCLAVE_MODEL_REGISTRY_PATH points at a different one.
+#
+# The registry is still fully validated at import: a malformed or self-inconsistent
+# document raises here rather than surfacing as a mysterious 400 (or, worse, a
+# request routed to a model with no accounting policy) on the hot path.
+_REGISTRY_FILENAME = "defaults/models.json"
+_SUPPORTED_SCHEMA_VERSION = 1
 
-
-_ALIAS_MAP: dict[str, ModelEntry] = {
-    alias: entry for entry in _REGISTRY for alias in entry.aliases
-}
-# Bedrock IDs are themselves valid client-facing identifiers (clients that
-# already speak Bedrock-native names). Allow them to round-trip through
-# resolve_model() but only for entries that exist in the registry.
-_BEDROCK_ID_MAP: dict[str, ModelEntry] = {
-    entry.bedrock_model_id: entry for entry in _REGISTRY
-}
+_PROVIDERS = frozenset({"anthropic", "openai", "xai", "google", "nvidia", "qwen"})
+_WIRE_PROTOCOLS = frozenset({"messages", "responses"})
+_SERVED_BY = frozenset({"bedrock", "vllm", "semantic-router"})
+# `notes` is documentation carried in the data; it has no runtime effect.
+_ENTRY_FIELDS = frozenset({
+    "provider", "bedrock_model_id", "bedrock_region", "aliases", "wire_protocol",
+    "pricing_key", "served_by", "endpoint_key", "virtual", "sr_pool_ref", "notes",
+})
+# `pricing_key` is required rather than defaulted. Defaulting a typo to "default"
+# charges the model at the `default` rate, and `default` is NOT an upper bound — the
+# fable tier is priced above it — so a mistyped key can under-charge.
+# `$comment` is the document's own prose; the rest is structure.
+_DOC_FIELDS = frozenset({"schema_version", "models", "$comment"})
+_REQUIRED_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "aliases",
+                    "wire_protocol", "pricing_key")
+_STRING_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "wire_protocol",
+                  "pricing_key", "endpoint_key", "sr_pool_ref", "notes")
+# Regions where the bedrock-mantle surface exists. `bedrock_region` is AUTHORITATIVE
+# for a responses entry — that is where the prompt goes — so a typo'd region must not
+# reach the transport, which would fail with a confusing connection error at best.
+#
+# Deliberately a STATIC fact about the service, not a deployment setting. In
+# particular it is NOT read from OPENAI_BEDROCK_REGIONS: that variable is a
+# display-only hint, and `tests/test_openai_region_residency_contract.py` pins that
+# it must never move a registry region, because the IaC residency analysis
+# (`iac/lib/region-config.ts`) reads the registry and ignores the variable. Making
+# the variable load-bearing here would silently invalidate that analysis. Residency
+# policy is enforced there; this check only rejects a region mantle does not have.
+# Per the model cards: the OpenAI and xAI families are offered in us-east-2/us-west-2,
+# and Gemma 4 adds us-east-1 and eu-central-1. Union of the two, because this check
+# only rejects a region mantle does not serve at all — which model is offered where is
+# the entry author's business.
+_MANTLE_REGIONS = frozenset({"us-east-1", "us-east-2", "us-west-2", "eu-central-1"})
 
 
 def _validate_registry(registry: tuple[ModelEntry, ...]) -> None:
@@ -309,10 +143,183 @@ def _validate_registry(registry: tuple[ModelEntry, ...]) -> None:
             )
 
 
+def registry_path() -> str:
+    """Path of the registry document actually in effect."""
+    override = os.getenv("STRATOCLAVE_MODEL_REGISTRY_PATH")
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), _REGISTRY_FILENAME)
+
+
+def _fail(path: str, message: str) -> NoReturn:
+    raise ValueError(f"model registry {path}: {message}")
+
+
+def _parse_entry(path: str, index: int, raw: object) -> ModelEntry:
+    where = f"models[{index}]"
+    if not isinstance(raw, dict):
+        _fail(path, f"{where} must be an object, got {type(raw).__name__}")
+    unknown = sorted(set(raw) - _ENTRY_FIELDS)
+    if unknown:
+        # Loud rather than ignored: a typo'd key is otherwise a silently dropped
+        # setting (e.g. "region" instead of "bedrock_region").
+        _fail(path, f"{where} has unknown field(s) {unknown}; allowed: {sorted(_ENTRY_FIELDS)}")
+    for field in _REQUIRED_FIELDS:
+        if field not in raw:
+            _fail(path, f"{where} is missing required field {field!r}")
+        if raw[field] in (None, "", [], {}):
+            _fail(path, f"{where} has an empty required field {field!r}")
+    for field in _STRING_FIELDS:
+        value = raw.get(field)
+        # Truthiness is not a type check: `"bedrock_region": 123` would otherwise
+        # pass here and fail much later inside boto3.
+        if value is not None and not isinstance(value, str):
+            _fail(path, f"{where}.{field} must be a string, got {type(value).__name__}")
+    virtual = raw.get("virtual", False)
+    # `bool(...)` would read the string "false" as True, and `virtual` is the flag
+    # that keeps an entry from ever being a charge-of-record model.
+    if not isinstance(virtual, bool):
+        _fail(path, f"{where}.virtual must be a JSON boolean, got {virtual!r}")
+    if raw["provider"] not in _PROVIDERS:
+        _fail(path, f"{where}.provider {raw['provider']!r} not in {sorted(_PROVIDERS)}")
+    if raw["wire_protocol"] not in _WIRE_PROTOCOLS:
+        _fail(path, f"{where}.wire_protocol {raw['wire_protocol']!r} not in {sorted(_WIRE_PROTOCOLS)}")
+    if raw["wire_protocol"] == "responses" and raw.get("served_by", "bedrock") == "bedrock":
+        if raw["bedrock_region"] not in _MANTLE_REGIONS:
+            _fail(path, f"{where}.bedrock_region {raw['bedrock_region']!r} is not a region where "
+                        f"bedrock-mantle exists {sorted(_MANTLE_REGIONS)}; a responses entry's "
+                        f"region is authoritative — that is where the prompt goes")
+    served_by = raw.get("served_by", "bedrock")
+    if served_by not in _SERVED_BY:
+        _fail(path, f"{where}.served_by {served_by!r} not in {sorted(_SERVED_BY)}")
+    aliases = raw["aliases"]
+    if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+        _fail(path, f"{where}.aliases must be a non-empty list of non-empty strings")
+    if len(set(aliases)) != len(aliases):
+        _fail(path, f"{where}.aliases repeats an alias: {aliases}")
+    # A virtual entry stands for a semantic-router pool rather than a model. Without
+    # both of these it would look like an ordinary billable entry, and `virtual` is
+    # the only thing keeping it from becoming a charge of record.
+    if virtual:
+        if served_by != "semantic-router":
+            _fail(path, f"{where} is virtual, so served_by must be 'semantic-router', got {served_by!r}")
+        if not raw.get("sr_pool_ref"):
+            _fail(path, f"{where} is virtual, so it must name the pool it stands for in sr_pool_ref")
+    elif raw.get("sr_pool_ref"):
+        _fail(path, f"{where} sets sr_pool_ref but is not virtual")
+    # Checked here as well as in `_validate_registry` so the message names the file
+    # and the entry index; a self-hosted entry without an endpoint key would otherwise be
+    # routed as if it were Bedrock.
+    if served_by == "vllm" and not raw.get("endpoint_key"):
+        _fail(path, f"{where} is served_by 'vllm', so it must name an endpoint_key "
+                    f"(an operator allowlist token, never a URL)")
+    return ModelEntry(
+        provider=raw["provider"],
+        bedrock_model_id=raw["bedrock_model_id"],
+        bedrock_region=raw["bedrock_region"],
+        aliases=tuple(aliases),
+        wire_protocol=raw["wire_protocol"],
+        pricing_key=raw["pricing_key"],
+        served_by=served_by,
+        endpoint_key=raw.get("endpoint_key"),
+        virtual=virtual,
+        sr_pool_ref=raw.get("sr_pool_ref"),
+    )
+
+
+def load_registry(path: Optional[str] = None) -> tuple[ModelEntry, ...]:
+    """Read, validate and freeze the registry document at `path`.
+
+    Raises `ValueError` on anything self-inconsistent. Separate from module import
+    so a test (or an operator's pre-deploy check) can validate a candidate file
+    without swapping the process-wide registry.
+    """
+    path = path or registry_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh, object_pairs_hook=_no_duplicate_keys)
+    except FileNotFoundError:
+        _fail(path, "file not found")
+    except OSError as exc:
+        _fail(path, f"cannot read: {exc}")
+    except json.JSONDecodeError as exc:
+        _fail(path, f"invalid JSON: {exc}")
+    if not isinstance(doc, dict):
+        _fail(path, "top level must be an object")
+    unknown_top = sorted(set(doc) - _DOC_FIELDS)
+    if unknown_top:
+        _fail(path, f"unknown top-level field(s) {unknown_top}; allowed: {sorted(_DOC_FIELDS)}")
+    version = doc.get("schema_version")
+    if version != _SUPPORTED_SCHEMA_VERSION:
+        # Refuse an unknown schema instead of guessing which fields still mean
+        # what they used to.
+        _fail(path, f"unsupported schema_version {version!r}; this build reads {_SUPPORTED_SCHEMA_VERSION}")
+    models = doc.get("models")
+    if not isinstance(models, list) or not models:
+        _fail(path, "\"models\" must be a non-empty array")
+
+    entries = tuple(_parse_entry(path, i, raw) for i, raw in enumerate(models))
+
+    # Uniqueness across the WHOLE namespace a client can address: aliases and
+    # Bedrock ids are both resolvable, so a collision between them is as
+    # ambiguous as a duplicate alias.
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        # Tracked by entry INDEX, not by model id: two entries sharing one
+        # bedrock_model_id (with different pricing keys, say) used to pass because
+        # the id matched itself, leaving `_BEDROCK_ID_MAP` last-writer-wins and the
+        # charged rate dependent on document order.
+        for name in (*entry.aliases, entry.bedrock_model_id):
+            previous = seen.get(name)
+            if previous is not None and previous != index:
+                _fail(path, f"name {name!r} is claimed by models[{previous}] "
+                            f"({entries[previous].bedrock_model_id!r}) and models[{index}] "
+                            f"({entry.bedrock_model_id!r})")
+            seen[name] = index
+
+    # Every pricing_key must name a real rate row in the BUNDLED document. A key that
+    # only a live source supplies is deliberately not enough: the floor is the layer
+    # guaranteed to load, so a model whose key exists nowhere else would be charged at
+    # `default` the moment the feed is unavailable. Add the row to the bundled
+    # document (a conservative rate is fine — the source raises it).
+    from .price_sources import load_rate_document
+
+    try:
+        known_keys = set(load_rate_document())
+    except Exception as exc:  # noqa: BLE001 — surface as a registry error, with cause.
+        _fail(path, f"cannot validate pricing keys: {exc}")
+    for index, entry in enumerate(entries):
+        if entry.pricing_key not in known_keys:
+            _fail(path, f"models[{index}] pricing_key {entry.pricing_key!r} has no rate row; "
+                        f"known keys: {sorted(known_keys)}")
+    _validate_registry(entries)
+    return entries
+
+
+# Loaded and validated once at import. A bad document fails the process start
+# rather than the first request that happens to touch it.
+_REGISTRY: tuple[ModelEntry, ...] = load_registry()
+
+
+_ALIAS_MAP: dict[str, ModelEntry] = {
+    alias: entry for entry in _REGISTRY for alias in entry.aliases
+}
+# Bedrock IDs are themselves valid client-facing identifiers (clients that
+# already speak Bedrock-native names). Allow them to round-trip through
+# resolve_model() but only for entries that exist in the registry.
+_BEDROCK_ID_MAP: dict[str, ModelEntry] = {
+    entry.bedrock_model_id: entry for entry in _REGISTRY
+}
+
+
 def assert_vllm_cache_rates_zero() -> None:
     """Assert every vLLM entry's pricing key has zero cache read/write rates.
-    Called lazily (e.g. at first hybrid use / in tests) rather than at import
-    to avoid a models<->pricing import cycle."""
+
+    Checked against the EFFECTIVE table (floor + active source + admin overrides),
+    not the bundled floor: a price source or an override could reintroduce a nonzero
+    cache rate that the floor does not have, and the invariant is about what actually
+    gets charged. Called lazily (first hybrid use / tests) rather than at import to
+    avoid a models<->pricing import cycle."""
     from .pricing import _cache
 
     for entry in _REGISTRY:
@@ -326,7 +333,6 @@ def assert_vllm_cache_rates_zero() -> None:
             )
 
 
-_validate_registry(_REGISTRY)
 
 
 def resolve_model(name: Optional[str]) -> ModelEntry:

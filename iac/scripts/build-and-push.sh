@@ -21,6 +21,15 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
+# Container runtime. Defaults to docker; set CONTAINER_CLI to any drop-in CLI
+# (finch, nerdctl, podman) so the documented path works on a host without docker
+# rather than requiring an edit here.
+CONTAINER_CLI="${CONTAINER_CLI:-docker}"
+if ! command -v "$CONTAINER_CLI" >/dev/null 2>&1; then
+    echo "[ERROR] container runtime '$CONTAINER_CLI' not found; set CONTAINER_CLI" >&2
+    exit 1
+fi
+
 # Validate required arguments
 if [ -z "$AWS_REGION" ]; then
     AWS_REGION="us-east-1"
@@ -60,22 +69,26 @@ log_info "ECR URI: $ECR_URI"
 
 # Authenticate to ECR
 log_info "Logging in to ECR..."
-aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_URI
+aws ecr get-login-password --region $AWS_REGION | "$CONTAINER_CLI" login --username AWS --password-stdin $ECR_URI
 
 # Build Docker image
-log_info "Building Docker image..."
+log_info "Building image with $CONTAINER_CLI..."
 cd "$(dirname "$0")/../../backend"
-docker build -t stratoclave-backend:latest .
+"$CONTAINER_CLI" build -t stratoclave-backend:latest .
+
+# One timestamp for both the tag and the push: evaluating `date` twice can
+# straddle a second boundary and push a tag that was never created.
+BUILD_TAG="$(date +%Y%m%d-%H%M%S)"
 
 # Tag image
 log_info "Tagging image..."
-docker tag stratoclave-backend:latest $ECR_URI:latest
-docker tag stratoclave-backend:latest $ECR_URI:$(date +%Y%m%d-%H%M%S)
+"$CONTAINER_CLI" tag stratoclave-backend:latest $ECR_URI:latest
+"$CONTAINER_CLI" tag stratoclave-backend:latest $ECR_URI:$BUILD_TAG
 
 # Push image to ECR
 log_info "Pushing image to ECR..."
-docker push $ECR_URI:latest
-docker push $ECR_URI:$(date +%Y%m%d-%H%M%S)
+"$CONTAINER_CLI" push $ECR_URI:latest
+"$CONTAINER_CLI" push $ECR_URI:$BUILD_TAG
 
 log_info "Docker image pushed successfully!"
 log_info "ECR URI: $ECR_URI:latest"

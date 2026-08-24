@@ -72,7 +72,10 @@ def api_client(dynamodb_mock, seed_active_tenant):
     app.dependency_overrides[get_current_user] = lambda: _FakeUser()
 
     with patch("mvp.anthropic._bedrock_client") as mock_bedrock:
-        with patch("mvp.chat_completions._bedrock_client") as mock_chat_bedrock:
+        # The chat route builds its Converse client through the shared
+        # `_bedrock_clients.deployment_client` (imported into this module), not a
+        # private helper of its own.
+        with patch("mvp.chat_completions.deployment_client") as mock_chat_bedrock:
             with patch("mvp.routing.infrarouter.bedrock_client") as mock_routing:
                 mock_bedrock.return_value.converse.side_effect = _mock_converse
                 mock_bedrock.return_value.converse_stream.side_effect = _mock_converse_stream
