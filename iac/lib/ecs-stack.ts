@@ -505,6 +505,38 @@ export class EcsStack extends cdk.Stack {
         ],
       }),
     );
+    // Non-Anthropic models the registry serves over Converse (see
+    // `backend/mvp/models.py` `_REGISTRY`, entries whose `wire_protocol` is
+    // "messages"). They are reachable only through /v1/chat/completions.
+    //
+    // Listed by EXACT model id, not by a `nvidia.*` / `qwen.*` vendor wildcard:
+    // the scoping rationale above is cost containment, and a vendor wildcard
+    // would grant every current and future model those vendors publish. The
+    // coupling is deliberate — registering a Converse model without adding it
+    // here fails loudly with AccessDeniedException at invoke time rather than
+    // quietly widening the blast radius.
+    //
+    // These carry no inference profile: the registry names the bare
+    // foundation-model id, so only the region-less foundation-model ARN applies.
+    const registryConverseModelIds = [
+      'nvidia.nemotron-super-3-120b',
+      'qwen.qwen3-next-80b-a3b',
+    ];
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowRegistryConverseInvoke',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+          'bedrock:Converse',
+          'bedrock:ConverseStream',
+        ],
+        resources: registryConverseModelIds.map(
+          (modelId) => `arn:aws:bedrock:*::foundation-model/${modelId}`,
+        ),
+      }),
+    );
     // Bedrock read-only operations (model discovery / /v1/models).
     // ListFoundationModels / ListInferenceProfiles do not support
     // resource-level scoping, so the resource list stays at `*`.
