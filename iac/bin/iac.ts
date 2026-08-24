@@ -4,6 +4,7 @@ import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
 import {
   capacityPlan,
   getPrefix,
+  impliedRatePer5Min,
   optionalPositiveIntFromEnv,
   stackName,
   paramPath,
@@ -123,7 +124,15 @@ const enableEcsExec = ecsExecExplicit !== undefined
 // P1-2 WAF: set ENABLE_WAF=false only for throwaway stacks. Default is on —
 // without WAF, /api/* is exposed with no rate limit or managed-rule coverage.
 const enableWaf = (process.env.ENABLE_WAF || 'true').toLowerCase() !== 'false';
-const wafRateLimit = Number(process.env.WAF_RATE_LIMIT_PER_5MIN || 300);
+// The per-IP ceiling for AUTHENTICATED traffic. Derived from the concurrency
+// target rather than fixed: at 300 req / 5 min a single host driving the target
+// was blocked with 403 on 1018 of 1024 requests while the service itself served
+// 60 req/s comfortably, because an aggregator in front of the gateway is one IP
+// carrying many users' traffic. Cost for that traffic is bounded per identity by
+// the token quota; this rule's remaining job is to bound a flood.
+const wafConcurrencyTarget = positiveIntFromEnv('BACKEND_CONCURRENCY_TARGET', 1024);
+const wafRateFloor = impliedRatePer5Min(wafConcurrencyTarget);
+const wafRateLimit = Number(process.env.WAF_RATE_LIMIT_PER_5MIN || wafRateFloor);
 // AWS WAF rate-based rule minimum is 100 req / 5 min; a typo like "3oo" yields
 // NaN and fails at CFN deploy with an unhelpful message. Fail at synth instead.
 // (Fable review L-3)
@@ -132,6 +141,20 @@ if (!Number.isInteger(wafRateLimit) || wafRateLimit < 100) {
     `WAF_RATE_LIMIT_PER_5MIN must be an integer >= 100 (got "${process.env.WAF_RATE_LIMIT_PER_5MIN}").`
   );
 }
+if (wafRateLimit < wafRateFloor) {
+  cdk.Annotations.of(app).addWarning(
+    `WAF_RATE_LIMIT_PER_5MIN (${wafRateLimit}) is below the ${wafRateFloor} a single ` +
+      `client at BACKEND_CONCURRENCY_TARGET (${wafConcurrencyTarget}) can produce: ` +
+      'traffic the gateway is sized to serve will be blocked with 403 before it ' +
+      'reaches the service.',
+  );
+}
+// Unattributable requests keep the original tight ceiling: with no user to charge,
+// the address is the only key available.
+const wafUnauthenticatedRateLimit = positiveIntFromEnv(
+  'WAF_UNAUTH_RATE_LIMIT_PER_5MIN',
+  300,
+);
 const wafIpAllowlistEnabled =
   (process.env.WAF_IP_ALLOWLIST_ENABLED || 'false').toLowerCase() === 'true';
 
@@ -188,6 +211,7 @@ if (enableWaf) {
     crossRegionReferences: true,
     prefix,
     rateLimitPer5Min: wafRateLimit,
+    unauthenticatedRateLimitPer5Min: wafUnauthenticatedRateLimit,
     ipAllowlistEnabled: wafIpAllowlistEnabled,
     description: `[${prefix}] WAFv2 WebACL for CloudFront (rate-limit + managed rules)`,
   });

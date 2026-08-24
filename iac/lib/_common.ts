@@ -195,3 +195,23 @@ export function capacityPlan(input: CapacityPlanInput): CapacityPlan {
   }
   return { immediate, sustained, notes, warnings };
 }
+
+/**
+ * The per-IP, per-5-minute rate a client at the concurrency target can legitimately
+ * produce.
+ *
+ * A rate rule and a concurrency target are the same kind of knob-pair trap as the
+ * thread ceilings: state them separately and one silently defeats the other. One
+ * client holding `target` requests in flight, each taking at least
+ * `fastestRequestSeconds`, issues at most this many requests per window. The
+ * default 0.5 s is below the fastest p50 measured on 2026-08-24 (306 ms direct,
+ * 597 ms through the gateway), so the result is a ceiling legitimate traffic does
+ * not reach rather than an average it might.
+ */
+export function impliedRatePer5Min(
+  target: number,
+  fastestRequestSeconds = 0.5,
+): number {
+  const windowSeconds = 300;
+  return Math.ceil((target * windowSeconds) / fastestRequestSeconds);
+}

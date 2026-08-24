@@ -175,22 +175,42 @@ latency 2.4x higher, and 6.0 req/s at 512 with latency worse again — saturatio
 around 8 req/s per task. Holding **300 requests per minute per task** (5 req/s)
 keeps a task at about 62% of that, which is where latency is still flat.
 
-## Two limits that are not capacity
+## Three limits that are not capacity
 
 The sweep could not reach 1024, and what stopped it was policy rather than
-capacity — worth knowing before sizing anything against this gateway:
+capacity — all three are worth knowing before sizing anything against this
+gateway.
 
-* **The WAF rate rule.** `WAF_RATE_LIMIT_PER_5MIN` defaults to 300 requests per
-  five minutes per source IP, which is one request per second sustained. The 1024
-  stage returned 403 for 1018 of its requests because earlier stages had used the
-  window up. Any single-IP client — a benchmark harness, a router in front of the
-  gateway — meets this long before it meets the concurrency ceiling.
-* **The caller's own token budget.** The 256 and 512 stages returned 402
-  `personal_budget_exhausted` for some requests. That is the accounting working,
-  but it caps a sustained run just as effectively.
+**The WAF rate rule, since fixed.** It allowed 300 requests per five minutes per
+source IP — one per second sustained — for all traffic. The 1024 stage returned
+403 for 1018 of its requests while the service itself was serving 60 req/s
+comfortably. The reasoning behind 300 was that an LLM request takes seconds, so
+1 req/s per IP could not impede normal use; that is false for the clients this
+gateway exists to serve, because an aggregator in front of it — a semantic router,
+a benchmark harness, a CI fleet behind one NAT — is one address carrying many
+users' traffic.
 
-Both have to be raised deliberately for a load test, and neither says anything
-about how many requests a task can hold.
+A per-IP rate rule is the wrong instrument for that traffic, and the gateway
+already has the right one: per-user token quotas and per-tenant dollar pools bound
+cost per identity rather than per address. So the rule is now two rules.
+Authenticated requests get a ceiling derived from the concurrency target
+(`impliedRatePer5Min`: a client holding the target in flight, each request no
+faster than the fastest measured p50, produces at most that many per window), whose
+remaining job is to bound a flood. Requests with no usable `Authorization` header
+keep the tight 300, because with no user to charge the address is the only key
+available.
+
+**The caller's token budget, and how it bounds concurrency.** Reservations are held
+concurrently and each one is at least 1024 tokens, so a single user cannot have more
+than `remaining_credit / 1024` requests in flight — regardless of what the fleet
+can serve. Driving 1024 concurrent from one identity needs roughly 1.05M tokens of
+headroom held at the peak, even though the settled cost of those requests is a few
+tens of thousands. The 256 and 512 stages returned 402 `personal_budget_exhausted`
+for exactly this reason. Settlement itself is correct: one request measured 37
+tokens of usage and 37 of credit.
+
+**Neither says anything about how many requests a task can hold**, which is what
+the ceilings above are about.
 
 ## Why scaling tracks requests, not CPU
 
