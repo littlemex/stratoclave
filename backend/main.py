@@ -136,6 +136,14 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # How many requests this task may hold at once. Applied before the server
+    # accepts traffic, because both ceilings belong to the running loop and the
+    # framework's defaults are low enough to cap a task well below what its CPU
+    # can serve.
+    from mvp._concurrency import configure_capacity as _configure_capacity
+
+    _configure_capacity()
+
     # Fail the deployment on a misconfigured price source rather than letting live
     # traffic be charged at the bundled floor. The request path degrades on pricing
     # failures by design, so startup is the only place this can be a hard error.
@@ -162,6 +170,14 @@ async def lifespan(app: FastAPI):
         logger.warning("vsr_startup_handshake_failed", error=str(exc))
 
     yield
+
+    # Close the pooled upstream clients. They live for the process, so this is the
+    # only place their connections are released; dropping them without closing
+    # would leak sockets for as long as the task lingers in draining.
+    from mvp._mantle_transport import aclose_all as _aclose_mantle_clients
+
+    await _aclose_mantle_clients()
+
     logger.info("application_shutdown")
 
 
