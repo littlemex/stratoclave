@@ -175,6 +175,48 @@ latency 2.4x higher, and 6.0 req/s at 512 with latency worse again — saturatio
 around 8 req/s per task. Holding **300 requests per minute per task** (5 req/s)
 keeps a task at about 62% of that, which is where latency is still flat.
 
+## Reaching the target, and what it costs
+
+With the WAF ceiling raised and the caller's budget topped up, the sweep reached
+1024 on 2026-08-25: 1017 of 1024 requests returned 200, with no 403 and no 402. Of
+the remaining seven, six were the load generator's own socket exhaustion — the
+direct arm hit the same six at the same concurrency — and one was a 504 on an
+upstream call that took longer than the 30 s CloudFront allows.
+
+| Concurrency | Per task | Gateway | Direct, same run |
+| --- | --- | --- | --- |
+| 8 | 1 | 10.2 req/s, p50 361 ms | 18.6 req/s, p50 312 ms |
+| 64 | 8 | 42.3 req/s, p50 549 ms | 11.7 req/s, p50 332 ms |
+| 256 | 32 | 81.1 req/s, p50 1331 ms | 147.9 req/s, p50 511 ms |
+| 512 | 64 | 91.9 req/s, p50 2791 ms | 107.8 req/s, p50 958 ms |
+| 1024 | 128 | 31.7 req/s, p50 7706 ms | 38.8 req/s, p50 1873 ms |
+
+Peak throughput is 91.9 req/s at 512, twenty times the 4.5 req/s this started at.
+But latency tracks *per-task* concurrency, not total: 390 ms at 4 per task, 549 ms
+at 8, 1331 ms at 32, 2791 ms at 64, 7706 ms at 128. Admitting a request and serving
+it at the upstream's own latency are different things, and the ceiling bounds the
+first.
+
+**Where the time goes at that level is our own accounting, not the model.** The
+per-phase timing over 3,006 requests: reserve p50 1201 ms and p95 3623 ms, settle
+p50 285 ms, upstream p50 317 ms, and 4.9 ms unaccounted. Restricted to requests
+slower than 5 s, reserve is p50 3844 ms and upstream p50 487 ms.
+
+DynamoDB is not the queue: UpdateItem averaged 3-4 ms with no conditional-check
+failures, no throttling and 82 WCU/s at peak. Task CPU averaged 32% and peaked at
+69%. So the wait is neither the database's service time nor raw CPU — it is 128
+threads in one Python process taking turns at the GIL, each request needing several
+short bursts of CPU for signing and serialization across reserve, invoke and
+settle. That is why latency scales with threads per process while CPU does not
+saturate.
+
+The consequence for sizing: **scale processes, not threads.** A per-process ceiling
+around 8 keeps latency at the upstream's own; 32 is a defensible compromise at p50
+1.3 s; 128 admits the traffic but at 7.7 s. Reaching 1024 at low latency means
+roughly 32 processes — `uvicorn --workers` within a task, or more tasks — rather
+than a higher thread ceiling. `GATEWAY_SYNC_ROUTE_THREADS` is an admission ceiling
+and this document should not be read as claiming it is a latency budget.
+
 ## Three limits that are not capacity
 
 The sweep could not reach 1024, and what stopped it was policy rather than
