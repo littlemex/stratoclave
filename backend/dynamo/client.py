@@ -4,12 +4,22 @@ from functools import lru_cache
 
 import boto3
 
+from core.aws_pool import boto_config
+
+# Every request reserves and settles, so this resource is the busiest AWS client in
+# the process and the one that must not inherit botocore's pool of 10. See
+# `core.aws_pool`: past the tenth concurrent call, every call was paying a fresh
+# TLS handshake to DynamoDB.
+DYNAMODB_POOL_ENV = "DYNAMODB_MAX_POOL_CONNECTIONS"
+
 
 @lru_cache(maxsize=1)
 def get_dynamodb_resource():
     """Return the process-wide DynamoDB resource (with StringSet serialisation support)."""
     region = os.getenv("AWS_REGION", "us-east-1")
-    return boto3.resource("dynamodb", region_name=region)
+    return boto3.resource(
+        "dynamodb", region_name=region, config=boto_config(DYNAMODB_POOL_ENV)
+    )
 
 
 def table_name(env_var: str, fallback: str) -> str:

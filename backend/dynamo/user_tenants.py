@@ -572,8 +572,13 @@ class UserTenantsRepository:
         # (resource.meta.client also works, but a fresh client avoids ResourceSerialization side effects.)
         import os as _os
         import boto3 as _boto3
+
+        from core.aws_pool import boto_config
+
+        from .client import DYNAMODB_POOL_ENV
         region = _os.getenv("AWS_REGION", "us-east-1")
-        dynamo = _boto3.client("dynamodb", region_name=region)
+        dynamo = _boto3.client(
+            "dynamodb", region_name=region, config=boto_config(DYNAMODB_POOL_ENV))
 
         transact_items: list[dict[str, Any]] = [
             # (1) Archive the old UserTenants row.

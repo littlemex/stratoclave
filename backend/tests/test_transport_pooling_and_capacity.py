@@ -118,13 +118,12 @@ class TestBedrockClientPooling:
         exists for."""
         from mvp import _bedrock_clients
 
+        from core.aws_pool import DEFAULT_POOL_CONNECTIONS
+
         _bedrock_clients.reset_client_cache()
         default = _bedrock_clients.bedrock_runtime_client("us-east-1")
-        assert (
-            default.meta.config.max_pool_connections
-            == _bedrock_clients.DEFAULT_MAX_POOL_CONNECTIONS
-        )
-        assert _bedrock_clients.DEFAULT_MAX_POOL_CONNECTIONS > 10
+        assert default.meta.config.max_pool_connections == DEFAULT_POOL_CONNECTIONS
+        assert DEFAULT_POOL_CONNECTIONS > 10
 
         monkeypatch.setenv(_bedrock_clients.MAX_POOL_CONNECTIONS_ENV, "300")
         _bedrock_clients.reset_client_cache()
@@ -628,10 +627,15 @@ class TestMantleClientPooling:
 
 
 class TestCapacityConfiguration:
-    def test_defaults_lift_both_framework_ceilings(self):
-        """anyio's 40 and the loop executor's `min(32, cpu+4)` are both below any
-        useful target, and the sync chat route holds its worker for the whole
-        upstream call, so the anyio ceiling IS the per-task request limit."""
+    def test_defaults_are_set_deliberately_in_both_places(self):
+        """The sync-route ceiling is set BELOW anyio's default of 40 on purpose.
+
+        128 was tried and measured: p50 went from 390 ms at 4 requests per process
+        to 7706 ms at 128, and throughput collapsed rather than plateaued. A process
+        that admits more than it can turn around is queueing inside itself where no
+        metric can see it, so the ceiling sits near the knee and the fleet grows by
+        processes instead.
+        """
         from anyio import to_thread
 
         from mvp._concurrency import (
@@ -649,7 +653,10 @@ class TestCapacityConfiguration:
         assert applied.offload_threads == DEFAULT_OFFLOAD_THREADS
         assert applied.sync_route_threads == DEFAULT_SYNC_ROUTE_THREADS
         assert limiter_total == DEFAULT_SYNC_ROUTE_THREADS
-        assert DEFAULT_SYNC_ROUTE_THREADS > 40, "must exceed anyio's default to matter"
+        assert DEFAULT_SYNC_ROUTE_THREADS < 40, (
+            "the measured knee is below anyio's default; admitting more per process "
+            "traded latency for nothing"
+        )
 
     def test_env_overrides_are_applied(self, monkeypatch):
         from anyio import to_thread

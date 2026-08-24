@@ -56,14 +56,22 @@ from botocore.config import Config
 #     tenth. It therefore tracks the same per-task concurrency ceiling as the
 #     thread limits in `_concurrency`.
 MAX_POOL_CONNECTIONS_ENV = "BEDROCK_MAX_POOL_CONNECTIONS"
-DEFAULT_MAX_POOL_CONNECTIONS = 128
 
 
 def bedrock_pool_size() -> int:
-    """Connections this task may hold to Bedrock. Validated at startup."""
+    """Connections this task may hold to Bedrock.
+
+    Falls back to the process's request ceiling rather than to a literal of its
+    own, so the two cannot drift apart. Validated at startup.
+    """
+    from core.aws_pool import max_pool_connections
+
     from ._concurrency import capacity_env_int
 
-    return capacity_env_int(MAX_POOL_CONNECTIONS_ENV, DEFAULT_MAX_POOL_CONNECTIONS)
+    # Read through the capacity validator first so an unusable value fails
+    # startup like every other ceiling, then resolve the default.
+    capacity_env_int(MAX_POOL_CONNECTIONS_ENV, max_pool_connections())
+    return max_pool_connections(MAX_POOL_CONNECTIONS_ENV)
 
 
 def _default_config() -> Config:

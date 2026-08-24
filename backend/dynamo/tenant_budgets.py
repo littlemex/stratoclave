@@ -76,8 +76,13 @@ def _budgets_low_level_client():
         import os
 
         import boto3
+
+        from core.aws_pool import boto_config
+
+        from .client import DYNAMODB_POOL_ENV
         _BUDGETS_LL_CLIENT = boto3.client(
-            "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"))
+            "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"),
+            config=boto_config(DYNAMODB_POOL_ENV))
     return _BUDGETS_LL_CLIENT
 
 
