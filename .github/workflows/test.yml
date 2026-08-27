@@ -14,7 +14,14 @@ name: test
 #   - Frontend (31 tests): RBAC helpers, token storage, ProtectedRoute
 #     integration, AuthContext bootstrap (3 paths), MeUsage rendering.
 #
+#   - Local mode (this file's `local` job): the scripts behind `make up`,
+#     the API-key auth path against DynamoDB Local, the model registry, the
+#     unknown-model guidance, plus `make prove` and `make demo-offline`. No AWS
+#     credentials and no paid Bedrock call — the point is that the credential-free
+#     paths cannot rot unnoticed.
+#
 # Playwright smoke runs separately in .github/workflows/e2e-nightly.yml.
+# The compose build itself is exercised nightly, not here (see that file).
 
 on:
   push:
@@ -49,6 +56,102 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Run pytest
         run: pytest -q tests/
+
+  local:
+    name: local / offline paths + local-mode wiring
+    runs-on: ubuntu-latest
+    # DynamoDB Local, same pinned tag as docker-compose.yml. Nothing here talks
+    # to AWS: the credentials below are placeholders DynamoDB Local accepts, and
+    # every request made against the gateway stops before Bedrock is invoked.
+    services:
+      dynamodb-local:
+        image: amazon/dynamodb-local:2.5.2
+        ports:
+          - 8000:8000
+    env:
+      AWS_ENDPOINT_URL_DYNAMODB: http://localhost:8000
+      AWS_ACCESS_KEY_ID: ci-local-placeholder
+      AWS_SECRET_ACCESS_KEY: ci-local-placeholder
+      AWS_REGION: us-east-1
+      ENVIRONMENT: ci
+      CODEX_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install runtime + dev dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      # --- paths that need neither AWS nor a container -------------------
+      - name: make prove (Z3 invariants over the money model)
+        run: make prove
+      - name: make demo-offline (offline rating + savings fold)
+        run: make demo-offline
+
+      # --- the local-mode scripts, for real, against DynamoDB Local -----
+      - name: Create the local tables
+        run: python scripts/local/create_tables.py
+      - name: Seed the local user and API key
+        run: python scripts/local/seed_local_user.py
+
+      - name: Boot the gateway
+        working-directory: backend
+        run: |
+          # nohup + disown so the process survives this step's shell exiting.
+          PYTHONPATH=. nohup python -m uvicorn main:app --host 127.0.0.1 --port 8080 \
+            > /tmp/gateway.log 2>&1 &
+          disown
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/health; then
+              echo "gateway up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway did not become healthy" >&2
+          tail -50 /tmp/gateway.log >&2
+          exit 1
+
+      - name: The seeded key authenticates and the registry answers
+        # Exercises the whole credential-free auth path: key hash -> api-keys
+        # table -> Users row -> org / roles / scopes, then the model registry.
+        run: |
+          KEY=$(cat data/local/api_key)
+          code=$(curl -s -o /tmp/models.json -w '%{http_code}' \
+            -H "Authorization: Bearer $KEY" http://127.0.0.1:8080/v1/models)
+          test "$code" = "200" || { echo "expected 200, got $code" >&2; cat /tmp/models.json >&2; exit 1; }
+          python - <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/models.json")).get("data") or []
+          if not data:
+              sys.exit("the model registry came back empty")
+          print(f"{len(data)} models listed")
+          PY
+
+      - name: An unrecognised model name is answered with guidance, not an internal path
+        # Also a guard on the request path itself: this 400 is raised during model
+        # resolution, before Bedrock would be called, so it needs no credentials.
+        run: |
+          KEY=$(cat data/local/api_key)
+          code=$(curl -s -o /tmp/badmodel.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+            -d '{"model":"us.anthropic.claude-haiku-4-5","max_tokens":4,
+                 "messages":[{"role":"user","content":"x"}]}' \
+            http://127.0.0.1:8080/v1/messages)
+          test "$code" = "400" || { echo "expected 400, got $code" >&2; cat /tmp/badmodel.json >&2; exit 1; }
+          grep -q "GET /v1/models" /tmp/badmodel.json \
+            || { echo "the error does not point the caller at the model list" >&2; cat /tmp/badmodel.json >&2; exit 1; }
+          grep -q "claude-haiku-4-5" /tmp/badmodel.json \
+            || { echo "the error does not suggest the alias it contains" >&2; cat /tmp/badmodel.json >&2; exit 1; }
+          if grep -q "backend/mvp" /tmp/badmodel.json; then
+            echo "the error leaks an internal source path" >&2; cat /tmp/badmodel.json >&2; exit 1
+          fi
+
+      - name: Gateway log on failure
+        if: failure()
+        run: tail -100 /tmp/gateway.log || true
 
   cli:
     name: cli / cargo test
