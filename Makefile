@@ -10,7 +10,7 @@ COMPOSE := $(shell command -v docker >/dev/null 2>&1 && echo "docker compose" ||
 LOCAL_DDB_ENDPOINT := http://127.0.0.1:8000
 GATEWAY_URL := http://127.0.0.1:8080
 
-.PHONY: up demo demo-offline prove down _host-deps
+.PHONY: up demo demo-offline prove verify-rating verify-formal down _host-deps
 
 # Start DynamoDB Local, create every table it needs (mirroring
 # iac/lib/dynamodb-stack.ts), build and start the gateway, then seed one
@@ -91,10 +91,29 @@ prove:
 	  tests/test_savings_z3.py \
 	  tests/test_sr_money_formal_z3.py \
 	  tests/test_observability_emit_z3.py \
+	  tests/test_rating_formal_z3.py \
+	  tests/test_pricing_pinning_z3.py \
 	  -q
-	@echo "Proved: reserve/settle admits no double-counting, and the PENDING-protocol"
-	@echo "migration is a verified-equivalent money path — under the axioms stated at"
-	@echo "the top of each test file run above."
+	@echo "Proved: reserve/settle admits no double-counting, the PENDING-protocol"
+	@echo "migration is a verified-equivalent money path, and the ceiling is sound"
+	@echo "GIVEN that the reserve estimate dominates the settled actual per"
+	@echo "component — under the axioms stated at the top of each test file above."
+	@echo ""
+	@echo "That premise is NOT proved and is false today: run 'make verify-rating'"
+	@echo "for the differential checks and the pinned known defect."
+
+# The differential half of the formal layer: drives the real pricing functions and
+# an independently written reference with the same inputs, so "the encoding matches
+# the code" is sampled rather than assumed. No network, no AWS, no container.
+verify-rating:
+	cd backend && python3 -m pytest tests/test_rating_differential.py -q
+	@echo ""
+	@echo "One xfail is expected and is a tracking device, not a nuisance: the"
+	@echo "estimator prices three components while the charger bills four, so a"
+	@echo "prompt-cache write settles above its reservation. See docs/EVIDENCE.md."
+
+# Everything in the formal layer that needs no credentials and no container.
+verify-formal: prove verify-rating
 
 # Stop DynamoDB Local and the gateway, and remove the local DynamoDB volume.
 # Your Bedrock account is never touched by this. Your local ledger, user, and

@@ -67,6 +67,48 @@ documented local path actually runs. Setup and caveats: `docs/LOCAL.md`.
 | **A stand-in store makes local timing meaningless, not merely inflated** | the same call on moto: `reserve_ms=9485.2`, `settle_ms=3866.3` — reserve alone ~690× the DynamoDB Local figure | **local-store** | — |
 | **The local scripts cannot write to a real account** | `scripts/local/_local_guard.py` checks the endpoint botocore *resolved*, not just the variable that was set, and exits if it is an AWS host. Both refusal paths exercised | **moto · in-process** | — |
 
+### Formal coverage of the money arithmetic (added 2026-08-28)
+
+Completeness here is measured as **the number of assumptions still merely
+trusted**, not the number of files. Each property wants three things: a proof, a
+counterexample that deletes the guard and shows the property break, and a
+differential link to the real Python. A row with a proof and no differential link
+is a claim about an encoding.
+
+| Property | Proof | Counterexample | Differential | Trusted assumption left |
+|---|---|---|---|---|
+| Ceiling soundness **given** per-component estimate dominance | `test_rating_formal_z3.py::test_g1_dominance_implies_actual_not_above_reserved`, `…settle_never_lowers_headroom_under_dominance` | `…sanity_without_dominance_ceiling_breaks`, `…sanity_repricing_at_settle_breaks_the_ceiling` | `test_rating_differential.py::test_estimate_dominates_actual_when_only_input_and_output_are_billed` | **the premise itself is FALSE today — see the row below** |
+| The rating fold is a function of the recorded components | `…test_g3_the_fold_is_a_function_of_the_recorded_components` | — (uniqueness has no guard to delete) | `test_rating_differential.py::test_rating_total_matches_an_independent_recomputation`, `…test_t1_the_event_recomputes_from_itself_alone` | none |
+| Recording the rounding rule is load-bearing | `…test_g3_per_component_and_post_total_rounding_differ`, `…test_g3_ceil_never_undercharges` | `…test_g3_sanity_floor_undercharges` | `…test_an_unknown_rounding_policy_is_refused_not_guessed`, `…test_ceil_never_undercharges_the_exact_rational_cost` | none |
+| Rounding is monotone, so token dominance carries to cost dominance | `…test_g3_ceil_is_monotone_in_the_numerator` (linear), `…test_g3_numerator_is_monotone_in_each_factor` (over the reals) | `…sanity_ceil_monotonicity_needs_the_ordering`, `…sanity_numerator_monotonicity_needs_a_nonnegative_factor` | covered by the fold row | negative rates are out of scope by assumption B3 |
+| Pinning is sufficient for the ceiling | `test_pricing_pinning_z3.py::test_g2_a_settle_rate_at_or_below_the_pinned_rate_preserves_the_ceiling` | `…sanity_a_settle_rate_above_the_pinned_rate_breaks_it` | **absent** — that settle does not re-read `CURRENT` is a code property no SMT run can establish | **that the code honours the pinned rate** |
+| A version read after its rows cannot dangle | `…test_g2_a_version_read_after_its_rows_cannot_dangle` | `…sanity_flipping_before_writing_dangles` | absent (needs the store; Phase 2) | row immutability, assumption C1 |
+| Sentinel biconditional: a real version **iff** a snapshot priced it | `…test_g4_real_version_stamped_if_and_only_if_snapshot_priced_it`, `…test_g4_each_cause_gets_its_own_label` | `…sanity_stamping_current_on_snapshot_failure_breaks_it`, `…sanity_one_shared_sentinel_collapses_the_causes` | `…test_the_modelled_sentinels_are_the_shipped_sentinels` (the constants are real and pairwise distinct) | that the stamping code implements the modelled rule |
+| No overflow; refunds cannot go negative | `test_rating_formal_z3.py::test_g6_no_overflow_within_realistic_bounds`, `…refund_cannot_drive_settled_negative` | `…sanity_unbounded_tokens_overflow`, `…sanity_unbounded_refund_goes_negative` | absent | the stated bounds |
+| Zero rate / zero tokens cost zero | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` | — | covered by the fold row | none |
+
+**The defect this found, before any of it was implemented.** `rate_usage` charges
+four components (input, output, cache_read, **cache_write**) while
+`estimate_cost_microusd` prices three (fresh input, warm input at the cache-read
+rate, output). There is no cache-write leg, and in the shipped rate document
+cache_write is priced **above** input, so a request that writes prompt cache
+settles above what was reserved for it. Measured on the shipped `default` rates
+with 1,000 input / 100 output / 5,000 cache-write tokens: reserved 7,500 microUSD,
+settled 38,750 — an overrun of 31,250. Premise (P) of the ceiling theorem is
+therefore false in the shipped implementation, and the dollar pool has no overrun
+path of its own: the token dimension has `credit_overrun` with a top-up and clamp,
+the pool books the actual. Pinned as
+`test_rating_differential.py::test_estimate_omits_the_cache_write_leg`, an
+`xfail(strict=True)` so that fixing the estimator fails the suite and forces the
+marker out.
+
+Assumptions deliberately left trusted, with the reason: DynamoDB's transactional
+atomicity and single-item serialisation (AWS's documented semantics — proving it
+here would be waste); pricing-row immutability (a discipline in `set_rates`, not a
+condition expression or an IAM boundary); and that the settle code honours the
+pinned rate rather than re-reading `CURRENT`. The third is the next one to
+discharge and it needs the store, not the solver.
+
 ## The honest borders (stated once, plainly)
 
 - **`deployed-live` rows are the only ones that ran outside the process.** Everything else,

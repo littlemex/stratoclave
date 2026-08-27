@@ -90,8 +90,11 @@ jobs:
         run: pip install -r backend/requirements-dev.txt
 
       # --- paths that need neither AWS nor a container -------------------
-      - name: make prove (Z3 invariants over the money model)
-        run: make prove
+      - name: make verify-formal (Z3 invariants + the differential oracle)
+        # `prove` replays the SMT proofs; `verify-rating` drives the real pricing
+        # functions against an independently written reference, so "the encoding
+        # matches the code" is sampled rather than assumed. Neither needs AWS.
+        run: make verify-formal
       - name: make demo-offline (offline rating + savings fold)
         run: make demo-offline
 
