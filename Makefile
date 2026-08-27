@@ -93,6 +93,7 @@ prove:
 	  tests/test_observability_emit_z3.py \
 	  tests/test_rating_formal_z3.py \
 	  tests/test_pricing_pinning_z3.py \
+	  tests/test_reservation_bound_formal_z3.py \
 	  -q
 	@echo "Proved: reserve/settle admits no double-counting, the PENDING-protocol"
 	@echo "migration is a verified-equivalent money path, and the ceiling is sound"
@@ -100,7 +101,9 @@ prove:
 	@echo "component — under the axioms stated at the top of each test file above."
 	@echo ""
 	@echo "That premise is NOT proved and is false today: run 'make verify-rating'"
-	@echo "for the differential checks and the pinned known defect."
+	@echo "for the differential checks and the pinned known defect. Also proved:"
+	@echo "replacing the reserve-time estimate with a sound BOUND makes the"
+	@echo "existing conditional write a hard ceiling, with nothing else changed."
 
 # The differential half of the formal layer: drives the real pricing functions and
 # an independently written reference with the same inputs, so "the encoding matches

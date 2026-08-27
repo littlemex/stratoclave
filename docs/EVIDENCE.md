@@ -87,6 +87,36 @@ is a claim about an encoding.
 | No overflow; refunds cannot go negative | `test_rating_formal_z3.py::test_g6_no_overflow_within_realistic_bounds`, `…refund_cannot_drive_settled_negative` | `…sanity_unbounded_tokens_overflow`, `…sanity_unbounded_refund_goes_negative` | absent | the stated bounds |
 | Zero rate / zero tokens cost zero, and the clamp is on tokens | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` — but note these read back the encoding's own axiom, so on their own they are circular | — | `test_rating_differential.py::test_the_clamp_is_on_tokens_and_a_negative_rate_credits`, `…test_no_usage_report_can_mint_a_credit_at_a_nonnegative_rate` — this is what makes the boundary claims non-circular | **a negative rate in the document would mint credit**: `_mtok_cost(1000, -5_000_000)` returns −5,000. Nothing in the rating path rejects one; the defence is that the document has never held one |
 
+**The ceiling can be made hard, and the mechanism already exists.** Two
+independent reviewers concluded a hard ceiling was unobtainable because prompt-cache
+writes are decided by the provider mid-call. That was an efficiency argument
+mistaken for an impossibility argument, and it does not survive the numbers. The
+pool reserve is already a conditional write on `pool_headroom_microusd >= :amt`, so
+an insufficient pool already refuses admission and no upstream call happens; the
+ceiling is soft for exactly one reason, which is that `:amt` is an estimate rather
+than a bound. And a bound is computable, because the provider cannot bill for
+content it was never sent: pricing every input-side token at
+`max(input, cache_read, cache_write)` covers cache behaviour with no assumption
+about provider choices, at 1.25x on that leg — not the "one fifth to one eighth of
+the concurrency" that was claimed.
+
+`test_reservation_bound_formal_z3.py` proves the implication: with a sound
+reservation, settle cannot raise `settled + reserved`, so the existing transaction
+becomes a hard ceiling with nothing else changed. It also proves the reaper guard —
+a hold released before its own settle lets a second request borrow the same
+headroom — and it records what the bound cannot cover. Measured cost of a bound
+that assumes nothing about the tokeniser (UTF-8 bytes at the worst input-side
+rate), against today's estimate with output at 2,000 tokens: English 3.48x,
+Japanese 9.60x, emoji-mixed 4.20x. That is in-flight admission headroom, not money,
+since settle returns the difference.
+
+Two holes no proof can close, and they bound the claim rather than defeat it: image
+tokens scale with pixels rather than bytes, so a few hundred bytes of flat-colour
+PNG can be thousands of tokens; and tool scaffolding plus server-side tool results
+are billable tokens that were never in the bytes the gateway sent. A bound is sound
+only inside a stated content envelope, and enforcing that envelope at the door is
+an implementation obligation, not a theorem.
+
 **The defect this found, before any of it was implemented.** `rate_usage` charges
 four components (input, output, cache_read, **cache_write**) while
 `estimate_cost_microusd` prices three (fresh input, warm input at the cache-read
