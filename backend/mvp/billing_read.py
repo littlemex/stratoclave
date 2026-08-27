@@ -255,7 +255,19 @@ def me_run_billing(
     unknown OR belongs to another tenant; no existence oracle)."""
     full = _full_run_breakdown(user.org_id, run_id)
     if full is None:
-        raise HTTPException(status_code=404, detail="run not found")
+        # One message for every miss, on purpose: an unknown run, another
+        # tenant's run, and a run with no dollar charge lines must be
+        # indistinguishable (no existence oracle). The wording names the third
+        # case too, because a token-quota-only tenant produces no charge lines
+        # and the bare "run not found" sent a live verification down the wrong
+        # path for half an hour (2026-08-27).
+        raise HTTPException(
+            status_code=404,
+            detail="no billing lines for this run id under your tenant. "
+                   "If the run exists, note that lines appear only once a dollar "
+                   "pool reservation has been settled — a token-quota-only "
+                   "tenant never produces any.",
+        )
     return RunBreakdownTenant(
         tenant_id=full["tenant_id"],
         run_id=full["run_id"],

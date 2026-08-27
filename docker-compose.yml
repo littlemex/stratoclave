@@ -1,0 +1,75 @@
+# Local mode: DynamoDB is local, Bedrock is real.
+#
+# The only thing this file runs on your machine is the state store
+# (DynamoDB Local) and the gateway process itself. Every inference call the
+# gateway makes still goes to your own Amazon Bedrock account, using
+# credentials read (read-only) from your host's ~/.aws — nothing here can
+# invoke a model without them, and nothing here bakes credentials into an
+# image layer. See docs/LOCAL.md for what this setup can and cannot verify.
+#
+# `make up` drives this file end to end (tables, seed user, health checks).
+# Works with `docker compose` or `finch compose` — the compose schema is the
+# same either way; only the CLI binary differs.
+name: stratoclave-local
+
+services:
+  dynamodb-local:
+    # A-02-docker (see backend/Dockerfile): tag-only references are mutable.
+    # Pinned to a specific version rather than `latest`; bump deliberately.
+    image: amazon/dynamodb-local:2.5.2
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
+    working_dir: /home/dynamodblocal
+    # The image runs as uid 1000, but a fresh named volume is created owned by
+    # root with mode 0700 on some runtimes (nerdctl, which is what `finch
+    # compose` drives), so DynamoDB Local cannot open its sqlite file. It still
+    # answers HTTP, so the container looks healthy while every operation fails
+    # with `unable to open database file` and the store retries forever. Running
+    # as root inside this container is the portable fix; it holds nothing but
+    # local test state and is reachable on loopback only.
+    user: root
+    ports:
+      # Loopback only — this table store has no auth of its own.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      - dynamodb-local
+    ports:
+      # Loopback only. The deployed path binds behind CloudFront/ALB with a
+      # WAF and CDN-origin header check in front of it; a laptop has none of
+      # that, so this must never be reachable from outside the machine.
+      - "127.0.0.1:8080:8000"
+    environment:
+      # Skips the Cognito/OIDC/CORS hard-requirements that only apply when
+      # ENVIRONMENT=production (backend/main.py) — this mode never touches
+      # Cognito, it authenticates with the sk-stratoclave-* API key seeded
+      # below.
+      ENVIRONMENT: development
+      # Off in production by default (backend/mvp/openai_responses.py); local
+      # mode turns it on so all three routes in `make demo` actually work,
+      # rather than the OpenAI Responses route silently 503ing.
+      CODEX_ENABLED: "true"
+      AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
+      # Deliberately NOT overriding a Bedrock endpoint: inference stays real.
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      # boto3 resolves SSO token cache relative to $HOME/.aws/sso/cache, so
+      # HOME must point at the mounted .aws directory too, not just these two
+      # file paths.
+      HOME: /app
+      AWS_CONFIG_FILE: /app/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /app/.aws/credentials
+      DEFAULT_ORG_ID: default-org
+    volumes:
+      # Read-only: this container can use your credentials, never edit them.
+      - ${HOME}/.aws:/app/.aws:ro
+    restart: unless-stopped
+
+volumes:
+  dynamodb-data:

@@ -16,6 +16,7 @@ Bedrock with no token-accounting policy attached.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
 
@@ -335,6 +336,58 @@ def assert_vllm_cache_rates_zero() -> None:
 
 
 
+# A suggestion is only useful if acting on it succeeds. Containment matching a
+# very short alias would fire on almost any input ("sol" inside anything), so
+# containment is gated on this length; shorter aliases are still reachable
+# through the lexical pass below.
+_MIN_CONTAINED_ALIAS = 8
+# The echoed name is bounded: it is attacker-supplied, it is scanned against
+# every candidate, and it ends up in a response body.
+_MAX_ECHOED_NAME = 120
+
+
+def _did_you_mean(name: Optional[str], *, limit: int = 3,
+                  only: Optional[frozenset[str]] = None) -> str:
+    """A ``did you mean`` fragment built from the live alias map.
+
+    Derived from the registry rather than hand-listed, so it cannot drift when
+    models are added or renamed. Returns "" when nothing is close enough, so the
+    caller can concatenate it unconditionally.
+
+    Only aliases are ever suggested — never raw Bedrock ids. The sentence that
+    follows a suggestion points at ``GET /v1/models``, and that endpoint lists
+    aliases, so suggesting anything else would contradict it.
+
+    ``only`` restricts the candidate set to names the calling route can actually
+    serve. Without it the Anthropic Messages route would suggest an OpenAI model
+    and then, in the next sentence, refuse it — a suggestion that cannot be
+    followed is worse than none.
+    """
+    if not name:
+        return ""
+    name = name[:_MAX_ECHOED_NAME]
+    lowered = name.casefold()
+    candidates = sorted(_ALIAS_MAP if only is None else (a for a in _ALIAS_MAP if a in only))
+    # Containment first, and deliberately so. A caller who sent something close
+    # to a full Bedrock id ("us.anthropic.claude-haiku-4-5") wants the short
+    # alias it contains ("claude-haiku-4-5"); pure lexical distance would answer
+    # with a different model of a similar name ("claude-opus-5"), which is a
+    # worse answer than no answer. Longest first: the most specific contained
+    # alias is the one meant. Case-folded, because a wrong case is the cheapest
+    # mistake to make and the lexical pass scores it far below its cutoff.
+    contained = sorted(
+        (a for a in candidates
+         if len(a) >= _MIN_CONTAINED_ALIAS and a.casefold() in lowered),
+        key=len, reverse=True,
+    )
+    close = contained[:limit]
+    if not close:
+        close = difflib.get_close_matches(lowered, candidates, n=limit, cutoff=0.6)
+    if not close:
+        return ""
+    return " Did you mean " + " or ".join(f"'{c}'" for c in close) + "?"
+
+
 def resolve_model(name: Optional[str]) -> ModelEntry:
     """Resolve a client-facing model name to a `ModelEntry`.
 
@@ -347,8 +400,9 @@ def resolve_model(name: Optional[str]) -> ModelEntry:
     entry = _ALIAS_MAP.get(name) or _BEDROCK_ID_MAP.get(name)
     if entry is None:
         raise ValueError(
-            f"model '{name}' is not in the allowlist. "
-            "Supported models are listed in backend/mvp/models.py:_REGISTRY."
+            f"model '{name[:_MAX_ECHOED_NAME]}' is not in the allowlist."
+            f"{_did_you_mean(name)} "
+            "The full list of accepted model names is served by GET /v1/models."
         )
     return entry
 
@@ -380,6 +434,14 @@ _ALLOWED_BEDROCK_MODELS: frozenset[str] = frozenset(
 )
 
 
+# Aliases the Anthropic Messages route can actually serve. Derived from the
+# registry so it cannot drift; used to keep suggestions on that route followable.
+_MESSAGES_ROUTE_ALIASES: frozenset[str] = frozenset(
+    a for a, e in _ALIAS_MAP.items()
+    if (_MAPPING.get(a) is not None) or (e.bedrock_model_id in _ALLOWED_BEDROCK_MODELS)
+)
+
+
 def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
     """Legacy resolver: returns the Bedrock model ID for an Anthropic name.
 
@@ -398,7 +460,22 @@ def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
     if anthropic_model in _ALLOWED_BEDROCK_MODELS:
         return anthropic_model
 
+    # Distinguish "known model, wrong route" from "unknown model". The old
+    # message said "Only Claude family models are supported" for BOTH, which
+    # reads as a contradiction when the rejected name IS a Claude model whose
+    # only problem is that it is not a registered alias (found in live
+    # verification, 2026-08-27).
+    known = _ALIAS_MAP.get(anthropic_model) or _BEDROCK_ID_MAP.get(anthropic_model)
+    shown = anthropic_model[:_MAX_ECHOED_NAME]
+    if known is not None:
+        raise ValueError(
+            f"model '{shown}' is not served by the Anthropic Messages "
+            f"route. Use /v1/chat/completions or /openai/v1/responses for "
+            f"provider '{known.provider}' models."
+        )
     raise ValueError(
-        f"model '{anthropic_model}' is not allowed. "
-        f"Only Claude family models are supported by the Anthropic Messages route."
+        f"model '{shown}' is not a recognised model name."
+        f"{_did_you_mean(anthropic_model, only=_MESSAGES_ROUTE_ALIASES)} "
+        "The Anthropic Messages route accepts Claude family names; the full list "
+        "of accepted names is served by GET /v1/models."
     )

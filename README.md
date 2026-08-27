@@ -2,7 +2,10 @@
 
 # Stratoclave
 
-**A tenant-aware credit gateway for Amazon Bedrock.**
+**Budget enforcement and an auditable ledger for Amazon Bedrock.<br>Model routing stays external.**
+
+Runnable on one machine against your own Bedrock — no always-on AWS infrastructure.<br>
+An AWS account with Bedrock access is still required; Bedrock usage is billed normally.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
@@ -18,6 +21,25 @@
 ---
 
 ## Overview
+
+**Stratoclave takes on two jobs and declines a third.** It enforces the budget
+before a call is made, and it records what the call cost in a way a third party
+can recompute. It does *not* choose which model your request should go to — that
+judgment belongs to an external router such as
+[vLLM Semantic Router](https://github.com/vllm-project/semantic-router).
+Stratoclave receives that decision, executes it under the current budget, and
+records the outcome.
+
+Those two jobs are what produce the three kinds of visibility described below.
+The ledger's transitions carry **Z3-checked invariants showing that the modelled
+reserve → settle transitions cannot double-count funds** — a proof over the
+money model, not over the deployment.
+
+**You can run the gateway application on one machine while inference goes to real
+Bedrock** — no CDK, no ALB, no Fargate, no Cognito, and no always-on AWS charges.
+See [Run locally with real Bedrock](#run-locally-with-real-bedrock).
+
+---
 
 Stratoclave is a self-hosted **inference gateway** that sits in the data path
 in front of Amazon Bedrock and adds the three things raw Bedrock does not give
@@ -47,7 +69,7 @@ account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito
 for token issuance, and AWS CDK v2 for the entire topology. There is no
 Postgres, no Redis, no external control plane, and no SaaS dependency.
 
-### The one thing that is hard to replicate: pre-flight, atomic budget enforcement
+### The narrow thing this project is for: a proven invariant on pre-flight budget enforcement
 
 If you are embedding AI into a SaaS product, inference is a **variable cost of
 goods** — AI-feature gross margins sit near ~50% versus 80–90% for classic SaaS,
@@ -56,17 +78,29 @@ makes per-tenant cost control not a nice-to-have but the P&L core, and it is a
 distributed-systems problem: *record the billable event across a trust boundary,
 exactly once, against the right tenant, non-repudiably*.
 
-Stratoclave's differentiator is narrow but real and **not something a competitor
-can bolt on from outside**: it reserves a tenant dollar pool **+** per-user token
+Stratoclave's differentiator is narrow, and it is a **guarantee level, not a
+feature nobody else has**: it reserves a tenant dollar pool **+** per-user token
 quota **+** per-model dollar quota in a **single DynamoDB `TransactWriteItems`
 before the model is invoked**. There is no client bypass and no
 check-then-act (TOCTOU) overspend race — an overshoot loses the conditional
-write and gets a `402`. A credential broker cannot do this at all (nothing is in
-the data path); a general-purpose proxy that checks a cached spend counter
-pre-call still has a race window under concurrency, so its budget is a soft
-limit, not a hard one. Judged purely on *shipped* capability (not "could be
-implemented"), Stratoclave is today the only one of the three that enforces the
-budget atomically at request time.
+write and gets a `402`. A credential broker cannot do this at all — nothing is in
+the data path, so there is no request-time point to enforce at.
+
+A general-purpose proxy *can*: as of 2026, LiteLLM ships pre-call budget
+reservation (fail-closed, seven scopes, adversarial `max_tokens` clamping), so
+"only we reserve before the call" is no longer true and this README no longer
+claims it. What differs is where the enforcing state lives and how the
+invariant is established. LiteLLM's admission counter is a `DualCache`
+(in-process + Redis) with the database as an authority that catches up; whether
+the ceiling holds through cache loss is not something we have verified, and we
+do not assert that it fails. Stratoclave puts the admission and the money move
+in the *same* authoritative store — a conditional DynamoDB transition — and
+carries Z3-checked invariants over that transition model showing it cannot
+double-count funds. Having a reservation and having a *machine-checked invariant*
+on the model of that reservation are different guarantee levels; this project
+provides the second one. Neither the implementation nor DynamoDB's own behaviour
+is inside the proof — see [EVIDENCE.md](docs/EVIDENCE.md) for where each claim
+actually stands.
 
 Mapped to the canonical five-layer AI-billing gateway, Stratoclave now ships
 all five layers:
@@ -77,7 +111,39 @@ all five layers:
 | 2. Context propagation | Carry tenant / run / budget across hops | **Shipped** — `x-sc-group-id` / `x-sc-workflow-run-id`, hard `x-sc-model-pin` |
 | 3. Budget enforcement | Two-phase authorize/capture + staged breaker | **Shipped** — atomic pre-flight reserve + settle, staged budget breaker; also exposed as an [external authorize/capture API](#external-authorizecapture-api-layer-5) |
 | 4. Credit ledger | Idempotent, event-sourced balance history | **Shipped** — dedicated append-only ledger table; every money move (RESERVE/SETTLE/RELEASE/RECLAIM/LATE_SETTLE) is one immutable event written in the same `TransactWriteItems` as the counter it moves |
-| 5. Rating + revenue recognition | Physical usage → money, cost passthrough | **Shipped** — rate frozen at reserve, versioned rating on the ledger terminal, per-run read API + provider-cost passthrough, and a routing decision log that makes router savings *provable* |
+| 5. Rating + revenue recognition | Physical usage → money, cost passthrough | **Shipped** — rate frozen at reserve, versioned rating on the ledger terminal, per-run read API + provider-cost passthrough, and a routing decision log that makes router savings *reproducible* |
+
+### Routing decides; Stratoclave enforces and records
+
+The division of labour stated at the top of this README is a **responsibility
+boundary**, not a promise about anyone's failure modes. Stratoclave does not ship
+a router and does not intend to: model choice, semantic classification, and
+quality scoring evolve on a different clock from the correctness of a ledger, and
+coupling them would drag one into the other.
+
+The integration surface is deliberately small — a decision identifier and a
+selected model in, a settled cost and an outcome back out. Concretely, an
+external router's verdict is honoured under the budget, model pin, session
+affinity, and provider state in force at that moment, and the decision log
+records which of `honored` / `overridden` / `denied` happened.
+
+One observation that makes this composition easy rather than negotiated: the
+vLLM Semantic Router reference Envoy configuration already runs its routing
+`ext_proc` with `failure_mode_allow: true` and its authorization `ext_authz` with
+`false`. Read as a pattern — a routing decision that may be skipped, an
+authorization that may not — that is the same asymmetry this project draws
+between judgment and enforcement. It is their configuration, not a guarantee
+either project makes to the other; Stratoclave's own failure behaviour is
+specified in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+
+**What this project does not claim.** It is not audit-grade today. `usage-logs`
+carry a hardcoded 90-day TTL, records are overwritable via `PutItem`, and there is
+no immutable long-term sink. What exists is an in-path settlement ledger whose
+transitions are conditional writes, with a machine-checked proof that
+double-counting cannot occur. WORM export, configurable retention, and a frozen
+export contract for the decision log are tracked gaps, not shipped properties.
+Separating "proven" from "not yet built" is the point of
+[EVIDENCE.md](docs/EVIDENCE.md).
 
 ## Why a gateway? (what a credential broker cannot do)
 
@@ -313,7 +379,64 @@ For a detailed walkthrough of components, data model, and invariants, see
 
 ## Quick start
 
-### Deploy to your AWS account
+Two ways in: **run the gateway locally against real Bedrock** (below), or
+[**deploy the full stack to AWS**](#deploy-the-full-stack-to-aws).
+
+### Run locally with real Bedrock
+
+**This is the shortest path to exercising the production application code against
+real Bedrock.** Reserve, settle, ledger writes, the three API routes, and rating
+run the same code as the deployed service, backed here by DynamoDB Local.
+
+It does **not** reproduce managed DynamoDB behaviour (throttling, contention,
+retries, durability), AWS ingress (CloudFront / ALB / TLS / Cognito), the API key
+issuance and revocation lifecycle, scaling, or production operations. The ledger's
+behaviour *under real contention* is specifically not exercised here, which
+matters because that is the property this project cares most about.
+
+Prerequisites:
+
+- Docker (or any Compose-compatible runtime) and GNU Make. DynamoDB Local runs as
+  a container; the gateway is built from `backend/Dockerfile`.
+- An AWS account whose credentials can invoke the demo models, with **Bedrock
+  model access already enabled in your region** for the Claude family. Enabling
+  model access is a one-time console step and is the most common first failure.
+- Working credentials on the host. For AWS SSO run `aws sso login` first; `make up`
+  mounts `~/.aws` read-only into the gateway container so the same profile is used
+  for Bedrock. Nothing is baked into the image.
+- Ports `8080` (gateway) and `8000` (DynamoDB Local), bound to `127.0.0.1` only.
+  Override them in `docker-compose.yml` if they are taken.
+
+```bash
+git clone https://github.com/littlemex/stratoclave.git
+cd stratoclave
+
+export AWS_PROFILE=your-profile   # must be allowed to invoke the demo models
+export AWS_REGION=us-east-1       # must be a region where those models are enabled
+
+make up        # DynamoDB Local + the gateway, tables created, a local API key issued
+make demo      # a real Bedrock call on each of the 3 routes, read back from the ledger
+make prove     # replay the Z3 invariant checks over the money model (no network)
+make down      # stop and remove the local state
+```
+
+`make demo` prints, per route, the token counts the provider reported, the reserve
+and settle that ran against them, and the effective model the ledger recorded —
+the same read-back the deployed stack gives you. **Those calls are billed by
+Bedrock at normal rates** (the demo is deliberately tiny — a handful of calls with
+`max_tokens` in the single digits). The exact model ids it uses, the IAM actions
+they require, and what to do when a model is not enabled are in
+[`docs/LOCAL.md`](./docs/LOCAL.md).
+
+`make prove` replays the Z3 invariant checks over the **money model**. It does not
+prove the implementation, the container, or DynamoDB.
+
+No AWS account at all? `make demo-offline` needs neither Docker nor credentials
+and makes no external network calls: it folds a checked-in workload through the
+shipped rating and savings code. It exercises the accounting arithmetic only — no
+reserve, no settle, no ledger write, no inference.
+
+### Deploy the full stack to AWS
 
 Prerequisites: AWS CLI with an administrator profile, Node.js 20 LTS, Docker,
 and Bedrock model access enabled for the Claude family in your region.
@@ -619,7 +742,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Providers | Amazon Bedrock — Claude (incl. Opus 5 / Fable 5) via `converse`; and, via bedrock-mantle, OpenAI GPT-5.x (incl. GPT-5.6 Sol/Terra), xAI Grok 4.6, and Google Gemma 4 **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Still fewer providers than LiteLLM — a breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
-| Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). A **hard** limit. | **No client bypass**; the pre-call budget check reads a **cached spend value** (LiteLLM's own `max_budget` docs describe async spend updates + an in-memory cache), so under concurrency a check-then-act (TOCTOU) window can remain at the margin. Not a bypass, and fine for most workloads — a **soft** ceiling rather than a hard one. Verify against the version you deploy | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
+| Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). A **hard** limit. | **No client bypass**, and **pre-call reservation is shipped** — `litellm/proxy/spend_tracking/budget_reservation.py` (first committed 2026-04-30) reserves before the call, fails closed when the reservation cannot be written, clamps adversarial `max_tokens`, and covers seven scopes. The admission counter is a `DualCache` (in-process + Redis) with the DB as an authority that catches up; the code documents recovery paths for Redis restart / cross-pod reset. **We have not tested whether the ceiling holds through cache loss, and we do not claim it fails.** The honest difference is the guarantee level, not the presence of a reservation. Verify against the version you deploy | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
 | Budget granularity | Dollar pool **+** per-user token **+** per-model micro-USD quota, priced per model | Per key/user/team `max_budget`, rpm/tpm | Per-user/team counter |
 | Crash-safe budget accounting | **Yes** — a killed request's reservation self-heals via an *inline lazy* sweep on the reserve path (no separate reaper). Not instant: reclaim happens on the next reserve (≥ a 1800s TTL floor before a hold is sweep-eligible), so an idle tenant with no further traffic reclaims late, and a burst of crashes drains a few holds per reserve | Durable via its Postgres/Redis (more ops, but a real datastore) | N/A (no server-side reservation) |
 | Resilience / routing | **Streaming:** retry + cross-region failover, first-event commit, staged breaker, and per-model fallback driven by the *same atomic budget reservation* (LiteLLM has budget-aware routing too; the distinctive part is the cascade being inside the pre-flight reserve). **Non-streaming: single-region, no failover** | Retries, fallbacks, latency/usage load-balancing, cooldowns — on **all** paths, across deployments *and* providers; battle-tested | None (client calls Bedrock; Bedrock CRIS only) |
@@ -645,10 +768,12 @@ pre-flight reserve/settle with crash-safe HOLD rows and a quota-driven model
 cascade wired into it**. A broker cannot do it *by construction* — it is not in
 the data path, so there is no request-time point to enforce at. Comparing only
 *shipped* capability (not "could be built" — by that logic every product's
-features are possible in every other, which decides nothing), Stratoclave is
-the one of the three that enforces a **hard** per-tenant budget atomically
-before the call; the broker's is a soft IAM/telemetry cap, and LiteLLM's
-pre-call check races a cached counter under concurrency.
+features are possible in every other, which decides nothing), the broker's cap is a
+soft IAM/telemetry one because it has no request-time choke point at all, while
+LiteLLM and Stratoclave both reserve before the call. Between those two the
+difference is *where the enforcing state lives* — a cache with a catching-up
+database, versus a single authoritative store whose transition carries a
+machine-checked proof that double-counting cannot occur.
 
 > **Maturity, stated plainly:** Stratoclave is alpha and young; LiteLLM is a
 > large, widely-deployed project. This table judges *capability*, not adoption —
@@ -728,7 +853,8 @@ ledger — a saving without a ledger behind it is a billing dispute waiting to h
 
 | Document                                                        | For                                                          |
 |-----------------------------------------------------------------|--------------------------------------------------------------|
-| [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | First run: install the CLI, sign in, make a call.            |
+| [`docs/LOCAL.md`](./docs/LOCAL.md)                              | Run the whole gateway on one machine against real Bedrock, and what that mode does and does not prove. |
+| [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | Deployed-stack walkthrough: install the CLI, sign in, make a call. |
 | [`docs/SCOPE.md`](./docs/SCOPE.md)                              | What Stratoclave is / is NOT, and the rules for deciding whether a feature belongs. |
 | [`docs/EVIDENCE.md`](./docs/EVIDENCE.md)                        | Reach-map: each differentiating claim, its strongest evidence today, and what that evidence does not cover (with commit SHAs). |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)                | Components, data model, auth flows, invariants.              |

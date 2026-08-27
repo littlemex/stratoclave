@@ -276,3 +276,31 @@ def test_golden_fixtures_match_committed_contract(dynamodb_mock, monkeypatch):
             f"{name} drifted from the API contract — review and regenerate with "
             f"REGEN_BILLING_FIXTURES=1 (this also breaks the CLI/UI fixture tests)"
         )
+
+
+def test_the_three_misses_are_byte_identical(dynamodb_mock, monkeypatch):
+    """The no-existence-oracle invariant, pinned.
+
+    An unknown run, another tenant's run, and a run that exists but has no
+    dollar charge lines must be indistinguishable — same status AND same body.
+    The 404 detail was made explanatory in 2026-08-27 after a live verification
+    spent half an hour deciding whether a bare "run not found" meant a wrong id
+    or a tenant without a dollar pool; this test is what stops a future author
+    from making the wording branch per case.
+    """
+    run_id = _seed_run_with_cost()
+
+    mine = _app(monkeypatch, allow={"usage:read-self"}, user=_user(["user"]))
+    other = _app(monkeypatch, allow={"usage:read-self"},
+                 user=_user(["user"], org="other-tenant"))
+
+    unknown = mine.get("/api/mvp/me/billing/runs/does-not-exist")
+    cross = other.get(f"/api/mvp/me/billing/runs/{run_id}")
+    # A run id that exists nowhere is the closest reachable stand-in for
+    # "exists but has no rated events": both take the `full is None` branch.
+    no_lines = mine.get("/api/mvp/me/billing/runs/run-with-no-rated-events")
+
+    assert unknown.status_code == cross.status_code == no_lines.status_code == 404
+    assert unknown.text == cross.text == no_lines.text
+    # And it still explains itself rather than saying only "run not found".
+    assert "dollar" in unknown.json()["detail"]
