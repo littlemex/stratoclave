@@ -137,6 +137,23 @@ more than it is:
 - Multi-user contention, tenant isolation, scaling, and anything about
   running this in a way that isn't a single developer on a single laptop.
 
+### If every DynamoDB call hangs, look at the volume's owner
+
+DynamoDB Local answers plain HTTP as soon as the JVM is up, so its container
+looks healthy while every *operation* against it times out. Its own log says
+what is wrong:
+
+    WARNING: [sqlite] cannot open DB[1]: ... [14] unable to open database file
+    WARNING: [sqlite] SQLiteQueue[shared-local-instance.db]: stopped abnormally
+
+The image has no `/home/dynamodblocal/data` directory, so a container runtime
+mounting a fresh named volume there creates it as **root**, while the image
+runs as uid 1000 and cannot write its database. `docker-compose.yml` runs that
+one container as root for this reason. If you change that line, or mount your
+own path, this is the failure you get — and the gateway will retry the write
+for minutes rather than fail, so `make up` times out waiting for health with
+nothing in the gateway's log but a read timeout.
+
 ### A known DynamoDB Local limitation
 
 TTL is *enabled* on every table that has one (`create_tables.py` calls
@@ -193,12 +210,16 @@ counts read back from the local ledger) have all been run and observed to
 work against **DynamoDB Local 2.x itself** (`-sharedDb`), with the backend run
 natively from a Python 3.11 venv.
 
-Two things are still not covered. The `docker-compose.yml` / `Dockerfile`
-build path has not been exercised on the machine this was written on, which
-has no Docker daemon and a Finch VM that will not accept connections; the
-`compose` job in `.github/workflows/e2e-nightly.yml` is what covers it, and it
-builds the image and brings the stack up in CI. And nothing here says anything
-about behaviour under concurrency — a single-node store with no throttling
+The container path is covered too: `make up` followed by `make demo` has been
+run from a clean state through `finch compose` (nerdctl), building
+`backend/Dockerfile`, and all three routes returned 200 from real Bedrock with
+the ledger read back out of the containerised store. The equivalent under
+`docker compose` is what the `compose` job in
+`.github/workflows/e2e-nightly.yml` covers; the two runtimes share the compose
+file but not the builder, so neither run substitutes for the other.
+
+What no local run says anything about is behaviour under concurrency — a
+single-node store with no throttling
 cannot. If you hit something that does not match this document when running
 `docker compose up` / `finch compose up`, that build path is the more likely
 place to look than this file.

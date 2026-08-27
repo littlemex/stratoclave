@@ -19,6 +19,14 @@ services:
     image: amazon/dynamodb-local:2.5.2
     command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
     working_dir: /home/dynamodblocal
+    # The image runs as uid 1000, but a fresh named volume is created owned by
+    # root with mode 0700 on some runtimes (nerdctl, which is what `finch
+    # compose` drives), so DynamoDB Local cannot open its sqlite file. It still
+    # answers HTTP, so the container looks healthy while every operation fails
+    # with `unable to open database file` and the store retries forever. Running
+    # as root inside this container is the portable fix; it holds nothing but
+    # local test state and is reachable on loopback only.
+    user: root
     ports:
       # Loopback only — this table store has no auth of its own.
       - "127.0.0.1:8000:8000"

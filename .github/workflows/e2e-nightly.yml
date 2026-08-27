@@ -119,36 +119,22 @@ jobs:
           printf '[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' \
             'AKIAIOSFODNN7EXAMPLE' 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' > "$HOME/.aws/credentials"
 
-      - name: Bring the stack up
-        run: |
-          docker compose up -d --build
-          for i in $(seq 1 120); do
-            if curl -sf -o /dev/null http://127.0.0.1:8080/health; then
-              echo "gateway healthy after ${i}s"; exit 0
-            fi
-            sleep 1
-          done
-          echo "gateway never became healthy" >&2
-          # A startup crash is a Python traceback interleaved with the other
-          # container's output, so a short tail can cut off the exception line
-          # that names the cause.
-          docker compose ps >&2
-          docker compose logs --no-color --tail=300 >&2
-          exit 1
+      # `make up` rather than a paraphrase of it. The order matters and is easy
+      # to get wrong: the gateway seeds the Permissions table from
+      # `backend/permissions.json` at startup (main.py:126) and only *warns* if
+      # the write fails, so a gateway started before the tables exist serves
+      # every authenticated request as 403 with nothing in its log to say why.
+      # `make up` starts the store, creates the tables, and only then builds and
+      # starts the gateway. Running the documented command is also the only way
+      # this job cannot drift from what a reader is told to type.
+      - name: make up (store, tables, gateway, seeded key)
+        run: make up
 
-      - name: Create tables and seed, through the same scripts the Makefile uses
-        env:
-          AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:8000
-          AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
-          AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+      - name: Diagnostics on failure
+        if: failure()
         run: |
-          echo "endpoint: $AWS_ENDPOINT_URL_DYNAMODB"
-          for i in $(seq 1 30); do
-            curl -s -o /dev/null "$AWS_ENDPOINT_URL_DYNAMODB" && break
-            sleep 1
-          done
-          python scripts/local/create_tables.py
-          python scripts/local/seed_local_user.py
+          docker compose ps
+          docker compose logs --no-color --tail=300
 
       - name: The seeded key authenticates against the containerised gateway
         run: |
