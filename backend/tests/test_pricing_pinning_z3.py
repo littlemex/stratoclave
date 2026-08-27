@@ -7,8 +7,15 @@ WHY THIS FILE EXISTS
 `test_rating_formal_z3.py` proves the ceiling is sound provided the rate is
 pinned, and its sanity test shows that letting settle re-read a risen price
 breaks the ceiling even when the token counts behave. That makes pinning a
-structural member of the ceiling rather than an audit nicety, so the pinning
-protocol deserves its own proof rather than an assumption (B4 there).
+structural member of the ceiling rather than an audit nicety.
+
+Read the scope carefully, because an earlier draft of these two files pointed at
+each other and left the obligation nowhere: file 1 said the pinning protocol was
+proved here, and this file said it was deferred to a differential test. What is
+established here is that pinning is SUFFICIENT for the ceiling and that violating
+it is enough to break the ceiling. That the settle code actually honours the
+pinned rate is still undischarged, and it is recorded that way in
+`docs/EVIDENCE.md` rather than implied by a cross-reference.
 
 The second half is the sentinel discipline. A version label on a terminal event
 is a claim about where the amount came from. If the code can stamp a real version
@@ -59,17 +66,22 @@ Z3_TIMEOUT_MS = 60_000
 z3.set_param("smt.random_seed", 0)
 z3.set_param("sat.random_seed", 0)
 
-# How the amount was priced. The encoding needs only these three cases, because
-# the question is always "did a frozen snapshot produce this amount".
+# How the amount was priced. Four causes, matching the four sentinel constants the
+# code actually ships — an earlier draft collapsed the legacy and external-amount
+# causes into one and then "proved" that every cause gets its own label, which is
+# a proof about a model that had already discarded the distinction.
 SNAPSHOT_OK = 0        # reserve froze rates and settle used them
 SNAPSHOT_FAILED = 1    # reserve tried to freeze and the table read failed
-NO_SNAPSHOT = 2        # explicit caller-supplied amount, or a legacy reservation
+LEGACY_NO_VERSION = 2  # a reservation that predates snapshotting
+EXTERNAL_AMOUNT = 3    # a client-declared fixed amount, derived from no rate
+CAUSES = (SNAPSHOT_OK, SNAPSHOT_FAILED, LEGACY_NO_VERSION, EXTERNAL_AMOUNT)
 
 # What ends up in `pricing_version`. Sentinels are distinct per cause on purpose,
 # so an alarm can tell a degraded path from a legacy one.
 STAMP_REAL_VERSION = 0
 STAMP_SNAPSHOT_FAILED_SENTINEL = 1
 STAMP_UNVERSIONED_SENTINEL = 2
+STAMP_EXTERNAL_AMOUNT_SENTINEL = 3
 
 
 def _solver() -> z3.Solver:
@@ -133,12 +145,17 @@ def test_g2_sanity_a_settle_rate_above_the_pinned_rate_breaks_it():
     _assert_sat(s, "G2 sanity: a settle rate above the pinned rate breaks it")
 
 
-def test_g2_a_version_read_after_its_rows_cannot_dangle():
-    """The read order `CURRENT` then rows cannot observe a version whose rows are
-    absent, given that `set_rates` writes rows BEFORE flipping the pointer.
+def test_g2_the_write_order_makes_a_dangling_read_impossible_in_time():
+    """The ORDERING argument behind "a version read after its rows cannot dangle",
+    and nothing more than that.
 
-    Modelled as two booleans over time: at the moment `CURRENT` names a version,
-    that version's rows are already present.
+    Both reviewers pointed out that the earlier name and docstring promised a
+    storage result while the encoding contains only a time inequality. So the
+    claim is now scoped to what is actually proved: if rows are written before the
+    pointer flips, and a reader reads the pointer no earlier than the flip and the
+    rows no earlier than the pointer, then the rows were written before they were
+    read. Read consistency mode, partial failure, replica visibility and item-level
+    durability are NOT modelled here and are not implied.
     """
     s = _solver()
     rows_written_at = z3.Int("rows_written_at")
@@ -154,15 +171,21 @@ def test_g2_a_version_read_after_its_rows_cannot_dangle():
 
 
 def test_g2_sanity_flipping_before_writing_dangles():
-    """SANITY: flip the pointer first and a reader can name a version whose rows
-    do not exist yet.
+    """SANITY: reverse the write order and the same reader can read rows that were
+    not yet written.
+
+    The reader's full sequence is kept — pointer first, then rows — so the only
+    change from the proof above is the deleted write-order guard. The earlier
+    version omitted `read_pointer_at` and so did not model the reader at all.
     """
     s = _solver()
     rows_written_at = z3.Int("rows_written_at")
     pointer_flipped_at = z3.Int("pointer_flipped_at")
+    read_pointer_at = z3.Int("read_pointer_at")
     read_rows_at = z3.Int("read_rows_at")
-    s.add(pointer_flipped_at < rows_written_at)          # guard deleted
-    s.add(read_rows_at >= pointer_flipped_at)
+    s.add(pointer_flipped_at < rows_written_at)          # the guard, reversed
+    s.add(read_pointer_at >= pointer_flipped_at)
+    s.add(read_rows_at >= read_pointer_at)
     s.add(read_rows_at < rows_written_at)                # rows still absent
     _assert_sat(s, "G2 sanity: flipping before writing dangles")
 
@@ -178,7 +201,8 @@ def _stamp_under_the_rule(priced_by: z3.ArithRef) -> z3.ArithRef:
     return z3.If(
         priced_by == SNAPSHOT_OK, STAMP_REAL_VERSION,
         z3.If(priced_by == SNAPSHOT_FAILED, STAMP_SNAPSHOT_FAILED_SENTINEL,
-              STAMP_UNVERSIONED_SENTINEL),
+              z3.If(priced_by == LEGACY_NO_VERSION, STAMP_UNVERSIONED_SENTINEL,
+                    STAMP_EXTERNAL_AMOUNT_SENTINEL)),
     )
 
 
@@ -193,9 +217,7 @@ def test_g4_real_version_stamped_if_and_only_if_snapshot_priced_it():
     """
     s = _solver()
     priced_by = z3.Int("priced_by")
-    s.add(z3.Or(priced_by == SNAPSHOT_OK,
-                priced_by == SNAPSHOT_FAILED,
-                priced_by == NO_SNAPSHOT))
+    s.add(z3.Or([priced_by == c for c in CAUSES]))
     stamped = _stamp_under_the_rule(priced_by)
     s.add(z3.Not((stamped == STAMP_REAL_VERSION) == (priced_by == SNAPSHOT_OK)))
     _assert_unsat(s, "G4 real version iff snapshot priced it")
@@ -210,15 +232,16 @@ def test_g4_sanity_stamping_current_on_snapshot_failure_breaks_it():
     """
     s = _solver()
     priced_by = z3.Int("priced_by")
-    s.add(z3.Or(priced_by == SNAPSHOT_OK,
-                priced_by == SNAPSHOT_FAILED,
-                priced_by == NO_SNAPSHOT))
+    s.add(z3.Or([priced_by == c for c in CAUSES]))
     buggy_stamp = z3.If(
         z3.Or(priced_by == SNAPSHOT_OK, priced_by == SNAPSHOT_FAILED),
         STAMP_REAL_VERSION, STAMP_UNVERSIONED_SENTINEL,
     )
-    s.add(priced_by == SNAPSHOT_FAILED)
-    s.add(buggy_stamp == STAMP_REAL_VERSION)
+    # The cause is left FREE rather than pinned to SNAPSHOT_FAILED. Pinning it made
+    # the If fold to a constant and the solver had nothing to search, which both
+    # reviewers called out. Now Z3 must find the cause that breaks the
+    # biconditional, which is the content of the check.
+    s.add(z3.Not((buggy_stamp == STAMP_REAL_VERSION) == (priced_by == SNAPSHOT_OK)))
     _assert_sat(s, "G4 sanity: stamping CURRENT on snapshot failure breaks it")
 
 
@@ -232,7 +255,7 @@ def test_g4_each_cause_gets_its_own_label():
     s = _solver()
     a, b = z3.Int("cause_a"), z3.Int("cause_b")
     for v in (a, b):
-        s.add(z3.Or(v == SNAPSHOT_OK, v == SNAPSHOT_FAILED, v == NO_SNAPSHOT))
+        s.add(z3.Or([v == c for c in CAUSES]))
     s.add(a != b)
     s.add(_stamp_under_the_rule(a) == _stamp_under_the_rule(b))
     _assert_unsat(s, "G4 each cause gets its own label")
@@ -247,8 +270,10 @@ def test_g4_sanity_one_shared_sentinel_collapses_the_causes():
     collapsed = lambda v: z3.If(v == SNAPSHOT_OK, STAMP_REAL_VERSION,
                                 STAMP_UNVERSIONED_SENTINEL)  # noqa: E731
     for v in (a, b):
-        s.add(z3.Or(v == SNAPSHOT_OK, v == SNAPSHOT_FAILED, v == NO_SNAPSHOT))
-    s.add(a == SNAPSHOT_FAILED, b == NO_SNAPSHOT)
+        s.add(z3.Or([v == c for c in CAUSES]))
+    # Causes left free, as above: Z3 finds the pair that collides rather than
+    # being handed it.
+    s.add(a != b)
     s.add(collapsed(a) == collapsed(b))
     _assert_sat(s, "G4 sanity: one shared sentinel collapses the causes")
 

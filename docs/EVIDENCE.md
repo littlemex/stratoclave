@@ -77,15 +77,15 @@ is a claim about an encoding.
 
 | Property | Proof | Counterexample | Differential | Trusted assumption left |
 |---|---|---|---|---|
-| Ceiling soundness **given** per-component estimate dominance | `test_rating_formal_z3.py::test_g1_dominance_implies_actual_not_above_reserved`, `…settle_never_lowers_headroom_under_dominance` | `…sanity_without_dominance_ceiling_breaks`, `…sanity_repricing_at_settle_breaks_the_ceiling` | `test_rating_differential.py::test_estimate_dominates_actual_when_only_input_and_output_are_billed` | **the premise itself is FALSE today — see the row below** |
-| The rating fold is a function of the recorded components | `…test_g3_the_fold_is_a_function_of_the_recorded_components` | — (uniqueness has no guard to delete) | `test_rating_differential.py::test_rating_total_matches_an_independent_recomputation`, `…test_t1_the_event_recomputes_from_itself_alone` | none |
+| Ceiling soundness **given** per-component estimate dominance | `test_rating_formal_z3.py::test_g1_dominance_implies_actual_not_above_reserved`, `…settle_never_lowers_headroom_under_dominance`, and the composed rounding theorem `…test_g1_the_composed_monotone_rounding_theorem` | `…sanity_without_dominance_ceiling_breaks` (one undominated component), `…sanity_repricing_at_settle_breaks_the_ceiling`, `…sanity_composed_theorem_needs_a_nonnegative_rate` | `test_rating_differential.py::test_dominance_holds_on_the_components_the_estimator_prices` | **the premise itself is FALSE today — see the row below** |
+| The rating fold is a function of the recorded components | `…test_g3_the_fold_is_a_function_of_the_recorded_components` | `…sanity_an_unconstrained_quotient_makes_the_fold_ambiguous` | `test_rating_differential.py::test_rating_total_matches_an_independent_recomputation` (driven from the inputs, not from the returned components, and it checks the components are the ones asked for at the rates asked for), `…test_t1_the_event_recomputes_from_itself_alone` | none |
 | Recording the rounding rule is load-bearing | `…test_g3_per_component_and_post_total_rounding_differ`, `…test_g3_ceil_never_undercharges` | `…test_g3_sanity_floor_undercharges` | `…test_an_unknown_rounding_policy_is_refused_not_guessed`, `…test_ceil_never_undercharges_the_exact_rational_cost` | none |
 | Rounding is monotone, so token dominance carries to cost dominance | `…test_g3_ceil_is_monotone_in_the_numerator` (linear), `…test_g3_numerator_is_monotone_in_each_factor` (over the reals) | `…sanity_ceil_monotonicity_needs_the_ordering`, `…sanity_numerator_monotonicity_needs_a_nonnegative_factor` | covered by the fold row | negative rates are out of scope by assumption B3 |
 | Pinning is sufficient for the ceiling | `test_pricing_pinning_z3.py::test_g2_a_settle_rate_at_or_below_the_pinned_rate_preserves_the_ceiling` | `…sanity_a_settle_rate_above_the_pinned_rate_breaks_it` | **absent** — that settle does not re-read `CURRENT` is a code property no SMT run can establish | **that the code honours the pinned rate** |
 | A version read after its rows cannot dangle | `…test_g2_a_version_read_after_its_rows_cannot_dangle` | `…sanity_flipping_before_writing_dangles` | absent (needs the store; Phase 2) | row immutability, assumption C1 |
 | Sentinel biconditional: a real version **iff** a snapshot priced it | `…test_g4_real_version_stamped_if_and_only_if_snapshot_priced_it`, `…test_g4_each_cause_gets_its_own_label` | `…sanity_stamping_current_on_snapshot_failure_breaks_it`, `…sanity_one_shared_sentinel_collapses_the_causes` | `…test_the_modelled_sentinels_are_the_shipped_sentinels` (the constants are real and pairwise distinct) | that the stamping code implements the modelled rule |
 | No overflow; refunds cannot go negative | `test_rating_formal_z3.py::test_g6_no_overflow_within_realistic_bounds`, `…refund_cannot_drive_settled_negative` | `…sanity_unbounded_tokens_overflow`, `…sanity_unbounded_refund_goes_negative` | absent | the stated bounds |
-| Zero rate / zero tokens cost zero | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` | — | covered by the fold row | none |
+| Zero rate / zero tokens cost zero, and the clamp is on tokens | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` — but note these read back the encoding's own axiom, so on their own they are circular | — | `test_rating_differential.py::test_the_clamp_is_on_tokens_and_a_negative_rate_credits`, `…test_no_usage_report_can_mint_a_credit_at_a_nonnegative_rate` — this is what makes the boundary claims non-circular | **a negative rate in the document would mint credit**: `_mtok_cost(1000, -5_000_000)` returns −5,000. Nothing in the rating path rejects one; the defence is that the document has never held one |
 
 **The defect this found, before any of it was implemented.** `rate_usage` charges
 four components (input, output, cache_read, **cache_write**) while
@@ -105,9 +105,33 @@ marker out.
 Assumptions deliberately left trusted, with the reason: DynamoDB's transactional
 atomicity and single-item serialisation (AWS's documented semantics — proving it
 here would be waste); pricing-row immutability (a discipline in `set_rates`, not a
-condition expression or an IAM boundary); and that the settle code honours the
-pinned rate rather than re-reading `CURRENT`. The third is the next one to
-discharge and it needs the store, not the solver.
+condition expression or an IAM boundary); that no rate document contains a
+negative rate; and that the settle code honours the pinned rate rather than
+re-reading `CURRENT`.
+
+**Bridges still missing, named rather than implied.** Two rows above rest on
+models written inside the test files, and until a differential test drives the
+real code they are proofs about those models:
+
+- **Snapshot pinning.** No test flips `CURRENT` between reserve and settle and
+  checks that the terminal cites the reserve-time version. The Z3 file establishes
+  that pinning is sufficient and that violating it breaks the ceiling; it cannot
+  establish that the code pins. This is the next discharge and it needs the store.
+- **Sentinel stamping.** G4 proves properties of a stamping rule written in the
+  test file. The bridge is only that the shipped sentinel constants exist and are
+  pairwise distinct. A test that drives the real settle path through snapshot
+  failure, an external fixed amount, and a legacy reservation — asserting each
+  stamps its own sentinel — does not exist yet.
+- **Per-component dominance in the ledger.** Dominance is checked at the total,
+  not per component against the ledger's own component records.
+
+Both reviewers of this work (Fable 5 and Codex, run independently) found earlier
+drafts of these files carrying vacuous proofs — an expression asserted equal to
+itself, sanity checks that were satisfiability of free variables, and a
+composition asserted only in prose. Those are fixed and the fixes are noted in the
+docstrings so the failure mode stays visible. The lesson is recorded here because
+it applies to the whole formal layer: a proof whose sanity counterexample has
+nothing to search is not evidence.
 
 ## The honest borders (stated once, plainly)
 
