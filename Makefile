@@ -10,13 +10,29 @@ COMPOSE := $(shell command -v docker >/dev/null 2>&1 && echo "docker compose" ||
 LOCAL_DDB_ENDPOINT := http://127.0.0.1:8000
 GATEWAY_URL := http://127.0.0.1:8080
 
-.PHONY: up demo demo-offline prove down
+.PHONY: up demo demo-offline prove down _host-deps
 
 # Start DynamoDB Local, create every table it needs (mirroring
 # iac/lib/dynamodb-stack.ts), build and start the gateway, then seed one
 # local user + a scoped API key. Bedrock calls the gateway makes still go to
 # your real AWS account via ~/.aws (read-only) — nothing here is a mock.
-up:
+# The scripts under scripts/local/ run on the HOST (they talk to DynamoDB
+# Local directly and import the backend's repositories), so the host needs the
+# backend's runtime dependencies. Failing here with the fix printed beats
+# failing three lines later with an ImportError traceback.
+_host-deps:
+	@python3 -c "import boto3" 2>/dev/null || { \
+	  echo "[make] the host is missing the backend's Python dependencies." >&2; \
+	  echo "[make] run: python3 -m pip install -r backend/requirements.txt" >&2; \
+	  exit 1; \
+	}
+	@PYTHONPATH=backend python3 -c "from dynamo.client import get_dynamodb_resource" 2>/dev/null || { \
+	  echo "[make] the host has boto3 but cannot import the backend package." >&2; \
+	  echo "[make] run: python3 -m pip install -r backend/requirements.txt" >&2; \
+	  exit 1; \
+	}
+
+up: _host-deps
 	@echo "[make up] using: $(COMPOSE)"
 	@echo "[make up] starting DynamoDB Local..."
 	$(COMPOSE) up -d dynamodb-local
@@ -47,7 +63,7 @@ up:
 # ledger (UsageLogs + UserTenants), not from this script's own bookkeeping.
 # Requires `make up` to have completed. Fails loudly on a credential problem;
 # there is no mock to silently fall back to.
-demo:
+demo: _host-deps
 	AWS_ENDPOINT_URL_DYNAMODB=$(LOCAL_DDB_ENDPOINT) AWS_REGION=$(AWS_REGION) \
 	  AWS_PROFILE=$(AWS_PROFILE) STRATOCLAVE_LOCAL_URL=$(GATEWAY_URL) \
 	  python3 scripts/local/demo.py

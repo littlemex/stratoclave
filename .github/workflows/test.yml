@@ -61,17 +61,21 @@ jobs:
     name: local / offline paths + local-mode wiring
     runs-on: ubuntu-latest
     # DynamoDB Local, same pinned tag as docker-compose.yml. Nothing here talks
-    # to AWS: the credentials below are placeholders DynamoDB Local accepts, and
-    # every request made against the gateway stops before Bedrock is invoked.
+    # to AWS. The credentials below are AWS's own documentation example pair.
+    # They have to be alphanumeric: DynamoDB Local names its database file after
+    # the access key id and rejects anything it cannot use as one, answering
+    # `UnrecognizedClientException` — which reads as if the request had reached
+    # AWS. Every request made against the gateway stops before Bedrock is
+    # invoked, so no real credential is needed.
     services:
       dynamodb-local:
         image: amazon/dynamodb-local:2.5.2
         ports:
           - 8000:8000
     env:
-      AWS_ENDPOINT_URL_DYNAMODB: http://localhost:8000
-      AWS_ACCESS_KEY_ID: ci-local-placeholder
-      AWS_SECRET_ACCESS_KEY: ci-local-placeholder
+      AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:8000
+      AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+      AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
       AWS_REGION: us-east-1
       ENVIRONMENT: ci
       CODEX_ENABLED: "true"
@@ -92,8 +96,25 @@ jobs:
         run: make demo-offline
 
       # --- the local-mode scripts, for real, against DynamoDB Local -----
+      - name: Wait for DynamoDB Local
+        # `services:` waits for the container to start, not for the process
+        # inside it to listen. Probing over IPv4 explicitly: `localhost` can
+        # resolve to ::1 first on the runner, which DynamoDB Local is not bound
+        # to, and the resulting failure looks nothing like a DNS problem.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null "$AWS_ENDPOINT_URL_DYNAMODB"; then
+              echo "DynamoDB Local answering after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "DynamoDB Local never answered at $AWS_ENDPOINT_URL_DYNAMODB" >&2
+          exit 1
+
       - name: Create the local tables
-        run: python scripts/local/create_tables.py
+        run: |
+          echo "endpoint: $AWS_ENDPOINT_URL_DYNAMODB"
+          python scripts/local/create_tables.py
       - name: Seed the local user and API key
         run: python scripts/local/seed_local_user.py
 

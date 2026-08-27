@@ -14,6 +14,7 @@ minutes before reviewing or adopting the branch.
 |---|---|
 | **deployed-live** | ran through the **deployed** stack from outside it: public CloudFront hostname → ALB → ECS Fargate → real DynamoDB → real Bedrock. No mocks, no in-process ASGI. The strongest tier |
 | **gateway-live** | ran THROUGH the gateway request path (`/v1/messages`: auth → reserve → real Bedrock → settle → ledger) on real model traffic, but in-process + moto |
+| **local-store** | ran over HTTP against the gateway on one machine, on **DynamoDB Local** (not a mock) and real Bedrock. Weaker than `deployed-live`: a single-node store, nothing crossing a network, no concurrency |
 | **direct-baseline** | ran against real Bedrock **directly**, gateway NOT in path — a measuring stick, verifies the method not the gateway |
 | **formal / offline** | proved by Z3 / property tests, or a deterministic offline fold — no network |
 | **moto · in-process** | exercised the real code, but on a mocked DynamoDB and in-process ASGI (no real DynamoDB, no network/ALB/TLS) |
@@ -51,6 +52,20 @@ Run from a laptop against the public CloudFront hostname of a live deployment, w
 **What this run did not touch**: the hard budget limit under concurrency (needs a small
 dollar budget, which is an admin operation), tenant isolation, contention between two users
 of the same tenant, server-side latency breakdown, and the expired-hold reaper.
+
+### Local mode, against DynamoDB Local and real Bedrock (2026-08-28)
+
+One machine: DynamoDB Local 2.x with `-sharedDb` for state, the backend run natively, and
+inference going to real Bedrock. Weaker than `deployed-live` — the store is a single node
+and nothing crosses a network — but stronger than moto, because it is the store the
+documented local path actually runs. Setup and caveats: `docs/LOCAL.md`.
+
+| Claim | Evidence | Tier | Not covered |
+|---|---|---|---|
+| **The documented local path runs end to end** | 23 tables + 11 GSIs created, seeding idempotent, all three inference routes 200 on real Bedrock, token counts and the resolved model read back from the local ledger | **local-store** | the `docker compose` build path (no Docker daemon on the machine used; the `compose` job in `e2e-nightly.yml` covers it) |
+| **The ledger is not the cost, once the store is real** | `/v1/chat/completions`: `reserve_ms=13.7`, `settle_ms=13.3`, `upstream_ms=1217.2`, `total_ms=1255.6` — 27 ms of ledger in a 1.26 s request, the same shape as the 1112 ms deployed call | **local-store** | anything under concurrency: single caller, single node, no throttling, no partition contention. This is not an authorize p99 |
+| **A stand-in store makes local timing meaningless, not merely inflated** | the same call on moto: `reserve_ms=9485.2`, `settle_ms=3866.3` — reserve alone ~690× the DynamoDB Local figure | **local-store** | — |
+| **The local scripts cannot write to a real account** | `scripts/local/_local_guard.py` checks the endpoint botocore *resolved*, not just the variable that was set, and exits if it is an AWS host. Both refusal paths exercised | **moto · in-process** | — |
 
 ## The honest borders (stated once, plainly)
 

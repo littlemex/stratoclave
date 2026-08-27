@@ -19,11 +19,26 @@ make down    # stop everything, wipe the local ledger
 - Docker or [Finch](https://github.com/runfinch/finch) with its VM running.
   `docker compose` and `finch compose` both work — the Makefile picks
   whichever binary it finds, preferring `docker`.
+- **Python 3 on the host with the backend's runtime dependencies**:
+
+      python3 -m pip install -r backend/requirements.txt
+
+  `make up` and `make demo` run the scripts under `scripts/local/` on the host,
+  not inside a container, because they talk to DynamoDB Local directly and
+  import the backend's repositories. `make up` checks for this first and prints
+  the command above rather than failing with an `ImportError` three steps later.
+  (`make prove` additionally needs `backend/requirements-dev.txt` for z3-solver.)
 - AWS credentials that can call Bedrock, resolvable via the standard chain
   (`~/.aws/credentials` or an SSO profile in `~/.aws/config`). If you use AWS
   SSO, run `aws sso login` **before** `make up` / `make demo` — the container
   reads your `~/.aws` directory read-only and can use a cached SSO token, but
   it cannot open a browser to refresh an expired one.
+
+  Only Bedrock needs them. Requests to the local store are signed too, but it
+  ignores the signature, so if the host has no credentials at all the scripts
+  fall back to AWS's published example key pair and say so. That covers table
+  creation and seeding on a machine with no AWS account; `make demo` still
+  needs real credentials, because Bedrock is real.
 - Model access enabled in the Bedrock console for the models `make demo`
   calls (below), in the regions those models use.
 - **Bedrock calls are billed by AWS as normal.** `make demo` sends three tiny
@@ -129,21 +144,34 @@ TTL is *enabled* on every table that has one (`create_tables.py` calls
 items — they simply accumulate until you `make down`. This does not affect
 `make demo`, but do not use it to test TTL cleanup behaviour.
 
-### Do not read latency off a local run
+### Latency here says something, but only about a single caller
 
-Timings from this mode are not representative, and the gap is large enough to
-mislead. On the moto-backed run described below, the gateway's own
-`request_timing` log line reported `reserve_ms=9485`, `settle_ms=3866` and
-`upstream_ms=1572` for a single `/v1/chat/completions` call: the DynamoDB
-stand-in, not Bedrock and not the gateway's own work, accounted for almost all
-of it. The same call against the deployed stack completes in about a second.
+Measured on `/v1/chat/completions`, one request at a time, from the gateway's
+own `request_timing` line:
+
+| Store | `reserve_ms` | `settle_ms` | `upstream_ms` | `total_ms` |
+| --- | --- | --- | --- | --- |
+| DynamoDB Local 2.x, `-sharedDb` | 13.7 | 13.3 | 1217.2 | 1255.6 |
+| moto, standing in for it | 9485.2 | 3866.3 | 1571.7 | ~14900 |
+
+So with DynamoDB Local the ledger costs about 27 ms of a 1.26 s request and
+Bedrock dominates — the same shape as the deployed stack, which took 1112 ms
+for the same call. **With a stand-in it is not the same shape at all**: moto
+made reserve alone ~690× more expensive and swamped everything else.
 `TransactWriteItems` and the conditional-CAS retry loop are exactly where a
-stand-in diverges most from the service.
+stand-in diverges most, so if you substitute one, treat its timings as
+meaningless rather than merely inflated.
 
-The useful part is that the split is visible at all: the gateway emits
-`reserve_ms` / `settle_ms` / `upstream_ms` / `unaccounted_ms` per request, so
-when a local run feels slow you can see which of the three it is rather than
-guessing.
+What no local number can tell you is behaviour under load. These are
+single-caller figures against a single-node store with no throttling and no
+partition contention; the reserve path's cost under concurrency is a property
+of the service, not of this laptop. See the section below.
+
+The split being visible at all is the useful part: `reserve_ms` /
+`settle_ms` / `upstream_ms` / `unaccounted_ms` are emitted per request, so a
+slow run points at one of the three rather than needing a guess. Note that
+only `/v1/chat/completions` emits this line today; the Messages and Responses
+routes do not.
 
 ### `make prove` proves a model, not this codebase
 
@@ -162,16 +190,18 @@ Table creation (23 tables, 11 GSIs), idempotent app-level seeding
 tenant-membership + API-key seeding, and one full round trip on all three
 inference routes against real Bedrock (with the effective model and token
 counts read back from the local ledger) have all been run and observed to
-work — using a Python 3.11 venv running the backend natively against a moto
-HTTP server standing in for DynamoDB Local, because the sandbox this was
-built in has neither a working Finch VM nor a Docker daemon. moto's
-transaction semantics are not identical to DynamoDB Local's, so this
-confirms the **wiring** (env vars, table schema, seeding, and all three
-routes) is correct; it does not confirm DynamoDB-Local-specific behaviour,
-and the `docker-compose.yml` / `Dockerfile` build path itself has not been
-exercised end to end in this environment. If you hit something that doesn't
-match this document when actually running `docker compose up` / `finch
-compose up`, that gap — not this file — is the more likely place to look.
+work against **DynamoDB Local 2.x itself** (`-sharedDb`), with the backend run
+natively from a Python 3.11 venv.
+
+Two things are still not covered. The `docker-compose.yml` / `Dockerfile`
+build path has not been exercised on the machine this was written on, which
+has no Docker daemon and a Finch VM that will not accept connections; the
+`compose` job in `.github/workflows/e2e-nightly.yml` is what covers it, and it
+builds the image and brings the stack up in CI. And nothing here says anything
+about behaviour under concurrency — a single-node store with no throttling
+cannot. If you hit something that does not match this document when running
+`docker compose up` / `finch compose up`, that build path is the more likely
+place to look than this file.
 
 ## No AWS account? Use `demo-offline`
 

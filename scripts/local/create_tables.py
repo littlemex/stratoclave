@@ -45,18 +45,9 @@ def _ensure_backend_importable() -> None:
 
 _ensure_backend_importable()
 
-from dynamo.client import get_dynamodb_resource  # noqa: E402
+from _local_guard import require_local_dynamodb  # noqa: E402
 
 
-def _require_local_endpoint() -> None:
-    endpoint = os.environ.get("AWS_ENDPOINT_URL_DYNAMODB", "")
-    if not endpoint:
-        raise SystemExit(
-            "AWS_ENDPOINT_URL_DYNAMODB is not set. Refusing to run: this script "
-            "creates tables and would do so against a real AWS account otherwise. "
-            "`make up` sets this for you; set it yourself if running standalone."
-        )
-    print(f"[create_tables] target endpoint: {endpoint}")
 
 
 # ---------------------------------------------------------------------------
@@ -295,8 +286,7 @@ def _enable_ttl(client, name: str, attribute: str) -> None:
 
 
 def main() -> None:
-    _require_local_endpoint()
-    client = get_dynamodb_resource().meta.client
+    client = require_local_dynamodb("create_tables")
 
     created, existed = [], []
     for spec in TABLES:

@@ -51,6 +51,7 @@ def _ensure_backend_importable() -> None:
 _ensure_backend_importable()
 
 from boto3.dynamodb.conditions import Key  # noqa: E402
+from _local_guard import require_local_dynamodb  # noqa: E402
 from dynamo.usage_logs import UsageLogsRepository  # noqa: E402
 from dynamo.user_tenants import UserTenantsRepository  # noqa: E402
 
@@ -144,8 +145,7 @@ def _latest_usage_log_since(since_iso: str, *, attempts: int = 5, delay_s: float
 
 
 def main() -> None:
-    if not os.environ.get("AWS_ENDPOINT_URL_DYNAMODB"):
-        raise SystemExit("AWS_ENDPOINT_URL_DYNAMODB is not set (the Makefile sets this for you).")
+    require_local_dynamodb("demo")
 
     _preflight_credentials()
     key = _read_key()

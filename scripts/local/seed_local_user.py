@@ -44,6 +44,7 @@ def _ensure_backend_importable() -> None:
 
 _ensure_backend_importable()
 
+from _local_guard import require_local_dynamodb  # noqa: E402
 from dynamo.api_keys import ApiKeysRepository, hash_key  # noqa: E402
 from dynamo.user_tenants import UserTenantsRepository  # noqa: E402
 from dynamo.users import UsersRepository  # noqa: E402
@@ -53,14 +54,6 @@ LOCAL_EMAIL = "local-dev@stratoclave.local"
 LOCAL_KEY_NAME = "local-dev"
 LOCAL_SCOPES = ["messages:send", "responses:send", "usage:read-self"]
 KEY_FILE = Path(__file__).resolve().parents[2] / "data" / "local" / "api_key"
-
-
-def _require_local_endpoint() -> None:
-    if not os.environ.get("AWS_ENDPOINT_URL_DYNAMODB"):
-        raise SystemExit(
-            "AWS_ENDPOINT_URL_DYNAMODB is not set. Refusing to run against what "
-            "would otherwise be a real AWS account."
-        )
 
 
 def _existing_live_key() -> str | None:
@@ -78,7 +71,7 @@ def _existing_live_key() -> str | None:
 
 
 def main() -> None:
-    _require_local_endpoint()
+    require_local_dynamodb("seed_local_user")
     org_id = os.environ.get("DEFAULT_ORG_ID", "default-org")
 
     UsersRepository().put_user(
