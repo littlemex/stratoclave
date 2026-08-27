@@ -137,9 +137,18 @@ error:
   self-hosted GPU (the `served_by="vllm"` transport seam + `VLLM_ENDPOINTS`
   allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and
   any OpenAI-compatible endpoint all flow through the **same** reserve / rating /
-  settle and the same Z3-proven ledger. LiteLLM *connects* many backends; their
-  billing and idempotency are best-effort. Binding an arbitrary backend under a
-  formally-proven charge of record is a different category of capability.
+  settle and the same Z3-proven ledger. LiteLLM *connects* many backends and, as
+  of 2026, also reserves budget before the call
+  (`litellm/proxy/spend_tracking/budget_reservation.py`, first committed
+  2026-04-30: fail-closed, seven scopes, adversarial `max_tokens` clamping). So the
+  claim here is **not** that their billing is best-effort — that wording was
+  inaccurate and is withdrawn. The claim is narrower and about *where the enforcing
+  state lives*: their admission counter is a `DualCache` (in-process + Redis) with
+  the database as an authority that catches up, while Stratoclave puts admission
+  and the money move in one authoritative store whose transition carries a
+  machine-checked proof. Whether their ceiling holds through cache loss is
+  **unverified by us and we do not assert that it fails.** Binding an arbitrary
+  backend under a proven charge of record remains the distinct capability.
 
 The three **weapons** LiteLLM does not have, all deriving from the strength of
 "fact confirmation". For a claim-by-claim map of **how far each is verified today**
@@ -154,32 +163,47 @@ with commit SHAs and the exact limits of each measurement, see
    protocol, which removes a permanent two-path flag) is being landed under a
    Z3 joint-transition **equivalence** proof — the old and new money paths are
    proven to move money identically before the old one is deleted (`27d86db`).
-2. **The decision log as a first-class data product.** LiteLLM's logs are
-   operational logs, not schema'd, trainable decision records with a defined
-   export contract.
-3. **Full VSR integration.** LiteLLM routing is static rules plus load
-   balancing. Stratoclave executes the VSR's semantic routing woven together
-   with budget constraints, pre-authorization, and session affinity (SAAR
-   router memory).
+2. **The decision log as a first-class data product.** LiteLLM logs spend per
+   request; what we have not found there is a *decision-to-charge join contract*
+   — a schema'd, exportable record that ties the advised model, the executed
+   model, and the real billed amount together. Note that our own export contract
+   is still unfixed (see "next"), so today this is a design intent on both sides,
+   not a shipped advantage.
+3. **Executing someone else's routing verdict under budget.** The earlier wording
+   here — "LiteLLM routing is static rules plus load balancing" — was wrong and is
+   withdrawn: LiteLLM ships a complexity router (with its own evals), quality
+   tiers, an adaptive router, and a savings baseline. Stratoclave does not compete
+   on routing quality. It takes an external verdict and decides whether that
+   verdict is *permitted* under the current budget, model pin, session affinity,
+   and provider state — and records which of `honored` / `overridden` / `denied`
+   happened. Not building a router is a boundary, not a gap: it keeps the
+   correctness of the ledger decoupled from the fast-moving world of classifiers.
 
 Concretely, VSR integration is three pieces: (a) a **hint protocol** carrying
 request features + router memory + tenant budget state to the VSR; (b) an
 **execution layer** that enforces the VSR verdict under authorization
 constraints; (c) a **feedback channel** returning real cost / latency /
-success as an outcome to the VSR and learning systems. This triple is the only
-construction in which "did the routing decision actually get cheaper" is
-verifiable *against the money ledger* — something neither LiteLLM nor a
-stand-alone VSR can build. The differentiation is not any single feature; it is
+success as an outcome to the VSR and learning systems. The point of the triple is
+that "did the routing decision actually get cheaper" becomes checkable *against
+the money ledger* rather than against an estimate. A stand-alone router does not
+see the settled charge, and we have not found this join contract in the gateways
+we surveyed — but "only we can build it" is not a claim we can support, so it is
+not made here. The differentiation is not any single feature; it is
 the **architecture that keeps judgment (VSR) and execution+recording
 (Stratoclave) separate while closing the loop between them.**
 
-**The weapon this loop fires: the Savings Certificate (shipped).** Weapons 1 and
-3 combine into a number LiteLLM structurally cannot produce — the
-**counterfactual, ledger-precision saving** of having followed the VSR's advice,
-per `(tenant, period)`, priced from the versioned rate table over each request's
-REAL billed tokens (`mvp.learning.savings`, joined via `vsr_reconcile` on
-`span_id`). It subtracts escalation loss (never hides it — `net` can be negative)
-and states its coverage, so it is an *audited* figure, not a dashboard estimate.
+**What this loop produces: a Reproducible Savings Report.** (Renamed from
+"Savings Certificate": until the long-term immutable sink and the export contract
+land, "certificate" overstates it.) Computing a savings figure is **not** unique —
+LiteLLM ships `router_strategy/savings_baseline.py`, so "a number LiteLLM
+structurally cannot produce" was wrong and is withdrawn. What differs is the
+**shape of the computation**: `mvp.learning.savings.summarize_savings(rows, price=,
+resolve=)` is a pure function taking normalized rows, a versioned rate table, and a
+resolver as explicit inputs, priced over each request's REAL billed tokens and
+joined to the ledger by `span_id`. Pin the inputs and anyone can recompute the same
+number. It subtracts escalation loss (never hides it — `net` can be negative) and
+states its coverage. The claim is therefore not "only our number is right" but
+**"this number is one you can recompute and check yourself."**
 The adoption wedge is **Shadow mode**: put Stratoclave behind an existing LiteLLM
 deployment in passthrough, consult the VSR without changing execution, and emit a
 savings report on the tenant's own traffic at zero risk — then Canary, then Full.
@@ -201,15 +225,26 @@ with a real ledger can produce. That run is `gateway-live` but **in-process + mo
 compatibility shim for the non-OpenAI-compatible providers (weeks–months), and
 that traffic then flows through the proven ledger too. For LiteLLM to absorb
 Stratoclave's edge — an event-sourced, idempotent, formally-proven
-reserve/rating/settle ledger — is a re-design, not a retrofit
-(quarters–a year), carried out while preserving an existing best-effort billing
-base. The moat is on Stratoclave's side. The one thing that keeps the lead
-"provisional" rather than realized is the ledger's _speed_ — now **measured, not
+reserve/rating/settle ledger — would be a re-design rather than a retrofit. But
+**stating that asymmetry as a fixed number of quarters was unfounded and is
+withdrawn**: LiteLLM has been extending reservation, dynamic routing, and Bedrock
+support quickly, and we cannot estimate another project's delivery speed from
+outside. The asymmetry worth pursuing is not speed but **boundary clarity** —
+keeping the compatible surface, the router consultation, admission, settlement,
+and decision export as separate contracts, so another router, gateway, or serving
+stack can adopt one part without adopting the whole proxy.
+
+The one thing that keeps the lead "provisional" rather than realized is the
+ledger's _speed_ — now **measured, not
 asserted** ([benchmarks/ledger-latency.md](benchmarks/ledger-latency.md)): the
 p50 is fast (ledger write 20 ms, end-to-end authorize 57 ms) but the **p99 does
-NOT meet the < 50 ms target** — the ledger `TransactWriteItems` is p99 = 58 ms
-even at the zero-contention floor, and single-pool-row contention degrades it
-further. The miss is neither CPU- nor client-bound; it is the DynamoDB
+NOT meet the < 50 ms target**. Two different p99 figures exist and must always be
+named with their metric, because quoting one for the other has caused confusion:
+the ledger `TransactWriteItems` is **p99 = 58 ms at the zero-contention floor**,
+while **end-to-end authorize is p99 = 225 ms** (see EVIDENCE.md). Single-pool-row
+contention degrades both. Both numbers come from EC2 against real DynamoDB; the
+deployed shape (Fargate + ALB + CloudFront) is **not yet measured**. The miss is
+neither CPU- nor client-bound; it is the DynamoDB
 transaction tail plus single-row optimistic-CAS retry. Honest current state:
 _correctness_ proven, _speed_ measured and **below target on the current
 synchronous four-item-transaction design** — closing it needs a design change
@@ -258,8 +293,10 @@ it is someone else's job.**
   tax, outcome-based billing (commerce / external); MCP hub / registry.
 - **Measured, and it points at a design change:** the ledger p99<50ms target is
   now benchmarked ([benchmarks/ledger-latency.md](benchmarks/ledger-latency.md))
-  and **missed** — p50 fast (20 ms ledger / 57 ms e2e), p99 = 58 ms at the
-  zero-contention floor, worse under single-row contention, and NOT CPU-bound.
+  and **missed** — p50 fast (20 ms ledger / 57 ms e2e); p99 = 58 ms for
+  `TransactWriteItems` at the zero-contention floor and **225 ms end-to-end
+  authorize**, worse under single-row contention, NOT CPU-bound, and not yet
+  measured on the deployed Fargate path.
   "A proven ledger you can afford on the hot path" is the entire pitch, so this
   is the highest-leverage item: it needs a design change (single-item
   conditional update and/or pool-row sharding), not tuning.
