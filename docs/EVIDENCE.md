@@ -12,7 +12,8 @@ minutes before reviewing or adopting the branch.
 
 | Tier | Meaning |
 |---|---|
-| **gateway-live** | ran THROUGH the gateway request path (`/v1/messages`: auth → reserve → real Bedrock → settle → ledger) on real model traffic |
+| **deployed-live** | ran through the **deployed** stack from outside it: public CloudFront hostname → ALB → ECS Fargate → real DynamoDB → real Bedrock. No mocks, no in-process ASGI. The strongest tier |
+| **gateway-live** | ran THROUGH the gateway request path (`/v1/messages`: auth → reserve → real Bedrock → settle → ledger) on real model traffic, but in-process + moto |
 | **direct-baseline** | ran against real Bedrock **directly**, gateway NOT in path — a measuring stick, verifies the method not the gateway |
 | **formal / offline** | proved by Z3 / property tests, or a deterministic offline fold — no network |
 | **moto · in-process** | exercised the real code, but on a mocked DynamoDB and in-process ASGI (no real DynamoDB, no network/ALB/TLS) |
@@ -31,8 +32,30 @@ minutes before reviewing or adopting the branch.
 | **Routing quality** | a tiny conservative exact-match scorer (gateway response scored 10/10, N=10) | gateway-live | `quality.measured = false` — Stratoclave does NOT claim quality without a tenant eval; N=10 is a mechanism demo, not a benchmark | `3378271` |
 | **Workshops surface the gaps** (machine-checked roadmap) | `scenarios/` coverage.yaml → auto-generated [`../scenarios/COVERAGE.md`](../scenarios/COVERAGE.md), CI-linted | formal / offline | — | `77c3f68` |
 
+### Added 2026-08-27: deployed-path verification
+
+Run from a laptop against the public CloudFront hostname of a live deployment, with a
+`user`-role API key only. Scripts and full write-up: see the run log referenced below.
+
+| Claim | Evidence | Tier | Not covered |
+|---|---|---|---|
+| **The deployed path is the path** | response headers on `GET /v1/models`: `Via: 1.1 <id>.cloudfront.net (CloudFront)`, `X-Amz-Cf-Id`, `X-Amz-Cf-Pop: SFO53-P12`, `server: uvicorn`; HSTS and the restrictive API CSP both present | **deployed-live** | which ECS task / AZ served it; CloudFront-to-ALB internals |
+| **All three inference routes work end to end on real Bedrock** | `/v1/messages` 200 (13 in / 4 out), `/v1/chat/completions` 200 (13 / 4), `/openai/v1/responses` 200 (12 / 5) | **deployed-live** | streaming paths were not exercised in this run; single request each |
+| **Server-side records match what the client was told** | `usage show` history rows carry exactly the token counts the client received, for all three calls, and record the **resolved** model (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) for the alias the client sent (`claude-haiku-4-5`) | **deployed-live** | the dollar rating itself — see the row below |
+| **Token quota decrements exactly** | two probes: 13 in + 4 out → 17 units; 22 in + 243 out → 265 units. Exactly one unit per token in both, i.e. the token quota, not a dollar rating | **deployed-live** | — |
+| **The dollar rating is correct** | — | **unverified** | the pool side of settle only runs when the reservation was pooled, and the test tenant has no dollar pool, so no ledger charge lines exist and `/me/billing/runs/{id}` correctly 404s. Verifying this needs an admin-configured dollar pool |
+| **Permissions are enforced at the deployed edge, not only in tests** | `POST /me/billing/authorizations` → **403 Missing permission: billing:write** for a `user` role, even though the CLI exposes the subcommand | **deployed-live** | — |
+| **API key revocation takes effect immediately** | create → `GET /v1/models` 200 → revoke → **401 at once**, and still 401 at +5 s and +20 s (no cache lag) | **deployed-live** | — |
+| **Deployed-path latency, first measurement** | `GET /v1/models` (auth + app only, no Bedrock, no reserve), connection reused: n=25, min 193 ms, **p50 253 ms**, p90 335, p95 349, max 882. Fresh connection per call: p50 568 ms. With inference: haiku ≈ 1.1–1.2 s, gpt-5.6-sol ≈ 2.3–3.9 s | **deployed-live** | **this is NOT the authorize p99** — it excludes the budget reserve and the Bedrock call, so it cannot be compared with the 225 ms row above. Client-side total only: no split of CloudFront / ALB / app / DynamoDB, no retry count, cold start neither induced nor identifiable. Measured from a SFO edge against a us-east-1 origin, so geography dominates |
+
+**What this run did not touch**: the hard budget limit under concurrency (needs a small
+dollar budget, which is an admin operation), tenant isolation, contention between two users
+of the same tenant, server-side latency breakdown, and the expired-hold reaper.
+
 ## The honest borders (stated once, plainly)
 
+- **`deployed-live` rows are the only ones that ran outside the process.** Everything else,
+  including the charge-of-record row below, is in-process.
 - **`gateway-live` here means in-process + moto.** The gateway's *code path and its
   billing accuracy* ran on real Bedrock traffic; a **real DynamoDB** ledger and a
   **deployed** path (uvicorn + ALB + TLS) are **unverified**. The overhead figure
