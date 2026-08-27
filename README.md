@@ -2,7 +2,10 @@
 
 # Stratoclave
 
-**A tenant-aware credit gateway for Amazon Bedrock.**
+**Budget enforcement and an auditable ledger for Amazon Bedrock.<br>Model routing stays external.**
+
+Runnable on one machine against your own Bedrock — no always-on AWS infrastructure.<br>
+An AWS account with Bedrock access is still required; Bedrock usage is billed normally.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
@@ -18,6 +21,25 @@
 ---
 
 ## Overview
+
+**Stratoclave takes on two jobs and declines a third.** It enforces the budget
+before a call is made, and it records what the call cost in a way a third party
+can recompute. It does *not* choose which model your request should go to — that
+judgment belongs to an external router such as
+[vLLM Semantic Router](https://github.com/vllm-project/semantic-router).
+Stratoclave receives that decision, executes it under the current budget, and
+records the outcome.
+
+Those two jobs are what produce the three kinds of visibility described below.
+The ledger's transitions carry **Z3-checked invariants showing that the modelled
+reserve → settle transitions cannot double-count funds** — a proof over the
+money model, not over the deployment.
+
+**You can run the gateway application on one machine while inference goes to real
+Bedrock** — no CDK, no ALB, no Fargate, no Cognito, and no always-on AWS charges.
+See [Run locally with real Bedrock](#run-locally-with-real-bedrock).
+
+---
 
 Stratoclave is a self-hosted **inference gateway** that sits in the data path
 in front of Amazon Bedrock and adds the three things raw Bedrock does not give
@@ -73,9 +95,12 @@ invariant is established. LiteLLM's admission counter is a `DualCache`
 the ceiling holds through cache loss is not something we have verified, and we
 do not assert that it fails. Stratoclave puts the admission and the money move
 in the *same* authoritative store — a conditional DynamoDB transition — and
-carries a machine-checked Z3 proof that double-counting cannot occur. Having a
-reservation and having a *proven invariant* on that reservation are different
-guarantee levels; this project provides the second one.
+carries Z3-checked invariants over that transition model showing it cannot
+double-count funds. Having a reservation and having a *machine-checked invariant*
+on the model of that reservation are different guarantee levels; this project
+provides the second one. Neither the implementation nor DynamoDB's own behaviour
+is inside the proof — see [EVIDENCE.md](docs/EVIDENCE.md) for where each claim
+actually stands.
 
 Mapped to the canonical five-layer AI-billing gateway, Stratoclave now ships
 all five layers:
@@ -88,28 +113,28 @@ all five layers:
 | 4. Credit ledger | Idempotent, event-sourced balance history | **Shipped** — dedicated append-only ledger table; every money move (RESERVE/SETTLE/RELEASE/RECLAIM/LATE_SETTLE) is one immutable event written in the same `TransactWriteItems` as the counter it moves |
 | 5. Rating + revenue recognition | Physical usage → money, cost passthrough | **Shipped** — rate frozen at reserve, versioned rating on the ledger terminal, per-run read API + provider-cost passthrough, and a routing decision log that makes router savings *reproducible* |
 
-### Judgment outside, enforcement and record inside
+### Routing decides; Stratoclave enforces and records
 
-One sentence for what this project is: **Stratoclave takes on exactly two jobs for
-LLM traffic — enforcement and record-keeping.** It reserves budget before each call
-and settles it in a conditional-write ledger. It does *not* decide which model a
-request should go to; that judgment belongs to an external router such as
-[vLLM Semantic Router](https://github.com/vllm-project/semantic-router). Stratoclave
-receives that decision, executes it under the current budget and session
-constraints, and records what happened in a form anyone can recompute.
+The division of labour stated at the top of this README is a **responsibility
+boundary**, not a promise about anyone's failure modes. Stratoclave does not ship
+a router and does not intend to: model choice, semantic classification, and
+quality scoring evolve on a different clock from the correctness of a ledger, and
+coupling them would drag one into the other.
 
-The operating principle, which the vLLM Semantic Router reference deployment
-already implements on its side of the line:
+The integration surface is deliberately small — a decision identifier and a
+selected model in, a settled cost and an outcome back out. Concretely, an
+external router's verdict is honoured under the budget, model pin, session
+affinity, and provider state in force at that moment, and the decision log
+records which of `honored` / `overridden` / `denied` happened.
 
-> **Judgment fails open. Enforcement fails closed.**
-
-In their Envoy configuration the routing `ext_proc` runs with
-`failure_mode_allow: true` and the authorization `ext_authz` with `false`. That is
-the same split Stratoclave draws internally: if the router is unavailable, serve
-the request with a default; if the budget cannot be reserved, refuse it. The two
-projects are complementary by construction rather than by agreement, and the
-integration surface is deliberately small — a decision identifier and a selected
-model in, a settled cost and an outcome back out.
+One observation that makes this composition easy rather than negotiated: the
+vLLM Semantic Router reference Envoy configuration already runs its routing
+`ext_proc` with `failure_mode_allow: true` and its authorization `ext_authz` with
+`false`. Read as a pattern — a routing decision that may be skipped, an
+authorization that may not — that is the same asymmetry this project draws
+between judgment and enforcement. It is their configuration, not a guarantee
+either project makes to the other; Stratoclave's own failure behaviour is
+specified in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
 **What this project does not claim.** It is not audit-grade today. `usage-logs`
 carry a hardcoded 90-day TTL, records are overwritable via `PutItem`, and there is
@@ -354,7 +379,64 @@ For a detailed walkthrough of components, data model, and invariants, see
 
 ## Quick start
 
-### Deploy to your AWS account
+Two ways in: **run the gateway locally against real Bedrock** (below), or
+[**deploy the full stack to AWS**](#deploy-the-full-stack-to-aws).
+
+### Run locally with real Bedrock
+
+**This is the shortest path to exercising the production application code against
+real Bedrock.** Reserve, settle, ledger writes, the three API routes, and rating
+run the same code as the deployed service, backed here by DynamoDB Local.
+
+It does **not** reproduce managed DynamoDB behaviour (throttling, contention,
+retries, durability), AWS ingress (CloudFront / ALB / TLS / Cognito), the API key
+issuance and revocation lifecycle, scaling, or production operations. The ledger's
+behaviour *under real contention* is specifically not exercised here, which
+matters because that is the property this project cares most about.
+
+Prerequisites:
+
+- Docker (or any Compose-compatible runtime) and GNU Make. DynamoDB Local runs as
+  a container; the gateway is built from `backend/Dockerfile`.
+- An AWS account whose credentials can invoke the demo models, with **Bedrock
+  model access already enabled in your region** for the Claude family. Enabling
+  model access is a one-time console step and is the most common first failure.
+- Working credentials on the host. For AWS SSO run `aws sso login` first; `make up`
+  mounts `~/.aws` read-only into the gateway container so the same profile is used
+  for Bedrock. Nothing is baked into the image.
+- Ports `8080` (gateway) and `8000` (DynamoDB Local), bound to `127.0.0.1` only.
+  Override them in `docker-compose.yml` if they are taken.
+
+```bash
+git clone https://github.com/littlemex/stratoclave.git
+cd stratoclave
+
+export AWS_PROFILE=your-profile   # must be allowed to invoke the demo models
+export AWS_REGION=us-east-1       # must be a region where those models are enabled
+
+make up        # DynamoDB Local + the gateway, tables created, a local API key issued
+make demo      # a real Bedrock call on each of the 3 routes, read back from the ledger
+make prove     # replay the Z3 invariant checks over the money model (no network)
+make down      # stop and remove the local state
+```
+
+`make demo` prints, per route, the token counts the provider reported, the reserve
+and settle that ran against them, and the effective model the ledger recorded —
+the same read-back the deployed stack gives you. **Those calls are billed by
+Bedrock at normal rates** (the demo is deliberately tiny — a handful of calls with
+`max_tokens` in the single digits). The exact model ids it uses, the IAM actions
+they require, and what to do when a model is not enabled are in
+[`docs/LOCAL.md`](./docs/LOCAL.md).
+
+`make prove` replays the Z3 invariant checks over the **money model**. It does not
+prove the implementation, the container, or DynamoDB.
+
+No AWS account at all? `make demo-offline` needs neither Docker nor credentials
+and makes no external network calls: it folds a checked-in workload through the
+shipped rating and savings code. It exercises the accounting arithmetic only — no
+reserve, no settle, no ledger write, no inference.
+
+### Deploy the full stack to AWS
 
 Prerequisites: AWS CLI with an administrator profile, Node.js 20 LTS, Docker,
 and Bedrock model access enabled for the Claude family in your region.
@@ -771,7 +853,8 @@ ledger — a saving without a ledger behind it is a billing dispute waiting to h
 
 | Document                                                        | For                                                          |
 |-----------------------------------------------------------------|--------------------------------------------------------------|
-| [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | First run: install the CLI, sign in, make a call.            |
+| [`docs/LOCAL.md`](./docs/LOCAL.md)                              | Run the whole gateway on one machine against real Bedrock, and what that mode does and does not prove. |
+| [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | Deployed-stack walkthrough: install the CLI, sign in, make a call. |
 | [`docs/SCOPE.md`](./docs/SCOPE.md)                              | What Stratoclave is / is NOT, and the rules for deciding whether a feature belongs. |
 | [`docs/EVIDENCE.md`](./docs/EVIDENCE.md)                        | Reach-map: each differentiating claim, its strongest evidence today, and what that evidence does not cover (with commit SHAs). |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)                | Components, data model, auth flows, invariants.              |
