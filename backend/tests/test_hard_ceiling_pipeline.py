@@ -180,8 +180,9 @@ def test_bound_exceeding_pool_limit_is_refused_distinctly_from_exhaustion(dynamo
 # ---------------------------------------------------------------------------
 
 
-def test_enforcement_active_iff_pool_row_exists(dynamodb_mock):
+def test_enforcement_active_iff_pool_row_exists(dynamodb_mock, monkeypatch):
     from mvp.reservation_bound import (
+        HARD_CEILING_GATE_ENV,
         dollar_pool_bound_should_compute,
         dollar_pool_bound_should_gate,
     )
@@ -197,6 +198,14 @@ def test_enforcement_active_iff_pool_row_exists(dynamodb_mock):
 
     _seed_tenant_with_pool(pool_limit_microusd=1_000_000_000)
     assert dollar_pool_bound_should_compute(TENANT_ID) is True
+    # A pool row alone is the `shadow` state, not `enforced`
+    # (CONTRACT-hard-ceiling.md section 9b's rollout requirement — see
+    # reservation_bound.py's own module docstring): `should_gate` also needs
+    # the gate env flag on. Explicitly clear it first so this assertion does
+    # not depend on the ambient test-environment default.
+    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
+    assert dollar_pool_bound_should_gate(TENANT_ID) is False
+    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "1")
     assert dollar_pool_bound_should_gate(TENANT_ID) is True
 
 

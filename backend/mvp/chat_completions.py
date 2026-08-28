@@ -50,7 +50,7 @@ from .models import ModelEntry, resolve_model
 from .reservation_bound import (
     assess_boundability,
     dollar_pool_bound_should_compute,
-    dollar_pool_bound_should_gate,
+    dollar_pool_bound_state,
     survey_and_hash_converse_kwargs,
     survey_and_hash_openai_chat_payload,
 )
@@ -380,8 +380,13 @@ def chat_completions(
     # might use it (`dollar_pool_bound_should_compute`); see `mvp.anthropic`'s
     # identical gate for why paying for this survey is real per-request work
     # with no purpose for a tenant whose bound can never gate admission.
+    # `_bound_state` is computed ONCE (mirroring `mvp.anthropic`) and reused
+    # for both the refusal check and `shadow_mode` below, so the two can never
+    # disagree about which of `measured`/`shadow`/`enforced` this request is
+    # in — see `mvp.reservation_bound.dollar_pool_bound_state`.
     _survey = _boundability = None
     _payload_hash: Optional[str] = None
+    _bound_state: Optional[str] = None
     if dollar_pool_bound_should_compute(user.org_id):
         if entry.wire_protocol == "messages":
             _survey, _payload_bytes, _payload_hash = survey_and_hash_converse_kwargs(kwargs)
@@ -390,7 +395,8 @@ def chat_completions(
                 mantle_payload or {}
             )
         _boundability = assess_boundability(_survey)
-        if _boundability.refused and dollar_pool_bound_should_gate(user.org_id):
+        _bound_state = dollar_pool_bound_state(user.org_id)
+        if _boundability.refused and _bound_state == "enforced":
             raise HTTPException(
                 status_code=400,
                 detail={"error": {
@@ -458,6 +464,9 @@ def chat_completions(
             input_bytes=_survey.text_bytes if _survey is not None else None,
             payload_hash=_payload_hash,
             extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
+            # `shadow` (section 9b): reserve the legacy estimate, not the
+            # bound — see the note above `_bound_state`.
+            shadow_mode=(_bound_state == "shadow"),
         )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point

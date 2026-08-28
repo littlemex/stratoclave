@@ -64,7 +64,7 @@ from .deps import AuthenticatedUser, extract_model_pin, get_current_user, get_re
 from .reservation_bound import (
     assess_boundability,
     dollar_pool_bound_should_compute,
-    dollar_pool_bound_should_gate,
+    dollar_pool_bound_state,
     survey_and_hash_converse_kwargs,
 )
 from .observability.context import RequestContext, response_headers as _corr_headers
@@ -712,18 +712,27 @@ def messages(
     # (`input_bytes=None`), unaffected by this change, exactly as it did
     # before it shipped.
     #
-    # `should_compute` and `should_gate` are DELIBERATELY separate checks, not
-    # one flag: the measurement flag alone (the `measured` state — no pool,
-    # flag on) must compute and record the bound WITHOUT ever refusing on it
-    # — there is no dollar limit for it to protect. Only `should_gate` (a real
-    # pool exists — the `enforced` state) may turn `_boundability.refused`
-    # into an actual 400.
+    # `should_compute` and the STATE are DELIBERATELY separate checks, not one
+    # flag: the measurement flag alone (the `measured` state — no pool, flag
+    # on) must compute and record the bound WITHOUT ever refusing on it —
+    # there is no dollar limit for it to protect. Only `enforced` (a real pool
+    # exists AND the gate flag is on) may turn `_boundability.refused` into an
+    # actual 400. `shadow` (a real pool exists, gate flag off) sits between
+    # the two: computed and recorded, same as `measured`, but ALSO threaded
+    # into `reserve_credit_for_model` below as `shadow_mode` so admission
+    # reserves the legacy estimate instead of the bound (section 9b's rollout
+    # requirement — see `mvp.reservation_bound.dollar_pool_bound_state`).
+    # `_bound_state` is computed ONCE here and reused for both decisions so
+    # the refusal check and the reservation amount can never disagree about
+    # which state this request is in.
     _survey = _boundability = None
     _payload_hash: Optional[str] = None
+    _bound_state: Optional[str] = None
     if dollar_pool_bound_should_compute(user.org_id):
         _survey, _payload_bytes, _payload_hash = _survey_and_hash_converse_kwargs(kwargs)
         _boundability = assess_boundability(_survey)
-        if _boundability.refused and dollar_pool_bound_should_gate(user.org_id):
+        _bound_state = dollar_pool_bound_state(user.org_id)
+        if _boundability.refused and _bound_state == "enforced":
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -905,6 +914,9 @@ def messages(
         input_bytes=_survey.text_bytes if _survey is not None else None,
         payload_hash=_payload_hash,
         extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
+        # `shadow` (section 9b): reserve the legacy estimate, not the bound —
+        # see the note above `_bound_state`.
+        shadow_mode=(_bound_state == "shadow"),
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the

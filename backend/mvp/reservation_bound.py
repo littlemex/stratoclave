@@ -1038,13 +1038,36 @@ def survey_and_hash_openai_responses_payload(payload: dict) -> tuple["ContentSur
 #                 two functions. Doing that properly needs the reservation
 #                 that actually gates the pool to keep using the legacy
 #                 estimate while the sound bound is computed and recorded
-#                 ONLY for comparison — a parallel/dual-cost code path this
-#                 change does not build (see the implementation report).
-#                 `dollar_pool_bound_should_compute` returning True whenever a
-#                 pool exists means today every enforced tenant is
-#                 IMMEDIATELY gated the moment this ships; there is no
-#                 separate "shadow first" rollout switch.
+#                 ONLY for comparison. This is now expressed, and it needed a
+#                 switch rather than a parallel path: `should_compute` keeps
+#                 returning True whenever a pool exists, so the bound is still
+#                 computed and recorded, while `should_gate` additionally
+#                 requires `STRATOCLAVE_HARD_CEILING_GATE`. With that flag off —
+#                 the default — a pooled tenant is in `shadow`: measured, not
+#                 refused, admission unchanged.
 MEASURE_UNENFORCED_BOUND_ENV = "STRATOCLAVE_MEASURE_UNENFORCED_BOUND"
+
+# The `shadow` switch, and shipping with it OFF is the point rather than an
+# oversight. Contract section 9b requires the order: compute and record the bound
+# first, measure what it WOULD refuse on real traffic, agree a maximum acceptable
+# refusal rate before looking at the data, and only then let the bound gate
+# admission. Without this flag a tenant with a pool row is gated the moment the
+# code ships — an unsizeable image starts returning 400 and the reserved amount
+# jumps from the legacy estimate to a bound several times larger, exhausting
+# headroom at concurrency levels that used to be fine. That is precisely the
+# "learn the refusal rate from an incident" outcome the contract forbids.
+#
+# A reviewer seeing a default-off flag on a correctness feature will assume the
+# feature is unfinished. It is not: the bound is complete and is recorded in both
+# states. What the flag defers is the decision to start refusing people, and that
+# decision needs data this flag exists to collect.
+HARD_CEILING_GATE_ENV = "STRATOCLAVE_HARD_CEILING_GATE"
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _env_flag_on(env_key: str) -> bool:
+    return os.getenv(env_key, "").strip().lower() in _TRUTHY
 
 
 def _pool_row_exists(tenant_id: Optional[str]) -> bool:
@@ -1070,10 +1093,9 @@ def dollar_pool_bound_should_compute(tenant_id: Optional[str]) -> bool:
         default OFF) — the `measured` state: an operator deliberately paying
         the survey cost to collect shadow-run data (contract section 9b)
         without any pool existing yet; or
-      - the tenant has an active dollar pool row for the current period (the
-        `enforced` state) — see the module note above for why this function
-        cannot yet also express `shadow` (pool exists, bound recorded, but
-        NOT what admission actually uses).
+      - the tenant has an active dollar pool row for the current period — the
+        `enforced` OR `shadow` state. Both compute and record the bound; only
+        `enforced` lets it gate, which is `dollar_pool_bound_should_gate`.
 
     False for `accounting` (neither condition holds), INCLUDING on a lookup
     failure — a transient Dynamo blip must not make the request PAY the
@@ -1083,22 +1105,49 @@ def dollar_pool_bound_should_compute(tenant_id: Optional[str]) -> bool:
     """
     if not tenant_id:
         return False
-    if os.getenv(MEASURE_UNENFORCED_BOUND_ENV, "").strip().lower() in (
-        "1", "true", "yes", "on",
-    ):
+    if _env_flag_on(MEASURE_UNENFORCED_BOUND_ENV):
         return True
     return _pool_row_exists(tenant_id)
 
 
 def dollar_pool_bound_should_gate(tenant_id: Optional[str]) -> bool:
-    """True iff a computed bound may actually REFUSE this request — the
-    `enforced` state only. The `measured` state (no pool, flag on) computes
-    and records the SAME bound but must never refuse on it: there is no
-    dollar limit for it to protect. Deliberately a SEPARATE function from
-    `dollar_pool_bound_should_compute` (which the measurement flag also makes
-    True) — collapsing them back into one flag is exactly the bug an earlier
-    version of this module shipped: the flag made the survey run AND made an
-    unmeasurable image refuse a tenant that was never supposed to see a
-    refusal from this work at all.
+    """True iff a computed bound may actually REFUSE this request, and change
+    what admission reserves — the `enforced` state only.
+
+    Three states share this module and only one of them gates:
+
+      - `measured`  : no pool, measurement flag on. Computes and records the
+                      bound, never refuses — there is no dollar limit for it to
+                      protect.
+      - `shadow`    : a pool exists, the gate flag is OFF. Computes and records
+                      the bound, admission keeps using the legacy estimate, and
+                      nothing is refused. This is the state contract section 9b
+                      requires a deployment to sit in while the refusal rate is
+                      measured.
+      - `enforced`  : a pool exists AND the gate flag is on. The bound is what
+                      admission reserves, and unboundable content is refused.
+
+    Deliberately a SEPARATE function from `dollar_pool_bound_should_compute`,
+    which the measurement flag also makes True. Collapsing them back into one
+    switch is the bug an earlier version of this module shipped: the flag made
+    the survey run AND made an unsizeable image refuse a tenant that was never
+    supposed to see a refusal from this work at all. Adding the gate flag to
+    `should_compute` instead of here would reintroduce the same shape from the
+    other side — the bound would stop being recorded in `shadow`, and the
+    measurement it exists for would collect nothing.
     """
-    return _pool_row_exists(tenant_id)
+    return _pool_row_exists(tenant_id) and _env_flag_on(HARD_CEILING_GATE_ENV)
+
+
+def dollar_pool_bound_state(tenant_id: Optional[str]) -> str:
+    """The state this request is in, for logging and for the shadow report.
+
+    A single accessor so a log line and a decision cannot disagree about which
+    state produced them, which is the failure mode of deriving the name at each
+    call site.
+    """
+    if not dollar_pool_bound_should_compute(tenant_id):
+        return "accounting"
+    if dollar_pool_bound_should_gate(tenant_id):
+        return "enforced"
+    return "shadow" if _pool_row_exists(tenant_id) else "measured"

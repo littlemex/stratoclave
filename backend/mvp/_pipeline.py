@@ -502,10 +502,15 @@ class ReservationContext:
     # inputs the pool debit's `cost_microusd` was actually computed from, kept
     # so the SETTLE ledger terminal can carry a RECOMPUTABLE reservation rather
     # than an opaque number. `bound_mode` is None when the legacy
-    # `estimate_cost_microusd` heuristic priced this reservation (a caller that
-    # has not yet been migrated to pass `input_bytes` — see
-    # `reserve_credit_for_model`), so a dispute can tell "priced under the old
-    # heuristic" apart from "priced under a sound/calibrated bound".
+    # `estimate_cost_microusd` heuristic priced this reservation — either a
+    # caller that has not yet been migrated to pass `input_bytes` (see
+    # `reserve_credit_for_model`), OR a `shadow_mode` reservation (a sound
+    # bound WAS computed, but `_legacy_estimate` is what actually got
+    # reserved) — so a dispute can tell "priced under the old heuristic"
+    # apart from "priced under a sound/calibrated bound" using the ONE
+    # question this field answers: what strategy produced `cost_microusd`.
+    # It is NOT "was a bound computed at all" — see `measured_bound_microusd`
+    # for that, which can be populated while this stays None.
     bound_mode: Optional[str] = None
     # Section 3a: the canonical outbound payload's byte length (text only —
     # section 3b's split means this deliberately EXCLUDES image payload
@@ -533,6 +538,19 @@ class ReservationContext:
     # `pool_reserved_microusd` (harmless: a cheap cross-check between the
     # ledger and the usage log), and for a `measured` one it is the ONLY
     # place the computed bound survives at all.
+    #
+    # `shadow` (a pool exists, the gate flag is off — see
+    # `reservation_bound.dollar_pool_bound_should_gate`) is the one state
+    # where this field DIVERGES from `pool_reserved_microusd`: admission
+    # reserves the legacy `estimate_cost_microusd` amount (byte-for-byte as
+    # if the hard-ceiling bound had never shipped — see
+    # `reserve_credit_for_model`'s `shadow_mode`), but the whole purpose of
+    # shadow mode is to compare the sound bound against what settle actually
+    # charges, so this field is deliberately still the BOUND, not the
+    # reserved amount, in that state. `reserve_credit`'s `bound_microusd`
+    # parameter is what carries that distinction down from `_price`; when
+    # omitted this field defaults to `cost_microusd`, i.e. bound and reserved
+    # coincide, exactly as they always have outside `shadow`.
     measured_bound_microusd: Optional[int] = None
     # Attribution carried from the request headers (x-sc-*), stamped at the
     # reserve chokepoint. NOT money — used so settle can key the ledger event's
@@ -1242,6 +1260,7 @@ def reserve_credit_for_model(
     input_bytes: Optional[int] = None,
     payload_hash: Optional[str] = None,
     extra_input_tokens: int = 0,
+    shadow_mode: bool = False,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
@@ -1256,14 +1275,37 @@ def reserve_credit_for_model(
     INCLUDING image bytes (a byte-length-only pin would let a retry swap an
     image while keeping the length), pinned onto the hold alongside the byte
     count (section 3a) so a retry can be verified byte-identical rather than
-    merely trusted to be. When `input_bytes` is supplied, the pool debit (and
-    any per-model quota amount) is priced by `mvp.reservation_bound` instead of
-    the legacy `estimate_cost_microusd`, in the mode the tenant's `bound_mode`
-    resolves to (`strict` — sound by construction, within section 4's stated
-    assumptions — or `calibrated`, out of scope for this change — see
-    `dynamo.tenants.resolve_bound_mode`). `extra_input_tokens` is the bounded
-    image-dimension token term `mvp.reservation_bound.assess_boundability`
-    computed.
+    merely trusted to be. When `input_bytes` is supplied, the sound bound is
+    ALWAYS computed (and recorded — see `shadow_mode` below) by
+    `mvp.reservation_bound` instead of the legacy `estimate_cost_microusd`, in
+    the mode the tenant's `bound_mode` resolves to (`strict` — sound by
+    construction, within section 4's stated assumptions — or `calibrated`, out
+    of scope for this change — see `dynamo.tenants.resolve_bound_mode`).
+    `extra_input_tokens` is the bounded image-dimension token term
+    `mvp.reservation_bound.assess_boundability` computed.
+
+    **`shadow_mode`** (section 9b's rollout requirement) is the ONE additional
+    fork `input_bytes is not None` needs, and it answers a DIFFERENT question
+    than "is the bound computed": whether the bound may also be what gets
+    RESERVED (against the pool and, incidentally, any per-model quota).
+    `shadow_mode=False` (the default — matches every caller's behaviour before
+    shadow mode existed, and the `enforced`/`measured` states) reserves the
+    bound itself, exactly as before. `shadow_mode=True` (the `shadow` state —
+    a dollar pool row exists but
+    `mvp.reservation_bound.dollar_pool_bound_should_gate` is False) reserves
+    the LEGACY `estimate_cost_microusd` amount instead — byte-for-byte the same
+    number this function would have reserved had the hard-ceiling bound never
+    shipped — while the sound bound is still computed and lands on
+    `ReservationContext.measured_bound_microusd` regardless, because comparing
+    the bound against what settle actually charges is the entire reason
+    `shadow` exists (section 9b: "compute and record the bound first, measure
+    what it would refuse on real traffic, ... only then let it gate
+    admission"). The CALLER — a route, which already calls
+    `dollar_pool_bound_should_gate` to decide whether to enforce
+    `assess_boundability`'s refusal — is the one place that knows which state
+    a request is in; this parameter is threaded straight from that decision
+    rather than re-derived here, so the refusal check and the reservation
+    amount can never disagree about which state governs a given request.
 
     **Budget enforcement is opt-in** (section 7a/7b): the CALLER decides
     whether to compute a byte count at all — see
@@ -1336,34 +1378,61 @@ def reserve_credit_for_model(
 
         _bound_mode = resolve_bound_mode(user.org_id)
 
-    def _price(model: str) -> tuple[str, int, Optional["RateSnapshot"]]:
+    def _legacy_estimate(model: str, pk: str) -> int:
+        # Factored out of the `input_bytes is None` branch below so
+        # `shadow_mode` can compute this EXACT same number for the reservation
+        # while the hard-ceiling branch, a few lines down, still computes and
+        # returns the sound bound for recording — see `_price`'s own
+        # docstring. Byte-for-byte the call this function made before the
+        # hard-ceiling bound existed; SAAR: when this request is served by the
+        # session's warm model, `saar_warm_prefix_tokens` of the input estimate
+        # re-bill at the cheaper cache-read rate — so staying warm reserves
+        # LESS than switching cold, and a switch that would breach the pool
+        # while a stay would fit is naturally gated at the 402. In P0 this is
+        # always 0 (cache evidence lands in P1), so the estimate is
+        # byte-identical to pre-SAAR. The discount applies ONLY to the warm
+        # model itself — the tool-loop hard pin (`vsr_hard_model`) or the
+        # sticky soft preference (`saar_prefer_model`) — never to a cold
+        # candidate.
+        warm_model = vsr_hard_model or saar_prefer_model
+        warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
+        return estimate_cost_microusd(
+            pricing_key=pk,
+            input_tokens_est=input_tokens_est,
+            max_output_tokens=max_output_tokens,
+            effort_multiplier=effort_multiplier,
+            warm_prefix_tokens=warm,
+        )
+
+    def _price(
+        model: str,
+    ) -> tuple[str, int, Optional["RateSnapshot"], Optional[int]]:
+        """`(pricing_key, reserved_cost_microusd, rate_snapshot, bound_microusd)`.
+
+        `bound_microusd` is the sound bound `mvp.reservation_bound` computed
+        for this candidate, independently of what actually gets reserved —
+        None on the legacy/`accounting` path (`input_bytes is None`, no bound
+        exists at all), populated on every hard-ceiling path (`measured`,
+        `shadow`, `enforced`) even when `shadow_mode` means it is NOT what
+        gets reserved. `reserved_cost_microusd` is what actually gates
+        admission (the pool debit, and any per-model quota amount): the bound
+        itself, UNLESS `shadow_mode` says this pool has not yet earned the
+        right to enforce it, in which case it is `_legacy_estimate` instead —
+        see `_price`'s enclosing function's docstring for why reserving the
+        smaller legacy number while still recording the bound is the entire
+        point of `shadow_mode`.
+        """
         try:
             pk = _resolve_pricing(model).pricing_key
         except ValueError:
             pk = "default"
         if input_bytes is None:
             # Legacy path, byte-for-byte unchanged for a caller not yet
-            # migrated to supply a byte count. SAAR: when this request is
-            # served by the session's warm model, `saar_warm_prefix_tokens` of
-            # the input estimate re-bill at the cheaper cache-read rate — so
-            # staying warm reserves LESS than switching cold, and a switch that
-            # would breach the pool while a stay would fit is naturally gated
-            # at the 402. In P0 this is always 0 (cache evidence lands in P1),
-            # so the estimate is byte-identical to pre-SAAR. The discount
-            # applies ONLY to the warm model itself — the tool-loop hard pin
-            # (`vsr_hard_model`) or the sticky soft preference
-            # (`saar_prefer_model`) — never to a cold candidate. No rate
-            # snapshot is frozen here (None): `reserve_credit` freezes its own,
-            # exactly as it always has for this path.
-            warm_model = vsr_hard_model or saar_prefer_model
-            warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
-            return pk, estimate_cost_microusd(
-                pricing_key=pk,
-                input_tokens_est=input_tokens_est,
-                max_output_tokens=max_output_tokens,
-                effort_multiplier=effort_multiplier,
-                warm_prefix_tokens=warm,
-            ), None
+            # migrated to supply a byte count. No rate snapshot is frozen here
+            # (None): `reserve_credit` freezes its own, exactly as it always
+            # has for this path. No bound exists to record either (None):
+            # this is the `accounting` state, where nothing is computed at all.
+            return pk, _legacy_estimate(model, pk), None, None
         # Hard-ceiling path (CONTRACT-hard-ceiling.md item 1). Deliberately no
         # warm/cold split here — a SAAR "this will hit the cache" expectation
         # is exactly the kind of provider-behaviour assumption a SOUND bound
@@ -1413,7 +1482,7 @@ def reserve_credit_for_model(
             snap = None
             rate = rate_for(pk)
         if _bound_mode == BOUND_MODE_CALIBRATED:
-            cost = calibrated_reservation_microusd(
+            bound_cost = calibrated_reservation_microusd(
                 rate,
                 input_bytes=input_bytes,
                 max_output_tokens=max_output_tokens,
@@ -1422,14 +1491,33 @@ def reserve_credit_for_model(
                 tokens_per_byte=calibration_store.get(pk),
             )
         else:
-            cost = strict_reservation_microusd(
+            bound_cost = strict_reservation_microusd(
                 rate,
                 input_bytes=input_bytes,
                 max_output_tokens=max_output_tokens,
                 effort_multiplier=effort_multiplier,
                 extra_input_tokens=extra_input_tokens,
             )
-        return pk, cost, snap
+        # CONTRACT-hard-ceiling.md section 9b: the bound is ALWAYS computed
+        # and returned once we are even in this branch (`should_compute` is
+        # why `input_bytes` is not None at all) — what `shadow_mode` decides
+        # is whether it is ALSO what gets reserved. `shadow_mode` is the
+        # caller's already-made decision (it already consulted
+        # `dollar_pool_bound_should_gate` for the refusal check above this
+        # call), threaded straight through rather than re-derived here, so
+        # this chokepoint and the route's refusal check can never disagree
+        # about which state a request is in. The legacy estimate is priced
+        # from the LIVE rate table via `_legacy_estimate` (unchanged from the
+        # `input_bytes is None` branch above), not from the frozen `rate`
+        # used for the bound — that frozen snapshot is still returned as
+        # `snap` regardless, so settle still charges at the reserve-time
+        # rates the bound was priced from (section 8), even though the
+        # reserved AMOUNT in `shadow_mode` came from a different, live-rated
+        # computation.
+        reserved_cost = (
+            _legacy_estimate(model, pk) if shadow_mode else bound_cost
+        )
+        return pk, reserved_cost, snap, bound_cost
 
     tenant_cfg = get_tenant_routing_config(user.org_id)
 
@@ -1445,7 +1533,24 @@ def reserve_credit_for_model(
         # `bound_mode` stays None (the dataclass default) on the legacy path
         # (input_bytes is None) — that is itself the signal that this
         # reservation was priced by the old heuristic, not a bound.
-        if input_bytes is not None:
+        #
+        # `shadow_mode` is the SAME signal for a different reason: `_price`
+        # priced THIS reservation's `cost_microusd` (what `pool_reserved_microusd`
+        # ends up holding) from `_legacy_estimate`, not the bound, even though
+        # `input_bytes` was supplied and the bound WAS computed (it lands on
+        # `measured_bound_microusd` instead — see `reserve_credit`'s
+        # `bound_microusd`). Stamping `bound_mode="strict"` here anyway would
+        # tell a reader of the ledger terminal "recompute `reserved_microusd`
+        # via `strict_reservation_microusd` from these inputs" — which is
+        # false in `shadow_mode`; the honest recomputation for what actually
+        # got reserved is `estimate_cost_microusd`, exactly the legacy
+        # convention `bound_mode is None` already means. Leaving these fields
+        # at the dataclass default in `shadow_mode` also has the side effect
+        # of skipping the settle-time `reservation_bound_overrun` alarm for a
+        # reservation that was never bound-priced to begin with — correct,
+        # since that alarm's whole premise ("a sound bound is never exceeded")
+        # was never asserted for this request's actual reservation.
+        if input_bytes is not None and not shadow_mode:
             ctx.bound_mode = _bound_mode
             ctx.reserved_input_bytes = int(input_bytes)
             ctx.reserved_payload_hash = payload_hash
@@ -1522,7 +1627,7 @@ def reserve_credit_for_model(
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
     if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
-        pk, cost, snap = _price(model_name)
+        pk, cost, snap, bound = _price(model_name)
         return _stamp_requested(reserve_credit(
             user, reservation_tokens,
             pricing_key=pk, cost_microusd=cost,
@@ -1530,6 +1635,7 @@ def reserve_credit_for_model(
             rate_snapshot=snap,
             payload_hash=payload_hash,
             payload_bytes=input_bytes,
+            bound_microusd=bound,
         ))
 
     user_cfg = get_user_routing_config(user.org_id, user.user_id)
@@ -1580,7 +1686,7 @@ def _reserve_over_candidates(
     priced_tried: list = []  # (model, pricing_key, est_cost) for tried candidates
     exhausted: set[str] = set()
     for idx, model in enumerate(candidates):
-        pk, cost, snap = price(model)
+        pk, cost, snap, bound = price(model)
         priced_tried.append((model, pk, cost))
         q = tenant_cfg.quotas.get(model)
         tenant_limit = q.limit if q else None
@@ -1602,6 +1708,7 @@ def _reserve_over_candidates(
                 rate_snapshot=snap,
                 payload_hash=payload_hash,
                 payload_bytes=payload_bytes,
+                bound_microusd=bound,
             )
             # Decision-facts construction must NEVER fail the reserve: the hold is
             # already committed here, so any exception (incl. pricing the untried
@@ -1827,6 +1934,7 @@ def reserve_credit(
     rate_snapshot: Optional["RateSnapshot"] = None,
     payload_hash: Optional[str] = None,
     payload_bytes: Optional[int] = None,
+    bound_microusd: Optional[int] = None,
 ) -> ReservationContext:
     """Atomically reserve budget before invoking Bedrock.
 
@@ -1845,9 +1953,23 @@ def reserve_credit(
     omitted (every other/legacy caller), the snapshot is frozen here as
     before — unchanged behaviour.
 
+    `bound_microusd`, when supplied and not equal to `cost_microusd`, is the
+    sound bound `cost_microusd` did NOT get priced at — the `shadow_mode`
+    case (`reserve_credit_for_model`'s `_price`): the pool/quota debit below
+    still uses `cost_microusd` exactly as always (that is what actually gates
+    admission), but `ReservationContext.measured_bound_microusd` records
+    `bound_microusd` instead, because recording the bound is the entire point
+    of shadow mode. Omitted (every other caller, and every state but
+    `shadow`), `measured_bound_microusd` defaults to `cost_microusd` — bound
+    and reserved coincide, unchanged from before this parameter existed.
+
     Returns a `ReservationContext` for the settle step. Raises HTTP 402 with a
     `reason` of `personal_budget_exhausted` or `tenant_pool_exhausted`.
     """
+    _measured_bound_microusd = (
+        int(bound_microusd) if bound_microusd is not None
+        else (int(cost_microusd) if cost_microusd is not None else None)
+    )
     repo = UserTenantsRepository()
     repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
 
@@ -1914,7 +2036,7 @@ def reserve_credit(
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
-            measured_bound_microusd=int(cost_microusd) if cost_microusd is not None else None,
+            measured_bound_microusd=_measured_bound_microusd,
         )
 
     # No pool budget but a per-model quota IS configured → enforce the quota
@@ -1927,6 +2049,7 @@ def reserve_credit(
             pricing_key=pricing_key, quota_lines=quota_lines,
             quota_model=quota_model, selected_model=selected_model,
             quota_reserved_amount=int(cost_microusd or 0),
+            bound_microusd=bound_microusd,
         )
 
     # Pool budget present → atomic two-table reservation. Both the per-user
@@ -2217,7 +2340,7 @@ def reserve_credit(
             quota_reserved_amount=cost if quota_lines else 0,
             quota_user_id=user.user_id,
             quota_period=period if quota_lines else None,
-            measured_bound_microusd=int(cost),
+            measured_bound_microusd=_measured_bound_microusd,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
@@ -2231,6 +2354,7 @@ def reserve_credit(
                 pricing_key=pricing_key, quota_lines=quota_lines,
                 quota_model=quota_model, selected_model=selected_model,
                 quota_reserved_amount=int(cost_microusd or 0),
+                bound_microusd=bound_microusd,
             )
         try:
             repo.reserve(
@@ -2250,7 +2374,7 @@ def reserve_credit(
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
-            measured_bound_microusd=int(cost_microusd) if cost_microusd is not None else None,
+            measured_bound_microusd=_measured_bound_microusd,
         )
 
     # Retries exhausted under contention while the pool was still present. We
@@ -3179,6 +3303,7 @@ def _reserve_quota_without_pool(
     quota_model: Optional[str],
     selected_model: Optional[str],
     quota_reserved_amount: int,
+    bound_microusd: Optional[int] = None,
 ) -> ReservationContext:
     """Reserve per-user tokens AND a per-model quota atomically, with NO pool.
 
@@ -3189,6 +3314,14 @@ def _reserve_quota_without_pool(
     QuotaExhausted so the caller's cascade advances; a user-row CCF (index 0) is
     the retryable snapshot race. Fails closed: a quota-configured request must
     never slip through unmetered (the Fable F-3 hole).
+
+    `bound_microusd`, when it differs from `quota_reserved_amount`, is the
+    sound bound to RECORD on `measured_bound_microusd` — see `reserve_credit`'s
+    identically-named parameter. In practice this path never sees a genuine
+    divergence (`shadow_mode` only applies when a pool row exists, and this
+    function is only reached when one does not), but the `pool_vanished`
+    caller in `reserve_credit` passes it through anyway rather than assume
+    that invariant holds forever.
     """
     client = _low_level_client()
     saw_throttle = False
@@ -3245,7 +3378,10 @@ def _reserve_quota_without_pool(
             quota_reserved_amount=quota_reserved_amount,
             quota_user_id=user.user_id,
             quota_period=period,
-            measured_bound_microusd=int(quota_reserved_amount) if quota_reserved_amount else None,
+            measured_bound_microusd=(
+                int(bound_microusd) if bound_microusd is not None
+                else (int(quota_reserved_amount) if quota_reserved_amount else None)
+            ),
         )
 
     logger.warning("quota_reserve_retries_exhausted", user_id=user.user_id,
@@ -3715,7 +3851,16 @@ def settle_reservation_and_log(
         # reservation that WAS bound-priced (bound_mode is not None). A
         # legacy-heuristic reservation (bound_mode is None) can still overrun —
         # that was always tolerated — so it is recorded but not alarmed as a
-        # bound defect.
+        # bound defect. `context.bound_mode` is None in `shadow_mode` (see
+        # `_stamp_bound_metadata`) precisely so THIS reservation — legacy-
+        # priced, even though the sound bound was separately computed and
+        # recorded on `measured_bound_microusd` — is treated exactly like the
+        # legacy-heuristic case here: recorded, never alarmed. Diffing against
+        # the bound instead of `reserved_microusd` would compare two
+        # differently-sourced numbers and break the ledger's own documented
+        # invariant that `overrun_microusd == max(0, actual - reserved)` (see
+        # `dynamo.credit_ledger`), so this stays keyed on the REAL admission
+        # reservation, unchanged from before shadow mode existed.
         _reserved_microusd = int(context.pool_reserved_microusd)
         _overrun_microusd = max(0, int(actual_cost_microusd) - _reserved_microusd)
         _reserve_pricing_version = (
