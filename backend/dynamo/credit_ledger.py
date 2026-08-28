@@ -172,6 +172,11 @@ class CreditLedgerRepository:
         actor: str = "caller",
         run_id_is_fallback: bool = False,
         ts_ms: Optional[int] = None,
+        reserved_microusd: Optional[int] = None,
+        overrun_microusd: Optional[int] = None,
+        reserve_pricing_version: Optional[str] = None,
+        bound_mode: Optional[str] = None,
+        estimate_inputs: Optional[dict] = None,
     ) -> dict[str, Any]:
         """Build the ledger Put for a terminal money move (SETTLE/RELEASE/RECLAIM).
 
@@ -187,6 +192,24 @@ class CreditLedgerRepository:
         (`recompute(rating) == settled_delta`). `pricing_version` is the frozen
         rate VERSION (not the pricing_key). Append-only: these are set once at
         creation, never updated.
+
+        Hard-ceiling overrun record (CONTRACT-hard-ceiling.md item 4):
+        `reserved_microusd` is the amount admission actually checked (NOT
+        derived from `reserved_delta_microusd`, which is signed and, for a
+        settled-only reaper-race event, is 0 even though a real reservation
+        existed); `overrun_microusd` is `max(0, actual - reserved)`, computed by
+        the caller so a reader never has to re-derive the clamp; `pricing_version`
+        above is already the SETTLE-time version, so `reserve_pricing_version`
+        is recorded separately — Layer 5 freezes them equal by construction
+        today, but a caller on the live-rate fallback path can settle at a
+        DIFFERENT version than it reserved at, and that divergence is exactly
+        what tells a dispute "the price moved" apart from "the bound missed a
+        term". `estimate_inputs` (a small dict: input byte count, extra
+        envelope tokens, max output tokens, effort multiplier) makes the
+        reservation amount RECOMPUTABLE from the terminal alone, the same way
+        `rating` already makes the charge recomputable. `bound_mode` records
+        which reservation strategy (`strict` / `calibrated` / absent = legacy
+        heuristic) produced `reserved_microusd`.
         """
         if event_type not in _TERMINAL_TYPES:
             raise ValueError(f"terminal_event_txn_item: {event_type} is not a terminal type")
@@ -223,18 +246,27 @@ class CreditLedgerRepository:
             ("pricing_version", pricing_version),
             ("pricing_key", pricing_key),
             ("settle_reason", settle_reason),
+            ("reserve_pricing_version", reserve_pricing_version),
+            ("bound_mode", bound_mode),
         ):
             if val:
                 item[key] = {"S": str(val)}
         if rating is not None:
             item["rating"] = {"S": _json_compact(rating)}
+        if estimate_inputs is not None:
+            item["estimate_inputs"] = {"S": _json_compact(estimate_inputs)}
         # Mark when run_id is a hold_id fallback (no real workflow run), so a
         # future run-level rollup can exclude these synthetic single-hold "runs"
         # rather than mistaking them for real workflow runs (Fable impl review
         # Bug 6). Immutable, so it must be recorded at write time.
         if run_id_is_fallback:
             item["run_id_source"] = {"S": "hold_id_fallback"}
-        for key, num in (("tokens_in", tokens_in), ("tokens_out", tokens_out)):
+        for key, num in (
+            ("tokens_in", tokens_in),
+            ("tokens_out", tokens_out),
+            ("reserved_microusd", reserved_microusd),
+            ("overrun_microusd", overrun_microusd),
+        ):
             if num is not None:
                 item[key] = {"N": str(int(num))}
         return {

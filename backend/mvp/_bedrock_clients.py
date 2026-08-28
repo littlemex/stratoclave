@@ -57,6 +57,15 @@ from botocore.config import Config
 #     thread limits in `_concurrency`.
 MAX_POOL_CONNECTIONS_ENV = "BEDROCK_MAX_POOL_CONNECTIONS"
 
+# Named (not inline) so `mvp._pipeline`'s reap-timeout derivation
+# (CONTRACT-hard-ceiling.md section 5: "derive it from those values in code
+# rather than choosing a constant") can import the SAME numbers this client
+# is actually configured with, instead of a second, independently-maintained
+# copy that could drift from the real timeout the moment either changes.
+CONNECT_TIMEOUT_SECONDS = 10
+READ_TIMEOUT_SECONDS = 120
+RETRY_MAX_ATTEMPTS = 2
+
 
 def bedrock_pool_size() -> int:
     """Connections this task may hold to Bedrock.
@@ -76,9 +85,9 @@ def bedrock_pool_size() -> int:
 
 def _default_config() -> Config:
     return Config(
-        connect_timeout=10,
-        read_timeout=120,
-        retries={"max_attempts": 2, "mode": "standard"},
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        read_timeout=READ_TIMEOUT_SECONDS,
+        retries={"max_attempts": RETRY_MAX_ATTEMPTS, "mode": "standard"},
         max_pool_connections=bedrock_pool_size(),
     )
 

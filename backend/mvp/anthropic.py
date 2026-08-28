@@ -61,6 +61,12 @@ from ._pipeline import (
 )
 from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_current_user, get_request_context
+from .reservation_bound import (
+    assess_boundability,
+    dollar_pool_bound_should_compute,
+    dollar_pool_bound_should_gate,
+    survey_and_hash_converse_kwargs,
+)
 from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
 
@@ -607,6 +613,39 @@ def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
     return max(reservation, _MIN_RESERVATION_TOKENS)
 
 
+# CONTRACT-hard-ceiling.md section 3a: the bound must be computed over the
+# CANONICAL payload the gateway is about to send to Bedrock — the CONVERSE
+# kwargs `_build_bedrock_kwargs` produces — not over the raw Anthropic request
+# body. The two are not always the same bytes: `_build_bedrock_kwargs` decodes
+# base64 image data to raw bytes, merges `system` blocks, and shapes
+# `tool_result`/`tool_use` into Converse's `toolResult`/`toolUse`. Surveying
+# the CONVERSE shape (via the SHARED `mvp.reservation_bound.
+# survey_and_hash_converse_kwargs` — also used by `/v1/chat/completions`'s
+# Converse leg) instead of the Anthropic shape (an earlier version of this
+# module walked the raw body) closes that gap by construction: there is only
+# ONE walk, over the SAME dict that is handed to `converse(**kwargs)`, so the
+# measured bytes cannot drift from the sent bytes.
+#
+# This also fixes a real ordering defect this change found in the existing
+# code: `messages()` used to reserve credit BEFORE calling
+# `_build_bedrock_kwargs`, and that call raises a bare `ValueError` on
+# unsupported/malformed image content with NO try/except at either of its two
+# call sites — an uncaught exception that, critically, sits OUTSIDE the
+# try/except that refunds the reservation around the `.converse()` call. A
+# malformed image therefore used to leak the hold (recovered only by the
+# reaper, minutes later) on every single occurrence. Building kwargs BEFORE
+# reserving — see `messages()` — means that failure now surfaces as a clean
+# 400 with no hold ever created, which is what acceptance criterion 2 ("a
+# request that cannot be bounded ... is refused before any upstream call")
+# requires anyway.
+
+# Backward-compatible local name: this used to be defined here; it is now a
+# shared function in `reservation_bound` (also used by `chat_completions.py`)
+# so the two Converse-shaped routes cannot drift into two subtly different
+# byte-counting rules.
+_survey_and_hash_converse_kwargs = survey_and_hash_converse_kwargs
+
+
 # Credit reservation and settlement live in `mvp._pipeline` and are
 # imported above as `reserve_credit` / `settle_reservation_and_log`.
 # The underscore-prefixed aliases at the top of this module preserve
@@ -641,6 +680,63 @@ def messages(
             status_code=400,
             detail={"type": "invalid_model", "message": str(e)},
         )
+
+    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 3a):
+    # build the CANONICAL Bedrock payload NOW, before anything else — routing
+    # (SAAR/VSR) only reads `body.messages`, so nothing between here and the
+    # reserve call below can mutate it. This is also where an unsupported
+    # image source / malformed content 400s (this used to happen much later,
+    # AFTER a hold was reserved, with no refund path — see the comment on
+    # `_survey_and_hash_converse_kwargs` for that finding). `kwargs["modelId"]`
+    # is re-stamped after the cascade resolves the actually-selected model
+    # (content bytes never depend on `model_id`, only this one field does).
+    # Building kwargs itself is unconditional — the invoke needs it regardless
+    # of budget enforcement, and this ordering fix (versus building it after
+    # reserve, as the pre-existing code did) is independently worth having.
+    try:
+        kwargs = _build_bedrock_kwargs(body, model_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"type": "invalid_request", "message": str(e)},
+        )
+
+    # CONTRACT-hard-ceiling.md section 0/7b: budget enforcement is opt-in, and
+    # "the bound is not computed where it cannot be enforced unless a
+    # measurement flag is on". Surveying the payload (walking every message,
+    # parsing every image header) is real per-request work with no purpose
+    # for a tenant whose bound can never gate anything — so this check runs
+    # BEFORE that work, not after. `_survey`/`_boundability` stay None for the
+    # `accounting` state (no pool, no measurement flag); `reserve_credit_for_model`
+    # below then takes the pre-existing legacy-heuristic path
+    # (`input_bytes=None`), unaffected by this change, exactly as it did
+    # before it shipped.
+    #
+    # `should_compute` and `should_gate` are DELIBERATELY separate checks, not
+    # one flag: the measurement flag alone (the `measured` state — no pool,
+    # flag on) must compute and record the bound WITHOUT ever refusing on it
+    # — there is no dollar limit for it to protect. Only `should_gate` (a real
+    # pool exists — the `enforced` state) may turn `_boundability.refused`
+    # into an actual 400.
+    _survey = _boundability = None
+    _payload_hash: Optional[str] = None
+    if dollar_pool_bound_should_compute(user.org_id):
+        _survey, _payload_bytes, _payload_hash = _survey_and_hash_converse_kwargs(kwargs)
+        _boundability = assess_boundability(_survey)
+        if _boundability.refused and dollar_pool_bound_should_gate(user.org_id):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "type": "unbounded_content",
+                    "reason": _boundability.refusal_reason,
+                    "message": (
+                        "One or more images in this request could not be sized "
+                        "from their header (unsupported/malformed format, or a "
+                        "reference this gateway does not fetch); the request "
+                        "cannot be admitted under a budget-safe reservation."
+                    ),
+                },
+            )
 
     fault_spec = request.headers.get("x-sc-fault")
 
@@ -799,6 +895,16 @@ def messages(
         # (not `or`) so a real VSR decision that is falsy-but-present is never
         # silently dropped in favour of shadow (Fable review-3 B).
         vsr_decision=vsr_decision if vsr_decision is not None else _shadow_vsr,
+        # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 3):
+        # priced from the CANONICAL payload surveyed above, not the legacy
+        # char-count heuristic — but ONLY when section 7b's enforcement gate
+        # (above) actually ran the survey. `_survey is None` (no pool, no
+        # measurement flag) means `input_bytes=None`, which is what makes
+        # `reserve_credit_for_model` take the pre-existing legacy-heuristic
+        # path unchanged. `payload_hash` pins section 3a's hash onto the hold.
+        input_bytes=_survey.text_bytes if _survey is not None else None,
+        payload_hash=_payload_hash,
+        extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
@@ -807,6 +913,17 @@ def messages(
     # cascade only ever selects a registry-resolvable `messages`-protocol model
     # (servability filter), so this re-resolve cannot land on the wrong model.
     model_id = _selected_bedrock_model(tenants_repo, model_id)
+    # Content bytes never depend on which model was selected — only this one
+    # field does (see `_survey_and_hash_converse_kwargs`'s module comment) —
+    # so the ALREADY-BUILT, already-surveyed `kwargs` is re-stamped and reused
+    # for the non-streaming invoke below rather than rebuilt from `body`. The
+    # streaming path (`_stream_messages`) still rebuilds its own kwargs
+    # further down (unchanged): that rebuild is redundant work, not a
+    # soundness gap, because `_build_bedrock_kwargs` is a pure function of
+    # `(body, model_id)` and neither has been (or can be) mutated since this
+    # point — but it is real duplicated work a follow-up should remove by
+    # threading `kwargs` through `_stream_messages` too.
+    kwargs["modelId"] = model_id
 
     if body.stream:
         # SAAR replay headers are known BEFORE the stream (replay id, chosen
@@ -835,7 +952,10 @@ def messages(
             },
         )
 
-    kwargs = _build_bedrock_kwargs(body, model_id)
+    # `kwargs` was built (and surveyed/hashed) BEFORE the reserve above, then
+    # re-stamped with the actually-selected model id — reused here rather
+    # than rebuilt, so this is provably the SAME payload the bound was priced
+    # against.
     try:
         resp = _bedrock_client().converse(**kwargs)
     except ClientError as e:

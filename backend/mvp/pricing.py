@@ -519,6 +519,22 @@ def effective_rates() -> tuple[Optional[str], dict[str, Rate], set[str]]:
     return _cache.effective_rates()
 
 
+def rate_for(pricing_key: str, repo: Optional[PricingConfigRepository] = None) -> Rate:
+    """The LIVE effective `Rate` for `pricing_key` (defaults<-overrides, TTL-cached).
+
+    Public wrapper around the process-local `_cache.get()` so a caller that needs
+    a rate (the hard-ceiling reservation bound in `reservation_bound.py`, for one)
+    does not reach into the private cache object. Deliberately the SAME live read
+    `estimate_cost_microusd` uses, not the frozen `RateSnapshot` — the admission
+    bound is computed at the same "now" as the legacy estimate it replaces, and
+    the reserve chokepoint freezes its own snapshot moments later for settle. The
+    tiny window between the two reads already existed for `estimate_cost_microusd`
+    and is unrelated to the soundness of the *bound* itself (the bound is sound
+    for whatever rate it prices at, live or frozen).
+    """
+    return _cache.get(pricing_key, repo)
+
+
 def _mtok_cost(tokens: int, per_mtok_microusd: int) -> int:
     """Cost in micro-USD for `tokens` at a per-MTok rate, rounded up.
 

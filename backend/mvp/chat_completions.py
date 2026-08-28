@@ -47,6 +47,13 @@ from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_request_context
 from .observability.context import RequestContext, response_headers as _corr_headers
 from .models import ModelEntry, resolve_model
+from .reservation_bound import (
+    assess_boundability,
+    dollar_pool_bound_should_compute,
+    dollar_pool_bound_should_gate,
+    survey_and_hash_converse_kwargs,
+    survey_and_hash_openai_chat_payload,
+)
 
 router = APIRouter(tags=["mvp-chat-completions"])
 
@@ -344,6 +351,8 @@ def chat_completions(
     # restrictions) would be dead work that also wrongly rejects payloads mantle
     # accepts natively.
     kwargs: dict[str, Any] = {}
+    mantle_payload: Optional[dict] = None
+    injected_usage = False
     if entry.wire_protocol == "messages":
         # Converse has no equivalent for these two, so they are rejected here
         # rather than route-wide: mantle serves both natively and rejecting them
@@ -357,6 +366,45 @@ def chat_completions(
             kwargs = _build_chat_bedrock_kwargs(body, model_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
+    else:
+        # CONTRACT-hard-ceiling.md section 3a: the mantle transport's canonical
+        # payload, built ONCE here (pre-reserve) rather than inside
+        # `_mantle_chat_completion` — same reasoning as the Converse `kwargs`
+        # above: one payload, surveyed and then sent, not two independently
+        # built copies.
+        mantle_payload, injected_usage = _build_mantle_chat_payload(body, entry)
+
+    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 0/7b):
+    # survey whichever canonical payload this request will actually send —
+    # Converse `kwargs` or the mantle `payload` — but ONLY when enforcement
+    # might use it (`dollar_pool_bound_should_compute`); see `mvp.anthropic`'s
+    # identical gate for why paying for this survey is real per-request work
+    # with no purpose for a tenant whose bound can never gate admission.
+    _survey = _boundability = None
+    _payload_hash: Optional[str] = None
+    if dollar_pool_bound_should_compute(user.org_id):
+        if entry.wire_protocol == "messages":
+            _survey, _payload_bytes, _payload_hash = survey_and_hash_converse_kwargs(kwargs)
+        else:
+            _survey, _payload_bytes, _payload_hash = survey_and_hash_openai_chat_payload(
+                mantle_payload or {}
+            )
+        _boundability = assess_boundability(_survey)
+        if _boundability.refused and dollar_pool_bound_should_gate(user.org_id):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {
+                    "message": (
+                        "One or more images in this request could not be sized "
+                        "from their header (unsupported/malformed format, a "
+                        "remote reference, or a data URI this gateway cannot "
+                        "decode); the request cannot be admitted under a "
+                        "budget-safe reservation."
+                    ),
+                    "type": "invalid_request_error",
+                    "code": _boundability.refusal_reason,
+                }},
+            )
 
     # Shadow VSR (litellm wedge): this endpoint has no external-VSR consult, so the
     # local rule judge is the only advisory. Dark by default + fail-open +
@@ -403,6 +451,13 @@ def chat_completions(
             group_id=ctx.group_id if ctx else None,
             request_id=ctx.request_id if ctx else None,
             vsr_decision=_shadow_vsr,
+            # Hard-ceiling reservation bound: this route has no reasoning-
+            # effort concept (unlike openai_responses.py), so effort_multiplier
+            # is omitted and defaults to 1 — the contract's own rule for "a
+            # route with no notion of it".
+            input_bytes=_survey.text_bytes if _survey is not None else None,
+            payload_hash=_payload_hash,
+            extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
         )
 
     # The reservation may have cascaded to a fallback model (P0-11). Re-point
@@ -428,9 +483,16 @@ def chat_completions(
             # validated model is safer than guessing a transport.
             if selected_entry is not None and selected_entry.wire_protocol == "responses":
                 entry = selected_entry
+        # Content bytes never depend on which model was selected — only this
+        # one field does (same reasoning as `kwargs["modelId"]` below) — so
+        # the already-built, already-surveyed `mantle_payload` is re-stamped
+        # and reused rather than rebuilt.
+        assert mantle_payload is not None
+        mantle_payload["model"] = entry.bedrock_model_id
         return _mantle_chat_completion(
             body=body, entry=entry, user=user, tenants_repo=tenants_repo,
             reservation=reservation, corr=corr,
+            payload=mantle_payload, injected_usage=injected_usage,
             request_id=ctx.request_id if ctx else None,
             timing=timing,
         )
@@ -563,6 +625,37 @@ def _mantle_status(upstream: int) -> int:
     return upstream if upstream in _MANTLE_PASSTHROUGH_STATUSES else 502
 
 
+def _build_mantle_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry") -> tuple[dict, bool]:
+    """The exact JSON `payload` `/v1/chat/completions` sends to bedrock-mantle
+    (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
+    the reserve call — CONTRACT-hard-ceiling.md section 3a requires the bound
+    to be computed over the canonical payload the gateway is about to send,
+    and this is that payload for the mantle transport (as
+    `mvp.anthropic._build_bedrock_kwargs` is for the Converse transport).
+    Building it pre-reserve also means `_mantle_chat_completion` below no
+    longer rebuilds it — one canonical payload, surveyed and then sent,
+    rather than two independently-constructed copies that could drift.
+    """
+    payload = body.model_dump(exclude_none=True)
+    payload["model"] = entry.bedrock_model_id
+    # Collapse to the modern spelling without letting `max_tokens`'s default
+    # overwrite a value the caller actually asked for.
+    payload.pop("max_tokens", None)
+    payload["max_completion_tokens"] = _requested_max_output(body)
+
+    # Inject usage reporting only when the caller did not already ask for it, so
+    # we know whether the terminal usage chunk is ours to swallow or theirs to see.
+    injected_usage = False
+    if body.stream:
+        opts = payload.get("stream_options")
+        opts = dict(opts) if isinstance(opts, dict) else {}
+        if not opts.get("include_usage"):
+            opts["include_usage"] = True
+            injected_usage = True
+        payload["stream_options"] = opts
+    return payload, injected_usage
+
+
 def _mantle_chat_completion(
     *,
     body: ChatCompletionsRequest,
@@ -571,6 +664,8 @@ def _mantle_chat_completion(
     tenants_repo: Any,
     reservation: int,
     corr: dict[str, str],
+    payload: Optional[dict] = None,
+    injected_usage: Optional[bool] = None,
     request_id: Optional[str] = None,
     timing: Optional[RequestTiming] = None,
 ):
@@ -590,28 +685,21 @@ def _mantle_chat_completion(
     chunk is swallowed instead of forwarded, so a caller that did not ask for
     usage sees the stream it expected.
 
+    `payload`/`injected_usage` are now built ONCE, pre-reserve, by the caller
+    (`_build_mantle_chat_payload`) — see that function's docstring.
+
     Accounting is exclusive by construction: `_account_once` runs either the
     refund-and-release path or the settle path, never both, and only once. An
     invoke-time failure refunds with NO settle; a response that arrived settles
     against reported usage.
     """
-    payload = body.model_dump(exclude_none=True)
-    payload["model"] = entry.bedrock_model_id
-    # Collapse to the modern spelling without letting `max_tokens`'s default
-    # overwrite a value the caller actually asked for.
-    payload.pop("max_tokens", None)
-    payload["max_completion_tokens"] = _requested_max_output(body)
-
-    # Inject usage reporting only when the caller did not already ask for it, so
-    # we know whether the terminal usage chunk is ours to swallow or theirs to see.
-    injected_usage = False
-    if body.stream:
-        opts = payload.get("stream_options")
-        opts = dict(opts) if isinstance(opts, dict) else {}
-        if not opts.get("include_usage"):
-            opts["include_usage"] = True
-            injected_usage = True
-        payload["stream_options"] = opts
+    if payload is None:
+        # Standalone-call fallback (e.g. a caller/test exercising this
+        # function in isolation, pre-reserve survey never having run): build
+        # it here exactly as the route used to, byte-identically to
+        # `_build_mantle_chat_payload`. The real route path always supplies
+        # `payload` pre-built, so this branch is never taken there.
+        payload, injected_usage = _build_mantle_chat_payload(body, entry)
 
     # One latch for both terminal paths. Whichever fires first wins; the other is a
     # no-op. This is what keeps a 4xx on a streamed request from being refunded by

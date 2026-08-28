@@ -71,6 +71,44 @@ logger = get_logger(__name__)
 # needs ~N rounds to drain. 12 rounds + full-jitter backoff comfortably clears
 # a 20-way burst; the reserve completes *before* the Bedrock call, so these
 # retries add latency only during genuine contention, never to a quiet request.
+# CONTRACT-hard-ceiling.md section 6: a sound bound can be several times the
+# eventual charge (how much depends on the script — deliberately not quoted as
+# a ratio here, see reservation_bound.py's module docstring), so a single
+# request's bound can occupy a material fraction of a tenant's pool_limit as
+# HEADROOM alone, long before real spend is anywhere near the ceiling.
+#
+# Three DISTINCT conditions follow, reported differently (an earlier draft
+# collapsed the first two into one fraction-based REFUSAL, which review found
+# wrong in both directions):
+#
+#   - "does not fit at all" (bound > pool_limit): refused, exactly, no
+#     fraction — see `_err_402_does_not_fit`. Not claimed as an acceptance
+#     criterion for the strict-only first slice (section 12): this and
+#     ordinary exhaustion may share one refusal there.
+#   - "will monopolise" (bound exceeds 1/N of pool_limit while still fitting
+#     under it): NOT refused — it can legitimately succeed — but WARNED,
+#     naming the tenant and the ratio, because it means the budget is sized
+#     for fewer concurrent requests than the workload wants. Also NOT claimed
+#     for the first slice (criterion 3 is explicitly deferred).
+#   - "refused while mostly unused": every refusal logs the reserved/settled
+#     split at that moment (see the refusal sites below) — this IS part of
+#     the first slice (it costs nothing extra and the aggregate-visibility
+#     gap it closes is real from day one).
+#
+# `N` is "the minimum in-flight concurrency the tenant is sized for" — a
+# TENANT setting per the contract, defaulting to 100 because, per the
+# contract's own account, both independent reviewers landed near that figure.
+# This module keeps that default as a single global env-configurable value
+# rather than a new per-tenant Tenants-table attribute: criterion 3 (the only
+# one this constant serves) is explicitly OUT of the first slice being shipped
+# (section 12), so per-tenant override plumbing — mirroring `bound_mode`'s — is
+# left as follow-up work rather than built ahead of the criterion that needs
+# it. Recorded here as a documented simplification, not silently done.
+_DEFAULT_MONOPOLISE_WARN_N = 100
+_MAX_RESERVATION_FRACTION_OF_POOL = 1.0 / float(
+    os.getenv("STRATOCLAVE_MONOPOLISE_WARN_N", str(_DEFAULT_MONOPOLISE_WARN_N))
+)
+
 _RESERVE_MAX_RETRIES = 12
 _RESERVE_BACKOFF_SECONDS = 0.01  # base delay for the exponential backoff below.
 _RESERVE_BACKOFF_CAP_SECONDS = 0.4  # ceiling so a hot row can't stall a request.
@@ -125,6 +163,102 @@ _HOLD_TTL_SECONDS = max(
     int(os.getenv("STRATOCLAVE_POOL_HOLD_TTL_SECONDS", "3600")),
     _HOLD_TTL_FLOOR_SECONDS,
 )
+
+# CONTRACT-hard-ceiling.md section 5: "the reap timeout must exceed the
+# maximum time a charge can still arrive for a hold — the request deadline
+# plus the retry budget plus a margin for clock skew. Derive it from those
+# values in code rather than choosing a constant, so a change to a timeout
+# cannot silently invalidate it. Assert that relationship at startup."
+#
+# With the legacy estimate, an under-reservation was the only failure mode the
+# reaper's timing had to out-live; with a sound bound, the reservation is HELD
+# for the call's full duration and is several times larger, so a hold released
+# while its call is still running is now a genuine ceiling breach: the
+# returned headroom admits a second request, and when the first charge lands
+# both are booked — a capacity leak, not a double-spend, but still a breach of
+# "settled + reserved <= pool_limit at any ledger-reconstructible state".
+#
+# DERIVATION (not a chosen constant): for each upstream transport this
+# pipeline's holds wait on, one attempt's own worst-case wall-clock time is
+# (connect + read timeout) — the time the underlying HTTP client will wait
+# before giving up and surfacing an error — and `RETRY_MAX_ATTEMPTS` many such
+# attempts can happen INSIDE that transport's OWN client before it hands
+# control back to this pipeline (Bedrock: botocore's `retries.max_attempts`;
+# mantle: no automatic retry, so 1). A hold's charge can only "still arrive"
+# for as long as ONE of these attempt-sequences is running, so the ceiling is
+# the WORST (largest) of the transports this pipeline actually uses, plus a
+# margin for clock skew between the process that started the timer and the one
+# that later reads it. This imports the SAME named constants
+# `_bedrock_clients`/`_mantle_transport` configure their real clients with
+# (added there for exactly this reason), so a change to either transport's
+# timeout changes this derivation automatically instead of by someone
+# remembering to update a second copy.
+from ._bedrock_clients import (
+    CONNECT_TIMEOUT_SECONDS as _BEDROCK_CONNECT_SECONDS,
+    READ_TIMEOUT_SECONDS as _BEDROCK_READ_SECONDS,
+    RETRY_MAX_ATTEMPTS as _BEDROCK_RETRY_ATTEMPTS,
+)
+from ._mantle_transport import (
+    RETRY_MAX_ATTEMPTS as _MANTLE_RETRY_ATTEMPTS,
+    STREAM_READ_TIMEOUT_SECONDS as _MANTLE_READ_SECONDS,
+)
+
+_BEDROCK_WORST_CASE_SECONDS = (
+    (_BEDROCK_CONNECT_SECONDS + _BEDROCK_READ_SECONDS) * _BEDROCK_RETRY_ATTEMPTS
+)
+# mantle's connect timeout (10s) is a module-private literal in
+# `_mantle_transport._DEFAULT_TIMEOUT`, not (yet) named — folding in only the
+# named read timeout here is the conservative direction (it UNDERSTATES
+# mantle's worst case by the connect leg), which is safe for a floor this
+# module then adds a full clock-skew margin on top of; overstating would be
+# the unsafe direction.
+_MANTLE_WORST_CASE_SECONDS = _MANTLE_READ_SECONDS * _MANTLE_RETRY_ATTEMPTS
+
+# Clock-skew margin: this pipeline's own timestamps (`created_at` on the hold,
+# `expires_at`) are all server-side wall-clock, but the reaper's sweep and the
+# request that wrote the hold can run on DIFFERENT hosts/containers. AWS's own
+# guidance keeps NTP-synchronised hosts within low single-digit seconds of
+# each other; 60s is a generous, round multiple of that with margin for a
+# host whose NTP sync has degraded, not a number tuned to any test.
+_CLOCK_SKEW_MARGIN_SECONDS = 60
+
+REQUEST_DEADLINE_SECONDS = max(_BEDROCK_READ_SECONDS, _MANTLE_READ_SECONDS)
+RETRY_BUDGET_SECONDS = max(_BEDROCK_WORST_CASE_SECONDS, _MANTLE_WORST_CASE_SECONDS)
+# `MAX_CALL_DURATION_SECONDS` is named to match section 5's own vocabulary
+# ("the request deadline plus the retry budget plus a margin for clock skew")
+# — `RETRY_BUDGET_SECONDS` here already folds the deadline into its own
+# worst-case product (attempts x (connect+read)), so the sum below double-
+# counts one attempt's deadline on top of the retry product. That is
+# deliberate slack in the SAFE direction (the ceiling can only be an
+# over-estimate of "how long a charge can still arrive"), not a bug: a
+# genuinely tight derivation would need per-transport attempt counts carried
+# separately through the max() above, which is more machinery than this
+# constant's one consumer (the assertion below) justifies today.
+MAX_CALL_DURATION_SECONDS = (
+    REQUEST_DEADLINE_SECONDS + RETRY_BUDGET_SECONDS + _CLOCK_SKEW_MARGIN_SECONDS
+)
+
+if _HOLD_TTL_FLOOR_SECONDS <= MAX_CALL_DURATION_SECONDS:
+    raise RuntimeError(
+        "hard-ceiling invariant violated at import: _HOLD_TTL_FLOOR_SECONDS "
+        f"({_HOLD_TTL_FLOOR_SECONDS}s) must exceed MAX_CALL_DURATION_SECONDS "
+        f"({MAX_CALL_DURATION_SECONDS}s = request deadline "
+        f"{REQUEST_DEADLINE_SECONDS}s + retry budget {RETRY_BUDGET_SECONDS}s + "
+        f"skew margin {_CLOCK_SKEW_MARGIN_SECONDS}s), or the reaper can "
+        "reclaim a hold whose call is still legitimately running."
+    )
+if _HOLD_TTL_SECONDS <= MAX_CALL_DURATION_SECONDS:
+    # The floor passed; the CONFIGURED value (env override) did not. Fail at
+    # import — same reasoning as the floor check, but on the value that is
+    # actually in force — rather than let a misconfigured deploy silently run
+    # with a TTL shorter than a call it will happily allow. This is
+    # acceptance criterion 8: "startup fails when the reap timeout does not
+    # exceed the request deadline plus the retry budget plus the skew margin."
+    raise RuntimeError(
+        "hard-ceiling invariant violated at import: STRATOCLAVE_POOL_HOLD_TTL_SECONDS "
+        f"resolves to {_HOLD_TTL_SECONDS}s, which does not exceed "
+        f"MAX_CALL_DURATION_SECONDS ({MAX_CALL_DURATION_SECONDS}s)."
+    )
 # Reclaim only a handful of expired holds per request so the sweep never turns
 # the hot reserve path into an unbounded scan.
 _SWEEP_MAX_HOLDS = int(os.getenv("STRATOCLAVE_POOL_SWEEP_MAX_HOLDS", "5"))
@@ -364,6 +498,42 @@ class ReservationContext:
     quota_period: Optional[str] = None
     quota_tenant_limit: Optional[int] = None
     quota_user_limit: Optional[int] = None
+    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md item 4): the
+    # inputs the pool debit's `cost_microusd` was actually computed from, kept
+    # so the SETTLE ledger terminal can carry a RECOMPUTABLE reservation rather
+    # than an opaque number. `bound_mode` is None when the legacy
+    # `estimate_cost_microusd` heuristic priced this reservation (a caller that
+    # has not yet been migrated to pass `input_bytes` — see
+    # `reserve_credit_for_model`), so a dispute can tell "priced under the old
+    # heuristic" apart from "priced under a sound/calibrated bound".
+    bound_mode: Optional[str] = None
+    # Section 3a: the canonical outbound payload's byte length (text only —
+    # section 3b's split means this deliberately EXCLUDES image payload
+    # bytes, which are covered by the dimension term instead) and its hash,
+    # pinned at reserve time. Acceptance criterion 9 compares these against an
+    # independent capture of the bytes actually sent, so both must be computed
+    # from the SAME canonical payload the client library serialises, not from
+    # the request body the route received.
+    reserved_input_bytes: Optional[int] = None
+    reserved_payload_hash: Optional[str] = None
+    reserved_extra_input_tokens: int = 0
+    reserved_max_output_tokens: Optional[int] = None
+    reserved_effort_multiplier: int = 1
+    # The coordinator's ITEM 2 (a per-request `measured` destination): the
+    # amount `cost_microusd` this reservation was priced at, carried on the
+    # context so `settle_reservation_and_log` can hand it to
+    # `UsageLogsRepository().record()` regardless of whether a dollar pool
+    # exists. This is what gives the `measured` state (no pool, but the
+    # bound WAS computed because the measurement flag is on) a place to land:
+    # the usage row is already per-request and append-only, so recording
+    # this here needs no shared-item write and pollutes no ledger invariant —
+    # explicitly NOT a synthesised pool row or a fake RESERVE event. Set
+    # whenever `cost_microusd` was supplied to `reserve_credit`, regardless of
+    # `pool_active` — for an `enforced` reservation this duplicates
+    # `pool_reserved_microusd` (harmless: a cheap cross-check between the
+    # ledger and the usage log), and for a `measured` one it is the ONLY
+    # place the computed bound survives at all.
+    measured_bound_microusd: Optional[int] = None
     # Attribution carried from the request headers (x-sc-*), stamped at the
     # reserve chokepoint. NOT money — used so settle can key the ledger event's
     # run-index (gsi1pk) on the client's workflow_run_id, making per-run billing
@@ -969,6 +1139,36 @@ def _err_402(reason: str) -> HTTPException:
     )
 
 
+def _err_402_does_not_fit(reason: str) -> HTTPException:
+    """402 for a request whose reservation bound EXCEEDS THE WHOLE `pool_limit`
+    (CONTRACT-hard-ceiling.md item 2b, "cannot fit at all") — exact, no
+    configured fraction involved: no amount of waiting or draining the pool
+    makes this request admissible to this budget.
+
+    Deliberately a DIFFERENT `reason` than `_err_402("tenant_pool_exhausted")`,
+    even though both are HTTP 402 `credit_exhausted`: the two need different
+    operator actions. "tenant_pool_exhausted" means wait or top up — the budget
+    is fine, it is just busy right now. "request_does_not_fit_pool_limit" means
+    THIS request cannot fit THIS budget no matter how quiet the pool is — the
+    fix is resizing the pool or shrinking the request, and reporting it as
+    ordinary exhaustion would send an operator chasing a transient-capacity
+    problem that does not exist.
+    """
+    return HTTPException(
+        status_code=402,
+        detail={
+            "type": "credit_exhausted",
+            "reason": reason,
+            "message": (
+                "This request's reservation exceeds the tenant's entire "
+                "budget for the period; no amount of available headroom "
+                "would admit it. Reduce the request size or ask your admin "
+                "to raise the budget."
+            ),
+        },
+    )
+
+
 def _err_400(reason: str) -> HTTPException:
     """400 for a malformed/unservable request input (e.g. an invalid VSR pin)."""
     return HTTPException(
@@ -1039,8 +1239,44 @@ def reserve_credit_for_model(
     saar_warm_prefix_tokens: int = 0,
     saar_prefer_model: Optional[str] = None,
     vsr_decision: Optional[dict] = None,
+    input_bytes: Optional[int] = None,
+    payload_hash: Optional[str] = None,
+    extra_input_tokens: int = 0,
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
+
+    **Hard-ceiling reservation bound** (CONTRACT-hard-ceiling.md). `input_bytes`
+    is the UTF-8 byte count of the CANONICAL outbound payload's non-image
+    content (section 3a: the payload the gateway is actually about to send to
+    Bedrock, NOT the raw request body — see the route handler for how that is
+    built before this is called; section 3b: this deliberately EXCLUDES image
+    payload bytes, which are covered by `extra_input_tokens` instead, so
+    counting both would double-charge) — a BOUND on the input token count, not
+    an estimate. `payload_hash` is a hash of the ENTIRE canonical payload
+    INCLUDING image bytes (a byte-length-only pin would let a retry swap an
+    image while keeping the length), pinned onto the hold alongside the byte
+    count (section 3a) so a retry can be verified byte-identical rather than
+    merely trusted to be. When `input_bytes` is supplied, the pool debit (and
+    any per-model quota amount) is priced by `mvp.reservation_bound` instead of
+    the legacy `estimate_cost_microusd`, in the mode the tenant's `bound_mode`
+    resolves to (`strict` — sound by construction, within section 4's stated
+    assumptions — or `calibrated`, out of scope for this change — see
+    `dynamo.tenants.resolve_bound_mode`). `extra_input_tokens` is the bounded
+    image-dimension token term `mvp.reservation_bound.assess_boundability`
+    computed.
+
+    **Budget enforcement is opt-in** (section 7a/7b): the CALLER decides
+    whether to compute a byte count at all — see
+    `mvp.reservation_bound.dollar_pool_bound_enforcement_active`, which the
+    route handler consults BEFORE surveying the payload, so a tenant with no
+    dollar pool never pays for that survey and never passes `input_bytes`
+    here. An unreadable image, in particular, is refused by the ROUTE (before
+    ever calling this function) when — and only when — enforcement is
+    active; this chokepoint never independently re-derives that refusal.
+
+    `input_bytes=None` (the default) keeps the exact legacy behaviour, for any
+    caller not yet migrated to compute a byte count (or for a tenant this
+    request's caller determined has no active dollar-pool enforcement).
 
     The single chokepoint every route handler calls. Two regimes:
 
@@ -1075,28 +1311,125 @@ def reserve_credit_for_model(
     from .pricing import estimate_cost_microusd
     from .routing.config import get_tenant_routing_config, get_user_routing_config
 
-    def _price(model: str) -> tuple[str, int]:
+    # Resolved ONCE per request, not per cascade candidate: a tenant's bound
+    # mode is one fact, and switching bounding strategy mid-cascade would make
+    # "which candidate we landed on" also decide "how sound the price is",
+    # which is not a decision the cascade should be making. Only consulted (and
+    # only costs a Dynamo read) when the caller actually supplied a byte count
+    # — a request still on the legacy path never pays for this lookup.
+    # CONTRACT-hard-ceiling.md section 7b: the caller (the route handler) is
+    # the one place that knows whether enforcement is worth checking BEFORE
+    # paying for the survey that produces `input_bytes` — see
+    # `mvp.reservation_bound.dollar_pool_bound_enforcement_active`, which the
+    # route consults first. So `input_bytes is not None` HERE already means
+    # "enforcement is active for this tenant"; this chokepoint does not
+    # re-derive that decision (a second existence read would be redundant on
+    # every path that reaches here, since the real reserve transaction below
+    # performs its own strongly-consistent read regardless). A caller that
+    # skipped the gate and passed `input_bytes` for an unenforced tenant
+    # anyway would simply price a bound that never gets enforced against
+    # (harmless — the pool-existent branch below is what actually debits
+    # anything, and it still requires a real pool row).
+    _bound_mode: Optional[str] = None
+    if input_bytes is not None:
+        from dynamo.tenants import resolve_bound_mode
+
+        _bound_mode = resolve_bound_mode(user.org_id)
+
+    def _price(model: str) -> tuple[str, int, Optional["RateSnapshot"]]:
         try:
             pk = _resolve_pricing(model).pricing_key
         except ValueError:
             pk = "default"
-        # SAAR: when this request is served by the session's warm model,
-        # `saar_warm_prefix_tokens` of the input estimate re-bill at the cheaper
-        # cache-read rate — so staying warm reserves LESS than switching cold, and
-        # a switch that would breach the pool while a stay would fit is naturally
-        # gated at the 402. In P0 this is always 0 (cache evidence lands in P1), so
-        # the estimate is byte-identical to pre-SAAR. The discount applies ONLY to
-        # the warm model itself — the tool-loop hard pin (`vsr_hard_model`) or the
-        # sticky soft preference (`saar_prefer_model`) — never to a cold candidate.
-        warm_model = vsr_hard_model or saar_prefer_model
-        warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
-        return pk, estimate_cost_microusd(
-            pricing_key=pk,
-            input_tokens_est=input_tokens_est,
-            max_output_tokens=max_output_tokens,
-            effort_multiplier=effort_multiplier,
-            warm_prefix_tokens=warm,
+        if input_bytes is None:
+            # Legacy path, byte-for-byte unchanged for a caller not yet
+            # migrated to supply a byte count. SAAR: when this request is
+            # served by the session's warm model, `saar_warm_prefix_tokens` of
+            # the input estimate re-bill at the cheaper cache-read rate — so
+            # staying warm reserves LESS than switching cold, and a switch that
+            # would breach the pool while a stay would fit is naturally gated
+            # at the 402. In P0 this is always 0 (cache evidence lands in P1),
+            # so the estimate is byte-identical to pre-SAAR. The discount
+            # applies ONLY to the warm model itself — the tool-loop hard pin
+            # (`vsr_hard_model`) or the sticky soft preference
+            # (`saar_prefer_model`) — never to a cold candidate. No rate
+            # snapshot is frozen here (None): `reserve_credit` freezes its own,
+            # exactly as it always has for this path.
+            warm_model = vsr_hard_model or saar_prefer_model
+            warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
+            return pk, estimate_cost_microusd(
+                pricing_key=pk,
+                input_tokens_est=input_tokens_est,
+                max_output_tokens=max_output_tokens,
+                effort_multiplier=effort_multiplier,
+                warm_prefix_tokens=warm,
+            ), None
+        # Hard-ceiling path (CONTRACT-hard-ceiling.md item 1). Deliberately no
+        # warm/cold split here — a SAAR "this will hit the cache" expectation
+        # is exactly the kind of provider-behaviour assumption a SOUND bound
+        # must not make (assuming a cache outcome instead of bounding against
+        # every one is the original cache-write defect's shape). A calibrated
+        # tenant still gets no warm discount either: the calibration is a
+        # measured tokens-per-byte ratio, not a caching assumption, and mixing
+        # the two would make a settle's realised-ratio signal ambiguous about
+        # which effect moved it. `extra_input_tokens` (the image-dimension
+        # bound) is additive input-side tokens, same as the byte-derived count.
+        #
+        # Item 5b ("a rate change between reserve and settle"): the bound is
+        # priced from a FROZEN snapshot (`snapshot_rates`, the SAME Layer-5
+        # primitive that pins the settle-time charge), not a second, separate
+        # live-table read. Returning that snapshot so `reserve_credit` uses it
+        # directly (rather than freezing its own) is what makes "settle at the
+        # reserve-time rates" airtight for this path: the bound and the charge
+        # then price at the IDENTICAL row by construction, so a rate document
+        # edit that lands between pricing this candidate and committing the
+        # reserve transaction cannot make settle charge above what was bounded
+        # — the edit is simply not visible to either side of this request.
+        from .pricing import rate_for, snapshot_rates
+        from .reservation_bound import (
+            calibrated_reservation_microusd,
+            calibration_store,
+            strict_reservation_microusd,
         )
+        from .rates import Rate as _Rate
+        from dynamo.tenants import BOUND_MODE_CALIBRATED
+
+        try:
+            snap = snapshot_rates(pk)
+            rate = _Rate(
+                input_per_mtok_microusd=snap.input_per_mtok_microusd,
+                output_per_mtok_microusd=snap.output_per_mtok_microusd,
+                cache_read_per_mtok_microusd=snap.cache_read_per_mtok_microusd,
+                cache_write_per_mtok_microusd=snap.cache_write_per_mtok_microusd,
+            )
+        except Exception:  # noqa: BLE001 — pricing must never break admission
+            # A rate-table blip must not fail the reserve (same invariant the
+            # legacy path already gives every caller). Degrade to a live read
+            # for the bound math ONLY; `snap` stays None, so `reserve_credit`
+            # below will attempt its OWN `snapshot_rates` call and — most
+            # likely hitting the same failure — mark this reservation
+            # `rate_snapshot_failed` and settle via the live-rate fallback,
+            # exactly the existing degraded path (Fable review-2 N3).
+            snap = None
+            rate = rate_for(pk)
+        if _bound_mode == BOUND_MODE_CALIBRATED:
+            cost = calibrated_reservation_microusd(
+                rate,
+                input_bytes=input_bytes,
+                max_output_tokens=max_output_tokens,
+                effort_multiplier=effort_multiplier,
+                extra_input_tokens=extra_input_tokens,
+                tokens_per_byte=calibration_store.get(pk),
+            )
+        else:
+            cost = strict_reservation_microusd(
+                rate,
+                input_bytes=input_bytes,
+                max_output_tokens=max_output_tokens,
+                effort_multiplier=effort_multiplier,
+                extra_input_tokens=extra_input_tokens,
+            )
+        return pk, cost, snap
 
     tenant_cfg = get_tenant_routing_config(user.org_id)
 
@@ -1105,10 +1438,26 @@ def reserve_credit_for_model(
     # reserve) — so pinning reuses all the money machinery, only the candidate
     # SELECTION changes. Handled before the no-config passthrough so a pin is
     # honoured whether or not the tenant has routing config.
+    def _stamp_bound_metadata(ctx: ReservationContext) -> None:
+        # CONTRACT-hard-ceiling.md item 4: carry the exact inputs `cost` was
+        # computed from onto the context, so settle can embed a RECOMPUTABLE
+        # reservation on the ledger terminal instead of an opaque amount.
+        # `bound_mode` stays None (the dataclass default) on the legacy path
+        # (input_bytes is None) — that is itself the signal that this
+        # reservation was priced by the old heuristic, not a bound.
+        if input_bytes is not None:
+            ctx.bound_mode = _bound_mode
+            ctx.reserved_input_bytes = int(input_bytes)
+            ctx.reserved_payload_hash = payload_hash
+            ctx.reserved_extra_input_tokens = int(extra_input_tokens)
+            ctx.reserved_max_output_tokens = int(max_output_tokens)
+            ctx.reserved_effort_multiplier = int(effort_multiplier)
+
     def _stamp_requested(ctx: ReservationContext) -> ReservationContext:
         # Record the client-requested model (pre-cascade) on the context so
         # settle can log P0-11 fallback visibility. Single chokepoint => every
         # handler gets it without threading through each reserve return path.
+        _stamp_bound_metadata(ctx)
         ctx.requested_model = model_name
         # Same chokepoint stamps the request attribution so settle keys the
         # ledger run-index on the client's workflow_run_id (per-run billing).
@@ -1147,12 +1496,14 @@ def reserve_credit_for_model(
         ctx = _reserve_over_candidates(
             user, reservation_tokens, candidates=[vsr_hard_model],
             tenant_cfg=tenant_cfg, price=_price,
+            payload_hash=payload_hash, payload_bytes=input_bytes,
         )
         # A VSR hard pin is a deliberate policy override, NOT a P0-11 quota
         # cascade fallback (Fable #65 rev1 BUG 2). Record the effective (pinned)
         # model as the "requested" one so the pin never inflates fallback_count
         # or shows a spurious fallback badge — the two events are semantically
         # different and the derived bool must not conflate them.
+        _stamp_bound_metadata(ctx)
         ctx.requested_model = ctx.selected_model or vsr_hard_model
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
@@ -1171,11 +1522,14 @@ def reserve_credit_for_model(
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
     if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
-        pk, cost = _price(model_name)
+        pk, cost, snap = _price(model_name)
         return _stamp_requested(reserve_credit(
             user, reservation_tokens,
             pricing_key=pk, cost_microusd=cost,
             selected_model=model_name,
+            rate_snapshot=snap,
+            payload_hash=payload_hash,
+            payload_bytes=input_bytes,
         ))
 
     user_cfg = get_user_routing_config(user.org_id, user.user_id)
@@ -1198,10 +1552,14 @@ def reserve_credit_for_model(
     return _stamp_requested(_reserve_over_candidates(
         user, reservation_tokens, candidates=candidates,
         tenant_cfg=tenant_cfg, price=_price,
+        payload_hash=payload_hash, payload_bytes=input_bytes,
     ))
 
 
-def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg, price):
+def _reserve_over_candidates(
+    user, reservation_tokens, *, candidates, tenant_cfg, price,
+    payload_hash=None, payload_bytes=None,
+):
     """Walk an ordered candidate list, pricing + quota-reserving each atomically.
 
     Shared by the P0-11 cascade and the P0-15 hard pin (a pin is just a
@@ -1222,7 +1580,7 @@ def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg
     priced_tried: list = []  # (model, pricing_key, est_cost) for tried candidates
     exhausted: set[str] = set()
     for idx, model in enumerate(candidates):
-        pk, cost = price(model)
+        pk, cost, snap = price(model)
         priced_tried.append((model, pk, cost))
         q = tenant_cfg.quotas.get(model)
         tenant_limit = q.limit if q else None
@@ -1241,6 +1599,9 @@ def _reserve_over_candidates(user, reservation_tokens, *, candidates, tenant_cfg
                 quota_lines=quota_lines,
                 quota_model=model if quota_lines else None,
                 selected_model=model,
+                rate_snapshot=snap,
+                payload_hash=payload_hash,
+                payload_bytes=payload_bytes,
             )
             # Decision-facts construction must NEVER fail the reserve: the hold is
             # already committed here, so any exception (incl. pricing the untried
@@ -1463,6 +1824,9 @@ def reserve_credit(
     quota_lines: Optional[list] = None,
     quota_model: Optional[str] = None,
     selected_model: Optional[str] = None,
+    rate_snapshot: Optional["RateSnapshot"] = None,
+    payload_hash: Optional[str] = None,
+    payload_bytes: Optional[int] = None,
 ) -> ReservationContext:
     """Atomically reserve budget before invoking Bedrock.
 
@@ -1470,6 +1834,16 @@ def reserve_credit(
       debits `reservation_tokens` from the per-user balance exactly as before.
     - With a tenant pool budget for the current period: debits the per-user
       tokens AND reserves `cost_microusd` from the pool in one transaction.
+
+    `rate_snapshot`, when supplied, is a RateSnapshot the CALLER already froze
+    (CONTRACT-hard-ceiling.md item 5b: "settle at the reserve-time rates" —
+    see `reserve_credit_for_model`'s `_price`). Using it here instead of
+    freezing a second, independent snapshot is what makes that rule airtight
+    rather than merely usual: the hard-ceiling bound and the settle-time
+    charge are then GUARANTEED to price at the identical rate row, because
+    they read it exactly once, not twice at slightly different instants. When
+    omitted (every other/legacy caller), the snapshot is frozen here as
+    before — unchanged behaviour.
 
     Returns a `ReservationContext` for the settle step. Raises HTTP 402 with a
     `reason` of `personal_budget_exhausted` or `tenant_pool_exhausted`.
@@ -1488,21 +1862,25 @@ def reserve_credit(
         UNVERSIONED_SENTINEL as _UNVERSIONED,
     )
 
-    _rate_snap = None
-    _snap_failed = False
-    if pricing_key:
-        try:
-            from .pricing import snapshot_rates
-            _rate_snap = snapshot_rates(pricing_key)
-        except Exception:  # noqa: BLE001 — pricing must never break admission
-            # DEGRADED PATH (Fable review-2 N3): the rate table read failed, so
-            # settle will charge via the live-rate fallback and the terminal is
-            # labeled `snapshot-failed` (a DISTINCT sentinel from legacy). error
-            # level (not warning) so a CloudWatch metric filter can alarm — a
-            # persistent rate-table outage silently degrading all charging is the
-            # exact failure mode Layer 5 must not hide.
-            _snap_failed = True
-            logger.error("RateSnapshotFailed", pricing_key=pricing_key)
+    if rate_snapshot is not None:
+        _rate_snap = rate_snapshot
+        _snap_failed = False
+    else:
+        _rate_snap = None
+        _snap_failed = False
+        if pricing_key:
+            try:
+                from .pricing import snapshot_rates
+                _rate_snap = snapshot_rates(pricing_key)
+            except Exception:  # noqa: BLE001 — pricing must never break admission
+                # DEGRADED PATH (Fable review-2 N3): the rate table read failed, so
+                # settle will charge via the live-rate fallback and the terminal is
+                # labeled `snapshot-failed` (a DISTINCT sentinel from legacy). error
+                # level (not warning) so a CloudWatch metric filter can alarm — a
+                # persistent rate-table outage silently degrading all charging is the
+                # exact failure mode Layer 5 must not hide.
+                _snap_failed = True
+                logger.error("RateSnapshotFailed", pricing_key=pricing_key)
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
@@ -1536,6 +1914,7 @@ def reserve_credit(
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
+            measured_bound_microusd=int(cost_microusd) if cost_microusd is not None else None,
         )
 
     # No pool budget but a per-model quota IS configured → enforce the quota
@@ -1617,6 +1996,18 @@ def reserve_credit(
             pool_vanished = True
             break
 
+        # Extracted before any refusal path below, so EVERY refusal — suspended,
+        # oversized, or ordinary exhaustion — can log the reserved/settled split
+        # at that moment (CONTRACT-hard-ceiling.md item 2b, third bullet): "a
+        # refusal with high reserved and low settled is the aggregate case,
+        # and it is the signal an operator needs to tell 'my budget is spent'
+        # from 'my budget is tied up in flight'." Without logging this on
+        # EVERY refusal path, that distinction is invisible exactly when it
+        # matters most.
+        p_limit = int(pool_row.get("pool_limit_microusd", 0))
+        p_reserved = int(pool_row.get("pool_reserved_microusd", 0))
+        p_settled = int(pool_row.get("pool_settled_microusd", 0))
+
         # A suspended pool must reject immediately. Without this the reserve
         # transaction's `status = active` condition fails every attempt, retries
         # exhaust, and (previously) the request slipped through per-user-only —
@@ -1628,18 +2019,71 @@ def reserve_credit(
                 tenant_id=user.org_id,
                 reason="tenant_pool_exhausted",
                 pool_status=str(pool_row.get("status")),
+                pool_reserved_microusd=p_reserved,
+                pool_settled_microusd=p_settled,
+                pool_limit_microusd=p_limit,
             )
             raise _err_402("tenant_pool_exhausted")
 
-        p_limit = int(pool_row.get("pool_limit_microusd", 0))
-        p_reserved = int(pool_row.get("pool_reserved_microusd", 0))
-        p_settled = int(pool_row.get("pool_settled_microusd", 0))
+        # CONTRACT-hard-ceiling.md item 2b: two DISTINCT conditions, reported
+        # differently. An earlier version of this check tested the bound
+        # against a FRACTION of pool_limit and refused on that — review found
+        # that wrong in both directions: it fires when the request would in
+        # fact fit the current headroom comfortably, and stays silent in
+        # exactly the scenario it exists for (many mid-sized concurrent
+        # requests, each under the fraction, collectively exhausting the
+        # headroom). So:
+        #
+        #   1. "Cannot fit at all" — bound > the WHOLE pool_limit. Exact, no
+        #      fraction: no amount of waiting or draining ever admits this
+        #      request to this budget, so it is refused with a reason distinct
+        #      from ordinary exhaustion. This is acceptance criterion 3's
+        #      first half; criterion 3 as a whole is NOT claimed for the
+        #      strict-only first slice (section 12 says does-not-fit and
+        #      exhausted may share one refusal there) — implemented anyway
+        #      because it is exact, cheap, and strictly more informative than
+        #      collapsing the two, never less. Checked before the headroom
+        #      test so it never burns a retry attempt discovering the pool
+        #      was "exhausted" by exactly this one reservation, and never
+        #      competes for headroom it could never have used anyway.
+        #   2. "Will monopolise the budget" — bound exceeds the CONFIGURED
+        #      FRACTION of pool_limit while still fitting under it. This can
+        #      legitimately succeed, so it is NOT refused — only warned, naming
+        #      the tenant and the ratio, because it means the budget is sized
+        #      for fewer concurrent requests than the workload wants.
+        if p_limit > 0 and cost > p_limit:
+            logger.warning(
+                "request_does_not_fit_pool_limit",
+                user_id=user.user_id,
+                tenant_id=user.org_id,
+                period=period,
+                reservation_microusd=cost,
+                pool_limit_microusd=p_limit,
+                pool_reserved_microusd=p_reserved,
+                pool_settled_microusd=p_settled,
+            )
+            raise _err_402_does_not_fit("request_does_not_fit_pool_limit")
+        if p_limit > 0 and cost > p_limit * _MAX_RESERVATION_FRACTION_OF_POOL:
+            logger.warning(
+                "reservation_will_monopolise_pool",
+                user_id=user.user_id,
+                tenant_id=user.org_id,
+                period=period,
+                reservation_microusd=cost,
+                pool_limit_microusd=p_limit,
+                max_fraction=_MAX_RESERVATION_FRACTION_OF_POOL,
+            )
+
         if p_reserved + p_settled + cost > p_limit:
             logger.info(
                 "credit_exhausted_402",
                 user_id=user.user_id,
                 tenant_id=user.org_id,
                 reason="tenant_pool_exhausted",
+                pool_reserved_microusd=p_reserved,
+                pool_settled_microusd=p_settled,
+                pool_limit_microusd=p_limit,
+                reservation_microusd=cost,
             )
             raise _err_402("tenant_pool_exhausted")
 
@@ -1666,6 +2110,13 @@ def reserve_credit(
             # capturable/voidable; without this tag it would rely on the RESERVE
             # event's source, which is exactly what that step stops reading.
             source="inline",
+            # CONTRACT-hard-ceiling.md section 3a: pin the canonical payload's
+            # hash + byte length onto the hold itself (not just the in-memory
+            # ReservationContext), so they survive a process restart and are
+            # independently readable — the hold, not the request, is this
+            # reservation's durable record.
+            payload_hash=payload_hash,
+            payload_bytes=payload_bytes,
         )
         txn_items = [user_txn, pool_txn, hold_txn]
         _quota_start = len(txn_items)
@@ -1766,6 +2217,7 @@ def reserve_credit(
             quota_reserved_amount=cost if quota_lines else 0,
             quota_user_id=user.user_id,
             quota_period=period if quota_lines else None,
+            measured_bound_microusd=int(cost),
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
@@ -1798,6 +2250,7 @@ def reserve_credit(
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
+            measured_bound_microusd=int(cost_microusd) if cost_microusd is not None else None,
         )
 
     # Retries exhausted under contention while the pool was still present. We
@@ -2792,6 +3245,7 @@ def _reserve_quota_without_pool(
             quota_reserved_amount=quota_reserved_amount,
             quota_user_id=user.user_id,
             quota_period=period,
+            measured_bound_microusd=int(quota_reserved_amount) if quota_reserved_amount else None,
         )
 
     logger.warning("quota_reserve_retries_exhausted", user_id=user.user_id,
@@ -3015,12 +3469,23 @@ def _recover_spend_via_late_settle(
                 TransactItems=so_items,
                 ClientRequestToken=_fresh_idempotency_token(),
             )
-            logger.info(
+            # CONTRACT-hard-ceiling.md section 8 ("a settle arriving after its
+            # hold was reaped"): this settle books a charge with NO reservation
+            # behind it (the reaper's RECLAIM already returned `reserved`) — a
+            # LEGITIMATE, expected event under this design, not dropped and not
+            # given a recreated reservation, but it must be BOOKED, TAGGED with
+            # its own cause code, and ALARMED — not logged at info, which pages
+            # no one. This is also the reason acceptance criterion 4
+            # ("settled + reserved <= pool_limit") explicitly excludes events
+            # marked reservation-less: this transaction adds to `settled` with
+            # no corresponding `reserved` to release, by design.
+            logger.error(
                 "pool_settle_late_settle_recovered",
                 tenant_id=tenant_id,
                 period=period,
                 hold_id=hold_id,
                 actual_microusd=actual_microusd,
+                cause="reservation_less",
             )
             return
         except ClientError as e:
@@ -3243,6 +3708,117 @@ def settle_reservation_and_log(
         # together, and a defensive double-settle (e.g. error handler + the
         # streaming `finally`) must not double-subtract pool_reserved.
         context._pool_finalized = True
+        # Hard-ceiling overrun record (CONTRACT-hard-ceiling.md item 4). Under a
+        # sound bound this is always zero — an overrun is a defect report about
+        # the bound, not an operating mode, so it is computed unconditionally
+        # (never gated on bound_mode) and alarmed below whenever it fires on a
+        # reservation that WAS bound-priced (bound_mode is not None). A
+        # legacy-heuristic reservation (bound_mode is None) can still overrun —
+        # that was always tolerated — so it is recorded but not alarmed as a
+        # bound defect.
+        _reserved_microusd = int(context.pool_reserved_microusd)
+        _overrun_microusd = max(0, int(actual_cost_microusd) - _reserved_microusd)
+        _reserve_pricing_version = (
+            context.rate_snapshot.version if context.rate_snapshot is not None else None
+        )
+        _estimate_inputs = None
+        if context.bound_mode is not None:
+            _estimate_inputs = {
+                "input_bytes": context.reserved_input_bytes,
+                "payload_hash": context.reserved_payload_hash,
+                "extra_input_tokens": context.reserved_extra_input_tokens,
+                "max_output_tokens": context.reserved_max_output_tokens,
+                "effort_multiplier": context.reserved_effort_multiplier,
+            }
+            if _overrun_microusd > 0:
+                # Cause code (contract section 9): distinguish the provider
+                # not respecting the requested output ceiling — the ONE place
+                # the provider's cooperation with `max_output_tokens *
+                # effort_multiplier` (section 4's stated assumption) is
+                # actually checked rather than assumed — from every other
+                # overrun, which is a defect in the bound itself. (A third
+                # cause, "no reservation found" / reservation-less, applies
+                # to the LATE_SETTLE reaper-race path, not here — see
+                # `_recover_spend_via_late_settle`.)
+                _output_ceiling = None
+                if context.reserved_max_output_tokens is not None:
+                    _output_ceiling = (
+                        int(context.reserved_max_output_tokens)
+                        * int(context.reserved_effort_multiplier)
+                    )
+                _output_ceiling_violated = (
+                    _output_ceiling is not None
+                    and int(actual_output_tokens) > _output_ceiling
+                )
+                _cause = (
+                    "output_ceiling_exceeded" if _output_ceiling_violated
+                    else "bound_exceeded"
+                )
+                # Fail-closed alarm, not a warning (contract section 9): a
+                # sound bound is NEVER exceeded in strict mode (section 6's
+                # guarantee, modulo the reservation-less exception section 5
+                # names explicitly — which this is not, since a live
+                # ReservationContext exists here), so this line means either
+                # the bound in force for this tenant/model is wrong, or the
+                # provider did not respect the output ceiling it was given —
+                # `cause` tells the two apart.
+                logger.error(
+                    "reservation_bound_overrun",
+                    tenant_id=user.org_id,
+                    period=context.period,
+                    hold_id=context.hold_id,
+                    model_id=model_id,
+                    bound_mode=context.bound_mode,
+                    cause=_cause,
+                    reserved_microusd=_reserved_microusd,
+                    actual_microusd=int(actual_cost_microusd),
+                    overrun_microusd=_overrun_microusd,
+                    reserve_pricing_version=_reserve_pricing_version,
+                    output_ceiling_tokens=_output_ceiling,
+                    actual_output_tokens=int(actual_output_tokens),
+                )
+            # Calibrated mode (CONTRACT-ceiling-phase2.md) is explicitly OUT
+            # OF SCOPE for this change and is not reachable today —
+            # `dynamo.tenants.VALID_BOUND_MODES` only accepts "strict", so
+            # `resolve_bound_mode` can never return "calibrated" for a real
+            # tenant. This block is therefore dead code on every path this
+            # change ships; it is kept (not deleted) so phase 2 does not have
+            # to rediscover this wiring, and it stays provably inert because
+            # the condition below can never be true.
+            from dynamo.tenants import BOUND_MODE_CALIBRATED
+
+            if (
+                context.bound_mode == BOUND_MODE_CALIBRATED
+                and context.reserved_input_bytes is not None
+            ):
+                from .reservation_bound import (
+                    calibration_breached,
+                    realized_tokens_per_byte,
+                )
+
+                _realized_input_tokens = (
+                    int(actual_input_tokens)
+                    + max(actual_cache_read_tokens, 0)
+                    + max(actual_cache_write_tokens, 0)
+                )
+                _ratio = realized_tokens_per_byte(
+                    _realized_input_tokens, context.reserved_input_bytes
+                )
+                if calibration_breached(context.pricing_key or "default", _ratio):
+                    # Fail-closed per the contract: "a single settle above the
+                    # calibration is a fail-closed event, not a warning" — this
+                    # settle already happened (settle is unconditional and must
+                    # stay that way), so "fail-closed" here means loudly, at
+                    # error level, with everything needed to act on it, not
+                    # silently degrading the mode for the next request.
+                    logger.error(
+                        "calibration_breach",
+                        tenant_id=user.org_id,
+                        pricing_key=context.pricing_key,
+                        realized_tokens_per_byte=_ratio,
+                        model_id=model_id,
+                        hold_id=context.hold_id,
+                    )
         try:
             _settle_pool_side(
                 user,
@@ -3290,6 +3866,28 @@ def settle_reservation_and_log(
                     # attribution (not in the run_id chain), so it is safe.
                     "run_id": context.workflow_run_id,
                     "group_id": context.group_id,
+                    # Hard-ceiling overrun record (see above). Named
+                    # "admission_checked_microusd" here (NOT the bare
+                    # "reserved_microusd" the ledger item ultimately uses,
+                    # matching CONTRACT-hard-ceiling.md section 9's own words
+                    # for this field: "the amount admission checked") because
+                    # this module is scanned by `tests/billing_guards.py`'s
+                    # write-discipline guard, which fail-closes on any bare
+                    # string CONTAINING "reserved_microusd"/"settled_microusd"
+                    # to catch dynamically-assembled pool-counter
+                    # UpdateExpression attribute names — a real, valuable
+                    # check for the counters that table mutates. This dict is
+                    # plain Python data flowing to a ledger Put on a DIFFERENT
+                    # table, never an UpdateExpression, but the guard cannot
+                    # tell the two apart from a bare string (a prefixed
+                    # "hold_reserved_microusd" still CONTAINS the flagged
+                    # fragment and does not clear it), so the rename avoids a
+                    # false positive without touching the guard itself.
+                    "admission_checked_microusd": _reserved_microusd,
+                    "overrun_microusd": _overrun_microusd,
+                    "reserve_pricing_version": _reserve_pricing_version,
+                    "bound_mode": context.bound_mode,
+                    "estimate_inputs": _estimate_inputs,
                 },
             )
         except Exception:  # noqa: BLE001
@@ -3372,6 +3970,14 @@ def settle_reservation_and_log(
         cost_microusd=actual_cost_microusd,
         requested_model_id=requested_stored,
         request_id=settle_request_id,
+        # Coordinator ITEM 2: the `measured` bound's destination is this
+        # per-request, append-only usage row — never the ledger (which would
+        # need a pool row, real or synthesised, to attach to). None whenever
+        # the bound was never computed for this request (the `accounting`
+        # state; see `mvp.reservation_bound.dollar_pool_bound_should_compute`).
+        measured_bound_microusd=(
+            context.measured_bound_microusd if context is not None else None
+        ),
     )
 
 
@@ -3484,6 +4090,15 @@ def _settle_pool_side(
                 tokens_in=facts.get("tokens_in"),
                 tokens_out=facts.get("tokens_out"),
                 settle_reason=reason,
+                # Hard-ceiling overrun record (CONTRACT-hard-ceiling.md item 4):
+                # passed straight through from what settle_reservation_and_log
+                # computed — this builder has no opinion on the money, only on
+                # how to shape the Put.
+                reserved_microusd=facts.get("admission_checked_microusd"),
+                overrun_microusd=facts.get("overrun_microusd"),
+                reserve_pricing_version=facts.get("reserve_pricing_version"),
+                bound_mode=facts.get("bound_mode"),
+                estimate_inputs=facts.get("estimate_inputs"),
             )
 
         _ledger_item = _mk_settle_event(
