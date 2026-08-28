@@ -87,6 +87,17 @@ is a claim about an encoding.
 | No overflow; refunds cannot go negative | `test_rating_formal_z3.py::test_g6_no_overflow_within_realistic_bounds`, `…refund_cannot_drive_settled_negative` | `…sanity_unbounded_tokens_overflow`, `…sanity_unbounded_refund_goes_negative` | absent | the stated bounds |
 | Zero rate / zero tokens cost zero, and the clamp is on tokens | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` — but note these read back the encoding's own axiom, so on their own they are circular | — | `test_rating_differential.py::test_the_clamp_is_on_tokens_and_a_negative_rate_credits`, `…test_no_usage_report_can_mint_a_credit_at_a_nonnegative_rate` — this is what makes the boundary claims non-circular | **a negative rate in the document would mint credit**: `_mtok_cost(1000, -5_000_000)` returns −5,000. Nothing in the rating path rejects one; the defence is that the document has never held one |
 
+**The limit no timing calculation removes.** A charge landing at Bedrock and the ledger
+write recording it are not atomic, and cannot be made so from this side. If Bedrock
+accepts and bills a request and the gateway process then dies, the hold is never settled,
+the reaper eventually releases it, and the real external spend disappears from the
+ledger — after which later admissions can carry the pool past its limit while every
+invariant this work proves still holds, because the ledger no longer contains the charge.
+Getting the reap timeout right narrows the window; it does not close it. This is the
+honest ceiling on the ceiling, and it is why the guarantee is stated with named failure
+modes rather than as an absolute. Both reviewers arrived at it independently, one of them
+naming it as the residual after every other item is done.
+
 **The ceiling can be made hard, and the mechanism already exists.** Two
 independent reviewers concluded a hard ceiling was unobtainable because prompt-cache
 writes are decided by the provider mid-call. That was an efficiency argument
