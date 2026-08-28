@@ -7,6 +7,7 @@ import {
   impliedRatePer5Min,
   workersForCpuUnits,
   optionalPositiveIntFromEnv,
+  pinnedStackName,
   stackName,
   paramPath,
   positiveIntFromEnv,
@@ -207,7 +208,14 @@ albStack.addDependency(networkStack);
 // impossible and also enforces deploy ordering).
 let wafStack: WafStack | undefined;
 if (enableWaf) {
-  wafStack = new WafStack(app, stackName(prefix, 'waf'), {
+  wafStack = new WafStack(
+    app,
+    // Qualified by the body region: see `pinnedStackName`. Two deployments that
+    // share a prefix and differ only in body region would otherwise both name
+    // this stack `<prefix>-waf` in us-east-1, and the second deploy would update
+    // the first one's WebACL.
+    pinnedStackName(prefix, 'waf', regionCfg.wafRegion, regionCfg.bodyRegion),
+    {
     env: wafEnv,
     crossRegionReferences: true,
     prefix,
