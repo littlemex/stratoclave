@@ -68,11 +68,11 @@
       "notes": "xAI Grok 4.6 In-Region/Geo list price: $2.20/$6.60 in/out, $0.55 cache read. Bedrock publishes no cache-WRITE rate; the 1.25x-input premium the Anthropic tiers use is assumed as an UPPER BOUND so the ledger never under-charges."
     },
     "gemma": {
-      "input_per_mtok_microusd": 5000000,
-      "output_per_mtok_microusd": 25000000,
-      "cache_read_per_mtok_microusd": 500000,
-      "cache_write_per_mtok_microusd": 6250000,
-      "notes": "Bedrock publishes no per-token list price for Gemma. Per the never-under-charge rule this DEFAULTS to the Opus tier — a deliberate over-charge. An admin lowers it to the real rate via the pricing table."
+      "input_per_mtok_microusd": 140000,
+      "output_per_mtok_microusd": 400000,
+      "cache_read_per_mtok_microusd": 140000,
+      "cache_write_per_mtok_microusd": 175000,
+      "notes": "Gemma 4 31B (google.gemma-4-31b) on-demand list price at us-east-2, standard service tier: $0.14 in / $0.40 out per MTok. Source: AWS Price List API, AmazonBedrock, service_tier=standard, corroborated by the public Bedrock pricing page. Bedrock publishes no cache-READ or cache-WRITE rate for this model, so per the never-under-charge rule a cache read is charged at the full input rate and a cache write carries the 1.25x-input premium the Anthropic tiers use, both as upper bounds."
     },
     "nemotron": {
       "input_per_mtok_microusd": 5000000,
