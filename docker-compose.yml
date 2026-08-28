@@ -55,6 +55,13 @@ services:
       # mode turns it on so all three routes in `make demo` actually work,
       # rather than the OpenAI Responses route silently 503ing.
       CODEX_ENABLED: "true"
+      # Off by default, which is the shipped posture: a tenant with a dollar pool
+      # sits in `shadow` — the sound reservation bound is computed and recorded,
+      # admission still uses the legacy estimate, and nothing is refused. Set this
+      # to 1 to see `enforced`, where the bound is what admission reserves and
+      # unboundable content is refused. `scripts/local/prove_ceiling.py` needs it
+      # on; `make demo` does not care either way.
+      STRATOCLAVE_HARD_CEILING_GATE: ${STRATOCLAVE_HARD_CEILING_GATE:-}
       AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
       # Deliberately NOT overriding a Bedrock endpoint: inference stays real.
       AWS_REGION: ${AWS_REGION:-us-east-1}

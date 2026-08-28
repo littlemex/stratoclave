@@ -911,7 +911,14 @@ def messages(
         # measurement flag) means `input_bytes=None`, which is what makes
         # `reserve_credit_for_model` take the pre-existing legacy-heuristic
         # path unchanged. `payload_hash` pins section 3a's hash onto the hold.
-        input_bytes=_survey.text_bytes if _survey is not None else None,
+        # The SERIALISED payload length, not `survey.text_bytes`. The survey's
+        # text count covers only the request's content strings, and the provider
+        # bills for the chat template it wraps around them — a two-character
+        # message surveyed 2 bytes and settled 8 input tokens, above its own
+        # bound. `envelope_bytes` explains the measurement; passing the wrong
+        # element of the survey tuple is what made the fix invisible the first
+        # time.
+        input_bytes=_payload_bytes if _survey is not None else None,
         payload_hash=_payload_hash,
         extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
         # `shadow` (section 9b): reserve the legacy estimate, not the bound —

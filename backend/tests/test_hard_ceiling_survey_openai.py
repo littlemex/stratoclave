@@ -42,7 +42,12 @@ def test_chat_payload_counts_text_across_messages():
     }
     survey, nbytes, digest = survey_and_hash_openai_chat_payload(payload)
     assert survey.text_bytes == len(b"be nice") + 1 + len(b"hello world")
-    assert nbytes == survey.text_bytes
+    # The returned byte count is the SERIALISED payload, not `survey.text_bytes`.
+    # A measured request settled above its own bound because the text-only count
+    # omitted the chat template the provider bills for, so the two numbers are
+    # deliberately different now: the survey still reports the content it saw, and
+    # the bound is priced from the envelope that contains it.
+    assert nbytes > survey.text_bytes
     assert len(digest) == 64
 
 
@@ -117,7 +122,12 @@ def test_responses_payload_counts_instructions_and_string_input():
     payload = {"instructions": "be nice", "input": "hello world"}
     survey, nbytes, digest = survey_and_hash_openai_responses_payload(payload)
     assert survey.text_bytes == len(b"be nice") + 1 + len(b"hello world")
-    assert nbytes == survey.text_bytes
+    # The returned byte count is the SERIALISED payload, not `survey.text_bytes`.
+    # A measured request settled above its own bound because the text-only count
+    # omitted the chat template the provider bills for, so the two numbers are
+    # deliberately different now: the survey still reports the content it saw, and
+    # the bound is priced from the envelope that contains it.
+    assert nbytes > survey.text_bytes
     assert len(digest) == 64
 
 

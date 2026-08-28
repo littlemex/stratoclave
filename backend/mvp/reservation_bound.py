@@ -644,6 +644,51 @@ def utf8_byte_count(text: str) -> int:
 # requirement) and never a shape it does not actually send.
 
 
+def envelope_bytes(payload: object) -> int:
+    """UTF-8 length of the payload as SERIALISED, with image data excluded.
+
+    Why this exists, measured rather than argued. An earlier version of the three
+    survey functions below returned the length of the request's *content strings*
+    alone. A `/v1/chat/completions` call whose message content was the two
+    characters `ok` therefore surveyed 2 bytes — and Bedrock billed 8 input
+    tokens, because the prompt it actually processes wraps that content in a chat
+    template with role markers. The reservation came to 323 micro-USD and the
+    settle to 328. `tokens <= bytes`, the assumption the whole bound rests on, is
+    false when "bytes" means only the content.
+
+    The contract's wording is what fixes it: the bound is computed over "the
+    canonical payload the gateway will send to Bedrock, **serialised**". The
+    serialised envelope carries the structure the provider turns into template
+    tokens, and it carries far more bytes than the template carries tokens — a
+    single message costs on the order of twenty envelope bytes against a handful
+    of template tokens. So counting it is sound with margin, and needs no invented
+    per-message constant. It does make the bound loose on tiny requests, which is
+    the correct direction: a loose bound is sound, a tight one was wrong.
+
+    Image payload bytes are stubbed out rather than counted, because section 3b
+    prices images by their pixel dimensions and counting them here as well would
+    charge them twice. Non-serialisable objects other than raw bytes raise, and
+    the caller turns that into an unboundable request — under-counting silently is
+    the defect being fixed, so failing loudly is the only safe direction.
+
+    `sort_keys` and the compact separators are for the independent verifier in
+    acceptance criterion 7: the same payload must reproduce the same number in a
+    second implementation.
+    """
+    import json
+
+    def _stub(obj: object) -> str:
+        if isinstance(obj, (bytes, bytearray, memoryview)):
+            return ""  # priced by dimension, not by byte
+        raise TypeError(
+            f"cannot serialise {type(obj).__name__} for the reservation bound; "
+            f"the request must be treated as unboundable rather than under-counted"
+        )
+
+    return len(json.dumps(payload, default=_stub, separators=(",", ":"),
+                          sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
 def survey_and_hash_converse_kwargs(kwargs: dict) -> tuple["ContentSurvey", int, str]:
     """`(survey, payload_bytes, payload_hash)` for Bedrock CONVERSE `kwargs`
     (the shape both `/v1/messages` and `/v1/chat/completions`'s Converse leg
@@ -766,7 +811,11 @@ def survey_and_hash_converse_kwargs(kwargs: dict) -> tuple["ContentSurvey", int,
     )
     return (
         survey,
-        len(canonical_text),
+        # The SERIALISED envelope, not `len(canonical_text)`. See
+        # `envelope_bytes`: the content-only count omitted the chat template the
+        # provider bills for, and a measured request settled above its own bound
+        # because of it.
+        envelope_bytes(kwargs),
         hashlib.sha256(canonical_for_hash).hexdigest(),
     )
 
@@ -877,7 +926,11 @@ def survey_and_hash_openai_chat_payload(payload: dict) -> tuple["ContentSurvey",
     )
     return (
         survey,
-        len(canonical_text),
+        # The SERIALISED envelope, not `len(canonical_text)`. See
+        # `envelope_bytes`: the content-only count omitted the chat template the
+        # provider bills for, and a measured request settled above its own bound
+        # because of it.
+        envelope_bytes(payload),
         hashlib.sha256(canonical_for_hash).hexdigest(),
     )
 
@@ -1009,7 +1062,11 @@ def survey_and_hash_openai_responses_payload(payload: dict) -> tuple["ContentSur
     )
     return (
         survey,
-        len(canonical_text),
+        # The SERIALISED envelope, not `len(canonical_text)`. See
+        # `envelope_bytes`: the content-only count omitted the chat template the
+        # provider bills for, and a measured request settled above its own bound
+        # because of it.
+        envelope_bytes(payload),
         hashlib.sha256(canonical_for_hash).hexdigest(),
     )
 

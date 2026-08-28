@@ -461,7 +461,14 @@ def chat_completions(
             # effort concept (unlike openai_responses.py), so effort_multiplier
             # is omitted and defaults to 1 — the contract's own rule for "a
             # route with no notion of it".
-            input_bytes=_survey.text_bytes if _survey is not None else None,
+            # The SERIALISED payload length, not `survey.text_bytes`. The survey's
+            # text count covers only the request's content strings, and the provider
+            # bills for the chat template it wraps around them — a two-character
+            # message surveyed 2 bytes and settled 8 input tokens, above its own
+            # bound. `envelope_bytes` explains the measurement; passing the wrong
+            # element of the survey tuple is what made the fix invisible the first
+            # time.
+            input_bytes=_payload_bytes if _survey is not None else None,
             payload_hash=_payload_hash,
             extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
             # `shadow` (section 9b): reserve the legacy estimate, not the

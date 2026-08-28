@@ -40,7 +40,12 @@ def test_survey_counts_text_bytes_across_messages_and_system():
     })
     survey, nbytes, digest = _survey_and_hash_converse_kwargs(kwargs)
     assert survey.text_bytes == len(b"be nice") + 1 + len(b"hello world")
-    assert nbytes == survey.text_bytes
+    # The returned byte count is the SERIALISED payload, not `survey.text_bytes`.
+    # A measured request settled above its own bound because the text-only count
+    # omitted the chat template the provider bills for, so the two numbers are
+    # deliberately different now: the survey still reports the content it saw, and
+    # the bound is priced from the envelope that contains it.
+    assert nbytes > survey.text_bytes
     assert len(digest) == 64  # sha256 hex digest
 
 
