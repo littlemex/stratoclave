@@ -47,8 +47,22 @@ from botocore.config import Config
 #   - read_timeout: 120 s caps the longest plausible "silent" stretch
 #     between Bedrock SSE chunks. A model that genuinely needs >120 s of
 #     thinking before its first token is misconfigured for our path.
-#   - retries.mode "standard" keeps boto3 quiet retries off for streaming
-#     responses (retrying mid-stream silently double-bills).
+#   - retries: the SDK makes exactly ONE attempt. An earlier version set
+#     `max_attempts: 2` in "standard" mode believing that meant two attempts and
+#     that the mode kept "quiet retries off for streaming responses". Both halves
+#     were wrong. botocore's `Config(retries={"max_attempts": N})` means N
+#     RETRIES — `ClientArgsCreator._compute_retry_max_attempts` rewrites it to
+#     `total_max_attempts = N + 1` — so that config made up to THREE provider
+#     invocations against a reservation priced for one, which is a ceiling breach
+#     the ledger cannot see. And no retry mode retries mid-stream once the event
+#     stream is returned, while "standard" mode DOES silently retry the initial
+#     call on a connection error, read timeout included. Measured on real
+#     Bedrock: `max_attempts=1` produced two counted invocations,
+#     `total_max_attempts=1` produced exactly one; and an attempt abandoned on
+#     read timeout is billed in full (1,493 output tokens for a call whose caller
+#     received nothing). A retry the gateway cannot see is an unaccounted charge,
+#     so retries belong to `mvp.routing.infrarouter`, which records an
+#     `AttemptRecord` per attempt and can price them.
 #   - max_pool_connections: botocore defaults to 10. Pooling the client is
 #     pointless if its connection pool is smaller than the number of requests the
 #     task admits: urllib3 opens the extra connections and then discards them
@@ -64,7 +78,12 @@ MAX_POOL_CONNECTIONS_ENV = "BEDROCK_MAX_POOL_CONNECTIONS"
 # copy that could drift from the real timeout the moment either changes.
 CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 120
-RETRY_MAX_ATTEMPTS = 2
+# TOTAL attempts this client may make, not retries on top of one. The name says
+# attempts and the wire key below says the same thing, so the reap-timeout
+# derivation that multiplies by this number is multiplying by what actually
+# happens. `total_max_attempts` is the unambiguous botocore key; `max_attempts`
+# is off by one and was the defect.
+RETRY_MAX_ATTEMPTS = 1
 
 
 def bedrock_pool_size() -> int:
@@ -87,7 +106,7 @@ def _default_config() -> Config:
     return Config(
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
         read_timeout=READ_TIMEOUT_SECONDS,
-        retries={"max_attempts": RETRY_MAX_ATTEMPTS, "mode": "standard"},
+        retries={"total_max_attempts": RETRY_MAX_ATTEMPTS, "mode": "standard"},
         max_pool_connections=bedrock_pool_size(),
     )
 

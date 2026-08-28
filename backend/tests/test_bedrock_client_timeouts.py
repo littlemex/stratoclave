@@ -26,22 +26,48 @@ def test_default_client_has_explicit_timeouts():
     )
 
 
-def test_default_client_retries_are_capped():
-    """Streaming responses must not be silently retried by the SDK; a
-    mid-stream retry would double-bill credit. Cap to a small number;
-    botocore exposes the cap under either `max_attempts` (legacy) or
-    `total_max_attempts` (standard mode) — accept whichever is set.
+def test_sdk_makes_exactly_one_attempt():
+    """The SDK must not re-send a request the ledger has priced once.
+
+    This assertion used to accept any cap up to 3, reasoning about "mid-stream
+    double-billing". Both parts were wrong, and the loophole is what let the real
+    defect ship. No retry mode retries mid-stream once the event stream is
+    returned; what standard mode does do is silently re-send the INITIAL call on
+    a connection error, read timeout included. And a read timeout does not mean
+    the provider did no work: measured on real Bedrock, a call abandoned at 2 s
+    was still billed 1,493 output tokens.
+
+    The cap is also read from `total_max_attempts` only, because
+    `Config(retries={"max_attempts": N})` means N RETRIES — botocore rewrites it
+    to `total_max_attempts = N + 1`. Accepting either key, as this test did,
+    cannot tell two attempts from three.
     """
     from mvp._bedrock_clients import bedrock_runtime_client
 
-    client = bedrock_runtime_client("us-east-1")
-    retries = client.meta.config.retries or {}
-    cap = retries.get("max_attempts") or retries.get("total_max_attempts")
-    assert cap is not None, "retries must be configured"
-    assert cap <= 3, (
-        "More than 3 attempts risks silent mid-stream double-billing on "
-        "streaming responses."
+    retries = bedrock_runtime_client("us-east-1").meta.config.retries or {}
+    assert retries.get("max_attempts") is None, (
+        "`max_attempts` is off by one against its name; configure "
+        "`total_max_attempts` so the number means attempts."
     )
+    assert retries.get("total_max_attempts") == 1, (
+        "the SDK must make exactly one attempt: a retry it makes on its own is "
+        "an unaccounted provider charge, so retries belong to the router, which "
+        "records and can price each attempt."
+    )
+
+
+def test_routing_client_is_the_same_configured_client():
+    """The failover path must not get its own unconfigured client.
+
+    `mvp.routing.clients` used to call `boto3.client("bedrock-runtime")` with no
+    Config, so the one path that re-sends on purpose ran with no read timeout and
+    botocore's default of three attempts — and this file never noticed, because
+    it only ever inspected the other factory.
+    """
+    from mvp._bedrock_clients import bedrock_runtime_client
+    from mvp.routing.clients import bedrock_client
+
+    assert bedrock_client("us-east-1") is bedrock_runtime_client("us-east-1")
 
 
 def test_factory_pools_per_region():

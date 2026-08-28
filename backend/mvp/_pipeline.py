@@ -181,31 +181,42 @@ _HOLD_TTL_SECONDS = max(
 # DERIVATION (not a chosen constant): for each upstream transport this
 # pipeline's holds wait on, one attempt's own worst-case wall-clock time is
 # (connect + read timeout) — the time the underlying HTTP client will wait
-# before giving up and surfacing an error — and `RETRY_MAX_ATTEMPTS` many such
-# attempts can happen INSIDE that transport's OWN client before it hands
-# control back to this pipeline (Bedrock: botocore's `retries.max_attempts`;
-# mantle: no automatic retry, so 1). A hold's charge can only "still arrive"
-# for as long as ONE of these attempt-sequences is running, so the ceiling is
-# the WORST (largest) of the transports this pipeline actually uses, plus a
-# margin for clock skew between the process that started the timer and the one
-# that later reads it. This imports the SAME named constants
+# before giving up and surfacing an error — multiplied by however many attempts
+# can happen before control returns to this pipeline. A hold's charge can only
+# "still arrive" for as long as ONE of these attempt-sequences is running, so
+# the ceiling is the WORST (largest) of the transports this pipeline actually
+# uses, plus a margin for clock skew between the process that started the timer
+# and the one that later reads it. This imports the SAME named constants
 # `_bedrock_clients`/`_mantle_transport` configure their real clients with
 # (added there for exactly this reason), so a change to either transport's
 # timeout changes this derivation automatically instead of by someone
 # remembering to update a second copy.
+#
+# WHERE THE ATTEMPTS LIVE changed, and the derivation follows it. This used to
+# multiply by the Bedrock client's `RETRY_MAX_ATTEMPTS` on the belief that the
+# SDK held the retry budget. Two things were wrong: that constant was configured
+# through botocore's `max_attempts`, which means RETRIES (the real ceiling was
+# one attempt higher than the derivation assumed), and the streaming path's own
+# retry loop in `mvp.routing.infrarouter` was never counted at all. The SDK now
+# makes exactly one attempt, so the retry budget is the router's: it starts no
+# new attempt after `_CHAIN_DEADLINE_S`, and an attempt started just under that
+# deadline can still run a full (connect + read). Hence chain deadline plus one
+# attempt, rather than a multiple of attempts.
 from ._bedrock_clients import (
     CONNECT_TIMEOUT_SECONDS as _BEDROCK_CONNECT_SECONDS,
     READ_TIMEOUT_SECONDS as _BEDROCK_READ_SECONDS,
-    RETRY_MAX_ATTEMPTS as _BEDROCK_RETRY_ATTEMPTS,
+    RETRY_MAX_ATTEMPTS as _BEDROCK_SDK_ATTEMPTS,
 )
 from ._mantle_transport import (
     RETRY_MAX_ATTEMPTS as _MANTLE_RETRY_ATTEMPTS,
     STREAM_READ_TIMEOUT_SECONDS as _MANTLE_READ_SECONDS,
 )
+from .routing.infrarouter import CHAIN_DEADLINE_SECONDS as _ROUTER_CHAIN_DEADLINE
 
-_BEDROCK_WORST_CASE_SECONDS = (
-    (_BEDROCK_CONNECT_SECONDS + _BEDROCK_READ_SECONDS) * _BEDROCK_RETRY_ATTEMPTS
+_BEDROCK_ONE_ATTEMPT_SECONDS = (
+    (_BEDROCK_CONNECT_SECONDS + _BEDROCK_READ_SECONDS) * _BEDROCK_SDK_ATTEMPTS
 )
+_BEDROCK_WORST_CASE_SECONDS = _ROUTER_CHAIN_DEADLINE + _BEDROCK_ONE_ATTEMPT_SECONDS
 # mantle's connect timeout (10s) is a module-private literal in
 # `_mantle_transport._DEFAULT_TIMEOUT`, not (yet) named — folding in only the
 # named read timeout here is the conservative direction (it UNDERSTATES
