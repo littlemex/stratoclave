@@ -62,6 +62,7 @@ class UsageLogsRepository:
         request_id: Optional[str] = None,
         cost_microusd: Optional[int] = None,
         requested_model_id: Optional[str] = None,
+        measured_bound_microusd: Optional[int] = None,
     ) -> dict[str, Any]:
         """Insert a UsageLog record.
 
@@ -69,6 +70,20 @@ class UsageLogsRepository:
         is persisted so the pool's `pool_settled` counter can be independently
         re-derived from the audit log — i.e. spend is auditable, not just
         asserted. Legacy callers that omit it write no cost field.
+
+        `measured_bound_microusd` (CONTRACT-hard-ceiling.md, coordinator's
+        ITEM 2) is the hard-ceiling reservation bound this request was priced
+        at by `mvp.reservation_bound`, carried here rather than into the
+        credit ledger so a tenant with no dollar pool (or one with a pool,
+        for a cheap cross-check) still gets the bound recorded WITHOUT any
+        shared-item write: this row is already per-request and append-only,
+        so writing this attribute costs nothing and touches nothing another
+        concurrent request also touches — unlike a ledger entry, which would
+        need a pool row (or a synthesised one) to attach to. Absent when the
+        bound was never computed for this request (the `accounting` state).
+        Alongside `cost_microusd` (the ACTUAL settled charge, when priced),
+        the pair on one row is exactly what a shadow-run ratio analysis
+        needs — a usage-log aggregation instead of a ledger query.
 
         `model_id` is the EFFECTIVE model the request was served by (after any
         P0-11 cascade). `requested_model_id` (P0-11 visibility) is the
@@ -100,5 +115,7 @@ class UsageLogsRepository:
             item["cost_microusd"] = Decimal(int(cost_microusd))
         if requested_model_id is not None:
             item["requested_model_id"] = requested_model_id
+        if measured_bound_microusd is not None:
+            item["measured_bound_microusd"] = Decimal(int(measured_bound_microusd))
         self._table.put_item(Item=item)
         return item

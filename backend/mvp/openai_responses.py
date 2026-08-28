@@ -53,6 +53,12 @@ from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_request_context
 from .models import ModelEntry, _REGISTRY, resolve_model
 from .observability.context import RequestContext, response_headers as _corr_headers
+from .reservation_bound import (
+    assess_boundability,
+    dollar_pool_bound_should_compute,
+    dollar_pool_bound_state,
+    survey_and_hash_openai_responses_payload,
+)
 
 
 logger = get_logger(__name__)
@@ -224,7 +230,12 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
     """Reasoning-effort output multiplier (1/2/4/8) for a request.
 
     Extracted so both the token reservation estimate and the dollar pool cost
-    estimate use the same multiplier for the output leg.
+    estimate use the same multiplier for the output leg. TOTAL and
+    deterministic from the request body alone (an unrecognised/absent effort
+    falls back to 1 via `.get(effort, 1)`) — CONTRACT-hard-ceiling.md section 3's
+    "refuse rather than assume 1 where [effort_multiplier] cannot be determined
+    before the call" therefore never applies to this route: there is no case
+    where this function cannot produce a value before the call.
     """
     effort = "none"
     if body.reasoning:
@@ -232,6 +243,23 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
         if isinstance(raw, str):
             effort = raw.lower()
     return _REASONING_MULTIPLIERS.get(effort, 1)
+
+
+def _build_mantle_responses_payload(
+    body: "OpenAIResponsesRequest", entry: "ModelEntry", *, stream: bool
+) -> dict:
+    """The exact JSON `payload` `/openai/v1/responses` sends to bedrock-mantle,
+    extracted so it can be built ONCE, BEFORE the reserve call
+    (CONTRACT-hard-ceiling.md section 3a: the bound must be computed over the
+    canonical payload the gateway is about to send) — mirroring
+    `mvp.chat_completions._build_mantle_chat_payload`. Forwards the RESOLVED
+    Bedrock model id, not the client-facing alias, because mantle only knows
+    ids like "xai.grok-4.6" / "openai.gpt-5.6-sol".
+    """
+    payload = body.model_dump(exclude_none=True)
+    payload["model"] = entry.bedrock_model_id
+    payload["stream"] = stream
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +513,48 @@ async def create_response(
     _multiplier = _reasoning_multiplier(body)
     _input_est = max(reservation - body.max_output_tokens * _multiplier, 0)
 
+    # CONTRACT-hard-ceiling.md section 3a: build the canonical mantle payload
+    # NOW, before the reserve below — SAAR only reads `body.input`/
+    # `previous_response_id` above, so nothing between here and reserve can
+    # mutate it. Built with the ORIGINALLY resolved `entry`; re-stamped with
+    # the cascade's actual selection further down (content bytes never depend
+    # on which model was selected, only this one field does — same reasoning
+    # as `mvp.anthropic`/`mvp.chat_completions`).
+    mantle_payload = _build_mantle_responses_payload(body, entry, stream=body.stream)
+
+    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 0/7b):
+    # survey the canonical payload, but ONLY when enforcement might use it —
+    # see `mvp.anthropic`'s identical gate. `input_image`/`input_file` are
+    # already refused unconditionally by `OpenAIResponsesRequest`'s own
+    # field validator (this route has no image-bounding path to exercise:
+    # every request that reaches here is text-only by construction), so the
+    # survey below only ever measures text and tool schemas on this route.
+    # `_bound_state` is computed ONCE (mirroring `mvp.anthropic`) and reused
+    # for both the refusal check and `shadow_mode` below, so the two can never
+    # disagree about which of `measured`/`shadow`/`enforced` this request is
+    # in — see `mvp.reservation_bound.dollar_pool_bound_state`.
+    _survey = _boundability = None
+    _payload_hash: Optional[str] = None
+    _bound_state: Optional[str] = None
+    if dollar_pool_bound_should_compute(user.org_id):
+        _survey, _payload_bytes, _payload_hash = survey_and_hash_openai_responses_payload(
+            mantle_payload
+        )
+        _boundability = assess_boundability(_survey)
+        _bound_state = dollar_pool_bound_state(user.org_id)
+        if _boundability.refused and _bound_state == "enforced":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "type": "unbounded_content",
+                    "reason": _boundability.refusal_reason,
+                    "message": (
+                        "This request cannot be admitted under a budget-safe "
+                        "reservation."
+                    ),
+                },
+            )
+
     # Shadow VSR (litellm wedge): no external-VSR consult on this route, so let the
     # local rule judge propose a cheaper counterfactual UNLESS a real pin already
     # decides routing (a deliberate pin is not a candidate for downgrade advice —
@@ -532,6 +602,23 @@ async def create_response(
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
         vsr_decision=_shadow_vsr,
+        # Hard-ceiling reservation bound: `_multiplier` above is this route's
+        # own effort_multiplier (contract section 3: "resolve it from that
+        # route's own source"), already computed and total, so no separate
+        # inject-or-refuse handling is needed here.
+        # The SERIALISED payload length, not `survey.text_bytes`. The survey's
+        # text count covers only the request's content strings, and the provider
+        # bills for the chat template it wraps around them — a two-character
+        # message surveyed 2 bytes and settled 8 input tokens, above its own
+        # bound. `envelope_bytes` explains the measurement; passing the wrong
+        # element of the survey tuple is what made the fix invisible the first
+        # time.
+        input_bytes=_payload_bytes if _survey is not None else None,
+        payload_hash=_payload_hash,
+        extra_input_tokens=_boundability.extra_input_tokens if _boundability is not None else 0,
+        # `shadow` (section 9b): reserve the legacy estimate, not the bound —
+        # see the note above `_bound_state`.
+        shadow_mode=(_bound_state == "shadow"),
     )
 
     # The reservation may have cascaded to a fallback model (P0-11). Invoke the
@@ -552,11 +639,16 @@ async def create_response(
         except ValueError:  # pragma: no cover — filtered out upstream
             logger.warning("cascade_model_unresolvable", selected_model=_selected)
 
+    # Content bytes never depend on which model was selected — only this one
+    # field does — so the already-built, already-surveyed `mantle_payload` is
+    # re-stamped and reused below rather than rebuilt.
+    mantle_payload["model"] = entry.bedrock_model_id
+
     if body.stream:
         return StreamingResponse(
             _stream_response(body, entry, user, tenants_repo, reservation,
                              request_id=ctx.request_id if ctx else None,
-                             sctx=sctx),
+                             sctx=sctx, payload=mantle_payload),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -566,14 +658,12 @@ async def create_response(
             },
         )
 
-    # Non-streaming path.
-    payload = body.model_dump(exclude_none=True)
-    # Forward the RESOLVED Bedrock model id, not the client-facing alias: mantle
-    # only knows ids like "xai.grok-4.6" / "openai.gpt-5.6-sol", so passing an
-    # alias ("grok-4.6") through verbatim makes mantle 404 with "model does not
-    # exist". This also charges/serves the model the cascade actually selected.
-    payload["model"] = entry.bedrock_model_id
-    payload["stream"] = False
+    # Non-streaming path. `mantle_payload` was built (and surveyed) BEFORE the
+    # reserve above, then re-stamped with the actually-selected model — reused
+    # here rather than rebuilt (it already carries the resolved Bedrock model
+    # id and `stream=False`; mantle only knows ids like "xai.grok-4.6" /
+    # "openai.gpt-5.6-sol", never the client-facing alias).
+    payload = mantle_payload
     try:
         client = _mantle_client(entry.bedrock_region)
         auth = await _mantle_auth(entry.bedrock_region)
@@ -652,6 +742,7 @@ async def _stream_response(
     reservation: int,
     request_id: Optional[str] = None,
     sctx=None,
+    payload: Optional[dict] = None,
 ) -> AsyncGenerator[bytes, None]:
     """Stream the Responses-API SSE feed back to the caller.
 
@@ -697,11 +788,13 @@ async def _stream_response(
     # cut / errored / id-less stream arms NO provider-state lock (Fable review §2).
     minted_id: Optional[str] = None
 
-    payload = body.model_dump(exclude_none=True)
-    # Forward the RESOLVED Bedrock model id, not the client-facing alias (mantle
-    # only knows ids like "xai.grok-4.6"); see the non-streaming path.
-    payload["model"] = entry.bedrock_model_id
-    payload["stream"] = True
+    if payload is None:
+        # Standalone-call fallback (e.g. a caller/test exercising this
+        # generator in isolation, pre-reserve survey never having run): build
+        # it here exactly as the route used to. The real route path always
+        # supplies `payload` pre-built (via `_build_mantle_responses_payload`),
+        # so this branch is never taken there.
+        payload = _build_mantle_responses_payload(body, entry, stream=True)
 
     client = _mantle_client(entry.bedrock_region)
     try:

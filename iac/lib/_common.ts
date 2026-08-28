@@ -24,6 +24,41 @@ export function getPrefix(): string {
  * names of the CloudFormation stacks already deployed in an account so that
  * `cdk diff` / `cdk deploy` addresses the same resources.
  */
+/**
+ * Stack name for a stack that is PINNED to a region other than the body region.
+ *
+ * The WAF stack is the case that exists today: a CLOUDFRONT-scope WebACL must
+ * live in us-east-1, so every deployment puts one stack there no matter which
+ * region its body is in. With an unqualified name, two deployments that share a
+ * prefix and differ only in body region both produce `<prefix>-waf` in us-east-1
+ * — so the second `cdk deploy` UPDATES the first deployment's WebACL and repoints
+ * it at the second deployment's CloudFront distribution. The eight body stacks do
+ * not collide, because their region differs; this one does, because its region is
+ * fixed.
+ *
+ * A guard on "the prefix is still the default" was considered and rejected: it
+ * detects a default value while claiming to prevent a collision, so it misses the
+ * real case (an operator reusing `blue` in a second region) and it is bypassed by
+ * the very workaround its error message asks for — copy the env file and set the
+ * prefix, to the same value. The naming scheme is what has to make the collision
+ * impossible, not a check that has to anticipate it.
+ *
+ * The body region is appended only when it differs from the pinned region, so the
+ * historical single-region deployment keeps the exact stack name it already has.
+ * Renaming it would orphan the live WebACL and, until the new stack deployed,
+ * leave the edge unprotected — the one outcome worse than the collision.
+ */
+export function pinnedStackName(
+  prefix: string,
+  id: string,
+  pinnedRegion: string,
+  bodyRegion: string
+): string {
+  return bodyRegion === pinnedRegion
+    ? stackName(prefix, id)
+    : stackName(prefix, `${id}-${bodyRegion}`);
+}
+
 export function stackName(prefix: string, id: string): string {
   return `${prefix}-${id}`;
 }

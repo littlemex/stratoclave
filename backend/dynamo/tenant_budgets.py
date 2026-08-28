@@ -646,6 +646,7 @@ class TenantBudgetsRepository:
         description: Optional[str] = None,
         rate_snapshot: Optional[dict[str, Any]] = None,
         payload_hash: Optional[str] = None,
+        payload_bytes: Optional[int] = None,
         run_id: Optional[str] = None,
         run_id_is_fallback: bool = False,
     ) -> dict[str, Any]:
@@ -668,11 +669,19 @@ class TenantBudgetsRepository:
             same fail-closed answer as a bogus token.
           * `description` / `rate_snapshot` — frozen here so an external capture
             in a separate HTTP call rehydrates from the HOLD alone.
-          * `payload_hash` — the authorize request fingerprint, so a duplicate
-            Idempotency-Key that resolves to this hold can 422 on a different body.
+          * `payload_hash` — for an external authorize, the request fingerprint
+            (a duplicate Idempotency-Key resolving to this hold 422s on a
+            different body); for an INLINE hold (CONTRACT-hard-ceiling.md
+            section 3a), the hash of the canonical outbound payload the
+            reservation was bound against — pinned here, immutable for the
+            life of the hold, so a retry can be verified byte-identical rather
+            than merely trusted to be.
+          * `payload_bytes` — the paired byte length for that same inline hash
+            (contract section 7: recorded so the reservation is recomputable).
 
-        Inline holds pass `source="inline"` (and nothing else); external authorize
-        passes the full set. Absent args are simply not written (no None in DDB).
+        Inline holds pass `source="inline"` plus `payload_hash`/`payload_bytes`;
+        external authorize passes the full legacy set. Absent args are simply
+        not written (no None in DDB).
         """
         item: dict[str, Any] = {
             "tenant_id": {"S": tenant_id},
@@ -689,6 +698,8 @@ class TenantBudgetsRepository:
             item["hold_description"] = {"S": str(description)}
         if payload_hash:
             item["payload_hash"] = {"S": str(payload_hash)}
+        if payload_bytes is not None:
+            item["payload_bytes"] = {"N": str(int(payload_bytes))}
         if rate_snapshot is not None:
             item["rate_snapshot"] = {"S": _json_compact_budget(rate_snapshot)}
         if run_id:

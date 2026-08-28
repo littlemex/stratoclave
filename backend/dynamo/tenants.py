@@ -29,6 +29,25 @@ from .client import get_dynamodb_resource
 
 ADMIN_OWNED = "admin-owned"
 
+# Per-tenant reservation-bound mode (CONTRACT-hard-ceiling.md,
+# mvp/reservation_bound.py):
+#   "strict"     — the sound byte-based bound; overspending the pool is
+#                   impossible by construction (within the stated
+#                   assumptions), at the cost of reserving several times the
+#                   eventual actual spend.
+#   "calibrated" — CONTRACT-ceiling-phase2.md, deliberately NOT part of this
+#                   change. The constant is defined so phase 2's code can
+#                   name it, but it is NOT in `VALID_BOUND_MODES` below, so it
+#                   is UNREACHABLE today: `update()` refuses to set it and
+#                   `resolve_bound_mode` can never return it for a real
+#                   tenant. Phase 2 adds it back to `VALID_BOUND_MODES` when
+#                   its own ship gate (a real shadow-run measurement) is met.
+# Absent (no attribute on the row) defaults to "strict" — see
+# `dynamo.tenants.resolve_bound_mode`.
+BOUND_MODE_STRICT = "strict"
+BOUND_MODE_CALIBRATED = "calibrated"
+VALID_BOUND_MODES = frozenset({BOUND_MODE_STRICT})
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -165,8 +184,13 @@ class TenantsRepository:
         tenant_id: str,
         name: Optional[str] = None,
         default_credit: Optional[int] = None,
+        bound_mode: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Update name and/or default_credit only. team_lead_user_id is updated via set_owner."""
+        """Update name / default_credit / bound_mode only. team_lead_user_id is
+        updated via set_owner. `bound_mode` (see VALID_BOUND_MODES) is
+        validated here — an admin typo must 400 at the write, not silently sit
+        on the row unread until `resolve_bound_mode`'s "anything unrecognised
+        falls back to strict" swallows it forever."""
         updates: list[str] = []
         values: dict[str, Any] = {":now": _now_iso(), ":active": "active"}
         expr_names: dict[str, str] = {"#s": "status"}
@@ -177,6 +201,13 @@ class TenantsRepository:
         if default_credit is not None:
             updates.append("default_credit = :dc")
             values[":dc"] = Decimal(default_credit)
+        if bound_mode is not None:
+            if bound_mode not in VALID_BOUND_MODES:
+                raise ValueError(
+                    f"bound_mode must be one of {sorted(VALID_BOUND_MODES)}, got {bound_mode!r}"
+                )
+            updates.append("bound_mode = :bm")
+            values[":bm"] = bound_mode
         if not updates:
             existing = self.get(tenant_id)
             if not existing:
@@ -340,3 +371,32 @@ class TenantsRepository:
                 return {"tenant_id": tenant_id, "created": False, "item": existing}
             raise
         return {"tenant_id": tenant_id, "created": True, "item": item}
+
+
+def resolve_bound_mode(tenant_id: Optional[str], *, repo: Optional["TenantsRepository"] = None) -> str:
+    """The reservation-bound mode in force for `tenant_id`: `"strict"` or
+    `"calibrated"` (see VALID_BOUND_MODES). The single decision point the
+    reserve chokepoint (`mvp/_pipeline.py`) and the read-only admin view both
+    consult, so a tenant's mode is one fact, not two independently-drifting
+    reads.
+
+    Fails closed to `"strict"` on every "we don't actually know" path: no
+    `tenant_id`, no Tenants row, a row with no `bound_mode` attribute (an
+    existing tenant from before this change), or an unrecognised value on the
+    row (a hand-edited/corrupt attribute). None of those are "the operator
+    asked for calibrated" — calibrated is an opt-in the contract requires be
+    backed by a real measurement, so anything short of an explicit, valid
+    value on the row must resolve to the bound that needs no measurement to
+    be correct.
+    """
+    if not tenant_id:
+        return BOUND_MODE_STRICT
+    try:
+        item = (repo or TenantsRepository()).get(tenant_id)
+    except Exception:  # noqa: BLE001 — a lookup failure must never crash reserve;
+        # fail to the safe mode instead of raising into the money path.
+        return BOUND_MODE_STRICT
+    if not item:
+        return BOUND_MODE_STRICT
+    mode = item.get("bound_mode")
+    return mode if mode in VALID_BOUND_MODES else BOUND_MODE_STRICT
