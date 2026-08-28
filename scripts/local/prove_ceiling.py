@@ -73,6 +73,106 @@ sys.path.insert(0, str(_HERE.parent.parent / "backend"))
 
 from _local_guard import require_local_dynamodb  # noqa: E402
 
+# The prefix the production deployment uses. Naming it here is what lets the
+# deployed mode below refuse it by identity rather than by hoping an operator
+# passes the right flag.
+PRODUCTION_PREFIX = "stratoclave"
+
+def discover_table_env_defaults() -> dict:
+    """Every `DYNAMODB_*_TABLE` variable the backend reads, with its default.
+
+    Discovered by scanning the source rather than listed here. The first version
+    of this file hand-wrote the nine calls in `dynamo/client.py` and asserted that
+    nothing was left on a default — there are eighteen, because other modules
+    resolve their own tables, and the very first deployed run died on
+    `stratoclave-api-keys`. That failure was lucky: the table did not exist in the
+    verification region. Run the same harness in the production region with an
+    incomplete map and it authenticates against the production api-keys table.
+
+    So the list is derived, and a table added tomorrow is covered without anyone
+    remembering this file. Missing the pattern entirely is a hard failure rather
+    than a shorter list.
+    """
+    import re
+
+    root = _HERE.parent.parent / "backend"
+    pattern = re.compile(
+        r'"(DYNAMODB_[A-Z_]+_TABLE)"\s*,\s*"([a-z0-9-]+)"'
+    )
+    found: dict = {}
+    for path in root.rglob("*.py"):
+        if "/tests/" in str(path):
+            continue
+        for env_key, default in pattern.findall(path.read_text(encoding="utf-8")):
+            if not default.startswith(f"{PRODUCTION_PREFIX}-"):
+                raise SystemExit(
+                    f"[prove_ceiling] {env_key} defaults to {default!r}, which does "
+                    f"not follow `{PRODUCTION_PREFIX}-<suffix>`. The rule this "
+                    f"harness uses to redirect tables no longer holds; fix the "
+                    f"derivation rather than guessing a suffix."
+                )
+            suffix = default[len(PRODUCTION_PREFIX) + 1:]
+            if env_key in found and found[env_key] != suffix:
+                raise SystemExit(
+                    f"[prove_ceiling] {env_key} has two different defaults "
+                    f"({found[env_key]!r} and {suffix!r}); which one a deployment "
+                    f"uses is unknowable from here."
+                )
+            found[env_key] = suffix
+    if len(found) < 10:
+        raise SystemExit(
+            f"[prove_ceiling] only found {len(found)} table variables, which is too "
+            f"few to be the whole set — the scan is broken and redirecting a subset "
+            f"would leave the rest pointing at production."
+        )
+    return found
+
+
+def point_at_deployment(prefix: str) -> None:
+    """Aim this harness at a NAMED deployment's real DynamoDB tables.
+
+    The local guard refuses to run against AWS at all, which is right for the
+    scripts that create tables and seed users: a mistake there is a mess in
+    someone's account. This harness has a different job — the one claim it exists
+    to test, that two concurrent conditional writes cannot both succeed against
+    stale headroom, is unreachable on a single-node local store. So it has to be
+    able to talk to the real thing.
+
+    The safety is by identity, not by flag discipline: the production prefix is
+    named above and refused outright. An operator who types it gets an error
+    rather than a load test against the live budget.
+
+    Tables are set explicitly rather than through `STRATOCLAVE_PREFIX`, because
+    the backend resolves each table from its own environment variable and falls
+    back to the `stratoclave-` default when unset — so setting the prefix alone
+    would silently leave every table pointing at production.
+    """
+    if prefix == PRODUCTION_PREFIX:
+        raise SystemExit(
+            f"[prove_ceiling] refusing to run against the {PRODUCTION_PREFIX!r} "
+            f"deployment. This harness deliberately exhausts a dollar pool and "
+            f"fires concurrent traffic; point it at a verification deployment."
+        )
+    if not prefix or "/" in prefix or prefix.startswith("-"):
+        raise SystemExit(f"[prove_ceiling] implausible deployment prefix {prefix!r}")
+
+    os.environ.pop("AWS_ENDPOINT_URL_DYNAMODB", None)
+    tables = discover_table_env_defaults()
+    for env_key, suffix in tables.items():
+        os.environ[env_key] = f"{prefix}-{suffix}"
+
+    from dynamo.client import get_dynamodb_resource
+
+    resolved = get_dynamodb_resource().meta.client.meta.endpoint_url or ""
+    if "amazonaws.com" not in resolved:
+        raise SystemExit(
+            f"[prove_ceiling] deployed mode resolved to {resolved!r}, which is not "
+            f"AWS. Refusing rather than measuring the wrong store."
+        )
+    print(f"[prove_ceiling] deployment={prefix} endpoint={resolved}")
+    print(f"[prove_ceiling] tables={prefix}-* ({len(tables)} discovered by scanning "
+          f"the backend and set explicitly, so none is left on a production default)")
+
 GATEWAY_URL = os.environ.get("STRATOCLAVE_LOCAL_URL", "http://127.0.0.1:8080")
 KEY_FILE = _HERE.parent.parent / "data" / "local" / "api_key"
 
@@ -254,6 +354,7 @@ class Repetition:
     overlap_witnessed: bool = False
     inconclusive_reason: str = ""
     contended_attempts: int = 0
+    peak_reserved: int = 0
 
 
 def _witness_overlap(peak_reserved: int, refusals: int) -> tuple[bool, str]:
@@ -281,14 +382,16 @@ def _witness_overlap(peak_reserved: int, refusals: int) -> tuple[bool, str]:
 
 
 def run_repetition(index: int, tenant: str, period: str, key: str,
-                   probes: int, probe_max_tokens: int) -> Repetition:
+                   probes: int, probe_max_tokens: int,
+                   occupier_max_tokens: int = 256) -> Repetition:
     rep = Repetition(index=index)
     from dynamo.tenant_budgets import TenantBudgetsRepository
 
     outcomes: list = []
     occupier_thread = threading.Thread(
         target=_fire,
-        args=("occupier", OCCUPIER_ROUTE, OCCUPIER_MODEL, 512, key, 120.0, outcomes, None),
+        args=("occupier", OCCUPIER_ROUTE, OCCUPIER_MODEL, occupier_max_tokens, key,
+              120.0, outcomes, None),
         daemon=True,
     )
     occupier_thread.start()
@@ -305,8 +408,27 @@ def run_repetition(index: int, tenant: str, period: str, key: str,
             break
         time.sleep(0.2)
     else:
-        rep.inconclusive_reason = "the occupier never opened a reservation within 20 s"
+        # Say WHY, not just that it did not happen. The first deployed run reported
+        # "never opened a reservation" and sent me to debug connectivity, when the
+        # occupier had in fact been refused for a reason the system was right to
+        # give: its bound exceeded the whole pool. A diagnostic that omits the
+        # outcome it already has costs a round of looking in the wrong place.
         occupier_thread.join(timeout=150)
+        own = next((o for o in outcomes if o.label == "occupier"), None)
+        if own is None:
+            rep.inconclusive_reason = (
+                "the occupier neither opened a reservation nor returned within 20 s")
+        elif own.kind == BUDGET_REFUSE:
+            rep.inconclusive_reason = (
+                f"the occupier itself was refused for budget ({own.detail!r}), so no "
+                f"reservation was ever held open. Its bound does not fit this pool. "
+                f"Run once with a large --headroom-microusd and read `peak_reserved` "
+                f"from this line: that IS the occupier's bound, and the headroom you "
+                f"want is a little above it")
+        else:
+            rep.inconclusive_reason = (
+                f"the occupier returned {own.kind} (status {own.status}, "
+                f"{own.detail!r}) without a reservation being visible")
         return rep
 
     # Sample the pool for as long as the probes are in flight and keep the peak.
@@ -354,6 +476,7 @@ def run_repetition(index: int, tenant: str, period: str, key: str,
         else:
             rep.upstream_failures += 1
 
+    rep.peak_reserved = peak["reserved"]
     witnessed, why = _witness_overlap(peak["reserved"], rep.budget_refusals)
     rep.overlap_witnessed = witnessed
     if not witnessed:
@@ -368,6 +491,54 @@ def run_repetition(index: int, tenant: str, period: str, key: str,
     return rep
 
 
+def seed_verification_identity(tenant: str) -> str:
+    """Make sure a verification user and API key exist, and return the key.
+
+    Reuses the same repositories the local seeder uses, rather than a second
+    creation path, so what this harness authenticates as is the same shape of
+    identity production issues. A fresh key each run would litter the deployment
+    with keys nobody revokes, so an existing usable key is reused and the plain
+    text is kept beside the local one.
+
+    The key is written to disk because the plain text is unrecoverable — the table
+    stores only its hash. Losing it means the next run creates another, which is
+    how a verification deployment accumulates credentials.
+    """
+    from dynamo.api_keys import ApiKeysRepository
+    from dynamo.user_tenants import UserTenantsRepository
+    from dynamo.users import UsersRepository
+
+    user_id = "verify-ceiling-user"
+    keyfile = KEY_FILE.parent / "api_key_deployed"
+
+    UsersRepository().put_user(
+        user_id=user_id, email="verify-ceiling@example.invalid",
+        auth_provider="local", auth_provider_user_id=user_id,
+        org_id=tenant, roles=["user"],
+    )
+    UserTenantsRepository().ensure(user_id=user_id, tenant_id=tenant, role="user")
+
+    if keyfile.exists():
+        plain = keyfile.read_text().strip()
+        from dynamo.api_keys import hash_key
+
+        item = ApiKeysRepository().get_by_hash(hash_key(plain))
+        if item and not item.get("revoked_at"):
+            print(f"[prove_ceiling] reusing the key at {keyfile}")
+            return plain
+
+    item, plain = ApiKeysRepository().create(
+        user_id=user_id, name="ceiling-verification",
+        scopes=["messages:send", "responses:send", "usage:read-self"],
+        expires_at=None, created_by=user_id,
+    )
+    keyfile.parent.mkdir(parents=True, exist_ok=True)
+    keyfile.write_text(plain + "\n")
+    keyfile.chmod(0o600)
+    print(f"[prove_ceiling] created key {item['key_id']} and saved it to {keyfile}")
+    return plain
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repetitions", type=int, default=2)
@@ -379,14 +550,28 @@ def main() -> None:
     # under test. The first run of this harness failed exactly that way.
     ap.add_argument("--headroom-microusd", type=int, default=16_000)
     ap.add_argument("--probe-max-tokens", type=int, default=64)
+    # The occupier's reservation has to fit the pool while still leaving less room
+    # than the probes collectively want. Too large and it is refused as not fitting
+    # the budget at all — which is correct behaviour and a useless run.
+    ap.add_argument("--occupier-max-tokens", type=int, default=256)
+    ap.add_argument(
+        "--deployment",
+        help="run against this deployment's REAL DynamoDB tables instead of a "
+             "local store. Required for the contention claim, which a single-node "
+             f"store cannot exercise. Refuses {PRODUCTION_PREFIX!r}.",
+    )
     args = ap.parse_args()
 
-    require_local_dynamodb("prove_ceiling")
+    if args.deployment:
+        point_at_deployment(args.deployment)
+    else:
+        require_local_dynamodb("prove_ceiling")
     from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
 
     tenant = os.environ.get("DEFAULT_ORG_ID", "default-org")
     period = current_period()
-    key = KEY_FILE.read_text().strip()
+    key = (seed_verification_identity(tenant) if args.deployment
+           else KEY_FILE.read_text().strip())
 
     # Terminals from earlier runs live in the same period partition, so a defect
     # that was fixed this morning would keep failing every run until the month
@@ -416,10 +601,14 @@ def main() -> None:
     for i in range(args.repetitions):
         print(f"\n-- repetition {i + 1}/{args.repetitions} --")
         rep = run_repetition(i, tenant, period, key, args.probes,
-                             args.probe_max_tokens)
+                             args.probe_max_tokens, args.occupier_max_tokens)
         reps.append(rep)
+        # The peak is the occupier's own reservation, which is the number needed to
+        # size the headroom. Printing it turns "guess, run, wait four minutes"
+        # into one measurement — three rounds of this run were spent guessing it.
         print(f"   admits={rep.admits} budget-refusals={rep.budget_refusals} "
               f"upstream-failures={rep.upstream_failures} "
+              f"peak_reserved={rep.peak_reserved} "
               f"overlap={'witnessed' if rep.overlap_witnessed else 'NOT witnessed'}")
         if rep.inconclusive_reason:
             print(f"   INCONCLUSIVE: {rep.inconclusive_reason}")
@@ -447,11 +636,25 @@ def main() -> None:
     # the one that finds an unsound bound; the aggregate check finds an unsound
     # POOL. They are different failures and both are needed.
     breaches = []
+    bound_priced = 0
+    legacy_priced = 0
     for t in view.terminals:
         reserved = int(t.get("reserved_microusd", 0) or 0)
         settled = int(t.get("settled_delta_microusd", 0) or 0)
         if reserved <= 0:
-            continue  # no reservation to exceed: shadow, or a legacy terminal
+            continue  # nothing was reserved, so there is nothing to exceed
+        # Only a BOUND-priced reservation is subject to the soundness claim. A
+        # deployment sitting in `shadow` — gating off, which is the shipped default
+        # — reserves the legacy estimate and records the bound alongside it, and the
+        # legacy estimate being exceeded is the defect this whole change exists to
+        # fix, not a new one. An earlier version of this check counted those as
+        # violations and reported the system broken when it was behaving exactly as
+        # designed. `estimate_inputs` is present only when the bound priced the
+        # admission, so its absence is the discriminator.
+        if t.get("estimate_inputs") is None and t.get("bound_mode") is None:
+            legacy_priced += 1
+            continue
+        bound_priced += 1
         if settled > reserved:
             ei = t.get("estimate_inputs")
             breaches.append({
@@ -504,6 +707,17 @@ def main() -> None:
     print(f"  admits / refusals / failures    : {admits} / {refusals} / {fails}")
 
     failures = []
+    failures = []
+    print(f"\n  reservations priced by the bound : {bound_priced}")
+    print(f"  reservations on the legacy estimate: {legacy_priced}"
+          + ("  <- this deployment is in `shadow`; the soundness claim is not being"
+             " tested here" if legacy_priced and not bound_priced else ""))
+    if legacy_priced and not bound_priced:
+        failures.append(
+            "every reservation used the legacy estimate, so this run measured the "
+            "OLD ceiling. Set STRATOCLAVE_HARD_CEILING_GATE=1 on the gateway to put "
+            "it in `enforced` and re-run; until then the soundness claim is untested"
+        )
     if breaches:
         print(f"\n=== {len(breaches)} terminal(s) settled ABOVE what admission checked ===")
         for b in breaches[:5]:
@@ -532,19 +746,40 @@ def main() -> None:
             print(f"  - {f}")
         raise SystemExit(1)
 
-    print(f"""
+    shared = f"""
 [prove_ceiling] PASS, with its scope stated rather than implied.
 
-  Across {len(proven)} repetitions with a witnessed overlapping reservation window
+  Across {len(proven)} repetition(s) with a witnessed overlapping reservation window
   and {attempts} contended attempts, no state reconstructed from the ledger showed
-  settled plus reserved above the pool limit, every terminal's amount recomputed
-  from its own recorded tokens and rates, and the headroom identity held.
+  settled plus reserved above the pool limit, every one of the {bound_priced}
+  bound-priced reservations settled within what admission checked, every terminal's
+  amount recomputed from its own recorded tokens and rates, and the headroom
+  identity held.
 
-  This is evidence against defects more frequent than roughly 1 in {attempts}. It
-  is not a proof, and it says nothing about conditional-write CONTENTION: this
-  store is a single node that effectively serialises transactions, so the branch
-  where two writes both succeed against stale headroom is not reachable here. That
-  branch needs the deployed run.
+  This is evidence against defects more frequent than roughly 1 in {attempts}, and
+  it is not a proof."""
+
+    if args.deployment:
+        print(shared + f"""
+
+  Store: the REAL DynamoDB tables of the {args.deployment!r} deployment, so the
+  conditional writes here are the service's own — transactions really could have
+  contended, and {attempts} attempts is how many chances this run gave them. That is
+  a small number: contention is timing-dependent rather than a Bernoulli trial, so a
+  larger claim needs more repetitions, not a confidence interval computed from these.
+
+  Still outside this run: a charge that lands at Bedrock while the process dies
+  before settling it. The reaper releases the hold, the spend disappears from the
+  ledger, and no invariant here notices — that gap is not closeable from this side.
+""")
+    else:
+        print(shared + """
+
+  Store: a single-node local store, which effectively serialises transactions, so
+  the dangerous branch — two conditional writes both succeeding against stale
+  headroom — was never reachable. What a green run here establishes is the admission
+  arithmetic, the classification, the recomputation and the barrier. Contention
+  itself needs `--deployment <prefix>` against real DynamoDB.
 """)
 
 

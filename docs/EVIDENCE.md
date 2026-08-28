@@ -49,9 +49,49 @@ Run from a laptop against the public CloudFront hostname of a live deployment, w
 | **API key revocation takes effect immediately** | create → `GET /v1/models` 200 → revoke → **401 at once**, and still 401 at +5 s and +20 s (no cache lag) | **deployed-live** | — |
 | **Deployed-path latency, first measurement** | `GET /v1/models` (auth + app only, no Bedrock, no reserve), connection reused: n=25, min 193 ms, **p50 253 ms**, p90 335, p95 349, max 882. Fresh connection per call: p50 568 ms. With inference: haiku ≈ 1.1–1.2 s, gpt-5.6-sol ≈ 2.3–3.9 s | **deployed-live** | **this is NOT the authorize p99** — it excludes the budget reserve and the Bedrock call, so it cannot be compared with the 225 ms row above. Client-side total only: no split of CloudFront / ALB / app / DynamoDB, no retry count, cold start neither induced nor identifiable. Measured from a SFO edge against a us-east-1 origin, so geography dominates |
 
-**What this run did not touch**: the hard budget limit under concurrency (needs a small
-dollar budget, which is an admin operation), tenant isolation, contention between two users
-of the same tenant, server-side latency breakdown, and the expired-hold reaper.
+**What this run did not touch**: tenant isolation, contention between two users of the
+same tenant, server-side latency breakdown, and the expired-hold reaper. The hard budget
+limit under concurrency was the largest gap here and is now measured — see the next
+section.
+
+### The dollar ceiling under concurrency, on a deployed stack (2026-08-29)
+
+The claim this project cares most about, measured rather than proved. A dedicated
+deployment (`sc-verify`, us-west-2, its own nine stacks and its own tables, Bedrock
+primary deliberately in a different region from production so the load test could not
+consume production's per-region model quota) with the hard-ceiling gate on, so
+admission reserved the sound bound rather than the legacy estimate.
+
+`scripts/local/prove_ceiling.py --deployment sc-verify`. Admissions counted from the
+ledger rather than from the client, every amount recomputed from the tokens and rates
+the event itself carries, a quiescence barrier whose timeout is a failure, and a run
+declared INCONCLUSIVE unless it produced at least one admit, at least one refusal whose
+reason was pool headroom, and an overlapping reservation window witnessed from the
+pool's own reserved counter.
+
+| Claim | Evidence | Tier | Not covered |
+|---|---|---|---|
+| **Concurrent callers cannot overspend the dollar pool** | 4 repetitions at 8 concurrent probes against an occupier holding a reservation open; 3 repetitions witnessed overlap, 24 contended attempts, 11 admits and 16 pool-headroom refusals; no ledger-reconstructed state showed settled plus reserved above the limit | **deployed-live** | 24 attempts is a small number, and contention is timing-dependent rather than a Bernoulli trial — a larger claim needs more repetitions, not a confidence interval computed from these |
+| **Every bound-priced reservation dominated its settle** | 11 of 11, on real Bedrock traffic | **deployed-live** | reservations priced by the legacy estimate are excluded by construction: a deployment with the gate off reserves the estimate, and the estimate being exceeded is the defect this work fixes |
+| **The headroom identity survives real concurrency** | held on every reconstruction | **deployed-live** | — |
+| **A request that cannot fit the budget is refused distinctly** | `402 request_does_not_fit_pool_limit`, observed when the occupier's bound exceeded the whole pool | **deployed-live** | — |
+
+**What the run does not reach**, and no invariant here notices: a charge that lands at
+Bedrock while the process dies before settling it. The reaper releases the hold, the
+spend leaves the ledger, and later admissions can carry the pool past its limit with
+every proved property intact. That is the atomicity gap recorded above, and it is not
+closeable from this side.
+
+Three defects in the harness itself were found by running it, and each would have made
+a green run meaningless: it reported only pool-level totals, so a five-micro-USD
+per-request breach vanished into a headroom of thousands; it asked for a pool limit
+rather than a headroom, so spend from earlier runs made the budget stop binding for
+reasons unrelated to the system; and it evaluated every terminal in the period, so a
+defect fixed in the morning would fail every run until the month rolled over. A fourth:
+its overlap witness read the pool once after the probes finished, which assumed the
+occupier was still in flight — true for a reasoning model on a long prompt, false on a
+trivial one, and it reported genuine overlap as inconclusive until the witness became a
+peak sampled across the probe window.
 
 ### Local mode, against DynamoDB Local and real Bedrock (2026-08-28)
 
