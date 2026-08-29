@@ -46,6 +46,7 @@ import asyncio
 import os
 import threading
 import time
+import typing
 from typing import Callable, Optional
 
 from botocore.config import Config
@@ -350,9 +351,100 @@ class DynamoRateLimiter:
                 )
                 return await func(*args, **kwargs)
 
-            return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+            wrapper = async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+            _carry_resolved_signature(func, wrapper, sig)
+            return wrapper
 
         return decorator
+
+
+def _carry_resolved_signature(func, wrapper, sig: inspect.Signature) -> None:
+    """Stamp the handler's RESOLVED signature onto the wrapper.
+
+    Route modules use `from __future__ import annotations`, so their annotations
+    are strings, and a framework has to evaluate them against the module the
+    handler was defined in. `functools.wraps` cannot copy `__globals__`, so an
+    evaluator that reads the wrapper's globals looks for the route's request model
+    in *this* module and does not find it. What it does then is worse than an
+    error: FastAPI treats every unresolvable parameter as a query parameter, so a
+    rate-limited route stops parsing its body and answers every well-formed
+    request with `422 Field required` for `query.body`. It is invisible in review
+    because the decorator, the route and the model are all individually correct.
+
+    Resolving here — where the handler's own globals are in scope — and attaching
+    the result as `__signature__` means nothing downstream has to evaluate
+    anything, so the behaviour no longer depends on whether the framework unwraps
+    `__wrapped__` before resolving.
+
+    Two details are load-bearing rather than incidental:
+
+    * **`include_extras=True`.** `Annotated[Model, Body(embed=True)]` and
+      `Annotated[Principal, Depends(authenticate)]` carry the framework's
+      instructions in the metadata. Stripping them would silently change body
+      shape and drop dependency injection — the same class of defect this
+      function exists to remove, and on an auth dependency it would be a security
+      defect.
+    * **Per-parameter resolution.** `get_type_hints` resolves the whole signature
+      or raises, so one genuinely unresolvable annotation (a `TYPE_CHECKING`-only
+      import, a real forward reference) would cost every other parameter its
+      resolution and put the route back on the 422. Each annotation is therefore
+      resolved on its own, and a failure is logged with the parameter that caused
+      it rather than passed over in silence: a request-time 422 that no log line
+      explains is what made this expensive to find.
+    """
+    hints = _resolved_hints(func, sig)
+    if not hints:
+        return
+    parameters = [
+        p.replace(annotation=hints.get(p.name, p.annotation))
+        for p in sig.parameters.values()
+    ]
+    wrapper.__signature__ = sig.replace(  # type: ignore[attr-defined]
+        parameters=parameters,
+        return_annotation=hints.get("return", sig.return_annotation),
+    )
+
+
+def _resolved_hints(func, sig: inspect.Signature) -> dict:
+    """The handler's annotations as objects, resolved in the handler's own module.
+
+    Whole-signature resolution first, because `typing` is the authority on what an
+    annotation means; per-annotation evaluation only as the fallback, so that one
+    unresolvable name costs one parameter instead of all of them.
+    """
+    try:
+        return typing.get_type_hints(func, include_extras=True)
+    except Exception as exc:  # noqa: BLE001 — fall back to per-parameter below
+        first_failure = exc
+
+    globalns = getattr(func, "__globals__", {})
+    hints: dict = {}
+    unresolved: list[str] = []
+    raw = dict(getattr(func, "__annotations__", {}) or {})
+    for name, annotation in raw.items():
+        if not isinstance(annotation, str):
+            hints[name] = annotation
+            continue
+        try:
+            # Evaluating the module's own annotation text, in that module's
+            # namespace — the same thing `typing` does internally. Nothing here
+            # comes from a request.
+            hints[name] = eval(annotation, globalns)  # noqa: S307
+        except Exception:  # noqa: BLE001 — one annotation, not the signature
+            unresolved.append(name)
+    if unresolved:
+        _log.warning(
+            "rate_limit_signature_unresolved",
+            handler=getattr(func, "__qualname__", "?"),
+            parameters=",".join(unresolved),
+            error=str(first_failure),
+            note=(
+                "these parameters keep their string annotation, so the framework "
+                "will resolve them against the wrapper's module and may treat them "
+                "as query parameters"
+            ),
+        )
+    return hints
 
 
 def _find_request(args, kwargs) -> Optional[Request]:
