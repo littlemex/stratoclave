@@ -607,6 +607,19 @@ export class EcsStack extends cdk.Stack {
           'bedrock:InvokeModelWithResponseStream',
         ],
         resources: [
+          // The OpenAI-compatible surface authorizes against a PROJECT resource, not
+          // against the model: without this line the call is denied with "not
+          // authorized to perform: bedrock:InvokeModel on resource:
+          // arn:aws:bedrock:<region>:<account>:project/default". Verified by assuming
+          // a role carrying exactly these statements and calling the real endpoint —
+          // the model-scoped ARNs alone produced a 401, and adding this produced 200.
+          // The mantle statement this replaced had the same shape
+          // (`arn:aws:bedrock-mantle:...:project/*`); dropping it in the namespace
+          // move was the defect.
+          `arn:aws:bedrock:*:${account}:project/*`,
+          // Kept as well: `Converse`-style model ARNs are what the same actions are
+          // scoped by elsewhere, and a future direct InvokeModel on these families
+          // should not need a second policy edit.
           `arn:aws:bedrock:*::foundation-model/openai.*`,
           `arn:aws:bedrock:*::foundation-model/xai.*`,
           `arn:aws:bedrock:*:${account}:inference-profile/us.openai.*`,
@@ -622,13 +635,14 @@ export class EcsStack extends cdk.Stack {
     // moved endpoint that the same minted token is accepted, so the mechanism is
     // unchanged; only the namespace moves with the endpoint.
     //
-    // `resources: ['*']` was a documented AWS constraint on the mantle namespace:
-    // a region-scoped ARN produced "not authorized to perform:
-    // bedrock-mantle:CallWithBearerToken on resource: * because no identity-based
-    // policy allows ...". Whether the `bedrock` namespace accepts resource-level
-    // scoping here is UNVERIFIED — it needs a deploy to find out. Left wide with
-    // this note rather than tightened on a guess, since a wrong guess fails closed
-    // at request time on a path that has no fallback.
+    // `bedrock:CallWithBearerToken` is verified as the correct action in this
+    // namespace: a role carrying only these two statements minted a token and got a
+    // 200 from the real endpoint. `resources: ['*']` is inherited from the mantle
+    // statement, where a region-scoped ARN was rejected outright. Whether the
+    // `bedrock` namespace would accept resource-level scoping is still untested —
+    // the mint succeeded with `*` and tightening it on a guess fails closed at
+    // request time on a path with no fallback, so it stays wide until someone tests
+    // the narrower form the same way the project ARN above was tested.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowBedrockBearerTokenMint',
