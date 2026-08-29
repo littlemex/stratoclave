@@ -707,6 +707,14 @@ code is one idempotency record and the rehydrate.
   (reaper-reclaimed) hold returns `410` and is deliberately **not** late-billed
   — an external capture window is unbounded, so late-billing a reclaimed hold
   could break the budget invariant.
+- **The key identifies the operation, byte for byte.** The idempotency record is
+  addressed by a digest of the raw `Idempotency-Key`, so two different keys are two
+  different operations: an earlier version sanitised the key into a sort key, which
+  merged `invoice/a` and `invoice?a` onto one record — the second authorize then
+  either replayed the first, reporting success for an amount that was never held, or
+  was refused as a reused key. A retry that crosses the billing period boundary
+  still finds its original record (the read falls back one period, which the
+  authorization's own 24-hour ceiling makes sufficient).
 - **The write verbs are rate-limited per source IP** (`authorize` / `capture` /
   `void`; `BILLING_WRITE_RATE_LIMIT`, default `60/minute`, backed by the same
   DynamoDB fixed-window limiter as the auth endpoints). Unlike an inline request
