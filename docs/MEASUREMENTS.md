@@ -1,4 +1,5 @@
 <!-- Japanese translation: MEASUREMENTS.ja.md -->
+<!-- Last updated: 2026-08-30. Every figure carries the conditions it was measured under. -->
 
 # What a failed LLM call actually costs
 
@@ -202,6 +203,8 @@ python3 scripts/local/measure_provider_outcome.py --retry-arithmetic-only
   measurement and naming its accepted risk.
 - `backend/mvp/_money.py` — the hold: the only object that may end a reservation,
   so every route asks the policy above and no route can answer for itself.
+- `docs/design/charge-loss.md` — the contract these measurements serve: attempts,
+  evidence, liability, and what cannot be done from inside a gateway.
 - `docs/EVIDENCE.md` — the full evidence map, including what is *not* verified.
 - `backend/tests/test_provider_outcome_formal.py`,
   `backend/tests/test_money_lifecycle_discipline.py` — the properties and the

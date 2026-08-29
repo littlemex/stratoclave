@@ -120,9 +120,8 @@ def nonstream_timeout() -> httpx.Timeout:
 # a 502 it can retry instead of a minutes-long hang.
 _DEFAULT_TIMEOUT = httpx.Timeout(600.0, connect=10.0, pool=10.0)
 
-# Named so `mvp._pipeline`'s reap-timeout derivation (CONTRACT-hard-
-# ceiling.md section 5) can read the SAME configured deadline this transport
-# actually uses. httpx performs NO automatic retry by default and none is
+# Named so `mvp._pipeline`'s reap-timeout derivation can read the SAME configured
+# deadline this transport actually uses (docs/design/hard-ceiling.md section 5). httpx performs NO automatic retry by default and none is
 # configured on this client (unlike the Bedrock botocore client's
 # `RETRY_MAX_ATTEMPTS` in `_bedrock_clients.py`), so this transport's own
 # retry budget is exactly 1 attempt.

@@ -385,14 +385,14 @@ def chat_completions(
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
     else:
-        # CONTRACT-hard-ceiling.md section 3a: the the OpenAI-compatible endpoint transport's canonical
+        # docs/design/hard-ceiling.md section 3a: the the OpenAI-compatible endpoint transport's canonical
         # payload, built ONCE here (pre-reserve) rather than inside
         # `_openai_chat_completion` — same reasoning as the Converse `kwargs`
         # above: one payload, surveyed and then sent, not two independently
         # built copies.
         openai_payload, injected_usage = _build_openai_chat_payload(body, entry)
 
-    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 0/7b):
+    # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey whichever canonical payload this request will actually send —
     # Converse `kwargs` or the the OpenAI-compatible endpoint `payload` — but ONLY when enforcement
     # might use it (`dollar_pool_bound_should_compute`); see `mvp.anthropic`'s
@@ -668,7 +668,7 @@ def _openai_status(upstream: int) -> int:
 def _build_openai_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry") -> tuple[dict, bool]:
     """The exact JSON `payload` `/v1/chat/completions` sends to the OpenAI-compatible endpoint
     (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
-    the reserve call — CONTRACT-hard-ceiling.md section 3a requires the bound
+    the reserve call — docs/design/hard-ceiling.md section 3a requires the bound
     to be computed over the canonical payload the gateway is about to send,
     and this is that payload for the the OpenAI-compatible endpoint transport (as
     `mvp.anthropic._build_bedrock_kwargs` is for the Converse transport).

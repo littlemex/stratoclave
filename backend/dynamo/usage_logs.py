@@ -71,7 +71,7 @@ class UsageLogsRepository:
         re-derived from the audit log — i.e. spend is auditable, not just
         asserted. Legacy callers that omit it write no cost field.
 
-        `measured_bound_microusd` (CONTRACT-hard-ceiling.md, coordinator's
+        `measured_bound_microusd` (docs/design/hard-ceiling.md, coordinator's
         ITEM 2) is the hard-ceiling reservation bound this request was priced
         at by `mvp.reservation_bound`, carried here rather than into the
         credit ledger so a tenant with no dollar pool (or one with a pool,

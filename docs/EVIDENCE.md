@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-07-23. Every figure carries the commit that produced it. -->
+<!-- Last updated: 2026-08-30. Every figure carries the commit that produced it. -->
 
 # Evidence map — what is claimed, and how far it is verified
 
@@ -40,7 +40,8 @@ AWS does not document which failures are billed, so it was measured against Clou
 The write-up is [`MEASUREMENTS.md`](MEASUREMENTS.md) ([日本語](MEASUREMENTS.ja.md)); the harness
 that repeats the probes is `scripts/local/measure_provider_outcome.py`, which reports a condition
 whose counter minute came back empty as `no_data` rather than as a zero. The measurement is the
-evidence for the liability policy rows in `backend/mvp/provider_outcome.py`.
+evidence for the liability policy rows in `backend/mvp/provider_outcome.py`, and the design those
+rows serve is [`design/charge-loss.md`](design/charge-loss.md).
 
 | Claim | Strongest evidence | Tier | Not covered | Commit |
 |---|---|---|---|---|

@@ -1,6 +1,6 @@
 """The classification and the liability policy, one test per branch.
 
-`CONTRACT-charge-loss.md` acceptance criterion 4 asks for a test per state and,
+`docs/design/charge-loss.md` acceptance criterion 4 asks for a test per state and,
 specifically, for an unrecognised error to land in the expensive state. That last
 one is the point of the whole module: the defect being fixed was a generic
 `except Exception` that refunded, so a test that only covers the errors somebody

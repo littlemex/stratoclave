@@ -72,7 +72,7 @@ from botocore.config import Config
 MAX_POOL_CONNECTIONS_ENV = "BEDROCK_MAX_POOL_CONNECTIONS"
 
 # Named (not inline) so `mvp._pipeline`'s reap-timeout derivation
-# (CONTRACT-hard-ceiling.md section 5: "derive it from those values in code
+# (docs/design/hard-ceiling.md section 5: "derive it from those values in code
 # rather than choosing a constant") can import the SAME numbers this client
 # is actually configured with, instead of a second, independently-maintained
 # copy that could drift from the real timeout the moment either changes.

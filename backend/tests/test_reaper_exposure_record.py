@@ -1,6 +1,6 @@
 """The reclaim must preserve what it was about, because it deletes the evidence.
 
-`CONTRACT-charge-loss.md`. The reaper credits an expired hold back with
+`docs/design/charge-loss.md`. The reaper credits an expired hold back with
 `actual=0`, which asserts the provider charged nothing. Measured on real Bedrock,
 that assertion is false for a request that died after its bytes left: a call
 abandoned at a 2 s client read timeout was billed 1,493 output tokens.

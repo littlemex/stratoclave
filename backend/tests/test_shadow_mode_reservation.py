@@ -1,5 +1,5 @@
 """Tests for the `shadow` state of the hard-ceiling reservation bound
-(CONTRACT-hard-ceiling.md section 9b) — the rollout-hazard fix.
+(docs/design/hard-ceiling.md section 9b) — the rollout-hazard fix.
 
 Background: `dollar_pool_bound_should_gate` returning `_pool_row_exists(tenant_id)`
 alone gated a tenant the instant a dollar pool row existed — an unsizeable
@@ -164,7 +164,7 @@ def test_shadow_reserves_the_legacy_estimate_and_still_records_the_bound(
     assert ctx.measured_bound_microusd == bound
     assert ctx.measured_bound_microusd != ctx.pool_reserved_microusd
 
-    # Ledger recomputability (CONTRACT-hard-ceiling.md item 4): `bound_mode`
+    # Ledger recomputability (docs/design/hard-ceiling.md item 4): `bound_mode`
     # records which strategy produced `pool_reserved_microusd`, which was the
     # LEGACY heuristic here, not the bound — a "strict" tag would tell a
     # reader to recompute via `strict_reservation_microusd`, which would NOT

@@ -29,13 +29,13 @@ from .client import get_dynamodb_resource
 
 ADMIN_OWNED = "admin-owned"
 
-# Per-tenant reservation-bound mode (CONTRACT-hard-ceiling.md,
+# Per-tenant reservation-bound mode (docs/design/hard-ceiling.md,
 # mvp/reservation_bound.py):
 #   "strict"     — the sound byte-based bound; overspending the pool is
 #                   impossible by construction (within the stated
 #                   assumptions), at the cost of reserving several times the
 #                   eventual actual spend.
-#   "calibrated" — CONTRACT-ceiling-phase2.md, deliberately NOT part of this
+#   "calibrated" — docs/design/calibrated-mode.md, deliberately NOT part of this
 #                   change. The constant is defined so phase 2's code can
 #                   name it, but it is NOT in `VALID_BOUND_MODES` below, so it
 #                   is UNREACHABLE today: `update()` refuses to set it and

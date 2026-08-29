@@ -1,4 +1,4 @@
-"""The hard-ceiling reservation bound (contract: CONTRACT-hard-ceiling.md).
+"""The hard-ceiling reservation bound (contract: docs/design/hard-ceiling.md).
 
 `estimate_cost_microusd` (mvp/pricing.py) is a heuristic, not a bound: it prices
 `char_count // 3` input tokens at the plain input rate and ignores cache-write
@@ -99,7 +99,7 @@ from .rates import Rate
 # ---------------------------------------------------------------------------
 # The assumptions the guarantee rests on — stated, not glossed
 # ---------------------------------------------------------------------------
-# CONTRACT-hard-ceiling.md section 4: "Put these where a reader of the
+# docs/design/hard-ceiling.md section 4: "Put these where a reader of the
 # guarantee will see them." This is that place — imported and quoted wherever
 # the strict-mode guarantee is documented (this module's own docstring above,
 # and `mvp._pipeline`'s reserve chokepoint), so the guarantee is never stated
@@ -279,7 +279,7 @@ calibration_store = CalibrationStore()
 
 
 # The guarantee, stated with its boundary rather than as a slogan
-# (CONTRACT-hard-ceiling.md, final revision — supersedes an earlier draft's
+# (docs/design/hard-ceiling.md, final revision — supersedes an earlier draft's
 # strict-vs-calibrated comparison, which does not apply while calibrated mode
 # is phase 2 / out of scope, and a still-earlier draft that named only ONE
 # visible failure mode). Kept as one importable string so every surface that
@@ -632,7 +632,7 @@ def utf8_byte_count(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Canonical-payload surveyors, shared across routes (CONTRACT-hard-ceiling.md
+# Canonical-payload surveyors, shared across routes (docs/design/hard-ceiling.md
 # section 3a)
 # ---------------------------------------------------------------------------
 # One surveyor per WIRE SHAPE a route actually sends, not one per route: two
@@ -1072,7 +1072,7 @@ def survey_and_hash_openai_responses_payload(payload: dict) -> tuple["ContentSur
 
 
 # ---------------------------------------------------------------------------
-# Budget enforcement is opt-in (CONTRACT-hard-ceiling.md section 0/7a/7b)
+# Budget enforcement is opt-in (docs/design/hard-ceiling.md section 0/7a/7b)
 # ---------------------------------------------------------------------------
 # The principle: the only reason to serialise requests on a shared item is to
 # PROVE a limit was not exceeded. Measurement needs no such proof, so

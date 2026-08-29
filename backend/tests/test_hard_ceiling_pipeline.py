@@ -1,5 +1,5 @@
 """Pipeline-level integration tests for the hard-ceiling reservation bound
-(CONTRACT-hard-ceiling.md), against real (moto) DynamoDB.
+(docs/design/hard-ceiling.md), against real (moto) DynamoDB.
 
 Scope: the strict-mode-only first slice (contract section 12). These drive
 `reserve_credit_for_model` / `settle_reservation_and_log` directly (the same
@@ -199,7 +199,7 @@ def test_enforcement_active_iff_pool_row_exists(dynamodb_mock, monkeypatch):
     _seed_tenant_with_pool(pool_limit_microusd=1_000_000_000)
     assert dollar_pool_bound_should_compute(TENANT_ID) is True
     # A pool row alone is the `shadow` state, not `enforced`
-    # (CONTRACT-hard-ceiling.md section 9b's rollout requirement — see
+    # (docs/design/hard-ceiling.md section 9b's rollout requirement — see
     # reservation_bound.py's own module docstring): `should_gate` also needs
     # the gate env flag on. Explicitly clear it first so this assertion does
     # not depend on the ambient test-environment default.

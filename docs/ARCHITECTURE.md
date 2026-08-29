@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-07-10 -->
+<!-- Last updated: 2026-08-30 -->
 <!-- Applies to: Stratoclave main -->
 
 # Architecture
@@ -648,9 +648,10 @@ costs:
 | no response at all | `hold.claim_unobserved(exc=…)` / `(status_code=…)` | classifies how far the request got (`mvp/provider_outcome.py`). The classification is **always** recorded; whether the reservation is withheld is the gate's decision — with `STRATOCLAVE_UNOBSERVED_HOLDS` off it is returned as before, with it on only a state that cannot have been billed is returned |
 | a stream that stopped part-way | `hold.claim_stream_interrupted(usage, provider_responded=…, sent=…)` | charges what arrived; if the provider answered but no usage came, the ceiling is held rather than a zero invented; if nothing was sent, the reservation is returned |
 | the consumer stopped reading | `hold.close(usage, sent=…, provider_responded=…)` | the same reading as an interrupted stream, plus it completes a write the close interrupted |
+| nothing left this process | `hold.claim_not_submitted()` | returns the reservation — no provider could have billed it |
 
 Two properties come from the shape rather than from discipline. **The liability
-policy is not reachable around**: `abandon` is the only path that returns a
+policy is not reachable around**: `claim_unobserved` is the only path that returns a
 reservation, and a static guard
 (`backend/tests/test_money_lifecycle_discipline.py`) scans every module under
 `mvp/` and fails the build when one calls `refund` / `release_pool` /

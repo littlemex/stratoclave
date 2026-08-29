@@ -5,9 +5,6 @@ entire Stratoclave deployment — VPC, DynamoDB tables, ECR, ALB, WAFv2,
 CloudFront + S3 frontend, Cognito User Pool, and the Fargate service —
 into a single AWS region in your own account.
 
-> The Japanese translation of this document lives at
-> [`../docs/ja/IAC.md`](../docs/ja/IAC.md).
-
 ## Architecture
 
 ```

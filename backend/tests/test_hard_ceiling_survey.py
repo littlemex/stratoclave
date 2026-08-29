@@ -1,5 +1,5 @@
 """Unit tests for `mvp.anthropic._survey_and_hash_converse_kwargs` —
-CONTRACT-hard-ceiling.md section 3a's canonical-payload byte survey and hash.
+docs/design/hard-ceiling.md section 3a's canonical-payload byte survey and hash.
 
 Pure-function tests, no AWS: `_build_bedrock_kwargs` and
 `_survey_and_hash_converse_kwargs` take/produce plain dicts.
