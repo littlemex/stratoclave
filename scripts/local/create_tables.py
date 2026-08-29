@@ -17,7 +17,6 @@ real AWS account.
 """
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
