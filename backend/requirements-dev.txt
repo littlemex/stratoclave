@@ -11,7 +11,7 @@
 # pytest 9.0.3 fixes CVE-2025-71176 (path traversal in tmp_path).
 # pytest-asyncio 1.4.0 is the first release whose dist-deps allow
 # pytest 9 (the 0.24.x line caps at pytest<9).
-pytest==9.0.3
+pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 
