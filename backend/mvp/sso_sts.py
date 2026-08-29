@@ -58,6 +58,13 @@ class StsIdentity:
     role_name: Optional[str]       # set for assumed-role identities
     session_name: Optional[str]    # tail of the assumed-role ARN (email, username, or instance-id)
     iam_user_name: Optional[str]   # set for iam_user identities
+    # The part of the STS UserId that AWS assigns and a caller cannot choose:
+    # `AROA…` for an assumed role, `AIDA…` for an IAM user. The ARN is NOT a
+    # substitute — an assumed-role ARN ends in the RoleSessionName, which whoever
+    # calls AssumeRole picks, so two different callers of the same role can
+    # produce byte-identical ARNs. Anything that binds an account to a principal
+    # has to bind to this instead. Defaulted so existing constructions stay valid.
+    principal_id: Optional[str] = None
 
 
 def verify_and_call_sts(
@@ -81,7 +88,7 @@ def verify_and_call_sts(
     pattern therefore stays safe without migrating to the boto3 STS
     client (which would force us to re-sign and lose the pass-through).
     """
-    _validate_inputs(method, url, headers)
+    _validate_inputs(method, url, headers, body)
 
     # Replay guard (P3-1, sweep-4 C-Critical-B2 fail-closed restored).
     #
@@ -163,7 +170,7 @@ def verify_and_call_sts(
         raise HTTPException(status_code=502, detail="Malformed STS response")
 
 
-def _validate_inputs(method: str, url: str, headers: dict[str, str]) -> None:
+def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str = "") -> None:
     if method.upper() != "POST":
         raise HTTPException(status_code=400, detail="STS request must use POST")
 
@@ -176,13 +183,22 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str]) -> None:
             detail=f"STS host not allowed: {parsed.hostname}",
         )
 
-    # Validate Action=GetCallerIdentity (check the URL side; it can also be in the body).
-    query = parse_qs(parsed.query)
-    action_values = query.get("Action", [])
-    # aws-sdk-rust presigning sometimes puts Action in the body instead of the URL;
-    # if Action is absent from the URL, it is assumed to be in the Authorization signed-payload.
-    # We enforce strictly when Action is in the URL; otherwise pass (STS will reject invalid requests).
-    if action_values and action_values[0] != _STS_ACTION:
+    # Validate Action=GetCallerIdentity. The action can be in the query string or,
+    # for signers that presign the POST form (aws-sdk-rust does), in the body — so
+    # both are checked. Enforcing only the query string, as this did before, left
+    # the documented control ("Only Action=GetCallerIdentity is accepted")
+    # unimplemented for exactly the signer the comment named: the gateway would
+    # forward any STS action the presented credentials allow. It never granted the
+    # presenter anything they did not already hold, and a non-identity response
+    # fails to parse, but a control that is documented and absent is worse than one
+    # that is neither.
+    action = _signed_action(parsed.query, body)
+    if action is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"STS request must carry Action={_STS_ACTION}",
+        )
+    if action != _STS_ACTION:
         raise HTTPException(
             status_code=400,
             detail=f"Only Action={_STS_ACTION} is accepted",
@@ -213,6 +229,21 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str]) -> None:
         )
 
 
+def _signed_action(query: str, body: str) -> Optional[str]:
+    """The `Action` the signed request carries, from the query string or the form body.
+
+    Returns None when neither carries one, which is itself a refusal: a request
+    with no action is not a `GetCallerIdentity` vouch.
+    """
+    for source in (query, body):
+        if not source:
+            continue
+        values = parse_qs(source).get("Action", [])
+        if values:
+            return values[0]
+    return None
+
+
 def _parse_sts_response(xml_text: str) -> StsIdentity:
     """Parse Arn/UserId/Account from the STS GetCallerIdentity XML and classify identity_type."""
     ns = {"sts": "https://sts.amazonaws.com/doc/2011-06-15/"}
@@ -228,6 +259,16 @@ def _parse_sts_response(xml_text: str) -> StsIdentity:
     account_id = (account_elem.text or "").strip()
 
     return classify_arn(arn=arn, user_id=user_id, account_id=account_id)
+
+
+def stable_principal_id(user_id: str) -> str:
+    """The AWS-assigned prefix of an STS UserId, with any session part removed.
+
+    `AROAEXAMPLE:alice@example.com` -> `AROAEXAMPLE`. The session part is the
+    RoleSessionName, which the caller of AssumeRole chooses; the prefix is the
+    role's (or user's) unique id, which it does not.
+    """
+    return (user_id or "").split(":", 1)[0]
 
 
 def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
@@ -247,6 +288,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
             role_name=None,
             session_name=None,
             iam_user_name=iam_user_name,
+            principal_id=stable_principal_id(user_id),
         )
 
     if ":assumed-role/" in arn:
@@ -269,6 +311,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
                 role_name=role_name,
                 session_name=session,
                 iam_user_name=None,
+                principal_id=stable_principal_id(user_id),
             )
 
         # IAM Identity Center (AWS SSO) reserved role format.
@@ -281,6 +324,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
                 role_name=role_name,
                 session_name=session,
                 iam_user_name=None,
+                principal_id=stable_principal_id(user_id),
             )
 
         # Any other assumed-role is treated as a federated / manual AssumeRole.
@@ -292,6 +336,7 @@ def classify_arn(*, arn: str, user_id: str, account_id: str) -> StsIdentity:
             role_name=role_name,
             session_name=session,
             iam_user_name=None,
+            principal_id=stable_principal_id(user_id),
         )
 
     raise HTTPException(

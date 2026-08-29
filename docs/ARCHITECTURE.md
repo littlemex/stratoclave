@@ -444,13 +444,34 @@ The four gates are evaluated in order and each can deny the login:
 | Gate | Check | Default if not explicitly allowed |
 |------|-------|-----------------------------------|
 | 1. Trusted account | `account_id` present in `TrustedAccounts` | **deny** |
-| 2. Role pattern | `role_name` matches an entry in `allowed_role_patterns` | allow if list is empty |
+| 2. Role pattern | `role_name` matches an entry in `allowed_role_patterns` | **deny** — an empty list denies every assumed-role identity |
 | 3. Identity type | `instance_profile` requires `allow_instance_profile=true`; `iam_user` requires `allow_iam_user=true` | **deny** (default DENY for shared identities) |
 | 4. Provisioning | `invite_only` looks up `SsoPreRegistrations`; `auto_provision` derives email from the session name | `invite_only` if unset |
 
 Existing invitations are always consulted before the account-level policy —
 this is intentional so that administrators can mix "auto-provision this
 role pattern, but invite these named individuals" on the same account.
+
+**What gate 2 actually bounds, and why an empty list denies.** Every identity on
+this path is read out of the `RoleSessionName`: the invite is looked up by it and
+`auto_provision` derives the email from it. That string is chosen by whoever calls
+`sts:AssumeRole`. So listing a role pattern is an assertion by the operator: *for
+these roles, the session name is set by an identity provider rather than by the
+caller.* It holds for IAM Identity Center roles (`AWSReservedSSO_*`), whose trust
+policy admits only the Identity Center SAML provider, so `AssumeRole` cannot be
+called against them directly; it holds for SAML federation roles configured the
+same way. **It does not hold for a role whose trust policy lets a principal assume
+it directly — listing such a pattern hands that principal every identity the
+account can name.** An empty list used to mean "no restriction", which is the one
+setting this gate cannot have, so it now denies.
+
+**The principal binding is on the STS UserId, not the ARN.** A user provisioned
+through this flow records the AWS-assigned part of the STS `UserId` (`AROA…` /
+`AIDA…`), and a later login must present the same one. The ARN is not usable for
+this: an assumed-role ARN ends in the caller-chosen `RoleSessionName`, so a second
+caller of the same role who passes the same session name reproduces it exactly.
+Rows provisioned before the id was recorded are compared on the ARN, as they always
+were, and are upgraded by their next successful login.
 
 ### 3. Long-lived API key flow
 

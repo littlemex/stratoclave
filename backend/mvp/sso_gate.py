@@ -2,7 +2,9 @@
 
 Flow (design doc §4.4, revised):
   Gate 0: check whether identity_type (iam_user / instance_profile) is allowed
-  Gate 1: check role_pattern against the allowlist
+  Gate 1: check role_pattern against the allowlist — REQUIRED and non-empty for
+          any assumed-role identity, because it is what makes the session name
+          trustworthy enough to read as an identity
   Gate 2: invite lookup (email, or session_name → iam_user_name format)
   Gate 3: fall back to provisioning_policy if no invite is found
      - invite_only (default): deny
@@ -77,9 +79,38 @@ def validate_sso_identity(sts: StsIdentity) -> TrustedSsoIdentity:
                 detail="IAM user login is not allowed for this account.",
             )
 
-    # Gate 1: check role_pattern allowlist (not applicable to iam_user, which has no role).
+    # Gate 1: the role allowlist. Not applicable to iam_user, which has no role and
+    # whose name comes from the ARN rather than from the request.
+    #
+    # An EMPTY list refuses. It used to mean "no restriction", which made the
+    # default configuration fail open in the one place that cannot afford it: what
+    # this gate bounds is not "which roles may log in" but "whose RoleSessionName
+    # this deployment is willing to read as an identity". Every identity below is
+    # derived from that session name — the invite lookup and the auto-provision
+    # email both — and whoever calls AssumeRole picks it. So an unrestricted
+    # allowlist let anyone able to assume any role in a trusted account present
+    # themselves as any email that account's invites name.
+    #
+    # Listing a pattern is therefore a statement by the operator: *for these roles,
+    # the session name is set by an identity provider, not by the caller.* That
+    # holds for IAM Identity Center roles (`AWSReservedSSO_*`, whose trust policy
+    # admits only the Identity Center SAML provider, so `sts:AssumeRole` cannot be
+    # called directly against them) and for SAML federation roles configured the
+    # same way. It does NOT hold for a role whose trust policy lets a principal
+    # assume it directly — listing such a pattern hands that principal every
+    # identity in the account.
     role_patterns: list[str] = list(trusted.get("allowed_role_patterns") or [])
-    if sts.role_name and role_patterns:
+    if sts.role_name:
+        if not role_patterns:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Account {sts.account_id} has no allowed role patterns "
+                    "configured, so no assumed-role identity can be read from it. "
+                    "An administrator must list the roles whose session name is set "
+                    "by an identity provider (for example AWSReservedSSO_*)."
+                ),
+            )
         if not any(fnmatch.fnmatch(sts.role_name, p) for p in role_patterns):
             raise HTTPException(
                 status_code=403,

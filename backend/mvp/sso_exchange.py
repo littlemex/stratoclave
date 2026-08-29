@@ -293,6 +293,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
             auth_method="sso",
             sso_account_id=sts_identity.account_id,
             sso_principal_arn=sts_identity.arn,
+            sso_principal_id=sts_identity.principal_id,
         )
         # UserTenants bootstrap. SSO provisioning is an explicit sign-up
         # flow, so archived rows are allowed to be revived here — unlike
@@ -351,16 +352,31 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
                     "SSO login is not permitted for this user."
                 ),
             )
-        # P2: refuse to continue if the incoming STS principal does not
-        # match the one that was bound when the user was provisioned.
-        # Prevents a second STS principal from hijacking an existing SSO
-        # user by supplying the same email in a trusted account.
+        # Refuse to continue if the incoming STS principal is not the one bound when
+        # the user was provisioned.
+        #
+        # This used to compare the ARN, which does not bind anything: an
+        # assumed-role ARN is `…:assumed-role/<role>/<RoleSessionName>`, and the
+        # session name is chosen by whoever calls AssumeRole. A second caller of the
+        # same role who passed the same session name reproduced the ARN byte for
+        # byte and passed this check — which is exactly the takeover the check was
+        # written to stop. The binding is now on the AWS-assigned part of the STS
+        # UserId (`AROA…` / `AIDA…`), which no caller can choose.
+        #
+        # Rows provisioned before that id was recorded carry only the ARN. They are
+        # compared on the ARN, as before, and upgraded on this login — the residual
+        # window is one successful login per pre-existing user, and it is narrower
+        # than the old behaviour rather than wider.
+        bound_principal = str(existing.get("sso_principal_id") or "")
+        incoming_principal = str(sts_identity.principal_id or "")
         bound_arn = str(existing.get("sso_principal_arn") or "")
-        if bound_arn and bound_arn != sts_identity.arn:
+        if not principal_matches(existing, sts_identity):
             _log.warning(
-                "sso_principal_arn_mismatch",
+                "sso_principal_mismatch",
                 extra={
                     "email": trusted.email,
+                    "bound_principal": bound_principal or "<legacy-arn-only>",
+                    "incoming_principal": incoming_principal,
                     "bound_arn_tail": bound_arn[-30:],
                     "incoming_arn_tail": sts_identity.arn[-30:],
                 },
@@ -406,6 +422,7 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
         user_id=sub,
         sso_account_id=sts_identity.account_id,
         sso_principal_arn=sts_identity.arn,
+        sso_principal_id=sts_identity.principal_id,
     )
 
     log_audit_event(
@@ -439,6 +456,31 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
         identity_type=sts_identity.identity_type,
         new_user=is_new_user,
     )
+
+
+def principal_matches(existing: dict, sts_identity) -> bool:
+    """Whether an incoming STS identity is the principal this user was bound to.
+
+    Pure, and separate from the exchange flow, because the flow needs Cognito and
+    this predicate is the whole security property: it is what stops a second caller
+    in a trusted account from logging in as an existing user.
+
+    The comparison is on `sso_principal_id` — the AWS-assigned part of the STS
+    UserId — precisely because the ARN is not a principal. An assumed-role ARN ends
+    in the RoleSessionName, which the caller of AssumeRole picks, so comparing ARNs
+    accepted anyone who could assume the same role and pass the same session name.
+
+    A row that predates the recorded principal id falls back to the ARN comparison,
+    which is what it had before; the login that passes it writes the id, so the
+    fallback is used at most once per pre-existing user.
+    """
+    bound_principal = str(existing.get("sso_principal_id") or "")
+    if bound_principal:
+        return str(getattr(sts_identity, "principal_id", "") or "") == bound_principal
+    bound_arn = str(existing.get("sso_principal_arn") or "")
+    if not bound_arn:
+        return True
+    return bound_arn == sts_identity.arn
 
 
 def _extract_roles(user: dict) -> list[str]:
