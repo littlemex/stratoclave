@@ -24,6 +24,8 @@ Phase 2 (same shape, one extra Put per existing transaction).
 """
 from __future__ import annotations
 
+import hashlib
+
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -102,22 +104,35 @@ def late_settle_sk(hold_id: str) -> str:
     return f"EV#HOLD#{hold_id}#LATE_SETTLE"
 
 
-def _safe_idemp_token(idempotency_key: str) -> str:
-    """Sanitize a client-supplied Idempotency-Key for use in a sort key.
+def _legacy_safe_idemp_token(idempotency_key: str) -> str:
+    """The sanitising token this used to build, kept only to READ rows it wrote.
 
-    The key is only ever used INSIDE the caller's own tenant partition (the pk
-    embeds the authenticated tenant_id), so it cannot address another tenant's
-    data whatever it contains. We still restrict the alphabet so a `#` in the
-    key cannot forge a different sk namespace: keep [A-Za-z0-9._-], replace the
-    rest with `_`, and bound the length (a pathological key must not blow the
-    2KB sort-key limit). Distinct chars collapsing to the same token is safe —
-    it can only make two DIFFERENT keys collide into ONE idempotency cell, i.e.
-    dedupe MORE aggressively (fail-safe: never a double-authorize), never less.
+    It replaced every character outside `[A-Za-z0-9._-]` with `_` and truncated at
+    512. The docstring argued that collapsing distinct characters was fail-safe
+    because it can only dedupe more aggressively, never less — which is true about
+    double-authorizing and false about everything else. Two genuinely different
+    keys (`invoice/a` and `invoice?a`) landed on one cell, so the second operation
+    either replayed the first — reporting success for an authorization that never
+    happened at the amount the caller asked for — or, when the bodies differed,
+    was refused as `idempotency_key_reuse`. Neither is a double charge; both are a
+    wrong answer to a well-formed request.
     """
     import re
 
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", str(idempotency_key))
     return cleaned[:512]
+
+
+def _idemp_token(idempotency_key: str) -> str:
+    """A collision-free, length-bounded token for a client-supplied key.
+
+    SHA-256 of the raw key. The alphabet is fixed by the hash, so a `#` in the key
+    cannot forge a different sk namespace and no key can approach the 2KB sort-key
+    limit — the two things the sanitising version was there for — without mapping
+    two different keys onto one cell. The raw key is stored in the row as well, so
+    a replay verifies the key itself rather than only its digest.
+    """
+    return hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
 
 
 def idemp_sk(idempotency_key: str) -> str:
@@ -130,7 +145,16 @@ def idemp_sk(idempotency_key: str) -> str:
     row per external authorize is negligible against the RESERVE/terminal rows
     already in the partition. No cleanup path is needed or wanted.
     """
-    return f"EV#IDEMP#{_safe_idemp_token(idempotency_key)}"
+    return f"EV#IDEMP#{_idemp_token(idempotency_key)}"
+
+
+def legacy_idemp_sk(idempotency_key: str) -> str:
+    """The sort key rows written before the digest are addressed by.
+
+    Read-only: `get_idemp` falls back to it so a retry of a key from before this
+    change still finds its original authorization. Nothing writes it.
+    """
+    return f"EV#IDEMP#{_legacy_safe_idemp_token(idempotency_key)}"
 
 
 # LATE_SETTLE is a non-terminal settled-side correction; kept separate from the
@@ -566,9 +590,26 @@ class CreditLedgerRepository:
 
         Read on a duplicate Idempotency-Key (the reserve txn CCF'd) to replay the
         original authorization_id + amount + expiry, so a retried authorize is a
-        deterministic 200 rather than a new hold."""
+        deterministic 200 rather than a new hold.
+
+        Falls back to the pre-digest sort key so a key first used before that
+        change still replays its original authorization instead of minting a
+        second hold. The fallback is read-only and costs one extra consistent
+        read only on a miss, which is the path that is about to write anyway.
+        """
+        pk = ledger_pk(tenant_id, period)
         resp = self._table.get_item(
-            Key={"pk": ledger_pk(tenant_id, period), "sk": idemp_sk(idempotency_key)},
+            Key={"pk": pk, "sk": idemp_sk(idempotency_key)},
+            ConsistentRead=True,
+        )
+        item = resp.get("Item")
+        if item is not None:
+            return item
+        legacy = legacy_idemp_sk(idempotency_key)
+        if legacy == idemp_sk(idempotency_key):
+            return None
+        resp = self._table.get_item(
+            Key={"pk": pk, "sk": legacy},
             ConsistentRead=True,
         )
         return resp.get("Item")

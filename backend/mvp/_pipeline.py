@@ -116,6 +116,9 @@ _RESERVE_BACKOFF_CAP_SECONDS = 0.4  # ceiling so a hot row can't stall a request
 # transient capacity errors before giving up loudly (a lost settle leaks the
 # hold, so it is logged at error level for reconciliation).
 _SETTLE_MAX_RETRIES = 4
+#: A release cancelled by contention is retried this many times before the
+#: reservation is left to the expired-hold sweep.
+_RELEASE_MAX_RETRIES = 3
 # Settle runs at the tail of the STREAMING path (from run_stream's async
 # generator, on the event loop), so its backoff sleep blocks every co-located
 # stream. Settle contention is far rarer and less bursty than the reserve
@@ -625,6 +628,52 @@ class ReservationContext:
     # streaming `finally`) cannot drive pool_reserved negative.
     _pool_finalized: bool = field(default=False, repr=False)
 
+    def _retry_release(self, items) -> None:
+        """Re-attempt a release that was cancelled by contention, not by a condition.
+
+        Bounded and best-effort, like the release itself: the caller is already on an
+        error path and must not be made to wait indefinitely or to raise. What this
+        buys is that a hot pool row no longer costs a tenant its headroom until the
+        sweep runs — the reservation is returned now, in the common case, and the
+        failure is named when it is not.
+        """
+        client = _low_level_client()
+        for attempt in range(1, _RELEASE_MAX_RETRIES + 1):
+            time.sleep(_contention_backoff(attempt))
+            try:
+                client.transact_write_items(
+                    TransactItems=items,
+                    ClientRequestToken=_fresh_idempotency_token(),
+                )
+                logger.info(
+                    "pool_release_recovered_after_contention",
+                    tenant_id=self.tenant_id,
+                    period=self.period,
+                    attempt=attempt,
+                )
+                return
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code != "TransactionCanceledException":
+                    break
+                reasons = [
+                    str((r or {}).get("Code") or "")
+                    for r in (e.response.get("CancellationReasons") or [])
+                ]
+                if not any(r == "TransactionConflict" for r in reasons):
+                    # A condition failed on this attempt: the hold went terminal
+                    # while we were retrying, which is the benign outcome.
+                    return
+            except Exception:  # noqa: BLE001 — best-effort, never mask the original
+                break
+        logger.error(
+            "pool_release_still_held_after_retries",
+            tenant_id=self.tenant_id,
+            period=self.period,
+            reserved_microusd=self.pool_reserved_microusd,
+            note="the reservation stays outstanding until the expired-hold sweep",
+        )
+
     def release_pool(self) -> None:
         """Release this request's outstanding pool reservation without recording
         spend (actual settled = 0).
@@ -709,15 +758,39 @@ class ReservationContext:
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code == "TransactionCanceledException":
-                # Cancelled because the hold was already reclaimed by the reaper
-                # (reserved already returned) or the pool row is gone — either
-                # way there is nothing left to release. Expected, not an error.
-                logger.info(
-                    "pool_release_noop_already_reconciled",
-                    tenant_id=self.tenant_id,
-                    period=self.period,
-                    reserved_microusd=self.pool_reserved_microusd,
-                )
+                # A cancellation says WHY in its reasons, and the two whys are
+                # opposite. `ConditionalCheckFailed` means the hold is already
+                # terminal — the reaper reclaimed it, or a settle got there — so
+                # there is nothing left to release and the counter is correct.
+                # `TransactionConflict` or throttling means nothing was written and
+                # the reservation is STILL outstanding; reading that as
+                # "already reconciled", which this did for every cancellation
+                # equally, left the reservation held until the sweep reclaimed it,
+                # with a log line that said the opposite.
+                reasons = [
+                    str((r or {}).get("Code") or "")
+                    for r in (e.response.get("CancellationReasons") or [])
+                ]
+                retryable = {"TransactionConflict", "ThrottlingError",
+                             "ThrottlingException", "ProvisionedThroughputExceeded",
+                             "RequestLimitExceeded"}
+                if any(r in retryable for r in reasons):
+                    logger.warning(
+                        "pool_release_contended",
+                        tenant_id=self.tenant_id,
+                        period=self.period,
+                        reserved_microusd=self.pool_reserved_microusd,
+                        reasons=",".join(reasons),
+                    )
+                    self._retry_release(items)
+                else:
+                    logger.info(
+                        "pool_release_noop_already_reconciled",
+                        tenant_id=self.tenant_id,
+                        period=self.period,
+                        reserved_microusd=self.pool_reserved_microusd,
+                        reasons=",".join(reasons),
+                    )
             else:
                 logger.warning(
                     "pool_release_failed",
@@ -1828,7 +1901,20 @@ def _build_decision_facts(priced_tried, untried_models, price, exhausted) -> dic
     chosen_model, chosen_pk, chosen_cost = priced_tried[-1]
     chosen_idx = len(priced_tried) - 1
     # Price the untried tail now (inside the fence).
-    priced = list(priced_tried) + [(m, *price(m)) for m in untried_models]
+    #
+    # `price()` returns four values — (pricing_key, reserved_cost, rate_snapshot,
+    # bound) — while this loop reads three. Splatting it produced a 5-tuple per
+    # untried candidate and the unpack below raised, which the caller's fence
+    # swallowed: any request whose cascade had an untried tail silently lost its
+    # decision record, and the record is what makes a routing saving reproducible.
+    # Take the two fields this function actually uses, by name.
+    priced = list(priced_tried)
+    for m in untried_models:
+        # Once per candidate: `price()` reads the rate table and can freeze a
+        # snapshot, so calling it twice to pick two fields would be two different
+        # reads of a table that can change between them.
+        pk, cost = price(m)[:2]
+        priced.append((m, pk, cost))
     rejected = []
     for i, (model, pk, cost) in enumerate(priced):
         if i == chosen_idx:
@@ -2778,8 +2864,11 @@ def _pending_replay_result(budgets, ledger, *, tenant_id, period, hold_id,
       * hold FAILED -> replay the original 402.
       * hold terminal/absent -> expired.
     """
-    intent = ledger.get_idemp(tenant_id=tenant_id, period=period,
-                              idempotency_key=idempotency_key)
+    # Cross the period boundary, as the transactional replay paths do: a retry that
+    # arrives after the period rolled would otherwise miss its own intent and mint a
+    # second hold. `_read_idemp_with_prev_period` states why one period back is
+    # enough (the authorization's own 24h ceiling).
+    intent = _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key)
     if intent is not None:
         # fingerprint mismatch = same key, different body -> 422 (never replay).
         fp = intent.get("request_fingerprint")

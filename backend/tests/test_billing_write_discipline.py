@@ -68,6 +68,17 @@ ALLOWED_SITES = {
         ("backend/mvp/_pipeline.py", "_reserve_quota_without_pool", "transact_write_items"),
         ("backend/mvp/_pipeline.py", "_settle_pool_side", "transact_write_items"),        # settle (stable token)
         ("backend/mvp/_pipeline.py", "ReservationContext.release_pool", "transact_write_items"),  # release
+        # The same release, re-attempted after a cancellation whose reason was
+        # contention rather than a failed condition. Reviewed against A2/A5: it
+        # submits the IDENTICAL item list the release built — no counter is computed
+        # a second time — and the hold Delete's `attribute_exists(sk)` plus the
+        # terminal's `attribute_not_exists` remain the latch, so a retry that races
+        # a reaper RECLAIM or a settle cancels and writes nothing. Fresh token per
+        # attempt, which is correct here for the same reason it is on the release
+        # itself: the token dedupes botocore's transparent retry of ONE attempt, and
+        # the conditions — not the token — are what make the whole sequence
+        # at-most-once.
+        ("backend/mvp/_pipeline.py", "ReservationContext._retry_release", "transact_write_items"),
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "transact_write_items"),        # reaper reclaim
         # Ledger P2: recovers spend after the reaper reclaimed the hold first
         # (RECLAIM terminal). Writes [settled-only counter (+actual, reserved
@@ -221,6 +232,7 @@ COUNTER_FUNCTIONS = {
         "_sweep_expired_holds",
         "_sweep_one_period",
         "ReservationContext.release_pool",
+        "ReservationContext._retry_release",
         "ReservationContext",
         # PENDING protocol reconciler (docs/design/pending-protocol.md): reads the
         # pool counter (counter-first) + sums ACTIVE holds to compute drift; the
@@ -263,6 +275,7 @@ EXPECTED_TOKEN_KIND = {
         "reserve_external_authorization": "fresh",
         "_reserve_quota_without_pool": "fresh",
         "ReservationContext.release_pool": "fresh",
+        "ReservationContext._retry_release": "fresh",
         "_sweep_one_period": "fresh",
         # settle has TWO transact sites: the main settle (fresh-minted `token`,
         # reused across its retry loop) and the settled-only fallback
