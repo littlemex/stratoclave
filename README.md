@@ -20,6 +20,25 @@ An AWS account with Bedrock access is still required; Bedrock usage is billed no
 
 ---
 
+## Start here: what a failed Bedrock call actually costs
+
+Bedrock does not document which failures are billed, so it was measured against
+the provider's own counters. A Converse call **abandoned at a 2 s client read
+timeout was billed 1,493 output tokens** while its caller received nothing;
+`Invocations` counts rejections that are **not** billed, so it is not a billing
+proxy; and `Config(retries={"max_attempts": 1})` is rewritten by botocore into
+**two** counted invocations, with the extra charge landing on the *success* path
+where no error handler can see it.
+
+**[docs/MEASUREMENTS.md](./docs/MEASUREMENTS.md)** ([日本語](./docs/MEASUREMENTS.ja.md))
+has all five findings, each with the point where its evidence stops, and a harness
+that reproduces the counter measurements. It is
+useful whether or not you ever run this gateway: the facts are about Bedrock and
+the AWS SDK. They are also why the budget code looks the way it does — a
+reservation is ended through exactly one object, at most once, and an ending with no
+usage to charge asks a versioned liability table rather than assuming an error was
+free.
+
 ## Overview
 
 **Stratoclave takes on two jobs and declines a third.** It enforces the budget
@@ -857,6 +876,7 @@ ledger — a saving without a ledger behind it is a billing dispute waiting to h
 
 | Document                                                        | For                                                          |
 |-----------------------------------------------------------------|--------------------------------------------------------------|
+| [`docs/MEASUREMENTS.md`](./docs/MEASUREMENTS.md) ([日本語](./docs/MEASUREMENTS.ja.md)) | **What a failed Bedrock call actually costs** — measured against the provider's own counters, each finding with the point where its evidence stops, plus the harness. Useful whether or not you run Stratoclave. |
 | [`docs/LOCAL.md`](./docs/LOCAL.md)                              | Run the whole gateway on one machine against real Bedrock, and what that mode does and does not prove. |
 | [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | Deployed-stack walkthrough: install the CLI, sign in, make a call. |
 | [`docs/SCOPE.md`](./docs/SCOPE.md)                              | What Stratoclave is / is NOT, and the rules for deciding whether a feature belongs. |

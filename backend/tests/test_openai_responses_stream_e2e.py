@@ -476,3 +476,105 @@ def test_stream_preserves_blank_line_event_terminator(
     # one terminating the stream. The Stratoclave proxy must not
     # collapse either of them.
     assert body.count(b"\n\n") >= 2, (body, body.count(b"\n\n"))
+
+
+# ---------------------------------------------------------------------------
+# The endings, as decisions rather than as drift.
+#
+# This route's endings were the ones that disagreed most with the rest of the
+# gateway, and both of the changes below are behaviour changes rather than
+# refactors — so each needs a test that would notice a revert.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def record_reservation_endings(monkeypatch: pytest.MonkeyPatch):
+    """Capture how the route ends its reservation, not just whether it 502s."""
+    endings: dict[str, list] = {"refunded": [], "released": []}
+
+    class _Repo:
+        hold_id = "hold-e2e"
+
+        def refund(self, *, user_id: str, tenant_id: str, tokens: int) -> int:
+            endings["refunded"].append(tokens)
+            return 0
+
+    monkeypatch.setattr(orx, "reserve_credit_for_model",
+                        lambda user, reservation_tokens, **kw: _Repo())
+    monkeypatch.setattr(orx, "_release_pool",
+                        lambda ctx: endings["released"].append(True))
+    return endings
+
+
+def test_a_200_the_route_cannot_parse_still_ends_the_reservation(
+    install_openai_stream, stub_auth_user, record_reservation_endings
+):
+    """A 200 with an unreadable body used to let the exception escape, stranding
+    the hold and the pool slot until the reaper. The model ran, so this is not a
+    free failure either: it ends as an unobserved outcome."""
+    app = install_openai_stream(b"this is not json", status=200)
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app).post(
+        "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": False},
+    )
+    assert resp.status_code == 502, resp.text
+    assert "malformed upstream response" in resp.text
+    # With the enforcement gate off (the default) an unobserved outcome still
+    # returns the reservation — the point is that SOMETHING ended the hold.
+    assert record_reservation_endings["refunded"], "the hold was left for the reaper"
+    assert record_reservation_endings["released"]
+
+
+def test_a_stream_cut_after_its_usage_is_charged_not_refunded(
+    monkeypatch, stub_auth_user, _stub_credit_pipeline
+):
+    """The deliberate behaviour change on this route, pinned so a revert is loud.
+
+    It used to refund the whole reservation on any transport failure, including
+    one that arrived AFTER the provider reported its usage — money the account had
+    really spent, returned. It now charges what the provider reported.
+    """
+    completed = _frame(
+        "response.completed",
+        {"type": "response.completed",
+         "response": {"usage": {"input_tokens": 31, "output_tokens": 41}}},
+    )
+
+    async def _cut_after_usage():
+        yield completed
+        raise httpx.ReadError("connection reset")
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            content=_cut_after_usage(),
+        )
+
+    transport = httpx.MockTransport(_handler)
+    monkeypatch.setattr(
+        orx, "_openai_client",
+        lambda region: httpx.AsyncClient(
+            base_url=f"https://x.{region}.api.aws/openai/v1",
+            transport=transport, timeout=httpx.Timeout(5.0, connect=1.0),
+        ),
+    )
+
+    app = _make_app()
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app).stream(
+        "POST", "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
+    ) as resp:
+        b"".join(resp.iter_bytes())
+
+    assert _stub_credit_pipeline, "the cut stream was refunded instead of charged"
+    last = _stub_credit_pipeline[-1]
+    assert (last["actual_input_tokens"], last["actual_output_tokens"]) == (31, 41), last

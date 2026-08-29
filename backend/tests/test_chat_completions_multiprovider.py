@@ -213,6 +213,61 @@ class TestopenaiPassThrough:
         repo.refund.assert_called_once()
         release.assert_called_once()
 
+    def test_a_read_timeout_is_not_refunded_when_enforcement_is_on(self, monkeypatch):
+        """The route's own error path must reach the liability policy.
+
+        A transport failure used to refund unconditionally here. A read timeout is
+        the measured expensive case — the model may have run to completion and been
+        billed — so with enforcement on the reservation must stay held. This drives
+        the route, not a hold built in the test: an except branch that stopped
+        consulting the policy would pass a unit test of the policy.
+        """
+        from botocore.exceptions import ReadTimeoutError
+        from fastapi import HTTPException
+
+        from mvp import provider_outcome as po
+
+        monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "1")
+        repo = MagicMock()
+        client = MagicMock()
+        client.post.side_effect = ReadTimeoutError(endpoint_url="https://x")
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.sync_client", return_value=client), \
+             patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
+             patch("mvp.chat_completions._release_pool") as release:
+            with pytest.raises(HTTPException):
+                _openai_chat_completion(
+                    body=_body(), entry=_entry(), user=_user(), tenants_repo=repo,
+                    reservation=1024, corr={}, request_id="req-1",
+                )
+        settle.assert_not_called()
+        repo.refund.assert_not_called()
+        release.assert_not_called()
+
+    def test_the_same_read_timeout_still_refunds_with_the_gate_off(self, monkeypatch):
+        """The gate is what changed behaviour, not the refactor."""
+        from botocore.exceptions import ReadTimeoutError
+        from fastapi import HTTPException
+
+        from mvp import provider_outcome as po
+
+        monkeypatch.delenv(po.UNOBSERVED_HOLD_ENV, raising=False)
+        repo = MagicMock()
+        client = MagicMock()
+        client.post.side_effect = ReadTimeoutError(endpoint_url="https://x")
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.sync_client", return_value=client), \
+             patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
+             patch("mvp.chat_completions._release_pool") as release:
+            with pytest.raises(HTTPException):
+                _openai_chat_completion(
+                    body=_body(), entry=_entry(), user=_user(), tenants_repo=repo,
+                    reservation=1024, corr={}, request_id="req-1",
+                )
+        settle.assert_not_called()
+        repo.refund.assert_called_once()
+        release.assert_called_once()
+
     def test_the_pooled_client_is_never_closed(self):
         """The client is process-wide. Closing it after a request would drop the
         connections every other in-flight request is using — and put the TLS

@@ -508,27 +508,54 @@ def test_the_reaper_records_the_hold_before_deleting_it(dynamodb_mock, monkeypat
     assert seen[0].get("hold_id") == ctx.hold_id
 
 
-def test_the_non_stream_route_consults_the_classifier_on_failure(monkeypatch):
-    """Spy on the classifier to prove the route's error path calls it.
+@pytest.mark.parametrize("route_module", ["anthropic", "chat_completions", "openai_responses"])
+def test_every_route_consults_the_classifier_on_failure(route_module, monkeypatch):
+    """Every route's hold asks the classifier, and none of them refunds a read
+    timeout once the gate is on.
 
-    A route that goes back to refunding on any exception is the original defect;
-    nothing else in this file would notice.
+    A route that goes back to refunding on any exception is the original defect,
+    and it was the shipped behaviour on eight of the nine endings until the hold
+    owned the decision. The spy is on the reference `mvp._money` actually calls,
+    so a route that reached past the hold would show up as a missing call rather
+    than as a passing test about a symbol nobody uses.
     """
-    from mvp import anthropic as route
+    import importlib
 
-    seen = []
+    from mvp import _money
+    from mvp._money import run_ending
+
+    route = importlib.import_module(f"mvp.{route_module}")
+
+    seen: list[str] = []
     real = po.classify_exception
-    monkeypatch.setattr(route._provider_outcome, "classify_exception",
+    monkeypatch.setattr(_money._outcome, "classify_exception",
                         lambda exc: seen.append(type(exc).__name__) or real(exc))
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "1")
 
-    src = route.__dict__
-    assert "_provider_outcome" in src, "the route no longer imports the outcome layer"
-    # Exercise the shared decision helper the way the route does, without standing up
-    # a full request: the point is that the module-level reference is the one used.
-    state = route._provider_outcome.classify_exception(
-        ReadTimeoutError(endpoint_url="https://x"))
-    assert seen == ["ReadTimeoutError"]
+    refunded: list[int] = []
+    released: list[bool] = []
+
+    class _Repo:
+        hold_id = "hold-1"
+
+        def refund(self, *, user_id, tenant_id, tokens):
+            refunded.append(tokens)
+
+    class _User:
+        user_id = "u"
+        org_id = "t"
+
+    monkeypatch.setattr(route, "_release_pool", lambda ctx: released.append(True))
+    hold = route._open_hold(
+        user=_User(), tenants_repo=_Repo(), reservation=4000,
+        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    )
+    state = run_ending(hold.claim_unobserved(exc=ReadTimeoutError(endpoint_url="https://x")))
+
+    assert seen == ["ReadTimeoutError"], f"{route_module} did not consult the classifier"
     assert state == po.SUBMITTED_UNSETTLED
+    assert refunded == [], f"{route_module} returned a reservation that may have been billed"
+    assert released == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,18 +1,44 @@
-"""Backend-agnostic money orchestration (layer a).
+"""Backend-agnostic streaming skeleton (layer a).
 
-Owns the ONE canonical reserve → invoke → settle skeleton, the two error paths
-(invoke-time full-refund+release vs mid-stream partial-settle), and the streaming
-finally-settle guard.
+Owns the ONE canonical reserve → invoke → stream → end shape for a streamed
+request, and nothing about money beyond *which observation* each ending reports.
+The hold decides what that observation costs (`mvp._money.Hold`), so the endings
+here are statements of fact rather than policy:
+
+  - nothing was sent yet: a request abandoned before its provider call cannot have
+    been billed.
+  - cancelled during the provider call: the bytes may already be on the wire,
+    which is the measured expensive case, so it is classified rather than settled
+    at zero. Whether the reservation is then held or returned is the gate's
+    decision (`STRATOCLAVE_UNOBSERVED_HOLDS`), not this file's.
+  - invoke-time failure: the classifier decides from the exception.
+  - the stream stopped: what arrived is charged, and `provider_responded` says
+    whether anything came back — the usage block is the LAST event on Converse, so
+    the token counters cannot answer that question.
+  - clean completion / consumer stopped reading: the observation is charged.
 
 The event loop drives normalized StreamEvents (from _converse_core.normalized_events)
 through an injected adapter. Both the Anthropic Messages wire and the OpenAI Chat
-Completions wire share this single settle-once machine.
+Completions wire share this single machine.
+
+Two orderings in here are load-bearing:
+
+* **Claim, then yield, then write.** Every ending claims synchronously before the
+  frame that announces it is handed to the caller. Yield first and the consumer can
+  close on that very frame, which runs the `finally` — a different ending, of a
+  different kind, claiming ahead of the one this branch decided on. The write stays
+  single either way; what changes is which ending it records.
+* **The write is dispatched by the ending, not by the call site.** `Ending.awaited()`
+  shields, `Ending.detached()` needs no loop. A bare `await to_thread(write)` drops
+  the write on a cancellation while the claim is already taken, and a spent claim
+  cannot be replaced: the hold would end with nothing recorded.
 """
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Callable, Iterable, Optional, Protocol
+from typing import Any, AsyncGenerator, Callable, Iterable, Protocol
 
 from . import _converse_types as t
+from ._money import Hold
 
 
 class StreamAdapter(Protocol):
@@ -28,169 +54,84 @@ async def run_stream(
     *,
     body: Any,
     model_id: str,
-    model_alias: str,
-    user: Any,
-    tenants_repo: Any,
-    reservation: int,
+    hold: Hold,
     invoke_stream: Callable[..., Any],
-    settle: Callable[..., Any],
-    release: Callable[..., Any],
     adapter: StreamAdapter,
-    on_finalized: Optional[Callable[[str, "t.UsageAccumulator"], None]] = None,
-    request_id: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
-    """Streaming budget flow — the settle-once invariant is explicit.
-
-    The two error paths are DISTINCT:
-      - invoke-time failure: refund + release, NO settle.
-      - mid-stream failure: partial settle, NO release.
-    """
+    """Streaming flow. The hold's claim is what makes the ending single."""
     import asyncio
-    import threading
 
     from core.error_handler import sanitize_exception_message
 
     from . import _converse_core as core
+    from . import provider_outcome as _outcome
 
     acc = t.UsageAccumulator()
-
-    # ONE-SHOT finalizer guard. There are four finalizer sites (invoke-error,
-    # mid-stream-error, clean-completion, and the disconnect `finally`). Exactly
-    # ONE must ever run its money writes. The flag is flipped INSIDE the lock
-    # BEFORE any write, so even if a client disconnect throws CancelledError at
-    # an `await asyncio.to_thread(...)` point (the offloaded thread still runs to
-    # completion and commits), the `finally` re-entry sees `finalized` already
-    # set and does nothing — no double-settle / double-refund. Without this the
-    # to_thread offload double-commits with fresh idempotency tokens (no DDB
-    # dedupe) → pool over-admission + double-billing.
-    _final_lock = threading.Lock()
-    finalized = False
-
-    def _claim_finalize() -> bool:
-        nonlocal finalized
-        with _final_lock:
-            if finalized:
-                return False
-            finalized = True
-            return True
-
-    def _notify(status: str) -> None:
-        # P0-13 observability hook. Money-neutral by construction: called ONLY
-        # after the finalizer claim is WON (so at most once per request — see
-        # tests/test_observability_emit_z3.py), swallowed on any exception,
-        # and synchronous-cheap (the real writer is fire-and-forget).
-        # CODE-SHAPE AXIOM (O2 in the Z3 module): there must be NO await
-        # between a winning _claim_finalize() and this call — that is why
-        # _notify is invoked BEFORE the shielded money await at every site.
-        # on_finalized=None is a strict no-op (backward compatible).
-        if on_finalized is None:
-            return
-        try:
-            on_finalized(status, acc)
-        except Exception:
-            # Observability must never affect the request, but a SYSTEMATIC hook
-            # failure (e.g. an unhashable field) would otherwise be invisible.
-            # Log at debug (contract-compatible: no raise, no request impact).
-            try:
-                import logging
-                logging.getLogger(__name__).debug(
-                    "on_finalized_hook_failed", exc_info=True,
-                    extra={"status": status},
-                )
-            except Exception:
-                pass
-
-    def _do_settle():
-        # settle does blocking boto3 (transact_write_items + jittered sleeps).
-        settle(
-            user=user, tenants_repo=tenants_repo, reservation=reservation,
-            actual_input_tokens=acc.input_tokens,
-            actual_output_tokens=acc.output_tokens,
-            model_id=model_id, context=tenants_repo,
-            actual_cache_read_tokens=acc.cache_read_tokens,
-            actual_cache_write_tokens=acc.cache_write_tokens,
-            # Key the UsageLogs row on the request id so the offline VSR
-            # reconciliation can join it to the reserve-time decision record.
-            request_id=request_id,
-        )
-
-    def _do_refund_release():
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-        )
-        release(tenants_repo)
+    sent = False                 # the provider call was started
+    provider_responded = False   # at least one event came back from it
 
     try:
         for frame in adapter.prologue():
             yield frame
 
         try:
+            sent = True
             import inspect
             if inspect.iscoroutinefunction(invoke_stream):
                 resp = await invoke_stream(body=body, model_id=model_id)
             else:
                 resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
+        except asyncio.CancelledError:
+            # The client went away while the request was in flight. `except
+            # Exception` does not cover this, and letting the `finally` settle a
+            # zero would treat a call that may have run to completion as free.
+            ending = hold.claim_unobserved(
+                state=_outcome.SUBMITTED_UNSETTLED, observation=acc,
+                status="invoke_error",
+            )
+            if ending is not None:
+                # Already cancelled: awaiting here would raise again.
+                ending.detached()
+            raise
         except Exception as e:
-            # Invoke-time failure → refund + release, NO settle. Claim first,
-            # then shield the offloaded write so a disconnect mid-refund can't
-            # cancel it before it starts (the finally must not then settle a
-            # request we already refunded).
-            if _claim_finalize():
-                _notify("invoke_error")
-                await asyncio.shield(asyncio.to_thread(_do_refund_release))
+            # Nothing was streamed. Claim on THIS thread, before the error frame
+            # goes out, so a client closing on that frame cannot end the hold
+            # differently.
+            ending = hold.claim_unobserved(exc=e, observation=acc, status="invoke_error")
             for frame in adapter.error_event(sanitize_exception_message(str(e))):
                 yield frame
+            if ending is not None:
+                await ending.awaited()
             return
 
         try:
             async for event in core.normalized_events(resp.get("stream", [])):
+                provider_responded = True
                 acc.absorb(event)
                 for frame in adapter.render_event(event):
                     yield frame
         except Exception as e:
+            ending = hold.claim_stream_interrupted(
+                acc, provider_responded=provider_responded, sent=sent, exc=e
+            )
             for frame in adapter.error_event(sanitize_exception_message(str(e))):
                 yield frame
-            # Mid-stream failure → partial settle, NO release. Offload the
-            # blocking settle; shield + once-guard make it exactly-once even on
-            # a disconnect at the await.
-            if _claim_finalize():
-                _notify("midstream_error")
-                await asyncio.shield(asyncio.to_thread(_do_settle))
+            if ending is not None:
+                await ending.awaited()
             return
 
+        ending = hold.claim_settle(acc)
         for frame in adapter.epilogue():
             yield frame
-
-        if _claim_finalize():
-            _notify("completed")
-            await asyncio.shield(asyncio.to_thread(_do_settle))
+        if ending is not None:
+            await ending.awaited()
     finally:
-        # Disconnect/GeneratorExit before any finalizer claimed: settle once for
-        # partial usage. Awaiting in a closing async generator is unsafe, so
-        # fire-and-forget onto the loop's executor (the thread outlives request
-        # teardown; process death is covered by the hold reaper) — never block
-        # the SHARED event loop with settle's boto3 + sleeps here.
-        if _claim_finalize():
-            _notify("client_disconnect")
-            def _do_settle_logged():
-                # This is the MOST COMMON finalizer (clients close on [DONE]),
-                # and its future is discarded — so a raised settle here would be
-                # only "exception never retrieved" GC noise. Make a failed
-                # disconnect-settle a first-class, alarmable log line instead.
-                try:
-                    _do_settle()
-                except Exception:
-                    import logging
-                    logging.getLogger(__name__).exception(
-                        "disconnect_settle_failed", extra={"model_id": model_id}
-                    )
-                    raise
-            try:
-                loop = asyncio.get_running_loop()
-                loop.run_in_executor(None, _do_settle_logged)
-            except RuntimeError:
-                try:
-                    _do_settle()
-                except Exception:
-                    import logging
-                    logging.getLogger(__name__).exception("disconnect_settle_failed")
+        # Reached when the generator is closed before any ending claimed it: a
+        # client disconnect, or a cancellation at an await that `except Exception`
+        # does not see. Which ending that is depends on how far the request got,
+        # and reading it as a zero settle in every case was the defect here.
+        # An ending claimed just above, whose write the close interrupted, is
+        # written here rather than lost — see Hold.dispatch_pending.
+        # One call: it completes a write this close interrupted, or ends the hold
+        # according to how far the request got. See Hold.close.
+        hold.close(acc, sent=sent, provider_responded=provider_responded)

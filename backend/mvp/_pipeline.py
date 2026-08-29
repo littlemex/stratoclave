@@ -851,7 +851,7 @@ def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
 def _reaped_hold_facts(hold: dict) -> dict:
     """What a reclaim must copy out of the hold row before deleting it.
 
-    `CONTRACT-charge-loss.md`. The reaper credits an expired hold back with
+    `docs/MEASUREMENTS.md`. The reaper credits an expired hold back with
     `actual=0`, which asserts the provider charged nothing. That assertion is
     false for any request that died after its bytes left: measured on real
     Bedrock, a call abandoned at a 2 s read timeout was billed 1,493 output

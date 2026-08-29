@@ -114,6 +114,16 @@ def _make_body():
     )
 
 
+def _hold(user, ctx, reservation, settle, *, release):
+    """The hold the flow reports to, wired to the REAL pool moves."""
+    from mvp._money import Hold
+
+    return Hold(
+        user=user, tenants_repo=ctx, reservation=reservation,
+        model_id="us.anthropic.claude-opus-4-7", settle=settle, release=release,
+    )
+
+
 def _make_settle_counter() -> tuple[dict, callable]:
     """Wrap the real settle so tests can count invocations AND keep real effects
     (pool move + UsageLogs write). Returns (counter_dict, counting_settle).
@@ -158,12 +168,17 @@ async def _drive(gen, *, stop_after=None) -> list:
 # settle happens exactly once, and the pool never goes negative, no matter
 # where the client disconnects.
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("stop_after", [1, 2, 3, 4, 5, 6, 7, None])
+@pytest.mark.parametrize("stop_after", [2, 3, 4, 5, 6, 7, None])
 def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
     seed_tenant_with_pool, stop_after
 ):
-    """Disconnecting at ANY yield (or running to completion, stop_after=None)
-    must settle the reservation exactly once and leave pool_reserved at zero.
+    """Disconnecting at ANY yield after the provider call (or running to
+    completion, stop_after=None) must settle the reservation exactly once and leave
+    pool_reserved at zero.
+
+    `stop_after=1` is excluded and covered by the test below: the first yield is
+    the wire prologue, which precedes the provider call, so that ending is a return
+    rather than a settle.
     """
     seed = seed_tenant_with_pool
     user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
@@ -177,13 +192,9 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
     gen = _budget_flow.run_stream(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
-        model_alias="us.anthropic.claude-opus-4-7",
-        user=user,
-        tenants_repo=ctx,
-        reservation=reservation,
+        hold=_hold(user, ctx, reservation, counting_settle,
+                   release=lambda c: release_pool(c)),
         invoke_stream=lambda *, body, model_id: fake.converse_stream(),
-        settle=counting_settle,
-        release=lambda ctx: release_pool(ctx),
         adapter=_TestAdapter(),
     )
     asyncio.run(_drive(gen, stop_after=stop_after))
@@ -195,6 +206,37 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
     summary = _pool(seed)
     assert summary["pool_reserved_microusd"] == 0, "pool_reserved must not go negative"
     assert summary["pool_reserved_microusd"] >= 0
+
+
+def test_a_disconnect_before_the_provider_call_returns_the_reservation(
+    seed_tenant_with_pool,
+):
+    """Nothing was sent, so nothing could be billed — and the pool must come back
+    to exactly where it started, with no spend recorded against it."""
+    seed = seed_tenant_with_pool
+    user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
+    reservation = 4000
+    ctx = reserve_credit(user, reservation, pricing_key="opus", cost_microusd=2_000_000)
+    assert _pool(seed)["pool_reserved_microusd"] == 2_000_000
+
+    settle_calls, counting_settle = _make_settle_counter()
+    fake = _FakeBedrock(stream=_SuccessStream())
+
+    gen = _budget_flow.run_stream(
+        body=_make_body(),
+        model_id="us.anthropic.claude-opus-4-7",
+        hold=_hold(user, ctx, reservation, counting_settle,
+                   release=lambda c: release_pool(c)),
+        invoke_stream=lambda *, body, model_id: fake.converse_stream(),
+        adapter=_TestAdapter(),
+    )
+    asyncio.run(_drive(gen, stop_after=1))
+
+    assert settle_calls["n"] == 0, "a request that never reached the provider settled"
+    summary = _pool(seed)
+    assert summary["pool_reserved_microusd"] == 0
+    assert summary["pool_settled_microusd"] == 0, "spend was recorded for no request"
+    assert summary["remaining_microusd"] == seed["pool_limit_microusd"]
 
 
 # ---------------------------------------------------------------------------
@@ -222,13 +264,8 @@ def test_invoke_time_failure_releases_pool_and_does_not_settle(
     gen = _budget_flow.run_stream(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
-        model_alias="us.anthropic.claude-opus-4-7",
-        user=user,
-        tenants_repo=ctx,
-        reservation=reservation,
+        hold=_hold(user, ctx, reservation, counting_settle, release=counting_release),
         invoke_stream=raising_invoke,
-        settle=counting_settle,
-        release=counting_release,
         adapter=_TestAdapter(),
     )
     chunks = asyncio.run(_drive(gen))
@@ -259,13 +296,8 @@ def test_mid_stream_failure_settles_once_and_does_not_release(
     gen = _budget_flow.run_stream(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
-        model_alias="us.anthropic.claude-opus-4-7",
-        user=user,
-        tenants_repo=ctx,
-        reservation=reservation,
+        hold=_hold(user, ctx, reservation, counting_settle, release=counting_release),
         invoke_stream=lambda *, body, model_id: {"stream": _RaisingMidStream()},
-        settle=counting_settle,
-        release=counting_release,
         adapter=_TestAdapter(),
     )
     chunks = asyncio.run(_drive(gen))

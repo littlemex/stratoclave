@@ -635,6 +635,60 @@ model implemented in `backend/mvp/_pipeline.py`:
 The net result is that the balance never permanently exceeds `total_credit`
 except for the bounded, logged overrun case.
 
+### Who is allowed to end a reservation
+
+Every inference route — Messages, Chat Completions, Responses, streaming and
+non-streaming, both transports — ends its reservation through one object,
+`mvp._money.Hold`. A route reports what it observed and never decides what that
+costs:
+
+| The route saw | It calls | The hold does |
+|---|---|---|
+| a usage block from the provider | `hold.claim_settle(usage)` | charges it, writes the `UsageLogs` row |
+| no response at all | `hold.claim_unobserved(exc=…)` / `(status_code=…)` | classifies how far the request got (`mvp/provider_outcome.py`). The classification is **always** recorded; whether the reservation is withheld is the gate's decision — with `STRATOCLAVE_UNOBSERVED_HOLDS` off it is returned as before, with it on only a state that cannot have been billed is returned |
+| a stream that stopped part-way | `hold.claim_stream_interrupted(usage, provider_responded=…, sent=…)` | charges what arrived; if the provider answered but no usage came, the ceiling is held rather than a zero invented; if nothing was sent, the reservation is returned |
+| the consumer stopped reading | `hold.close(usage, sent=…, provider_responded=…)` | the same reading as an interrupted stream, plus it completes a write the close interrupted |
+
+Two properties come from the shape rather than from discipline. **The liability
+policy is not reachable around**: `abandon` is the only path that returns a
+reservation, and a static guard
+(`backend/tests/test_money_lifecycle_discipline.py`) scans every module under
+`mvp/` and fails the build when one calls `refund` / `release_pool` /
+`settle_reservation_and_log` outside its single hold factory. It is an AST check,
+so it sees direct calls rather than an alias or a reflective one; its exemptions
+(administrative credit operations, the Layer 5 external charge) are listed there
+with a reason each.
+
+And there is **exactly one claimed ending, dispatched at most once** — not "one
+write": returning a reservation is two writes, the token credit and then the pool
+hold.
+The hold latches inside a lock before any write, so a streaming request's four
+endings and a generator `finally` re-entering after a cancellation cannot produce
+two. The claim is also taken *synchronously*, before the frame that announces the
+ending goes out, and the write is dispatched by the claimed ending rather than by
+the call site: when the claim travelled into the offloaded worker instead, a
+cancellation arriving before that worker started let the `finally` claim first, and
+a classified abandon silently became a zero settle — one write, of the wrong kind.
+A claim whose write is then interrupted is completed from the same `finally`, so an
+ending cannot be claimed and dropped.
+
+What this does not promise is exactly-once: a write that *raises* after its claim
+is not retried, since a raised write may still have committed, and the hold reaper
+is the backstop that records the exposure. On the two OpenAI-compatible routes a
+cancellation while the request is in flight is read as a disconnect rather than as
+an invoke error — the same money under the gate, a different span label.
+
+Why this matters is measured, not stylistic: a call abandoned on a client read
+timeout was billed 1,493 output tokens while its caller received nothing, so a
+route that refunds "because Bedrock errored" hands back money the account really
+spent. See [`MEASUREMENTS.md`](MEASUREMENTS.md).
+
+The one reading here that rests on a narrower measurement than its reach is the
+disconnect: a stream closed by the consumer was measured — once, on Converse — to
+leave the provider's token counters at what had been delivered. On the
+OpenAI-compatible routes the same reading is a convention carried over rather than
+a measured fact, and `mvp/_money.py` says so at the method that applies it.
+
 ### Refills
 
 Refills are performed by an administrator via
