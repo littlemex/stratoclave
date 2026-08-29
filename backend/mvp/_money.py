@@ -105,8 +105,12 @@ class Usage:
 
     input_tokens: int = 0
     output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    # `None` means the provider did not report the leg at all, which is a different
+    # fact from reporting zero: some models never report prompt-cache counts, and
+    # whether a model caches is the largest term in its economics. The charge is the
+    # same either way; the record is not.
+    cache_read_tokens: Optional[int] = 0
+    cache_write_tokens: Optional[int] = 0
 
 
 #: The four tokens a settle prices. Read off the observation by name so an

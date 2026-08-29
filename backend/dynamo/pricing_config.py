@@ -32,6 +32,39 @@ _PK = "CONFIG#pricing"
 _CURRENT_SK = "CURRENT"
 
 
+def _nonneg_int(value, version: str, pricing_key, column: str) -> int:
+    """`value` as a non-negative int, or ValueError naming where it came from.
+
+    Rejects bool (a `True` that becomes 1 micro-USD is not a price), rejects
+    anything with a fractional part, and rejects negatives. Shared by the write and
+    the read boundary so a row that could never be accepted cannot be served
+    either — the document is validated wherever it is handled, not once.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"pricing version {version!r} key {str(pricing_key)!r}: {column} is a "
+            "boolean, not a rate"
+        )
+    try:
+        ival = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"pricing version {version!r} key {str(pricing_key)!r}: {column}="
+            f"{value!r} is not an integer micro-USD rate"
+        ) from e
+    if ival != value and float(ival) != float(value):
+        raise ValueError(
+            f"pricing version {version!r} key {str(pricing_key)!r}: {column}="
+            f"{value!r} is not a whole micro-USD amount"
+        )
+    if ival < 0:
+        raise ValueError(
+            f"pricing version {version!r} key {str(pricing_key)!r}: {column}="
+            f"{ival} is negative; a rate that credits an account is not a price"
+        )
+    return ival
+
+
 class PricingConfigRepository:
     def __init__(self, table_name: Optional[str] = None) -> None:
         self._table = get_dynamodb_resource().Table(
@@ -49,33 +82,84 @@ class PricingConfigRepository:
         return str(version) if version else None
 
     def load_rates(self, version: str):
-        """Return {pricing_key: Rate} for a version.
+        """Return {pricing_key: Rate} for a version — all of it, or raise.
+
+        A DynamoDB Query response is a PAGE, not a result set: it stops at 1 MB and
+        hands back a cursor. Reading only the first page turned a large version into
+        a silently different document — the keys past the cut were absent, so their
+        requests were charged at the floor rate while the operator console still
+        reported this version as active. Every row of a money document is
+        load-bearing, so this follows the cursor and then checks the count the
+        writer recorded: a version that cannot be read whole is refused rather than
+        served in part. A row missing its `pricing_key`, or missing any of the four
+        charge legs, is likewise a partial document and not a zero-priced key.
 
         Imported lazily to avoid a circular import with `mvp.pricing` (which
-        imports this module). Rows missing a field default that field to 0.
+        imports this module).
         """
         from mvp.pricing import Rate
 
-        resp = self._table.query(
-            KeyConditionExpression=Key("pk").eq(_PK)
-            & Key("sk").begins_with(f"__ratever__{version}__")
+        _LEGS = (
+            "input_per_mtok_microusd",
+            "output_per_mtok_microusd",
+            "cache_read_per_mtok_microusd",
+            "cache_write_per_mtok_microusd",
         )
         rates: dict[str, Rate] = {}
-        for item in resp.get("Items", []):
-            key = item.get("pricing_key")
-            if not key:
-                continue
-            rates[str(key)] = Rate(
-                input_per_mtok_microusd=int(item.get("input_per_mtok_microusd", 0)),
-                output_per_mtok_microusd=int(item.get("output_per_mtok_microusd", 0)),
-                cache_read_per_mtok_microusd=int(
-                    item.get("cache_read_per_mtok_microusd", 0)
-                ),
-                cache_write_per_mtok_microusd=int(
-                    item.get("cache_write_per_mtok_microusd", 0)
-                ),
+        kwargs = {
+            "KeyConditionExpression": Key("pk").eq(_PK)
+            & Key("sk").begins_with(f"__ratever__{version}__"),
+        }
+        while True:
+            resp = self._table.query(**kwargs)
+            for item in resp.get("Items", []):
+                key = item.get("pricing_key")
+                if not key:
+                    raise ValueError(
+                        f"pricing version {version!r} has a rate row with no "
+                        "pricing_key; the document is not readable as written"
+                    )
+                missing = [leg for leg in _LEGS if item.get(leg) is None]
+                if missing:
+                    raise ValueError(
+                        f"pricing version {version!r} key {str(key)!r} is missing "
+                        f"{missing}; a missing leg is not a zero rate"
+                    )
+                rates[str(key)] = Rate(
+                    input_per_mtok_microusd=_nonneg_int(
+                        item["input_per_mtok_microusd"], version, key,
+                        "input_per_mtok_microusd"),
+                    output_per_mtok_microusd=_nonneg_int(
+                        item["output_per_mtok_microusd"], version, key,
+                        "output_per_mtok_microusd"),
+                    cache_read_per_mtok_microusd=_nonneg_int(
+                        item["cache_read_per_mtok_microusd"], version, key,
+                        "cache_read_per_mtok_microusd"),
+                    cache_write_per_mtok_microusd=_nonneg_int(
+                        item["cache_write_per_mtok_microusd"], version, key,
+                        "cache_write_per_mtok_microusd"),
+                )
+            cursor = resp.get("LastEvaluatedKey")
+            if not cursor:
+                break
+            kwargs["ExclusiveStartKey"] = cursor
+        expected = self._expected_row_count(version)
+        if expected is not None and len(rates) != expected:
+            raise ValueError(
+                f"pricing version {version!r} read {len(rates)} rows but the "
+                f"pointer records {expected}; refusing a partial rate document"
             )
         return rates
+
+    def _expected_row_count(self, version: str):
+        """The row count the writer stamped for `version`, or None if it predates
+        the stamp. None means "cannot check", never "check passed"."""
+        resp = self._table.get_item(Key={"pk": _PK, "sk": _CURRENT_SK})
+        item = resp.get("Item") or {}
+        if str(item.get("active_version") or "") != version:
+            return None
+        count = item.get("row_count")
+        return int(count) if count is not None else None
 
     def get_rates_for_version(self, version: str, pricing_key: str):
         """Return the rate-row item for one (version, pricing_key), or None.
@@ -162,10 +246,20 @@ class PricingConfigRepository:
 
         costs = costs or {}
         for key, rate in rates.items():
-            vin = int(rate.input_per_mtok_microusd)
-            vout = int(rate.output_per_mtok_microusd)
-            vcr = int(rate.cache_read_per_mtok_microusd)
-            vcw = int(rate.cache_write_per_mtok_microusd)
+            # A rate is a value, not whatever `int()` accepts. A negative leg mints
+            # credit (`_mtok_cost` refuses one now, so such a row would refuse every
+            # charge for that key instead), a bool is not a price, and a float has no
+            # place in integer micro-USD. The version is immutable once written, so a
+            # bad row can never be corrected — only superseded — which is why this is
+            # checked here rather than repaired later.
+            vin = _nonneg_int(rate.input_per_mtok_microusd, version, key,
+                              "input_per_mtok_microusd")
+            vout = _nonneg_int(rate.output_per_mtok_microusd, version, key,
+                               "output_per_mtok_microusd")
+            vcr = _nonneg_int(rate.cache_read_per_mtok_microusd, version, key,
+                              "cache_read_per_mtok_microusd")
+            vcw = _nonneg_int(rate.cache_write_per_mtok_microusd, version, key,
+                              "cache_write_per_mtok_microusd")
             item = {
                 "pk": _PK,
                 "sk": f"__ratever__{version}__{key}",
@@ -238,5 +332,12 @@ class PricingConfigRepository:
         # BEFORE this flip is recoverable: re-running set_rates with the same
         # (version, rates) idempotently re-writes the rows and completes the flip.
         self._table.put_item(
-            Item={"pk": _PK, "sk": _CURRENT_SK, "active_version": version}
+            Item={
+                "pk": _PK,
+                "sk": _CURRENT_SK,
+                "active_version": version,
+                # How many rows this version has, so a reader can tell a complete
+                # document from a truncated read of one (see `load_rates`).
+                "row_count": len(rates),
+            }
         )

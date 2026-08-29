@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from dynamo.client import get_dynamodb_resource
 
+from . import quota as _quota
 from .model_resolver import ModelQuotaConfig, RoutingConfig, UserRoutingConfig
 
 _TABLE = os.getenv("DYNAMODB_USER_TENANTS_TABLE", "stratoclave-user-tenants")
@@ -165,7 +166,15 @@ def _parse_tenant_config(item: dict) -> RoutingConfig:
         if isinstance(cfg, dict):
             quotas[model] = ModelQuotaConfig(
                 model=model,
-                unit=cfg.get("unit", "tokens"),
+                # An absent unit is not a claim that the cap is in tokens. The
+                # admin write path always stores `usd_micro` and the enforcement
+                # path reserves micro-USD, so defaulting the PARSE to "tokens"
+                # made a row that stated nothing disagree with both of them —
+                # and the enforcement, which never read the field, then applied a
+                # dollar cap to a number the operator's console showed as tokens.
+                # Absence resolves to the one denomination this system keeps;
+                # anything explicitly different is refused at admission.
+                unit=cfg.get("unit", _quota.RESERVED_UNIT),
                 limit=cfg.get("limit"),
                 period=cfg.get("period", "monthly"),
             )

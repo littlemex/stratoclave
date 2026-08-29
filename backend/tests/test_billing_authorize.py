@@ -1090,7 +1090,7 @@ def test_idemp_replay_rejects_missing_fingerprint(dynamodb_mock):
     row = {"authorization_id": "auth_x", "hold_id": "h", "hold_sk": "HOLD#p#0#h",
            "period": "2026-07", "amount_microusd": 1, "expires_at": 1, "capture_mode": "amount"}
     with pytest.raises(_pipeline.IdempotencyKeyReuse):
-        _pipeline._idemp_replay(row, "some-fingerprint")
+        _pipeline._idemp_replay(row, "some-fingerprint", idempotency_key="k")
 
 
 # --------------------------------------------------------------------------- GAP 2: idempotency-CCF concurrency race

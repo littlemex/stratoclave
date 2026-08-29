@@ -106,8 +106,11 @@ class _AccSnapshot:
 
     input_tokens: int
     output_tokens: int
-    cache_read_tokens: int
-    cache_write_tokens: int
+    # `None` = the provider never reported this leg (see
+    # `mvp._converse_core.cache_tokens_from_usage`). The span keeps the
+    # distinction; the rollup, being a sum, contributes nothing for it.
+    cache_read_tokens: Optional[int]
+    cache_write_tokens: Optional[int]
     stop_reason: Optional[str]
     saw_final_usage: bool
 
@@ -141,8 +144,10 @@ def rollup_delta(status: str, acc) -> dict:
         "span_count": 1,
         "input_tokens": int(acc.input_tokens),
         "output_tokens": int(acc.output_tokens),
-        "cache_read_tokens": int(acc.cache_read_tokens),
-        "cache_write_tokens": int(acc.cache_write_tokens),
+        # A sum over reported counts: an unreported leg adds nothing. The
+        # per-request span is where "not reported" stays visible.
+        "cache_read_tokens": int(acc.cache_read_tokens or 0),
+        "cache_write_tokens": int(acc.cache_write_tokens or 0),
         "completed_count": 1 if completed else 0,
         "error_count": 1 if status in ("invoke_error", "midstream_error") else 0,
         "canceled_count": 1 if true_cancel else 0,
@@ -160,8 +165,10 @@ def emit_span_and_rollup(draft: SpanDraft, status: str, acc) -> None:
         snap = _AccSnapshot(
             input_tokens=int(acc.input_tokens),
             output_tokens=int(acc.output_tokens),
-            cache_read_tokens=int(acc.cache_read_tokens),
-            cache_write_tokens=int(acc.cache_write_tokens),
+            cache_read_tokens=(
+                None if acc.cache_read_tokens is None else int(acc.cache_read_tokens)),
+            cache_write_tokens=(
+                None if acc.cache_write_tokens is None else int(acc.cache_write_tokens)),
             stop_reason=acc.stop_reason,
             saw_final_usage=bool(getattr(acc, "saw_final_usage", False)),
         )
@@ -281,8 +288,12 @@ def _emit_sync(draft: SpanDraft, status: str, snap: _AccSnapshot) -> None:
             "usage_is_partial": usage_is_partial,          # not saw_final_usage
             "input_tokens": snap.input_tokens,
             "output_tokens": snap.output_tokens,
-            "cache_read_tokens": snap.cache_read_tokens,
-            "cache_write_tokens": snap.cache_write_tokens,
+            # Written only when the provider reported them: an absent attribute
+            # says "not reported", where a 0 would claim the provider said none.
+            **({"cache_read_tokens": snap.cache_read_tokens}
+               if snap.cache_read_tokens is not None else {}),
+            **({"cache_write_tokens": snap.cache_write_tokens}
+               if snap.cache_write_tokens is not None else {}),
             "stop_reason": snap.stop_reason or "",
             "started_at_ms": draft.started_at_ms,
             "finalized_at_ms": now_ms,

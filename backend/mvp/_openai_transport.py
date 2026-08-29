@@ -544,8 +544,41 @@ async def aclose_all() -> None:
         await client.aclose()
 
 
+# Paths an upstream may tell a caller to use, mapped to the path THIS gateway
+# serves the same API on. Only the gateway knows its own routes, so a relayed
+# message naming a path it does not serve sends the caller to a 404 — reported by
+# a caller who followed the instruction and had to read the router table to
+# recover. Keys are matched longest-first so a prefix never shadows a full path.
+_PATH_REWRITES = {
+    "/v1/responses": "/openai/v1/responses",
+    "/responses": "/openai/v1/responses",
+}
+
+
+def rewrite_served_paths(message: str) -> str:
+    """Replace endpoint paths the gateway does not serve with the ones it does.
+
+    Applied to every relayed upstream message. A path the gateway DOES serve
+    (`/v1/chat/completions`, `/v1/messages`, `/openai/v1/responses`) is left
+    exactly as it is, and a message naming no path is returned unchanged.
+    """
+    if not message:
+        return message
+    out = message
+    for wrong, right in sorted(_PATH_REWRITES.items(), key=lambda kv: -len(kv[0])):
+        if wrong in out and right not in out:
+            out = out.replace(wrong, right)
+    return out
+
+
 def format_error(resp: httpx.Response) -> str:
-    """A sanitized error message from a non-2xx the OpenAI-compatible endpoint response."""
+    """A sanitized error message from a non-2xx the OpenAI-compatible endpoint response.
+
+    Relayed messages go through `rewrite_served_paths`: the upstream composes its
+    advice for its own routes, and this gateway exposes the Responses API on a
+    different path, so passing the sentence through verbatim tells the caller to
+    call something that does not exist here.
+    """
     try:
         body = resp.json()
         if isinstance(body, dict):
@@ -553,10 +586,10 @@ def format_error(resp: httpx.Response) -> str:
             if isinstance(err, dict):
                 msg = err.get("message")
                 if isinstance(msg, str) and msg:
-                    return sanitize_exception_message(msg)
+                    return rewrite_served_paths(sanitize_exception_message(msg))
     except Exception:  # noqa: BLE001 — a non-JSON error body is still an error
         pass
-    return sanitize_exception_message(resp.text[:500])
+    return rewrite_served_paths(sanitize_exception_message(resp.text[:500]))
 
 
 def extract_usage(usage: Any) -> tuple[int, int]:

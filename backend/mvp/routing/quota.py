@@ -33,6 +33,11 @@ from typing import Any, Optional
 from dynamo.client import get_dynamodb_resource
 
 _TABLE = os.getenv("DYNAMODB_MODEL_QUOTAS_TABLE", "stratoclave-model-quotas")
+# The one denomination these counters are kept in. `ModelQuotaConfig` carries a
+# `unit` field and the admin write path pins it to this value; the enforcement
+# path refuses any other value rather than enforcing a configured number in a
+# denomination it was not written in (see `_pipeline._reserve_over_candidates`).
+RESERVED_UNIT = "usd_micro"
 _TTL_GRACE_SECONDS = 3 * 24 * 3600  # keep a period's counters 3 days past its end
 
 

@@ -311,26 +311,30 @@ def test_dominance_holds_on_the_components_the_estimator_prices(
 # Boundary behaviour of the real `_mtok_cost`, which the Z3 encoding assumes
 # ---------------------------------------------------------------------------
 
-def test_the_clamp_is_on_tokens_and_a_negative_rate_credits():
+def test_the_clamp_is_on_tokens_and_a_negative_rate_is_refused():
     """The Z3 files encode `_mtok_cost` as clamped on TOKENS. That is an
     assumption about the code, so it is checked here rather than trusted.
 
-    It also records something the clamp does not cover: a negative rate with
-    positive tokens produces a NEGATIVE cost — a credit that would inflate
-    headroom. Nothing in the rating path rejects a negative rate; the only defence
-    is that the rate document has never held one. That is a configuration
-    assumption, and this test is where it is visible instead of implied.
+    The negative-rate case used to be recorded here as a configuration assumption:
+    a negative rate with positive tokens returned a NEGATIVE cost — a credit that
+    inflates headroom — and the only defence was that no rate document had ever
+    held one. A discipline is not a mechanism, so the rating path refuses it now,
+    at both the write boundary (`PricingConfigRepository.set_rates`) and here on
+    every charging path, whatever wrote the document.
     """
+    import pytest as _pytest
+
     from mvp.pricing import _mtok_cost
 
     assert _mtok_cost(-100, 5_000_000) == 0        # clamped on tokens
     assert _mtok_cost(0, 5_000_000) == 0
     assert _mtok_cost(1_000, 0) == 0               # a zero rate costs nothing
-    assert _mtok_cost(1_000, -5_000_000) == -5_000, (
-        "a negative rate no longer credits — if the rating path started rejecting "
-        "negative rates, say so here and drop the configuration assumption from "
-        "docs/EVIDENCE.md"
-    )
+    with _pytest.raises(ValueError):
+        _mtok_cost(1_000, -5_000_000)
+    # The refusal does not depend on there being tokens to charge: a document
+    # holding a negative leg is rejected even where the cost would round to zero.
+    with _pytest.raises(ValueError):
+        _mtok_cost(0, -5_000_000)
 
 
 @settings(max_examples=120, deadline=None)

@@ -55,6 +55,7 @@ from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
 from ._bedrock_clients import bedrock_runtime_client
+from ._converse_core import cache_tokens_from_usage
 from . import _money
 from ._pipeline import (
     release_pool as _release_pool,
@@ -578,27 +579,6 @@ def _build_bedrock_kwargs(
 _MIN_RESERVATION_TOKENS = 1024
 
 
-def _cache_tokens_from_usage(usage: dict[str, Any]) -> tuple[int, int]:
-    """Extract (cache_read, cache_write) token counts from a Bedrock usage block.
-
-    Bedrock's Converse usage reports prompt-cache activity as
-    `cacheReadInputTokens` / `cacheWriteInputTokens` (0 or absent when caching
-    is not used). Returning them lets settle price cached traffic at its own
-    rate instead of billing it at zero. Bad/missing values collapse to 0.
-    """
-    def _int(v) -> int:
-        try:
-            n = int(v)
-        except (TypeError, ValueError):
-            return 0
-        return n if n > 0 else 0
-
-    return (
-        _int(usage.get("cacheReadInputTokens")),
-        _int(usage.get("cacheWriteInputTokens")),
-    )
-
-
 def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
     """Estimate how many tokens to pre-reserve before calling Bedrock.
 
@@ -1029,7 +1009,7 @@ def messages(
     usage = resp.get("usage", {})
     input_tokens = int(usage.get("inputTokens", 0))
     output_tokens = int(usage.get("outputTokens", 0))
-    cache_read, cache_write = _cache_tokens_from_usage(usage)
+    cache_read, cache_write = cache_tokens_from_usage(usage)
     _run_ending(hold.claim_settle(_money.Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,

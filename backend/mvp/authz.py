@@ -218,18 +218,48 @@ def require_permission(permission: str) -> Callable[..., AuthenticatedUser]:
     return _dep
 
 
-def require_any_role(*allowed_roles: str) -> Callable[..., AuthenticatedUser]:
-    """FastAPI dependency that allows only users holding at least one of the specified roles (coarser than permission checks)."""
+def require_any_role(
+    *allowed_roles: str, scope: Optional[str] = None
+) -> Callable[..., AuthenticatedUser]:
+    """Allow only principals holding one of `allowed_roles` — AND, for an API key,
+    the `scope` this gate names.
+
+    An API key carries its OWNER's roles (`_authenticate_api_key` copies them), so
+    a role test alone hands a key issued with `scopes=["messages:send"]` everything
+    its owner can do, defeating the scope narrowing the key was issued for. This
+    dependency cannot know which scope an endpoint needs unless the endpoint says
+    so, and a gate that cannot evaluate the intersection must not admit: an API-key
+    principal is refused outright when `scope` is not named.
+
+    `require_permission` remains the gate to reach for; every shipped route uses
+    it. This one exists for the coarser cases and is now fail-closed rather than a
+    quieter way around the same check.
+    """
 
     def _dep(user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
         if not any(r in user.roles for r in allowed_roles):
             raise HTTPException(status_code=403, detail="Forbidden role")
+        if user.auth_kind == "api_key":
+            if scope is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "This endpoint cannot be reached with an API key: its "
+                        "authorization is role-based and the key's scopes cannot "
+                        "be evaluated against it."
+                    ),
+                )
+            if not _permission_matches(user.key_scopes or [], scope):
+                raise HTTPException(
+                    status_code=403, detail=f"Missing permission: {scope}")
         return user
 
     return _dep
 
 
-def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., AuthenticatedUser]:
+def require_tenant_owner(
+    tenant_id_param: str = "tenant_id", *, scope: Optional[str] = None
+) -> Callable[..., AuthenticatedUser]:
     """Allow only the tenant owner (team_lead_user_id == user.user_id) or an admin.
 
     Admins have access to all tenants.
@@ -240,6 +270,23 @@ def require_tenant_owner(tenant_id_param: str = "tenant_id") -> Callable[..., Au
         tenant_id: str,
         user: AuthenticatedUser = Depends(get_current_user),
     ) -> AuthenticatedUser:
+        # Ownership is a role fact, and an API key holds its owner's roles, so this
+        # gate cannot distinguish a narrowed key from its owner. It names the scope
+        # a key must ALSO carry; without one, a key is refused rather than admitted
+        # on its owner's authority (see `require_any_role`).
+        if user.auth_kind == "api_key":
+            if scope is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "This endpoint cannot be reached with an API key: its "
+                        "authorization is ownership-based and the key's scopes "
+                        "cannot be evaluated against it."
+                    ),
+                )
+            if not _permission_matches(user.key_scopes or [], scope):
+                raise HTTPException(
+                    status_code=403, detail=f"Missing permission: {scope}")
         tenant = TenantsRepository().get(tenant_id)
         if "admin" in user.roles:
             if not tenant:

@@ -135,6 +135,20 @@ def _idemp_token(idempotency_key: str) -> str:
     return hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
 
 
+def idemp_pk(tenant_id: str) -> str:
+    """Partition for a tenant's idempotency records — deliberately NOT the money
+    partition.
+
+    The record used to live in `ledger_pk(tenant_id, period)`, which made the
+    KEY's identity period-scoped while its own docstring called the mapping
+    permanent. A retry that crossed two period boundaries found nothing and minted
+    a second authorization, so one key could produce two charges. The authorization
+    it points at is still period-scoped — that is where the money is — so the row
+    carries `period` as data and a replay uses it to address the right partition.
+    """
+    return f"TENANT#{tenant_id}#IDEMP"
+
+
 def idemp_sk(idempotency_key: str) -> str:
     """Sort key for an external-authorize idempotency record.
 
@@ -539,7 +553,7 @@ class CreditLedgerRepository:
         authorization; it is a client error, not a replay."""
         ts = ts_ms if ts_ms is not None else _now_ms()
         item: dict[str, Any] = {
-            "pk": {"S": ledger_pk(tenant_id, period)},
+            "pk": {"S": idemp_pk(tenant_id)},
             "sk": {"S": idemp_sk(idempotency_key)},
             "event_type": {"S": "IDEMP"},
             "schema_version": {"S": SCHEMA_VERSION},
@@ -597,22 +611,28 @@ class CreditLedgerRepository:
         second hold. The fallback is read-only and costs one extra consistent
         read only on a miss, which is the path that is about to write anyway.
         """
-        pk = ledger_pk(tenant_id, period)
-        resp = self._table.get_item(
-            Key={"pk": pk, "sk": idemp_sk(idempotency_key)},
-            ConsistentRead=True,
-        )
-        item = resp.get("Item")
-        if item is not None:
-            return item
-        legacy = legacy_idemp_sk(idempotency_key)
-        if legacy == idemp_sk(idempotency_key):
-            return None
-        resp = self._table.get_item(
-            Key={"pk": pk, "sk": legacy},
-            ConsistentRead=True,
-        )
-        return resp.get("Item")
+        sk = idemp_sk(idempotency_key)
+        legacy_sk = legacy_idemp_sk(idempotency_key)
+        # Newest addressing first, then the locations rows were written at before
+        # each change. A miss costs one consistent read per legacy location, on the
+        # path that is about to write anyway; a MISS THAT SHOULD HAVE HIT costs a
+        # second authorization for one key, which is why the fallbacks stay until
+        # the oldest reachable row is gone.
+        candidates = [
+            (idemp_pk(tenant_id), sk),          # period-independent (current)
+            (ledger_pk(tenant_id, period), sk),  # digest sk, period partition
+        ]
+        if legacy_sk != sk:
+            candidates.append((ledger_pk(tenant_id, period), legacy_sk))
+        for pk, candidate_sk in candidates:
+            resp = self._table.get_item(
+                Key={"pk": pk, "sk": candidate_sk},
+                ConsistentRead=True,
+            )
+            item = resp.get("Item")
+            if item is not None:
+                return item
+        return None
 
     # ---- PENDING protocol IDEMP intent (docs/design/pending-protocol.md) ----
     # The transactional path writes the IDEMP row INSIDE the reserve txn (atomic).
@@ -635,7 +655,7 @@ class CreditLedgerRepository:
         ConditionalCheckFailedException, which the caller resolves by reading
         state. Resource API (plain values)."""
         item: dict[str, Any] = {
-            "pk": ledger_pk(tenant_id, period),
+            "pk": idemp_pk(tenant_id),
             "sk": idemp_sk(idempotency_key),
             "event_type": "IDEMP",
             "schema_version": SCHEMA_VERSION,
@@ -667,15 +687,20 @@ class CreditLedgerRepository:
         self._set_idemp_status(tenant_id, period, idempotency_key, "FAILED")
 
     def _set_idemp_status(self, tenant_id, period, idempotency_key, status) -> None:
-        try:
-            self._table.update_item(
-                Key={"pk": ledger_pk(tenant_id, period), "sk": idemp_sk(idempotency_key)},
-                UpdateExpression="SET idemp_status = :s",
-                ConditionExpression="attribute_exists(pk)",
-                ExpressionAttributeValues={":s": status},
-            )
-        except Exception:  # noqa: BLE001 — best-effort finalize
-            pass
+        # Try the current location, then the period partition a pre-migration
+        # intent would sit in, so finalizing an in-flight authorization written by
+        # the previous version still lands.
+        for pk in (idemp_pk(tenant_id), ledger_pk(tenant_id, period)):
+            try:
+                self._table.update_item(
+                    Key={"pk": pk, "sk": idemp_sk(idempotency_key)},
+                    UpdateExpression="SET idemp_status = :s",
+                    ConditionExpression="attribute_exists(pk)",
+                    ExpressionAttributeValues={":s": status},
+                )
+                return
+            except Exception:  # noqa: BLE001 — best-effort finalize
+                continue
 
     def get_terminal(
         self, *, tenant_id: str, period: str, hold_id: str

@@ -146,11 +146,11 @@ is a claim about an encoding.
 | The rating fold is a function of the recorded components | `…test_g3_the_fold_is_a_function_of_the_recorded_components` | `…sanity_an_unconstrained_quotient_makes_the_fold_ambiguous` | `test_rating_differential.py::test_rating_total_matches_an_independent_recomputation` (driven from the inputs, not from the returned components, and it checks the components are the ones asked for at the rates asked for), `…test_t1_the_event_recomputes_from_itself_alone` | none |
 | Recording the rounding rule is load-bearing | `…test_g3_per_component_and_post_total_rounding_differ`, `…test_g3_ceil_never_undercharges` | `…test_g3_sanity_floor_undercharges` | `…test_an_unknown_rounding_policy_is_refused_not_guessed`, `…test_ceil_never_undercharges_the_exact_rational_cost` | none |
 | Rounding is monotone, so token dominance carries to cost dominance | `…test_g3_ceil_is_monotone_in_the_numerator` (linear), `…test_g3_numerator_is_monotone_in_the_varying_factor` (over the reals) | `…sanity_ceil_monotonicity_needs_the_ordering`, `…sanity_numerator_monotonicity_needs_a_nonnegative_factor` | covered by the fold row | negative rates are out of scope by assumption B3 |
-| Pinning is sufficient for the ceiling | `test_pricing_pinning_z3.py::test_g2_a_settle_rate_at_or_below_the_pinned_rate_preserves_the_ceiling` | `…sanity_a_settle_rate_above_the_pinned_rate_breaks_it` | **absent** — that settle does not re-read `CURRENT` is a code property no SMT run can establish | **that the code honours the pinned rate** |
+| Pinning is sufficient for the ceiling | `test_pricing_pinning_z3.py::test_g2_a_settle_rate_at_or_below_the_pinned_rate_preserves_the_ceiling` | `…sanity_a_settle_rate_above_the_pinned_rate_breaks_it` | `test_contract_price_identity.py::test_a_rate_flip_between_reserve_and_settle_does_not_move_the_charge` — flips `CURRENT` between reserve and settle and asserts the terminal cites, and charges at, the admitted version | none for the inline settle path. Late settle and external capture restore the same snapshot from the ledger; that they do is code review, not a differential yet |
 | A version read after its rows cannot dangle | `…test_g2_the_write_order_makes_a_dangling_read_impossible_in_time` | `…sanity_flipping_before_writing_dangles` | absent (needs the store; Phase 2) | row immutability, assumption C1 |
 | Sentinel biconditional: a real version **iff** a snapshot priced it | `…test_g4_real_version_stamped_if_and_only_if_snapshot_priced_it`, `…test_g4_each_cause_gets_its_own_label` | `…sanity_stamping_current_on_snapshot_failure_breaks_it`, `…sanity_one_shared_sentinel_collapses_the_causes` | `…test_the_modelled_sentinels_are_the_shipped_sentinels` (the constants are real and pairwise distinct) | that the stamping code implements the modelled rule |
 | No overflow; refunds cannot go negative | `test_rating_formal_z3.py::test_g6_no_overflow_within_realistic_bounds`, `…refund_cannot_drive_settled_negative` | `…sanity_unbounded_tokens_overflow`, `…sanity_unbounded_refund_goes_negative` | absent | the stated bounds |
-| Zero rate / zero tokens cost zero, and the clamp is on tokens | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` — but note these read back the encoding's own axiom, so on their own they are circular | — | `test_rating_differential.py::test_the_clamp_is_on_tokens_and_a_negative_rate_credits`, `…test_no_usage_report_can_mint_a_credit_at_a_nonnegative_rate` — this is what makes the boundary claims non-circular | **a negative rate in the document would mint credit**: `_mtok_cost(1000, -5_000_000)` returns −5,000. Nothing in the rating path rejects one; the defence is that the document has never held one |
+| Zero rate / zero tokens cost zero, and the clamp is on tokens | `…test_g7_zero_side_costs_nothing`, `…test_g7_negative_tokens_are_clamped_not_credited` — but note these read back the encoding's own axiom, so on their own they are circular | — | `test_rating_differential.py::test_the_clamp_is_on_tokens_and_a_negative_rate_is_refused`, `…test_no_usage_report_can_mint_a_credit_at_a_nonnegative_rate` — this is what makes the boundary claims non-circular | none. A negative rate used to mint credit (`_mtok_cost(1000, -5_000_000)` returned −5,000) with the document's contents as the only defence; it is now refused at both boundaries — `PricingConfigRepository.set_rates` rejects the write and `_mtok_cost` refuses the charge |
 
 **The limit no timing calculation removes.** A charge landing at Bedrock and the ledger
 write recording it are not atomic, and cannot be made so from this side. If Bedrock
@@ -236,24 +236,36 @@ were replaced by ones that prove no SAAR state can move an admission amount.
 
 Assumptions deliberately left trusted, with the reason: DynamoDB's transactional
 atomicity and single-item serialisation (AWS's documented semantics — proving it
-here would be waste); pricing-row immutability (a discipline in `set_rates`, not a
-condition expression or an IAM boundary); that no rate document contains a
-negative rate; and that the settle code honours the pinned rate rather than
-re-reading `CURRENT`.
+here would be waste); and pricing-row immutability (enforced by an
+`attribute_not_exists(sk)`-style condition on each row Put in `set_rates`, not by
+an IAM boundary).
 
-**Bridges still missing, named rather than implied.** Two rows above rest on
-models written inside the test files, and until a differential test drives the
-real code they are proofs about those models:
+Two assumptions that used to be listed here are now mechanisms rather than
+trust: a rate document holding a negative rate is refused at the write and at the
+charge, and that the settle honours the pinned rate is checked by a differential
+that flips `CURRENT` mid-request. A third has moved the other way and is stated
+where it belongs: a priced reservation whose rate cannot be frozen is REFUSED
+before the provider is called, so there is no longer a live-rate settle path to
+assume anything about.
 
-- **Snapshot pinning.** No test flips `CURRENT` between reserve and settle and
-  checks that the terminal cites the reserve-time version. The Z3 file establishes
-  that pinning is sufficient and that violating it breaks the ceiling; it cannot
-  establish that the code pins. This is the next discharge and it needs the store.
+**Bridges still missing, named rather than implied.** Rows above that rest on
+models written inside the test files are proofs about those models until a
+differential drives the real code:
+
+- **Snapshot pinning — discharged for the inline settle.**
+  `test_contract_price_identity.py::test_a_rate_flip_between_reserve_and_settle_does_not_move_the_charge`
+  writes a version, admits a request, flips `CURRENT` to a version priced ten times
+  higher, settles, and asserts the terminal cites the admitted version and charges
+  at its rates. What is still unbridged is the same property for LATE_SETTLE and
+  for external capture, which restore the snapshot from the ledger rather than from
+  a live context.
 - **Sentinel stamping.** G4 proves properties of a stamping rule written in the
   test file. The bridge is only that the shipped sentinel constants exist and are
-  pairwise distinct. A test that drives the real settle path through snapshot
-  failure, an external fixed amount, and a legacy reservation — asserting each
-  stamps its own sentinel — does not exist yet.
+  pairwise distinct. One of the modelled causes no longer exists in the code — a
+  reservation whose rate could not be frozen is refused rather than stamped
+  `snapshot-failed` — so the rule to bridge is now narrower than the one G4
+  models, and `test_contract_price_identity.py::test_the_snapshot_failed_sentinel_is_no_longer_reachable`
+  pins that nothing stamps the retired label.
 - **Per-component dominance in the ledger.** Dominance is checked at the total,
   not per component against the ledger's own component records.
 

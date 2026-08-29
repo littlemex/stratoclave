@@ -54,9 +54,13 @@ BUILTIN_VERSION = "builtin"
 # can tell them apart (Fable review-2 N2/N3) — never the pricing_key (bug#1).
 #   UNVERSIONED_SENTINEL: an explicit caller-supplied cost, or a legacy
 #     reservation that predates snapshotting — no version was in play.
-#   SNAPSHOT_FAILED_SENTINEL: reserve tried to freeze a rate but the rate table
-#     read failed; the settle then charged via the live-rate fallback. This is a
-#     degraded path that MUST be alarmed, so it gets its own label.
+#   SNAPSHOT_FAILED_SENTINEL: RETIRED as a label a new charge can carry. It named
+#     the path where reserve failed to freeze a rate and the settle charged from
+#     the live table instead — which let a rate edit between admission and settle
+#     change what a request was charged. Freezing is now a precondition of
+#     admission, so there is no such charge to label; the constant stays only
+#     because ledger events written before that change still carry it and a
+#     reader must keep recognising it. Nothing may stamp it.
 UNVERSIONED_SENTINEL = "unversioned-legacy"
 SNAPSHOT_FAILED_SENTINEL = "snapshot-failed"
 # External authorize/capture in AMOUNT mode: the settled figure is a
@@ -620,7 +624,20 @@ def _mtok_cost(tokens: int, per_mtok_microusd: int) -> int:
     Rounding up (ceil) is deliberate: a budget must never be under-charged by
     integer truncation, or a caller could nibble past a limit one sub-MTok
     request at a time.
+
+    A negative rate is refused rather than computed. Ceil rounding and integer
+    micro-USD are the mechanisms behind "a request is never under-charged", and a
+    negative leg defeats both by minting credit: `_mtok_cost(1000, -5_000_000)`
+    used to return −5,000 and the ledger recorded it as truth. The defence was
+    that no rate document had ever held one, which is a discipline, not a
+    mechanism. Refusing here makes it a mechanism on every charging path,
+    whatever wrote the document.
     """
+    if per_mtok_microusd < 0:
+        raise ValueError(
+            f"negative rate: {per_mtok_microusd} micro-USD per MTok. A rate that "
+            "credits an account is not a price; reject the rate document."
+        )
     if tokens <= 0:
         return 0
     numerator = tokens * per_mtok_microusd
@@ -674,13 +691,44 @@ def estimate_cost_microusd(
     chosen is a reservation below the possible charge, which is not a reservation.
     The warm preference belongs in which candidate is CHOSEN, and the money claim
     about it belongs in `switch_cost_delta_microusd` — a comparison recorded on the
-    decision, not an amount that gates admission."""
-    rate = _cache.get(pricing_key, repo)
+    decision, not an amount that gates admission.
+
+    This wrapper reads the LIVE table and is for callers that are not admitting a
+    request (a comparison, an operator view). The admission path must call
+    `estimate_cost_from_rates` with the snapshot it froze, so the amount that gates
+    admission and the amount the settle charges cannot come from two different
+    documents — see that function."""
+    return estimate_cost_from_rates(
+        _cache.get(pricing_key, repo),
+        input_tokens_est=input_tokens_est,
+        max_output_tokens=max_output_tokens,
+        effort_multiplier=effort_multiplier,
+    )
+
+
+def estimate_cost_from_rates(
+    rates: object,
+    *,
+    input_tokens_est: int,
+    max_output_tokens: int,
+    effort_multiplier: int = 1,
+) -> int:
+    """`estimate_cost_microusd`'s arithmetic over rates the caller already holds.
+
+    `rates` is any object carrying the four per-MTok fields — a `Rate` or a frozen
+    `RateSnapshot` — which is the whole point: the reserve chokepoint freezes a
+    snapshot and prices the admission from THAT object, so the price that admits a
+    request and the price that charges it are one document by construction. Pricing
+    the admission with a separate live read left a window in which a rate refresh
+    landing between the two reads sized the reservation at one rate and charged it
+    at another, and recorded, as "the version that priced this admission", a
+    version that priced nothing.
+    """
     reserved_output = max(max_output_tokens, 0) * max(effort_multiplier, 1)
     total_input = max(input_tokens_est, 0)
     return (
-        _mtok_cost(total_input, worst_rate_in_group(rate, INPUT_SIDE))
-        + _mtok_cost(reserved_output, rate.output_per_mtok_microusd)
+        _mtok_cost(total_input, worst_rate_in_group(rates, INPUT_SIDE))
+        + _mtok_cost(reserved_output, rates.output_per_mtok_microusd)
         + rounding_slack_microusd(INPUT_SIDE, total_input)
         + rounding_slack_microusd(OUTPUT_SIDE, reserved_output)
     )
@@ -867,8 +915,8 @@ def rate_usage(
     *,
     input_tokens: int,
     output_tokens: int,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
+    cache_read_tokens: Optional[int] = 0,
+    cache_write_tokens: Optional[int] = 0,
 ) -> RatingRecord:
     """PURE function: rate real usage against a FROZEN snapshot (no table read).
 
@@ -876,6 +924,14 @@ def rate_usage(
     same usage → same RatingRecord, so SETTLE and a reaper-race LATE_SETTLE that
     restore the same snapshot charge identically (INV-R6). ceil rounding per
     component (never under-charge by truncation).
+
+    A token count of `None` means the provider did not report that leg — some
+    models never report prompt-cache counts at all. It costs the same as zero,
+    because there is nothing to charge, but the component records
+    `reported: False` so the ledger does not assert a measurement nobody made. A
+    reader comparing models needs "not reported" and "reported as none" to be
+    different facts; they are the difference between "this model does not cache"
+    and "this model did not cache this time".
     """
     # The snapshot froze a rounding policy; refuse to silently charge under an
     # unknown one (Fable review M4). Only ceil is implemented today — a future
@@ -897,9 +953,18 @@ def rate_usage(
         (leg.name, observed[leg.name], getattr(snapshot, leg.rate_field))
         for leg in BILLABLE_LEGS
     ):
-        t = max(int(tokens), 0)
+        reported = tokens is not None
+        t = max(int(tokens or 0), 0)
         cost = _mtok_cost(t, int(rate))
-        comp[name] = {"tokens": t, "rate_microusd_per_mtok": int(rate), "cost_microusd": cost}
+        comp[name] = {
+            "tokens": t,
+            "rate_microusd_per_mtok": int(rate),
+            "cost_microusd": cost,
+            # Whether the PROVIDER reported this leg. `tokens: 0` alone cannot say
+            # it: an absent count and a reported zero are different facts and only
+            # one of them is a measurement.
+            "reported": reported,
+        }
         total += cost
 
     provider_cost = None
@@ -918,7 +983,7 @@ def rate_usage(
             (cache_read_tokens, snapshot.cost_cache_read_per_mtok_microusd),
             (cache_write_tokens, snapshot.cost_cache_write_per_mtok_microusd),
         ):
-            pc += _mtok_cost(max(int(tokens), 0), int(rate or 0))
+            pc += _mtok_cost(max(int(tokens or 0), 0), int(rate or 0))
         provider_cost = pc
         margin = total - pc
 

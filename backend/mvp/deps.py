@@ -317,6 +317,21 @@ def _authenticate_api_key(plain_key: str) -> AuthenticatedUser:
     )
 
 
+def cognito_auto_provision_enabled() -> bool:
+    """Whether authenticating an unregistered Cognito subject registers it.
+
+    Default OFF: registration is an operator act, not a side effect of a
+    successful token verification. Symmetric with the SSO path, where
+    `invite_only` is the default and auto-provisioning is an explicit
+    per-account policy (`mvp/sso_gate.py`). Read per call so an operator can
+    flip it without a rebuild, and named in DEPLOYMENT.md because it changes who
+    can spend the default tenant's budget.
+    """
+    return os.getenv("STRATOCLAVE_COGNITO_AUTO_PROVISION", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 # ---------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------
@@ -381,8 +396,29 @@ def get_current_user(
         else:
             roles = [str(r) for r in roles_raw]
         org_id = str(user_record.get("org_id") or DEFAULT_ORG_ID)
-    else:
+    elif cognito_auto_provision_enabled():
+        # Explicit operator policy: authenticating an unregistered pool member
+        # registers it into the default tenant with the `user` role. Off by
+        # default — see `cognito_auto_provision_enabled`.
         needs_backfill = True
+    else:
+        # AUTHENTICATION IS NOT REGISTRATION. A valid token from the Cognito pool
+        # proves the pool knows this subject; it does not say the operator granted
+        # it a tenant or a budget. This branch used to synthesize `roles=["user"]`
+        # and `org_id=DEFAULT_ORG_ID` and write the row, so any pool member — one
+        # created for another purpose, or self-signed-up — could spend the default
+        # tenant's dollar pool by calling an inference route once. The SSO path made
+        # the opposite choice on purpose (invite-only by default, auto-provisioning
+        # an explicit per-account policy); this is the same rule for the password
+        # path. Registration happens through the admin API or an SSO invite.
+        _log.info("cognito_identity_not_registered", extra={"sub": sub})
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This identity is not registered with the gateway. Ask an "
+                "administrator to create your user."
+            ),
+        )
 
     # C-C (2026-04 critical sweep): DB-owned session revocation.
     # Cognito's AdminUserGlobalSignOut only kills refresh tokens; the

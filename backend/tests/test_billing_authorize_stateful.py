@@ -129,20 +129,29 @@ class ExternalAuthcapMachine(RuleBasedStateMachine):
         return int(row.get("pool_reclaimed_microusd", 0))
 
     def _all_events(self) -> list[dict]:
+        """Every ledger row this tenant has: the period's money partition PLUS the
+        period-independent idempotency partition.
+
+        The IDEMP record used to live in the money partition, which made an
+        idempotency key's identity expire with the billing period; it now has its
+        own per-tenant partition and carries the period as data. The invariant this
+        feeds ("exactly one IDEMP row per key") is therefore stronger than before —
+        it holds across periods rather than within one."""
         out: list[dict] = []
         led = self._ledger()
-        kwargs = {
-            "KeyConditionExpression": Key("pk").eq(
-                f"TENANT#{self.tenant_id}#P#{self.period}"
-            )
-        }
-        while True:
-            resp = led._table.query(**kwargs)
-            out.extend(resp.get("Items", []))
-            lek = resp.get("LastEvaluatedKey")
-            if not lek:
-                return out
-            kwargs["ExclusiveStartKey"] = lek
+        for pk in (
+            f"TENANT#{self.tenant_id}#P#{self.period}",
+            f"TENANT#{self.tenant_id}#IDEMP",
+        ):
+            kwargs = {"KeyConditionExpression": Key("pk").eq(pk)}
+            while True:
+                resp = led._table.query(**kwargs)
+                out.extend(resp.get("Items", []))
+                lek = resp.get("LastEvaluatedKey")
+                if not lek:
+                    break
+                kwargs["ExclusiveStartKey"] = lek
+        return out
 
     def _events_by_kind(self):
         """Split the partition into (reserve, terminal, idemp) dicts. reserve /
