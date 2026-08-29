@@ -21,11 +21,26 @@ The claim decomposes into an implication and a premise:
              =>  headroom' = headroom + (cost_reserved - cost_actual) >= headroom
 
 (I) is a theorem about the arithmetic and is proved here.  (P) is an empirical
-property of the estimator and the provider, NOT a theorem — see
-`test_estimate_dominance_fails_for_cache_write_tokens`, which demonstrates on the
-shipped rate document that it is false today.  Do not read a green run of this
-file as "the ceiling holds".  It says: the arithmetic is sound, and the premise
-the arithmetic needs is a separate, currently-violated obligation.
+property of the estimator and the provider, NOT a theorem, and it has two axes
+that hold to different degrees in the shipped code:
+
+  * the RATE axis — that a token is reserved at a rate no lower than the one it
+    settles at — holds.  It did not: the estimator priced three legs where settle
+    charged four, and the missing cache-write leg is priced above fresh input, so
+    a request that wrote prompt cache settled above its reservation.  Both sides
+    now read one registry and the input side is priced at its worst rate.  Proved
+    against every partition in `test_billable_legs_registry.py`.
+  * the TOKEN axis — that a request settles no more tokens than were reserved for
+    it — holds only where the count is bounded from UTF-8 bytes, i.e. the
+    `measured`, `shadow` and `enforced` states of `dollar_pool_bound_state`.  On
+    the `accounting` path the count is an estimate, which is not a bound, and
+    `test_rating_differential.py::test_the_estimate_path_is_not_a_bound_on_the_token_count`
+    asserts that the overrun still happens rather than letting it be forgotten.
+
+So do not read a green run of this file as "the ceiling holds".  It says: the
+arithmetic is sound, and the premise the arithmetic needs is a separate
+obligation, discharged on one axis everywhere and on the other only where a bound
+is actually computed.
 
 METHOD
 ------
@@ -96,7 +111,7 @@ def _ceil_of(numerator: z3.ArithRef, name: str):
     proof pushes Z3 into a fragment where it returns `unknown` — which this file
     treats as a failure. Keeping the ceil encoding linear lets the arithmetic
     lemmas be decided, and confines nonlinear reasoning to the one lemma that
-    genuinely needs it (`test_g3_numerator_is_monotone_*`).
+    genuinely needs it (`test_g3_numerator_is_monotone_in_the_varying_factor`).
     """
     q = z3.Int(name)
     return q, z3.If(

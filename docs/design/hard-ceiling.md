@@ -32,11 +32,22 @@ fully switched on. As of 2026-08-30:
   in `accounting` until an operator turns on measurement or the gate itself.
 - **The bound, the payload survey and rate pinning ship**, and the reaper writes its
   RECLAIM terminal in the same transaction as the counter move (section 5).
-- **Premise (P) — that each priced component dominates its settle — is FALSE in the
-  shipped estimator**, which omits the cache-write leg. It is pinned as a strict
-  `xfail` in `backend/tests/test_rating_differential.py`, so fixing the estimator
-  fails the suite and forces the marker out. Until then the ceiling theorem's
-  precondition is not met on traffic that writes prompt cache.
+- **Premise (P) holds on the rate axis and not on the token axis.** It used to fail on
+  both: the estimator priced three legs where settle charged four, and the missing one
+  — cache_write — costs more than fresh input, so any request that wrote prompt cache
+  settled above its reservation. Both sides now read one leg registry
+  (`mvp.pricing.BILLABLE_LEGS`) and every input-side token is priced at the worst rate
+  an input-side leg can bill it at, so no classification the provider chooses can push
+  the settle above the reservation. What remains is the token count: on the
+  `accounting` path it is an estimate, and an estimate is not a bound, so a prompt that
+  tokenises to more than the estimate still settles above its reservation. The ceiling
+  theorem's precondition is met only where the bound is computed from bytes — the
+  `measured`, `shadow` and `enforced` states below.
+- **Per-leg rounding is covered explicitly.** Settle rounds each leg up; the bound
+  rounds each group's total up once, and ceiling is not subadditive, so the bound
+  carries `min(legs, tokens) - 1` microUSD of slack per group. Without it the "sound
+  bound" was not an upper bound: three input-side legs at 1 microUSD/MTok with one
+  token each settle at 3 while the group total rounds to 1.
 - **Retaining a reservation instead of returning it is not built.**
   [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far each claim is
   verified; where this document and that one disagree, that one is describing today.
@@ -79,13 +90,16 @@ enforcement and the word "mode" is not used for them.
 `pool_headroom_microusd >= :amt` is handed that estimate. Settle records the actual,
 which can be larger. Two independent causes:
 
-- **No cache-write leg.** `rate_usage` bills four components — input, output,
-  cache_read, cache_write — and the estimate prices three. Read the shipped rate
-  document for how the cache-write rate compares with input.
+- **No cache-write leg.** `rate_usage` billed four components — input, output,
+  cache_read, cache_write — and the estimate priced three. Read the shipped rate
+  document for how the cache-write rate compares with input. **Fixed**: the legs are
+  enumerated once and the estimate prices the input side at the worst input-side rate,
+  so this cause is closed on both the estimate and the bound path.
 - **The input count is a heuristic, not a bound.** It is `char_count // 3`, calibrated
   for English. Scripts that tokenise near one token per character are under-reserved
   by roughly that factor, with no prompt caching involved. Reproduce it on text in a
-  language you can check.
+  language you can check. **This cause is what the bound below exists for**, and it is
+  still live wherever the bound is not computed — that is, in `accounting`.
 
 ## 2. What stays as it is
 
@@ -110,7 +124,11 @@ mode replaces the derivation with a measured one and gives up soundness delibera
 soundness is required here and in every criterion that names `strict`.
 
 - **Every billable component has a term.** Today: input, output, cache_read,
-  cache_write. If a fifth is ever charged, the bound gains a term in the same change.
+  cache_write — and not as a list written here and repeated in two functions. The legs
+  are declared once in `mvp.pricing.BILLABLE_LEGS` with the group each belongs to, the
+  worst-rate helper and the settle rater both read it, and a rate column that charges
+  money with no leg fails `backend/tests/test_billable_legs_registry.py`. A fifth leg
+  therefore reaches the bound and the estimate in the change that adds it.
 - **All input-side tokens are priced at the worst input-side rate**,
   `max(input, cache_read, cache_write)`. The provider cannot cache content it was not
   sent, so this covers any caching behaviour with no assumption about what it caches.

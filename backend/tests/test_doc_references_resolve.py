@@ -10,6 +10,13 @@ The same class of defect covers the other direction: a documentation link that
 points at a file someone renamed or removed. Both are cheap to check and invisible
 otherwise, so they are checked here.
 
+A citation by TEST NAME rots the same way and is worse, because it is the form the
+evidence document uses to say a claim is verified. Three had already rotted:
+`docs/EVIDENCE.md` cited a Z3 proof of "a version read after its rows cannot dangle"
+under a name no test has, and a monotonicity proof under a name that was pluralised
+away, while a docstring pointed at a reaper invariant without the `reaper_` in its
+name. Each read as evidence and resolved to nothing.
+
 Two deliberate limits. This looks at paths, not at content: a citation can point at
 the right file and describe it wrongly, and only a reader catches that. And it
 resolves `docs/...` paths from the repository root, because that is the form a
@@ -41,6 +48,11 @@ BARE_MD = re.compile(r'(?<![/\w-])([A-Za-z][A-Za-z0-9_-]*\.md)\b')
 
 #: Names that are templates or examples rather than references to a real file.
 TEMPLATE_NAMES = {"_ja.md", "template.md", "NAME.md", "example.md"}
+
+#: A cited test function. Long enough not to match a fixture called `test_x`, and
+#: required not to end in `_` so a deliberately truncated family reference
+#: (`test_inv2_`) is read as the prefix it is rather than as a name.
+TEST_NAME = re.compile(r'\btest_[a-z0-9]+(?:_[a-z0-9]+)+\b')
 
 
 #: This file names examples of the very citations it rejects, so it cannot scan
@@ -143,4 +155,64 @@ def test_a_published_contract_says_where_it_stands(doc):
     assert "## Status in the shipped code" in text, (
         f"{doc} has no status section, so a reader cannot tell which of its rules "
         "are switched on"
+    )
+
+
+def _defined_test_names() -> set[str]:
+    """Every test this repository defines, in both suites.
+
+    The Rust CLI's `#[test] fn` names are included because a Python docstring may
+    legitimately cite one, and a check that flagged those would be noise a reader
+    learns to ignore — which is how a guard stops guarding.
+    """
+    names: set[str] = set()
+    for path in REPO_ROOT.rglob("*.py"):
+        if any(part in IGNORED for part in path.relative_to(REPO_ROOT).parts):
+            continue
+        names |= set(re.findall(
+            r'^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)', path.read_text(errors="replace"), re.M,
+        ))
+    for path in REPO_ROOT.rglob("*.rs"):
+        if any(part in IGNORED for part in path.relative_to(REPO_ROOT).parts):
+            continue
+        names |= set(re.findall(
+            r'fn\s+(test_[A-Za-z0-9_]+)', path.read_text(errors="replace"),
+        ))
+    return names
+
+
+def _test_module_stems() -> set[str]:
+    return {
+        p.stem for p in REPO_ROOT.rglob("test_*.py")
+        if not any(part in IGNORED for part in p.relative_to(REPO_ROOT).parts)
+    }
+
+
+def test_every_cited_test_name_exists():
+    """A claim that names its own proof has to name one that exists.
+
+    This is the citation form `docs/EVIDENCE.md` is built out of, so a rotted name
+    there is a claim of verification with nothing behind it. Renaming a test is
+    normal and fine — leaving a document asserting the old name is what this fails
+    on.
+    """
+    defined = _defined_test_names()
+    modules = _test_module_stems()
+    dangling: dict[str, set[str]] = {}
+    for path in _repo_files(CODE_SUFFIXES | {".md"}):
+        text = path.read_text(errors="replace")
+        for name in set(TEST_NAME.findall(text)):
+            if name in defined or name in modules:
+                continue
+            # `test_foo.py` is a module reference, already covered by the path checks.
+            if re.search(re.escape(name) + r'\.py', text):
+                continue
+            dangling.setdefault(name, set()).add(str(path.relative_to(REPO_ROOT)))
+    assert not dangling, (
+        "citations to tests that do not exist:\n  "
+        + "\n  ".join(
+            f"{name} — cited in {', '.join(sorted(where))}"
+            for name, where in sorted(dangling.items())
+        )
+        + "\n\nRename the citation to the test that replaced it, or write the test."
     )

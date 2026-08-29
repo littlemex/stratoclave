@@ -785,7 +785,6 @@ def messages(
     sctx = None
     saar_hard = None
     saar_prefer = None
-    saar_warm = 0
     if model_pin is None:
         from .routing import saar as _saar
 
@@ -798,7 +797,6 @@ def messages(
         if sctx is not None:
             saar_hard = sctx.decision.hard_model
             saar_prefer = sctx.decision.prefer_model
-            saar_warm = int(sctx.decision.warm_prefix_tokens)
 
     # External VSR consult (task #13). Runs ONLY when the client sent no explicit
     # pin AND SAAR produced no hard lock (both are stronger, local signals). It
@@ -911,7 +909,6 @@ def messages(
         # external VSR hard suggestion. All three land on the same enforced pin.
         vsr_hard_model=model_pin or saar_hard or vsr_hard,
         saar_prefer_model=saar_prefer,
-        saar_warm_prefix_tokens=saar_warm,
         # L5-d: carry request attribution so settle keys the ledger run-index on
         # the client's workflow_run_id (per-run billing).
         workflow_run_id=ctx.workflow_run_id if ctx else None,

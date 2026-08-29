@@ -1408,7 +1408,6 @@ def reserve_credit_for_model(
     workflow_run_id: Optional[str] = None,
     group_id: Optional[str] = None,
     request_id: Optional[str] = None,
-    saar_warm_prefix_tokens: int = 0,
     saar_prefer_model: Optional[str] = None,
     vsr_decision: Optional[dict] = None,
     input_bytes: Optional[int] = None,
@@ -1537,25 +1536,21 @@ def reserve_credit_for_model(
         # `shadow_mode` can compute this EXACT same number for the reservation
         # while the hard-ceiling branch, a few lines down, still computes and
         # returns the sound bound for recording — see `_price`'s own
-        # docstring. Byte-for-byte the call this function made before the
-        # hard-ceiling bound existed; SAAR: when this request is served by the
-        # session's warm model, `saar_warm_prefix_tokens` of the input estimate
-        # re-bill at the cheaper cache-read rate — so staying warm reserves
-        # LESS than switching cold, and a switch that would breach the pool
-        # while a stay would fit is naturally gated at the 402. In P0 this is
-        # always 0 (cache evidence lands in P1), so the estimate is
-        # byte-identical to pre-SAAR. The discount applies ONLY to the warm
-        # model itself — the tool-loop hard pin (`vsr_hard_model`) or the
-        # sticky soft preference (`saar_prefer_model`) — never to a cold
-        # candidate.
-        warm_model = vsr_hard_model or saar_prefer_model
-        warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
+        # docstring.
+        #
+        # This used to discount the warm model's input leg by SAAR's cache
+        # evidence, so that a switch which would breach the pool was gated at the
+        # 402 while a stay fitted. The discount is gone: the provider decides at
+        # settle which leg each token bills at, so reserving the cheaper leg
+        # reserves below the charge. The warm preference is expressed by candidate
+        # ORDER (`vsr_hard_model`, `saar_prefer_model`), which is where it was
+        # always doing the real work, and the money claim about staying warm is
+        # `switch_cost_delta_microusd` on the decision record.
         return estimate_cost_microusd(
             pricing_key=pk,
             input_tokens_est=input_tokens_est,
             max_output_tokens=max_output_tokens,
             effort_multiplier=effort_multiplier,
-            warm_prefix_tokens=warm,
         )
 
     def _price(

@@ -394,7 +394,7 @@ def test_pool_invariant_inductive_step_all_ops():
     Per-op assumptions (each justified elsewhere):
       * settle/release/reap operate on a live hold of amount `res`, and the
         ledger invariant R == sum(live holds) gives res <= R.  That ledger
-        invariant is exactly what test_hold_reclaimed_exactly_once and the
+        invariant is exactly what test_reaper_hold_reclaimed_exactly_once and the
         Hypothesis machine establish (each hold subtracted from R exactly
         once), so this is not circular — it is compositional.
       * The FALLBACK settle (S += actual with NO -reserved) is deliberately

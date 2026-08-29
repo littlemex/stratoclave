@@ -17,14 +17,26 @@ literal constant rather than read back from the code under test.
 
 WHAT THIS FILE ALSO PINS
 ------------------------
-The premise the whole ceiling rests on — that the reserve-time estimate dominates
-the settled actual, per component — is FALSE in the shipped implementation:
-`rate_usage` charges four components while `estimate_cost_microusd` prices three,
-so a request that writes prompt cache settles above what was reserved for it.
-`test_estimate_omits_the_cache_write_leg` is an `xfail(strict=True)` marker for
-exactly that, which means the day the estimator grows a cache-write leg this file
-fails with "unexpectedly passing" and forces the marker out. A known defect that
-cannot be forgotten is worth more than a comment.
+The premise the whole ceiling rests on — that what is reserved dominates what is
+settled — used to be FALSE on the rate axis in the shipped implementation:
+`rate_usage` charged four legs while `estimate_cost_microusd` priced three, with no
+cache-write leg, and cache writes cost more than fresh input. A request that wrote
+prompt cache settled above its reservation: 7,500 microUSD reserved, 38,750 settled.
+This file carried that as an `xfail(strict=True)` until it was fixed.
+
+It is fixed on the RATE axis and only there. Both sides now read one registry
+(`mvp.pricing.BILLABLE_LEGS`), and the estimator prices every input-side token at
+the worst rate any input-side leg can bill it at, so no classification the provider
+chooses can push the settle above the reservation.
+
+The TOKEN axis is a different claim and this function does not make it. An estimated
+token count is not a bound on the token count, so a prompt that tokenises to more
+than `input_tokens_est` still settles above its reservation, by design, on the
+accounting path. Only `mvp.reservation_bound` — which prices a byte-count ceiling
+rather than an estimate — carries the ceiling claim, and
+`tests/test_billable_legs_registry.py` is where that dominance is proved against
+every partition. `test_the_estimate_path_is_not_a_bound_on_the_token_count` below
+pins the boundary so the two claims cannot be confused for one.
 """
 
 import math
@@ -190,21 +202,40 @@ def test_ceil_never_undercharges_the_exact_rational_cost(tokens, rate):
 # ---------------------------------------------------------------------------
 
 def reference_estimate(*, rate, input_tokens_est: int, max_output_tokens: int,
-                       effort_multiplier: int = 1, warm_prefix_tokens: int = 0) -> int:
+                       effort_multiplier: int = 1) -> int:
     """Independent `estimate_cost_microusd`, written from its docstring.
 
-    "input_estimate + max_output * effort_multiplier, priced per token type: input
-    at the input rate, the (multiplied) max output at the output rate", with
-    `warm_prefix_tokens` of the input re-priced at the cache-read rate and clamped
-    so warm never exceeds the input estimate.
+    "input_estimate + max_output * effort_multiplier, priced per token type", where
+    every input-side token is priced at the worst rate an input-side leg can bill it
+    at, because the provider — not the gateway — classifies it at settle.
+
+    The three input-side rate fields are named LITERALLY here rather than read from
+    `BILLABLE_LEGS`. That is the point of a differential reference: if a leg were
+    dropped from the registry, the implementation would quietly price one fewer and
+    this reference would still price all three, so the disagreement surfaces. The
+    registry's own completeness is checked against the dataclass fields in
+    `tests/test_billable_legs_registry.py`.
+
+    The slack terms are the whole microUSD that per-leg rounding at settle can add
+    over a rounded group total: each input-side leg can round up, the group total
+    rounds up once, and ceil is not subadditive. Capped by the token count too — n
+    tokens cannot make more than n legs round up — so a side with no tokens adds
+    nothing. Two output-side legs would add a unit; there is one, so it adds none.
     """
     reserved_output = max(max_output_tokens, 0) * max(effort_multiplier, 1)
     total_input = max(input_tokens_est, 0)
-    warm = min(max(warm_prefix_tokens, 0), total_input)
-    fresh = total_input - warm
-    return (reference_component_cost(fresh, rate.input_per_mtok_microusd)
-            + reference_component_cost(warm, rate.cache_read_per_mtok_microusd)
-            + reference_component_cost(reserved_output, rate.output_per_mtok_microusd))
+    worst_input_side = max(
+        rate.input_per_mtok_microusd,
+        rate.cache_read_per_mtok_microusd,
+        rate.cache_write_per_mtok_microusd,
+    )
+    input_side_legs = 3
+    output_side_legs = 1
+    input_slack = max(min(input_side_legs, total_input) - 1, 0)
+    output_slack = max(min(output_side_legs, reserved_output) - 1, 0)
+    return (reference_component_cost(total_input, worst_input_side)
+            + reference_component_cost(reserved_output, rate.output_per_mtok_microusd)
+            + input_slack + output_slack)
 
 
 @settings(max_examples=80, deadline=None)
@@ -212,10 +243,9 @@ def reference_estimate(*, rate, input_tokens_est: int, max_output_tokens: int,
     input_tokens_est=st.integers(min_value=0, max_value=200_000),
     max_output_tokens=st.integers(min_value=0, max_value=100_000),
     effort_multiplier=st.sampled_from([1, 2, 4, 8]),
-    warm_prefix_tokens=st.integers(min_value=0, max_value=200_000),
 )
 def test_estimate_matches_an_independent_recomputation(
-    input_tokens_est, max_output_tokens, effort_multiplier, warm_prefix_tokens,
+    input_tokens_est, max_output_tokens, effort_multiplier,
 ):
     """The estimator agrees with a reference written from its own specification.
 
@@ -232,14 +262,12 @@ def test_estimate_matches_an_independent_recomputation(
         input_tokens_est=input_tokens_est,
         max_output_tokens=max_output_tokens,
         effort_multiplier=effort_multiplier,
-        warm_prefix_tokens=warm_prefix_tokens,
     )
     actual = estimate_cost_microusd(
         pricing_key="default",
         input_tokens_est=input_tokens_est,
         max_output_tokens=max_output_tokens,
         effort_multiplier=effort_multiplier,
-        warm_prefix_tokens=warm_prefix_tokens,
     )
     assert actual == expected
 
@@ -316,37 +344,79 @@ def test_no_usage_report_can_mint_a_credit_at_a_nonnegative_rate(tokens, rate):
     assert _mtok_cost(tokens, rate) >= 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN DEFECT, and the marker is the tracking device: rate_usage bills "
-           "four components (input, output, cache_read, cache_write) while "
-           "estimate_cost_microusd prices three (fresh input, warm input at the "
-           "cache-read rate, output). It has no cache-write leg, and in the "
-           "shipped rate document cache_write is priced ABOVE input, so any "
-           "request that writes prompt cache settles above what was reserved for "
-           "it. That breaks premise (P) of the ceiling theorem in "
-           "test_rating_formal_z3.py, and the dollar pool has no overrun path of "
-           "its own — the token dimension has credit_overrun, the pool just books "
-           "the actual. When the estimator grows a cache-write leg this test will "
-           "pass, the strict marker will fail the suite, and the marker must then "
-           "be deleted along with this reason.",
-)
-def test_estimate_omits_the_cache_write_leg():
-    """The premise fails on a request that writes prompt cache.
+def test_the_cache_write_leg_no_longer_settles_above_the_estimate():
+    """The case that used to break premise (P), now holding.
 
-    Concrete rather than generated, so the number in the failure is the number a
-    reader can reproduce: the shipped `default` rates, 1,000 input tokens, 100
-    output tokens, 5,000 cache-write tokens.
+    Concrete rather than generated, so the number a reader can reproduce is the
+    number in the failure: the shipped `default` rates, 1,000 input-side tokens,
+    100 output tokens, and the provider classifying every one of those input-side
+    tokens as the most expensive thing it could be — a cache write.
     """
     rate = baseline_rates()["default"]
-    # The precondition, asserted rather than assumed: if the rate document ever
-    # prices cache writes at zero this test would flip to passing for a reason
-    # that has nothing to do with the estimator, and the strict xfail would fail
-    # the suite misleadingly. Fail loudly here instead.
+    # The precondition, asserted rather than assumed: at a zero cache-write rate
+    # this test would pass for a reason that has nothing to do with the estimator.
     assert rate.cache_write_per_mtok_microusd > 0, (
         "cache writes are priced at zero in the rate document; this test can no "
-        "longer demonstrate the missing leg"
+        "longer exercise the leg it exists for"
     )
+    snap = _snapshot(input_rate=rate.input_per_mtok_microusd,
+                     output_rate=rate.output_per_mtok_microusd,
+                     cache_read_rate=rate.cache_read_per_mtok_microusd,
+                     cache_write_rate=rate.cache_write_per_mtok_microusd)
+    reserved = estimate_cost_microusd(
+        pricing_key="default", input_tokens_est=1_000, max_output_tokens=100,
+    )
+    actual = rate_usage(
+        snap, input_tokens=0, output_tokens=100, cache_write_tokens=1_000,
+    ).total_cost_microusd
+    assert actual <= reserved, (
+        f"settled {actual} against a reservation of {reserved} — an input-side leg "
+        f"is priced below what it settles at"
+    )
+
+
+@pytest.mark.parametrize("partition", [
+    (1_000, 0, 0),      # all fresh input
+    (0, 1_000, 0),      # all cache reads
+    (0, 0, 1_000),      # all cache writes, the leg that used to be missing
+    (400, 300, 300),    # split three ways, where per-leg rounding compounds
+    (333, 333, 334),
+])
+def test_no_classification_of_the_estimated_tokens_settles_above_the_estimate(partition):
+    """The estimate has to dominate every partition, not the one it guessed.
+
+    The gateway sends tokens; the PROVIDER decides at settle how many of them were
+    fresh input, cache reads or cache writes, and the gateway learns that only from
+    the usage report. So pricing the estimated count at the input rate reserved
+    against one classification out of many.
+    """
+    fresh, reads, writes = partition
+    rate = baseline_rates()["default"]
+    snap = _snapshot(input_rate=rate.input_per_mtok_microusd,
+                     output_rate=rate.output_per_mtok_microusd,
+                     cache_read_rate=rate.cache_read_per_mtok_microusd,
+                     cache_write_rate=rate.cache_write_per_mtok_microusd)
+    reserved = estimate_cost_microusd(
+        pricing_key="default", input_tokens_est=fresh + reads + writes,
+        max_output_tokens=100,
+    )
+    actual = rate_usage(
+        snap, input_tokens=fresh, cache_read_tokens=reads,
+        cache_write_tokens=writes, output_tokens=100,
+    ).total_cost_microusd
+    assert actual <= reserved, f"settled {actual} > reserved {reserved} at {partition}"
+
+
+def test_the_estimate_path_is_not_a_bound_on_the_token_count():
+    """The boundary of the claim above, pinned so it cannot be overstated.
+
+    Fixing the rate axis did not turn the accounting estimate into a ceiling. The
+    token count is still a guess, and a prompt that tokenises to more than the guess
+    settles above its reservation. That is the difference between `accounting` and
+    the bound modes in `dollar_pool_bound_state`, and it is why
+    `docs/design/hard-ceiling.md` states the ceiling for the bound path only.
+    """
+    rate = baseline_rates()["default"]
     snap = _snapshot(input_rate=rate.input_per_mtok_microusd,
                      output_rate=rate.output_per_mtok_microusd,
                      cache_read_rate=rate.cache_read_per_mtok_microusd,
@@ -357,9 +427,10 @@ def test_estimate_omits_the_cache_write_leg():
     actual = rate_usage(
         snap, input_tokens=1_000, output_tokens=100, cache_write_tokens=5_000,
     ).total_cost_microusd
-    assert actual <= reserved, (
-        f"settled {actual} against a reservation of {reserved} — the cache-write "
-        f"leg is unreserved"
+    assert actual > reserved, (
+        "the accounting estimate now dominates a token count six times its guess. "
+        "If the estimator grew a token bound, say so in docs/design/hard-ceiling.md "
+        "and move this case to the dominance tests — do not just delete it."
     )
 
 
@@ -377,29 +448,35 @@ def test_the_shipped_rate_document_prices_cache_writes_above_input():
     )
 
 
-def test_the_estimator_prices_fewer_components_than_the_charger():
-    """The asymmetry itself, stated so the cause is visible without reading both
-    functions.
+def test_the_estimator_and_the_charger_enumerate_the_same_legs():
+    """The asymmetry that caused the defect, closed at the source rather than
+    patched at one call site.
 
-    Kept separate from the xfail above: this one passes today and documents WHY
-    that one fails. It fails the day a fifth component is charged without a
-    matching estimate leg, which is the same defect arriving again.
+    The estimator does not take a cache-write parameter and should not: it prices a
+    token count it cannot classify. What it must not do is enumerate the legs a
+    SECOND time — that is how three came to be priced while four were charged. It
+    reads `BILLABLE_LEGS`, so a fifth billable leg appears on both sides at once.
     """
+    from mvp.pricing import BILLABLE_LEGS, INPUT_SIDE, legs_in_group
+
     snap = _snapshot(input_rate=1_000_000, output_rate=1_000_000,
                      cache_read_rate=1_000_000, cache_write_rate=1_000_000)
     charged_components = set(
         rate_usage(snap, input_tokens=1, output_tokens=1,
                    cache_read_tokens=1, cache_write_tokens=1).components
     )
-    assert charged_components == {"input", "output", "cache_read", "cache_write"}
+    assert charged_components == {leg.name for leg in BILLABLE_LEGS}
 
-    # What the estimator can express, read off its signature rather than guessed.
-    import inspect
-    estimate_params = set(inspect.signature(estimate_cost_microusd).parameters)
-    assert "cache_write_tokens" not in estimate_params, (
-        "the estimator grew a cache-write parameter. This test and the strict "
-        "xfail on test_estimate_omits_the_cache_write_leg will both fail, on "
-        "purpose and together: one says the shape changed, the other says the "
-        "behaviour did. Delete both, and add the dominance test for the new leg."
+    # A leg added to the registry with a rate above the others must move the
+    # estimate up. Priced at 10x the shipped input rate, on the same token count.
+    baseline = estimate_cost_microusd(
+        pricing_key="default", input_tokens_est=1_000, max_output_tokens=0,
     )
-    assert {"input_tokens_est", "max_output_tokens", "warm_prefix_tokens"} <= estimate_params
+    rate = baseline_rates()["default"]
+    dearest = max(
+        getattr(rate, leg.rate_field) for leg in legs_in_group(INPUT_SIDE)
+    )
+    assert baseline >= reference_component_cost(1_000, dearest), (
+        "the estimate is below the worst input-side leg on the shipped rates — the "
+        "estimator is enumerating legs of its own again"
+    )

@@ -506,7 +506,6 @@ async def create_response(
     sctx = None
     saar_hard = None
     saar_prefer = None
-    saar_warm = 0
     prev_response_id = _previous_response_id(body)
     try:
         from .routing import saar as _saar
@@ -521,7 +520,6 @@ async def create_response(
         if sctx is not None:
             saar_hard = sctx.decision.hard_model
             saar_prefer = sctx.decision.prefer_model
-            saar_warm = int(sctx.decision.warm_prefix_tokens)
     except Exception:  # noqa: BLE001 — SAAR must never break the request.
         sctx = None
 
@@ -612,7 +610,6 @@ async def create_response(
         # Hard-pin precedence: explicit client pin > SAAR provider-state lock.
         vsr_hard_model=model_pin or saar_hard,
         saar_prefer_model=saar_prefer,
-        saar_warm_prefix_tokens=saar_warm,
         # L5-d: per-run billing attribution.
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,

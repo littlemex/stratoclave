@@ -3,6 +3,13 @@
 Covers the integer micro-USD math, the per-token-type settlement pricing, the
 reasoning-effort multiplier on the reservation estimate, and the hot-reload
 cache that overlays PricingConfig rows on the built-in defaults.
+
+The reservation numbers here are the WORST input-side rate, not the input rate.
+The gateway sends tokens and the provider decides at settle whether each one was
+fresh input, a cache read or a cache write; it reports that afterwards. So an
+estimate priced at the input rate is below the charge for any request that writes
+prompt cache, and on the shipped table that is a factor of 1.25. See
+`mvp.pricing.BILLABLE_LEGS` and `tests/test_billable_legs_registry.py`.
 """
 from __future__ import annotations
 
@@ -19,15 +26,19 @@ def _reset_pricing_cache():
     pricing.reset_cache()
 
 
-def test_estimate_uses_input_and_output_rates(dynamodb_mock):
-    # opus default: input 5_000_000 /MTok, output 25_000_000 /MTok
-    # 1 MTok input + 1 MTok output = 5_000_000 + 25_000_000 micro-USD
+def test_estimate_prices_the_input_side_at_its_worst_rate(dynamodb_mock):
+    # opus default: input 5_000_000 /MTok, cache_write 6_250_000 /MTok (the worst
+    # input-side leg), output 25_000_000 /MTok. 1 MTok of input-side tokens is
+    # reserved at 6_250_000 because the provider may classify every one of them as
+    # a cache write. Plus 2 microUSD of slack: three input-side legs can each round
+    # up at settle where the group total rounds up once, and one output-side leg
+    # adds none.
     cost = pricing.estimate_cost_microusd(
         pricing_key="opus",
         input_tokens_est=1_000_000,
         max_output_tokens=1_000_000,
     )
-    assert cost == 30_000_000  # $30.00
+    assert cost == 6_250_000 + 25_000_000 + 2
 
 
 def test_estimate_applies_effort_multiplier_to_output_only(dynamodb_mock):
@@ -38,18 +49,25 @@ def test_estimate_applies_effort_multiplier_to_output_only(dynamodb_mock):
         max_output_tokens=1_000_000,
         effort_multiplier=4,
     )
-    assert cost == 60_000_000  # 4 * 15_000_000
+    # 4 * 15_000_000, and no rounding slack: the output side has one leg, and the
+    # input side has no tokens.
+    assert cost == 60_000_000
 
 
 def test_estimate_rounds_up_sub_mtok(dynamodb_mock):
-    # 1 token of Haiku input (1_000_000 /MTok) must round UP to 1 micro-USD,
-    # never truncate to 0 — otherwise sub-MTok requests would be free.
+    # 1 token of Haiku input-side must round UP, never truncate to 0 — otherwise
+    # sub-MTok requests would be free. Haiku's worst input-side rate is cache_write
+    # at 1_250_000 /MTok, so one token is 2 microUSD — and no rounding slack, because
+    # one token lands on exactly one leg whose own ceiling is the group's.
     cost = pricing.estimate_cost_microusd(
         pricing_key="haiku",
         input_tokens_est=1,
         max_output_tokens=0,
     )
-    assert cost == 1
+    assert cost == 2
+    assert pricing.estimate_cost_microusd(
+        pricing_key="haiku", input_tokens_est=0, max_output_tokens=0,
+    ) == 0, "a request that reserves no tokens reserves no money"
 
 
 def test_actual_cost_prices_each_token_type(dynamodb_mock):
@@ -85,12 +103,14 @@ def test_pricing_config_override_is_hot_reloaded(dynamodb_mock):
     from dynamo.pricing_config import PricingConfigRepository
 
     repo = PricingConfigRepository()
-    # Halve the opus input rate under a new version and activate it.
+    # Halve every opus input-side rate under a new version and activate it. Halving
+    # only `input` would no longer move the estimate — it is not the worst leg — so
+    # the test would pass without proving the reload happened.
     override = pricing.Rate(
         input_per_mtok_microusd=2_500_000,
         output_per_mtok_microusd=25_000_000,
-        cache_read_per_mtok_microusd=500_000,
-        cache_write_per_mtok_microusd=6_250_000,
+        cache_read_per_mtok_microusd=250_000,
+        cache_write_per_mtok_microusd=3_125_000,
     )
     repo.set_rates(version="2026-07", rates={"opus": override})
 
@@ -101,7 +121,7 @@ def test_pricing_config_override_is_hot_reloaded(dynamodb_mock):
         input_tokens_est=1_000_000,
         max_output_tokens=0,
     )
-    assert cost == 2_500_000  # halved input rate took effect
+    assert cost == 3_125_000 + 2  # the halved worst input-side rate took effect
 
 
 def test_missing_pricing_table_keeps_defaults(dynamodb_mock):
@@ -114,7 +134,7 @@ def test_missing_pricing_table_keeps_defaults(dynamodb_mock):
         input_tokens_est=1_000_000,
         max_output_tokens=0,
     )
-    assert cost == 5_000_000
+    assert cost == 6_250_000 + 2
 
 
 # ---------------------------------------------------------------------------

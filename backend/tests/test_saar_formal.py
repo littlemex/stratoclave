@@ -4,14 +4,20 @@ The example tests in test_saar.py show SAAR *works*; this file proves the four
 properties that make it *safe to ship dark and safe to enable*, over the whole
 input domain (Hypothesis) rather than hand-picked cases:
 
-  INV-1  degenerate-cost-identity — with warm_prefix_tokens=0 (always true in
-         P0), estimate_cost_microusd is BYTE-IDENTICAL to the pre-SAAR formula
-         for every rate/token combination. This is the mathematical core of
-         "flag-off / P0 is bit-identical".
-  INV-2  warm-discount-monotone — a warm (stay) estimate is always ≤ the cold
-         (switch) estimate and never below the true floor, so SAAR can only make
-         a switch cost MORE to reserve, never under-reserve (no 402-evasion, no
-         pool overshoot).
+  INV-1  cache-evidence-independence — the reserved amount is a function of
+         (pricing_key, token counts, effort) and NOTHING SAAR knows. This is a
+         stronger property than the one this file used to prove, and it replaced
+         it because the old one was the defect: SAAR passed `warm_prefix_tokens`
+         into `estimate_cost_microusd`, which re-priced that many input tokens at
+         the cheaper cache-read rate. The gateway does not decide which leg a
+         token settles at, so that was a reservation below the possible charge.
+         The estimator no longer accepts cache evidence, and INV-1 pins that no
+         SAAR state can move an admission amount.
+  INV-2  the-warm-claim-is-a-comparison — staying warm and switching cold now
+         reserve the SAME amount, and the saving SAAR claims lives entirely in
+         `saar_checkout_delta_microusd`, which is non-negative and recorded on the
+         decision. So no cache evidence can lower an admission gate: 402-evasion
+         is closed by construction rather than by a bounded-slack argument.
   INV-3  soft-preference-availability — reordering the candidate chain by a soft
          preference is a pure permutation: the SET of candidates the cascade may
          serve is unchanged, so a preference can never remove a servable model
@@ -40,8 +46,13 @@ from mvp.routing.saar import Phase, SessionMemory
 
 
 def _pre_saar_estimate(rate: Rate, input_est: int, max_out: int, effort: int) -> int:
-    """The estimate formula EXACTLY as it was before SAAR (no warm split). The
-    reference the warm=0 path must equal bit-for-bit."""
+    """The estimate formula as it was before SAAR: the input estimate at the input
+    rate, the multiplied output allowance at the output rate.
+
+    No longer a bit-for-bit reference — it is the LOWER bound the current estimator
+    must never fall below. It prices every input-side token at the input rate, and
+    the input rate is not the worst rate an input-side token can bill at.
+    """
     reserved_output = max(max_out, 0) * max(effort, 1)
     return (
         pricing._mtok_cost(max(input_est, 0), rate.input_per_mtok_microusd)
@@ -78,50 +89,65 @@ def _pin_rate(rate):
 
 @settings(max_examples=400, deadline=None)
 @given(rate=_RATE, input_est=_TOK, max_out=_TOK, effort=_EFFORT)
-def test_inv1_warm_zero_is_bit_identical(rate, input_est, max_out, effort):
-    # Pin the rate cache to `rate` so both formulas price against the same table.
+def test_inv1_the_estimate_never_falls_below_the_pre_saar_formula(rate, input_est, max_out, effort):
+    """The direction that matters. SAAR was allowed to raise a reservation and not
+    to lower one, and lowering is exactly what the warm split did."""
     with _pin_rate(rate):
-        saar_val = pricing.estimate_cost_microusd(
+        val = pricing.estimate_cost_microusd(
             pricing_key="x", input_tokens_est=input_est, max_output_tokens=max_out,
-            effort_multiplier=effort, warm_prefix_tokens=0,
+            effort_multiplier=effort,
         )
-    ref = _pre_saar_estimate(rate, input_est, max_out, effort)
-    assert saar_val == ref, f"warm=0 diverged from pre-SAAR: {saar_val} != {ref}"
+    assert val >= _pre_saar_estimate(rate, input_est, max_out, effort), (
+        "the estimate fell below the pre-SAAR formula, which means an input-side "
+        "leg is priced below the input rate somewhere"
+    )
+
+
+def test_inv1_the_estimator_cannot_be_told_about_cache_evidence():
+    """Read off the signature rather than argued from the body: there is no
+    parameter through which a warm-cache count could reach a reserved amount, so no
+    caller can reintroduce the discount without changing this test."""
+    import inspect
+
+    params = set(inspect.signature(pricing.estimate_cost_microusd).parameters)
+    assert params == {
+        "pricing_key", "input_tokens_est", "max_output_tokens",
+        "effort_multiplier", "repo",
+    }, (
+        f"the estimator's parameters changed to {sorted(params)}. If a cache-evidence "
+        "parameter came back, INV-1 is broken: the provider classifies tokens at "
+        "settle, so a discount applied at reserve time under-reserves."
+    )
 
 
 # --------------------------------------------------------------------------- INV-2
 
 
-@settings(max_examples=400, deadline=None)
+@settings(max_examples=200, deadline=None)
 @given(rate=_RATE, input_est=_TOK, max_out=_TOK, effort=_EFFORT,
        warm=st.integers(min_value=0, max_value=10_000_000))
-def test_inv2_warm_estimate_never_exceeds_cold(rate, input_est, max_out, effort, warm):
-    # cache_read is never above input for a real rate table; constrain to that
-    # (the pricing config invariant) so the discount is well-defined.
-    assume(rate.cache_read_per_mtok_microusd <= rate.input_per_mtok_microusd)
+def test_inv2_staying_warm_and_switching_cold_reserve_the_same_amount(
+    rate, input_est, max_out, effort, warm,
+):
+    """What replaced "warm ≤ cold up to rounding slack".
+
+    The old invariant had to tolerate a slack of up to 1 microUSD per extra ceil
+    term, because the warm split priced the input leg as two ceil terms where cold
+    priced one. There is no split now, so there is no slack and no inequality: the
+    two amounts are the same number, and the cache evidence has nowhere to enter.
+    """
     with _pin_rate(rate):
         cold = pricing.estimate_cost_microusd(
             pricing_key="x", input_tokens_est=input_est, max_output_tokens=max_out,
-            effort_multiplier=effort, warm_prefix_tokens=0,
+            effort_multiplier=effort,
         )
         stay = pricing.estimate_cost_microusd(
             pricing_key="x", input_tokens_est=input_est, max_output_tokens=max_out,
-            effort_multiplier=effort, warm_prefix_tokens=warm,
+            effort_multiplier=effort,
         )
-    # Staying warm is never negative, and — up to integer-ceil rounding — never
-    # more expensive than switching cold. NOTE (formal finding): the warm split
-    # prices the input leg as TWO ceil terms (fresh@input + warm@cache_read) vs
-    # cold's ONE ceil term (all@input). Splitting one ceil into two can add up to
-    # 1 microUSD of rounding, so `stay` can exceed `cold` by that rounding unit in
-    # a pathological rate case. This is SAFE — reserving marginally more is
-    # conservative and never under-reserves — but it means "stay is cheaper" holds
-    # only up to a bounded rounding slack, not strictly. The provable CLAIM
-    # (saar_checkout_delta_microusd) is a single ceil, so it carries no such slack.
-    _ROUNDING_SLACK = 2  # < 1 microUSD per extra ceil term; 2 is a safe bound
-    assert stay >= 0, f"warm estimate went negative: {stay}"
-    assert stay <= cold + _ROUNDING_SLACK, (
-        f"warm estimate exceeded cold beyond rounding slack: stay={stay} cold={cold}"
-    )
+        delta = pricing.saar_checkout_delta_microusd(pricing_key="x", warm_prefix_tokens=warm)
+    assert stay == cold, f"cache evidence moved an admission amount: {stay} != {cold}"
+    assert delta >= 0, f"the warm claim went negative: {delta}"
 
 
 @settings(max_examples=200, deadline=None)

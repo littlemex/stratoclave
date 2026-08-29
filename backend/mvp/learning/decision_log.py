@@ -357,13 +357,17 @@ def record_outcome_from_context(
         if not facts or not run_id or not span_id:
             return
 
-        from ..pricing import BUILTIN_VERSION, effective_rates, estimate_cost_microusd
+        from ..pricing import BUILTIN_VERSION, actual_cost_microusd, effective_rates
 
-        # effort MUST come through from the decision facts. If it is missing (e.g.
-        # the estimate_inputs build was fenced at reserve), we must NOT silently
-        # assume effort=1 — that would compute a too-low counterfactual and record
-        # a self-consistent WRONG savings (Fable RDL review-2 M2). Propagate None
-        # so no savings is fabricated.
+        # `effort` is persisted on the record as evidence of what the reservation was
+        # sized for. It is NOT an input to the counterfactual below, and a missing
+        # effort therefore no longer suppresses the savings figure. It used to be
+        # both: the counterfactual priced `actual_output_tokens * effort`, so a
+        # request served at effort 4 was compared against a baseline charged for four
+        # times the output it actually produced, and the recorded saving was
+        # overstated by that factor. Effort bounds how much output a RESERVATION
+        # allows; it has no bearing on what a baseline would have been charged for
+        # output that has already been generated and counted.
         _ei = facts.get("estimate_inputs") or {}
         effort = _ei.get("effort")
         effort = int(effort) if effort is not None else None
@@ -375,19 +379,35 @@ def record_outcome_from_context(
         cf_version = effective_rates()[0] or BUILTIN_VERSION
 
         def _cf(pricing_key: Optional[str]) -> Optional[int]:
-            # Counterfactual: what the baseline WOULD have cost at the chosen
-            # request's ACTUAL tokens + same effort. estimate (not measured).
-            # None when the input is unusable (no key / unknown effort) or a single
-            # candidate's pricing raises — the failure is confined to THAT baseline,
-            # never dropping the whole outcome record (Fable review-2 M3).
-            if not pricing_key or effort is None:
+            # Counterfactual: what the baseline would have been CHARGED for this
+            # request's actual tokens. The charging fold — the same one that produced
+            # `actual_total_cost_microusd` for the model that ran — so the subtraction
+            # below compares two amounts computed the same way.
+            #
+            # This used to call `estimate_cost_microusd`, the RESERVATION estimator.
+            # That is a different function with a different job: it prices every
+            # input-side token at the worst rate an input-side leg can bill it at,
+            # because at reserve time nobody knows which leg the provider will pick.
+            # Here the provider has already picked, and the tokens are counted. Using
+            # the reservation estimator prices the baseline above what it would have
+            # been charged and inflates the saving.
+            #
+            # `actual_cost_microusd` is deprecated for CHARGING because it re-reads
+            # the live rate table, and a charge must be rated at the price it was
+            # admitted under. A counterfactual is not a charge: it is priced under the
+            # live table on purpose, and `cf_version` stamps which table, so the
+            # figure stays reconstructable.
+            #
+            # None when the key is unusable or a single candidate's pricing raises —
+            # the failure is confined to THAT baseline, never dropping the whole
+            # outcome record (Fable review-2 M3).
+            if not pricing_key:
                 return None
             try:
-                return estimate_cost_microusd(
+                return actual_cost_microusd(
                     pricing_key=pricing_key,
-                    input_tokens_est=int(actual_input_tokens),
-                    max_output_tokens=int(actual_output_tokens),
-                    effort_multiplier=effort,
+                    input_tokens=int(actual_input_tokens),
+                    output_tokens=int(actual_output_tokens),
                 )
             except Exception:  # noqa: BLE001 — one bad key must not sink the record.
                 return None
