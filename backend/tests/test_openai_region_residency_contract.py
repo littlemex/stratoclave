@@ -24,11 +24,18 @@ import os
 from mvp.models import _REGISTRY
 
 # Must equal OPENAI_REGISTRY_REGIONS in iac/bin/iac.ts (order-independent).
+#
+# The set is taken over `wire_protocol == "responses"`, not over `provider ==
+# "openai"`. Residency is a property of the TRANSPORT — where a prompt is sent —
+# and every responses entry rides the OpenAI-compatible endpoint regardless of who
+# made the model. Filtering by provider under-counted the moment a non-OpenAI model
+# (Grok, in us-west-2) joined that transport, which would have certified a posture
+# narrower than the one actually in force.
 EXPECTED_OPENAI_REGIONS = {"us-east-2", "us-west-2"}
 
 
 def test_openai_registry_regions_match_iac_constant():
-    actual = {e.bedrock_region for e in _REGISTRY if e.provider == "openai"}
+    actual = {e.bedrock_region for e in _REGISTRY if e.wire_protocol == "responses"}
     assert actual == EXPECTED_OPENAI_REGIONS, (
         f"OpenAI registry regions changed to {sorted(actual)}. Update "
         f"OPENAI_REGISTRY_REGIONS in iac/bin/iac.ts AND EXPECTED_OPENAI_REGIONS "
@@ -68,7 +75,7 @@ def test_openai_region_is_not_driven_by_env_hint(monkeypatch):
     reloaded = importlib.import_module("mvp.models")
     try:
         regions = {
-            e.bedrock_region for e in reloaded._REGISTRY if e.provider == "openai"
+            e.bedrock_region for e in reloaded._REGISTRY if e.wire_protocol == "responses"
         }
         assert regions == EXPECTED_OPENAI_REGIONS, (
             "OPENAI_BEDROCK_REGIONS moved the codex registry regions on reload — "
@@ -86,5 +93,5 @@ def test_every_openai_region_is_a_valid_region_id():
 
     pat = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
     for e in _REGISTRY:
-        if e.provider == "openai":
+        if e.wire_protocol == "responses":
             assert pat.match(e.bedrock_region), e.bedrock_region

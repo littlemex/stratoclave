@@ -4,7 +4,7 @@ What broke in the field
 -----------------------
 codex (OpenAI SDK) reported `stream disconnected before completion: stream
 closed before response.completed`. The Stratoclave gateway is an SSE
-pass-through to bedrock-mantle, so this either means
+pass-through to bedrock-the OpenAI-compatible endpoint, so this either means
 
   (a) the upstream bytes never carried a `response.completed` event, or
   (b) the gateway dropped/mangled the framing such that the codex parser
@@ -12,7 +12,7 @@ pass-through to bedrock-mantle, so this either means
 
 These tests pin (b) — the bit Stratoclave actually owns. They drive the
 real `mvp.openai_responses.create_response` route via FastAPI's
-TestClient, with the bedrock-mantle httpx call replaced by an
+TestClient, with the bedrock-the OpenAI-compatible endpoint httpx call replaced by an
 `httpx.MockTransport`. We assert two things the field bug both depend on:
 
   1. the gateway preserves SSE event-frame boundaries (a `\\n\\n` after
@@ -50,7 +50,7 @@ from mvp.authz import require_permission
 
 # ---------------------------------------------------------------------------
 # Fixtures: stub the auth dep, stub credit reservation/settlement, and
-# replace `_mantle_client` with one backed by an httpx.MockTransport.
+# replace `_openai_client` with one backed by an httpx.MockTransport.
 # ---------------------------------------------------------------------------
 
 
@@ -119,9 +119,9 @@ def _stub_credit_pipeline(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def install_mantle_stream(monkeypatch: pytest.MonkeyPatch):
+def install_openai_stream(monkeypatch: pytest.MonkeyPatch):
     """Yield a function that installs a fixed SSE byte sequence as the
-    bedrock-mantle response, returning the FastAPI app it should be
+    bedrock-the OpenAI-compatible endpoint response, returning the FastAPI app it should be
     mounted under. Each test calls it with the exact upstream bytes
     it wants to exercise.
     """
@@ -139,15 +139,15 @@ def install_mantle_stream(monkeypatch: pytest.MonkeyPatch):
 
         transport = httpx.MockTransport(_handler)
 
-        def _fake_mantle_client(region: str) -> httpx.AsyncClient:
+        def _fake_openai_client(region: str) -> httpx.AsyncClient:
             return httpx.AsyncClient(
-                base_url=f"https://bedrock-mantle.{region}.api.aws/openai/v1",
+                base_url=f"https://bedrock-the OpenAI-compatible endpoint.{region}.api.aws/openai/v1",
                 headers={"Authorization": "Bearer test"},
                 transport=transport,
                 timeout=httpx.Timeout(5.0, connect=1.0),
             )
 
-        monkeypatch.setattr(orx, "_mantle_client", _fake_mantle_client)
+        monkeypatch.setattr(orx, "_openai_client", _fake_openai_client)
 
         app = _make_app()
         return app
@@ -181,7 +181,7 @@ def _override_auth(app: FastAPI, user: AuthenticatedUser) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Helpers: compose the kind of SSE bytes bedrock-mantle actually emits.
+# Helpers: compose the kind of SSE bytes bedrock-the OpenAI-compatible endpoint actually emits.
 # ---------------------------------------------------------------------------
 
 
@@ -194,7 +194,7 @@ def _multiline_data_frame(event: str, payload: str) -> bytes:
     """A frame whose `data:` is split across multiple data: lines.
 
     Per the SSE spec each `data:` line in the same event is concatenated
-    with a `\\n` by the parser. bedrock-mantle (and the OpenAI Responses
+    with a `\\n` by the parser. bedrock-the OpenAI-compatible endpoint (and the OpenAI Responses
     API in general) is documented to fold long payloads onto multiple
     `data:` lines.
     """
@@ -210,7 +210,7 @@ def _multiline_data_frame(event: str, payload: str) -> bytes:
 
 
 def test_stream_completes_and_settles_with_upstream_usage(
-    install_mantle_stream, stub_auth_user, _stub_credit_pipeline
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     sse = b"".join(
         [
@@ -229,7 +229,7 @@ def test_stream_completes_and_settles_with_upstream_usage(
         ]
     )
 
-    app = install_mantle_stream(sse)
+    app = install_openai_stream(sse)
     _override_auth(app, stub_auth_user)
 
     from fastapi.testclient import TestClient
@@ -239,7 +239,7 @@ def test_stream_completes_and_settles_with_upstream_usage(
         "POST",
         "/openai/v1/responses",
         json={
-            "model": "openai.gpt-5.4",
+            "model": "openai.gpt-5.6-sol",
             "input": "hi",
             "stream": True,
         },
@@ -271,12 +271,12 @@ def test_stream_completes_and_settles_with_upstream_usage(
 
 
 def test_stream_multiline_data_completed_event_extracts_usage(
-    install_mantle_stream, stub_auth_user, _stub_credit_pipeline
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     # An upstream that pretty-prints the JSON across multiple `data:`
     # lines, with a literal newline between members. This is what the
     # SSE spec calls out as the "long payload" case and is what we
-    # actually saw bedrock-mantle do for some completed events.
+    # actually saw bedrock-the OpenAI-compatible endpoint do for some completed events.
     multiline = (
         b"event: response.completed\n"
         b'data: {"type":"response.completed",\n'
@@ -286,7 +286,7 @@ def test_stream_multiline_data_completed_event_extracts_usage(
 
     sse = _frame("response.created", {"type": "response.created"}) + multiline
 
-    app = install_mantle_stream(sse)
+    app = install_openai_stream(sse)
     _override_auth(app, stub_auth_user)
 
     from fastapi.testclient import TestClient
@@ -295,7 +295,7 @@ def test_stream_multiline_data_completed_event_extracts_usage(
     with client.stream(
         "POST",
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "stream": True},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
     ) as resp:
         body = b"".join(resp.iter_bytes())
 
@@ -324,7 +324,7 @@ def test_stream_multiline_data_completed_event_extracts_usage(
 
 
 def test_stream_unterminated_final_event_is_terminated_by_proxy(
-    install_mantle_stream, stub_auth_user, _stub_credit_pipeline
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     # Note: NO trailing `\n\n` after the response.completed event.
     sse = (
@@ -336,7 +336,7 @@ def test_stream_unterminated_final_event_is_terminated_by_proxy(
         # <-- upstream closed here, missing the blank line terminator.
     )
 
-    app = install_mantle_stream(sse)
+    app = install_openai_stream(sse)
     _override_auth(app, stub_auth_user)
 
     from fastapi.testclient import TestClient
@@ -345,7 +345,7 @@ def test_stream_unterminated_final_event_is_terminated_by_proxy(
     with client.stream(
         "POST",
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "stream": True},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
     ) as resp:
         body = b"".join(resp.iter_bytes())
 
@@ -408,15 +408,15 @@ def test_stream_buffers_event_split_across_chunks(monkeypatch, stub_auth_user, _
 
     transport = httpx.MockTransport(_handler)
 
-    def _fake_mantle_client(region: str) -> httpx.AsyncClient:
+    def _fake_openai_client(region: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=f"https://bedrock-mantle.{region}.api.aws/openai/v1",
+            base_url=f"https://bedrock-the OpenAI-compatible endpoint.{region}.api.aws/openai/v1",
             headers={"Authorization": "Bearer test"},
             transport=transport,
             timeout=httpx.Timeout(5.0, connect=1.0),
         )
 
-    monkeypatch.setattr(orx, "_mantle_client", _fake_mantle_client)
+    monkeypatch.setattr(orx, "_openai_client", _fake_openai_client)
 
     app = _make_app()
     _override_auth(app, stub_auth_user)
@@ -427,7 +427,7 @@ def test_stream_buffers_event_split_across_chunks(monkeypatch, stub_auth_user, _
     with client.stream(
         "POST",
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "stream": True},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
     ) as resp:
         body = b"".join(resp.iter_bytes())
 
@@ -447,7 +447,7 @@ def test_stream_buffers_event_split_across_chunks(monkeypatch, stub_auth_user, _
 
 
 def test_stream_preserves_blank_line_event_terminator(
-    install_mantle_stream, stub_auth_user, _stub_credit_pipeline
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     # Two events back-to-back: an interior event and a terminal one.
     sse = (
@@ -459,7 +459,7 @@ def test_stream_preserves_blank_line_event_terminator(
         b"\n"
     )
 
-    app = install_mantle_stream(sse)
+    app = install_openai_stream(sse)
     _override_auth(app, stub_auth_user)
 
     from fastapi.testclient import TestClient
@@ -468,7 +468,7 @@ def test_stream_preserves_blank_line_event_terminator(
     with client.stream(
         "POST",
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "stream": True},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
     ) as resp:
         body = b"".join(resp.iter_bytes())
 

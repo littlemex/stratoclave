@@ -126,7 +126,7 @@ def test_pipeline_settle_overrun_path(stub_usage_logs):
         reservation=2_000,
         actual_input_tokens=2_500,
         actual_output_tokens=500,
-        model_id="openai.gpt-5.4",
+        model_id="openai.gpt-5.6-sol",
     )
 
     # 2_000 reserved, 3_000 used → +1_000 additional reserve.
@@ -150,7 +150,7 @@ def test_pipeline_settle_zero_actual_refunds_full(stub_usage_logs):
         reservation=8_192,
         actual_input_tokens=0,
         actual_output_tokens=0,
-        model_id="openai.gpt-5.4",
+        model_id="openai.gpt-5.6-sol",
     )
 
     assert repo.refund_calls == [8_192]
@@ -176,7 +176,7 @@ def test_pipeline_overrun_clamps_when_balance_exhausted(stub_usage_logs):
         reservation=2_000,
         actual_input_tokens=10_000,
         actual_output_tokens=2_000,
-        model_id="openai.gpt-5.4",
+        model_id="openai.gpt-5.6-sol",
     )
 
     # First reserve(10000) fails, then clamp reserve(8000) succeeds.

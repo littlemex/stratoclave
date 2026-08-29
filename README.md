@@ -53,8 +53,7 @@ Desktop Cowork), an OpenAI `Chat Completions`-compatible endpoint at
 `/v1/chat/completions` (for the OpenAI SDK, on the same Bedrock converse
 backend), and an OpenAI Responses API-compatible endpoint at
 `/openai/v1/responses` (for the `codex` CLI, backed by the OpenAI-compatible
-models on Amazon Bedrock's bedrock-mantle service — OpenAI GPT-5.x, xAI Grok,
-and Google Gemma). Every route enforces per-user token
+models on Bedrock's OpenAI-compatible endpoint — GPT-5.6 Sol/Terra and xAI Grok 4.6). Every route enforces per-user token
 quotas and optional per-tenant **dollar pool** and **per-model** budgets with
 atomic DynamoDB reservations; **streaming** Bedrock calls additionally get
 retry + cross-region failover with quota-driven per-model fallback (the
@@ -169,7 +168,7 @@ choke point:
   telemetry the user can simply stop sending.
 - **Both Claude and codex through one control plane.** The same identity,
   budget, and audit primitives cover the Anthropic Messages API *and* the
-  OpenAI Responses API (GPT-5.x via bedrock-mantle). A Bedrock credential
+  OpenAI Responses API (GPT-5.x via bedrock-runtime). A Bedrock credential
   broker is Anthropic-only.
 - **App-layer model / capability policy.** The model allowlist, and (on the
   roadmap) per-tenant reasoning-effort and tool caps, are enforced in the
@@ -208,10 +207,10 @@ for where a broker is the better choice.
   list.
 - **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
   `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
-  them to the OpenAI-compatible models on Amazon Bedrock's bedrock-mantle
+  them to the OpenAI-compatible models on Amazon Bedrock's bedrock-runtime
   service — OpenAI GPT-5.x (`gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`),
   xAI Grok (`grok-4.6`), and Google Gemma (`gemma-4-31b`). Because all of these
-  speak the same mantle wire shape, adding one is a registry entry, not a new
+  speak the same OpenAI wire shape, adding one is a registry entry, not a new
   transport. The `stratoclave codex` CLI
   subcommand wraps the `codex` binary against this endpoint with an ephemeral
   key; the `--codex` flag on `stratoclave setup` patches `~/.codex/config.toml`
@@ -316,7 +315,7 @@ for where a broker is the better choice.
 ## Architecture at a glance
 
 <p align="center">
-  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus bedrock-mantle." width="100%">
+  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus the OpenAI-compatible endpoint." width="100%">
 </p>
 
 The Stratoclave control plane lives inside a **single AWS region of your
@@ -335,7 +334,7 @@ independent of the deploy region** (`BEDROCK_PRIMARY_REGION`). Anthropic Message
 single Bedrock `converse` / `converseStream` backend against an
 inference-profile allowlist — different wire shapes, one control core. OpenAI
 Responses calls (`/openai/v1/responses`) are forwarded by httpx to the
-bedrock-mantle service at `bedrock-mantle.{region}.api.aws/openai/v1`, where the
+bedrock-runtime service at `bedrock-runtime.{region}.amazonaws.com/openai/v1`, where the
 region is per-model (GPT-5.4 and Grok 4.6 → us-west-2; GPT-5.5, GPT-5.6 Sol/Terra,
 and Gemma 4 → us-east-2). The gateway forwards the resolved Bedrock model id (not
 the client-facing alias), so both `grok-4.6` and `xai.grok-4.6` route correctly.
@@ -557,7 +556,7 @@ print(resp.output_text)
 
 The `responses:send` scope is required; all three roles (`admin`, `team_lead`,
 `user`) carry it by default. GPT-5.x, xAI Grok, and Google Gemma are served via
-the bedrock-mantle service and gated by the `CODEX_ENABLED` feature flag on the
+the OpenAI-compatible endpoint on bedrock-runtime and gated by the `CODEX_ENABLED` feature flag on the
 ECS task. The default codex model is `openai.gpt-5.6-sol` (override per call with
 `--model`, or per deployment with the `DEFAULT_CODEX_MODEL` env). See
 [`docs/CODEX_GUIDE.md`](./docs/CODEX_GUIDE.md) for the full codex setup.
@@ -602,7 +601,7 @@ Concurrent requests that would overshoot a quota cannot race. Both
 inference routes share the same reservation pipeline (`backend/mvp/_pipeline.py`):
 the request reserves `max_tokens + input_estimate` with a conditional
 `UpdateItem` on `UserTenants`, invokes the upstream service (Bedrock
-`converse` for `/v1/messages`, bedrock-mantle Responses for
+`converse` for `/v1/messages`, bedrock-runtime Responses for
 `/openai/v1/responses`), then refunds the difference from the real token
 counts. `UsageLogs` always records the actual spend, not the reservation.
 
@@ -706,7 +705,7 @@ from a human form is a typo risk.
 | `POST /v1/messages`                    | Anthropic `Messages API` payload; translated to Bedrock `converse` / `converseStream`. Tools, vision (base64), thinking, prompt caching. Requires the `messages:send` scope. |
 | `POST /v1/chat/completions`            | OpenAI `Chat Completions` payload on the **same** Bedrock converse backend. Streaming + tool calls. Unsupported params (`n>1`, `logprobs`, `response_format`, `image_url`) rejected with `400`, never silently dropped. Requires the `messages:send` scope. |
 | `GET  /v1/models`                      | Returns the Claude-family inference profiles mapped by the backend. |
-| `POST /openai/v1/responses`            | OpenAI Responses API payload; forwarded to `bedrock-mantle.{region}.api.aws/openai/v1`. Requires the `responses:send` scope. Gated by the `CODEX_ENABLED` ECS env flag. |
+| `POST /openai/v1/responses`            | OpenAI Responses API payload; forwarded to `bedrock-runtime.{region}.amazonaws.com/openai/v1`. Requires the `responses:send` scope. Gated by the `CODEX_ENABLED` ECS env flag. |
 | `GET  /openai/v1/models`               | Returns OpenAI-family entries from the model registry, in the OpenAI `/v1/models` shape. Requires the `responses:send` scope. |
 | `GET  /.well-known/stratoclave-config` | Unauthenticated discovery document; drives `stratoclave setup`.    |
 | `POST /api/mvp/auth/sso-exchange`      | Vouch-by-STS entry point for CLI SSO login.                         |
@@ -717,7 +716,7 @@ from a human form is a typo risk.
 | `/api/mvp/admin/*`                     | Admin and team-lead operations (user, tenant, credit, usage, trusted accounts, invites). |
 
 The Claude family (via Bedrock `converse`) and the OpenAI family (via the
-bedrock-mantle Responses API, currently `gpt-5.4` and `gpt-5.5`) are the
+bedrock-runtime Responses API, currently `gpt-5.4` and `gpt-5.5`) are the
 supported providers. Any model outside the explicit allowlist is rejected
 with HTTP 400. The full registry lives in
 [`backend/mvp/models.py`](./backend/mvp/models.py).
@@ -739,7 +738,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
-| Providers | Amazon Bedrock — Claude (incl. Opus 5 / Fable 5) via `converse`; and, via bedrock-mantle, OpenAI GPT-5.x (incl. GPT-5.6 Sol/Terra), xAI Grok 4.6, and Google Gemma 4 **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Still fewer providers than LiteLLM — a breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
+| Providers | Amazon Bedrock — Claude (incl. Opus 5 / Fable 5) via `converse`; and, via the OpenAI-compatible endpoint on bedrock-runtime, OpenAI GPT-5.x (incl. GPT-5.6 Sol/Terra), xAI Grok 4.6, and Google Gemma 4 **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Still fewer providers than LiteLLM — a breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
 | Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit. It is not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), but retaining their reservations is opt-in and off by default, so today such an outcome still returns its budget. See the crash-safe row below. | **No client bypass**, and **pre-call reservation is shipped** — `litellm/proxy/spend_tracking/budget_reservation.py` (first committed 2026-04-30) reserves before the call, fails closed when the reservation cannot be written, clamps adversarial `max_tokens`, and covers seven scopes. The admission counter is a `DualCache` (in-process + Redis) with the DB as an authority that catches up; the code documents recovery paths for Redis restart / cross-pod reset. **We have not tested whether the ceiling holds through cache loss, and we do not claim it fails.** The honest difference is the guarantee level, not the presence of a reservation. Verify against the version you deploy | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
@@ -891,7 +890,7 @@ Infrastructure-level hardening is enforced at synth time by `cdk-nag`
 - Vouch-by-STS replay defence via the `sso-nonces` TTL table,
 - VPC Flow Logs (CloudWatch, 30 d),
 - structured-log PII redaction (emails → SHA-256 markers),
-- bedrock-mantle bearer tokens minted with a 15-minute TTL (capped in
+- Bedrock bearer tokens minted with a 15-minute TTL (capped in
   `openai_responses.py`); the token lives only in the ECS task heap for
   the duration of one request and is never persisted to DynamoDB or logs,
 - a dedicated `responses:send` scope on `POST /openai/v1/responses` and

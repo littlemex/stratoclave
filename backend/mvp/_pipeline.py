@@ -187,7 +187,7 @@ _HOLD_TTL_SECONDS = max(
 # the ceiling is the WORST (largest) of the transports this pipeline actually
 # uses, plus a margin for clock skew between the process that started the timer
 # and the one that later reads it. This imports the SAME named constants
-# `_bedrock_clients`/`_mantle_transport` configure their real clients with
+# `_bedrock_clients`/`_openai_transport` configure their real clients with
 # (added there for exactly this reason), so a change to either transport's
 # timeout changes this derivation automatically instead of by someone
 # remembering to update a second copy.
@@ -207,9 +207,9 @@ from ._bedrock_clients import (
     READ_TIMEOUT_SECONDS as _BEDROCK_READ_SECONDS,
     RETRY_MAX_ATTEMPTS as _BEDROCK_SDK_ATTEMPTS,
 )
-from ._mantle_transport import (
-    RETRY_MAX_ATTEMPTS as _MANTLE_RETRY_ATTEMPTS,
-    STREAM_READ_TIMEOUT_SECONDS as _MANTLE_READ_SECONDS,
+from ._openai_transport import (
+    RETRY_MAX_ATTEMPTS as _openai_RETRY_ATTEMPTS,
+    STREAM_READ_TIMEOUT_SECONDS as _openai_READ_SECONDS,
 )
 from .routing.infrarouter import CHAIN_DEADLINE_SECONDS as _ROUTER_CHAIN_DEADLINE
 
@@ -217,13 +217,13 @@ _BEDROCK_ONE_ATTEMPT_SECONDS = (
     (_BEDROCK_CONNECT_SECONDS + _BEDROCK_READ_SECONDS) * _BEDROCK_SDK_ATTEMPTS
 )
 _BEDROCK_WORST_CASE_SECONDS = _ROUTER_CHAIN_DEADLINE + _BEDROCK_ONE_ATTEMPT_SECONDS
-# mantle's connect timeout (10s) is a module-private literal in
-# `_mantle_transport._DEFAULT_TIMEOUT`, not (yet) named — folding in only the
+# the OpenAI-compatible endpoint's connect timeout (10s) is a module-private literal in
+# `_openai_transport._DEFAULT_TIMEOUT`, not (yet) named — folding in only the
 # named read timeout here is the conservative direction (it UNDERSTATES
-# mantle's worst case by the connect leg), which is safe for a floor this
+# the OpenAI-compatible endpoint's worst case by the connect leg), which is safe for a floor this
 # module then adds a full clock-skew margin on top of; overstating would be
 # the unsafe direction.
-_MANTLE_WORST_CASE_SECONDS = _MANTLE_READ_SECONDS * _MANTLE_RETRY_ATTEMPTS
+_openai_WORST_CASE_SECONDS = _openai_READ_SECONDS * _openai_RETRY_ATTEMPTS
 
 # Clock-skew margin: this pipeline's own timestamps (`created_at` on the hold,
 # `expires_at`) are all server-side wall-clock, but the reaper's sweep and the
@@ -233,8 +233,8 @@ _MANTLE_WORST_CASE_SECONDS = _MANTLE_READ_SECONDS * _MANTLE_RETRY_ATTEMPTS
 # host whose NTP sync has degraded, not a number tuned to any test.
 _CLOCK_SKEW_MARGIN_SECONDS = 60
 
-REQUEST_DEADLINE_SECONDS = max(_BEDROCK_READ_SECONDS, _MANTLE_READ_SECONDS)
-RETRY_BUDGET_SECONDS = max(_BEDROCK_WORST_CASE_SECONDS, _MANTLE_WORST_CASE_SECONDS)
+REQUEST_DEADLINE_SECONDS = max(_BEDROCK_READ_SECONDS, _openai_READ_SECONDS)
+RETRY_BUDGET_SECONDS = max(_BEDROCK_WORST_CASE_SECONDS, _openai_WORST_CASE_SECONDS)
 # `MAX_CALL_DURATION_SECONDS` is named to match section 5's own vocabulary
 # ("the request deadline plus the retry budget plus a margin for clock skew")
 # — `RETRY_BUDGET_SECONDS` here already folds the deadline into its own

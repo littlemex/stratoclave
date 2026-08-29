@@ -40,7 +40,7 @@ class ModelEntry:
     `aliases` is the set of client-facing identifiers (Anthropic SDK names,
     short codex-style names, raw Bedrock IDs) that map to this entry.
     `bedrock_region` is asymmetric on purpose. For `wire_protocol="responses"` it
-    is authoritative: each bedrock-mantle model is offered in specific regions
+    is authoritative: each model on the OpenAI-compatible endpoint is offered in specific regions
     (us-east-2 / us-west-2). For `"messages"` it is advisory — the Converse chain
     is built from the deployment's region policy (`routing.chains`), so a Converse
     model must be offered there or it should not be registered.
@@ -109,7 +109,7 @@ _REQUIRED_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "aliases",
                     "wire_protocol", "pricing_key")
 _STRING_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "wire_protocol",
                   "pricing_key", "endpoint_key", "sr_pool_ref", "notes")
-# Regions where the bedrock-mantle surface exists. `bedrock_region` is AUTHORITATIVE
+# Regions where the OpenAI-compatible surface serves these models. `bedrock_region` is AUTHORITATIVE
 # for a responses entry — that is where the prompt goes — so a typo'd region must not
 # reach the transport, which would fail with a confusing connection error at best.
 #
@@ -119,12 +119,12 @@ _STRING_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "wire_protoc
 # it must never move a registry region, because the IaC residency analysis
 # (`iac/lib/region-config.ts`) reads the registry and ignores the variable. Making
 # the variable load-bearing here would silently invalidate that analysis. Residency
-# policy is enforced there; this check only rejects a region mantle does not have.
+# policy is enforced there; this check only rejects a region the endpoint does not have.
 # Per the model cards: the OpenAI and xAI families are offered in us-east-2/us-west-2,
 # and Gemma 4 adds us-east-1 and eu-central-1. Union of the two, because this check
-# only rejects a region mantle does not serve at all — which model is offered where is
+# only rejects a region the endpoint does not serve at all — which model is offered where is
 # the entry author's business.
-_MANTLE_REGIONS = frozenset({"us-east-1", "us-east-2", "us-west-2", "eu-central-1"})
+_OPENAI_ENDPOINT_REGIONS = frozenset({"us-east-1", "us-east-2", "us-west-2", "eu-central-1"})
 
 
 def _validate_registry(registry: tuple[ModelEntry, ...]) -> None:
@@ -186,9 +186,9 @@ def _parse_entry(path: str, index: int, raw: object) -> ModelEntry:
     if raw["wire_protocol"] not in _WIRE_PROTOCOLS:
         _fail(path, f"{where}.wire_protocol {raw['wire_protocol']!r} not in {sorted(_WIRE_PROTOCOLS)}")
     if raw["wire_protocol"] == "responses" and raw.get("served_by", "bedrock") == "bedrock":
-        if raw["bedrock_region"] not in _MANTLE_REGIONS:
+        if raw["bedrock_region"] not in _OPENAI_ENDPOINT_REGIONS:
             _fail(path, f"{where}.bedrock_region {raw['bedrock_region']!r} is not a region where "
-                        f"bedrock-mantle exists {sorted(_MANTLE_REGIONS)}; a responses entry's "
+                        f"the OpenAI-compatible endpoint serves {sorted(_OPENAI_ENDPOINT_REGIONS)}; a responses entry's "
                         f"region is authoritative — that is where the prompt goes")
     served_by = raw.get("served_by", "bedrock")
     if served_by not in _SERVED_BY:

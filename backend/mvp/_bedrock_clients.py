@@ -167,7 +167,7 @@ def reset_client_cache() -> None:
     Closing before dropping matters: the client owns a urllib3 pool, and letting
     it fall out of the dict unclosed leaks the sockets it holds for as long as the
     process lives. Not offered as an operational tool for the same reason as the
-    mantle equivalent — closing a client while requests are in flight severs them.
+    OpenAI-transport equivalent — closing a client while requests are in flight severs them.
     """
     with _CLIENTS_LOCK:
         for client in _CLIENTS.values():
@@ -186,7 +186,7 @@ def deployment_client():
     target in one region and invoked in another. It does NOT follow a failover
     selection: a caller that has picked an alternate target must build a client for
     that target's region. `ModelEntry.bedrock_region` is authoritative only for the
-    bedrock-mantle surface.
+    OpenAI-compatible surface on bedrock-runtime.
     """
     region = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1"
     return bedrock_runtime_client(region)

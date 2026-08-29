@@ -67,7 +67,7 @@ Override `AWS_PROFILE` / `AWS_REGION` on the command line:
 |---|---|---|
 | `POST /v1/messages` | `claude-haiku-4-5` | Anthropic Messages API, via Bedrock Converse |
 | `POST /v1/chat/completions` | `claude-haiku-4-5` | OpenAI Chat Completions shape, same Bedrock backend |
-| `POST /openai/v1/responses` | `openai.gpt-5.6-sol` | OpenAI Responses shape, via `bedrock-mantle` |
+| `POST /openai/v1/responses` | `openai.gpt-5.6-sol` | OpenAI Responses shape, via `bedrock-runtime` |
 
 These are aliases resolved by `backend/mvp/models.py` (`_ALIAS_MAP`) — not raw
 Bedrock model IDs. `GET /v1/models` on your running gateway lists every
@@ -98,10 +98,10 @@ than a bare `InvokeModel` grant. **This doc does not assert that this list is
 either the minimum or the complete set for your own IAM setup** — read
 `iac/lib/ecs-stack.ts` directly for the authoritative, current policy, and
 adjust your own principal's permissions to match what your models and
-invocation style actually require. The IAM story for the `bedrock-mantle`
+invocation style actually require. The IAM story for the `bedrock-runtime`
 OpenAI-compatible route (`openai.gpt-5.6-sol`) has not been verified here at
 all; if that call fails with an access-denied error, check your account's
-`bedrock-mantle` access separately.
+`bedrock-runtime` access separately.
 
 ## What this setup verifies, and what it does not
 

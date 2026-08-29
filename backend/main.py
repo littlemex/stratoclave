@@ -174,9 +174,9 @@ async def lifespan(app: FastAPI):
     # Close the pooled upstream clients. They live for the process, so this is the
     # only place their connections are released; dropping them without closing
     # would leak sockets for as long as the task lingers in draining.
-    from mvp._mantle_transport import aclose_all as _aclose_mantle_clients
+    from mvp._openai_transport import aclose_all as _aclose_openai_clients
 
-    await _aclose_mantle_clients()
+    await _aclose_openai_clients()
 
     logger.info("application_shutdown")
 

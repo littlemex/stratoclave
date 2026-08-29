@@ -10,17 +10,17 @@ resolved entry's `wire_protocol` — the route adds no third transport:
   - `messages`  → Bedrock `converse` / `converse_stream` via the shared
                   budget-flow layer, in the DEPLOYMENT's Converse region, exactly
                   as /v1/messages does. `ModelEntry.bedrock_region` is authoritative
-                  only for the mantle leg: the Converse chain is built from the
+                  only for the the OpenAI-compatible endpoint leg: the Converse chain is built from the
                   operator's primary + failover regions (see routing/chains.py), so
                   a Converse model must be offered there or not be registered.
-  - `responses` → bedrock-mantle's NATIVE OpenAI Chat Completions surface at
-                  `/openai/v1/chat/completions`. Mantle speaks Chat Completions
+  - `responses` → the OpenAI-compatible endpoint's NATIVE OpenAI Chat Completions surface at
+                  `/openai/v1/chat/completions`. OpenAI-compatible endpoint speaks Chat Completions
                   directly, so this is a pass-through: no Responses-API
                   round-trip and no shape translation to drift.
 
 Widening this route is what lets an OpenAI-compatible client that cannot speak
 the Responses API — vLLM Semantic Router, for one, whose only upstream formats
-are `openai` and `anthropic` — reach the mantle-served models through the
+are `openai` and `anthropic` — reach the the OpenAI-compatible endpoint-served models through the
 gateway, with the same reserve/settle accounting as every other route.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import _mantle_transport
+from . import _openai_transport
 from ._bedrock_clients import deployment_client
 from ._timing import RequestTiming, phase as _timed_phase
 from .anthropic import _selected_bedrock_model
@@ -301,7 +301,7 @@ def chat_completions(
         raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "invalid_model"}})
     # `resolve_model` resolves the WHOLE registry, including entries this route
     # cannot serve: self-hosted vLLM entries (`served_by="vllm"`) have no Bedrock
-    # region or mantle endpoint, and virtual semantic-router pool entries are
+    # region or the OpenAI-compatible endpoint endpoint, and virtual semantic-router pool entries are
     # candidate-chain placeholders that must never be a charge-of-record model.
     # The old Claude-only resolver excluded both by accident; now it is explicit.
     if getattr(entry, "served_by", "bedrock") != "bedrock" or getattr(entry, "virtual", False):
@@ -346,16 +346,16 @@ def chat_completions(
     # hold, and removes the twin-validation drift hazard (no separate pre-check
     # that can diverge from the converter). The same kwargs are reused by both
     # the streaming and non-streaming paths below.
-    # Only the Converse transport needs Bedrock kwargs. The mantle transport
+    # Only the Converse transport needs Bedrock kwargs. The the OpenAI-compatible endpoint transport
     # forwards the client's OpenAI body verbatim, so building (and its content
-    # restrictions) would be dead work that also wrongly rejects payloads mantle
+    # restrictions) would be dead work that also wrongly rejects payloads the OpenAI-compatible endpoint
     # accepts natively.
     kwargs: dict[str, Any] = {}
-    mantle_payload: Optional[dict] = None
+    openai_payload: Optional[dict] = None
     injected_usage = False
     if entry.wire_protocol == "messages":
         # Converse has no equivalent for these two, so they are rejected here
-        # rather than route-wide: mantle serves both natively and rejecting them
+        # rather than route-wide: the OpenAI-compatible endpoint serves both natively and rejecting them
         # for every transport would deny structured output to the models that
         # support it.
         if body.top_logprobs is not None:
@@ -367,16 +367,16 @@ def chat_completions(
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"error": {"message": str(e), "type": "invalid_request_error", "code": "unsupported_content"}})
     else:
-        # CONTRACT-hard-ceiling.md section 3a: the mantle transport's canonical
+        # CONTRACT-hard-ceiling.md section 3a: the the OpenAI-compatible endpoint transport's canonical
         # payload, built ONCE here (pre-reserve) rather than inside
-        # `_mantle_chat_completion` — same reasoning as the Converse `kwargs`
+        # `_openai_chat_completion` — same reasoning as the Converse `kwargs`
         # above: one payload, surveyed and then sent, not two independently
         # built copies.
-        mantle_payload, injected_usage = _build_mantle_chat_payload(body, entry)
+        openai_payload, injected_usage = _build_openai_chat_payload(body, entry)
 
     # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 0/7b):
     # survey whichever canonical payload this request will actually send —
-    # Converse `kwargs` or the mantle `payload` — but ONLY when enforcement
+    # Converse `kwargs` or the the OpenAI-compatible endpoint `payload` — but ONLY when enforcement
     # might use it (`dollar_pool_bound_should_compute`); see `mvp.anthropic`'s
     # identical gate for why paying for this survey is real per-request work
     # with no purpose for a tenant whose bound can never gate admission.
@@ -392,7 +392,7 @@ def chat_completions(
             _survey, _payload_bytes, _payload_hash = survey_and_hash_converse_kwargs(kwargs)
         else:
             _survey, _payload_bytes, _payload_hash = survey_and_hash_openai_chat_payload(
-                mantle_payload or {}
+                openai_payload or {}
             )
         _boundability = assess_boundability(_survey)
         _bound_state = dollar_pool_bound_state(user.org_id)
@@ -481,11 +481,11 @@ def chat_completions(
     # priced/quota-charged so the Bedrock call agrees with the pool + quota.
     # The cascade only selects registry-resolvable `messages`-protocol models,
     # so a cross-protocol / typo'd chain entry can never win here.
-    # The mantle transport forks here, AFTER the reservation, so it inherits the
+    # The the OpenAI-compatible endpoint transport forks here, AFTER the reservation, so it inherits the
     # identical reserve/settle/refund accounting as the Converse path — and, like
     # the Converse path, it must invoke whatever the reservation actually selected.
     # `reserve_credit_for_model` cascades and honours a hard pin WITHIN a protocol,
-    # so a `responses` request whose quota cascaded to another mantle model would
+    # so a `responses` request whose quota cascaded to another the OpenAI-compatible endpoint model would
     # otherwise charge one model and invoke another.
     if entry.wire_protocol == "responses":
         selected_id = _selected_bedrock_model(tenants_repo, entry.bedrock_model_id)
@@ -494,21 +494,21 @@ def chat_completions(
                 selected_entry = resolve_model(selected_id)
             except ValueError:
                 selected_entry = None
-            # Only follow a selection that is still mantle-served: a cross-protocol
+            # Only follow a selection that is still the OpenAI-compatible endpoint-served: a cross-protocol
             # selection cannot be invoked here, and invoking the originally
             # validated model is safer than guessing a transport.
             if selected_entry is not None and selected_entry.wire_protocol == "responses":
                 entry = selected_entry
         # Content bytes never depend on which model was selected — only this
         # one field does (same reasoning as `kwargs["modelId"]` below) — so
-        # the already-built, already-surveyed `mantle_payload` is re-stamped
+        # the already-built, already-surveyed `openai_payload` is re-stamped
         # and reused rather than rebuilt.
-        assert mantle_payload is not None
-        mantle_payload["model"] = entry.bedrock_model_id
-        return _mantle_chat_completion(
+        assert openai_payload is not None
+        openai_payload["model"] = entry.bedrock_model_id
+        return _openai_chat_completion(
             body=body, entry=entry, user=user, tenants_repo=tenants_repo,
             reservation=reservation, corr=corr,
-            payload=mantle_payload, injected_usage=injected_usage,
+            payload=openai_payload, injected_usage=injected_usage,
             request_id=ctx.request_id if ctx else None,
             timing=timing,
         )
@@ -622,33 +622,33 @@ def chat_completions(
 
 
 # ---------------------------------------------------------------------------
-# bedrock-mantle pass-through (entries whose wire_protocol is not "messages")
+# the OpenAI-compatible endpoint pass-through (entries whose wire_protocol is not "messages")
 # ---------------------------------------------------------------------------
 
 # Upstream statuses that describe the CALLER's request (or ask it to back off) and
 # are therefore worth preserving. Anything else collapses to 502: it describes the
 # gateway's own upstream problem, not something the caller can act on.
-# 401/403 are deliberately absent: from mantle they mean the GATEWAY's credential
+# 401/403 are deliberately absent: from the OpenAI-compatible endpoint they mean the GATEWAY's credential
 # is wrong, which the caller can do nothing about, so they surface as 502.
-_MANTLE_PASSTHROUGH_STATUSES = frozenset({400, 404, 408, 409, 413, 422, 429})
+_openai_PASSTHROUGH_STATUSES = frozenset({400, 404, 408, 409, 413, 422, 429})
 
-# mantle's Chat Completions path, relative to the transport's `/openai/v1` base.
-_MANTLE_CHAT_PATH = "/chat/completions"
+# the OpenAI-compatible endpoint's Chat Completions path, relative to the transport's `/openai/v1` base.
+_openai_CHAT_PATH = "/chat/completions"
 
 
-def _mantle_status(upstream: int) -> int:
+def _openai_status(upstream: int) -> int:
     """Map an upstream status onto the one the caller should see."""
-    return upstream if upstream in _MANTLE_PASSTHROUGH_STATUSES else 502
+    return upstream if upstream in _openai_PASSTHROUGH_STATUSES else 502
 
 
-def _build_mantle_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry") -> tuple[dict, bool]:
-    """The exact JSON `payload` `/v1/chat/completions` sends to bedrock-mantle
+def _build_openai_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry") -> tuple[dict, bool]:
+    """The exact JSON `payload` `/v1/chat/completions` sends to the OpenAI-compatible endpoint
     (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
     the reserve call — CONTRACT-hard-ceiling.md section 3a requires the bound
     to be computed over the canonical payload the gateway is about to send,
-    and this is that payload for the mantle transport (as
+    and this is that payload for the the OpenAI-compatible endpoint transport (as
     `mvp.anthropic._build_bedrock_kwargs` is for the Converse transport).
-    Building it pre-reserve also means `_mantle_chat_completion` below no
+    Building it pre-reserve also means `_openai_chat_completion` below no
     longer rebuilds it — one canonical payload, surveyed and then sent,
     rather than two independently-constructed copies that could drift.
     """
@@ -672,7 +672,7 @@ def _build_mantle_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry"
     return payload, injected_usage
 
 
-def _mantle_chat_completion(
+def _openai_chat_completion(
     *,
     body: ChatCompletionsRequest,
     entry: "ModelEntry",
@@ -685,12 +685,12 @@ def _mantle_chat_completion(
     request_id: Optional[str] = None,
     timing: Optional[RequestTiming] = None,
 ):
-    """Forward an OpenAI Chat Completions request to bedrock-mantle unchanged.
+    """Forward an OpenAI Chat Completions request to the OpenAI-compatible endpoint unchanged.
 
-    mantle serves `/openai/v1/chat/completions` natively, so there is no shape
+    the OpenAI-compatible endpoint serves `/openai/v1/chat/completions` natively, so there is no shape
     translation. Three rewrites are applied and all are mechanical: the `model`
-    field carries the resolved Bedrock model ID (mantle 404s on our client-facing
-    aliases); `max_tokens` becomes `max_completion_tokens`, the spelling mantle's
+    field carries the resolved Bedrock model ID (the OpenAI-compatible endpoint 404s on our client-facing
+    aliases); `max_tokens` becomes `max_completion_tokens`, the spelling the OpenAI-compatible endpoint's
     reasoning-capable tiers accept; and on a streamed request
     `stream_options.include_usage` is forced on.
 
@@ -702,7 +702,7 @@ def _mantle_chat_completion(
     usage sees the stream it expected.
 
     `payload`/`injected_usage` are now built ONCE, pre-reserve, by the caller
-    (`_build_mantle_chat_payload`) — see that function's docstring.
+    (`_build_openai_chat_payload`) — see that function's docstring.
 
     Accounting is exclusive by construction: `_account_once` runs either the
     refund-and-release path or the settle path, never both, and only once. An
@@ -713,9 +713,9 @@ def _mantle_chat_completion(
         # Standalone-call fallback (e.g. a caller/test exercising this
         # function in isolation, pre-reserve survey never having run): build
         # it here exactly as the route used to, byte-identically to
-        # `_build_mantle_chat_payload`. The real route path always supplies
+        # `_build_openai_chat_payload`. The real route path always supplies
         # `payload` pre-built, so this branch is never taken there.
-        payload, injected_usage = _build_mantle_chat_payload(body, entry)
+        payload, injected_usage = _build_openai_chat_payload(body, entry)
 
     # One latch for both terminal paths. Whichever fires first wins; the other is a
     # no-op. This is what keeps a 4xx on a streamed request from being refunded by
@@ -748,20 +748,20 @@ def _mantle_chat_completion(
         from core.error_handler import sanitize_exception_message
 
         # Pooled, process-wide client: not closed here, and auth travels with the
-        # request rather than with the client (see `_mantle_transport`).
-        client = _mantle_transport.sync_client(entry.bedrock_region)
-        auth = _mantle_transport.auth_headers(entry.bedrock_region)
+        # request rather than with the client (see `_openai_transport`).
+        client = _openai_transport.sync_client(entry.bedrock_region)
+        auth = _openai_transport.auth_headers(entry.bedrock_region)
         try:
             with _timed_phase(timing, "upstream"):
                 # Deadline per request, below the CDN's, so a slow upstream becomes
                 # our JSON 502 rather than the CDN's HTML 504.
                 resp = client.post(
-                    _MANTLE_CHAT_PATH, json=payload, headers=auth,
-                    timeout=_mantle_transport.nonstream_timeout(),
+                    _openai_CHAT_PATH, json=payload, headers=auth,
+                    timeout=_openai_transport.nonstream_timeout(),
                 )
         except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
             if timing is not None:
-                timing.emit(route="chat_completions", transport="mantle",
+                timing.emit(route="chat_completions", transport="the OpenAI-compatible endpoint",
                             model=body.model, outcome="upstream_error")
             raise _fail(502, sanitize_exception_message(str(e)))
         if resp.status_code >= 400:
@@ -769,21 +769,21 @@ def _mantle_chat_completion(
             # would otherwise be handed to every request in this region until its
             # TTL ran out.
             if resp.status_code in (401, 403):
-                _mantle_transport.invalidate_token(entry.bedrock_region, auth)
-            raise _fail(_mantle_status(resp.status_code), _mantle_transport.format_error(resp))
+                _openai_transport.invalidate_token(entry.bedrock_region, auth)
+            raise _fail(_openai_status(resp.status_code), _openai_transport.format_error(resp))
         # A 200 with an unparseable body is still an invoke-time failure: without
         # a usage block there is nothing to settle against, and letting the
         # exception escape would strand the hold and the pool slot.
         try:
             data = resp.json()
-            input_tokens, output_tokens = _mantle_transport.extract_usage(data.get("usage") or {})
+            input_tokens, output_tokens = _openai_transport.extract_usage(data.get("usage") or {})
         except Exception as e:  # noqa: BLE001
             raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
 
         with _timed_phase(timing, "settle"):
             _settle(input_tokens, output_tokens)
         if timing is not None:
-            timing.emit(route="chat_completions", transport="mantle", model=body.model,
+            timing.emit(route="chat_completions", transport="the OpenAI-compatible endpoint", model=body.model,
                         outcome="ok", input_tokens=input_tokens,
                         output_tokens=output_tokens)
         # Echo the client-facing alias, not the Bedrock ID: the caller asked for
@@ -803,18 +803,18 @@ def _mantle_chat_completion(
         input_tokens = output_tokens = 0
         # Pooled and process-wide, so it outlives this stream and is not closed
         # here; only the stream itself is scoped by `async with`.
-        client = _mantle_transport.async_client(entry.bedrock_region)
+        client = _openai_transport.async_client(entry.bedrock_region)
         try:
             try:
-                auth = await _mantle_transport.auth_headers_async(entry.bedrock_region)
+                auth = await _openai_transport.auth_headers_async(entry.bedrock_region)
                 async with client.stream(
-                    "POST", _MANTLE_CHAT_PATH, json=payload, headers=auth,
+                    "POST", _openai_CHAT_PATH, json=payload, headers=auth,
                 ) as resp:
                     if resp.status_code >= 400:
                         if resp.status_code in (401, 403):
-                            _mantle_transport.invalidate_token(entry.bedrock_region, auth)
+                            _openai_transport.invalidate_token(entry.bedrock_region, auth)
                         await resp.aread()
-                        msg = _mantle_transport.format_error(resp)
+                        msg = _openai_transport.format_error(resp)
                         await asyncio.to_thread(_refund_and_release)
                         yield f"data: {json.dumps({'error': {'message': msg, 'type': 'api_error'}})}\n\n".encode()
                         return
@@ -846,7 +846,7 @@ def _mantle_chat_completion(
                                 continue
                             usage = parsed.get("usage")
                             if usage:
-                                input_tokens, output_tokens = _mantle_transport.extract_usage(usage)
+                                input_tokens, output_tokens = _openai_transport.extract_usage(usage)
                                 if injected_usage and not parsed.get("choices"):
                                     ours = True
                         return ours

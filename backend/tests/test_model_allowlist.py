@@ -146,8 +146,12 @@ class TestSuggestionsAreFollowable:
     def test_a_very_short_alias_cannot_match_arbitrary_input(self):
         from mvp.models import _did_you_mean, _MIN_CONTAINED_ALIAS
         # Containment is gated on length, so a short alias cannot fire on junk.
+        # The probe must embed a SHORT alias: an earlier version embedded
+        # `gpt-5.6-sol`, which is 11 characters and therefore long enough to match
+        # legitimately, so the test passed for the wrong reason once the registry's
+        # names got longer.
         assert _MIN_CONTAINED_ALIAS >= 8
-        assert _did_you_mean("junk-gpt-5.4-junk") == ""
+        assert _did_you_mean("junk-opus-junk") == ""
 
     def test_the_echoed_name_is_bounded(self):
         from mvp.models import resolve_model, _MAX_ECHOED_NAME

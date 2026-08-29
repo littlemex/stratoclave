@@ -200,74 +200,42 @@
     },
     {
       "provider": "openai",
-      "bedrock_model_id": "openai.gpt-5.4",
-      "bedrock_region": "us-west-2",
-      "aliases": [
-        "gpt-5.4",
-        "openai.gpt-5.4"
-      ],
-      "wire_protocol": "responses",
-      "pricing_key": "gpt-5"
-    },
-    {
-      "provider": "openai",
-      "bedrock_model_id": "openai.gpt-5.5",
-      "bedrock_region": "us-east-2",
-      "aliases": [
-        "gpt-5.5",
-        "openai.gpt-5.5"
-      ],
-      "wire_protocol": "responses",
-      "pricing_key": "gpt-5"
-    },
-    {
-      "provider": "openai",
-      "bedrock_model_id": "openai.gpt-5.6-sol",
+      "bedrock_model_id": "us.openai.gpt-5.6-sol",
       "bedrock_region": "us-east-2",
       "aliases": [
         "gpt-5.6-sol",
-        "openai.gpt-5.6-sol"
+        "openai.gpt-5.6-sol",
+        "us.openai.gpt-5.6-sol"
       ],
       "wire_protocol": "responses",
       "pricing_key": "gpt-5.6-sol",
-      "notes": "Flagship GPT-5.6 tier on bedrock-mantle; its own pricing_key because each tier is a distinct model card with its own price. Region is PINNED to us-east-2 to reuse the mantle region already proven by the earlier gpt-5.5 entry, even though the model is also offered elsewhere."
+      "notes": "Flagship GPT-5.6 tier on bedrock-runtime OpenAI-compatible endpoint; its own pricing_key because each tier is a distinct model card with its own price. Region is PINNED to us-east-2 to reuse the region already proven by the earlier gpt-5.5 entry, even though the model is also offered elsewhere. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix because that endpoint refuses the bare id with \"Invocation ... with on-demand throughput isn't supported\", and because every Anthropic entry already stores its profile id the same way."
     },
     {
       "provider": "openai",
-      "bedrock_model_id": "openai.gpt-5.6-terra",
+      "bedrock_model_id": "us.openai.gpt-5.6-terra",
       "bedrock_region": "us-east-2",
       "aliases": [
         "gpt-5.6-terra",
-        "openai.gpt-5.6-terra"
+        "openai.gpt-5.6-terra",
+        "us.openai.gpt-5.6-terra"
       ],
       "wire_protocol": "responses",
       "pricing_key": "gpt-5.6-terra",
-      "notes": "Balanced GPT-5.6 tier on bedrock-mantle; its own pricing_key for the same reason as sol. Region is PINNED to us-east-2 for the same reason as sol."
+      "notes": "Balanced GPT-5.6 tier on bedrock-runtime OpenAI-compatible endpoint; its own pricing_key for the same reason as sol. Region is PINNED to us-east-2 for the same reason as sol. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix because that endpoint refuses the bare id with \"Invocation ... with on-demand throughput isn't supported\", and because every Anthropic entry already stores its profile id the same way."
     },
     {
       "provider": "xai",
-      "bedrock_model_id": "xai.grok-4.6",
+      "bedrock_model_id": "us.xai.grok-4.6",
       "bedrock_region": "us-west-2",
       "aliases": [
         "grok-4.6",
-        "xai.grok-4.6"
+        "xai.grok-4.6",
+        "us.xai.grok-4.6"
       ],
       "wire_protocol": "responses",
       "pricing_key": "grok",
-      "notes": "Served on bedrock-mantle's OpenAI-compatible surface, so it rides the same transport as the OpenAI family — no new transport, just an entry. In-region mantle is us-west-2 only."
-    },
-    {
-      "provider": "google",
-      "bedrock_model_id": "google.gemma-4-31b",
-      "bedrock_region": "us-east-2",
-      "aliases": [
-        "gemma-4",
-        "gemma-4-31b",
-        "google.gemma-4-31b"
-      ],
-      "wire_protocol": "responses",
-      "pricing_key": "gemma",
-      "notes": "Served ONLY on the bedrock-mantle OpenAI-compatible endpoint (no Converse/InvokeModel). Bedrock publishes no per-token list price, so pricing_key \"gemma\" defaults to the Opus tier — a deliberate over-charge, never an under-charge. An admin lowers it via the pricing table. Offered on mantle in us-east-1/us-east-2/us-west-2/eu-central-1; PINNED to us-east-2, reusing the region already proven for the OpenAI family."
+      "notes": "Served on bedrock-runtime OpenAI-compatible endpoint's OpenAI-compatible surface, so it rides the same transport as the OpenAI family — no new transport, just an entry. Offered in us-west-2. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix because that endpoint refuses the bare id with \"Invocation ... with on-demand throughput isn't supported\", and because every Anthropic entry already stores its profile id the same way."
     },
     {
       "provider": "nvidia",

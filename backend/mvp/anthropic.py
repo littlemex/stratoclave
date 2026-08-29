@@ -336,7 +336,7 @@ def _bedrock_client():
     `iac/bin/iac.ts`). Per-model regions are encoded in the model registry
     but the Anthropic route here is single-region by design — the OpenAI
     Responses route consults `client_for_model(entry)` directly when it
-    needs the bedrock-mantle endpoint in us-east-2/us-west-2.
+    needs the the OpenAI-compatible endpoint endpoint in us-east-2/us-west-2.
     """
     from ._bedrock_clients import deployment_client
 

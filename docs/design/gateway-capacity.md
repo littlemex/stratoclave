@@ -21,7 +21,7 @@ same model called directly.
 Throughput flattened at about 4.5 req/s while latency grew with concurrency: the
 extra load was queueing, not being served. Every request returned 200, so nothing
 was rejected — it was simply held. The same ceiling appeared on the Converse
-transport, which shares no code with the bedrock-mantle transport, so the limit was
+transport, which shares no code with the bedrock-runtime transport, so the limit was
 common infrastructure rather than one upstream.
 
 ## What limited it
@@ -41,7 +41,7 @@ Both are now set explicitly, per task, in `mvp/_concurrency.py`, from
 `GATEWAY_SYNC_ROUTE_THREADS` and `GATEWAY_OFFLOAD_THREADS`.
 
 **Per-request connection setup.** The Bedrock client factory built a fresh
-`boto3.client` per call, and the mantle transport built a fresh `httpx` client and
+`boto3.client` per call, and the OpenAI transport built a fresh `httpx` client and
 minted a fresh bearer per call. Two clients from one session hold separate
 connection pools, so each request paid a new TLS handshake — visible as the 300 ms
 gap at concurrency 1, which is not queueing and did not close as load rose. Both
@@ -59,7 +59,7 @@ Pooling is only as wide as the pool. `botocore` caps a client at 10 connections
 by default, and `httpx` at 100: past that, urllib3 opens a connection, uses it and
 discards it, which puts the handshake back on every request beyond the cap. Both
 ceilings therefore track the per-task request ceiling
-(`BEDROCK_MAX_POOL_CONNECTIONS`, `MANTLE_MAX_CONNECTIONS`), and the mantle pool
+(`BEDROCK_MAX_POOL_CONNECTIONS`, `OPENAI_TRANSPORT_MAX_CONNECTIONS`), and the OpenAI-transport pool
 wait is bounded at 10 s: a connection is acquired *after* the budget reservation
 is taken, so an unbounded wait would hold a customer's balance on a queue that is
 our own saturation rather than the model's work.
@@ -123,7 +123,7 @@ idle capacity.
 | `GATEWAY_UVICORN_WORKERS` | one per vCPU | server processes per task |
 | `GATEWAY_SYNC_ROUTE_THREADS` | 32 | in-flight sync-route requests per PROCESS |
 | `GATEWAY_OFFLOAD_THREADS` | 32 | concurrent offloaded blocking calls per process |
-| `MANTLE_MAX_CONNECTIONS` | 256 | pooled connections per process to bedrock-mantle |
+| `OPENAI_TRANSPORT_MAX_CONNECTIONS` | 256 | pooled connections per process to bedrock-runtime |
 | `BEDROCK_MAX_POOL_CONNECTIONS` | request ceiling | pooled connections per process to Bedrock |
 | `DYNAMODB_MAX_POOL_CONNECTIONS` | request ceiling | pooled connections per process to DynamoDB |
 
@@ -135,14 +135,14 @@ answered 429 or 503 at its limit would tell the caller something it could act on
 and that is not implemented here. Until it is, the ceiling has to be sized above
 the load rather than relied on to shed.
 
-The mantle connection pool is the one place with a bound (10 s), because a pool
+The OpenAI-transport connection pool is the one place with a bound (10 s), because a pool
 wait happens inside the reserve/settle window and holding a customer's balance on
 our own queue is worse than failing the request.
 
 The two surfaces are bounded differently, which is worth knowing before reading a
 saturation graph. Sync routes are limited by the thread ceiling, so admission is
 explicit. Async routes — streaming, and the Responses surface — have no per-task
-admission limit at all: what bounds them is `MANTLE_MAX_CONNECTIONS` plus that 10 s
+admission limit at all: what bounds them is `OPENAI_TRANSPORT_MAX_CONNECTIONS` plus that 10 s
 pool wait, so beyond the pool they fail with a 502 rather than queue. Same absence
 of admission control, different symptom.
 
