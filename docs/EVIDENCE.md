@@ -33,6 +33,26 @@ minutes before reviewing or adopting the branch.
 | **Routing quality** | a tiny conservative exact-match scorer (gateway response scored 10/10, N=10) | gateway-live | `quality.measured = false` — Stratoclave does NOT claim quality without a tenant eval; N=10 is a mechanism demo, not a benchmark | `3378271` |
 | **Workshops surface the gaps** (machine-checked roadmap) | `scenarios/` coverage.yaml → auto-generated [`../scenarios/COVERAGE.md`](../scenarios/COVERAGE.md), CI-linted | formal / offline | — | `77c3f68` |
 
+### Added 2026-08-29: what an unobserved outcome actually costs
+
+AWS does not document which failures are billed, so it was measured against CloudWatch's own
+`AWS/Bedrock` counters, one condition per minute, on models this account otherwise never invokes.
+The probes are reproducible; the measurement is the evidence for the liability policy rows in
+`backend/mvp/provider_outcome.py`.
+
+| Claim | Strongest evidence | Tier | Not covered | Commit |
+|---|---|---|---|---|
+| **"No response received" does not mean "not billed"** | a Converse call abandoned at a 2 s client read timeout, exactly one SDK attempt: 1 invocation, **1,493 output tokens**, caller received nothing | **provider-live** (real Bedrock, provider's own counters) | one trial per condition, one model family; on-demand token pricing only | this change |
+| **The line is whether the model ran, not whether the call failed** | a service rejection (`ValidationException`, HTTP 400) records 1 invocation and 1 `InvocationClientErrors` with **no token counters**; a stream closed by the consumer after two events records **nothing**, while a completed stream records exact usage | **provider-live** | `Invocations` alone is not a billing proxy — it counts rejections; the token counters are | this change |
+| **One reservation could pay for three provider invocations** | botocore rewrites `Config(retries={"max_attempts": N})` to `total_max_attempts = N + 1`; measured, `max_attempts=1` produced two counted invocations and `total_max_attempts=1` produced one. The double charge lands on the **success** path, so no error handling can see it | **provider-live** + botocore source | fixed by making the SDK single-attempt; the router's own retry loop is still the retry budget | this change |
+| **An abandoned call is reconcilable per attempt on Converse** | model invocation logging (text delivery off) records the abandoned call with `in 22 / out 1,493`, retrieved by the `requestMetadata` marker the gateway stamps; delivery lag **35–41 s** | **provider-live** | Converse only. On the OpenAI-compatible endpoint the log record exists but `requestMetadata` is recorded as `null`, so those attempts are aggregate evidence, not per-hold attribution. `bedrock-mantle` produces no record at all | this change |
+| **The reclaim's `actual = 0` is an assertion, not an observation** | every reclaim now copies the reaped hold's `source` / `created_at` / `expires_at` / amount into its RECLAIM terminal, so the exposure is derivable from the ledger | formal / shipped | the number itself needs real traffic; retaining the reservation instead of returning it is **not built** — it needs a durable sweep cursor, pool-incarnation fencing and a settle-dispatcher branch | this change |
+
+Recorded as **exposure**, not as a leak: the amount is the reservation rather than the provider's
+bill, a request that died before its provider call cost nothing, and a settle arriving after the
+reclaim is already recovered by `LATE_SETTLE`. Neither classic CUR nor CUR 2.0 carries a
+per-request identifier, so invoice-level per-request reconciliation is not available to anyone.
+
 ### Added 2026-08-27: deployed-path verification
 
 Run from a laptop against the public CloudFront hostname of a live deployment, with a
