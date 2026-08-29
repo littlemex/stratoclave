@@ -125,19 +125,19 @@ def configure_capacity() -> Capacity:
     from core.aws_pool import max_pool_connections
 
     from ._bedrock_clients import bedrock_pool_size
-    from ._mantle_transport import mantle_connection_ceiling
+    from ._openai_transport import openai_transport_connection_ceiling
 
     bedrock_connections = bedrock_pool_size()
-    mantle_connections = mantle_connection_ceiling()
+    openai_connections = openai_transport_connection_ceiling()
     # Every request reserves and settles, so this is the busiest pool in the
     # process and the one whose default of 10 cost the most.
     dynamodb_connections = max_pool_connections("DYNAMODB_MAX_POOL_CONNECTIONS")
     # Each pool is compared with the ceiling that actually feeds it. Converse calls
     # reach Bedrock through `asyncio.to_thread`, so the offload width is what can
-    # be in flight there; mantle requests come from the sync routes and from async
+    # be in flight there; the OpenAI-compatible endpoint requests come from the sync routes and from async
     # streams, so the sync ceiling is the closer bound of the two.
     for name, connections, feeding_ceiling in (
-        ("mantle", mantle_connections, sync_routes),
+        ("the OpenAI-compatible endpoint", openai_connections, sync_routes),
         ("bedrock", bedrock_connections, offload),
         ("dynamodb", dynamodb_connections, sync_routes),
     ):
@@ -159,7 +159,7 @@ def configure_capacity() -> Capacity:
         "concurrency_capacity_configured",
         offload_threads=applied.offload_threads,
         sync_route_threads=applied.sync_route_threads,
-        mantle_connections=mantle_connections,
+        openai_connections=openai_connections,
         bedrock_connections=bedrock_connections,
         dynamodb_connections=dynamodb_connections,
         note="per task; fleet concurrency is this times the running task count",

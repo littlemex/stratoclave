@@ -3,9 +3,9 @@
 The route used to resolve through the Claude-only `resolve_bedrock_model` and so
 rejected every non-Claude model. It now resolves through `resolve_model` and
 dispatches on the entry's `wire_protocol`: Converse for `messages` entries
-(including the non-Anthropic ones), and a bedrock-mantle pass-through for
+(including the non-Anthropic ones), and a OpenAI-compatible endpoint pass-through for
 `responses` entries. These tests cover the dispatch, the two payload rewrites the
-mantle leg requires, and the accounting on both success and failure.
+the OpenAI-compatible endpoint leg requires, and the accounting on both success and failure.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mvp.chat_completions import ChatCompletionsRequest, ChatMessage, _mantle_chat_completion
+from mvp.chat_completions import ChatCompletionsRequest, ChatMessage, _openai_chat_completion
 from mvp.models import resolve_bedrock_model, resolve_model
 
 
@@ -67,7 +67,7 @@ class TestRegistryWidening:
 
 
 # ---------------------------------------------------------------------------
-# bedrock-mantle pass-through
+# OpenAI-compatible endpoint pass-through
 # ---------------------------------------------------------------------------
 
 def _entry(region="us-east-2", model_id="google.gemma-4-31b"):
@@ -108,7 +108,7 @@ def _fake_client(resp):
     return client
 
 
-MANTLE_OK = {
+openai_OK = {
     "id": "chatcmpl-x", "object": "chat.completion",
     "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"},
                  "finish_reason": "stop"}],
@@ -117,42 +117,42 @@ MANTLE_OK = {
 }
 
 
-class TestMantlePassThrough:
+class TestopenaiPassThrough:
     def _call(self, body, entry, resp, tenants_repo=None):
         tenants_repo = tenants_repo or MagicMock()
         client = _fake_client(resp)
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.sync_client", return_value=client), \
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.sync_client", return_value=client), \
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
-            out = _mantle_chat_completion(
+            out = _openai_chat_completion(
                 body=body, entry=entry, user=_user(), tenants_repo=tenants_repo,
                 reservation=1024, corr={}, request_id="req-1",
             )
         return out, client, settle, release, tenants_repo
 
     def test_model_field_is_rewritten_to_the_bedrock_id(self):
-        """mantle resolves Bedrock model IDs, not our client-facing aliases; sending
-        "gemma-4" through verbatim makes mantle 404."""
-        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, MANTLE_OK))
+        """the OpenAI-compatible endpoint resolves Bedrock model IDs, not our client-facing aliases; sending
+        "gemma-4" through verbatim makes the OpenAI-compatible endpoint 404."""
+        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, openai_OK))
         sent = client.post.call_args.kwargs["json"]
         assert sent["model"] == "google.gemma-4-31b"
 
     def test_max_tokens_is_translated_to_max_completion_tokens(self):
         out, client, _, _, _ = self._call(
-            _body(max_tokens=64), _entry(), _FakeResponse(200, MANTLE_OK))
+            _body(max_tokens=64), _entry(), _FakeResponse(200, openai_OK))
         sent = client.post.call_args.kwargs["json"]
         assert sent["max_completion_tokens"] == 64
         assert "max_tokens" not in sent
 
     def test_response_echoes_the_client_facing_alias(self):
         """The caller asked for `body.model`; an OpenAI client may compare the two."""
-        out, _, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, MANTLE_OK))
+        out, _, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, openai_OK))
         assert json.loads(out.body)["model"] == "gemma-4"
 
     def test_settles_once_against_the_reported_usage(self):
         _, _, settle, release, repo = self._call(
-            _body(), _entry(), _FakeResponse(200, MANTLE_OK))
+            _body(), _entry(), _FakeResponse(200, openai_OK))
         assert settle.call_count == 1
         kw = settle.call_args.kwargs
         assert kw["actual_input_tokens"] == 11
@@ -167,12 +167,12 @@ class TestMantlePassThrough:
 
         repo = MagicMock()
         client = _fake_client(resp)
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.sync_client", return_value=client), \
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.sync_client", return_value=client), \
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
             with pytest.raises(HTTPException) as ei:
-                _mantle_chat_completion(
+                _openai_chat_completion(
                     body=_body(), entry=_entry(), user=_user(), tenants_repo=repo,
                     reservation=1024, corr={}, request_id="req-1",
                 )
@@ -217,24 +217,24 @@ class TestMantlePassThrough:
         """The client is process-wide. Closing it after a request would drop the
         connections every other in-flight request is using — and put the TLS
         handshake back on the hot path for the next one."""
-        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, MANTLE_OK))
+        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, openai_OK))
         client.close.assert_not_called()
 
     def test_auth_travels_with_the_request(self):
         """Pinning the bearer to the client would tie the connection pool's
         lifetime to the token's TTL."""
-        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, MANTLE_OK))
+        out, client, _, _, _ = self._call(_body(), _entry(), _FakeResponse(200, openai_OK))
         assert client.post.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
-    def test_client_targets_the_entrys_own_mantle_region(self):
+    def test_client_targets_the_entrys_own_openai_region(self):
         """Gemma 4 is pinned to us-east-2 and Grok to us-west-2; the base URL has to
         follow the entry or the request lands on a region that does not serve it."""
-        client = _fake_client(_FakeResponse(200, MANTLE_OK))
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.sync_client", return_value=client) as ctor, \
+        client = _fake_client(_FakeResponse(200, openai_OK))
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.sync_client", return_value=client) as ctor, \
              patch("mvp.chat_completions._settle_reservation_and_log"), \
              patch("mvp.chat_completions._release_pool"):
-            _mantle_chat_completion(
+            _openai_chat_completion(
                 body=_body(model="grok-4.6"),
                 entry=_entry(region="us-west-2", model_id="xai.grok-4.6"),
                 user=_user(), tenants_repo=MagicMock(), reservation=1024,
@@ -244,16 +244,16 @@ class TestMantlePassThrough:
         # the transport's business and is asserted there.
         assert ctor.call_args.args[0] == "us-west-2"
 
-    def test_transport_builds_the_regional_mantle_url(self):
-        from mvp import _mantle_transport
+    def test_transport_builds_the_regional_openai_url(self):
+        from mvp import _openai_transport
 
-        assert _mantle_transport.base_url("us-west-2") == (
-            "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+        assert _openai_transport.base_url("us-west-2") == (
+            "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"
         )
 
 
 # ---------------------------------------------------------------------------
-# bedrock-mantle streaming
+# OpenAI-compatible endpoint streaming
 # ---------------------------------------------------------------------------
 
 class _FakeStreamResponse:
@@ -316,18 +316,18 @@ CONTENT_CHUNK = {"choices": [{"index": 0, "delta": {"content": "hi"}}]}
 USAGE_CHUNK = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
 
 
-class TestMantleStreaming:
+class TestopenaiStreaming:
     def _run(self, body, lines, raise_mid=False):
         import asyncio
 
         capture = {}
         client = _FakeAsyncClient(_FakeStreamResponse(200, lines), capture, raise_mid=raise_mid)
         repo = MagicMock()
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.async_client", return_value=client), \
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.async_client", return_value=client), \
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
-            out = _mantle_chat_completion(
+            out = _openai_chat_completion(
                 body=body, entry=_entry(), user=_user(), tenants_repo=repo,
                 reservation=1024, corr={}, request_id="req-1",
             )
@@ -376,18 +376,18 @@ class TestMantleStreaming:
     def test_streamed_upstream_error_refunds_exactly_once_and_never_settles(self):
         """The regression this guards: refunding in the error branch and then
         settling again in the generator's cleanup double-releases the hold, which a
-        client can trigger on purpose by streaming a request mantle rejects."""
+        client can trigger on purpose by streaming a request the OpenAI-compatible endpoint rejects."""
         import asyncio
 
         capture = {}
         client = _FakeAsyncClient(_FakeStreamResponse(429, []), capture)
         repo = MagicMock()
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.format_error", return_value="slow down"), \
-             patch("mvp._mantle_transport.async_client", return_value=client), \
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.format_error", return_value="slow down"), \
+             patch("mvp._openai_transport.async_client", return_value=client), \
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
-            out = _mantle_chat_completion(
+            out = _openai_chat_completion(
                 body=_body(stream=True), entry=_entry(), user=_user(), tenants_repo=repo,
                 reservation=1024, corr={}, request_id="req-1",
             )
@@ -461,13 +461,13 @@ class TestMaxOutputTokenSpelling:
 
         assert _requested_max_output(_body(max_tokens=256)) == 256
 
-    def test_mantle_payload_carries_the_callers_value(self):
-        client = _fake_client(_FakeResponse(200, MANTLE_OK))
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.sync_client", return_value=client), \
+    def test_openai_payload_carries_the_callers_value(self):
+        client = _fake_client(_FakeResponse(200, openai_OK))
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.sync_client", return_value=client), \
              patch("mvp.chat_completions._settle_reservation_and_log"), \
              patch("mvp.chat_completions._release_pool"):
-            _mantle_chat_completion(
+            _openai_chat_completion(
                 body=_body(max_completion_tokens=16000), entry=_entry(), user=_user(),
                 tenants_repo=MagicMock(), reservation=1024, corr={}, request_id=None,
             )
@@ -482,7 +482,7 @@ class TestMaxOutputTokenSpelling:
         assert kwargs["inferenceConfig"]["maxTokens"] == 999
 
 
-class TestMantleStreamFraming:
+class TestopenaiStreamFraming:
     """SSE framing must survive the proxy. An event may carry several `data:` lines
     plus `event:`/`id:` fields, and a `:` comment is a valid keepalive; forwarding
     line by line would split or drop those."""
@@ -491,11 +491,11 @@ class TestMantleStreamFraming:
         import asyncio
 
         client = _FakeAsyncClient(_FakeStreamResponse(200, lines), {})
-        with patch("mvp._mantle_transport.mint_bearer_token", return_value="tok"), \
-             patch("mvp._mantle_transport.async_client", return_value=client), \
+        with patch("mvp._openai_transport.mint_bearer_token", return_value="tok"), \
+             patch("mvp._openai_transport.async_client", return_value=client), \
              patch("mvp.chat_completions._settle_reservation_and_log"), \
              patch("mvp.chat_completions._release_pool"):
-            out = _mantle_chat_completion(
+            out = _openai_chat_completion(
                 body=_body(stream=True), entry=_entry(), user=_user(),
                 tenants_repo=MagicMock(), reservation=1024, corr={}, request_id=None,
             )
@@ -574,7 +574,10 @@ class TestCostTierTracksPrice:
         "downgrade" could move to a costlier model."""
         from mvp.routing.chains import _tier_for_model
 
-        for name in ("gemma-4", "claude-fable-5", "gpt-5.6-sol"):
+        # `gemma-4` was the third case here until it was retired with the
+        # `bedrock-mantle` endpoint. Grok does NOT replace it: its tier is 2, so
+        # asserting 3 for it would pin a price relationship that is not true.
+        for name in ("claude-fable-5", "gpt-5.6-sol"):
             assert _tier_for_model(name) == 3, name
 
     def test_unresolvable_model_name_stays_mid_tier(self):

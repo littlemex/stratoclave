@@ -822,8 +822,8 @@ def survey_and_hash_converse_kwargs(kwargs: dict) -> tuple["ContentSurvey", int,
 
 def survey_and_hash_openai_chat_payload(payload: dict) -> tuple["ContentSurvey", int, str]:
     """`(survey, payload_bytes, payload_hash)` for the OpenAI Chat Completions
-    JSON `payload` `/v1/chat/completions` sends VERBATIM to bedrock-mantle
-    (`mvp.chat_completions._mantle_chat_completion`) — a plain
+    JSON `payload` `/v1/chat/completions` sends VERBATIM to the OpenAI-compatible endpoint
+    (`mvp.chat_completions._openai_chat_completion`) — a plain
     `{"messages": [...], "tools": [...], ...}` dict, NOT Converse `kwargs`.
 
     Mirrors `survey_and_hash_converse_kwargs`'s rules on the OpenAI wire
@@ -937,7 +937,7 @@ def survey_and_hash_openai_chat_payload(payload: dict) -> tuple["ContentSurvey",
 
 def survey_and_hash_openai_responses_payload(payload: dict) -> tuple["ContentSurvey", int, str]:
     """`(survey, payload_bytes, payload_hash)` for the OpenAI Responses API
-    JSON `payload` `/v1/responses` sends VERBATIM to bedrock-mantle
+    JSON `payload` `/v1/responses` sends VERBATIM to the OpenAI-compatible endpoint
     (`mvp.openai_responses`) — `{"input": [...], "tools": [...], ...}`.
 
     `input` is a string, or a list of items each shaped either as a message

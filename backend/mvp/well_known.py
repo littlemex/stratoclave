@@ -23,7 +23,7 @@ Schema (`schema_version = "1"`):
         "default_model": "us.anthropic.claude-opus-4-7",
         "callback_port": 18080,
         "codex": {                              // only when CODEX_ENABLED=true
-          "default_model":     "openai.gpt-5.4",
+          "default_model":     "us.openai.gpt-5.6-sol",
           "openai_base_path":  "/openai/v1",
           "supported_regions": ["us-east-2", "us-west-2"]
         }
@@ -59,7 +59,11 @@ _DEFAULT_CALLBACK_PORT = 18080
 _DEFAULT_CLI_MODEL_FALLBACK = "us.anthropic.claude-opus-4-7"
 
 # Default Codex model surfaced to the CLI when DEFAULT_CODEX_MODEL is unset.
-_DEFAULT_CODEX_MODEL_FALLBACK = "openai.gpt-5.4"
+# Moved off `openai.gpt-5.4` when the OpenAI routes moved to the `bedrock-runtime`
+# endpoint: 5.4 is not offered there under any inference profile, so advertising it
+# would hand the CLI a default that resolves to nothing. The prefix is part of the
+# id here for the same reason it is in the registry.
+_DEFAULT_CODEX_MODEL_FALLBACK = "us.openai.gpt-5.6-sol"
 _DEFAULT_OPENAI_BASE_PATH = "/openai/v1"
 _DEFAULT_OPENAI_SUPPORTED_REGIONS = "us-east-2,us-west-2"
 

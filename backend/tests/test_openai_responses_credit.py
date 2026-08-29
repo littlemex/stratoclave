@@ -23,7 +23,7 @@ from mvp.openai_responses import (
     _MIN_RESERVATION_TOKENS_OPENAI,
     _estimate_reservation_tokens,
     _extract_usage,
-    _format_mantle_error,
+    _format_openai_error,
     _sanitize_sse_error_line,
 )
 
@@ -36,7 +36,7 @@ from mvp.openai_responses import (
 def test_estimate_reservation_no_reasoning():
     """No `reasoning` field → multiplier 1, plain (chars/3 + max_output)."""
     body = OpenAIResponsesRequest(
-        model="openai.gpt-5.4",
+        model="openai.gpt-5.6-sol",
         input="x" * 900,
         max_output_tokens=4_096,
     )
@@ -47,7 +47,7 @@ def test_estimate_reservation_no_reasoning():
 def test_estimate_reservation_high_effort():
     """`reasoning.effort = high` quadruples the output budget."""
     body = OpenAIResponsesRequest(
-        model="openai.gpt-5.4",
+        model="openai.gpt-5.6-sol",
         input="x" * 900,
         max_output_tokens=4_096,
         reasoning={"effort": "high"},
@@ -58,7 +58,7 @@ def test_estimate_reservation_high_effort():
 
 def test_estimate_reservation_xhigh_effort_uses_8x():
     body = OpenAIResponsesRequest(
-        model="openai.gpt-5.4",
+        model="openai.gpt-5.6-sol",
         input="x" * 30,
         max_output_tokens=8_192,
         reasoning={"effort": "xhigh"},
@@ -70,7 +70,7 @@ def test_estimate_reservation_xhigh_effort_uses_8x():
 def test_estimate_reservation_minimum_floor():
     """Tiny request still reserves at least the floor."""
     body = OpenAIResponsesRequest(
-        model="openai.gpt-5.4",
+        model="openai.gpt-5.6-sol",
         input="hi",
         max_output_tokens=1,
     )
@@ -80,7 +80,7 @@ def test_estimate_reservation_minimum_floor():
 def test_estimate_reservation_input_array_input_text_blocks():
     """Responses-API style input arrays are walked block-by-block."""
     body = OpenAIResponsesRequest(
-        model="openai.gpt-5.4",
+        model="openai.gpt-5.6-sol",
         input=[
             {
                 "role": "user",
@@ -106,7 +106,7 @@ def test_image_block_rejected_422():
     """`type: input_image` is reserved for vision and not yet costed here."""
     with pytest.raises(ValidationError):
         OpenAIResponsesRequest(
-            model="openai.gpt-5.4",
+            model="openai.gpt-5.6-sol",
             input=[{"type": "input_image", "image_url": "https://x.invalid"}],
             max_output_tokens=8,
         )
@@ -115,7 +115,7 @@ def test_image_block_rejected_422():
 def test_file_block_rejected_422():
     with pytest.raises(ValidationError):
         OpenAIResponsesRequest(
-            model="openai.gpt-5.4",
+            model="openai.gpt-5.6-sol",
             input=[
                 {
                     "role": "user",
@@ -129,7 +129,7 @@ def test_file_block_rejected_422():
 def test_oversized_input_rejected():
     with pytest.raises(ValidationError):
         OpenAIResponsesRequest(
-            model="openai.gpt-5.4",
+            model="openai.gpt-5.6-sol",
             input="x" * 200_001,
             max_output_tokens=8,
         )
@@ -141,7 +141,7 @@ def test_per_element_input_text_cap_rejected():
     a future ASGI body-cap relaxation would otherwise let it through)."""
     with pytest.raises(ValidationError):
         OpenAIResponsesRequest(
-            model="openai.gpt-5.4",
+            model="openai.gpt-5.6-sol",
             input=[
                 {
                     "role": "user",
@@ -159,7 +159,7 @@ def test_aggregate_input_text_cap_rejected():
     ]
     with pytest.raises(ValidationError):
         OpenAIResponsesRequest(
-            model="openai.gpt-5.4",
+            model="openai.gpt-5.6-sol",
             input=[{"role": "user", "content": blocks}],
             max_output_tokens=8,
         )
@@ -175,7 +175,7 @@ def test_extract_usage_responses_field_names():
 
 
 def test_extract_usage_chat_completions_aliases():
-    """If bedrock-mantle ever returns Chat-Completions naming, fall back to it."""
+    """If bedrock-the OpenAI-compatible endpoint ever returns Chat-Completions naming, fall back to it."""
     assert _extract_usage({"prompt_tokens": 5, "completion_tokens": 9}) == (5, 9)
 
 
@@ -239,7 +239,7 @@ def test_error_sanitizer_extracts_openai_json():
             }
         }
     )
-    out = _format_mantle_error(resp)  # type: ignore[arg-type]
+    out = _format_openai_error(resp)  # type: ignore[arg-type]
     # Sanitizer must scrub the AWS account id from the user-facing message.
     assert "123456789012" not in out
     # The English of the message survives.
@@ -247,9 +247,9 @@ def test_error_sanitizer_extracts_openai_json():
 
 
 def test_error_sanitizer_falls_back_to_text_on_non_json():
-    resp = _StubResponse(body=None, text="<html>bedrock-mantle outage</html>")
-    out = _format_mantle_error(resp)  # type: ignore[arg-type]
-    assert "bedrock-mantle outage" in out
+    resp = _StubResponse(body=None, text="<html>bedrock-the OpenAI-compatible endpoint outage</html>")
+    out = _format_openai_error(resp)  # type: ignore[arg-type]
+    assert "bedrock-the OpenAI-compatible endpoint outage" in out
 
 
 def test_sse_error_event_sanitized_before_yield():
@@ -260,7 +260,7 @@ def test_sse_error_event_sanitized_before_yield():
             "type": "api_error",
             "message": (
                 "InternalFailure: account 999988887777 quota exceeded for "
-                "arn:aws:bedrock:us-east-2:999988887777:inference-profile/openai.gpt-5.4"
+                "arn:aws:bedrock:us-east-2:999988887777:inference-profile/openai.gpt-5.6-sol"
             ),
         },
     }

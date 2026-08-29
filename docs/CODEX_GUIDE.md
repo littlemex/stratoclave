@@ -7,7 +7,7 @@ OpenAI's `codex` CLI runs long-form, agentic coding sessions against an
 OpenAI Responses-compatible model. This guide shows how to point it at a
 Stratoclave deployment so every call is authenticated, credit-accounted,
 and audit-logged per user and per tenant, while the inference itself
-continues to run on Amazon Bedrock (`bedrock-mantle`).
+continues to run on Amazon Bedrock (`bedrock-runtime`).
 
 Codex is the OpenAI counterpart of Claude Code, and Stratoclave handles
 both with the same primitives: a wrapper subcommand for ergonomic
@@ -257,7 +257,7 @@ export AWS_REGION=us-east-2
 ```
 
 This works when your AWS principal already holds
-`bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`
+`bedrock-runtime:CreateInference` and `bedrock-runtime:CallWithBearerToken`
 on the appropriate project ARNs. **No tenant-level credit reservation
 or audit happens — every dollar lands directly on the AWS bill, and
 nothing shows up in Stratoclave's UsageLogs.**
@@ -293,7 +293,7 @@ reservation already accounts for them via a multiplier (1× / 2× / 4× / 8×).
 
 The region is per-model, not per-deployment. The Stratoclave control
 plane runs in us-east-1 and makes a cross-region HTTPS call to
-`bedrock-mantle.{region}.api.aws/openai/v1/responses` for each
+`bedrock-runtime.{region}.amazonaws.com/openai/v1/responses` for each
 inference. To add a new model: append a `ModelEntry` to
 `backend/mvp/models.py:_REGISTRY` and redeploy.
 
@@ -311,19 +311,19 @@ or the key you minted did not include it (check `--scope` on
 console).
 
 **`HTTP 400 Tool type 'web_search' is not supported`**
-— Bedrock's bedrock-mantle endpoint does not implement the `web_search`
+— Bedrock's bedrock-runtime endpoint does not implement the `web_search`
 tool. Add `web_search = "disabled"` at the top level of your codex
 config. Path A injects this automatically.
 
-**`HTTP 401 not authorized to perform: bedrock-mantle:CallWithBearerToken`**
-— The ECS task role does not have the `AllowBedrockMantleBearerTokenMint`
+**`HTTP 401 not authorized to perform: bedrock-runtime:CallWithBearerToken`**
+— The ECS task role does not have the `AllowBedrockBearerTokenMint`
 IAM statement, or it is scoped too tightly. AWS does not currently
 support resource-level conditions on this action; the policy must use
 `Resource: "*"`. See `iac/lib/ecs-stack.ts`.
 
 **`stream disconnected before completion`**
 — Check the backend logs (`/ecs/stratoclave-backend` in CloudWatch) for
-the `bedrock_mantle_stream_4xx_5xx` event; the sanitized error message
+the `openai_transport_stream_4xx_5xx` event; the sanitized error message
 explains the upstream rejection.
 
 **`codex` waits forever after "Reading additional input from stdin..."**
@@ -343,7 +343,7 @@ arg. Pipe in `</dev/null` or use a fully interactive terminal.
   long as you choose. Default to `--expires-days 30` and `responses:send`
   only. Keys are stored as SHA-256 hashes; the plaintext is never
   written to DynamoDB or logs.
-- Stratoclave's bedrock-mantle bearer token is minted per-request with
+- Stratoclave's bedrock-runtime bearer token is minted per-request with
   a 15-minute TTL cap. The token lives only in the ECS task heap for
   the duration of one invocation.
 
@@ -354,7 +354,7 @@ The codex client speaks the OpenAI Responses API
 at `POST /openai/v1/responses` (in `backend/mvp/openai_responses.py`),
 runs the same credit-reservation pipeline as `/v1/messages`
 (`backend/mvp/_pipeline.py`), and forwards the body via `httpx` to
-`bedrock-mantle.{region}.api.aws/openai/v1/responses`. The bearer
+`bedrock-runtime.{region}.amazonaws.com/openai/v1/responses`. The bearer
 token is minted on demand by `aws-bedrock-token-generator.provide_token(
 region=…, expiry=timedelta(seconds=900))` from the ECS task role.
 
@@ -362,9 +362,9 @@ The IAM trust path:
 
 ```
 ECS task role
-  → bedrock-mantle:CallWithBearerToken   (Resource: *, AWS constraint)
-  → bedrock-mantle:CreateInference / Get* / List*
-       (Resource: arn:aws:bedrock-mantle:{us-east-2,us-west-2}:<account>:project/*)
+  → bedrock-runtime:CallWithBearerToken   (Resource: *, AWS constraint)
+  → bedrock-runtime:CreateInference / Get* / List*
+       (Resource: arn:aws:bedrock-runtime:{us-east-2,us-west-2}:<account>:project/*)
 ```
 
 Reasoning effort maps to a reservation multiplier:

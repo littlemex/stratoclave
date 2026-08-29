@@ -586,50 +586,68 @@ export class EcsStack extends cdk.Stack {
       }),
     );
 
-    // OpenAI (codex / GPT-5.x) on Amazon Bedrock — separate IAM namespace.
+    // OpenAI-family models (codex / GPT-5.6, Grok) on Amazon Bedrock.
     //
-    // Bedrock's OpenAI-compatible endpoint lives at
-    // `bedrock-mantle.{region}.api.aws/openai/v1/...` with its own
-    // `bedrock-mantle:*` action set. GPT-5.4 / GPT-5.5 are GA only in
-    // us-east-2 and us-west-2 today, so we scope by region. Unlike the
-    // Anthropic statement above this one is intentionally separate so
-    // that future provider expansion (Llama / Nova / Mistral) can each
-    // ship their own statement without widening Anthropic or OpenAI.
+    // These used to be invoked through `bedrock-mantle.{region}.api.aws`, which has
+    // its own `bedrock-mantle:*` action set, and this block granted it. The routes
+    // now call the OpenAI-compatible surface on `bedrock-runtime` — the endpoint AWS
+    // recommends, and the only one whose calls appear in model invocation logs — so
+    // the permissions move into the `bedrock` namespace with everything else.
     //
-    // We list only the project-scoped resource ARNs we expect AWS to
-    // accept; the inference action set covers `CreateInference`,
-    // discovery (`Get*` / `List*`). If AWS later accepts wildcards on
-    // the bedrock-mantle namespace at the resource level (similar to
-    // `bedrock:*`-style ARNs), we should tighten further.
+    // Scoped by inference-profile prefix rather than `*` for the same reason as the
+    // Anthropic statement above: `Resource: *` would let an RCE invoke any model in
+    // the account. The registry pins these to `us.` profiles, so that is what is
+    // granted; add a prefix here when a registry entry starts using one.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        sid: 'AllowOpenAIBedrockMantleInvoke',
+        sid: 'AllowOpenAIFamilyBedrockInvoke',
         effect: iam.Effect.ALLOW,
-        actions: ['bedrock-mantle:CreateInference', 'bedrock-mantle:Get*', 'bedrock-mantle:List*'],
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+        ],
         resources: [
-          `arn:aws:bedrock-mantle:us-east-2:${account}:project/*`,
-          `arn:aws:bedrock-mantle:us-west-2:${account}:project/*`,
+          // The OpenAI-compatible surface authorizes against a PROJECT resource, not
+          // against the model: without this line the call is denied with "not
+          // authorized to perform: bedrock:InvokeModel on resource:
+          // arn:aws:bedrock:<region>:<account>:project/default". Verified by assuming
+          // a role carrying exactly these statements and calling the real endpoint —
+          // the model-scoped ARNs alone produced a 401, and adding this produced 200.
+          // The mantle statement this replaced had the same shape
+          // (`arn:aws:bedrock-mantle:...:project/*`); dropping it in the namespace
+          // move was the defect.
+          `arn:aws:bedrock:*:${account}:project/*`,
+          // Kept as well: `Converse`-style model ARNs are what the same actions are
+          // scoped by elsewhere, and a future direct InvokeModel on these families
+          // should not need a second policy edit.
+          `arn:aws:bedrock:*::foundation-model/openai.*`,
+          `arn:aws:bedrock:*::foundation-model/xai.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/us.openai.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/global.openai.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/us.xai.*`,
+          `arn:aws:bedrock:*:${account}:inference-profile/global.xai.*`,
         ],
       }),
     );
 
-    // The bearer-token mint action that `aws-bedrock-token-generator`
-    // performs in `mvp/openai_responses.py`.
+    // The bearer-token mint that `aws-bedrock-token-generator` performs before each
+    // OpenAI-compatible call (`mvp/_openai_transport.py`). Verified against the
+    // moved endpoint that the same minted token is accepted, so the mechanism is
+    // unchanged; only the namespace moves with the endpoint.
     //
-    // Verified at deploy time (2026-06-02): bedrock-mantle does NOT
-    // accept resource-level conditions on `CallWithBearerToken`. A
-    // region-scoped ARN yields:
-    //   "User: ... is not authorized to perform: bedrock-mantle:CallWithBearerToken
-    //    on resource: * because no identity-based policy allows ..."
-    // `resources: ['*']` is therefore the documented AWS constraint,
-    // not a posture choice. If AWS later supports resource-level scoping
-    // (parity with bedrock:InvokeModel), tighten back to the project
-    // ARN list used by AllowOpenAIBedrockMantleInvoke above.
+    // `bedrock:CallWithBearerToken` is verified as the correct action in this
+    // namespace: a role carrying only these two statements minted a token and got a
+    // 200 from the real endpoint. `resources: ['*']` is inherited from the mantle
+    // statement, where a region-scoped ARN was rejected outright. Whether the
+    // `bedrock` namespace would accept resource-level scoping is still untested —
+    // the mint succeeded with `*` and tightening it on a guess fails closed at
+    // request time on a path with no fallback, so it stays wide until someone tests
+    // the narrower form the same way the project ARN above was tested.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        sid: 'AllowBedrockMantleBearerTokenMint',
+        sid: 'AllowBedrockBearerTokenMint',
         effect: iam.Effect.ALLOW,
-        actions: ['bedrock-mantle:CallWithBearerToken'],
+        actions: ['bedrock:CallWithBearerToken'],
         resources: ['*'],
       }),
     );

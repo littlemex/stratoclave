@@ -1,10 +1,13 @@
-"""bedrock-mantle transport: endpoint, auth, clients, error and usage parsing.
+"""OpenAI-compatible transport: endpoint, auth, clients, error and usage parsing.
 
-Two routes talk to bedrock-mantle — the OpenAI Responses route and the widened
-OpenAI Chat Completions route — and they differ only in which path they POST to
-and what they do with the body. Everything below that is transport: the endpoint
-template, the short-lived bearer, client construction with the right timeouts,
-and reading an error message or a usage block out of a mantle response.
+Two routes speak this surface — the OpenAI Responses route and the widened OpenAI
+Chat Completions route — and they differ only in which path they POST to and what
+they do with the body. Everything below that is transport: the endpoint template,
+the short-lived bearer, client construction with the right timeouts, and reading an
+error message or a usage block out of a response.
+
+The endpoint is `bedrock-runtime`, the one AWS recommends; see `_ENDPOINT_TEMPLATE`
+for what moving off `the OpenAI-compatible endpoint` bought and what it did not.
 
 Keeping those here means the endpoint template exists once. A second copy is the
 kind of duplication that goes unnoticed until one of them is pointed at the wrong
@@ -43,9 +46,39 @@ logger = get_logger(__name__)
 # 15 min, against the library default of 1 h (12 h max).
 DEFAULT_TOKEN_TTL = timedelta(seconds=900)
 
-# mantle's OpenAI-compatible surface. The `/openai/v1` prefix is part of the
-# contract and distinct from the bare `/v1` some models are served under.
-_ENDPOINT_TEMPLATE = "https://bedrock-mantle.{region}.api.aws/openai/v1"
+# The OpenAI-compatible surface on `bedrock-runtime`, which is the endpoint AWS
+# recommends: the `the OpenAI-compatible endpoint` documentation opens with "For new applications,
+# we recommend the `bedrock-runtime` endpoint" and marks it as such in its own
+# endpoint table.
+#
+# This used to point at `https://bedrock-runtime.{region}.amazonaws.com/openai/v1`, and
+# moving it is not cosmetic. Two capabilities this gateway needs are documented as
+# absent on the OpenAI-compatible endpoint and present here:
+#
+#   * Model invocation logging is "only supported for calls made through the
+#     `bedrock-runtime` endpoint. This includes the OpenAI-compatible Responses and
+#     Chat Completions APIs on that endpoint. Calls made through other endpoints,
+#     such as the same APIs on `the OpenAI-compatible endpoint`, are not currently captured."
+#     Verified: a call here produces a log record with `operation:
+#     "ChatCompletions"` and its token counts. On the OpenAI-compatible endpoint there is no record at all,
+#     so an abandoned call left nothing to reconcile against.
+#   * The usage block carries `input_tokens_details.cached_tokens`,
+#     `cache_write_tokens` and `output_tokens_details.reasoning_tokens`, so a
+#     cached or reasoning-heavy call can be priced on what it actually was.
+#
+# What did NOT change is the auth: `provide_token` mints a Bedrock API key, and
+# this endpoint accepts it as a bearer. Verified against a real call rather than
+# assumed, which is why the token machinery below is untouched by the move.
+#
+# What this endpoint does NOT give us: `requestMetadata` is accepted and then
+# recorded as `null` on the OpenAI-compatible APIs (the per-request metadata
+# documentation lists only InvokeModel/Converse and their streaming forms). So
+# these routes have aggregate evidence that an attempt occurred and what it cost,
+# not per-hold attribution. `/v1/messages` on Converse has both.
+#
+# The `/openai/v1` prefix is part of the contract and distinct from the bare `/v1`
+# the OpenAI-compatible endpoint served these models under.
+_ENDPOINT_TEMPLATE = "https://bedrock-runtime.{region}.amazonaws.com/openai/v1"
 
 # The non-streaming read window is bounded BELOW the CDN's origin timeout (60 s)
 # on purpose. A request that outlives the CDN's patience reaches the caller as a
@@ -57,7 +90,7 @@ _ENDPOINT_TEMPLATE = "https://bedrock-mantle.{region}.api.aws/openai/v1"
 # Streaming keeps the long window: bytes flow, so the CDN's timeout applies to each
 # read rather than to the whole stream, and a reasoning model may legitimately stay
 # quiet for a while before its first token.
-NONSTREAM_READ_TIMEOUT_ENV = "MANTLE_NONSTREAM_READ_TIMEOUT_SECONDS"
+NONSTREAM_READ_TIMEOUT_ENV = "OPENAI_TRANSPORT_NONSTREAM_READ_TIMEOUT_SECONDS"
 DEFAULT_NONSTREAM_READ_TIMEOUT = 50.0
 
 
@@ -98,12 +131,12 @@ RETRY_MAX_ATTEMPTS = 1
 
 
 def base_url(region: str) -> str:
-    """The mantle OpenAI-compatible base URL for `region`."""
+    """The OpenAI-compatible base URL on `bedrock-runtime` for `region`."""
     return _ENDPOINT_TEMPLATE.format(region=region)
 
 
 def mint_bearer_token(region: str) -> str:
-    """Mint a short-lived bearer token for mantle in `region`."""
+    """Mint a short-lived bearer token (a Bedrock API key) for `region`."""
     # Imported lazily so the module loads even where the dependency is absent
     # (e.g. a dev environment running only the Converse tests); the route-time
     # failure is then a 503 rather than a worker that will not start.
@@ -113,7 +146,7 @@ def mint_bearer_token(region: str) -> str:
         raise HTTPException(
             status_code=503,
             detail=(
-                "A bedrock-mantle route is enabled but "
+                "An OpenAI-compatible route is enabled but "
                 "aws-bedrock-token-generator is not installed. "
                 "Add it to backend/requirements.txt."
             ),
@@ -132,7 +165,7 @@ def mint_bearer_token(region: str) -> str:
 
 
 # How early a cached bearer is refreshed. Inside this window the cached token is
-# still served — mantle validates the credential when it admits the request, so a
+# still served — the OpenAI-compatible endpoint validates the credential when it admits the request, so a
 # token that expires mid-stream does not interrupt one already accepted — while a
 # single background refresh replaces it. That is what the margin is for: without
 # it, every in-flight request in a region misses the cache at the same instant and
@@ -141,15 +174,15 @@ def mint_bearer_token(region: str) -> str:
 #
 # It is NOT a guarantee that a token outlives the request it is given to: the read
 # window is 600 s and this is 120 s. Admission-time validation is the assumption
-# that makes that acceptable; if mantle ever revalidates mid-stream, this has to
+# that makes that acceptable; if the OpenAI-compatible endpoint ever revalidates mid-stream, this has to
 # grow past the longest request instead.
 _TOKEN_REFRESH_MARGIN = timedelta(seconds=120)
 
 # Connection ceiling per pooled client. This is the per-task in-flight limit for
-# the mantle surface, so it has to be raised alongside the task count when the
+# the the OpenAI-compatible endpoint surface, so it has to be raised alongside the task count when the
 # concurrency target moves; httpx would otherwise queue at its default of 100
 # while the task still had CPU and threads to spare.
-_MAX_CONNECTIONS_ENV = "MANTLE_MAX_CONNECTIONS"
+_MAX_CONNECTIONS_ENV = "OPENAI_TRANSPORT_MAX_CONNECTIONS"
 _DEFAULT_MAX_CONNECTIONS = 256
 
 def _now() -> float:
@@ -173,8 +206,8 @@ _async_clients: dict[str, httpx.AsyncClient] = {}
 _clients_lock = threading.Lock()
 
 
-def mantle_connection_ceiling() -> int:
-    """Connections this task may hold to mantle. Validated at startup."""
+def openai_transport_connection_ceiling() -> int:
+    """Connections this task may hold to the OpenAI-compatible endpoint. Validated at startup."""
     from ._concurrency import capacity_env_int
 
     return capacity_env_int(_MAX_CONNECTIONS_ENV, _DEFAULT_MAX_CONNECTIONS)
@@ -186,7 +219,7 @@ def mantle_connection_ceiling() -> int:
 # had expired in the gaps. Five minutes keeps a bursty client's pool warm while
 # staying well inside the idle timeouts of the load balancers in front of the
 # upstream, so we do not hand out a connection the peer has already dropped.
-_KEEPALIVE_EXPIRY_ENV = "MANTLE_KEEPALIVE_EXPIRY_SECONDS"
+_KEEPALIVE_EXPIRY_ENV = "OPENAI_TRANSPORT_KEEPALIVE_EXPIRY_SECONDS"
 _DEFAULT_KEEPALIVE_EXPIRY = 300.0
 
 
@@ -202,7 +235,7 @@ def _limits() -> httpx.Limits:
     # Keepalive matches the connection ceiling: a connection closed between
     # requests puts the TLS handshake back on the hot path, which is the cost this
     # pool exists to remove.
-    ceiling = mantle_connection_ceiling()
+    ceiling = openai_transport_connection_ceiling()
     return httpx.Limits(
         max_connections=ceiling,
         max_keepalive_connections=ceiling,
@@ -296,7 +329,7 @@ def _refresh_now(region: str) -> None:
             _mint_and_store(region)
     except Exception:  # noqa: BLE001 — the cached token is still usable
         logger.warning(
-            "mantle_bearer_background_refresh_failed",
+            "openai_bearer_background_refresh_failed",
             region=region,
             note="serving the cached token for the rest of its life",
         )
@@ -331,7 +364,7 @@ def invalidate_token(region: str, used: Optional[dict[str, str]] = None) -> None
     Under per-request minting a dead token cost one request, because the next one
     minted again. A cached token would instead be handed to every request in the
     region until its TTL ran out, and independently per task, so a credential that
-    stops working takes the whole mantle surface down for a refresh interval rather
+    stops working takes the whole the OpenAI-compatible endpoint surface down for a refresh interval rather
     than for one request. The money path is unaffected either way — those responses
     refund — but the outage is real.
 
@@ -385,7 +418,7 @@ def _refresh_executor() -> "ThreadPoolExecutor":
             from concurrent.futures import ThreadPoolExecutor
 
             _refresher = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mantle-token-refresh"
+                max_workers=1, thread_name_prefix="the OpenAI-compatible endpoint-token-refresh"
             )
     return _refresher
 
@@ -399,7 +432,7 @@ def _token_lock(region: str) -> threading.Lock:
 
 
 def async_client(region: str) -> httpx.AsyncClient:
-    """The pooled async mantle client for `region`.
+    """The pooled async OpenAI-transport client for `region`.
 
     Use for streaming: a sync client would hold a threadpool worker for the life
     of the stream. Process-wide and NOT to be closed by the caller — closing it
@@ -430,7 +463,7 @@ def async_client(region: str) -> httpx.AsyncClient:
 
 
 def sync_client(region: str) -> httpx.Client:
-    """The pooled blocking mantle client for `region`.
+    """The pooled blocking the OpenAI-compatible endpoint client for `region`.
 
     Same ownership rule as `async_client`: process-wide, not closed by the caller,
     auth passed per request, and no per-call override.
@@ -513,7 +546,7 @@ async def aclose_all() -> None:
 
 
 def format_error(resp: httpx.Response) -> str:
-    """A sanitized error message from a non-2xx mantle response."""
+    """A sanitized error message from a non-2xx the OpenAI-compatible endpoint response."""
     try:
         body = resp.json()
         if isinstance(body, dict):
@@ -528,7 +561,7 @@ def format_error(resp: httpx.Response) -> str:
 
 
 def extract_usage(usage: Any) -> tuple[int, int]:
-    """Return `(input_tokens, output_tokens)` from a mantle usage block.
+    """Return `(input_tokens, output_tokens)` from a the OpenAI-compatible endpoint usage block.
 
     Accepts both the Responses spelling (`input_tokens`/`output_tokens`) and the
     Chat Completions one (`prompt_tokens`/`completion_tokens`), because the two

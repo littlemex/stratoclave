@@ -37,7 +37,7 @@ import random
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -181,38 +181,49 @@ _HOLD_TTL_SECONDS = max(
 # DERIVATION (not a chosen constant): for each upstream transport this
 # pipeline's holds wait on, one attempt's own worst-case wall-clock time is
 # (connect + read timeout) — the time the underlying HTTP client will wait
-# before giving up and surfacing an error — and `RETRY_MAX_ATTEMPTS` many such
-# attempts can happen INSIDE that transport's OWN client before it hands
-# control back to this pipeline (Bedrock: botocore's `retries.max_attempts`;
-# mantle: no automatic retry, so 1). A hold's charge can only "still arrive"
-# for as long as ONE of these attempt-sequences is running, so the ceiling is
-# the WORST (largest) of the transports this pipeline actually uses, plus a
-# margin for clock skew between the process that started the timer and the one
-# that later reads it. This imports the SAME named constants
-# `_bedrock_clients`/`_mantle_transport` configure their real clients with
+# before giving up and surfacing an error — multiplied by however many attempts
+# can happen before control returns to this pipeline. A hold's charge can only
+# "still arrive" for as long as ONE of these attempt-sequences is running, so
+# the ceiling is the WORST (largest) of the transports this pipeline actually
+# uses, plus a margin for clock skew between the process that started the timer
+# and the one that later reads it. This imports the SAME named constants
+# `_bedrock_clients`/`_openai_transport` configure their real clients with
 # (added there for exactly this reason), so a change to either transport's
 # timeout changes this derivation automatically instead of by someone
 # remembering to update a second copy.
+#
+# WHERE THE ATTEMPTS LIVE changed, and the derivation follows it. This used to
+# multiply by the Bedrock client's `RETRY_MAX_ATTEMPTS` on the belief that the
+# SDK held the retry budget. Two things were wrong: that constant was configured
+# through botocore's `max_attempts`, which means RETRIES (the real ceiling was
+# one attempt higher than the derivation assumed), and the streaming path's own
+# retry loop in `mvp.routing.infrarouter` was never counted at all. The SDK now
+# makes exactly one attempt, so the retry budget is the router's: it starts no
+# new attempt after `_CHAIN_DEADLINE_S`, and an attempt started just under that
+# deadline can still run a full (connect + read). Hence chain deadline plus one
+# attempt, rather than a multiple of attempts.
 from ._bedrock_clients import (
     CONNECT_TIMEOUT_SECONDS as _BEDROCK_CONNECT_SECONDS,
     READ_TIMEOUT_SECONDS as _BEDROCK_READ_SECONDS,
-    RETRY_MAX_ATTEMPTS as _BEDROCK_RETRY_ATTEMPTS,
+    RETRY_MAX_ATTEMPTS as _BEDROCK_SDK_ATTEMPTS,
 )
-from ._mantle_transport import (
-    RETRY_MAX_ATTEMPTS as _MANTLE_RETRY_ATTEMPTS,
-    STREAM_READ_TIMEOUT_SECONDS as _MANTLE_READ_SECONDS,
+from ._openai_transport import (
+    RETRY_MAX_ATTEMPTS as _openai_RETRY_ATTEMPTS,
+    STREAM_READ_TIMEOUT_SECONDS as _openai_READ_SECONDS,
 )
+from .routing.infrarouter import CHAIN_DEADLINE_SECONDS as _ROUTER_CHAIN_DEADLINE
 
-_BEDROCK_WORST_CASE_SECONDS = (
-    (_BEDROCK_CONNECT_SECONDS + _BEDROCK_READ_SECONDS) * _BEDROCK_RETRY_ATTEMPTS
+_BEDROCK_ONE_ATTEMPT_SECONDS = (
+    (_BEDROCK_CONNECT_SECONDS + _BEDROCK_READ_SECONDS) * _BEDROCK_SDK_ATTEMPTS
 )
-# mantle's connect timeout (10s) is a module-private literal in
-# `_mantle_transport._DEFAULT_TIMEOUT`, not (yet) named — folding in only the
+_BEDROCK_WORST_CASE_SECONDS = _ROUTER_CHAIN_DEADLINE + _BEDROCK_ONE_ATTEMPT_SECONDS
+# the OpenAI-compatible endpoint's connect timeout (10s) is a module-private literal in
+# `_openai_transport._DEFAULT_TIMEOUT`, not (yet) named — folding in only the
 # named read timeout here is the conservative direction (it UNDERSTATES
-# mantle's worst case by the connect leg), which is safe for a floor this
+# the OpenAI-compatible endpoint's worst case by the connect leg), which is safe for a floor this
 # module then adds a full clock-skew margin on top of; overstating would be
 # the unsafe direction.
-_MANTLE_WORST_CASE_SECONDS = _MANTLE_READ_SECONDS * _MANTLE_RETRY_ATTEMPTS
+_openai_WORST_CASE_SECONDS = _openai_READ_SECONDS * _openai_RETRY_ATTEMPTS
 
 # Clock-skew margin: this pipeline's own timestamps (`created_at` on the hold,
 # `expires_at`) are all server-side wall-clock, but the reaper's sweep and the
@@ -222,8 +233,8 @@ _MANTLE_WORST_CASE_SECONDS = _MANTLE_READ_SECONDS * _MANTLE_RETRY_ATTEMPTS
 # host whose NTP sync has degraded, not a number tuned to any test.
 _CLOCK_SKEW_MARGIN_SECONDS = 60
 
-REQUEST_DEADLINE_SECONDS = max(_BEDROCK_READ_SECONDS, _MANTLE_READ_SECONDS)
-RETRY_BUDGET_SECONDS = max(_BEDROCK_WORST_CASE_SECONDS, _MANTLE_WORST_CASE_SECONDS)
+REQUEST_DEADLINE_SECONDS = max(_BEDROCK_READ_SECONDS, _openai_READ_SECONDS)
+RETRY_BUDGET_SECONDS = max(_BEDROCK_WORST_CASE_SECONDS, _openai_WORST_CASE_SECONDS)
 # `MAX_CALL_DURATION_SECONDS` is named to match section 5's own vocabulary
 # ("the request deadline plus the retry budget plus a margin for clock skew")
 # — `RETRY_BUDGET_SECONDS` here already folds the deadline into its own
@@ -384,6 +395,24 @@ def _reserve_protocol_for(tenant_id: Optional[str]) -> str:
     return "transaction"
 
 
+def pool_deltas(reserved_microusd, actual_microusd):
+    """The three counter deltas a pool move applies, as a pure function.
+
+    Extracted from `_pool_settle_items` so the arithmetic can be verified over
+    symbolic values rather than over a transcription of it. Two reviews landed on
+    the same finding: a Z3 proof that re-implements this in the test file proves the
+    test author's algebra, and stays green while production swaps two bindings.
+    Nothing here converts to `int`, so z3 `Int` expressions flow through unchanged
+    and the proof is over the shipped expression.
+
+    Returns `(reserved_delta, settled_delta, headroom_delta)` for
+    `ADD pool_reserved :dr, pool_settled :actual, pool_headroom :dh`. `headroom` is
+    defined as `limit - reserved - settled`, so returning `reserved` and booking
+    `actual` moves it by their difference.
+    """
+    return (-reserved_microusd, actual_microusd, reserved_microusd - actual_microusd)
+
+
 def _pool_settle_items(
     *,
     table_name: str,
@@ -417,12 +446,14 @@ def _pool_settle_items(
     # `actual` of true spend shifts headroom by (reserved - actual). This keeps
     # the invariant on settle (actual>0), release, and reclaim (both actual=0 =>
     # full reservation returned to headroom). Same aggregate for all three paths.
-    delta_headroom = int(reserved_microusd) - int(actual_microusd)
+    d_reserved, d_settled, delta_headroom = pool_deltas(
+        reserved_microusd, actual_microusd
+    )
     expr = ("ADD pool_reserved_microusd :dr, pool_settled_microusd :actual, "
             "pool_headroom_microusd :dh")
     values = {
-        ":dr": {"N": str(-int(reserved_microusd))},
-        ":actual": {"N": str(int(actual_microusd))},
+        ":dr": {"N": str(d_reserved)},
+        ":actual": {"N": str(d_settled)},
         ":dh": {"N": str(delta_headroom)},
     }
     if reclaimed_microusd:
@@ -817,6 +848,42 @@ def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
         return 0
 
 
+def _reaped_hold_facts(hold: dict) -> dict:
+    """What a reclaim must copy out of the hold row before deleting it.
+
+    `CONTRACT-charge-loss.md`. The reaper credits an expired hold back with
+    `actual=0`, which asserts the provider charged nothing. That assertion is
+    false for any request that died after its bytes left: measured on real
+    Bedrock, a call abandoned at a 2 s read timeout was billed 1,493 output
+    tokens. Holding those reservations instead of returning them is a larger
+    change (it needs a durable sweep cursor, pool-incarnation fencing, and a
+    settle-dispatcher branch), and how big a problem it is worth solving should be
+    a number rather than an argument.
+
+    So this preserves the facts that make the number derivable from the ledger
+    alone, because the reclaim's Delete destroys the row that holds them.
+    `source` is the discriminator that already exists: "inline" means the hold
+    backed a provider call, "external" means it backed an authorization that
+    never made one, so only the inline sum is exposure at all.
+
+    Read-only over the hold item, no new attribute, and nothing here is ever
+    conditioned on — the money path is unchanged by design.
+    """
+    facts: dict[str, Any] = {}
+    for key in ("source", "created_at", "provider_invoked_at"):
+        val = hold.get(key)
+        if val:
+            facts[key] = str(val)
+    for key in ("amount_microusd", "expires_at"):
+        val = hold.get(key)
+        if val is not None:
+            try:
+                facts[key] = int(val)
+            except (TypeError, ValueError):
+                pass
+    return facts
+
+
 def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
     """Reclaim up to `cap` expired holds for one tenant/period. See
     `_sweep_expired_holds` for the contract; this is the per-period worker."""
@@ -905,6 +972,9 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                         run_id_is_fallback=True,
                         settle_reason="reaper_reclaim",
                         actor="reaper",
+                        # The Delete below destroys the hold row, so what this
+                        # reclaim was ABOUT survives only here.
+                        reaped_hold_facts=_reaped_hold_facts(hold),
                     )
                 )
             client.transact_write_items(
@@ -921,12 +991,23 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
             # budget then vanished. If the crash was AFTER a successful Bedrock
             # call, real spend happened but is recorded here as actual=0 — this
             # line + pool_reclaimed_microusd let operators reconcile the bill.
+            #
+            # `exposure_microusd` is that amount when, and only when, the hold
+            # backed a provider call (`source == "inline"`). It is the money this
+            # reclaim hands back on a request that may well have been billed —
+            # what a retained-liability design would keep held instead. An
+            # external authorization hold made no provider call, so returning it
+            # is simply correct and it is not exposure.
+            _source = str(hold.get("source") or "")
             logger.error(
                 "pool_hold_reclaimed",
                 tenant_id=tenant_id,
                 period=period,
                 hold_id=hold_id,
                 amount_microusd=amount,
+                hold_source=_source or "unknown",
+                exposure_microusd=amount if _source == "inline" else 0,
+                provider_invoked_at=hold.get("provider_invoked_at") or "",
             )
         except ClientError as e:
             # A cancelled transaction means the hold was already reclaimed or

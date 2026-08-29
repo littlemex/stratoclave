@@ -1,6 +1,6 @@
 """Unit tests for the OpenAI-shape canonical-payload surveyors in
 `mvp.reservation_bound` — `survey_and_hash_openai_chat_payload` (the
-`/v1/chat/completions` mantle leg) and `survey_and_hash_openai_responses_payload`
+`/v1/chat/completions` the OpenAI-compatible endpoint leg) and `survey_and_hash_openai_responses_payload`
 (`/openai/v1/responses`). Pure-function tests, no AWS.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _png_data_uri(width: int, height: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Chat Completions (mantle) payload shape
+# Chat Completions (the OpenAI-compatible endpoint) payload shape
 # ---------------------------------------------------------------------------
 
 

@@ -43,7 +43,7 @@
     </mxCell>
 
     <!-- B2: Backend validate -->
-    <mxCell id="B2" value="Validate request shape:&#xa;- Action=GetCallerIdentity only&#xa;- method=POST&#xa;- X-Amz-Date ±5 min&#xa;- URL allowlist sts.*.amazonaws.com" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=left;spacingLeft=8;" vertex="1" parent="1">
+    <mxCell id="B2" value="Validate request shape:&#xa;- Action=GetCallerIdentity only&#xa;- method=POST&#xa;- X-Amz-Date ±5 min&#xa;- URL host must be in an ENUMERATED allowlist&#xa;  (mvp/sso_sts.py; not a wildcard)" style="rounded=1;whiteSpace=wrap;overflow=hidden;fillColor=#FFFFFF;strokeColor=#1E7E5A;fontStyle=0;fontSize=12;align=left;spacingLeft=8;" vertex="1" parent="1">
       <mxGeometry x="570" y="250" width="510" height="100" as="geometry" />
     </mxCell>
 

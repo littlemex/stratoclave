@@ -481,9 +481,9 @@ stratoclave codex --model openai.gpt-5.5 -- "Plan a refactor"
 Aliases without the provider prefix (`gpt-5.4`, `gpt-5.6-sol`, `grok-4.6`,
 `gemma-4`, …) are also accepted. All of these are reached through the same
 OpenAI-compatible Responses transport — the deployment's ECS task makes the
-cross-region HTTPS call to `bedrock-mantle.{region}.api.aws/openai/v1/responses`,
+cross-region HTTPS call to `bedrock-runtime.{region}.amazonaws.com/openai/v1/responses`,
 so xAI Grok and Google Gemma need no new transport, only a registry entry. Gemma
-is served on bedrock-mantle only (no Converse). To add a new model, append a
+is served on bedrock-runtime only (no Converse). To add a new model, append a
 `ModelEntry` to `backend/mvp/models.py` (with a `pricing_key`) and redeploy.
 
 > **Gemma pricing.** Bedrock publishes no per-token list price for Gemma, so its

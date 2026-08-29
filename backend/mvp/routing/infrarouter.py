@@ -28,7 +28,13 @@ logger = get_logger(__name__)
 _MAX_RETRIES_PER_TARGET = 2
 _BASE_DELAY_S = 0.2
 _MAX_DELAY_S = 2.0
-_CHAIN_DEADLINE_S = 12.0
+# Public, because this is now the retry budget the pipeline's reap-timeout
+# derivation reads: with the SDK making exactly one attempt, this loop is the
+# only thing that re-sends, so how long a provider charge can still arrive is
+# bounded here rather than in the transport's config. Naming it keeps the two
+# from drifting the way the transport's attempt count already did once.
+CHAIN_DEADLINE_SECONDS = 12.0
+_CHAIN_DEADLINE_S = CHAIN_DEADLINE_SECONDS
 
 _cooldowns: dict[tuple[str, str], float] = {}
 _COOLDOWN_TTL_S = 15.0

@@ -29,8 +29,10 @@ Credit handling (pessimistic reservation):
     keeps N concurrent requests from racing past the budget.
   - After Bedrock returns, refund the difference between reservation
     and actual usage.
-  - On any error path, the `finally` clause refunds the full
-    reservation (Bedrock did not bill us).
+  - On an error path the reservation is returned only when the request
+    cannot have been billed — see `mvp.provider_outcome`. "An error
+    means Bedrock did not bill us" was the previous rule here and it is
+    false: a call abandoned on a client read timeout is billed in full.
   - UsageLogs receives exactly one row per request, with the actual
     usage (never the reservation).
 """
@@ -53,6 +55,7 @@ from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
 from ._bedrock_clients import bedrock_runtime_client
+from . import provider_outcome as _provider_outcome
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit,
@@ -333,7 +336,7 @@ def _bedrock_client():
     `iac/bin/iac.ts`). Per-model regions are encoded in the model registry
     but the Anthropic route here is single-region by design — the OpenAI
     Responses route consults `client_for_model(entry)` directly when it
-    needs the bedrock-mantle endpoint in us-east-2/us-west-2.
+    needs the the OpenAI-compatible endpoint endpoint in us-east-2/us-west-2.
     """
     from ._bedrock_clients import deployment_client
 
@@ -975,15 +978,69 @@ def messages(
     # re-stamped with the actually-selected model id — reused here rather
     # than rebuilt, so this is provably the SAME payload the bound was priced
     # against.
-    try:
-        resp = _bedrock_client().converse(**kwargs)
-    except ClientError as e:
-        # On a Bedrock error nothing was billed; refund the full reservation
-        # AND release the pool hold (release_pool is a no-op when unpooled).
+    #
+    # `requestMetadata` is added after that survey on purpose. It is not model
+    # input: Bedrock does not tokenise it, so it cannot move the token bound the
+    # hash was computed to pin. What it does buy is the only way to attribute a
+    # charge this request never saw — Bedrock echoes it into model invocation log
+    # records, verified on real Bedrock against a call abandoned on read timeout,
+    # whose record was retrieved by this marker alone and carried the exact token
+    # counts. The pinned hash therefore covers the priced CONTENT, not every byte
+    # on the wire.
+    _attempt_md = _provider_outcome.attempt_request_metadata(
+        getattr(tenants_repo, "hold_id", None), user.org_id
+    )
+    if _attempt_md:
+        kwargs["requestMetadata"] = _attempt_md
+
+    def _return_reservation() -> None:
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
         _release_pool(tenants_repo)
+
+    def _finalize_failed_attempt(exc: BaseException) -> str:
+        """Return the reservation only if the request cannot have been billed.
+
+        This used to refund unconditionally, on the reasoning that "on a Bedrock
+        error nothing was billed". That is false for anything after the request
+        bytes left: measured on real Bedrock, a call abandoned at a 2 s read
+        timeout was billed 1,493 output tokens while its caller received nothing,
+        so refunding returned money the account had actually spent and let a later
+        admission carry the pool past its limit with every proved invariant
+        intact.
+
+        `mvp.provider_outcome` decides how far the request got; the liability that
+        state carries is a versioned policy row, so a change in provider billing
+        behaviour is a table edit rather than a change here.
+        """
+        state = _provider_outcome.classify_exception(exc)
+        if _provider_outcome.refunds_immediately(state):
+            _return_reservation()
+        elif not _provider_outcome.unobserved_holds_enforced():
+            # Enforcement is opt-in, so the classification runs and is logged
+            # everywhere from the first deploy while the refund behaviour stays
+            # exactly what it was. The hard-ceiling gate shipped defaulting ON and
+            # started refusing every pooled tenant on merge; this is that lesson.
+            _return_reservation()
+        logger.info(
+            "provider_attempt_failed",
+            extra={
+                "outcome_state": state,
+                "liability": _provider_outcome.liability_for(state),
+                "liability_policy_version": _provider_outcome.LIABILITY_POLICY_VERSION,
+                "enforced": _provider_outcome.unobserved_holds_enforced(),
+                "hold_id": getattr(tenants_repo, "hold_id", None),
+                "model_id": kwargs.get("modelId"),
+                "error_class": type(exc).__name__,
+            },
+        )
+        return state
+
+    try:
+        resp = _bedrock_client().converse(**kwargs)
+    except ClientError as e:
+        _finalize_failed_attempt(e)
         # Sanitize the upstream message before returning it: Bedrock errors
         # can leak account IDs, inference-profile ARNs, and internal paths.
         from core.error_handler import sanitize_exception_message
@@ -992,11 +1049,8 @@ def messages(
             status_code=502,
             detail=f"Bedrock error: {sanitize_exception_message(str(e))}",
         )
-    except Exception:
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-        )
-        _release_pool(tenants_repo)
+    except Exception as e:
+        _finalize_failed_attempt(e)
         raise
 
     usage = resp.get("usage", {})

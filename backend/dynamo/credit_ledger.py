@@ -177,6 +177,7 @@ class CreditLedgerRepository:
         reserve_pricing_version: Optional[str] = None,
         bound_mode: Optional[str] = None,
         estimate_inputs: Optional[dict] = None,
+        reaped_hold_facts: Optional[dict] = None,
     ) -> dict[str, Any]:
         """Build the ledger Put for a terminal money move (SETTLE/RELEASE/RECLAIM).
 
@@ -210,6 +211,25 @@ class CreditLedgerRepository:
         `rating` already makes the charge recomputable. `bound_mode` records
         which reservation strategy (`strict` / `calibrated` / absent = legacy
         heuristic) produced `reserved_microusd`.
+
+        `reaped_hold_facts` exists because **the reclaim transaction deletes the
+        hold row**, so anything about that hold which is not copied here is
+        destroyed. On a RECLAIM it carries the reaped hold's own attributes —
+        `source` ("inline" means it backed a provider call, "external" means it
+        backed an authorization that never made one), `created_at`, `expires_at`,
+        the amount, and `provider_invoked_at` when that marker was enabled.
+        Write-only: no condition expression references these, nothing branches on
+        them, and `derived_totals` does not fold them. They exist to make one
+        question answerable from the ledger alone — how much budget the reaper
+        returns on holds that were real provider attempts, which is the
+        **exposure** a retained-liability design would hold instead.
+
+        Deliberately "exposure" and not "leak": the amount is the reservation, not
+        the provider's bill; a hold whose request died before the provider call
+        cost nothing; and a settle arriving after the reclaim is recovered by
+        LATE_SETTLE, correlatable within this partition without new
+        instrumentation. Sizing a write-off budget from this number as though it
+        were a leak would size it wrong.
         """
         if event_type not in _TERMINAL_TYPES:
             raise ValueError(f"terminal_event_txn_item: {event_type} is not a terminal type")
@@ -269,6 +289,11 @@ class CreditLedgerRepository:
         ):
             if num is not None:
                 item[key] = {"N": str(int(num))}
+        if reaped_hold_facts:
+            # One JSON blob rather than a scatter of top-level attributes, so a
+            # later addition to what the reaper preserves cannot collide with an
+            # attribute name a reader already keys on.
+            item["reaped_hold"] = {"S": _json_compact(reaped_hold_facts)}
         return {
             "Put": {
                 "TableName": self._name,

@@ -22,11 +22,11 @@
         <mxCell id="budget_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="atomic reserve · pool $&#xa;+ per-model quota" vertex="1">
           <mxGeometry height="66" width="310" x="360" y="350" as="geometry" />
         </mxCell>
-        <mxCell id="breaker" parent="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;fontStyle=1;shadow=1;" value="Staged breaker" vertex="1">
+        <mxCell id="breaker" parent="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;fontStyle=1;shadow=1;" value="Staged breaker (advisory)" vertex="1">
           <mxGeometry height="130" width="220" x="700" y="230" as="geometry" />
         </mxCell>
-        <mxCell id="breaker_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="≤5% reject 402&#xa;≤25% downgrade tier" vertex="1">
-          <mxGeometry height="72" width="240" x="690" y="358" as="geometry" />
+        <mxCell id="breaker_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="advisory, not the gate&#xa;≤25% left → downgrade&#xa;≤5% left → 402" vertex="1">
+          <mxGeometry height="92" width="260" x="690" y="352" as="geometry" />
         </mxCell>
         <mxCell id="resolver" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2FA374;strokeColor=#14442F;strokeWidth=2;fontSize=24;fontColor=#FFFFFF;fontStyle=1;verticalAlign=middle;shadow=1;" value="Model resolver&#xa;cascading fallback" vertex="1">
           <mxGeometry height="110" width="230" x="400" y="470" as="geometry" />
@@ -49,20 +49,20 @@
         <mxCell id="ddb" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;fontStyle=1;shadow=1;" value="DynamoDB&#xa;single store" vertex="1">
           <mxGeometry height="150" width="180" x="1080" y="230" as="geometry" />
         </mxCell>
-        <mxCell id="ddb_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="budgets · quotas&#xa;usage log · routing config" vertex="1">
-          <mxGeometry height="72" width="290" x="1025" y="380" as="geometry" />
+        <mxCell id="ddb_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#14442F;whiteSpace=wrap;" value="tenant-budgets · credit-ledger&#xa;usage-logs" vertex="1">
+          <mxGeometry height="60" width="400" x="1010" y="392" as="geometry" />
         </mxCell>
         <mxCell id="brband" parent="1" style="rounded=1;fillColor=#F4FBF7;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;" value="" vertex="1">
-          <mxGeometry height="360" width="260" x="1380" y="430" as="geometry" />
+          <mxGeometry height="620" width="260" x="1380" y="410" as="geometry" />
         </mxCell>
         <mxCell id="brband_l" parent="1" style="text;html=1;align=center;fontSize=26;fontStyle=2;fontColor=#2FA374;" value="Amazon Bedrock" vertex="1">
-          <mxGeometry height="28" width="260" x="1380" y="440" as="geometry" />
+          <mxGeometry height="28" width="260" x="1380" y="420" as="geometry" />
         </mxCell>
-        <mxCell id="br1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="Converse&#xa;us-east-1" vertex="1">
-          <mxGeometry height="80" width="180" x="1420" y="485" as="geometry" />
+        <mxCell id="br1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=26;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="converse&#xa;us-east-1 (Claude)" vertex="1">
+          <mxGeometry height="110" width="180" x="1420" y="460" as="geometry" />
         </mxCell>
-        <mxCell id="br2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CDE9DC;strokeWidth=2;fontSize=26;fontColor=#2FA374;verticalAlign=middle;shadow=1;" value="Converse&#xa;us-west-2 (failover)" vertex="1">
-          <mxGeometry height="130" width="180" x="1420" y="640" as="geometry" />
+        <mxCell id="br2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CDE9DC;strokeWidth=2;fontSize=26;fontColor=#2FA374;verticalAlign=middle;shadow=1;" value="converse&#xa;us-west-2 (failover)" vertex="1">
+          <mxGeometry height="110" width="180" x="1420" y="600" as="geometry" />
         </mxCell>
         <mxCell id="e_client_budget" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=24;fontColor=#14442F;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="budget">
           <mxGeometry relative="1" as="geometry" />
@@ -94,7 +94,7 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="e_failover_lbl" parent="1" style="text;html=1;fontSize=24;fontColor=#2FA374;fontStyle=2;align=center;" value="on 429 / empty" vertex="1">
-          <mxGeometry height="44" width="130" x="1250" y="710" as="geometry" />
+          <mxGeometry height="44" width="150" x="1230" y="700" as="geometry" />
         </mxCell>
         <mxCell id="e_infra_settle" edge="1" parent="1" source="infra" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=3;endArrow=block;endFill=1;fontSize=24;fontColor=#14442F;" target="settle">
           <mxGeometry relative="1" as="geometry">
@@ -130,6 +130,15 @@
               <mxPoint x="1170" y="815" />
             </Array>
           </mxGeometry>
+        </mxCell>
+        <mxCell id="br3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=2;fontSize=24;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="bedrock-runtime /openai/v1&#xa;httpx + bearer&#xa;no retry, no failover&#xa;requestMetadata: null" vertex="1">
+          <mxGeometry as="geometry" height="160" width="250" x="1385" y="790" />
+        </mxCell>
+        <mxCell id="e_openai" parent="1" source="resolver" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2F9C72;strokeWidth=3;endArrow=blockThin;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="br3" edge="1">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e_openai_lbl" parent="1" style="text;html=1;fontSize=22;fontColor=#2FA374;fontStyle=2;align=center;" value="responses route" vertex="1">
+          <mxGeometry as="geometry" height="34" width="250" x="1120" y="800" />
         </mxCell>
       </root>
     </mxGraphModel>

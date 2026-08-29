@@ -25,10 +25,11 @@ from dynamo.user_tenants import UNLIMITED_CREDIT
 NEW_MODELS = {
     "claude-opus-5": ("us.anthropic.claude-opus-5", "us-east-1", "messages", "opus", "anthropic"),
     "claude-fable-5": ("us.anthropic.claude-fable-5", "us-east-1", "messages", "fable", "anthropic"),
-    "gpt-5.6-sol": ("openai.gpt-5.6-sol", "us-east-2", "responses", "gpt-5.6-sol", "openai"),
-    "gpt-5.6-terra": ("openai.gpt-5.6-terra", "us-east-2", "responses", "gpt-5.6-terra", "openai"),
-    "grok-4.6": ("xai.grok-4.6", "us-west-2", "responses", "grok", "xai"),
-    "gemma-4": ("google.gemma-4-31b", "us-east-2", "responses", "gemma", "google"),
+    # The `us.` prefix is the inference-profile id the bedrock-runtime endpoint
+    # requires; it is stored, not synthesised, exactly as every Anthropic entry does.
+    "gpt-5.6-sol": ("us.openai.gpt-5.6-sol", "us-east-2", "responses", "gpt-5.6-sol", "openai"),
+    "gpt-5.6-terra": ("us.openai.gpt-5.6-terra", "us-east-2", "responses", "gpt-5.6-terra", "openai"),
+    "grok-4.6": ("us.xai.grok-4.6", "us-west-2", "responses", "grok", "xai"),
 }
 
 
@@ -58,7 +59,7 @@ def test_every_new_pricing_key_has_a_rate():
     explicitly present so billing is intentional, not accidental."""
     from mvp.pricing import _DEFAULT_RATES
 
-    for key in {"fable", "gpt-5.6-sol", "gpt-5.6-terra", "grok", "gemma"}:
+    for key in {"fable", "gpt-5.6-sol", "gpt-5.6-terra", "grok"}:
         assert key in _DEFAULT_RATES, f"missing pricing rate for {key!r}"
 
 
@@ -412,14 +413,16 @@ def test_permissions_json_grants_scope_to_team_lead_not_user():
 
 def test_responses_alias_resolves_to_distinct_bedrock_id():
     """The Responses transport forwards `entry.bedrock_model_id` (not the client
-    alias) to bedrock-mantle. That rewrite is load-bearing precisely because the
-    alias and the id DIFFER for grok/gemma — mantle 404s on the bare alias. Lock
-    the divergence so the rewrite can't be "simplified" away."""
+    alias) to the OpenAI-compatible endpoint. That rewrite is load-bearing precisely
+    because the alias and the id DIFFER: the endpoint refuses a bare id with
+    "Invocation ... with on-demand throughput isn't supported", so what goes on the
+    wire must be the stored inference-profile id. Lock the divergence so the rewrite
+    can't be "simplified" away."""
     from mvp.models import resolve_model
 
     for alias, expected_id in [
-        ("grok-4.6", "xai.grok-4.6"),
-        ("gemma-4", "google.gemma-4-31b"),
+        ("grok-4.6", "us.xai.grok-4.6"),
+        ("gpt-5.6-sol", "us.openai.gpt-5.6-sol"),
     ]:
         e = resolve_model(alias)
         assert e.bedrock_model_id == expected_id

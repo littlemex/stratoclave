@@ -2,7 +2,7 @@
 
 POST /openai/v1/responses
     Accepts an OpenAI Responses-API request and forwards it to Bedrock's
-    OpenAI-compatible endpoint at `bedrock-mantle.{region}.api.aws/openai/v1`.
+    OpenAI-compatible endpoint at `bedrock-runtime.{region}.amazonaws.com/openai/v1`.
     Supports both non-streaming and `stream: true` (SSE pass-through).
 
 GET /openai/v1/models
@@ -17,7 +17,7 @@ only OpenAI-specific bits in this module are:
   - request shape (Responses API: `input`, `reasoning`, `max_output_tokens`)
   - reservation multiplier driven by `reasoning.effort` (xhigh runs can
     emit 8x the output tokens of a no-effort run)
-  - bedrock-mantle wire transport (httpx + short-lived bearer token from
+  - the OpenAI-compatible endpoint wire transport (httpx + short-lived bearer token from
     `aws-bedrock-token-generator.provide_token`)
   - SSE event-name parsing (`response.completed` → final `usage`)
 
@@ -42,7 +42,7 @@ from core.error_handler import sanitize_exception_message
 from core.logging import get_logger
 from dynamo import UserTenantsRepository
 
-from . import _mantle_transport
+from . import _openai_transport
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit,
@@ -114,7 +114,7 @@ class OpenAIResponsesRequest(BaseModel):
     @classmethod
     def _validate_input(cls, v: Any) -> Any:
         # Reject unsupported block types up-front. Image/file inputs are
-        # not blocked at the IAM layer (bedrock-mantle accepts them) but
+        # not blocked at the IAM layer (the OpenAI-compatible endpoint accepts them) but
         # token accounting for image tokens is not modelled by stratoclave
         # yet — letting them through would silently undercount credit.
         #
@@ -245,15 +245,15 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
     return _REASONING_MULTIPLIERS.get(effort, 1)
 
 
-def _build_mantle_responses_payload(
+def _build_openai_responses_payload(
     body: "OpenAIResponsesRequest", entry: "ModelEntry", *, stream: bool
 ) -> dict:
-    """The exact JSON `payload` `/openai/v1/responses` sends to bedrock-mantle,
+    """The exact JSON `payload` `/openai/v1/responses` sends to the OpenAI-compatible endpoint,
     extracted so it can be built ONCE, BEFORE the reserve call
     (CONTRACT-hard-ceiling.md section 3a: the bound must be computed over the
     canonical payload the gateway is about to send) — mirroring
-    `mvp.chat_completions._build_mantle_chat_payload`. Forwards the RESOLVED
-    Bedrock model id, not the client-facing alias, because mantle only knows
+    `mvp.chat_completions._build_openai_chat_payload`. Forwards the RESOLVED
+    Bedrock model id, not the client-facing alias, because the endpoint only knows
     ids like "xai.grok-4.6" / "openai.gpt-5.6-sol".
     """
     payload = body.model_dump(exclude_none=True)
@@ -263,7 +263,7 @@ def _build_mantle_responses_payload(
 
 
 # ---------------------------------------------------------------------------
-# bedrock-mantle client
+# the OpenAI-compatible endpoint client
 # ---------------------------------------------------------------------------
 # `provide_token(region=..., expiry=timedelta(seconds=900))` mints a
 # short-lived bearer (15 min cap; library default is 1h with a 12h max).
@@ -272,32 +272,32 @@ def _build_mantle_responses_payload(
 # compromise. A SigV4-from-task-role migration is tracked as a P1
 # follow-up — see plan's Out of scope.
 
-_DEFAULT_TOKEN_TTL = _mantle_transport.DEFAULT_TOKEN_TTL
+_DEFAULT_TOKEN_TTL = _openai_transport.DEFAULT_TOKEN_TTL
 
 
-def _mantle_client(region: str) -> httpx.AsyncClient:
-    """The pooled async mantle client for `region` (see `_mantle_transport`).
+def _openai_client(region: str) -> httpx.AsyncClient:
+    """The pooled async OpenAI-transport client for `region` (see `_openai_transport`).
 
     Process-wide: do NOT wrap it in `async with`, which would close the shared
     connection pool out from under every other in-flight request. Auth travels
-    per request via `_mantle_auth`.
+    per request via `_openai_auth`.
     """
-    return _mantle_transport.async_client(region)
+    return _openai_transport.async_client(region)
 
 
-async def _mantle_auth(region: str) -> dict[str, str]:
+async def _openai_auth(region: str) -> dict[str, str]:
     """The Authorization header for `region` (cached under its own TTL).
 
     Async because a cache miss mints, and minting must not happen on the event
-    loop: see `_mantle_transport.auth_headers_async`.
+    loop: see `_openai_transport.auth_headers_async`.
     """
-    return await _mantle_transport.auth_headers_async(region)
+    return await _openai_transport.auth_headers_async(region)
 
 
 # ---------------------------------------------------------------------------
 # Usage extraction
 # ---------------------------------------------------------------------------
-# bedrock-mantle returns Responses-API-shaped JSON. We guard against the
+# the OpenAI-compatible endpoint returns Responses-API-shaped JSON. We guard against the
 # Chat-Completions field names because some intermediate proxies and the
 # OpenAI SDK normalise inconsistently — defaulting to 0 on missing keys
 # is safer than relying on either name being present.
@@ -305,10 +305,10 @@ async def _mantle_auth(region: str) -> dict[str, str]:
 def _extract_usage(usage: dict[str, Any]) -> tuple[int, int]:
     """Return `(input_tokens, output_tokens)` from a usage block.
 
-    Delegates to `_mantle_transport`, which accepts both the Responses and Chat
-    Completions spellings — the two mantle routes share one parser.
+    Delegates to `_openai_transport`, which accepts both the Responses and Chat
+    Completions spellings — the two the OpenAI-compatible endpoint routes share one parser.
     """
-    return _mantle_transport.extract_usage(usage)
+    return _openai_transport.extract_usage(usage)
 
 
 def _previous_response_id(body: OpenAIResponsesRequest) -> Optional[str]:
@@ -337,11 +337,11 @@ def _response_id(data: dict[str, Any]) -> Optional[str]:
 # Both the non-streaming response body and SSE `event: error` lines are
 # fed through `core.error_handler.sanitize_exception_message` before they
 # reach the client. The sanitizer scrubs ARNs, account IDs, and internal
-# request IDs that bedrock-mantle's error envelopes can include.
+# request IDs that the OpenAI-compatible endpoint's error envelopes can include.
 
-def _format_mantle_error(resp: httpx.Response) -> str:
-    """A sanitized error message from a non-2xx mantle response."""
-    return _mantle_transport.format_error(resp)
+def _format_openai_error(resp: httpx.Response) -> str:
+    """A sanitized error message from a non-2xx the OpenAI-compatible endpoint response."""
+    return _openai_transport.format_error(resp)
 
 
 def _sanitize_sse_error_line(line: str) -> str:
@@ -513,14 +513,14 @@ async def create_response(
     _multiplier = _reasoning_multiplier(body)
     _input_est = max(reservation - body.max_output_tokens * _multiplier, 0)
 
-    # CONTRACT-hard-ceiling.md section 3a: build the canonical mantle payload
+    # CONTRACT-hard-ceiling.md section 3a: build the canonical the OpenAI-compatible endpoint payload
     # NOW, before the reserve below — SAAR only reads `body.input`/
     # `previous_response_id` above, so nothing between here and reserve can
     # mutate it. Built with the ORIGINALLY resolved `entry`; re-stamped with
     # the cascade's actual selection further down (content bytes never depend
     # on which model was selected, only this one field does — same reasoning
     # as `mvp.anthropic`/`mvp.chat_completions`).
-    mantle_payload = _build_mantle_responses_payload(body, entry, stream=body.stream)
+    openai_payload = _build_openai_responses_payload(body, entry, stream=body.stream)
 
     # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 0/7b):
     # survey the canonical payload, but ONLY when enforcement might use it —
@@ -538,7 +538,7 @@ async def create_response(
     _bound_state: Optional[str] = None
     if dollar_pool_bound_should_compute(user.org_id):
         _survey, _payload_bytes, _payload_hash = survey_and_hash_openai_responses_payload(
-            mantle_payload
+            openai_payload
         )
         _boundability = assess_boundability(_survey)
         _bound_state = dollar_pool_bound_state(user.org_id)
@@ -640,15 +640,15 @@ async def create_response(
             logger.warning("cascade_model_unresolvable", selected_model=_selected)
 
     # Content bytes never depend on which model was selected — only this one
-    # field does — so the already-built, already-surveyed `mantle_payload` is
+    # field does — so the already-built, already-surveyed `openai_payload` is
     # re-stamped and reused below rather than rebuilt.
-    mantle_payload["model"] = entry.bedrock_model_id
+    openai_payload["model"] = entry.bedrock_model_id
 
     if body.stream:
         return StreamingResponse(
             _stream_response(body, entry, user, tenants_repo, reservation,
                              request_id=ctx.request_id if ctx else None,
-                             sctx=sctx, payload=mantle_payload),
+                             sctx=sctx, payload=openai_payload),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -658,18 +658,18 @@ async def create_response(
             },
         )
 
-    # Non-streaming path. `mantle_payload` was built (and surveyed) BEFORE the
+    # Non-streaming path. `openai_payload` was built (and surveyed) BEFORE the
     # reserve above, then re-stamped with the actually-selected model — reused
     # here rather than rebuilt (it already carries the resolved Bedrock model
-    # id and `stream=False`; mantle only knows ids like "xai.grok-4.6" /
+    # id and `stream=False`; the OpenAI-compatible endpoint only knows ids like "xai.grok-4.6" /
     # "openai.gpt-5.6-sol", never the client-facing alias).
-    payload = mantle_payload
+    payload = openai_payload
     try:
-        client = _mantle_client(entry.bedrock_region)
-        auth = await _mantle_auth(entry.bedrock_region)
+        client = _openai_client(entry.bedrock_region)
+        auth = await _openai_auth(entry.bedrock_region)
         resp = await client.post(
             "/responses", json=payload, headers=auth,
-            timeout=_mantle_transport.nonstream_timeout(),
+            timeout=_openai_transport.nonstream_timeout(),
         )
     except httpx.HTTPError as e:
         tenants_repo.refund(
@@ -692,7 +692,7 @@ async def create_response(
         # dead credential from being served to every request in this region for
         # the rest of the token's life.
         if resp.status_code in (401, 403):
-            _mantle_transport.invalidate_token(entry.bedrock_region, auth)
+            _openai_transport.invalidate_token(entry.bedrock_region, auth)
         tenants_repo.refund(
             user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
         )
@@ -703,7 +703,7 @@ async def create_response(
         # error message after sanitisation.
         raise HTTPException(
             status_code=502,
-            detail=f"Bedrock OpenAI error: {_format_mantle_error(resp)}",
+            detail=f"Bedrock OpenAI error: {_format_openai_error(resp)}",
         )
 
     data = resp.json()
@@ -792,20 +792,20 @@ async def _stream_response(
         # Standalone-call fallback (e.g. a caller/test exercising this
         # generator in isolation, pre-reserve survey never having run): build
         # it here exactly as the route used to. The real route path always
-        # supplies `payload` pre-built (via `_build_mantle_responses_payload`),
+        # supplies `payload` pre-built (via `_build_openai_responses_payload`),
         # so this branch is never taken there.
-        payload = _build_mantle_responses_payload(body, entry, stream=True)
+        payload = _build_openai_responses_payload(body, entry, stream=True)
 
-    client = _mantle_client(entry.bedrock_region)
+    client = _openai_client(entry.bedrock_region)
     try:
         try:
-            auth = await _mantle_auth(entry.bedrock_region)
+            auth = await _openai_auth(entry.bedrock_region)
             async with client.stream(
                 "POST", "/responses", json=payload, headers=auth,
             ) as resp:
                 if resp.status_code >= 400:
                     if resp.status_code in (401, 403):
-                        _mantle_transport.invalidate_token(entry.bedrock_region, auth)
+                        _openai_transport.invalidate_token(entry.bedrock_region, auth)
                     # Read the body so the sanitizer has something to chew on.
                     body_text = (await resp.aread()).decode("utf-8", "replace")
                     sanitized = sanitize_exception_message(body_text[:500])
@@ -815,7 +815,7 @@ async def _stream_response(
                     # event reaches the client but their TUI usually
                     # only surfaces "stream disconnected").
                     logger.warning(
-                        "bedrock_mantle_stream_4xx_5xx",
+                        "bedrock_openai_stream_4xx_5xx",
                         status_code=resp.status_code,
                         region=entry.bedrock_region,
                         model_id=entry.bedrock_model_id,
@@ -854,7 +854,7 @@ async def _stream_response(
                             minted_id = ev_id
 
                 # Flush any trailing bytes that were not terminated
-                # by a blank line. bedrock-mantle (or any hop in
+                # by a blank line. the OpenAI-compatible endpoint (or any hop in
                 # between) sometimes closes the chunked-transfer
                 # body before the final `\\n\\n` is flushed —
                 # that's the exact symptom of the codex
@@ -894,7 +894,7 @@ async def _stream_response(
                                 else:
                                     out_bytes = out_bytes + b"\n\n"
                             logger.warning(
-                                "bedrock_mantle_stream_unterminated_final_event",
+                                "bedrock_openai_stream_unterminated_final_event",
                                 region=entry.bedrock_region,
                                 model_id=entry.bedrock_model_id,
                                 note=(
@@ -1036,7 +1036,7 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Opt
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        # Bedrock-mantle's stream is documented as UTF-8; if a chunk
+        # Bedrock-the OpenAI-compatible endpoint's stream is documented as UTF-8; if a chunk
         # somehow violated that we still want to forward it verbatim
         # rather than drop the frame. The codex parser will handle the
         # decode error itself.

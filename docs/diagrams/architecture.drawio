@@ -61,7 +61,7 @@
         <mxCell id="ddb" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=2;fontSize=24;fontColor=#14442F;fontStyle=1;shadow=1;" value="DynamoDB&#xa;single store" vertex="1">
           <mxGeometry height="182" width="252" x="1092" y="980" as="geometry" />
         </mxCell>
-        <mxCell id="ddb_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#2FA374;" value="users · tenants · user-tenants · budgets&#xa;model-quotas · usage-logs · api-keys&#xa;permissions · routing config" vertex="1">
+        <mxCell id="ddb_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#2FA374;" value="users · user-tenants · tenant-budgets&#xa;credit-ledger (append-only) · usage-logs&#xa;api-keys · pricing-config · routing config" vertex="1">
           <mxGeometry height="84" width="522" x="1120" y="1170" as="geometry" />
         </mxCell>
         <mxCell id="sts" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2FA374;strokeWidth=2;dashed=1;fontSize=24;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="AWS STS (global)&#xa;GetCallerIdentity — Vouch path" vertex="1">
@@ -73,7 +73,7 @@
         <mxCell id="bedrock" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=3;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="Amazon Bedrock — Claude family&#xa;converse / converseStream&#xa;us-east-1 primary → us-west-2 failover" vertex="1">
           <mxGeometry height="154" width="756" x="1624" y="340" as="geometry" />
         </mxCell>
-        <mxCell id="mantle" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=3;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="bedrock-mantle — OpenAI Responses&#xa;gpt-5.4 (us-west-2) / gpt-5.5 (us-east-2)&#xa;cross-region httpx from ECS" vertex="1">
+        <mxCell id="mantle" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=3;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="bedrock-runtime /openai/v1 — OpenAI Responses&#xa;gpt-5.6 Sol / Terra (us-east-2) · Grok 4.6 (us-west-2)&#xa;cross-region httpx · no retry, no failover" vertex="1">
           <mxGeometry height="154" width="756" x="1624" y="784" as="geometry" />
         </mxCell>
         <mxCell id="ext_band" parent="1" style="rounded=1;fillColor=#FAFDFB;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;" value="" vertex="1">
@@ -82,7 +82,7 @@
         <mxCell id="ext_title" parent="1" style="text;html=1;align=center;fontSize=24;fontStyle=2;fontColor=#2FA374;" value="External AWS (not owned)" vertex="1">
           <mxGeometry height="36" width="504" x="2520" y="1277" as="geometry" />
         </mxCell>
-        <mxCell id="sts_ext" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2FA374;strokeWidth=2;fontSize=24;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="sts.amazonaws.com&#xa;(global endpoint)" vertex="1">
+        <mxCell id="sts_ext" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#2FA374;strokeWidth=2;fontSize=24;fontColor=#14442F;verticalAlign=middle;shadow=1;" value="sts.amazonaws.com or sts.&lt;region&gt;.amazonaws.com&#xa;(only allowlisted hosts are forwarded)" vertex="1">
           <mxGeometry height="112" width="392" x="2576" y="1344" as="geometry" />
         </mxCell>
         <mxCell id="ext_note" parent="1" style="text;html=1;align=center;fontSize=24;fontColor=#2FA374;" value="Backend trusts only the Arn STS returns; never parses creds." vertex="1">
@@ -120,7 +120,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e_ecs_mantle_l" parent="1" style="text;html=1;fontSize=24;fontColor=#14442F;fontStyle=2;align=center;" value="bearer token (15-min TTL)" vertex="1">
+        <mxCell id="e_ecs_mantle_l" parent="1" style="text;html=1;fontSize=24;fontColor=#14442F;fontStyle=2;align=center;" value="per-region Bedrock API key, 900 s TTL&#xa;(transport credential, not the caller's)" vertex="1">
           <mxGeometry height="31" width="280" x="1570" y="740" as="geometry" />
         </mxCell>
         <mxCell id="e_ecs_ddb" edge="1" parent="1" source="ecs_routes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#1E7E5A;strokeWidth=2;endArrow=open;startArrow=open;dashed=1;exitX=0.75;exitY=1;entryX=0.5;entryY=0;fontSize=24;fontColor=#2FA374;exitDx=0;exitDy=0;" target="ddb">

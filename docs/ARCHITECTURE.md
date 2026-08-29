@@ -9,7 +9,7 @@ control, credit quotas, and a unified login surface (Amazon Cognito or AWS
 SSO). The control plane runs entirely inside a single AWS account and
 region (us-east-1) without introducing non-AWS control-plane dependencies;
 the optional OpenAI Responses path makes cross-region HTTPS calls to the
-Bedrock-hosted bedrock-mantle endpoint (us-east-2 / us-west-2). The system
+Bedrock-hosted bedrock-runtime endpoint (us-east-2 / us-west-2). The system
 is deliberately composed of a small number of moving parts so that an
 operator can understand the whole stack from this document alone.
 
@@ -31,7 +31,7 @@ repository lives at [`https://github.com/littlemex/stratoclave`](https://github.
 - [Authentication flows](#authentication-flows)
 - [Authorization (RBAC)](#authorization-rbac)
 - [Credit model](#credit-model)
-- [OpenAI Responses API (bedrock-mantle path)](#openai-responses-api-bedrock-mantle-path)
+- [OpenAI Responses API (bedrock-runtime path)](#openai-responses-api-bedrock-runtime-path)
 - [OpenAI Chat Completions API (both transports)](#openai-chat-completions-api-both-transports)
 - [Audit logging](#audit-logging)
 - [Well-known configuration](#well-known-configuration)
@@ -47,7 +47,7 @@ repository lives at [`https://github.com/littlemex/stratoclave`](https://github.
 1. **One region, one account, no SaaS.** Stratoclave deploys to a single AWS
    region inside your own account. There is no external control plane, no
    hosted metadata service, and no third-party control-plane dependency
-   beyond the optional cross-region call to bedrock-mantle. Nothing third-party
+   beyond the optional cross-region call to bedrock-runtime. Nothing third-party
    could become
    a single point of failure or data leak.
 2. **Stateless backend.** The FastAPI container holds no per-user state
@@ -517,7 +517,7 @@ The shipped permissions table:
 
 The `messages:send` scope gates `POST /v1/messages` (Anthropic Messages
 API). `responses:send` gates `POST /openai/v1/responses` (OpenAI Responses
-API on bedrock-mantle). The two are independent: a key issued with only
+API on bedrock-runtime). The two are independent: a key issued with only
 `messages:send` cannot reach the OpenAI route, and vice versa.
 
 ### How permissions are seeded
@@ -644,17 +644,17 @@ audited (`event=credit_overwritten`).
 
 ---
 
-## OpenAI Responses API (bedrock-mantle path)
+## OpenAI Responses API (bedrock-runtime path)
 
 `POST /openai/v1/responses` is the OpenAI counterpart of `/v1/messages`.
 It accepts an OpenAI Responses API payload, runs the same credit pipeline
 as the Anthropic route (`backend/mvp/_pipeline.py`), and forwards the body
-to `bedrock-mantle.{region}.api.aws/openai/v1/responses` via `httpx`. The
+to `bedrock-runtime.{region}.amazonaws.com/openai/v1/responses` via `httpx`. The
 target region is per-model (`ModelEntry.bedrock_region`), so the call from
 the us-east-1 ECS task is cross-region (us-west-2 for `gpt-5.4`,
 us-east-2 for `gpt-5.5`).
 
-The bedrock-mantle endpoint authenticates with a bearer token that
+The bedrock-runtime endpoint authenticates with a bearer token that
 Stratoclave mints on demand from `aws-bedrock-token-generator.provide_token(
 region=…, expiry=timedelta(seconds=900))`. The token TTL is capped at 15
 minutes; the token is held only on the request stack and is never
@@ -674,11 +674,11 @@ persisted to DynamoDB or logs.
 - Image / file inputs are rejected at the Pydantic layer (HTTP 422); the
   proxy does not yet model image-token cost.
 
-The `bedrock-mantle:CallWithBearerToken` IAM action does not currently
+The `bedrock-runtime:CallWithBearerToken` IAM action does not currently
 support resource-level conditions (verified at deploy time, 2026-06), so
 the task role's policy uses `Resource: '*'` for that action only.
-`bedrock-mantle:CreateInference` and friends are scoped to
-`arn:aws:bedrock-mantle:{us-east-2,us-west-2}:<account>:project/*`.
+`bedrock-runtime:CreateInference` and friends are scoped to
+`arn:aws:bedrock-runtime:{us-east-2,us-west-2}:<account>:project/*`.
 
 For the user-facing setup, see [`CODEX_GUIDE.md`](./CODEX_GUIDE.md).
 
@@ -694,15 +694,15 @@ transports, selected by the resolved `ModelEntry.wire_protocol`
 | `wire_protocol` | Upstream | Models |
 |---|---|---|
 | `messages` | Bedrock `converse` / `converse_stream`, in the deployment's Converse region | Claude family, Nemotron, Qwen3 |
-| `responses` | bedrock-mantle `/openai/v1/chat/completions`, a native pass-through | GPT-5.x, Grok, Gemma 4 |
+| `responses` | bedrock-runtime `/openai/v1/chat/completions`, a native pass-through | GPT-5.x, Grok, Gemma 4 |
 
 The route exists so that an OpenAI-compatible client which cannot speak the
-Responses API still reaches the mantle-served models through the gateway, with
+Responses API still reaches those models through the gateway, with
 the same reserve/settle accounting as every other route. vLLM Semantic Router is
 the motivating case: its only upstream formats are `openai` and `anthropic`
 (`APIFormatOpenAI` / `APIFormatAnthropic`), and it has no SigV4 signer.
 
-Both transports share the mantle plumbing in `backend/mvp/_mantle_transport.py`
+Both transports share the plumbing in `backend/mvp/_openai_transport.py`
 — endpoint template, bearer minting and TTL, client construction, error
 formatting, usage parsing — so the endpoint exists in exactly one place.
 
@@ -716,7 +716,7 @@ formatting, usage parsing — so the endpoint exists in exactly one place.
   `virtual` pool placeholders (never a charge-of-record model) return HTTP 400,
   and an unknown `wire_protocol` returns 500 rather than defaulting to a
   transport.
-- On a streamed mantle request the gateway forces
+- On a streamed OpenAI-compatible request the gateway forces
   `stream_options.include_usage`. Without it an OpenAI-compatible stream carries
   no usage block, so every streamed request would settle at zero — a full refund
   of the hold. When the gateway injects the option it also swallows the terminal
@@ -727,7 +727,7 @@ formatting, usage parsing — so the endpoint exists in exactly one place.
   an upstream 4xx mid-stream cannot both refund the hold and settle it again.
 - Upstream statuses that describe the caller's request or ask it to back off
   (400, 404, 408, 409, 413, 422, 429) are preserved; everything else becomes 502.
-  401/403 from mantle mean the gateway's own credential is wrong and are therefore
+  401/403 from the OpenAI-compatible endpoint mean the gateway's own credential is wrong and are therefore
   not passed through.
 - The reservation cascade is honoured on both transports: the model actually
   invoked is re-resolved from the reservation's selection, so the Bedrock region
@@ -736,10 +736,10 @@ formatting, usage parsing — so the endpoint exists in exactly one place.
   its presence says nothing about intent; taking it would truncate the response and
   under-reserve the hold.
 - Converse has no equivalent for `response_format` or `top_logprobs`, so those are
-  rejected on the `messages` branch only — mantle serves both natively.
+  rejected on the `messages` branch only — the OpenAI-compatible endpoint serves both natively.
 
 **Registry regions and residency.** `ModelEntry.bedrock_region` is asymmetric by
-design. For `responses` entries it is authoritative — each bedrock-mantle model is
+design. For `responses` entries it is authoritative — each bedrock-runtime model is
 offered in specific regions. For `messages` entries it is advisory: every Converse
 target is built from the operator's configured primary plus
 `STRATOCLAVE_FAILOVER_REGIONS` (`backend/mvp/routing/chains.py`), and the invoke
@@ -1103,5 +1103,5 @@ release; in the meantime, work around them as described.
   `us-east-1`; see
   [DEPLOYMENT.md -> Regional constraints](DEPLOYMENT.md#regional-constraints).
   Bedrock for the Claude path is also us-east-1; the OpenAI Responses path
-  makes cross-region HTTPS calls to bedrock-mantle (us-east-2 / us-west-2),
+  makes cross-region HTTPS calls to bedrock-runtime (us-east-2 / us-west-2),
   but no second control-plane region is deployed.

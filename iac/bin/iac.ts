@@ -270,7 +270,7 @@ cognitoStack.addDependency(frontendStack);
 // traffic at 7.7 s p50, which is not serving it.
 const backendSyncRouteThreads = positiveIntFromEnv('GATEWAY_SYNC_ROUTE_THREADS', 32);
 const backendOffloadThreads = positiveIntFromEnv('GATEWAY_OFFLOAD_THREADS', 32);
-const backendMantleConnections = positiveIntFromEnv('MANTLE_MAX_CONNECTIONS', 256);
+const backendOpenAiConnections = positiveIntFromEnv('OPENAI_TRANSPORT_MAX_CONNECTIONS', 256);
 // One worker per vCPU by default. 1024 CPU units is one vCPU, so a 1 vCPU task
 // stays single-process (which is what it was) and a larger task gets the workers
 // its cores can actually run.
@@ -279,9 +279,9 @@ const backendUvicornWorkers = positiveIntFromEnv(
   'GATEWAY_UVICORN_WORKERS',
   workersForCpuUnits(backendTaskCpu),
 );
-if (backendMantleConnections < backendSyncRouteThreads) {
+if (backendOpenAiConnections < backendSyncRouteThreads) {
   cdk.Annotations.of(app).addWarning(
-    `MANTLE_MAX_CONNECTIONS (${backendMantleConnections}) is below ` +
+    `OPENAI_TRANSPORT_MAX_CONNECTIONS (${backendOpenAiConnections}) is below ` +
       `GATEWAY_SYNC_ROUTE_THREADS (${backendSyncRouteThreads}): a task can admit more ` +
       'mantle requests than it holds connections for, so the surplus waits on the ' +
       'connection pool rather than on the model.',
@@ -373,11 +373,11 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // (anyio's 40 worker threads, and a loop executor sized from the HOST's core
     // count) capped a task far below what its CPU could serve, so both are set
     // explicitly here next to the task size and the scaling ceiling they have to
-    // agree with. The mantle connection ceiling matches: a pooled client left at
+    // agree with. The OpenAI-transport connection ceiling matches: a pooled client left at
     // httpx's default of 100 would queue while threads and CPU were still free.
     GATEWAY_OFFLOAD_THREADS: String(backendOffloadThreads),
     GATEWAY_SYNC_ROUTE_THREADS: String(backendSyncRouteThreads),
-    MANTLE_MAX_CONNECTIONS: String(backendMantleConnections),
+    OPENAI_TRANSPORT_MAX_CONNECTIONS: String(backendOpenAiConnections),
     // The Converse transport's equivalent. botocore defaults this to 10, which
     // would put a TLS handshake back on every request past the tenth however many
     // threads the task has.

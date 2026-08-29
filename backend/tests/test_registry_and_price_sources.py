@@ -567,20 +567,20 @@ class TestUniqueness:
 
 
 class TestResponsesRegionIsAuthoritative:
-    def _mantle_entry(self, region):
+    def _openai_entry(self, region):
         return _entry(provider="google", bedrock_model_id="google.gemma-4-31b",
                       aliases=["gemma-4"], wire_protocol="responses",
                       pricing_key="gemma", bedrock_region=region)
 
-    def test_a_region_mantle_does_not_have_is_rejected(self, tmp_path):
+    def test_a_region_openai_does_not_have_is_rejected(self, tmp_path):
         """For a responses entry the region is where the prompt goes, so a typo must
         not reach the transport."""
-        path = _write(tmp_path, _doc(self._mantle_entry("ap-northeast-1")))
-        with pytest.raises(ValueError, match="bedrock-mantle exists"):
+        path = _write(tmp_path, _doc(self._openai_entry("ap-northeast-1")))
+        with pytest.raises(ValueError, match="is not a region where the OpenAI-compatible endpoint serves"):
             load_registry(path)
 
-    def test_a_real_mantle_region_is_accepted(self, tmp_path):
-        path = _write(tmp_path, _doc(self._mantle_entry("eu-central-1")))
+    def test_a_real_openai_region_is_accepted(self, tmp_path):
+        path = _write(tmp_path, _doc(self._openai_entry("eu-central-1")))
         (entry,) = load_registry(path)
         assert entry.bedrock_region == "eu-central-1"
 
@@ -591,7 +591,7 @@ class TestResponsesRegionIsAuthoritative:
         tests/test_openai_region_residency_contract.py as well; this is the loader
         half of the same contract."""
         monkeypatch.setenv("OPENAI_BEDROCK_REGIONS", "eu-west-1")
-        path = _write(tmp_path, _doc(self._mantle_entry("us-east-2")))
+        path = _write(tmp_path, _doc(self._openai_entry("us-east-2")))
         (entry,) = load_registry(path)
         assert entry.bedrock_region == "us-east-2"
 
@@ -643,15 +643,15 @@ class TestRegionAsymmetryIsPinnedOnBothSides:
         assert seen["region"] == "eu-west-1"
 
     def test_client_for_model_still_honours_the_entry_region(self, monkeypatch):
-        """The mantle side of the asymmetry: per-entry region stays authoritative."""
+        """The OpenAI-compatible endpoint side of the asymmetry: per-entry region stays authoritative."""
         from mvp import _bedrock_clients
         from mvp.models import resolve_model
 
         seen = {}
         monkeypatch.setattr(_bedrock_clients, "bedrock_runtime_client",
                             lambda region, **kw: seen.setdefault("region", region))
-        _bedrock_clients.client_for_model(resolve_model("gemma-4"))
-        assert seen["region"] == resolve_model("gemma-4").bedrock_region
+        _bedrock_clients.client_for_model(resolve_model("grok-4.6"))
+        assert seen["region"] == resolve_model("grok-4.6").bedrock_region
 
 
 class TestMigrationEquivalence:
@@ -687,20 +687,13 @@ class TestMigrationEquivalence:
         "claude-sonnet-4-5-20250929": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
         "claude-sonnet-5": "us.anthropic.claude-sonnet-5",
-        "gemma-4": "google.gemma-4-31b",
-        "gemma-4-31b": "google.gemma-4-31b",
-        "google.gemma-4-31b": "google.gemma-4-31b",
-        "gpt-5.4": "openai.gpt-5.4",
-        "gpt-5.5": "openai.gpt-5.5",
-        "gpt-5.6-sol": "openai.gpt-5.6-sol",
-        "gpt-5.6-terra": "openai.gpt-5.6-terra",
-        "grok-4.6": "xai.grok-4.6",
+        "gpt-5.6-sol": "us.openai.gpt-5.6-sol",
+        "gpt-5.6-terra": "us.openai.gpt-5.6-terra",
+        "grok-4.6": "us.xai.grok-4.6",
         "nemotron-super-3-120b": "nvidia.nemotron-super-3-120b",
         "nvidia.nemotron-super-3-120b": "nvidia.nemotron-super-3-120b",
-        "openai.gpt-5.4": "openai.gpt-5.4",
-        "openai.gpt-5.5": "openai.gpt-5.5",
-        "openai.gpt-5.6-sol": "openai.gpt-5.6-sol",
-        "openai.gpt-5.6-terra": "openai.gpt-5.6-terra",
+        "openai.gpt-5.6-sol": "us.openai.gpt-5.6-sol",
+        "openai.gpt-5.6-terra": "us.openai.gpt-5.6-terra",
         "qwen.qwen3-next-80b-a3b": "qwen.qwen3-next-80b-a3b",
         "qwen3-next-80b": "qwen.qwen3-next-80b-a3b",
         "us.anthropic.claude-3-5-haiku-20241022-v1:0": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
@@ -719,7 +712,7 @@ class TestMigrationEquivalence:
         "us.anthropic.claude-sonnet-4-5-20250929-v1:0": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "us.anthropic.claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
         "us.anthropic.claude-sonnet-5": "us.anthropic.claude-sonnet-5",
-        "xai.grok-4.6": "xai.grok-4.6"
+        "xai.grok-4.6": "us.xai.grok-4.6"
     }
 
     def test_every_name_the_literal_resolved_still_resolves_to_the_same_model(self):

@@ -56,7 +56,7 @@ def _make_app(monkeypatch, *, scope_holder: list[str], codex_enabled: bool) -> T
     auth + RBAC stubbed out. `scope_holder[0]` is the scope set returned
     by the mocked authentication."""
     monkeypatch.setenv("CODEX_ENABLED", "true" if codex_enabled else "false")
-    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "openai.gpt-5.4")
+    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "openai.gpt-5.6-sol")
 
     _patch_authz(monkeypatch, allow={"responses:send"})
 
@@ -83,7 +83,7 @@ def test_codex_disabled_returns_503(monkeypatch):
     assert resp.status_code == 503
     resp = client.post(
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "max_output_tokens": 4},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "max_output_tokens": 4},
     )
     assert resp.status_code == 503
 
@@ -127,7 +127,7 @@ def test_messages_send_scope_cannot_reach_responses(monkeypatch):
     client = _make_app(monkeypatch, scope_holder=["messages:send"], codex_enabled=True)
     resp = client.post(
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "max_output_tokens": 4},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "max_output_tokens": 4},
     )
     assert resp.status_code == 403
 
@@ -153,7 +153,7 @@ def test_responses_send_only_passes_scope_layer(monkeypatch):
     client = _make_app(monkeypatch, scope_holder=["responses:send"], codex_enabled=True)
     resp = client.post(
         "/openai/v1/responses",
-        json={"model": "openai.gpt-5.4", "input": "hi", "max_output_tokens": 4},
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "max_output_tokens": 4},
     )
     # 402 from the stub means the scope check passed and we reached
     # the reservation step; 403 (scope reject) or 422 (schema reject)
