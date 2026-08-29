@@ -34,7 +34,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import _openai_transport
+from . import _money, _openai_transport
+from . import provider_outcome as _provider_outcome
 from ._bedrock_clients import deployment_client
 from ._timing import RequestTiming, phase as _timed_phase
 from .anthropic import _selected_bedrock_model
@@ -56,6 +57,23 @@ from .reservation_bound import (
 )
 
 router = APIRouter(tags=["mvp-chat-completions"])
+
+
+_run_ending = _money.run_ending
+
+
+def _open_hold(**kwargs) -> _money.Hold:
+    """The reservation this route just took, as the object that owns ending it.
+
+    `settle` / `release` resolve this module's globals at CALL time so a suite
+    patching `_settle_reservation_and_log` or `_release_pool` here still observes
+    every write.
+    """
+    return _money.Hold(
+        settle=lambda **kw: _settle_reservation_and_log(**kw),
+        release=lambda ctx: _release_pool(ctx),
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -545,12 +563,22 @@ def chat_completions(
         )
 
     # Non-streaming path
+    hold = _open_hold(
+        user=user, tenants_repo=tenants_repo, reservation=reservation,
+        model_id=model_id, request_id=ctx.request_id if ctx else None,
+        route="chat_completions",
+    )
+    # The marker that lets an abandoned call be found in the provider's own
+    # invocation log. Bedrock does not tokenise it, so it cannot move the token
+    # bound the payload was priced against — see `Hold.request_metadata`.
+    _attempt_md = hold.request_metadata()
+    if _attempt_md:
+        kwargs["requestMetadata"] = _attempt_md
     try:
         with _timed_phase(timing, "upstream"):
             resp = deployment_client().converse(**kwargs)
     except Exception as e:
-        tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
-        _release_pool(tenants_repo)
+        _run_ending(hold.claim_unobserved(exc=e))
         timing.emit(route="chat_completions", transport="converse", model=body.model,
                     outcome="upstream_error")
         from core.error_handler import sanitize_exception_message
@@ -563,14 +591,10 @@ def chat_completions(
     cache_read, cache_write = cache_tokens_from_usage(usage)
 
     with _timed_phase(timing, "settle"):
-        _settle_reservation_and_log(
-            user=user, tenants_repo=tenants_repo, reservation=reservation,
-            actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
-            model_id=model_id, context=tenants_repo,
-            actual_cache_read_tokens=cache_read, actual_cache_write_tokens=cache_write,
-            # Key the UsageLogs row on the request id for the offline VSR reconcile join.
-            request_id=ctx.request_id if ctx else None,
-        )
+        _run_ending(hold.claim_settle(_money.Usage(
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+        )))
     timing.emit(route="chat_completions", transport="converse", model=body.model,
                 outcome="ok", input_tokens=input_tokens, output_tokens=output_tokens)
 
@@ -704,10 +728,10 @@ def _openai_chat_completion(
     `payload`/`injected_usage` are now built ONCE, pre-reserve, by the caller
     (`_build_openai_chat_payload`) — see that function's docstring.
 
-    Accounting is exclusive by construction: `_account_once` runs either the
-    refund-and-release path or the settle path, never both, and only once. An
-    invoke-time failure refunds with NO settle; a response that arrived settles
-    against reported usage.
+    Accounting is exclusive by construction: the hold below is the only object
+    that can end the reservation and it ends exactly once. A failure reports what
+    was seen and `mvp.provider_outcome` decides whether the reservation may go
+    back; a response that arrived settles against reported usage.
     """
     if payload is None:
         # Standalone-call fallback (e.g. a caller/test exercising this
@@ -717,31 +741,25 @@ def _openai_chat_completion(
         # `payload` pre-built, so this branch is never taken there.
         payload, injected_usage = _build_openai_chat_payload(body, entry)
 
-    # One latch for both terminal paths. Whichever fires first wins; the other is a
-    # no-op. This is what keeps a 4xx on a streamed request from being refunded by
-    # the error branch and then settled again by the generator's cleanup.
-    accounted = {"done": False}
-
-    def _refund_and_release() -> None:
-        if accounted["done"]:
-            return
-        accounted["done"] = True
-        tenants_repo.refund(user_id=user.user_id, tenant_id=user.org_id, tokens=reservation)
-        _release_pool(tenants_repo)
+    # The hold's latch is what keeps a 4xx on a streamed request from being
+    # refunded by the error branch and then settled again by the generator's
+    # cleanup: whichever ending arrives first wins and the rest are no-ops.
+    hold = _open_hold(
+        user=user, tenants_repo=tenants_repo, reservation=reservation,
+        model_id=entry.bedrock_model_id, requested_model=body.model,
+        request_id=request_id, route="chat_completions_openai",
+    )
 
     def _settle(input_tokens: int, output_tokens: int) -> None:
-        if accounted["done"]:
-            return
-        accounted["done"] = True
-        _settle_reservation_and_log(
-            user=user, tenants_repo=tenants_repo, reservation=reservation,
-            actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
-            model_id=entry.bedrock_model_id, context=tenants_repo,
-            requested_model=body.model, request_id=request_id,
-        )
+        _run_ending(hold.claim_settle(
+            _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+        ))
 
-    def _fail(status: int, message: str) -> HTTPException:
-        _refund_and_release()
+    def _fail(status: int, message: str, *, upstream_status: Optional[int] = None,
+              exc: Optional[BaseException] = None, state: Optional[str] = None) -> HTTPException:
+        _run_ending(hold.claim_unobserved(
+            exc=exc, status_code=upstream_status, state=state
+        ))
         return HTTPException(status_code=status, detail={"error": {"message": message, "type": "api_error"}})
 
     if not body.stream:
@@ -759,26 +777,31 @@ def _openai_chat_completion(
                     _openai_CHAT_PATH, json=payload, headers=auth,
                     timeout=_openai_transport.nonstream_timeout(),
                 )
-        except Exception as e:  # noqa: BLE001 — transport failure is invoke-time
+        except Exception as e:  # noqa: BLE001 — a transport failure, which may or
+            # may not have been billed: a read timeout here is the measured
+            # expensive case, so the classifier reads the exception rather than
+            # this branch assuming the request was free.
             if timing is not None:
                 timing.emit(route="chat_completions", transport="the OpenAI-compatible endpoint",
                             model=body.model, outcome="upstream_error")
-            raise _fail(502, sanitize_exception_message(str(e)))
+            raise _fail(502, sanitize_exception_message(str(e)), exc=e)
         if resp.status_code >= 400:
             # 401/403 mean OUR bearer was rejected, so the cached one must go: it
             # would otherwise be handed to every request in this region until its
             # TTL ran out.
             if resp.status_code in (401, 403):
                 _openai_transport.invalidate_token(entry.bedrock_region, auth)
-            raise _fail(_openai_status(resp.status_code), _openai_transport.format_error(resp))
-        # A 200 with an unparseable body is still an invoke-time failure: without
-        # a usage block there is nothing to settle against, and letting the
-        # exception escape would strand the hold and the pool slot.
+            raise _fail(_openai_status(resp.status_code), _openai_transport.format_error(resp),
+                        upstream_status=resp.status_code)
+        # A 200 with an unparseable body means the model RAN and we cannot read
+        # what it did — the one case that is neither a settle nor a free failure.
+        # Letting the exception escape would strand the hold and the pool slot.
         try:
             data = resp.json()
             input_tokens, output_tokens = _openai_transport.extract_usage(data.get("usage") or {})
         except Exception as e:  # noqa: BLE001
-            raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}")
+            raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}",
+                        state=_provider_outcome.SUBMITTED_UNSETTLED)
 
         with _timed_phase(timing, "settle"):
             _settle(input_tokens, output_tokens)
@@ -801,12 +824,19 @@ def _openai_chat_completion(
         import asyncio
 
         input_tokens = output_tokens = 0
+        # `sent`: the upstream request was started, so a charge may exist.
+        # `provider_responded`: at least one event came back. The endings need both
+        # because a stream cut before the usage chunk leaves the counts at zero
+        # while the request demonstrably reached the model service.
+        sent = False
+        provider_responded = False
         # Pooled and process-wide, so it outlives this stream and is not closed
         # here; only the stream itself is scoped by `async with`.
         client = _openai_transport.async_client(entry.bedrock_region)
         try:
             try:
                 auth = await _openai_transport.auth_headers_async(entry.bedrock_region)
+                sent = True
                 async with client.stream(
                     "POST", _openai_CHAT_PATH, json=payload, headers=auth,
                 ) as resp:
@@ -815,8 +845,10 @@ def _openai_chat_completion(
                             _openai_transport.invalidate_token(entry.bedrock_region, auth)
                         await resp.aread()
                         msg = _openai_transport.format_error(resp)
-                        await asyncio.to_thread(_refund_and_release)
+                        ending = hold.claim_unobserved(status_code=resp.status_code)
                         yield f"data: {json.dumps({'error': {'message': msg, 'type': 'api_error'}})}\n\n".encode()
+                        if ending is not None:
+                            await ending.awaited()
                         return
                     # Buffer whole SSE events (lines up to a blank separator) rather
                     # than forwarding line by line. An event can carry several
@@ -856,22 +888,38 @@ def _openai_chat_completion(
                             event.append(raw)
                             continue
                         if event and not _is_ours(event):
+                            provider_responded = True
                             yield _render(event)
                         event = []
                     if event and not _is_ours(event):
+                        provider_responded = True
                         yield _render(event)
-            except Exception:  # noqa: BLE001 — transport/read failure mid-stream
-                # Settle what the model already produced rather than refunding it
-                # all; a partial stream is not a free request.
-                await asyncio.to_thread(_settle, input_tokens, output_tokens)
+            except Exception as e:  # noqa: BLE001 — transport/read failure mid-stream
+                # Charge what the model already produced; a partial stream is not
+                # a free request. `provider_responded` is the caller's own fact: the
+                # usage chunk is the last one, so token counts cannot answer it.
+                ending = hold.claim_stream_interrupted(
+                    _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+                    provider_responded=provider_responded, sent=sent, exc=e,
+                )
+                if ending is not None:
+                    await ending.awaited()
                 raise
-            await asyncio.to_thread(_settle, input_tokens, output_tokens)
+            ending = hold.claim_settle(
+                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+            )
+            if ending is not None:
+                await ending.awaited()
         finally:
-            # Backstop for a client disconnect (GeneratorExit) or any path above
-            # that neither refunded nor settled. `_settle` is latched, so this
-            # cannot double-account. The client is pooled, so nothing is closed
-            # here — only the accounting has to be finished.
-            await asyncio.to_thread(_settle, input_tokens, output_tokens)
+            # Reached on a client disconnect (GeneratorExit) or a cancellation at an
+            # await that `except Exception` does not see. Which ending that is
+            # depends on how far the request got. Awaiting in a closing async
+            # generator is unsafe, so the claimed write is detached. The client is
+            # pooled, so nothing is closed here — only the accounting.
+            hold.close(
+                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+                sent=sent, provider_responded=provider_responded,
+            )
 
     return StreamingResponse(
         _proxy(), media_type="text/event-stream",
@@ -977,14 +1025,12 @@ async def _stream_chat(
     async for frame in _budget_flow.run_stream(
         body=body,
         model_id=model_id,
-        model_alias=body.model,
-        user=user,
-        tenants_repo=tenants_repo,
-        reservation=reservation,
+        hold=_open_hold(
+            user=user, tenants_repo=tenants_repo, reservation=reservation,
+            model_id=model_id, request_id=request_id,
+            route="chat_completions_stream",
+        ),
         invoke_stream=_invoke,
-        settle=lambda **kw: _settle_reservation_and_log(**kw),
-        release=lambda ctx: _release_pool(ctx),
         adapter=_ChatAdapter(),
-        request_id=request_id,
     ):
         yield frame

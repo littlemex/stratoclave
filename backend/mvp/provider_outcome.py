@@ -1,8 +1,8 @@
 """How far did a provider call get, and what does that oblige us to hold?
 
-`CONTRACT-charge-loss.md`. The gateway cannot observe what the provider charged;
-it can only observe how far its own request got. Everything here follows from
-that, and from one measured fact: **"I did not receive a response" does not mean
+`docs/MEASUREMENTS.md` publishes the measurements this module encodes. The gateway
+cannot observe what the provider charged; it can only observe how far its own
+request got. Everything here follows from that, and from one measured fact: **"I did not receive a response" does not mean
 "I was not billed."** A Converse call abandoned on a 2 s client read timeout was
 still executed and billed 1,493 output tokens, measured against CloudWatch's own
 `AWS/Bedrock` token counters on a model the account otherwise never invokes.
@@ -60,7 +60,7 @@ LIABILITY_FULL_CEILING = "full_ceiling"
 LIABILITY_OBSERVED = "observed_amount"
 
 #: Bump when a row changes, so a ledger event can record which policy priced it.
-LIABILITY_POLICY_VERSION = "2026-08-29.1"
+LIABILITY_POLICY_VERSION = "2026-08-29.2"
 
 #: scope: what this row was measured against. Narrow it rather than generalising.
 _SCOPE = "aws-bedrock/converse+converse_stream/on-demand-token-pricing"
@@ -96,7 +96,11 @@ LIABILITY_POLICY: dict[str, dict[str, Any]] = {
             "canary notices. Change the row, not the code. Narrower still: only "
             "ValidationException was measured; the other codes in "
             "`_REJECTION_CODES_BY_SHAPE` inherit this zero by argument, not by "
-            "counter, and a canary should promote them one at a time."
+            "counter, and a canary should promote them one at a time. The same "
+            "applies to the HTTP statuses in `_REJECTION_STATUSES_BY_SHAPE`: the "
+            "OpenAI-compatible endpoint reports a refusal as a status rather than "
+            "as a modelled error code, and none of those statuses has a counter "
+            "behind it here."
         ),
     },
     SUBMITTED_UNSETTLED: {
@@ -148,6 +152,36 @@ _REJECTION_CODES_BY_SHAPE = frozenset({
 _REJECTION_CODES = _REJECTION_CODES_MEASURED | _REJECTION_CODES_BY_SHAPE
 
 
+#: HTTP statuses that mean the service refused the request before a model could
+#: run. The OpenAI-compatible endpoint answers with a status where Converse raises
+#: a modelled error code, so this is the same argument as
+#: `_REJECTION_CODES_BY_SHAPE` in the other alphabet — and, like that set, nobody
+#: has put a token counter behind it. The set is a MAPPING of that one, not a
+#: generalisation of it: 400/422 are Validation, 401/403 are AccessDenied and the
+#: signature codes, 404 is ResourceNotFound, 429 is Throttling and
+#: ServiceQuotaExceeded, and 405/413/415 are refusals the service makes on the
+#: shape of the request before it can route it to a model. Anything without a
+#: counterpart in that set is deliberately absent — 409 was dropped for exactly
+#: that reason — as are 408 and every 5xx, where the measured expensive case lives:
+#: a timeout or a server-side failure may follow a model that ran to completion.
+_REJECTION_STATUSES_BY_SHAPE = frozenset({
+    400, 401, 403, 404, 405, 413, 415, 422, 429,
+})
+
+
+def classify_http_status(status: int) -> str:
+    """Which state an HTTP status from an OpenAI-compatible provider leaves us in.
+
+    The status-shaped sibling of `classify_exception`, for the routes that read a
+    response instead of catching an exception. A 2xx is not a classification: a
+    route that got one observed usage and must settle it, so asking here is a
+    programming error and gets the expensive answer rather than a free one.
+    """
+    if status in _REJECTION_STATUSES_BY_SHAPE:
+        return REJECTED_PRE_INFERENCE
+    return SUBMITTED_UNSETTLED
+
+
 def liability_for(state: str) -> str:
     """What `state` obliges the pool to hold.
 
@@ -163,9 +197,10 @@ def liability_for(state: str) -> str:
 def refunds_immediately(state: str) -> bool:
     """Whether a reservation in `state` may be returned to the pool now.
 
-    The single question the routes ask. Phrased as one function so three routes
-    cannot drift into three answers, which is exactly what happened with the
-    reservation bound before it was centralised.
+    The single question asked of this module, and it is asked from exactly one
+    place: the write that `mvp._money.Hold.claim_unobserved` hands back. Routes report
+    what they saw and never answer this themselves — nine hand-written endings gave
+    five different answers to it before the hold owned the decision.
     """
     return liability_for(state) == LIABILITY_NONE
 

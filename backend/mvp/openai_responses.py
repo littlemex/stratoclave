@@ -27,6 +27,7 @@ and are gated by the new `responses:send` scope.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -42,7 +43,8 @@ from core.error_handler import sanitize_exception_message
 from core.logging import get_logger
 from dynamo import UserTenantsRepository
 
-from . import _openai_transport
+from . import _money, _openai_transport
+from . import provider_outcome as _provider_outcome
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit,
@@ -63,6 +65,20 @@ from .reservation_bound import (
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["mvp-openai-responses"])
+
+
+def _open_hold(**kwargs) -> _money.Hold:
+    """The reservation this route just took, as the object that owns ending it.
+
+    `settle` / `release` resolve this module's globals at CALL time so a suite
+    patching `settle_reservation_and_log` or `_release_pool` here still observes
+    every write.
+    """
+    return _money.Hold(
+        settle=lambda **kw: settle_reservation_and_log(**kw),
+        release=lambda ctx: _release_pool(ctx),
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -664,27 +680,49 @@ async def create_response(
     # id and `stream=False`; the OpenAI-compatible endpoint only knows ids like "xai.grok-4.6" /
     # "openai.gpt-5.6-sol", never the client-facing alias).
     payload = openai_payload
+    hold = _open_hold(
+        user=user, tenants_repo=tenants_repo, reservation=reservation,
+        model_id=entry.bedrock_model_id,
+        request_id=ctx.request_id if ctx else None, route="responses",
+    )
+    sent = False
     try:
         client = _openai_client(entry.bedrock_region)
         auth = await _openai_auth(entry.bedrock_region)
+        sent = True
         resp = await client.post(
             "/responses", json=payload, headers=auth,
             timeout=_openai_transport.nonstream_timeout(),
         )
-    except httpx.HTTPError as e:
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
+    except asyncio.CancelledError:
+        # A client that gives up mid-request. There is no `finally` on this path
+        # and `except Exception` does not see this, so without the branch the hold
+        # would be left for the reaper — and if the request was already on the wire
+        # it may have been billed, which is the measured expensive case.
+        ending = (
+            hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED)
+            if sent else hold.claim_not_submitted()
         )
-        _release_pool(tenants_repo)
+        if ending is not None:
+            ending.detached()
+        raise
+    except httpx.HTTPError as e:
+        # A transport failure is not evidence that nothing was billed: a read
+        # timeout is the measured expensive case. The hold asks the classifier.
+        # `awaited()` because this route is async: the write is blocking boto3 and
+        # must not run on the event loop, where it would freeze every co-located
+        # stream.
+        ending = hold.claim_unobserved(exc=e)
+        if ending is not None:
+            await ending.awaited()
         raise HTTPException(
             status_code=502,
             detail=f"Bedrock OpenAI error: {sanitize_exception_message(str(e))}",
         )
-    except Exception:
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-        )
-        _release_pool(tenants_repo)
+    except Exception as e:
+        ending = hold.claim_unobserved(exc=e)
+        if ending is not None:
+            await ending.awaited()
         raise
 
     if resp.status_code >= 400:
@@ -693,10 +731,9 @@ async def create_response(
         # the rest of the token's life.
         if resp.status_code in (401, 403):
             _openai_transport.invalidate_token(entry.bedrock_region, auth)
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-        )
-        _release_pool(tenants_repo)
+        ending = hold.claim_unobserved(status_code=resp.status_code)
+        if ending is not None:
+            await ending.awaited()
         # Map upstream 4xx to our 502 (the client did not directly cause
         # this — it's a downstream/IAM/region issue from the proxy's
         # perspective). 4xx-vs-5xx upstream classification is left to the
@@ -706,19 +743,25 @@ async def create_response(
             detail=f"Bedrock OpenAI error: {_format_openai_error(resp)}",
         )
 
-    data = resp.json()
-    input_tokens, output_tokens = _extract_usage(data.get("usage", {}))
-    settle_reservation_and_log(
-        user=user,
-        tenants_repo=tenants_repo,
-        reservation=reservation,
-        actual_input_tokens=input_tokens,
-        actual_output_tokens=output_tokens,
-        model_id=entry.bedrock_model_id,
-        context=tenants_repo,
-        # Key the UsageLogs row on the request id for the offline VSR reconcile join.
-        request_id=ctx.request_id if ctx else None,
+    # A 200 whose body will not parse means the model RAN and we cannot read what
+    # it did — neither a settle nor a free failure. Letting the exception escape
+    # would strand the hold and the pool slot until the reaper.
+    try:
+        data = resp.json()
+        input_tokens, output_tokens = _extract_usage(data.get("usage", {}))
+    except Exception as e:  # noqa: BLE001
+        ending = hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED)
+        if ending is not None:
+            await ending.awaited()
+        raise HTTPException(
+            status_code=502,
+            detail=f"malformed upstream response: {sanitize_exception_message(str(e))}",
+        )
+    ending = hold.claim_settle(
+        _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
     )
+    if ending is not None:
+        await ending.awaited()
     # SAAR post-settle: persist the session's routing state. A minted response id
     # marks non-portable continuation state, so the NEXT turn that references it
     # hard-locks to this backend (provider-state). Emit replay headers. Best-
@@ -782,7 +825,15 @@ async def _stream_response(
     """
     input_tokens = 0
     output_tokens = 0
-    settled = False
+    # `sent`: the upstream request was started, so a charge may exist.
+    # `provider_responded`: at least one event came back (see claim_stream_interrupted).
+    sent = False
+    provider_responded = False
+    hold = _open_hold(
+        user=user, tenants_repo=tenants_repo, reservation=reservation,
+        model_id=entry.bedrock_model_id, request_id=request_id,
+        route="responses_stream",
+    )
     # The provider continuation id the stream actually minted (from
     # response.completed). None unless a real completed event carried one — so a
     # cut / errored / id-less stream arms NO provider-state lock (Fable review §2).
@@ -800,6 +851,7 @@ async def _stream_response(
     try:
         try:
             auth = await _openai_auth(entry.bedrock_region)
+            sent = True
             async with client.stream(
                 "POST", "/responses", json=payload, headers=auth,
             ) as resp:
@@ -821,6 +873,10 @@ async def _stream_response(
                         model_id=entry.bedrock_model_id,
                         message=sanitized,
                     )
+                    # Claim before the frame goes out: a client closing on this
+                    # very frame would otherwise run the `finally` and end the hold
+                    # as a disconnect instead of as the refusal it is.
+                    ending = hold.claim_unobserved(status_code=resp.status_code)
                     yield _sse_event(
                         "error",
                         {
@@ -831,13 +887,8 @@ async def _stream_response(
                             },
                         },
                     )
-                    tenants_repo.refund(
-                        user_id=user.user_id,
-                        tenant_id=user.org_id,
-                        tokens=reservation,
-                    )
-                    _release_pool(tenants_repo)
-                    settled = True
+                    if ending is not None:
+                        await ending.awaited()
                     return
 
                 buffer = bytearray()
@@ -847,11 +898,18 @@ async def _stream_response(
                     buffer.extend(chunk)
                     for raw_event in _drain_events(buffer):
                         out_bytes, usage, ev_id = _handle_sse_event(raw_event)
-                        yield out_bytes
+                        # Read what the event carried BEFORE handing it to the
+                        # caller. A client that closes on the `response.completed`
+                        # frame would otherwise be settled against the zero this
+                        # loop had not yet updated — the usage was in our hands and
+                        # we would have charged nothing for it.
                         if usage is not None:
                             input_tokens, output_tokens = usage
                         if ev_id is not None:
                             minted_id = ev_id
+                        if out_bytes:
+                            provider_responded = True
+                        yield out_bytes
 
                 # Flush any trailing bytes that were not terminated
                 # by a blank line. the OpenAI-compatible endpoint (or any hop in
@@ -871,7 +929,10 @@ async def _stream_response(
                     out_bytes, usage, ev_id = _handle_sse_event(trailing)
                     if ev_id is not None:
                         minted_id = ev_id
+                    if usage is not None:
+                        input_tokens, output_tokens = usage
                     if out_bytes:
+                        provider_responded = True
                         if not (
                             out_bytes.endswith(b"\n\n")
                             or out_bytes.endswith(b"\r\n\r\n")
@@ -905,10 +966,17 @@ async def _stream_response(
                                 ),
                             )
                         yield out_bytes
-                    if usage is not None:
-                        input_tokens, output_tokens = usage
                     buffer.clear()
         except httpx.HTTPError as e:
+            # Claimed BEFORE the error frame goes out: a client closing on that
+            # frame runs the `finally`, which would otherwise end the hold as a
+            # disconnect instead of as the interruption this branch decided on.
+            # `provider_responded` is the caller's own fact — the usage block is the
+            # last event, so the counts cannot answer whether the provider answered.
+            ending = hold.claim_stream_interrupted(
+                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+                provider_responded=provider_responded, sent=sent, exc=e,
+            )
             yield _sse_event(
                 "error",
                 {
@@ -922,26 +990,15 @@ async def _stream_response(
                     },
                 },
             )
-            tenants_repo.refund(
-                user_id=user.user_id,
-                tenant_id=user.org_id,
-                tokens=reservation,
-            )
-            _release_pool(tenants_repo)
-            settled = True
+            if ending is not None:
+                await ending.awaited()
             return
 
-        settle_reservation_and_log(
-            user=user,
-            tenants_repo=tenants_repo,
-            reservation=reservation,
-            actual_input_tokens=input_tokens,
-            actual_output_tokens=output_tokens,
-            model_id=entry.bedrock_model_id,
-            context=tenants_repo,
-            request_id=request_id,
-        )
-        settled = True
+        ending = hold.claim_settle(_money.Usage(
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        ))
+        if ending is not None:
+            await ending.awaited()
         # SAAR post-settle (stream): persist routing state, storing the ACTUAL
         # response id the stream minted (from response.completed) — NOT a fixed
         # True. A stream that errored / was cut / minted no id stores minted_id=
@@ -963,18 +1020,13 @@ async def _stream_response(
                 pass
     finally:
         # Defensive: if the generator was closed mid-stream (client drop,
-        # cancellation), still settle so the reservation does not leak.
-        if not settled:
-            settle_reservation_and_log(
-                user=user,
-                tenants_repo=tenants_repo,
-                reservation=reservation,
-                actual_input_tokens=input_tokens,
-                actual_output_tokens=output_tokens,
-                model_id=entry.bedrock_model_id,
-                context=tenants_repo,
-                request_id=request_id,
-            )
+        # cancellation), still end the hold so the reservation does not leak. An
+        # ending that already ran makes this a no-op, and awaiting in a closing
+        # async generator is unsafe, so the claimed write is detached.
+        hold.close(
+            _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+            sent=sent, provider_responded=provider_responded,
+        )
 
 
 # ---------------------------------------------------------------------------

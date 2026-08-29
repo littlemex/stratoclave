@@ -55,7 +55,7 @@ from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
 from ._bedrock_clients import bedrock_runtime_client
-from . import provider_outcome as _provider_outcome
+from . import _money
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit,
@@ -82,6 +82,23 @@ _settle_reservation_and_log = settle_reservation_and_log
 
 
 logger = get_logger(__name__)
+
+
+_run_ending = _money.run_ending
+
+
+def _open_hold(**kwargs) -> _money.Hold:
+    """The reservation this route just took, as the object that owns ending it.
+
+    `settle` / `release` are passed as closures that resolve this module's globals
+    at CALL time, so a suite patching `_settle_reservation_and_log` or
+    `_release_pool` here still observes every write.
+    """
+    return _money.Hold(
+        settle=lambda **kw: _settle_reservation_and_log(**kw),
+        release=lambda ctx: _release_pool(ctx),
+        **kwargs,
+    )
 
 
 def _selected_bedrock_model(context, default_model_id: str) -> str:
@@ -987,60 +1004,19 @@ def messages(
     # whose record was retrieved by this marker alone and carried the exact token
     # counts. The pinned hash therefore covers the priced CONTENT, not every byte
     # on the wire.
-    _attempt_md = _provider_outcome.attempt_request_metadata(
-        getattr(tenants_repo, "hold_id", None), user.org_id
+    hold = _open_hold(
+        user=user, tenants_repo=tenants_repo, reservation=reservation,
+        model_id=model_id, request_id=ctx.request_id if ctx else None,
+        route="messages",
     )
+    _attempt_md = hold.request_metadata()
     if _attempt_md:
         kwargs["requestMetadata"] = _attempt_md
-
-    def _return_reservation() -> None:
-        tenants_repo.refund(
-            user_id=user.user_id, tenant_id=user.org_id, tokens=reservation
-        )
-        _release_pool(tenants_repo)
-
-    def _finalize_failed_attempt(exc: BaseException) -> str:
-        """Return the reservation only if the request cannot have been billed.
-
-        This used to refund unconditionally, on the reasoning that "on a Bedrock
-        error nothing was billed". That is false for anything after the request
-        bytes left: measured on real Bedrock, a call abandoned at a 2 s read
-        timeout was billed 1,493 output tokens while its caller received nothing,
-        so refunding returned money the account had actually spent and let a later
-        admission carry the pool past its limit with every proved invariant
-        intact.
-
-        `mvp.provider_outcome` decides how far the request got; the liability that
-        state carries is a versioned policy row, so a change in provider billing
-        behaviour is a table edit rather than a change here.
-        """
-        state = _provider_outcome.classify_exception(exc)
-        if _provider_outcome.refunds_immediately(state):
-            _return_reservation()
-        elif not _provider_outcome.unobserved_holds_enforced():
-            # Enforcement is opt-in, so the classification runs and is logged
-            # everywhere from the first deploy while the refund behaviour stays
-            # exactly what it was. The hard-ceiling gate shipped defaulting ON and
-            # started refusing every pooled tenant on merge; this is that lesson.
-            _return_reservation()
-        logger.info(
-            "provider_attempt_failed",
-            extra={
-                "outcome_state": state,
-                "liability": _provider_outcome.liability_for(state),
-                "liability_policy_version": _provider_outcome.LIABILITY_POLICY_VERSION,
-                "enforced": _provider_outcome.unobserved_holds_enforced(),
-                "hold_id": getattr(tenants_repo, "hold_id", None),
-                "model_id": kwargs.get("modelId"),
-                "error_class": type(exc).__name__,
-            },
-        )
-        return state
 
     try:
         resp = _bedrock_client().converse(**kwargs)
     except ClientError as e:
-        _finalize_failed_attempt(e)
+        _run_ending(hold.claim_unobserved(exc=e))
         # Sanitize the upstream message before returning it: Bedrock errors
         # can leak account IDs, inference-profile ARNs, and internal paths.
         from core.error_handler import sanitize_exception_message
@@ -1050,27 +1026,19 @@ def messages(
             detail=f"Bedrock error: {sanitize_exception_message(str(e))}",
         )
     except Exception as e:
-        _finalize_failed_attempt(e)
+        _run_ending(hold.claim_unobserved(exc=e))
         raise
 
     usage = resp.get("usage", {})
     input_tokens = int(usage.get("inputTokens", 0))
     output_tokens = int(usage.get("outputTokens", 0))
     cache_read, cache_write = _cache_tokens_from_usage(usage)
-    _settle_reservation_and_log(
-        user=user,
-        tenants_repo=tenants_repo,
-        reservation=reservation,
-        actual_input_tokens=input_tokens,
-        actual_output_tokens=output_tokens,
-        model_id=model_id,
-        context=tenants_repo,
-        actual_cache_read_tokens=cache_read,
-        actual_cache_write_tokens=cache_write,
-        # Key the UsageLogs row on the request id so the offline VSR
-        # reconciliation can join it to the reserve-time decision record.
-        request_id=ctx.request_id if ctx else None,
-    )
+    _run_ending(hold.claim_settle(_money.Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+    )))
 
     content_blocks: list[dict[str, Any]] = []
     for block in resp.get("output", {}).get("message", {}).get("content", []):
@@ -1322,16 +1290,14 @@ async def _stream_messages(
     async for frame in _budget_flow.run_stream(
         body=body,
         model_id=model_id,
-        model_alias=body.model,
-        user=user,
-        tenants_repo=tenants_repo,
-        reservation=reservation,
+        hold=_open_hold(
+            user=user, tenants_repo=tenants_repo, reservation=reservation,
+            model_id=model_id, request_id=ctx.request_id if ctx else None,
+            route="messages_stream",
+            on_finalized=_on_finalized,
+        ),
         invoke_stream=_invoke,
-        settle=lambda **kw: _settle_reservation_and_log(**kw),
-        release=lambda ctx: _release_pool(ctx),
         adapter=_AnthropicAdapter(),
-        on_finalized=_on_finalized,
-        request_id=ctx.request_id if ctx else None,
     ):
         yield frame
 
