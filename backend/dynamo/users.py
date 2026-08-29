@@ -50,6 +50,7 @@ class UsersRepository:
         auth_method: Optional[str] = None,
         sso_account_id: Optional[str] = None,
         sso_principal_arn: Optional[str] = None,
+        sso_principal_id: Optional[str] = None,
         locale: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create a new user or update an existing one.
@@ -101,6 +102,10 @@ class UsersRepository:
             item["sso_principal_arn"] = sso_principal_arn
         elif existing and existing.get("sso_principal_arn"):
             item["sso_principal_arn"] = existing["sso_principal_arn"]
+        if sso_principal_id is not None:
+            item["sso_principal_id"] = sso_principal_id
+        elif existing and existing.get("sso_principal_id"):
+            item["sso_principal_id"] = existing["sso_principal_id"]
 
         if existing and existing.get("last_sso_login_at"):
             item["last_sso_login_at"] = existing["last_sso_login_at"]
@@ -109,20 +114,37 @@ class UsersRepository:
         return item
 
     def record_sso_login(
-        self, *, user_id: str, sso_account_id: str, sso_principal_arn: str
+        self,
+        *,
+        user_id: str,
+        sso_account_id: str,
+        sso_principal_arn: str,
+        sso_principal_id: Optional[str] = None,
     ) -> None:
-        """Update last_sso_login_at upon a successful SSO login."""
+        """Update last_sso_login_at upon a successful SSO login.
+
+        `sso_principal_id` is the AWS-assigned part of the STS UserId. Writing it
+        here is also the upgrade path for rows provisioned before it existed: they
+        carry only the ARN, whose tail is the caller-chosen RoleSessionName, so the
+        first successful login after this change gives them a binding that a
+        different caller of the same role cannot reproduce.
+        """
+        expr = (
+            "SET last_sso_login_at = :now, sso_account_id = :acc, "
+            "sso_principal_arn = :arn, updated_at = :now"
+        )
+        values = {
+            ":now": _now_iso(),
+            ":acc": sso_account_id,
+            ":arn": sso_principal_arn,
+        }
+        if sso_principal_id:
+            expr += ", sso_principal_id = :pid"
+            values[":pid"] = sso_principal_id
         self._table.update_item(
             Key={"user_id": user_id, "sk": self.SK_PROFILE},
-            UpdateExpression=(
-                "SET last_sso_login_at = :now, sso_account_id = :acc, "
-                "sso_principal_arn = :arn, updated_at = :now"
-            ),
-            ExpressionAttributeValues={
-                ":now": _now_iso(),
-                ":acc": sso_account_id,
-                ":arn": sso_principal_arn,
-            },
+            UpdateExpression=expr,
+            ExpressionAttributeValues=values,
         )
 
     def mark_deleted(self, user_id: str) -> Optional[dict[str, Any]]:

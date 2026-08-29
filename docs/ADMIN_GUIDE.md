@@ -266,10 +266,16 @@ Administered through the web UI (**Trusted Accounts -> Add account**) or by call
 | ----------------------- | ----- |
 | AWS Account ID          | 12-digit account number. |
 | Provisioning policy     | `invite_only` (default, safest) or `auto_provision`. |
-| Allowed role patterns   | Glob patterns matched against the assumed-role ARN. Empty list means "any role". |
+| Allowed role patterns   | Glob patterns matched against the assumed-role name. **Required: an empty list denies every assumed-role login.** Listing a pattern asserts that these roles' `RoleSessionName` is set by an identity provider (`AWSReservedSSO_*`, or a SAML federation role whose trust policy admits only the identity provider) — every identity on this path is read out of that session name, and whoever can call `sts:AssumeRole` on a role directly chooses it. Do not list a role that a principal can assume directly. |
 | Allow IAM user          | Off by default. Opt in only for break-glass or automation accounts. |
 | Allow instance profile  | Off by default. Strongly discouraged for interactive use. |
 | Default tenant / credit | Applied to auto-provisioned users unless an invite overrides it. |
+
+> **Upgrading an existing deployment.** A trusted account created with no role
+> patterns used to accept any role in that account; it now denies until patterns are
+> set. If SSO logins start returning 403 with "has no allowed role patterns
+> configured", add the pattern your identity provider uses — for IAM Identity Center
+> that is `AWSReservedSSO_*`, and narrower is better (`AWSReservedSSO_Developer_*`).
 
 ### Invite-only vs. auto-provisioning
 
