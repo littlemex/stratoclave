@@ -23,7 +23,7 @@
     </mxCell>
 
     <!-- Upstream Lane -->
-    <mxCell id="lane-upstream" value="Bedrock — converse and /openai/v1" style="swimlane;startSize=40;fillColor=#2FA374;strokeColor=#1E7E5A;fontColor=#14442F;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#EAF7F0;" vertex="1" parent="1">
+    <mxCell id="lane-upstream" value="Bedrock — converse (boto3/IAM) and /openai/v1 (httpx/bearer): different auth, different audit" style="swimlane;startSize=40;fillColor=#2FA374;strokeColor=#1E7E5A;fontColor=#14442F;fontStyle=1;fontSize=13;swimlaneLine=1;swimlaneHead=0;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;swimlaneFillColor=#EAF7F0;" vertex="1" parent="1">
       <mxGeometry x="1540" y="10" width="450" height="1130" as="geometry"/>
     </mxCell>
 
