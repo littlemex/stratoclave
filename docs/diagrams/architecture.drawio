@@ -73,7 +73,7 @@
         <mxCell id="bedrock" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF7F0;strokeColor=#1E7E5A;strokeWidth=3;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="Amazon Bedrock — Claude family&#xa;converse / converseStream&#xa;us-east-1 primary → us-west-2 failover" vertex="1">
           <mxGeometry height="154" width="756" x="1624" y="340" as="geometry" />
         </mxCell>
-        <mxCell id="mantle" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=3;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="bedrock-runtime /openai/v1 — OpenAI Responses&#xa;gpt-5.6 Sol / Terra (us-east-2) · Grok 4.6 (us-west-2)&#xa;cross-region httpx from ECS" vertex="1">
+        <mxCell id="mantle" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1E7E5A;strokeWidth=3;fontSize=24;fontColor=#14442F;fontStyle=1;verticalAlign=middle;shadow=1;" value="bedrock-runtime /openai/v1 — OpenAI Responses&#xa;gpt-5.6 Sol / Terra (us-east-2) · Grok 4.6 (us-west-2)&#xa;cross-region httpx · no retry, no failover" vertex="1">
           <mxGeometry height="154" width="756" x="1624" y="784" as="geometry" />
         </mxCell>
         <mxCell id="ext_band" parent="1" style="rounded=1;fillColor=#FAFDFB;strokeColor=#CDE9DC;strokeWidth=1;dashed=1;" value="" vertex="1">

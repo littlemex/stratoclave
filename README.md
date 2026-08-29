@@ -314,6 +314,11 @@ for where a broker is the better choice.
 
 ## Architecture at a glance
 
+Four diagrams, in the order they are meant to be read: **architecture** (the map),
+**request flow** (what happens to one request), **credit reservation** (where the money
+moves), and **Vouch-by-STS** (the auth edge). Each is rendered from the `.drawio` source
+beside it in `docs/diagrams/`.
+
 <p align="center">
   <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus the OpenAI-compatible endpoint." width="100%">
 </p>
@@ -370,7 +375,7 @@ its own price and serving the model actually reserved.
   degenerate configuration; it needs no special setup and is locked by test.
 
 <p align="center">
-  <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock, then settle once and return; DynamoDB holds budgets, quotas, usage log, and routing config." width="100%">
+  <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock converse, with a second upstream — the OpenAI-compatible endpoint on bedrock-runtime, which has no retry and no failover — reached directly from the resolver; then settle once and return." width="100%">
 </p>
 
 For a detailed walkthrough of components, data model, and invariants, see
@@ -612,7 +617,7 @@ upfront reservation (1× / 2× / 4× / 8× for `low` / `medium` / `high` /
 per request regardless of multiplier.
 
 <p align="center">
-  <img src="./docs/diagrams/credit-reservation.png" alt="Credit reservation flow: authenticate, conditional UpdateItem to reserve tokens, invoke Bedrock, refund the diff, write a UsageLogs row." width="100%">
+  <img src="./docs/diagrams/credit-reservation.png" alt="Credit reservation flow: authenticate, then one TransactWriteItems that moves the per-user counter and the pool headroom, appends an immutable RESERVE ledger event and writes a hold row; invoke the upstream, refund the diff, settle the ledger and write a UsageLogs row." width="100%">
 </p>
 
 The credit model, role matrix, and the underlying DynamoDB tables are
