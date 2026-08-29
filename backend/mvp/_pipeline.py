@@ -828,6 +828,42 @@ def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
         return 0
 
 
+def _reaped_hold_facts(hold: dict) -> dict:
+    """What a reclaim must copy out of the hold row before deleting it.
+
+    `CONTRACT-charge-loss.md`. The reaper credits an expired hold back with
+    `actual=0`, which asserts the provider charged nothing. That assertion is
+    false for any request that died after its bytes left: measured on real
+    Bedrock, a call abandoned at a 2 s read timeout was billed 1,493 output
+    tokens. Holding those reservations instead of returning them is a larger
+    change (it needs a durable sweep cursor, pool-incarnation fencing, and a
+    settle-dispatcher branch), and how big a problem it is worth solving should be
+    a number rather than an argument.
+
+    So this preserves the facts that make the number derivable from the ledger
+    alone, because the reclaim's Delete destroys the row that holds them.
+    `source` is the discriminator that already exists: "inline" means the hold
+    backed a provider call, "external" means it backed an authorization that
+    never made one, so only the inline sum is exposure at all.
+
+    Read-only over the hold item, no new attribute, and nothing here is ever
+    conditioned on — the money path is unchanged by design.
+    """
+    facts: dict[str, Any] = {}
+    for key in ("source", "created_at", "provider_invoked_at"):
+        val = hold.get(key)
+        if val:
+            facts[key] = str(val)
+    for key in ("amount_microusd", "expires_at"):
+        val = hold.get(key)
+        if val is not None:
+            try:
+                facts[key] = int(val)
+            except (TypeError, ValueError):
+                pass
+    return facts
+
+
 def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
     """Reclaim up to `cap` expired holds for one tenant/period. See
     `_sweep_expired_holds` for the contract; this is the per-period worker."""
@@ -916,6 +952,9 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                         run_id_is_fallback=True,
                         settle_reason="reaper_reclaim",
                         actor="reaper",
+                        # The Delete below destroys the hold row, so what this
+                        # reclaim was ABOUT survives only here.
+                        reaped_hold_facts=_reaped_hold_facts(hold),
                     )
                 )
             client.transact_write_items(
@@ -932,12 +971,23 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
             # budget then vanished. If the crash was AFTER a successful Bedrock
             # call, real spend happened but is recorded here as actual=0 — this
             # line + pool_reclaimed_microusd let operators reconcile the bill.
+            #
+            # `exposure_microusd` is that amount when, and only when, the hold
+            # backed a provider call (`source == "inline"`). It is the money this
+            # reclaim hands back on a request that may well have been billed —
+            # what a retained-liability design would keep held instead. An
+            # external authorization hold made no provider call, so returning it
+            # is simply correct and it is not exposure.
+            _source = str(hold.get("source") or "")
             logger.error(
                 "pool_hold_reclaimed",
                 tenant_id=tenant_id,
                 period=period,
                 hold_id=hold_id,
                 amount_microusd=amount,
+                hold_source=_source or "unknown",
+                exposure_microusd=amount if _source == "inline" else 0,
+                provider_invoked_at=hold.get("provider_invoked_at") or "",
             )
         except ClientError as e:
             # A cancelled transaction means the hold was already reclaimed or
