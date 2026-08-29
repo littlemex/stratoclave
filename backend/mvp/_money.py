@@ -108,9 +108,13 @@ class Usage:
     # `None` means the provider did not report the leg at all, which is a different
     # fact from reporting zero: some models never report prompt-cache counts, and
     # whether a model caches is the largest term in its economics. The charge is the
-    # same either way; the record is not.
-    cache_read_tokens: Optional[int] = 0
-    cache_write_tokens: Optional[int] = 0
+    # same either way; the record is not. It is also the DEFAULT, because a default of
+    # 0 made the record depend on which call site remembered to pass the argument —
+    # the OpenAI-compatible transport never parses these legs, so every settle on
+    # that route was recording a measured zero for a field nobody read. A measured
+    # zero has to be stated by the code that measured it.
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
 
 
 #: The four tokens a settle prices. Read off the observation by name so an

@@ -190,20 +190,39 @@ class TestTheAdmissionAmountComesFromTheFrozenSnapshot:
 
     def test_the_snapshot_failed_sentinel_is_no_longer_reachable(self):
         """The sentinel exists only to label a charge rated after admission from a
-        live table. With pricing failing closed there is no such charge, so the
-        sentinel must not be writable by any path — keeping it as an accepted
-        version label would let the class come back silently."""
+        live table. With pricing failing closed there is no such charge, so no path
+        may stamp it — the constant stays only because ledger events written before
+        that change still carry it and a reader must keep recognising it.
+
+        The check is on the SHAPE: any mention of the constant or its literal value
+        outside the module that defines it, and outside the reserved-versions set a
+        reader consults. Keying it on the co-occurrence of two identifiers would only
+        have caught the exact revert of this change."""
+        import ast
+        import pathlib
+
         from mvp.pricing import SNAPSHOT_FAILED_SENTINEL
 
-        import pathlib
         root = pathlib.Path(__file__).resolve().parents[1]
-        writers = []
-        for p in (root / "mvp").rglob("*.py"):
-            text = p.read_text()
-            if "SNAPSHOT_FAILED_SENTINEL" in text and "rate_snapshot_failed" in text:
-                writers.append(p.name)
-        assert writers == [], (
-            f"{SNAPSHOT_FAILED_SENTINEL!r} is still stamped by {writers}; a charge "
+        offenders: list[str] = []
+        for path in (root / "mvp").rglob("*.py"):
+            if path.name == "pricing.py":
+                continue  # defines it, and lists it among the versions a reader knows
+            # AST only: a comment explaining the retired path is not a code path,
+            # and the whole point of the retirement is that the explanation stays.
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == "SNAPSHOT_FAILED_SENTINEL":
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+                elif (isinstance(node, ast.Attribute)
+                        and node.attr == "SNAPSHOT_FAILED_SENTINEL"):
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+                elif (isinstance(node, ast.Constant)
+                        and node.value == SNAPSHOT_FAILED_SENTINEL):
+                    offenders.append(
+                        f"{path.relative_to(root)}:{node.lineno} (literal)")
+        assert offenders == [], (
+            f"{SNAPSHOT_FAILED_SENTINEL!r} is reachable from {offenders}; a charge "
             "rated at a rate the admission never saw is a C2.2 violation")
 
 
@@ -272,6 +291,34 @@ def _ledger_events() -> list:
     return table.scan().get("Items", [])
 
 
+class TestAPreMigrationReservationStillReachesTheLedger:
+    """A migration case, not a live one. Reservations written by the previous version
+    during a rate-table failure carry no frozen rate. Refusing to settle them would
+    be worse than charging from the live table: nothing re-drives a failed settle, so
+    the reaper would end them as a reclaim with a settled delta of zero and the usage
+    the gateway did observe would leave the ledger. They settle at the amount the
+    admission already debited — an upper bound, needing no rate read."""
+
+    def test_a_snapshotless_pool_reservation_settles_at_the_reserved_amount(
+            self, env):
+        ctx = _reserve()
+        reserved = ctx.pool_reserved_microusd
+        assert reserved > 0
+        # Exactly the shape the previous version could leave behind.
+        ctx.rate_snapshot = None
+
+        _pipeline.settle_reservation_and_log(
+            user=_User(user_id=USER, org_id=TENANT), tenants_repo=ctx,
+            reservation=1000, actual_input_tokens=1_000_000,
+            actual_output_tokens=1_000_000, model_id=MODEL, context=ctx,
+        )
+        settled = [e for e in _ledger_events()
+                   if str(e.get("event_type", "")).endswith("SETTLE")]
+        assert settled, "the observed usage never reached the ledger"
+        assert int(settled[-1]["settled_delta_microusd"]) == reserved
+        assert str(settled[-1]["pricing_version"]) == "unversioned-legacy"
+
+
 class TestTheRateDocumentIsOneCompleteValidatedValue:
     """C2 rate validity. A rate document is a value, not a bag of coercible
     attributes: a negative leg mints credit, a missing leg silently prices at
@@ -300,6 +347,58 @@ class TestTheRateDocumentIsOneCompleteValidatedValue:
         class of input."""
         with pytest.raises(ValueError):
             _pricing.mtok_cost_for_rounding(1000, -5_000_000, "ceil")
+
+    def test_a_versions_key_set_is_immutable(self, dynamodb_mock):
+        """Rate rows were already create-or-identical, but a version's KEY SET was
+        not: re-running `set_rates` for an active version with a different set of
+        keys left the old rows in place. With a row count on the mutable CURRENT
+        pointer, `load_rates` would then refuse the active document — and, with
+        pricing failing closed, refuse every admission on the gateway. An operator
+        misuse must not be able to do that."""
+        from dynamo.pricing_config import PricingConfigRepository
+
+        repo = PricingConfigRepository()
+        repo.set_rates(version="vset", rates={PRICING_KEY: CHEAP, "haiku": CHEAP})
+        with pytest.raises(ValueError):
+            repo.set_rates(version="vset", rates={PRICING_KEY: CHEAP})
+        # And the active document still loads.
+        assert set(repo.load_rates("vset")) == {PRICING_KEY, "haiku"}
+
+    def test_rewriting_a_version_with_the_same_rates_still_completes(
+            self, dynamodb_mock):
+        """The documented crash-recovery path: re-running `set_rates` with the same
+        (version, rates) must finish the flip rather than be refused."""
+        from dynamo.pricing_config import PricingConfigRepository
+
+        repo = PricingConfigRepository()
+        repo.set_rates(version="vsame", rates={PRICING_KEY: CHEAP})
+        repo.set_rates(version="vsame", rates={PRICING_KEY: CHEAP})
+        assert repo.current_version() == "vsame"
+
+    def test_the_snapshot_point_read_refuses_a_row_missing_a_leg(
+            self, dynamodb_mock, monkeypatch):
+        """The frozen snapshot is built by a POINT read, not by the bulk load, so
+        validating only the bulk path left the one place where a partial row becomes
+        the price a request is admitted and charged at: a missing leg was read as a
+        rate of zero."""
+        from dynamo.pricing_config import PricingConfigRepository
+
+        repo = PricingConfigRepository()
+        repo.set_rates(version="vpartial", rates={PRICING_KEY: CHEAP})
+        _pricing.reset_cache()
+        _pricing.reset_version_cache()
+
+        # Replace the row out of band with one that has no output rate.
+        tbl = boto3.resource("dynamodb", region_name="us-east-1").Table(repo._table.name)
+        key = {"pk": "CONFIG#pricing", "sk": f"__ratever__vpartial__{PRICING_KEY}"}
+        item = tbl.get_item(Key=key)["Item"]
+        item.pop("output_per_mtok_microusd")
+        tbl.put_item(Item=item)
+        _pricing.reset_version_cache()
+
+        with pytest.raises(Exception) as e:
+            _pricing.snapshot_rates(PRICING_KEY)
+        assert "missing" in str(e.value)
 
     def test_a_version_read_that_paginates_returns_every_row(self, dynamodb_mock, monkeypatch):
         """A single Query response is not a complete result set. The read side

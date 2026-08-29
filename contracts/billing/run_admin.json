@@ -5,13 +5,13 @@
         "cache_read": {
           "cost_microusd": 0,
           "rate_microusd_per_mtok": 0,
-          "reported": true,
+          "reported": false,
           "tokens": 0
         },
         "cache_write": {
           "cost_microusd": 0,
           "rate_microusd_per_mtok": 0,
-          "reported": true,
+          "reported": false,
           "tokens": 0
         },
         "input": {

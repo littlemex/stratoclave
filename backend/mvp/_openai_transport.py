@@ -592,6 +592,32 @@ def format_error(resp: httpx.Response) -> str:
     return rewrite_served_paths(sanitize_exception_message(resp.text[:500]))
 
 
+def extract_cache_usage(usage: Any) -> tuple[Optional[int], Optional[int]]:
+    """`(cached_input_tokens, cache_write_tokens)` from an OpenAI-compatible usage
+    block, or `None` per leg when it is not reported.
+
+    The Responses/Chat shapes carry a read count as
+    `input_tokens_details.cached_tokens` (`prompt_tokens_details.cached_tokens` on
+    the Chat spelling) and report no cache-WRITE count at all. `None` is not a
+    formality here: this transport never parsed these fields, so the settle used
+    its caller's default of zero and the ledger recorded "the provider said nothing
+    was cached" for a field nobody had read. Absence is the honest answer, and it is
+    what a caller comparing models needs in order to tell a model that does not
+    cache from a request that did not.
+    """
+    if not isinstance(usage, dict):
+        return None, None
+    details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details")
+    cached = None
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        try:
+            cached = max(int(details["cached_tokens"]), 0)
+        except (TypeError, ValueError):
+            cached = None
+    # No cache-write count exists in these shapes; do not invent one.
+    return cached, None
+
+
 def extract_usage(usage: Any) -> tuple[int, int]:
     """Return `(input_tokens, output_tokens)` from a the OpenAI-compatible endpoint usage block.
 

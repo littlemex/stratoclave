@@ -2241,7 +2241,16 @@ def reserve_credit(
         else (int(cost_microusd) if cost_microusd is not None else None)
     )
     repo = UserTenantsRepository()
-    repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
+    # Admission READS authority; it does not create it. This used to call
+    # `ensure()`, which creates the membership and seeds it with the tenant's
+    # default credit — so an identity with a profile row but no membership (an admin
+    # creation that crashed between its two writes, or a row written out of band)
+    # was granted a budget by making a request. Provisioning happens in the admin
+    # API and the SSO exchange, both of which say which tenant and how much.
+    if repo.get(user.user_id, user.org_id) is None:
+        logger.info("identity_not_provisioned", user_id=user.user_id,
+                    tenant_id=user.org_id)
+        raise _err_403("identity_not_provisioned")
 
     period = current_period()
     # Layer 5: freeze the rate NOW (reserve time) so settle rates the charge at
@@ -4030,8 +4039,8 @@ def settle_reservation_and_log(
     # `None` means the provider did not report that leg — distinct from a reported
     # zero, and carried through to the rating record so the ledger does not assert a
     # measurement nobody made (see `mvp.pricing.rate_usage`).
-    actual_cache_read_tokens: Optional[int] = 0,
-    actual_cache_write_tokens: Optional[int] = 0,
+    actual_cache_read_tokens: Optional[int] = None,
+    actual_cache_write_tokens: Optional[int] = None,
     requested_model: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> None:
@@ -4126,18 +4135,26 @@ def settle_reservation_and_log(
             )
             actual_cost_microusd = _rating.total_cost_microusd
         else:
-            # A pool-active priced reservation always carries the rate it was
-            # admitted at: `reserve_credit` refuses the request when it cannot
-            # freeze one. Reaching here would mean a context was constructed
-            # outside that path, and charging from the live table is exactly the
-            # behaviour that let a rate edit between admission and settle change
-            # what a request was charged. Refuse instead of charging at a rate the
-            # admission never saw; the reservation is then ended by the reaper.
-            raise RuntimeError(
-                "settle reached a priced pool reservation with no frozen rate "
-                f"(pricing_key={context.pricing_key!r}); refusing to rate a charge "
-                "at a rate the admission did not see"
+            # A reservation admitted by THIS version always carries the rate it was
+            # admitted at, because pricing fails closed. Reaching here means the
+            # reservation predates that: a RESERVE event written by the previous
+            # version during a rate-table failure, or before snapshots existed,
+            # restored from the ledger after a deploy. Charging it from the live table
+            # is the C2.2 violation this branch removed — and refusing is worse,
+            # because nothing re-drives a failed settle, so the reaper would end it as
+            # a reclaim with a settled delta of zero and the usage the gateway DID
+            # observe would leave the ledger entirely.
+            #
+            # It settles at the amount the admission already debited. That is an upper
+            # bound on any charge this request could have had (the pool was gated on
+            # it), it needs no rate read at all, and the terminal carries the honest
+            # `unversioned-legacy` label because no version priced it.
+            logger.warning(
+                "settle_without_frozen_rate_charging_reserved",
+                pricing_key=context.pricing_key,
+                reserved_microusd=int(context.pool_reserved_microusd or 0),
             )
+            actual_cost_microusd = int(context.pool_reserved_microusd or 0)
 
     if (
         context is not None

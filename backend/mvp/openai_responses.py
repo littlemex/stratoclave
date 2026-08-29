@@ -745,7 +745,9 @@ async def create_response(
     # would strand the hold and the pool slot until the reaper.
     try:
         data = resp.json()
-        input_tokens, output_tokens = _extract_usage(data.get("usage", {}))
+        _usage_block = data.get("usage", {})
+        input_tokens, output_tokens = _extract_usage(_usage_block)
+        _cache_read, _cache_write = _openai_transport.extract_cache_usage(_usage_block)
     except Exception as e:  # noqa: BLE001
         ending = hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED)
         if ending is not None:
@@ -755,7 +757,11 @@ async def create_response(
             detail=f"malformed upstream response: {sanitize_exception_message(str(e))}",
         )
     ending = hold.claim_settle(
-        _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+        # `None` for a cache leg means this transport did not report it — stated
+        # rather than defaulted, so the ledger does not record a measured zero for a
+        # field nobody read (contract C8.1).
+        _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens,
+                     cache_read_tokens=_cache_read, cache_write_tokens=_cache_write)
     )
     if ending is not None:
         await ending.awaited()

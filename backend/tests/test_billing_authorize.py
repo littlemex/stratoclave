@@ -43,12 +43,18 @@ def _mk_id(hold_id, period, hold_sk):
     return encode_authorization_id(hold_id=hold_id, period=period, hold_sk=hold_sk)
 
 
-def _seed(tenant_id="acme-authcap", limit=10_000_000_000):
+def _seed(tenant_id="acme-authcap", limit=10_000_000_000, *, user_ids=()):
+    """Provision the tenant, its pool, and the memberships a test will spend from.
+
+    Admission reads authority rather than creating it (it used to call `ensure()` on
+    the way past, which is how a subject with no grant acquired a budget by making a
+    request), so every user id a test drives has to be provisioned here."""
     period = current_period()
-    UserTenantsRepository().ensure(
-        user_id=f"user-{tenant_id}", tenant_id=tenant_id, role="user",
-        total_credit=1_000_000_000,
-    )
+    for uid in (f"user-{tenant_id}", *user_ids):
+        UserTenantsRepository().ensure(
+            user_id=uid, tenant_id=tenant_id, role="user",
+            total_credit=1_000_000_000,
+        )
     TenantBudgetsRepository().set_pool_limit(
         tenant_id=tenant_id, period=period, pool_limit_microusd=limit,
     )
@@ -275,7 +281,7 @@ def test_inline_hold_still_late_settles_after_reclaim(dynamodb_mock):
         email = "u@e.com"
         roles = ("user",)
 
-    tenant, period = _seed(tenant_id="acme-inline")
+    tenant, period = _seed(tenant_id="acme-inline", user_ids=("user-inline",))
     ctx = reserve_credit(
         _U(), 1024, pricing_key="haiku", cost_microusd=800_000, selected_model="haiku",
     )
@@ -627,7 +633,7 @@ def test_http_void_then_capture_409(dynamodb_mock, monkeypatch):
 
 
 def test_http_capture_after_reclaim_410(dynamodb_mock, monkeypatch):
-    tenant, period = _seed(tenant_id="acme-http")
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
     c = _client(monkeypatch)
     a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "rc"},
                json={"amount_microusd": 900_000}).json()
@@ -796,7 +802,7 @@ def test_inline_hold_token_cannot_be_captured(dynamodb_mock, monkeypatch):
         email = "u@e.com"
         roles = ("user",)
 
-    tenant, period = _seed(tenant_id="acme-http")
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
     ctx = reserve_credit(_U(), 1024, pricing_key="haiku", cost_microusd=500_000, selected_model="haiku")
     # Forge the external-style token from the inline hold's real identity
     # (all discoverable from the tenant's own billing surface).
@@ -824,7 +830,7 @@ def test_rehydrate_rejects_non_external_hold(dynamodb_mock):
         email = "u@e.com"
         roles = ("user",)
 
-    tenant, period = _seed(tenant_id="acme-rehy")
+    tenant, period = _seed(tenant_id="acme-rehy", user_ids=("u2",))
     ctx = reserve_credit(_U(), 1024, pricing_key="haiku", cost_microusd=400_000, selected_model="haiku")
     assert _pipeline.rehydrate_reservation_context(
         tenant_id=tenant, period=period, hold_id=ctx.hold_id, hold_sk=ctx.hold_sk
@@ -850,7 +856,7 @@ def test_http_idempotency_key_reuse_different_body_422(dynamodb_mock, monkeypatc
 
 def test_http_idempotency_same_body_replayed_flag(dynamodb_mock, monkeypatch):
     """Same key + same body → replay with replayed=true, same id, one hold."""
-    tenant, period = _seed(tenant_id="acme-http")
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
     c = _client(monkeypatch)
     b = {"amount_microusd": 500_000, "description": "x"}
     r1 = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "same"}, json=b)
@@ -1040,7 +1046,7 @@ def test_rehydrate_refuses_amount_mismatch(dynamodb_mock):
 
 def test_http_capture_inconsistent_hold_409(dynamodb_mock, monkeypatch):
     """The inconsistency surfaces to the client as 409, not a 500 or a wrong charge."""
-    tenant, period = _seed(tenant_id="acme-http")
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
     c = _client(monkeypatch)
     a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "mm2"},
                json={"amount_microusd": 500_000}).json()["authorization_id"]

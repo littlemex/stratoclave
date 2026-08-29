@@ -117,8 +117,11 @@ def test_402_credit_exhausted_does_not_leak_balance(monkeypatch):
     from mvp import _pipeline
 
     class FakeRepo:
-        def ensure(self, **kw):
-            pass
+        def get(self, *a, **kw):
+            # A provisioned membership. Admission READS authority now instead of
+            # creating it, so a stub has to have one for the request to get as far
+            # as the exhaustion this test is about.
+            return {"user_id": "u", "tenant_id": "t", "status": "active"}
 
         def reserve(self, **kw):
             raise CreditExhaustedError()

@@ -133,6 +133,117 @@ class TestAuthenticationIsNotRegistration:
         assert written and written[0]["user_id"] == "sub-unregistered"
 
 
+class TestAdmissionDoesNotGrantAuthority:
+    """C6.3, second half. Refusing an unregistered subject at authentication is not
+    enough while the money path repairs what it finds missing: `reserve_credit`
+    called `UserTenantsRepository.ensure`, which CREATES a membership carrying the
+    tenant's default credit. So a subject with a profile row but no membership —
+    an admin creation that crashed between its two writes, or a row written out of
+    band — was granted a budget by making a request. Admission reads authority; it
+    does not create it."""
+
+    def test_admission_refuses_an_identity_with_no_membership(self, dynamodb_mock):
+        from dataclasses import dataclass
+
+        from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+        from dynamo.user_tenants import UserTenantsRepository
+        from mvp import _pipeline
+
+        @dataclass
+        class _U:
+            user_id: str
+            org_id: str
+            email: str = "u@example.com"
+
+        TenantBudgetsRepository().set_pool_limit(
+            tenant_id="org-unprovisioned", period=current_period(),
+            pool_limit_microusd=10**9,
+        )
+        with pytest.raises(HTTPException) as e:
+            _pipeline.reserve_credit(
+                _U(user_id="user-no-membership", org_id="org-unprovisioned"), 1000)
+        assert e.value.status_code == 403
+        assert e.value.detail["reason"] == "identity_not_provisioned"
+        assert UserTenantsRepository().get(
+            "user-no-membership", "org-unprovisioned") is None, (
+            "a refused admission must not have created the membership it was "
+            "refusing for")
+
+    def test_an_existing_row_with_no_roles_is_not_elevated(self, monkeypatch):
+        """The other half of the same shape: a profile row carrying no roles was
+        given the `user` role — a spending-capable grant — by authenticating."""
+        from mvp import deps
+
+        class _Users:
+            def get_by_user_id(self, sub):
+                return {"user_id": "sub-1", "email": "u@example.com",
+                        "roles": [], "org_id": "org-1"}
+
+            def put_user(self, **kwargs):
+                raise AssertionError("authentication must not write authority")
+
+        monkeypatch.setattr(deps, "UsersRepository", _Users)
+        monkeypatch.setattr(
+            deps, "_decode_cognito_access_token",
+            lambda token: {"sub": "sub-1", "iat": 1})
+        monkeypatch.setattr(deps, "_fetch_email_from_cognito", lambda sub: "")
+        with pytest.raises(HTTPException) as e:
+            deps.get_current_user(authorization="Bearer sometoken")
+        assert e.value.status_code == 403
+
+
+class TestAGateOutsideADependencyStillEvaluatesTheIntersection:
+    """A route can authorize itself: depend on `get_current_user` and test
+    `user.roles` in the handler or a helper. The VSR config surface did exactly
+    that, so an admin's API key narrowed to `messages:send` could write a tenant's
+    routing config — the dependency-shaped check above never saw it."""
+
+    def test_the_vsr_config_gate_refuses_a_narrowed_key(self, dynamodb_mock):
+        from mvp import admin_vsr_config
+
+        with pytest.raises(HTTPException) as e:
+            admin_vsr_config._authorize(
+                "default",
+                _key_user("admin", scopes=["messages:send"]),
+                permission="tenants:update",
+            )
+        assert e.value.status_code == 403
+
+    def test_the_vsr_config_gate_admits_a_key_with_the_scope(self):
+        """With the scope held, the ownership rules are unchanged: an admin reaches
+        `default`."""
+        from mvp import admin_vsr_config
+
+        admin_vsr_config._authorize(
+            "default",
+            _key_user("admin", scopes=["tenants:update"]),
+            permission="tenants:update",
+        )
+
+    def test_no_route_reads_roles_without_evaluating_scopes(self):
+        """Static sweep for the shape rather than for the two spellings: any
+        function in a route module that tests membership in `user.roles` must be
+        inside a module that also consults `user_has_permission`, so the scope side
+        cannot be forgotten by copying an existing handler."""
+        root = pathlib.Path(__file__).resolve().parents[1]
+        offenders: list[str] = []
+        for path in (root / "mvp").rglob("*.py"):
+            if path.name in ("authz.py", "deps.py"):
+                continue  # where the intersection is DEFINED
+            text = path.read_text()
+            reads_roles = ".roles" in text and (
+                'in user.roles' in text or 'in _user.roles' in text
+                or 'in current_user.roles' in text
+            )
+            evaluates_scopes = (
+                "user_has_permission" in text or "_permission_matches" in text
+                or "require_permission" in text
+            )
+            if reads_roles and not evaluates_scopes:
+                offenders.append(path.relative_to(root).as_posix())
+        assert offenders == [], offenders
+
+
 class TestNoRouteGatesOnRolesAlone:
 
     def test_every_route_dependency_evaluates_the_intersection(self):

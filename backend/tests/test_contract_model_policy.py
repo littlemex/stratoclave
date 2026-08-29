@@ -134,6 +134,17 @@ class TestACapIsEnforcedInTheUnitItWasWrittenIn:
         assert e.value.status_code == 503
         assert e.value.detail["reason"] == "quota_unit_unsupported"
 
+    def test_a_quota_row_keyed_by_another_spelling_still_binds(self, env):
+        """The cap's subject is the model. A row written with a dated alias — by a
+        writer that predates the canonical pin, or out of band — used to miss the
+        canonical lookup entirely, so the configured cap contributed nothing to the
+        admission write and the unit check never ran either."""
+        _put_routing_config(
+            quotas={ALLOWED_DATED_ALIAS: {"unit": "usd_micro", "limit": 40_000}},
+        )
+        ctx = _reserve(ALLOWED)
+        assert ctx.quota_reserved_amount > 0
+
     def test_the_supported_unit_still_reserves(self, env):
         _put_routing_config(
             quotas={ALLOWED: {"unit": "usd_micro", "limit": 10_000_000}},

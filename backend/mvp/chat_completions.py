@@ -750,9 +750,20 @@ def _openai_chat_completion(
         request_id=request_id, route="chat_completions_openai",
     )
 
-    def _settle(input_tokens: int, output_tokens: int) -> None:
+    def _settle(
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        cache_read: Optional[int] = None,
+        cache_write: Optional[int] = None,
+    ) -> None:
+        # `None` for a cache leg means this transport did not report it. It is passed
+        # explicitly rather than left to a default so the record says what was read.
         _run_ending(hold.claim_settle(
-            _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+            _money.Usage(
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+            )
         ))
 
     def _fail(status: int, message: str, *, upstream_status: Optional[int] = None,
@@ -798,13 +809,16 @@ def _openai_chat_completion(
         # Letting the exception escape would strand the hold and the pool slot.
         try:
             data = resp.json()
-            input_tokens, output_tokens = _openai_transport.extract_usage(data.get("usage") or {})
+            _usage_block = data.get("usage") or {}
+            input_tokens, output_tokens = _openai_transport.extract_usage(_usage_block)
+            _cache_read, _cache_write = _openai_transport.extract_cache_usage(_usage_block)
         except Exception as e:  # noqa: BLE001
             raise _fail(502, f"malformed upstream response: {sanitize_exception_message(str(e))}",
                         state=_provider_outcome.SUBMITTED_UNSETTLED)
 
         with _timed_phase(timing, "settle"):
-            _settle(input_tokens, output_tokens)
+            _settle(input_tokens, output_tokens,
+                    cache_read=_cache_read, cache_write=_cache_write)
         if timing is not None:
             timing.emit(route="chat_completions", transport="the OpenAI-compatible endpoint", model=body.model,
                         outcome="ok", input_tokens=input_tokens,
@@ -824,6 +838,10 @@ def _openai_chat_completion(
         import asyncio
 
         input_tokens = output_tokens = 0
+        # Absent until a usage frame reports them; `None` records "not reported"
+        # rather than a measured zero (contract C8.1).
+        cache_read: Optional[int] = None
+        cache_write: Optional[int] = None
         # `sent`: the upstream request was started, so a charge may exist.
         # `provider_responded`: at least one event came back. The endings need both
         # because a stream cut before the usage chunk leaves the counts at zero
@@ -865,6 +883,7 @@ def _openai_chat_completion(
                         """True when this event is the terminal usage-only chunk that
                         exists solely because we injected `include_usage`."""
                         nonlocal input_tokens, output_tokens
+                        nonlocal cache_read, cache_write
                         ours = False
                         for line in lines:
                             if not line.startswith("data:"):
@@ -879,6 +898,14 @@ def _openai_chat_completion(
                             usage = parsed.get("usage")
                             if usage:
                                 input_tokens, output_tokens = _openai_transport.extract_usage(usage)
+                                # Reported on the terminal usage frame, or not at
+                                # all — in which case these stay None and the ledger
+                                # records "not reported" rather than a zero.
+                                _cr, _cw = _openai_transport.extract_cache_usage(usage)
+                                if _cr is not None:
+                                    cache_read = _cr
+                                if _cw is not None:
+                                    cache_write = _cw
                                 if injected_usage and not parsed.get("choices"):
                                     ours = True
                         return ours
@@ -899,14 +926,18 @@ def _openai_chat_completion(
                 # a free request. `provider_responded` is the caller's own fact: the
                 # usage chunk is the last one, so token counts cannot answer it.
                 ending = hold.claim_stream_interrupted(
-                    _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+                    _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens,
+                                 cache_read_tokens=cache_read,
+                                 cache_write_tokens=cache_write),
                     provider_responded=provider_responded, sent=sent, exc=e,
                 )
                 if ending is not None:
                     await ending.awaited()
                 raise
             ending = hold.claim_settle(
-                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens,
+                             cache_read_tokens=cache_read,
+                             cache_write_tokens=cache_write)
             )
             if ending is not None:
                 await ending.awaited()
@@ -917,7 +948,9 @@ def _openai_chat_completion(
             # generator is unsafe, so the claimed write is detached. The client is
             # pooled, so nothing is closed here — only the accounting.
             hold.close(
-                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens,
+                             cache_read_tokens=cache_read,
+                             cache_write_tokens=cache_write),
                 sent=sent, provider_responded=provider_responded,
             )
 

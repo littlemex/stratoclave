@@ -30,6 +30,7 @@ from typing import Any, Optional
 from dynamo.client import get_dynamodb_resource
 
 from . import quota as _quota
+from ..models import canonical_model_id
 from .model_resolver import ModelQuotaConfig, RoutingConfig, UserRoutingConfig
 
 _TABLE = os.getenv("DYNAMODB_USER_TENANTS_TABLE", "stratoclave-user-tenants")
@@ -164,8 +165,15 @@ def _parse_tenant_config(item: dict) -> RoutingConfig:
     quotas = {}
     for model, cfg in item.get("quotas", {}).items():
         if isinstance(cfg, dict):
-            quotas[model] = ModelQuotaConfig(
-                model=model,
+            # Key the cap on the MODEL, not on the spelling the row was written
+            # with. The admin write path canonicalises, but a historical or
+            # out-of-band row need not have, and the enforcement path looks the cap
+            # up canonically — so a raw-spelled key silently contributed no quota
+            # line at all. Canonicalising here means both sides of the lookup agree
+            # wherever the row came from, which is the same fix the allowlist got.
+            key = canonical_model_id(model)
+            quotas[key] = ModelQuotaConfig(
+                model=key,
                 # An absent unit is not a claim that the cap is in tokens. The
                 # admin write path always stores `usd_micro` and the enforcement
                 # path reserves micro-USD, so defaulting the PARSE to "tokens"

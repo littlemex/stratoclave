@@ -55,7 +55,7 @@ price the request was admitted under.
 | **C2.2** The rate document that priced the admission is recorded with the reservation, and a live rate edit in between cannot change what this request is charged. A rate that cannot be frozen refuses the request before the provider is called. | E | `test_contract_price_identity.py::test_a_rate_flip_between_reserve_and_settle_does_not_move_the_charge` |
 | **C2.3** A published derived money figure is reproducible from stored facts. | B | Recomputable from the rows and a pinned rate table; the report does not yet embed the rates it priced with, and detail rows past the stored cap are not retained |
 | **C2.4** The set of billable legs is declared in one place; adding a leg to the charge without adding it to the estimate is impossible to do silently. | E | `test_billable_legs_registry.py` |
-| **C2.5** A rate document is one complete validated value: every leg present, every rate a non-negative integer, and a version read whole or refused. | E | `test_contract_price_identity.py` |
+| **C2.5** A rate document is one complete validated value: every leg present, every rate a non-negative integer, a version read whole or refused, and a version's rows and row COUNT immutable once written. Validated at every boundary that consumes a row — including the point read that builds the frozen snapshot, not only the bulk load. An invalid document is not a transient, so it refuses admission instead of quietly leaving the previous rates in place. | E | `test_contract_price_identity.py` |
 
 ## C3 — Termination and recovery
 
@@ -87,7 +87,7 @@ One idempotency key means one authorization, for all time.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C5.1** A retry that crosses a billing period resolves to the same authorization. | E | `test_contract_idempotency.py` |
+| **C5.1** A retry that crosses a billing period resolves to the same authorization. | E for records written by this version or later; **B** for older ones until the backfill has run | `test_contract_idempotency.py`. Records written before the identity left the money partition are read where they were written, but only for the period supplied and the one before it — the reader cannot guess an older period. `scripts/local/backfill_idemp_partition.py` copies them into the permanent partition and closes that window; it is an upgrade step, listed in [DEPLOYMENT.md](../DEPLOYMENT.md) |
 | **C5.2** The mapping from a client key to a stored row is injective, and a replay verifies the key itself rather than the address it was found at. | E | `test_contract_idempotency.py` |
 | **C5.3** A replay returns the original outcome and never mints a second money move. | E | `test_contract_idempotency.py`, `test_billing_authorize.py` |
 | **C5.4** A retry can tell committed from not-committed without guessing. | B | Holds on the transactional path, where the record is written inside the reserve transaction. Under the PENDING protocol the intent is written before the commit point and finalized best-effort — see the open items below |
@@ -99,9 +99,9 @@ grants and what its credential was scoped to.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C6.1** Every gate on every route evaluates that intersection; a gate that cannot evaluate it refuses. | E | `test_contract_authority.py` (including a static check over every route dependency) |
+| **C6.1** Every gate on every route evaluates that intersection; a gate that cannot evaluate it refuses. Gates that are not FastAPI dependencies count: a handler that tests `user.roles` itself is a gate. | E | `test_contract_authority.py` — the dependency check, the VSR config helper, and a static sweep for any route module that reads roles without consulting `user_has_permission` |
 | **C6.2** Tenant data and budget are reachable only by principals of that tenant, admins excepted explicitly. | E | `test_authz_lattice.py` |
-| **C6.3** No identity acquires a budget implicitly. Authentication is not registration. | E | `test_contract_authority.py` |
+| **C6.3** No identity acquires a budget implicitly. Authentication is not registration, and admission does not repair a missing one: it reads authority rather than creating it. | E | `test_contract_authority.py` |
 | **C6.4** Revocation and demotion take effect on the next request. | E | `test_jwt_verify.py`, `test_api_key_tombstone.py` |
 | **C6.5** Nothing a client sets in a request changes which tenant, identity or budget it is accounted to. | E | `test_authz_lattice.py` |
 
@@ -123,7 +123,7 @@ The gateway says what it observed, and no more.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C8.1** A value the gateway did not observe is reported as absent, never as zero. | E | `test_contract_reporting.py` |
+| **C8.1** A value the gateway did not observe is reported as absent, never as zero — and absence is the DEFAULT, so a transport that does not parse a leg cannot record a measured zero by omission. | E | `test_contract_reporting.py` |
 | **C8.2** Any path or parameter the gateway names in an error is one it serves, including in a message relayed from upstream. | E | `test_contract_reporting.py` |
 | **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable. | E | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py` |
 
@@ -151,7 +151,10 @@ because a contract that quietly omits its failures is worse than no contract.
   inline holds is the fix.
 - **C3.5 after a settle that never commits.** When the settle transaction exhausts
   its retries, nothing re-drives it: the reaper later writes `RECLAIM` with a
-  settled delta of zero and the observed usage never reaches the ledger.
+  settled delta of zero and the observed usage never reaches the ledger. (A
+  reservation restored from a PRE-SNAPSHOT ledger event is a different case and is
+  closed: it settles at the amount the admission debited, which is an upper bound,
+  rather than being refused into that same hole.)
 - **C5.4 under the PENDING protocol.** The intent is written before the commit
   point and finalized best-effort, and one replay path reads the intent's presence
   rather than the marker, so a refused authorize can replay as authorized.

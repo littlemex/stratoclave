@@ -28,6 +28,17 @@ TENANT_ID = "hard-ceiling-test-tenant"
 
 
 def _user(uid: str = "u1", tid: str = TENANT_ID) -> AuthenticatedUser:
+    """An authenticated user AND its membership.
+
+    Admission used to create the membership on the way past (`ensure()`), which is
+    how a subject with no grant acquired a budget by making a request. It reads
+    authority now, so constructing a test principal means provisioning it, the way a
+    real deployment does through the admin API."""
+    from dynamo.user_tenants import UserTenantsRepository
+
+    UserTenantsRepository().ensure(
+        user_id=uid, tenant_id=tid, role="user", total_credit=10**12,
+    )
     return AuthenticatedUser(
         user_id=uid,
         email="hardceiling@test.example",

@@ -428,6 +428,8 @@ class _RateCache:
         return active_source_name()
 
     def _refresh_locked(self, repo: PricingConfigRepository) -> None:
+        from dynamo.pricing_config import RateDocumentInvalid
+
         from .price_sources import PriceSourceConfigError
 
         # Fail-static across the ENTIRE refresh (Fable #66 rev1 BUG1): a throw
@@ -463,12 +465,13 @@ class _RateCache:
                 self._version = version
                 self._overrides = dict(overrides)
                 self._override_keys = frozenset(overrides)
-        except PriceSourceConfigError:
-            # A misconfigured price source is not a transient. It must reach the
-            # caller: absorbing it here would charge the bundled floor for as long as
-            # nobody reads the logs, which is the silent fallback this module forbids.
-            # Re-raised BEFORE the catch-all because it is a ValueError and would
-            # otherwise be swallowed by it.
+        except (PriceSourceConfigError, RateDocumentInvalid):
+            # Neither is a transient. A misconfigured price source and an invalid
+            # rate document will both still be invalid on the next tick, so absorbing
+            # them here would charge the bundled floor for as long as nobody reads
+            # the logs — the silent fallback this module forbids. Re-raised BEFORE
+            # the catch-all because both are ValueErrors and would otherwise be
+            # swallowed by it; the reserve path turns them into a refusal.
             raise
         except Exception:  # noqa: BLE001 — table missing / transient: keep last-good map.
             pass
@@ -845,16 +848,25 @@ def snapshot_rates(
                     f"pricing row key mismatch: asked ({version!r},{pricing_key!r}) "
                     f"got ({row.get('version')!r},{row.get('pricing_key')!r})"
                 )
+            # Validate the row this snapshot is built from, with the same rule the
+            # bulk load applies. A `.get(leg, 0)` here substituted a rate of ZERO
+            # for a leg the document does not carry — the one place where a partial
+            # or hand-written row becomes the price a request is admitted and
+            # charged at, and the boundary `load_rates` validates does not cover it
+            # because the snapshot is a point read.
+            from dynamo.pricing_config import validate_rate_row_legs
+
+            validate_rate_row_legs(row, version=version, pricing_key=pricing_key)
             snap = RateSnapshot(
                 version=version,
                 pricing_key=pricing_key,
-                input_per_mtok_microusd=int(row.get("input_per_mtok_microusd", 0)),
-                output_per_mtok_microusd=int(row.get("output_per_mtok_microusd", 0)),
+                input_per_mtok_microusd=int(row["input_per_mtok_microusd"]),
+                output_per_mtok_microusd=int(row["output_per_mtok_microusd"]),
                 cache_read_per_mtok_microusd=int(
-                    row.get("cache_read_per_mtok_microusd", 0)
+                    row["cache_read_per_mtok_microusd"]
                 ),
                 cache_write_per_mtok_microusd=int(
-                    row.get("cache_write_per_mtok_microusd", 0)
+                    row["cache_write_per_mtok_microusd"]
                 ),
                 cost_input_per_mtok_microusd=_opt_int(row.get("cost_input_per_mtok_microusd")),
                 cost_output_per_mtok_microusd=_opt_int(row.get("cost_output_per_mtok_microusd")),

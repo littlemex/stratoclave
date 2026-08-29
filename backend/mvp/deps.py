@@ -399,7 +399,10 @@ def get_current_user(
     elif cognito_auto_provision_enabled():
         # Explicit operator policy: authenticating an unregistered pool member
         # registers it into the default tenant with the `user` role. Off by
-        # default — see `cognito_auto_provision_enabled`.
+        # default — see `cognito_auto_provision_enabled`. The role is granted HERE,
+        # on the branch the operator opted into, rather than by a later fill-in that
+        # also caught rows nobody meant to grant anything to.
+        roles = ["user"]
         needs_backfill = True
     else:
         # AUTHENTICATION IS NOT REGISTRATION. A valid token from the Cognito pool
@@ -448,11 +451,19 @@ def get_current_user(
             email = fetched
             needs_backfill = True
 
-    # Empty roles means the user is not yet registered; backfill with the `user` role
-    # (elevation to admin requires an explicit API call).
+    # A row carrying no roles is not a registration either. Filling it in with the
+    # `user` role granted spending authority — `user` holds `messages:send` — as a
+    # side effect of authenticating, which is the same defect as synthesizing the
+    # whole row. Refuse; an operator grants the role explicitly.
     if not roles:
-        roles = ["user"]
-        needs_backfill = True
+        _log.info("cognito_identity_has_no_roles", extra={"sub": sub})
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This identity has no roles assigned. Ask an administrator to "
+                "grant one."
+            ),
+        )
 
     if needs_backfill:
         try:
