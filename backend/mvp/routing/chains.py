@@ -246,6 +246,49 @@ def reset_catalog() -> None:
     _CATALOG = {}
 
 
+def _uncatalogued_targets(alias: str) -> list[Target]:
+    """Targets for a name the catalog does not carry, priced from the registry.
+
+    `resolve_bedrock_model` decides whether the name is servable at all — it
+    raises for anything outside the Anthropic subset of the registry, and that
+    raise is how an unknown model becomes a 400. What must NOT be decided here is
+    the PRICE. This branch used to stamp `price_key="sonnet"` and `cost_tier=2`
+    on whatever it had just resolved, so settle charged the Sonnet rate for a
+    model that may be priced above Opus, and the invented tier walked straight
+    through a breaker DOWNGRADE cap that exists to stop a "cheaper" fallback from
+    being the expensive one. The registry knows both facts for every name it
+    resolves; read them instead of assuming them.
+
+    A vLLM-served entry that is NOT servable (hybrid serving off, or an endpoint
+    outside the operator allowlist) yields no targets, so the chain exhausts
+    exactly as it does for a model that does not exist. `_build_catalog` already
+    stated that as the behaviour; it was only true for a non-Anthropic provider —
+    an `anthropic` vLLM entry resolved through `resolve_bedrock_model` here and
+    was routed into a Bedrock region the operator never chose to serve it from.
+    """
+    from mvp.models import resolve_bedrock_model, resolve_model
+
+    model_id = resolve_bedrock_model(alias)
+    entry = resolve_model(alias)
+    if getattr(entry, "served_by", "bedrock") == "vllm":
+        from mvp.serving.vllm import endpoint_is_servable
+        if not endpoint_is_servable(entry.endpoint_key):
+            return []
+    price_key = entry.pricing_key
+    tier = _tier_for(price_key)
+    region = default_region()
+    # Primary + the SAME configured failover regions as the catalog, so the
+    # residency setting applies to the unregistered-alias fallback too (an
+    # empty STRATOCLAVE_FAILOVER_REGIONS keeps this single-region).
+    targets = [Target(model_id=model_id, region=region, cost_tier=tier, price_key=price_key)]
+    for alt in failover_regions():
+        if alt != region:
+            targets.append(
+                Target(model_id=model_id, region=alt, cost_tier=tier, price_key=price_key)
+            )
+    return targets
+
+
 def resolve_chain(
     alias: str,
     *,
@@ -260,17 +303,13 @@ def resolve_chain(
     catalog = get_catalog()
     targets = catalog.get(alias)
     if not targets:
-        from mvp.models import resolve_bedrock_model
-        model_id = resolve_bedrock_model(alias)
-        region = default_region()
-        # Primary + the SAME configured failover regions as the catalog, so the
-        # residency setting applies to the unregistered-alias fallback too (an
-        # empty STRATOCLAVE_FAILOVER_REGIONS keeps this single-region).
-        targets = [Target(model_id=model_id, region=region, cost_tier=2, price_key="sonnet")]
-        for alt in failover_regions():
-            targets.append(
-                Target(model_id=model_id, region=alt, cost_tier=2, price_key="sonnet")
-            )
+        targets = _uncatalogued_targets(alias)
+        if not targets:
+            # Resolvable but not servable (see `_uncatalogued_targets`). Said
+            # separately from the exhausted-by-constraints case below so an
+            # operator reading the log is not sent looking for a breaker or an
+            # exclusion that had nothing to do with it.
+            raise ValueError(f"Model '{alias}' is not servable in this deployment")
 
     filtered = [t for t in targets if t not in exclude]
 

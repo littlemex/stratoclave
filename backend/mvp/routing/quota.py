@@ -62,7 +62,24 @@ def _pk_user(tenant_id: str, user_id: str) -> str:
 
 
 def _sk(model: str, period: str) -> str:
-    return f"MQ#{model}#{period}"
+    """Counter key for (model, period), keyed on the model's CANONICAL spelling.
+
+    The counter's subject is the model, not the name the caller used for it. Keyed
+    on the raw name, one model has one counter per spelling: a limit configured
+    for `claude-sonnet-4-6` did not count a request that spelled the same model
+    `us.anthropic.claude-sonnet-4-6-...`, so a per-model cap was avoidable by
+    respelling its subject. Canonicalising here also keeps reserve, settle and
+    release on one key by construction, whatever spelling each was handed.
+
+    Existing counters are not re-keyed by this: a quota line was only ever built
+    when the request's raw spelling matched a config key, and config keys are
+    stored canonicalised, so every counter that exists is already under the
+    canonical name. What changes is that the previously-unmetered spellings now
+    land on that same counter.
+    """
+    from ..models import canonical_model_id
+
+    return f"MQ#{canonical_model_id(model)}#{period}"
 
 
 def soft_check_exhausted(

@@ -290,7 +290,13 @@ for where a broker is the better choice.
   model's quota is exhausted the request cascades to the next model in the
   tenant/user chain; each candidate is priced and settled at *its own* rate, and
   the request is served by the model actually reserved. Live today across the
-  Anthropic Messages, OpenAI Chat Completions, and Responses routes.
+  Anthropic Messages, OpenAI Chat Completions, and Responses routes. A quota is
+  keyed on the **model**, not on the name a client used for it: every alias and
+  Bedrock id of one registry entry counts against one counter, so a cap cannot be
+  dodged by respelling its subject. And because the routing config only ever
+  *restricts* a request, a config the gateway cannot read is not treated as a
+  tenant without restrictions — a task serves the last config it read, or fails
+  closed with `503 routing_config_unavailable`.
 - **Crash-resilient budget accounting.** A pooled reservation writes a sibling
   *hold* record in the same atomic write; settle and release delete it, and if
   a task is killed (OOM, deploy drain) between reserve and settle, a bounded,

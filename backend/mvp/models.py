@@ -407,6 +407,34 @@ def resolve_model(name: Optional[str]) -> ModelEntry:
     return entry
 
 
+def canonical_model_id(name: str) -> str:
+    """The one spelling of a model that every layer keys on: its registry primary
+    alias (the Bedrock id when an entry declares no alias).
+
+    A model reaches this system under several names — a short alias, a dated
+    alias, an inference-profile-prefixed Bedrock id — and each of them names the
+    SAME entry, hence the same price and the same quota. Anything that identifies
+    a model by the string the caller happened to send therefore holds as many
+    identities as there are spellings, and a control keyed that way is bypassed by
+    respelling its subject. That is why the routing config is stored canonicalised
+    on write and why the per-model quota counter is keyed here.
+
+    An unresolvable name maps to ITSELF rather than raising: callers use this to
+    compare and to key, so a name outside the registry must simply fail to match
+    anything instead of turning a lookup into an error. An EMPTY name is likewise
+    returned unchanged — `resolve_model` reads it as "give me the default model",
+    which is the right answer when serving a request and the wrong one when
+    identifying which model a counter or a config entry is about.
+    """
+    if not name:
+        return name
+    try:
+        entry = resolve_model(name)
+    except ValueError:
+        return name
+    return entry.aliases[0] if entry.aliases else entry.bedrock_model_id
+
+
 def registry_entries() -> tuple[ModelEntry, ...]:
     """Read-only view of the model registry (the code-resident allowlist). Used by
     the shadow VSR to find the cheapest model in a price tier; a plain accessor so

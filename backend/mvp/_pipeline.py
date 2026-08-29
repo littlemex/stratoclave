@@ -1357,6 +1357,24 @@ def _err_403(reason: str) -> HTTPException:
     )
 
 
+def _err_503(reason: str) -> HTTPException:
+    """503 for a routing input the gateway could not read.
+
+    Same `type` as the contended-reservation 503s so a client's retry logic keys
+    on one shape: the request was not refused on its merits and retrying is the
+    right response. The `reason` distinguishes which input was missing."""
+    return HTTPException(
+        status_code=503,
+        detail={
+            "type": "budget_unavailable",
+            "reason": reason,
+            "message": (
+                "Routing policy is temporarily unavailable. Retry shortly."
+            ),
+        },
+    )
+
+
 class QuotaExhausted(Exception):
     """A per-model quota condition failed during reserve — the caller's
     cascading fallback should try the next model. Carries which model's quota
@@ -1504,7 +1522,11 @@ def reserve_credit_for_model(
     """
     from .models import resolve_model as _resolve_pricing
     from .pricing import estimate_cost_microusd
-    from .routing.config import get_tenant_routing_config, get_user_routing_config
+    from .routing.config import (
+        RoutingConfigUnavailable,
+        get_tenant_routing_config,
+        get_user_routing_config,
+    )
 
     # Resolved ONCE per request, not per cascade candidate: a tenant's bound
     # mode is one fact, and switching bounding strategy mid-cascade would make
@@ -1668,7 +1690,16 @@ def reserve_credit_for_model(
         )
         return pk, reserved_cost, snap, bound_cost
 
-    tenant_cfg = get_tenant_routing_config(user.org_id)
+    # A routing config that could not be read is not a config: its quotas and its
+    # allowlist only ever restrict this request, so proceeding without it would
+    # admit exactly what the tenant configured against. The loader serves a
+    # last-known-good value when it has one and raises otherwise; fail closed on a
+    # retryable 503 rather than route unrestricted.
+    try:
+        tenant_cfg = get_tenant_routing_config(user.org_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed", tenant_id=user.org_id)
+        raise _err_503("routing_config_unavailable") from None
 
     # VSR hard pin (P0-15): validate, then force the candidate list to exactly
     # [pin] and fall through to the same reserve loop (pricing + quota + atomic
@@ -1787,7 +1818,14 @@ def reserve_credit_for_model(
             bound_microusd=bound,
         ))
 
-    user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    # Same discipline as the tenant config: a user chain NARROWS the candidate
+    # set, so serving the request without it would widen what this user may reach.
+    try:
+        user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed",
+                       tenant_id=user.org_id, user_id=user.user_id)
+        raise _err_503("routing_config_unavailable") from None
     candidates = _resolve_candidate_chain(
         requested_model=model_name,
         tenant_cfg=tenant_cfg,
@@ -1822,6 +1860,7 @@ def _reserve_over_candidates(
     if every candidate's quota is exhausted, 402 `model_quota_exhausted` (for a
     single-element pin list that means: the pinned model's quota is gone, no
     fallback — the hard-pin contract)."""
+    from .models import canonical_model_id as _canonical_model_id
     from .routing import quota as _quota
 
     period = current_period()
@@ -1837,7 +1876,14 @@ def _reserve_over_candidates(
     for idx, model in enumerate(candidates):
         pk, cost, snap, bound = price(model)
         priced_tried.append((model, pk, cost))
-        q = tenant_cfg.quotas.get(model)
+        # Look the limit up under the model's CANONICAL spelling. The admin write
+        # path stores quota keys canonicalised, while a candidate can be the raw
+        # `body.model` (a tenant with quotas but no chain routes the requested
+        # model as-is), so a raw-string lookup found nothing whenever the client
+        # spelled the model any other way — no quota line, request unmetered.
+        # Keying on the model rather than on its spelling closes that, and the
+        # counter key (`quota._sk`) canonicalises identically.
+        q = tenant_cfg.quotas.get(_canonical_model_id(model))
         tenant_limit = q.limit if q else None
         quota_lines = (
             _quota.build_reserve_txn_items(
