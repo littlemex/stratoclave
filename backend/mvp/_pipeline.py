@@ -71,7 +71,7 @@ logger = get_logger(__name__)
 # needs ~N rounds to drain. 12 rounds + full-jitter backoff comfortably clears
 # a 20-way burst; the reserve completes *before* the Bedrock call, so these
 # retries add latency only during genuine contention, never to a quiet request.
-# CONTRACT-hard-ceiling.md section 6: a sound bound can be several times the
+# docs/design/hard-ceiling.md section 6: a sound bound can be several times the
 # eventual charge (how much depends on the script — deliberately not quoted as
 # a ratio here, see reservation_bound.py's module docstring), so a single
 # request's bound can occupy a material fraction of a tenant's pool_limit as
@@ -164,7 +164,7 @@ _HOLD_TTL_SECONDS = max(
     _HOLD_TTL_FLOOR_SECONDS,
 )
 
-# CONTRACT-hard-ceiling.md section 5: "the reap timeout must exceed the
+# docs/design/hard-ceiling.md section 5: "the reap timeout must exceed the
 # maximum time a charge can still arrive for a hold — the request deadline
 # plus the retry budget plus a margin for clock skew. Derive it from those
 # values in code rather than choosing a constant, so a change to a timeout
@@ -529,7 +529,7 @@ class ReservationContext:
     quota_period: Optional[str] = None
     quota_tenant_limit: Optional[int] = None
     quota_user_limit: Optional[int] = None
-    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md item 4): the
+    # Hard-ceiling reservation bound (docs/design/hard-ceiling.md item 4): the
     # inputs the pool debit's `cost_microusd` was actually computed from, kept
     # so the SETTLE ledger terminal can carry a RECOMPUTABLE reservation rather
     # than an opaque number. `bound_mode` is None when the legacy
@@ -1240,7 +1240,7 @@ def _err_402(reason: str) -> HTTPException:
 
 def _err_402_does_not_fit(reason: str) -> HTTPException:
     """402 for a request whose reservation bound EXCEEDS THE WHOLE `pool_limit`
-    (CONTRACT-hard-ceiling.md item 2b, "cannot fit at all") — exact, no
+    (docs/design/hard-ceiling.md item 2b, "cannot fit at all") — exact, no
     configured fraction involved: no amount of waiting or draining the pool
     makes this request admissible to this budget.
 
@@ -1345,7 +1345,7 @@ def reserve_credit_for_model(
 ) -> ReservationContext:
     """Reserve credit for a request, with per-model quota + cascading fallback.
 
-    **Hard-ceiling reservation bound** (CONTRACT-hard-ceiling.md). `input_bytes`
+    **Hard-ceiling reservation bound** (docs/design/hard-ceiling.md). `input_bytes`
     is the UTF-8 byte count of the CANONICAL outbound payload's non-image
     content (section 3a: the payload the gateway is actually about to send to
     Bedrock, NOT the raw request body — see the route handler for how that is
@@ -1440,7 +1440,7 @@ def reserve_credit_for_model(
     # which is not a decision the cascade should be making. Only consulted (and
     # only costs a Dynamo read) when the caller actually supplied a byte count
     # — a request still on the legacy path never pays for this lookup.
-    # CONTRACT-hard-ceiling.md section 7b: the caller (the route handler) is
+    # docs/design/hard-ceiling.md section 7b: the caller (the route handler) is
     # the one place that knows whether enforcement is worth checking BEFORE
     # paying for the survey that produces `input_bytes` — see
     # `mvp.reservation_bound.dollar_pool_bound_enforcement_active`, which the
@@ -1514,7 +1514,7 @@ def reserve_credit_for_model(
             # has for this path. No bound exists to record either (None):
             # this is the `accounting` state, where nothing is computed at all.
             return pk, _legacy_estimate(model, pk), None, None
-        # Hard-ceiling path (CONTRACT-hard-ceiling.md item 1). Deliberately no
+        # Hard-ceiling path (docs/design/hard-ceiling.md item 1). Deliberately no
         # warm/cold split here — a SAAR "this will hit the cache" expectation
         # is exactly the kind of provider-behaviour assumption a SOUND bound
         # must not make (assuming a cache outcome instead of bounding against
@@ -1579,7 +1579,7 @@ def reserve_credit_for_model(
                 effort_multiplier=effort_multiplier,
                 extra_input_tokens=extra_input_tokens,
             )
-        # CONTRACT-hard-ceiling.md section 9b: the bound is ALWAYS computed
+        # docs/design/hard-ceiling.md section 9b: the bound is ALWAYS computed
         # and returned once we are even in this branch (`should_compute` is
         # why `input_bytes` is not None at all) — what `shadow_mode` decides
         # is whether it is ALSO what gets reserved. `shadow_mode` is the
@@ -1608,7 +1608,7 @@ def reserve_credit_for_model(
     # SELECTION changes. Handled before the no-config passthrough so a pin is
     # honoured whether or not the tenant has routing config.
     def _stamp_bound_metadata(ctx: ReservationContext) -> None:
-        # CONTRACT-hard-ceiling.md item 4: carry the exact inputs `cost` was
+        # docs/design/hard-ceiling.md item 4: carry the exact inputs `cost` was
         # computed from onto the context, so settle can embed a RECOMPUTABLE
         # reservation on the ledger terminal instead of an opaque amount.
         # `bound_mode` stays None (the dataclass default) on the legacy path
@@ -2025,7 +2025,7 @@ def reserve_credit(
       tokens AND reserves `cost_microusd` from the pool in one transaction.
 
     `rate_snapshot`, when supplied, is a RateSnapshot the CALLER already froze
-    (CONTRACT-hard-ceiling.md item 5b: "settle at the reserve-time rates" —
+    (docs/design/hard-ceiling.md item 5b: "settle at the reserve-time rates" —
     see `reserve_credit_for_model`'s `_price`). Using it here instead of
     freezing a second, independent snapshot is what makes that rule airtight
     rather than merely usual: the hard-ceiling bound and the settle-time
@@ -2202,7 +2202,7 @@ def reserve_credit(
 
         # Extracted before any refusal path below, so EVERY refusal — suspended,
         # oversized, or ordinary exhaustion — can log the reserved/settled split
-        # at that moment (CONTRACT-hard-ceiling.md item 2b, third bullet): "a
+        # at that moment (docs/design/hard-ceiling.md item 2b, third bullet): "a
         # refusal with high reserved and low settled is the aggregate case,
         # and it is the signal an operator needs to tell 'my budget is spent'
         # from 'my budget is tied up in flight'." Without logging this on
@@ -2229,7 +2229,7 @@ def reserve_credit(
             )
             raise _err_402("tenant_pool_exhausted")
 
-        # CONTRACT-hard-ceiling.md item 2b: two DISTINCT conditions, reported
+        # docs/design/hard-ceiling.md item 2b: two DISTINCT conditions, reported
         # differently. An earlier version of this check tested the bound
         # against a FRACTION of pool_limit and refused on that — review found
         # that wrong in both directions: it fires when the request would in
@@ -2314,7 +2314,7 @@ def reserve_credit(
             # capturable/voidable; without this tag it would rely on the RESERVE
             # event's source, which is exactly what that step stops reading.
             source="inline",
-            # CONTRACT-hard-ceiling.md section 3a: pin the canonical payload's
+            # docs/design/hard-ceiling.md section 3a: pin the canonical payload's
             # hash + byte length onto the hold itself (not just the in-memory
             # ReservationContext), so they survive a process restart and are
             # independently readable — the hold, not the request, is this
@@ -2737,8 +2737,9 @@ def reserve_external_authorization(
 
 
 def _pending_hold_id(tenant_id: str, period: str, idempotency_key: str) -> str:
-    """Deterministic hold_id from the Idempotency-Key (I6, docs/design/
-    pending-protocol.md). Step 1's `attribute_not_exists(sk)` then doubles as the
+    """Deterministic hold_id from the Idempotency-Key.
+
+    I6 in docs/design/pending-protocol.md. Step 1's `attribute_not_exists(sk)` doubles as the
     duplicate-Key detector: a replay derives the SAME hold_id → the SAME sk →
     collides, so no second hold or debit is created. Namespaced by tenant+period
     so the same key in different tenants/periods never collides."""
@@ -3686,7 +3687,7 @@ def _recover_spend_via_late_settle(
                 TransactItems=so_items,
                 ClientRequestToken=_fresh_idempotency_token(),
             )
-            # CONTRACT-hard-ceiling.md section 8 ("a settle arriving after its
+            # docs/design/hard-ceiling.md section 8 ("a settle arriving after its
             # hold was reaped"): this settle books a charge with NO reservation
             # behind it (the reaper's RECLAIM already returned `reserved`) — a
             # LEGITIMATE, expected event under this design, not dropped and not
@@ -3925,7 +3926,7 @@ def settle_reservation_and_log(
         # together, and a defensive double-settle (e.g. error handler + the
         # streaming `finally`) must not double-subtract pool_reserved.
         context._pool_finalized = True
-        # Hard-ceiling overrun record (CONTRACT-hard-ceiling.md item 4). Under a
+        # Hard-ceiling overrun record (docs/design/hard-ceiling.md item 4). Under a
         # sound bound this is always zero — an overrun is a defect report about
         # the bound, not an operating mode, so it is computed unconditionally
         # (never gated on bound_mode) and alarmed below whenever it fires on a
@@ -4003,7 +4004,7 @@ def settle_reservation_and_log(
                     output_ceiling_tokens=_output_ceiling,
                     actual_output_tokens=int(actual_output_tokens),
                 )
-            # Calibrated mode (CONTRACT-ceiling-phase2.md) is explicitly OUT
+            # Calibrated mode (docs/design/calibrated-mode.md) is explicitly OUT
             # OF SCOPE for this change and is not reachable today —
             # `dynamo.tenants.VALID_BOUND_MODES` only accepts "strict", so
             # `resolve_bound_mode` can never return "calibrated" for a real
@@ -4095,7 +4096,7 @@ def settle_reservation_and_log(
                     # Hard-ceiling overrun record (see above). Named
                     # "admission_checked_microusd" here (NOT the bare
                     # "reserved_microusd" the ledger item ultimately uses,
-                    # matching CONTRACT-hard-ceiling.md section 9's own words
+                    # matching docs/design/hard-ceiling.md section 9's own words
                     # for this field: "the amount admission checked") because
                     # this module is scanned by `tests/billing_guards.py`'s
                     # write-discipline guard, which fail-closes on any bare
@@ -4316,7 +4317,7 @@ def _settle_pool_side(
                 tokens_in=facts.get("tokens_in"),
                 tokens_out=facts.get("tokens_out"),
                 settle_reason=reason,
-                # Hard-ceiling overrun record (CONTRACT-hard-ceiling.md item 4):
+                # Hard-ceiling overrun record (docs/design/hard-ceiling.md item 4):
                 # passed straight through from what settle_reservation_and_log
                 # computed — this builder has no opinion on the money, only on
                 # how to shape the Put.

@@ -769,12 +769,12 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
     {
       id: 'AwsSolutions-COG2',
       reason:
-        'MFA is deferred (tracked in HANDOVER_SECURITY_HARDENING.md). Enabling it now requires an email/SMS channel rollout that has its own provisioning surface.',
+        'MFA is not enabled. Turning it on requires an email/SMS channel rollout with its own provisioning surface, so it is a deployment decision rather than a stack default.',
     },
     {
       id: 'AwsSolutions-COG3',
       reason:
-        'Cognito AdvancedSecurityMode is deferred alongside MFA (HANDOVER_SECURITY_HARDENING.md). Non-essentials get punted until after the comprehensive audit lands.',
+        'Cognito AdvancedSecurityMode is not enabled, for the same reason as MFA above: it is priced and configured per deployment rather than fixed by this stack.',
     },
     {
       id: 'AwsSolutions-COG8',

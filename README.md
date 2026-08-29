@@ -888,6 +888,24 @@ ledger — a saving without a ledger behind it is a billing dispute waiting to h
 | [`docs/CODEX_GUIDE.md`](./docs/CODEX_GUIDE.md)                  | OpenAI codex CLI setup via `stratoclave codex` and Path B (long-lived key). |
 | [`docs/COWORK_INTEGRATION.md`](./docs/COWORK_INTEGRATION.md)    | Claude Desktop Cowork (Gateway mode) setup.                  |
 
+### Design notes — the normative source for a behaviour
+
+Where a rule is stated as a property rather than as code, the code cites the
+section. Changing the behaviour means changing the document first.
+
+| Document | Governs |
+|---|---|
+| [`docs/design/hard-ceiling.md`](./docs/design/hard-ceiling.md) | The dollar ceiling for strict-mode traffic: the reservation bound, what strict mode refuses, the assumptions the guarantee rests on, and the reaper's part in it. |
+| [`docs/design/calibrated-mode.md`](./docs/design/calibrated-mode.md) | Calibrated mode — a tighter bound that trades a stated margin for admission headroom — and how a shortage is told from a sizing problem. |
+| [`docs/design/charge-loss.md`](./docs/design/charge-loss.md) | Attempts, evidence and liability: what a provider call may have cost when the gateway did not observe its outcome. The measurements behind it are in [`docs/MEASUREMENTS.md`](./docs/MEASUREMENTS.md). |
+| [`docs/design/ledger-hot-path.md`](./docs/design/ledger-hot-path.md) | The ledger's place on the request path, and the latency it is allowed to add. |
+| [`docs/design/pending-protocol.md`](./docs/design/pending-protocol.md) | The PENDING-protocol migration for hold records, and the gate conditions for deleting the old shape. |
+| [`docs/design/gateway-capacity.md`](./docs/design/gateway-capacity.md) | How many requests the gateway holds at once, what limits it, and how to size it. |
+| [`docs/design/vsr-savings-certificate.md`](./docs/design/vsr-savings-certificate.md) | The counterfactual savings report: what is potential, what is realised, and why they are never added. |
+
+Measured runs live in [`docs/benchmarks/`](./docs/benchmarks) and demo assets in
+[`docs/demo/`](./docs/demo) — the synthetic ones carry a `SYNTHETIC` banner.
+
 Diagram sources are in [`docs/diagrams/`](./docs/diagrams) as both
 `*.drawio` (editable in [diagrams.net](https://www.diagrams.net/)) and `*.png`.
 

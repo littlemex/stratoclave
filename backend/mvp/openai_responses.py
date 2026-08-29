@@ -248,7 +248,7 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
     Extracted so both the token reservation estimate and the dollar pool cost
     estimate use the same multiplier for the output leg. TOTAL and
     deterministic from the request body alone (an unrecognised/absent effort
-    falls back to 1 via `.get(effort, 1)`) — CONTRACT-hard-ceiling.md section 3's
+    falls back to 1 via `.get(effort, 1)`) — docs/design/hard-ceiling.md section 3's
     "refuse rather than assume 1 where [effort_multiplier] cannot be determined
     before the call" therefore never applies to this route: there is no case
     where this function cannot produce a value before the call.
@@ -266,7 +266,7 @@ def _build_openai_responses_payload(
 ) -> dict:
     """The exact JSON `payload` `/openai/v1/responses` sends to the OpenAI-compatible endpoint,
     extracted so it can be built ONCE, BEFORE the reserve call
-    (CONTRACT-hard-ceiling.md section 3a: the bound must be computed over the
+    (docs/design/hard-ceiling.md section 3a: the bound must be computed over the
     canonical payload the gateway is about to send) — mirroring
     `mvp.chat_completions._build_openai_chat_payload`. Forwards the RESOLVED
     Bedrock model id, not the client-facing alias, because the endpoint only knows
@@ -529,7 +529,7 @@ async def create_response(
     _multiplier = _reasoning_multiplier(body)
     _input_est = max(reservation - body.max_output_tokens * _multiplier, 0)
 
-    # CONTRACT-hard-ceiling.md section 3a: build the canonical the OpenAI-compatible endpoint payload
+    # docs/design/hard-ceiling.md section 3a: build the canonical the OpenAI-compatible endpoint payload
     # NOW, before the reserve below — SAAR only reads `body.input`/
     # `previous_response_id` above, so nothing between here and reserve can
     # mutate it. Built with the ORIGINALLY resolved `entry`; re-stamped with
@@ -538,7 +538,7 @@ async def create_response(
     # as `mvp.anthropic`/`mvp.chat_completions`).
     openai_payload = _build_openai_responses_payload(body, entry, stream=body.stream)
 
-    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 0/7b):
+    # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey the canonical payload, but ONLY when enforcement might use it —
     # see `mvp.anthropic`'s identical gate. `input_image`/`input_file` are
     # already refused unconditionally by `OpenAIResponsesRequest`'s own

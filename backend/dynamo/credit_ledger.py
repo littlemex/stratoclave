@@ -194,7 +194,7 @@ class CreditLedgerRepository:
         rate VERSION (not the pricing_key). Append-only: these are set once at
         creation, never updated.
 
-        Hard-ceiling overrun record (CONTRACT-hard-ceiling.md item 4):
+        Hard-ceiling overrun record (docs/design/hard-ceiling.md item 4):
         `reserved_microusd` is the amount admission actually checked (NOT
         derived from `reserved_delta_microusd`, which is signed and, for a
         settled-only reaper-race event, is 0 even though a real reservation

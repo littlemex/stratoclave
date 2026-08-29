@@ -633,7 +633,7 @@ def _estimate_reservation_tokens(body: AnthropicMessagesRequest) -> int:
     return max(reservation, _MIN_RESERVATION_TOKENS)
 
 
-# CONTRACT-hard-ceiling.md section 3a: the bound must be computed over the
+# docs/design/hard-ceiling.md section 3a: the bound must be computed over the
 # CANONICAL payload the gateway is about to send to Bedrock — the CONVERSE
 # kwargs `_build_bedrock_kwargs` produces — not over the raw Anthropic request
 # body. The two are not always the same bytes: `_build_bedrock_kwargs` decodes
@@ -701,7 +701,7 @@ def messages(
             detail={"type": "invalid_model", "message": str(e)},
         )
 
-    # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 3a):
+    # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 3a):
     # build the CANONICAL Bedrock payload NOW, before anything else — routing
     # (SAAR/VSR) only reads `body.messages`, so nothing between here and the
     # reserve call below can mutate it. This is also where an unsupported
@@ -721,7 +721,7 @@ def messages(
             detail={"type": "invalid_request", "message": str(e)},
         )
 
-    # CONTRACT-hard-ceiling.md section 0/7b: budget enforcement is opt-in, and
+    # docs/design/hard-ceiling.md section 0/7b: budget enforcement is opt-in, and
     # "the bound is not computed where it cannot be enforced unless a
     # measurement flag is on". Surveying the payload (walking every message,
     # parsing every image header) is real per-request work with no purpose
@@ -924,7 +924,7 @@ def messages(
         # (not `or`) so a real VSR decision that is falsy-but-present is never
         # silently dropped in favour of shadow (Fable review-3 B).
         vsr_decision=vsr_decision if vsr_decision is not None else _shadow_vsr,
-        # Hard-ceiling reservation bound (CONTRACT-hard-ceiling.md section 3):
+        # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 3):
         # priced from the CANONICAL payload surveyed above, not the legacy
         # char-count heuristic — but ONLY when section 7b's enforcement gate
         # (above) actually ran the survey. `_survey is None` (no pool, no

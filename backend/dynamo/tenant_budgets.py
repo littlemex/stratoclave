@@ -671,7 +671,7 @@ class TenantBudgetsRepository:
             in a separate HTTP call rehydrates from the HOLD alone.
           * `payload_hash` — for an external authorize, the request fingerprint
             (a duplicate Idempotency-Key resolving to this hold 422s on a
-            different body); for an INLINE hold (CONTRACT-hard-ceiling.md
+            different body); for an INLINE hold (docs/design/hard-ceiling.md
             section 3a), the hash of the canonical outbound payload the
             reservation was bound against — pinned here, immutable for the
             life of the hold, so a retry can be verified byte-identical rather

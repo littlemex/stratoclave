@@ -1,4 +1,4 @@
-"""Unit tests for `mvp.reservation_bound` (CONTRACT-hard-ceiling.md).
+"""Unit tests for `mvp.reservation_bound` (docs/design/hard-ceiling.md).
 
 Pure-function tests only — no AWS, no moto. These exercise the properties the
 contract states explicitly for the sound/calibrated bound and the image

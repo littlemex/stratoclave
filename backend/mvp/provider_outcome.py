@@ -1,8 +1,8 @@
 """How far did a provider call get, and what does that oblige us to hold?
 
-`docs/MEASUREMENTS.md` publishes the measurements this module encodes. The gateway
-cannot observe what the provider charged; it can only observe how far its own
-request got. Everything here follows from that, and from one measured fact: **"I did not receive a response" does not mean
+`docs/design/charge-loss.md` is the contract; `docs/MEASUREMENTS.md` publishes the
+measurements it rests on. The gateway cannot observe what the provider charged; it
+can only observe how far its own request got. Everything here follows from that, and from one measured fact: **"I did not receive a response" does not mean
 "I was not billed."** A Converse call abandoned on a 2 s client read timeout was
 still executed and billed 1,493 output tokens, measured against CloudWatch's own
 `AWS/Bedrock` token counters on a model the account otherwise never invokes.

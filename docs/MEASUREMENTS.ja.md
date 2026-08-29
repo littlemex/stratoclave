@@ -1,4 +1,5 @@
 <!-- English original: MEASUREMENTS.md. This is the one document in this repository that also exists in Japanese. -->
+<!-- Last updated: 2026-08-30 -->
 
 # 失敗した LLM 呼び出しに、実際いくら課金されるのか
 
@@ -185,6 +186,8 @@ python3 scripts/local/measure_provider_outcome.py --retry-arithmetic-only
   測定結果 1 つにつき 1 行で、各行が根拠の測定と、受け入れているリスクを明記しています。
 - `backend/mvp/_money.py` — hold。予約を終わらせられる唯一のオブジェクトなので、
   すべてのルートが上の policy に問い合わせ、ルートが自分で答えることはできません。
+- `docs/design/charge-loss.md` — この測定が支える契約。試行、証拠、liability、そして
+  ゲートウェイの内側からはできないこと。
 - `docs/EVIDENCE.md` — 証拠の全体図。**検証できていないもの**も含みます。
 - `backend/tests/test_provider_outcome_formal.py`、
   `backend/tests/test_money_lifecycle_discipline.py` — 性質の検証と、

@@ -1,6 +1,6 @@
 """Formal and property coverage for the outcome/liability layer.
 
-`CONTRACT-charge-loss.md`. `tests/test_provider_outcome.py` covers each branch by
+`docs/design/charge-loss.md`. `tests/test_provider_outcome.py` covers each branch by
 example; this file covers what examples cannot. It is the second draft: two
 independent reviews took the first one apart, and the findings are recorded here
 because each one is a trap worth not falling into twice.
