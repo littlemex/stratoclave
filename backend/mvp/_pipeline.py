@@ -395,6 +395,24 @@ def _reserve_protocol_for(tenant_id: Optional[str]) -> str:
     return "transaction"
 
 
+def pool_deltas(reserved_microusd, actual_microusd):
+    """The three counter deltas a pool move applies, as a pure function.
+
+    Extracted from `_pool_settle_items` so the arithmetic can be verified over
+    symbolic values rather than over a transcription of it. Two reviews landed on
+    the same finding: a Z3 proof that re-implements this in the test file proves the
+    test author's algebra, and stays green while production swaps two bindings.
+    Nothing here converts to `int`, so z3 `Int` expressions flow through unchanged
+    and the proof is over the shipped expression.
+
+    Returns `(reserved_delta, settled_delta, headroom_delta)` for
+    `ADD pool_reserved :dr, pool_settled :actual, pool_headroom :dh`. `headroom` is
+    defined as `limit - reserved - settled`, so returning `reserved` and booking
+    `actual` moves it by their difference.
+    """
+    return (-reserved_microusd, actual_microusd, reserved_microusd - actual_microusd)
+
+
 def _pool_settle_items(
     *,
     table_name: str,
@@ -428,12 +446,14 @@ def _pool_settle_items(
     # `actual` of true spend shifts headroom by (reserved - actual). This keeps
     # the invariant on settle (actual>0), release, and reclaim (both actual=0 =>
     # full reservation returned to headroom). Same aggregate for all three paths.
-    delta_headroom = int(reserved_microusd) - int(actual_microusd)
+    d_reserved, d_settled, delta_headroom = pool_deltas(
+        reserved_microusd, actual_microusd
+    )
     expr = ("ADD pool_reserved_microusd :dr, pool_settled_microusd :actual, "
             "pool_headroom_microusd :dh")
     values = {
-        ":dr": {"N": str(-int(reserved_microusd))},
-        ":actual": {"N": str(int(actual_microusd))},
+        ":dr": {"N": str(d_reserved)},
+        ":actual": {"N": str(d_settled)},
         ":dh": {"N": str(delta_headroom)},
     }
     if reclaimed_microusd:
