@@ -16,7 +16,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 - **The clause levels in [`CONTRACTS.md`](docs/design/CONTRACTS.md) are the surface.** A
   clause's guarantee level (**P** machine-checked, **E** a test fails if violated, **B**
   true inside a stated configuration, **N** deliberately not guaranteed) is not lowered
-  in a minor or patch release. Lowering one is a major version.
+  in a minor or patch release. Lowering one is a major version. This is clause C10.5 and
+  it is enforced: the levels are recorded, and `test_clause_levels_are_a_ratchet.py` fails
+  when one weakens while the released major has not moved. It does not check that a level
+  is CORRECT — that is a human reading the clause, and it is named as such.
 - **The HTTP surface is the second half of it.** The three inference routes, their
   request and response shapes, and the scope names that authorize them do not change
   incompatibly within 1.x.
@@ -28,6 +31,23 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 - **Defaults may change in a minor release**, and when a default changes the entry here
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
+
+## [Unreleased]
+
+### Added
+
+- **Exposure accounting and alarms for retained reservations.** `STRATOCLAVE_UNOBSERVED_HOLDS`
+  defaults on as of 1.0.0, so retentions hold budget; until now nothing pushed the held
+  amount anywhere and the first signal of an outage filling a tenant's headroom was a
+  refusal for an unrelated request. The backend emits `retention_exposure` with the
+  standing figures per tenant and period — when a retention is taken, when one is
+  resolved, and from a sweep while any remain unresolved so the metric cannot go silent
+  while the money is still held. Two alarms read it: saturation on the fraction of a pool
+  that retentions hold, and staleness on the oldest unresolved one, kept separate because
+  no single threshold distinguishes an incident in progress from an operator who stopped
+  looking. This is the accounting `charge-loss.md` section 7 names as the precondition for
+  ever releasing an unobserved hold automatically; the automatic release itself still
+  needs a capped write-off budget and remains unbuilt.
 
 ## [1.0.0] — 2026-08-31
 
@@ -146,10 +166,12 @@ money paths lose nothing on the failure routes.
 Named here because they are the honest state, and in full at the bottom of
 [`CONTRACTS.md`](docs/design/CONTRACTS.md).
 
-- **Nothing watches `held_microusd`.** With retention on by default, a provider outage
-  accumulates retentions against a tenant's headroom and the first signal an operator
-  gets is a refusal. Retention is the correct behaviour — the money may really have been
-  spent — but the exposure needs an alarm, and that alarm is the next piece of work.
+- **Nothing drains the retention queue but a human.** The exposure is now reported and
+  alarmed (saturation on the fraction of a pool that retentions hold, staleness on the
+  oldest unresolved one), so a provider outage filling a tenant's headroom is visible
+  rather than arriving as a refusal. Ending a retention is still manual by design:
+  `charge-loss.md` section 7 requires a capped write-off budget before anything releases
+  an unobserved hold automatically, and that budget does not exist.
 - **The ledger's hot path pays for its atomicity.** The admission transaction is a
   multi-item `TransactWriteItems` on a hot row; single-item conditional updates and
   pool-row sharding are designed and not built.

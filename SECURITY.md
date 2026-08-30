@@ -8,15 +8,17 @@ describes how to report vulnerabilities and what to expect in response.
 
 ## Supported Versions
 
-Stratoclave is currently **alpha** software on the `0.x` series. Only the
-latest tagged minor release and the latest commit on the `main` branch are
-supported; older `0.x` tags do not receive backported fixes while in alpha.
+Stratoclave is on the `1.x` series. Only the latest tagged minor release and the
+latest commit on the `main` branch receive fixes; older tags do not get backports.
+That is a single-maintainer capacity statement, not a judgement about how serious a
+vulnerability in an older tag would be — if you are pinned to one, the fix is to move
+forward.
 
 | Version / Branch          | Supported          |
 |---------------------------|--------------------|
 | `main` (latest commit)    | :white_check_mark: |
-| latest `v0.x` tag         | :white_check_mark: |
-| older tags / everything else | :x:             |
+| latest `v1.x` tag         | :white_check_mark: |
+| older tags (including all `v0.x`) | :x:        |
 
 ## Reporting a Vulnerability
 

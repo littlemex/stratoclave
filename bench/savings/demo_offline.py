@@ -33,7 +33,6 @@ is glue over the shipped `summarize_savings(rows, price=, resolve=)` seam.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 

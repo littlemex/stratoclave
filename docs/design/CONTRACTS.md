@@ -179,6 +179,7 @@ boundary at which its evidence stops.
 | **C10.1** A sentence that matches the guarantee lexicon declared in [`contracts/claims/config.json`](../../contracts/claims/config.json), found in one of the six documents that same file names as covered, is registered with the reason it is allowed to say that — a clause here, a row in [EVIDENCE.md](../EVIDENCE.md), a limit stated in the sentence, or a named debt. "Guarantee-shaped" means "matches that lexicon", not "reads like a promise", so this clause is true of a declared vocabulary over six named files — never of every guarantee this project's documents make, and never of a document outside the six, which is not read at all. | E | `test_claims_are_anchored.py`, reading the lexicon and the file list from `contracts/claims/config.json` rather than carrying its own copy — currently `README.md`, `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, `docs/ARCHITECTURE.md`, `docs/ADMIN_GUIDE.md`, `docs/DEPLOYMENT.md` — against `contracts/claims/anchored.json`. Adding or editing a matching sentence in one of those files fails the build until its author points at the reason |
 | **C10.2** A sentence qualified because the unconditional version is not true yet carries a `debt:` anchor naming the clause that would make it unconditional, and that clause is on the open-items list. | E | `test_claims_are_anchored.py`. This is the clause that keeps honesty from becoming retreat: a weakened sentence and the work that would strengthen it are the same list |
 | **C10.4** A clause's own citation resolves: a test named here exists, and a named node is a function defined in the suite. | E | `test_contract_clauses_cite_real_tests.py`. The failure this prevents is the one this document is most exposed to — a test is renamed or deleted, the row keeps citing it, and an unenforced clause goes on reading as enforced while looking audited. It also requires that a clause at P or E cites something at all |
+| **C10.5** A clause's guarantee level is not lowered without a major version bump. Lowering one is honest and sometimes required — a clause found untrue at E should drop rather than keep lying — but it breaks what a reader pinned a tag on, so it costs a major release rather than a patch. | E | `test_clause_levels_are_a_ratchet.py`, mutation-checked (weakening C1.6 from E to B inside the 1.x line fails it). The levels are recorded in `contracts/claims/snapshot.json` under `detector.clause_levels`, a clause holding at two levels is recorded at the WEAKER one so a caveat cannot weaken it while the letter stays put, and a strengthening that is not re-recorded also fails — otherwise a clause could go B to E and slide back to B unseen. The released major is read from `CHANGELOG.md` rather than from a git tag, so this runs from a clean checkout under plain pytest. What it does NOT check is whether a level is CORRECT; that is the first permanent human obligation below |
 | **C10.3** A verdict word in a comparison table is not contradicted by its own cell. | **B** | The lint treats a table cell as a sentence, so the verdict is registered like any other claim; it cannot check that a cell agrees with itself |
 
 The lint cannot tell whether a sentence is TRUE — only whether someone was made to
@@ -363,10 +364,9 @@ without paying a cost the clause names.
   clause rather than because the sentence is safe; the remaining nine are sentences a
   clause should not cover at all.
 - **C8.3 has no watcher on the retention.** The reaper holds a departed call's
-  reservation whose provider call departed, and nothing watches `held_microusd`, so a
-  provider outage can fill a tenant's headroom and the first signal is a refusal. See
-  the exposure item below: the flag now defaults on, so the watcher is no longer
-  optional.
+  reservation whose provider call departed. A provider outage can still fill a tenant's
+  headroom, but it is no longer silent: see the exposure item below for the alarms, and
+  note that draining the queue is still a human's job.
 - **C12.5 has no mechanism.** Credential material is kept out of every store and log
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper
@@ -393,11 +393,13 @@ without paying a cost the clause names.
   promise anything about it. The omission is named rather than silent —
   `guarantee_terms_deliberately_absent` in the same config — so a reader can tell the
   gap is a judgement made on purpose and not an oversight nobody noticed.
-- **Nothing watches `held_microusd`, and retention is now on by default.** This was
-  filed as the reason the flag stayed off. The flag no longer stays off, so the item
-  changed shape rather than closing: under a provider outage, retentions accumulate
-  against a tenant's headroom and the first signal an operator gets is a refusal.
-  Retention is correct — the money may really have been spent — but a mechanism whose
-  failure mode is a silent lockout needs the exposure surfaced. `held_microusd` is
-  reported; the alarm on it is the work, and it is now on the enforced path rather
-  than behind a flag nobody turned on.
+- **Retention exposure is reported and alarmed; what remains is that nothing ENDS a
+  retention but a human.** The watcher this item asked for exists: `retention_exposure`
+  carries the standing figures per tenant and period, and two alarms read it — saturation
+  on the fraction of a pool that retentions hold, and staleness on the oldest unresolved
+  one. Saturation and staleness are separate alarms because no single threshold separates
+  an incident in progress from an operator who stopped looking. What is still open is the
+  ending: a retention ends only when someone settles it at the figure the provider's own
+  record shows or releases it when that record shows none, and `charge-loss.md` section 7
+  is explicit that automating that needs a capped write-off budget on top of this
+  accounting. The alarms make the queue visible; they do not drain it.

@@ -7,10 +7,12 @@ code quality, and the workflow for submitting changes.
 By participating you agree to uphold our
 [Code of Conduct](./CODE_OF_CONDUCT.md).
 
-> **Note:** Stratoclave is in alpha. APIs, schemas, and infrastructure
-> constructs may change between commits. If you are planning non-trivial
-> work, please open an issue to discuss the approach before investing
-> significant time.
+> **Note:** Stratoclave is on the `1.x` line, so the public HTTP surface and the
+> guarantee levels in `docs/design/CONTRACTS.md` are stable — see *What 1.0 promises*
+> in [`CHANGELOG.md`](./CHANGELOG.md) for exactly what that covers. Internal APIs,
+> DynamoDB item shapes and infrastructure constructs are NOT covered and may change
+> between commits. If you are planning non-trivial work, please open an issue to
+> discuss the approach before investing significant time.
 
 ## Table of Contents
 
@@ -78,8 +80,7 @@ cd stratoclave
 git remote add upstream https://github.com/littlemex/stratoclave.git
 ```
 
-Work on feature branches created from `main` (or `feature/draft-version` if
-directed by maintainers for alpha-era changes):
+Work on feature branches created from `main`:
 
 ```bash
 git checkout -b feat/descriptive-name
