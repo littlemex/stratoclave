@@ -330,6 +330,40 @@ class Hold:
         self._finalized = False
         self._outcome_state: Optional[str] = None
         self._pending: Optional[Ending] = None
+        # Whether this request was ever handed to the provider transport. Set by
+        # `provider_call_starting()` at the call site, which is the only place that
+        # knows it; see that method for why the exception classifier cannot answer it.
+        self._provider_call_started = False
+
+    def provider_call_starting(self) -> None:
+        """Record that this request is being handed to the provider transport.
+
+        Retention is for money that may already have been spent, and the only honest
+        basis for "may have been spent" is that something left this process. Until
+        this fact existed, that judgement came from the exception type: everything
+        `classify_exception` did not recognise fell through to `SUBMITTED_UNSETTLED`,
+        and a bare exception raised by our OWN code before the call — a bug in body
+        assembly, a helper that raised `RuntimeError` — was indistinguishable from a
+        read timeout on a generation that ran to completion. The retention then held
+        the tenant's budget for a call that never left, until an operator went and
+        released it by hand. A gateway that consumes a customer's budget when its own
+        code crashes is worse than one that refunds a call it should have charged.
+
+        So the call site says it, once, immediately before the provider client is
+        invoked. Before rather than after: a socket write that timed out did leave,
+        and the states that are provably cheap (our serialiser refused it; no socket
+        was ever established) are recognised by `classify_exception` and refund on
+        their own regardless of this flag.
+
+        In-memory on purpose. It answers "did this process reach the transport", which
+        only this process can know; the durable marker written at the ending is what
+        carries the fact to the reaper.
+        """
+        self._provider_call_started = True
+
+    @property
+    def provider_call_started(self) -> bool:
+        return self._provider_call_started
 
     # ---------------------------------------------------------------- identity
 
@@ -444,7 +478,20 @@ class Hold:
         def _commit() -> str:
             liability = _outcome.liability_for(resolved)
             enforced = _outcome.unobserved_holds_enforced()
-            returnable = _outcome.refunds_immediately(resolved) or not enforced
+            # Nothing reached the transport, so nothing can have been billed: this is
+            # not an unobserved cost, it is no cost, and holding the budget for it
+            # would invent a liability rather than record one. See
+            # `provider_call_starting()` — the classifier cannot make this call,
+            # because its catch-all has to assume the expensive answer.
+            never_left = not self._provider_call_started
+            returnable = (
+                _outcome.refunds_immediately(resolved) or not enforced or never_left)
+            if never_left and enforced and not _outcome.refunds_immediately(resolved):
+                logger.info(
+                    "unobserved_hold_returned_never_departed",
+                    extra={"hold_id": self.hold_id, "outcome_state": resolved,
+                           "route": self.route},
+                )
             if returnable:
                 self._return_reservation()
             else:

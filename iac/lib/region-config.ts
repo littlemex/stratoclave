@@ -45,6 +45,8 @@ export interface RegionConfig {
   codexEnabled: boolean;
   /** Residency warnings to surface as CDK Annotations (empty in the common case). */
   residencyWarnings: string[];
+  /** Deprecated-env-var-name warnings to surface as CDK Annotations (empty in the common case). */
+  deprecationWarnings: string[];
 }
 
 export type Env = Record<string, string | undefined>;
@@ -140,16 +142,38 @@ export function resolveRegionConfig(env: Env): RegionConfig {
 
   const failoverRegionsEnv = env.STRATOCLAVE_FAILOVER_REGIONS;
   // Match the backend for every EXPLICIT value: mvp/openai_responses.py treats
-  // codex as enabled iff `CODEX_ENABLED.lower() == "true"`. Using `!== 'false'`
-  // here would flip an existing `CODEX_ENABLED=0`/`no`/`off` deployment to
-  // enabled on the next synth — silently re-enabling codex (and, off us-east-1,
-  // leaking prompts to the US registry regions). One deliberate divergence:
-  // empty string is falsy in JS `||`, so `''` takes the IaC default ('true')
-  // rather than the backend's bare-getenv 'false' — harmless because CDK always
-  // injects the normalized String(codexEnabled) into the task, so the container
-  // and this analysis always agree. Operators disable codex with 'false', not
-  // ''. (Fable final review B-1)
-  const codexEnabled = (env.CODEX_ENABLED || 'true').toLowerCase() === 'true';
+  // codex as enabled iff `STRATOCLAVE_CODEX_ENABLED.lower() == "true"`. Using
+  // `!== 'false'` here would flip an existing `..._ENABLED=0`/`no`/`off`
+  // deployment to enabled on the next synth — silently re-enabling codex
+  // (and, off us-east-1, leaking prompts to the US registry regions).
+  //
+  // Default is FALSE (Fable final review B-1 flagged the old 'true' default
+  // as the odd one out among the flags that gate money/route exposure — every
+  // other one of them ships conservative). A route that exposes a provider
+  // surface must be opted into.
+  //
+  // `CODEX_ENABLED` (bare, unnamespaced) is the deprecated predecessor name,
+  // honoured as a fallback only when `STRATOCLAVE_CODEX_ENABLED` is unset, so
+  // an existing deployment does not silently disable codex on the next synth
+  // just because it never renamed its env var. Presence (`!== undefined`) is
+  // checked rather than JS truthiness so an explicit `''` on either name is
+  // treated as "set, evaluates to disabled" — the same as the backend's
+  // bare-getenv reading of an explicit empty string.
+  const deprecationWarnings: string[] = [];
+  let codexEnabledRaw: string;
+  if (env.STRATOCLAVE_CODEX_ENABLED !== undefined) {
+    codexEnabledRaw = env.STRATOCLAVE_CODEX_ENABLED;
+  } else if (env.CODEX_ENABLED !== undefined) {
+    codexEnabledRaw = env.CODEX_ENABLED;
+    deprecationWarnings.push(
+      'CODEX_ENABLED is deprecated; set STRATOCLAVE_CODEX_ENABLED instead. ' +
+        'The bare name is still honoured for this synth but support for it ' +
+        'will be removed in a future release.',
+    );
+  } else {
+    codexEnabledRaw = 'false';
+  }
+  const codexEnabled = codexEnabledRaw.toLowerCase() === 'true';
 
   const effectiveFailover = effectiveFailoverRegions(env, bedrockPrimaryRegion);
   for (const r of effectiveFailover) {
@@ -223,7 +247,7 @@ export function resolveRegionConfig(env: Env): RegionConfig {
     }
     if (codexEnabled && OPENAI_REGISTRY_REGIONS.some((r) => r !== bodyRegion)) {
       hints.push(
-        `set CODEX_ENABLED=false (the OpenAI/codex path is hardwired to ` +
+        `set STRATOCLAVE_CODEX_ENABLED=false (the OpenAI/codex path is hardwired to ` +
           `${OPENAI_REGISTRY_REGIONS.join(', ')} in the model registry and cannot be relocated)`
       );
     }
@@ -251,5 +275,6 @@ export function resolveRegionConfig(env: Env): RegionConfig {
     failoverRegionsEnv,
     codexEnabled,
     residencyWarnings,
+    deprecationWarnings,
   };
 }

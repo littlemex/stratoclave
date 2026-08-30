@@ -30,7 +30,7 @@ configurations that need to survive across runs (CI, remote workers).
 
 ## Prerequisites
 
-- A working Stratoclave deployment where `CODEX_ENABLED=true` is set on
+- A working Stratoclave deployment where `STRATOCLAVE_CODEX_ENABLED=true` is set on
   the ECS task (the default in `iac/bin/iac.ts`).
 - `codex` CLI installed locally and able to reach the deployment's
   CloudFront URL over HTTPS. Test with
@@ -300,8 +300,8 @@ inference. To add a new model: append a `ModelEntry` to
 ## Troubleshooting
 
 **`HTTP 503 OpenAI Responses API is not enabled`**
-— `CODEX_ENABLED` is not `"true"` on the ECS task. Check the env
-on the running task definition; redeploy with `CODEX_ENABLED=true` in
+— `STRATOCLAVE_CODEX_ENABLED` is not `"true"` on the ECS task. Check the env
+on the running task definition; redeploy with `STRATOCLAVE_CODEX_ENABLED=true` in
 `iac/bin/iac.ts`.
 
 **`HTTP 403 Missing permission: responses:send`**

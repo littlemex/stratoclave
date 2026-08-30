@@ -134,7 +134,7 @@ error:
   not to win: OpenAI-compatible unified API, adapters for the major providers,
   virtual keys with per-team budgets, fallback/retry, response cache.
 - **Depth of integration** — Stratoclave wins, and not narrowly. Bedrock, a
-  self-hosted GPU (the `served_by="vllm"` transport seam + `VLLM_ENDPOINTS`
+  self-hosted GPU (the `served_by="vllm"` transport seam + `STRATOCLAVE_VLLM_ENDPOINTS`
   allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and
   any OpenAI-compatible endpoint all flow through the **same** reserve / rating /
   settle and the same ledger, whose money-transition model carries a machine-checked

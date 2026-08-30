@@ -243,9 +243,18 @@ def classify_exception(exc: BaseException) -> str:
 
 # --- the opt-in switch -----------------------------------------------------
 
-#: Off by default, so merging this changes no deployment's behaviour. The hard
-#: ceiling work shipped a gate that defaulted ON and began refusing every pooled
-#: tenant the moment it merged; this is that lesson applied.
+#: On by default. Every classification still runs and is recorded regardless of
+#: this flag — the states and the ledger events are the point, and they are
+#: useful on their own — but with the flag on, a `SUBMITTED_UNSETTLED` attempt
+#: keeps its reservation until an operator settles or releases it, rather than
+#: being handed back as though the call were free. It was not free: an abandoned
+#: Bedrock call is billed for the full generation (see the module docstring's
+#: measured 1,493-token example). The hard-ceiling work once shipped a gate that
+#: defaulted ON and began refusing every pooled tenant the moment it merged; this
+#: flag existed to apply that lesson by shipping OFF first and observing the
+#: effect in production before it could withhold anyone's budget. That
+#: observation period is over: the default is now ON, and an operator who needs
+#: the old byte-for-byte refund behaviour sets this variable to a falsy value.
 UNOBSERVED_HOLD_ENV = "STRATOCLAVE_UNOBSERVED_HOLDS"
 
 _TRUTHY = ("1", "true", "yes", "on")
@@ -254,12 +263,17 @@ _TRUTHY = ("1", "true", "yes", "on")
 def unobserved_holds_enforced() -> bool:
     """Whether a `SUBMITTED_UNSETTLED` attempt keeps its reservation.
 
-    With this off, every classification still runs and is recorded — the states
-    and the ledger events are the point, and they are useful on their own — but
-    the refund behaviour stays byte-for-byte what it was, so the change can be
-    observed in production before it can withhold anyone's budget.
+    True unless an operator explicitly sets `STRATOCLAVE_UNOBSERVED_HOLDS` to a
+    falsy value. With it off, every classification still runs and is recorded —
+    the states and the ledger events are the point, and they are useful on their
+    own — but the refund behaviour reverts to byte-for-byte what it was before
+    this module existed: the reservation is handed back as though the call were
+    free, which it was not.
     """
-    return os.getenv(UNOBSERVED_HOLD_ENV, "").strip().lower() in _TRUTHY
+    raw = os.getenv(UNOBSERVED_HOLD_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() in _TRUTHY
 
 
 def attempt_request_metadata(

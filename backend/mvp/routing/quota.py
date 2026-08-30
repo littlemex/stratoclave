@@ -179,6 +179,91 @@ def build_reserve_txn_items(
     return items
 
 
+def reserved_scopes(
+    tenant_id: str,
+    user_id: Optional[str],
+    model: str,
+    period: str,
+    items: list[dict[str, Any]],
+) -> dict[str, bool]:
+    """Which of the tenant/user quota rows a set of `build_reserve_txn_items`
+    output actually reserved against, for a (model, period) — read back from
+    the items themselves rather than re-derived from a limit config, because
+    the caller reversing this reservation later (a reaper reclaim, long after
+    the config that produced these items may have changed) has no config to
+    re-derive from, only the items that were actually committed. Comparing
+    each item's own `Key.pk` to the two partition keys this scope would use
+    is exact regardless of how many items were built (0, 1, or 2).
+    """
+    pks = {
+        it.get("Update", {}).get("Key", {}).get("pk", {}).get("S")
+        for it in (items or [])
+    }
+    return {
+        "tenant": _pk_tenant(tenant_id) in pks,
+        "user": bool(user_id) and _pk_user(tenant_id, user_id) in pks,
+    }
+
+
+def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
+    """One TransactWriteItems Update that gives back `amount` from a quota
+    row's `used` counter, for a reservation whose owning request cannot give
+    it back itself (a reaper reclaim, or a retained hold an operator later
+    releases). Gated on `attribute_exists(used)`, the SAME no-phantom-row
+    guard `_adjust_used` uses for settle/release: a scope this reservation
+    never actually reserved against has no `used` attribute to exist, so
+    the condition fails closed rather than creating a negative-`used` row
+    for a scope this specific reservation never touched.
+    """
+    return {
+        "Update": {
+            "TableName": _TABLE,
+            "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
+            "UpdateExpression": "ADD used :d",
+            "ConditionExpression": "attribute_exists(used)",
+            "ExpressionAttributeValues": {":d": {"N": str(-int(amount))}},
+        }
+    }
+
+
+def build_reverse_txn_items(
+    tenant_id: str,
+    user_id: Optional[str],
+    model: str,
+    period: str,
+    amount: int,
+    *,
+    tenant_scope: bool,
+    user_scope: bool,
+) -> list[dict[str, Any]]:
+    """Build the TransactWriteItems entries that reverse a leaked per-model
+    quota reservation of `amount` on (`model`, `period`).
+
+    Unlike `release_quota`/`settle_quota` (which the owning request's own
+    context drives, and which may safely touch both scopes unconditionally
+    because `_adjust_used`'s `attribute_exists(used)` guard is enough there —
+    the context's OWN `quota_lines` already say which scopes it reserved),
+    a caller reversing someone else's leaked reservation has no such context:
+    `attribute_exists(used)` alone cannot tell "this reservation touched this
+    scope" apart from "some OTHER reservation touched this scope, and this one
+    never did" whenever a config change means only some requests for this
+    model reserve at the user scope. `tenant_scope`/`user_scope` are therefore
+    REQUIRED here — the caller must have recorded, at the time this specific
+    reservation was made, which scopes it actually wrote to (see
+    `reserved_scopes` and the pool budgets repository's hold-enrichment
+    `quota_tenant_scope`/`quota_user_scope` facts) — reversing a scope this
+    reservation never reserved against would wrongly deflate a counter other
+    requests are still relying on.
+    """
+    sk = _sk(model, period)
+    items: list[dict[str, Any]] = []
+    if tenant_scope:
+        items.append(_reverse_item(_pk_tenant(tenant_id), sk, amount))
+    if user_scope and user_id:
+        items.append(_reverse_item(_pk_user(tenant_id, user_id), sk, amount))
+    return items
+
+
 def settle_quota(
     tenant_id: str,
     user_id: Optional[str],

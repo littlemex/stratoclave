@@ -98,6 +98,18 @@ ALLOWED_SITES = {
         # A non-counter delete: removes an amount<=0 HOLD row only; does NOT
         # touch the BUDGET row / counters (reviewed — see _sweep_one_period).
         ("backend/mvp/_pipeline.py", "_sweep_one_period", "delete_item"),
+        # Retained-hold release (C8.3's own resolution path): gives back a
+        # retention's per-user token debit + per-model quota reservation once
+        # the pool side is already confirmed released. Writes ONLY
+        # UserTenants.credit_used (via reverse_reservation_txn_item's own
+        # underflow-guarded item) and the per-model quota `used` rows
+        # (build_reverse_txn_items) — never a pool counter, and it runs after
+        # `_resolution_outcome` has already raised on anything but a
+        # confirmed RELEASE, so there is nothing left for this write to race.
+        # Best-effort: a failure here is logged, not raised, since undoing the
+        # already-landed pool release would be worse than leaving a counter to
+        # reconcile by hand. Reviewed OK.
+        ("backend/mvp/_pipeline.py", "_reverse_retained_hold_counters_best_effort", "transact_write_items"),
     },
     "backend/dynamo/tenant_budgets.py": {
         # set_pool_limit CREATE branch: conditional put_item seeding a brand-new
@@ -311,6 +323,12 @@ EXPECTED_TOKEN_KIND = {
         # dedup window would misfire against our own retry window (Fable PR-1
         # Q4-item-1). A lost-ack retry re-issues the idempotent transact. Reviewed.
         "_pending_commit_transact": "none",
+        # Retained-hold counter give-back: a fresh token per call, matching
+        # every other best-effort release-side write — this is not on the
+        # settle-once dedupe path (no lost-ack retry needs to land on the
+        # SAME write twice; the underlying items' own conditions make a second
+        # attempt from scratch safe regardless).
+        "_reverse_retained_hold_counters_best_effort": "fresh",
     },
     "backend/dynamo/tenant_budgets.py": {
         # PENDING-protocol credit-back (PR-1): the 2-item pool-return + marker

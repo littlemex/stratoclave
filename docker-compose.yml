@@ -51,10 +51,11 @@ services:
       # Cognito, it authenticates with the sk-stratoclave-* API key seeded
       # below.
       ENVIRONMENT: development
-      # Off in production by default (backend/mvp/openai_responses.py); local
-      # mode turns it on so all three routes in `make demo` actually work,
-      # rather than the OpenAI Responses route silently 503ing.
-      CODEX_ENABLED: "true"
+      # Off by default (backend/mvp/openai_responses.py) — route exposure must
+      # be opted into. Local mode turns it on explicitly so all three routes
+      # in `make demo` actually work, rather than the OpenAI Responses route
+      # silently 503ing.
+      STRATOCLAVE_CODEX_ENABLED: "true"
       # Off by default, which is the shipped posture: a tenant with a dollar pool
       # sits in `shadow` — the sound reservation bound is computed and recorded,
       # admission still uses the legacy estimate, and nothing is refused. Set this

@@ -107,12 +107,28 @@ _clients_lock = threading.Lock()
 
 
 def _load_endpoints() -> dict[str, str]:
-    """Parse the operator endpoint allowlist from VLLM_ENDPOINTS (a JSON object
-    ``{"<endpoint_key>": "<internal-url>"}``). Values are internal VPC URLs set
-    by IaC; keys are the opaque tokens the registry references. Malformed or
-    absent config yields an empty map (every vLLM entry becomes unservable —
-    fail-closed to Bedrock-only)."""
-    raw = os.getenv("VLLM_ENDPOINTS", "").strip()
+    """Parse the operator endpoint allowlist from STRATOCLAVE_VLLM_ENDPOINTS
+    (a JSON object ``{"<endpoint_key>": "<internal-url>"}``). Values are
+    internal VPC URLs set by IaC; keys are the opaque tokens the registry
+    references. Malformed or absent config yields an empty map (every vLLM
+    entry becomes unservable — fail-closed to Bedrock-only).
+
+    `VLLM_ENDPOINTS` (bare, unnamespaced) is the deprecated predecessor name.
+    It is honoured as a fallback, only when the new name is unset, so an
+    existing deployment does not silently lose its allowlist on upgrade. The
+    result is cached by `endpoints()` (this function only runs again after a
+    `reset_for_test()`), so the deprecation warning below is a natural
+    once-per-process log line rather than a per-request one."""
+    raw = os.getenv("STRATOCLAVE_VLLM_ENDPOINTS", "").strip()
+    if not raw:
+        legacy = os.getenv("VLLM_ENDPOINTS", "").strip()
+        if legacy:
+            logger.warning(
+                "vllm_endpoints_env_deprecated",
+                old_name="VLLM_ENDPOINTS",
+                new_name="STRATOCLAVE_VLLM_ENDPOINTS",
+            )
+            raw = legacy
     if not raw:
         return {}
     try:
@@ -147,7 +163,7 @@ def endpoint_is_servable(endpoint_key: Optional[str]) -> bool:
 
 
 def reset_for_test() -> None:
-    """Drop cached endpoint map + clients so a test can vary VLLM_ENDPOINTS."""
+    """Drop cached endpoint map + clients so a test can vary STRATOCLAVE_VLLM_ENDPOINTS."""
     global _ENDPOINTS
     with _endpoints_lock:
         _ENDPOINTS = None

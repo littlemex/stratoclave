@@ -121,13 +121,13 @@
   {
    "id": "cl-afa6822fcaaf",
    "claim": "What cannot be raced past is the amount the request was ADMITTED at.",
-   "anchor": "contract:C1.5@75c6b04a",
+   "anchor": "contract:C1.5@9cd99058",
    "note": "this sentence is the boundary itself"
   },
   {
-   "id": "cl-63f15d5323aa",
-   "claim": "The bound gates admission only where the operator has turned it on (`STRATOCLAVE_HARD_CEILING_GATE`), because it also refuses requests it cannot size and an operator should measure that refusal rate on real traffic first — see [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md).",
-   "anchor": "contract:C1.5@75c6b04a"
+   "id": "cl-4f0dad7b3f88",
+   "claim": "The bound gates admission by default (`STRATOCLAVE_HARD_CEILING_GATE`), so a tenant with a dollar pool is reserved against a bound rather than a guess without configuring anything; it also refuses requests it cannot size, and an operator who wants to measure that refusal rate on real traffic before refusing anyone sets the flag falsy to run in shadow — see [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md).",
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-e2c45e0f9f81",
@@ -238,7 +238,7 @@
   {
    "id": "cl-96868f70bb83",
    "claim": "**No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), but retaining their reservations is opt-in and off by default, so today such an outcome still returns its budget. See the crash-safe row below.",
-   "anchor": "contract:C1.1@a32b5b92,C1.2@f5b97cc2,C1.5@75c6b04a,C8.3@a3881eee"
+   "anchor": "contract:C1.1@a32b5b92,C1.2@f5b97cc2,C1.5@9cd99058,C8.3@893d48b7"
   },
   {
    "id": "cl-3655fa510675",
@@ -315,7 +315,7 @@
   {
    "id": "cl-4dfe70573bf1",
    "claim": "Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch cost recorded on the decision as a comparison, never discounted off the reservation. Superseded by the real SR's own session-aware policy above; retained for its provider-state lock, which the replacement does not cover ([EVIDENCE.md](docs/EVIDENCE.md))",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-6eb9864ae5f2",
@@ -343,7 +343,7 @@
   {
    "id": "cl-52ae05b86355",
    "claim": "The dollar ceiling for strict-mode traffic: the reservation bound, what strict mode refuses, the assumptions the guarantee rests on, and the reaper's part in it.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-d0612c7444cb",
@@ -434,8 +434,8 @@
    "anchor": "descriptive:a scope decision about where outcome billing would live"
   },
   {
-   "id": "cl-cd0412ec7f22",
-   "claim": "Bedrock, a self-hosted GPU (the `served_by=\"vllm\"` transport seam + `VLLM_ENDPOINTS` allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and any OpenAI-compatible endpoint all flow through the **same** reserve / rating / settle and the same ledger, whose money-transition model carries a machine-checked no-double-post invariant.",
+   "id": "cl-d2d92e0588ee",
+   "claim": "Bedrock, a self-hosted GPU (the `served_by=\"vllm\"` transport seam + `STRATOCLAVE_VLLM_ENDPOINTS` allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and any OpenAI-compatible endpoint all flow through the **same** reserve / rating / settle and the same ledger, whose money-transition model carries a machine-checked no-double-post invariant.",
    "anchor": "descriptive:describes the transport seam and its endpoint allowlist"
   },
   {
@@ -573,7 +573,7 @@
   {
    "id": "cl-e61bb4f40686",
    "claim": "**Everything concerning the bound, `reserved_microusd`, the pool row, the refusals of section 6 and the reaper of section 5 belongs to the dollar dimension and applies only where a pool limit exists.** A tenant enforced on tokens alone gets none of it: no bound, no dollar reservation, no `reserved_microusd` on its terminal, and no new refusal.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-1e4645a2920a",
@@ -593,7 +593,7 @@
   {
    "id": "cl-67dc5b80353c",
    "claim": "- **Monotone in every input.** More bytes, a higher output ceiling or a larger effort multiplier may never decrease the bound.",
-   "anchor": "contract:C1.5@75c6b04a",
+   "anchor": "contract:C1.5@9cd99058",
    "note": "monotonicity is a property of the bound the clause rests on"
   },
   {
@@ -604,7 +604,7 @@
   {
    "id": "cl-e3c118c0aa96",
    "claim": "- **Fail closed.** An image whose dimensions cannot be determined — unsupported format, truncated or malformed header, a header disagreeing with the payload — is refused, never admitted with the term skipped.",
-   "anchor": "contract:C1.5@75c6b04a",
+   "anchor": "contract:C1.5@9cd99058",
    "note": "fail closed on an unsizeable image is what makes the bound a bound"
   },
   {
@@ -625,7 +625,7 @@
   {
    "id": "cl-05db3a17573e",
    "claim": "- **A hold is not reaped while its charge can still arrive.** Enforced by section 5.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-81664db7c2fc",
@@ -660,7 +660,7 @@
   {
    "id": "cl-323ec00356a7",
    "claim": "Refused at admission, before any upstream call, **in `enforced` only**:",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-091436a9cb9f",
@@ -690,7 +690,7 @@
   {
    "id": "cl-0a98f90f1b0e",
    "claim": "The guarantee, stated with its boundary rather than as a slogan: **for admitted requests, the pool cannot be overspent, except for two cases, both alarmed and both recorded with their own cause code — a charge whose hold was reaped before it settled, and a charge where the provider exceeded the output ceiling it was given.** Those are the visible failure modes; there are two, not one.",
-   "anchor": "contract:C1.1@a32b5b92,C1.5@75c6b04a"
+   "anchor": "contract:C1.1@a32b5b92,C1.5@9cd99058"
   },
   {
    "id": "cl-4b532d43a8b5",
@@ -735,12 +735,12 @@
   {
    "id": "cl-23bb4f76f570",
    "claim": "A calibrated reservation can be smaller than a strict bound, so after a switch to strict the pool can hold pre-switch holds whose reservations were never sound.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-bdd8b5e03923",
    "claim": "The rule: **a switch applies to admissions from that moment, and the guarantee is claimed only once every pre-switch hold has settled or been reaped.** Record the switch in the ledger with its timestamp so the boundary is reconstructible, and do not halt admissions, drain, or top up — those all cost availability to buy a property that waiting gives for free.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-539d5ac64207",
@@ -766,7 +766,7 @@
   {
    "id": "cl-7620455b9388",
    "claim": "If it is not, tighten the bound — never raise a pool limit, which converts a correctness property into a capacity setting.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-935565ea2272",
@@ -781,17 +781,17 @@
   {
    "id": "cl-f7f2e33dd83d",
    "claim": "`strict` with a pool limit, once gating is on: concurrent callers cannot drive `settled + reserved` above `pool_limit` in any state reconstructible from the ledger, excluding the two excluded cause codes.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-a5345ade4766",
    "claim": "`enforced`: the non-image byte length and the payload hash recorded on the hold equal those of the outbound bytes captured **at the client-library boundary**, for every admitted request including retries.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-d63dc2ce720f",
    "claim": "`enforced`: startup fails when the reap timeout does not exceed the request deadline plus the retry budget plus the skew margin.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-bbe3384c9c76",
@@ -886,12 +886,12 @@
   {
    "id": "cl-bf38720e7a0b",
    "claim": "What the gateway cannot do is decide what the call cost, so a retention ends only when an operator settles it at the figure the provider's own record shows or releases it when that record shows none.",
-   "anchor": "contract:C8.3@a3881eee"
+   "anchor": "contract:C8.3@893d48b7"
   },
   {
    "id": "cl-68f925b85fb8",
    "claim": "This holds for the artifact as shipped, with every money flag at its default: what those flags gate is a stronger and separate property — a bound on what the settle can charge, and retention of a charge the gateway could not observe — and both are stated where they are claimed.",
-   "anchor": "contract:C1.1@a32b5b92,C1.5@75c6b04a"
+   "anchor": "contract:C1.1@a32b5b92,C1.5@9cd99058"
   },
   {
    "id": "cl-562564e9abde",
@@ -927,12 +927,12 @@
   {
    "id": "cl-43831b7ca0f8",
    "claim": "The departure is recorded by the ENDING, which is the only moment anything knows a call left, so a task that dies with no ending at all records nothing and its hold still reclaims — the same residual C3.5 names, for the same reason.",
-   "anchor": "contract:C8.3@a3881eee"
+   "anchor": "contract:C8.3@893d48b7"
   },
   {
    "id": "cl-21820ce93823",
    "claim": "A non-monotone bound lets a caller shrink its reservation by sending more, which is the shape of every quota-evasion bug.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-0e217409923b",
@@ -957,7 +957,7 @@
   {
    "id": "cl-9c179ef121d8",
    "claim": "This overrides the \"record the bound for every request\" line in section 7a: compute it where it gates admission, or where measurement is deliberately switched on and someone has accepted the cost.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-21f41dac9be9",
@@ -972,7 +972,7 @@
   {
    "id": "cl-122a71dc6e17",
    "claim": "`strict`, with a pool limit: for every admitted request, the amount settled is not greater than the amount admission checked, excluding charges whose cause code is `hold reaped before settle` or `provider exceeded the output ceiling`.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-3d99fa090c2c",
@@ -1012,7 +1012,7 @@
   {
    "id": "cl-229c0e495aad",
    "claim": "classifies how far the request got (`mvp/provider_outcome.py`). The classification is **always** recorded; whether the reservation is withheld is the gate's decision — with `STRATOCLAVE_UNOBSERVED_HOLDS` off it is returned as before, with it on only a state that cannot have been billed is returned",
-   "anchor": "contract:C8.3@a3881eee"
+   "anchor": "contract:C8.3@893d48b7"
   },
   {
    "id": "cl-5ada9462a9f5",
@@ -1037,7 +1037,7 @@
   {
    "id": "cl-98723c33000c",
    "claim": "The backend sets it to `null` so that creator logs, screenshots, and shell history never contain a reusable credential.",
-   "anchor": "contract:C12.2,C12.5"
+   "anchor": "contract:C12.2@c35704a2,C12.5@60b55405"
   },
   {
    "id": "cl-f772f79858dc",
@@ -1067,12 +1067,12 @@
   {
    "id": "cl-4a21d1bbc3e9",
    "claim": "Whether a reservation is **kept** when the gateway never observed the provider's outcome (a read timeout, a 5xx, a 200 it could not parse). Default **off**, in which case the outcome is still classified and logged (`provider_attempt_failed`) but the reservation is returned exactly as before. Turning it on makes the dollar ceiling bind on calls that may have been billed while the caller saw nothing, and the reaper no longer hands the headroom back either: a hold whose provider call had departed moves to `RETAINED` and is ended only by an operator, at the figure the provider's own record shows or as a release when it shows none (`GET`/`POST /api/mvp/admin/tenants/{tenant_id}/pool-retained…`). So read [`design/charge-loss.md`](design/charge-loss.md) section 7 first: the exposure accounting and saturation alarms it asks for do not exist yet, so under a provider outage a tenant's headroom can fill with retentions and the first signal is a refusal. `held_microusd` on the list endpoint is the figure to watch. Measured evidence for the rows this reads: [`MEASUREMENTS.md`](MEASUREMENTS.md).",
-   "anchor": "contract:C8.3@a3881eee"
+   "anchor": "contract:C8.3@893d48b7"
   },
   {
    "id": "cl-ad4fb83134ab",
    "claim": "Turns the sound reservation **bound** into an admission gate, so a request that cannot fit the pool is refused with `402 request_does_not_fit_pool_limit` instead of admitted on an estimate. Default **off**. Do not enable it without first running the shadow measurement — [`design/hard-ceiling.md`](design/hard-ceiling.md) section 9b states the refusal-rate target, and section 4 the assumptions the guarantee rests on.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-a01f39da8b46",
@@ -1348,12 +1348,12 @@
   {
    "id": "cl-faed8ef493dc",
    "claim": "- **Total.** Every request either gets a bound or is refused.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-f4b000ee6fdc",
    "claim": "Between those points the gateway may add a system prompt, retrieved context, tool schemas, a guardrail wrapper or a converted image, and every one of those is billed.",
-   "anchor": "contract:C1.5@75c6b04a"
+   "anchor": "contract:C1.5@9cd99058"
   },
   {
    "id": "cl-b4c9b93161d8",
@@ -1564,6 +1564,11 @@
    "id": "cl-f85dec6606e9",
    "claim": "If it 502s, the task never bound to port 8000.",
    "anchor": "descriptive:a troubleshooting symptom and its cause"
+  },
+  {
+   "id": "cl-ca57d6f86167",
+   "claim": "The gate is `STRATOCLAVE_HARD_CEILING_GATE` and it is **on by default**, so a tenant with a dollar pool sits in `enforced` without an operator configuring anything.",
+   "anchor": "contract:C1.5@9cd99058"
   }
  ]
 }

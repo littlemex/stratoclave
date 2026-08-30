@@ -35,7 +35,7 @@ from mvp.serving import vllm
 
 def test_endpoint_unservable_when_flag_off(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "false")
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     vllm.reset_for_test()
     assert vllm.hybrid_serving_enabled() is False
     assert vllm.endpoint_is_servable("vllm-primary") is False
@@ -43,7 +43,7 @@ def test_endpoint_unservable_when_flag_off(monkeypatch):
 
 def test_endpoint_servable_only_with_flag_and_allowlisted_key(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     vllm.reset_for_test()
     assert vllm.endpoint_is_servable("vllm-primary") is True
     # A key NOT in the allowlist is never servable — no URL can be invented.
@@ -54,12 +54,50 @@ def test_endpoint_servable_only_with_flag_and_allowlisted_key(monkeypatch):
 def test_endpoints_rejects_non_http_and_malformed(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
     # file:// scheme is dropped (SSRF); a non-JSON value yields an empty map.
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"bad": "file:///etc/passwd", "ok": "http://h:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"bad": "file:///etc/passwd", "ok": "http://h:8000"}))
     vllm.reset_for_test()
     assert vllm.endpoints() == {"ok": "http://h:8000"}
-    monkeypatch.setenv("VLLM_ENDPOINTS", "not json")
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", "not json")
     vllm.reset_for_test()
     assert vllm.endpoints() == {}
+
+
+def test_vllm_endpoints_deprecated_bare_name_is_honoured_as_fallback(monkeypatch):
+    """The old, unnamespaced `VLLM_ENDPOINTS` still works when the new name is
+    unset, so an un-migrated deployment does not lose its allowlist on
+    upgrade — but the new name always wins when both are set."""
+    monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
+    monkeypatch.delenv("STRATOCLAVE_VLLM_ENDPOINTS", raising=False)
+    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://legacy:8000"}))
+    vllm.reset_for_test()
+    assert vllm.endpoints() == {"vllm-primary": "http://legacy:8000"}
+
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://new:8000"}))
+    vllm.reset_for_test()
+    assert vllm.endpoints() == {"vllm-primary": "http://new:8000"}  # new name wins
+
+
+def test_vllm_endpoints_deprecated_bare_name_warns(monkeypatch):
+    """Using the deprecated bare name logs a deprecation warning. Unlike the
+    codex flag, this is not read at request time (the parsed map is cached by
+    `endpoints()`/`reset_for_test()`), so no separate once-per-process guard
+    is needed here — the cache itself makes `_load_endpoints()` run rarely."""
+    monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
+    monkeypatch.delenv("STRATOCLAVE_VLLM_ENDPOINTS", raising=False)
+    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://legacy:8000"}))
+    vllm.reset_for_test()
+
+    calls: list[str] = []
+    monkeypatch.setattr(vllm.logger, "warning", lambda event, **kw: calls.append(event))
+    assert vllm.endpoints() == {"vllm-primary": "http://legacy:8000"}
+    assert calls == ["vllm_endpoints_env_deprecated"]
+
+    # Setting only the new name never warns.
+    calls.clear()
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://new:8000"}))
+    vllm.reset_for_test()
+    assert vllm.endpoints() == {"vllm-primary": "http://new:8000"}
+    assert calls == []
 
 
 # --------------------------------------------------------------------------
@@ -80,7 +118,7 @@ def _vllm_registry():
 
 def test_vllm_entry_expands_to_single_self_hosted_target(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
     vllm.reset_for_test()
     chains.reset_catalog()
@@ -155,10 +193,10 @@ def test_vllm_entry_not_catalogued_when_flag_off(monkeypatch):
 
 
 def test_vllm_entry_not_catalogued_when_key_not_allowlisted(monkeypatch):
-    # Flag on but the endpoint_key is NOT in VLLM_ENDPOINTS => still unservable
+    # Flag on but the endpoint_key is NOT in STRATOCLAVE_VLLM_ENDPOINTS => still unservable
     # (SSRF guard: no invented URL), so still absent from the catalog.
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"other-key": "http://h:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"other-key": "http://h:8000"}))
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
     vllm.reset_for_test()
     chains.reset_catalog()
@@ -188,7 +226,7 @@ def test_vllm_pin_rejected_400_when_flag_off(monkeypatch):
 @pytest.mark.asyncio
 async def test_attempt_invoke_flag_on_uses_vllm_for_vllm_target(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     vllm.reset_for_test()
     from mvp.routing import infrarouter
 
@@ -349,7 +387,7 @@ def test_vllm_dead_endpoint_exhausts_chain_and_raises(monkeypatch):
     import asyncio
 
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
-    monkeypatch.setenv("VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
+    monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
     vllm.reset_for_test()
     chains.reset_catalog()

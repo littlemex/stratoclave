@@ -581,6 +581,10 @@ def chat_completions(
         kwargs["requestMetadata"] = _attempt_md
     try:
         with _timed_phase(timing, "upstream"):
+            # About to reach the provider transport: from here a failure may have
+            # been billed, before here it cannot have been. See
+            # `Hold.provider_call_starting`.
+            hold.provider_call_starting()
             resp = deployment_client().converse(**kwargs)
     except Exception as e:
         _run_ending(hold.claim_unobserved(exc=e))
@@ -789,6 +793,10 @@ def _openai_chat_completion(
             with _timed_phase(timing, "upstream"):
                 # Deadline per request, below the CDN's, so a slow upstream becomes
                 # our JSON 502 rather than the CDN's HTML 504.
+                # About to reach the provider transport: from here a failure may
+                # have been billed, before here it cannot have been. See
+                # `Hold.provider_call_starting`.
+                hold.provider_call_starting()
                 resp = client.post(
                     _openai_CHAT_PATH, json=payload, headers=auth,
                     timeout=_openai_transport.nonstream_timeout(),
@@ -860,6 +868,10 @@ def _openai_chat_completion(
             try:
                 auth = await _openai_transport.auth_headers_async(entry.bedrock_region)
                 sent = True
+                # About to reach the provider transport: from here a failure may have
+                # been billed, before here it cannot have been. See
+                # `Hold.provider_call_starting`.
+                hold.provider_call_starting()
                 async with client.stream(
                     "POST", _openai_CHAT_PATH, json=payload, headers=auth,
                 ) as resp:

@@ -324,7 +324,7 @@ the backend registry (`backend/mvp/models.py` — currently `us-west-2` /
 `us-east-2`) and **cannot be relocated by an environment variable**.
 `OPENAI_BEDROCK_REGIONS` is only a display hint surfaced to the CLI; it does not
 move the actual call. The only residency lever for codex is therefore
-`CODEX_ENABLED=false`.
+`STRATOCLAVE_CODEX_ENABLED=false`.
 
 ### Data-residency recipe (e.g. EU-only prompts)
 
@@ -338,7 +338,7 @@ sufficient, because failover and the codex path otherwise reach US regions:
 export STRATOCLAVE_REGION=eu-west-1            # gateway + state in the EU
 export BEDROCK_PRIMARY_REGION=eu-west-1        # Claude calls stay in eu-west-1
 export STRATOCLAVE_FAILOVER_REGIONS=disabled   # no cross-region failover (default reaches us-west-2)
-export CODEX_ENABLED=false                     # OpenAI/codex is hardwired to us-west-2/us-east-2 — disable it
+export STRATOCLAVE_CODEX_ENABLED=false                     # OpenAI/codex is hardwired to us-west-2/us-east-2 — disable it
 export DEFAULT_BEDROCK_MODEL=anthropic.claude-…  # a DIRECTLY-HOSTED (non-geo) model id — see below
 export STRATOCLAVE_RESIDENCY=strict            # hard-fail synth if ANY Bedrock region != the deploy region
 ```
@@ -500,11 +500,11 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `BEDROCK_PRIMARY_REGION`                 | IaC-only                | n/a         | Bedrock **model** primary region, independent of `R`. Becomes the task's `BEDROCK_REGION`. **Required at synth when `STRATOCLAVE_REGION != us-east-1`** (Stratoclave refuses to guess). Defaults to `us-east-1` when `R == us-east-1`. |
 | `STRATOCLAVE_RESIDENCY`                   | IaC-only                | n/a         | `strict` \| `warn` (any other value is rejected at synth). `strict` makes `cdk synth` **hard-fail** if any region Bedrock is actually called in (model + failover + codex) differs from the exact deploy region, or if the default model is a geo inference profile. `warn` (or unset) only warns, and only when `R` is non-default or this var is set. See the data-residency recipe under [Regional constraints](#regional-constraints). |
 | `STRATOCLAVE_ALLOW_GEO_INFERENCE`        | IaC-only                | n/a         | `true` downgrades the strict-mode refusal of a geo inference-profile model (`us./eu./apac./global.`-prefixed) to a warning — i.e. accept geography-level residency instead of single-region. Default: unset (strict refuses geo profiles). |
-| `OPENAI_BEDROCK_REGIONS`                 | IaC-only                | yes (default `us-east-2,us-west-2`) | **Display-only hint** surfaced to the CLI via `/.well-known/stratoclave-config`. It does **not** change the codex call region — that is hardwired per-model in `backend/mvp/models.py`. For residency, disable codex with `CODEX_ENABLED=false`; setting this var does not keep codex prompts in-region. |
+| `OPENAI_BEDROCK_REGIONS`                 | IaC-only                | yes (default `us-east-2,us-west-2`) | **Display-only hint** surfaced to the CLI via `/.well-known/stratoclave-config`. It does **not** change the codex call region — that is hardwired per-model in `backend/mvp/models.py`. For residency, disable codex with `STRATOCLAVE_CODEX_ENABLED=false`; setting this var does not keep codex prompts in-region. |
 | `CDK_NAG`                                | IaC-only                | n/a         | Set to `off` to skip the cdk-nag synth-time aspect. Default: `on`. |
 | `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`      | optional                | no          | If set, the backend auto-provisions this email as admin on first startup when no admin exists. Idempotent. |
 | `ALLOW_ADMIN_CREATION`                   | bootstrap only          | yes (default `false`) | See [Locking down after bootstrap](#locking-down-after-bootstrap). |
-| `CODEX_ENABLED`                          | optional                | yes (default `true`)  | Enables the OpenAI Responses API endpoint (`/openai/v1/*`). Set `CODEX_ENABLED=false` to disable. |
+| `STRATOCLAVE_CODEX_ENABLED`                          | optional                | yes (default `true`)  | Enables the OpenAI Responses API endpoint (`/openai/v1/*`). Set `STRATOCLAVE_CODEX_ENABLED=false` to disable. |
 | `DYNAMODB_RATE_LIMITS_TABLE`             | optional                | yes (default `stratoclave-rate-limits`) | DynamoDB table backing the per-IP auth rate limiter (`backend/core/rate_limit_ddb.py`). Fixed-window counters with a TTL attribute (`expires_at`) are **shared across every ECS task**, so caps hold under multi-task / multi-AZ scale-out with no Redis. Failure policy: a **misconfiguration** (missing/mis-named table, missing IAM grant → `ResourceNotFound`/`AccessDenied`/`Validation`) fails **CLOSED** — auth endpoints return `429` — so a broken limiter can't silently run unlimited. **⚠️ If every login/SSO returns 429 right after a deploy, check this table name + the task role's DynamoDB grant first.** A **transient outage** (connectivity/timeout) degrades to an in-process per-task limiter (not fully open). Wire a CloudWatch metric filter + alarm on the log line `rate_limit_degrade_to_local` to detect degraded mode. |
 | `RATE_LIMIT_TRUSTED_HOPS`                | optional                | no          | Number of right-side `X-Forwarded-For` entries written by your own proxy chain (not counting the viewer IP CloudFront appends). Default `1` matches CloudFront → ALB → ECS. Use `0` for CloudFront-only and `2` for custom WAF → CloudFront → ALB → ECS. See `backend/core/rate_limit.py`. |
 | `EXPOSE_TEMPORARY_PASSWORD`              | optional                | no          | If `true`, `admin user create` returns the one-time password in the response. Default `false` (response field is `null`). Not recommended for production. |

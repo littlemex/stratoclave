@@ -996,6 +996,10 @@ def messages(
         kwargs["requestMetadata"] = _attempt_md
 
     try:
+        # About to reach the provider transport: from here a failure may have
+        # been billed, before here it cannot have been. See
+        # `Hold.provider_call_starting`.
+        hold.provider_call_starting()
         resp = _bedrock_client().converse(**kwargs)
     except ClientError as e:
         _run_ending(hold.claim_unobserved(exc=e))

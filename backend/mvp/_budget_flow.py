@@ -76,6 +76,11 @@ async def run_stream(
 
         try:
             sent = True
+            # The request is about to reach the provider transport. Everything after
+            # this point may have been billed even if we never see a result; anything
+            # that raised before it never left. `Hold.provider_call_starting` explains
+            # why this cannot be inferred from the exception type instead.
+            hold.provider_call_starting()
             import inspect
             if inspect.iscoroutinefunction(invoke_stream):
                 resp = await invoke_stream(body=body, model_id=model_id)

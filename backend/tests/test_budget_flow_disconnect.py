@@ -16,6 +16,7 @@ import pytest
 
 from mvp import _budget_flow
 from mvp import _converse_types as t
+from mvp import provider_outcome as po
 from mvp._money import Hold
 from mvp._wire import anthropic_wire as wire
 
@@ -103,16 +104,34 @@ async def _drive_and_close(gen, *, stop_after):
 # 1.1: GeneratorExit at every yield → settle exactly once
 # ---------------------------------------------------------------------------
 
-def _hold(repo, settle, *, release=None, reservation=5000):
-    """The hold under test. run_stream reports observations to it; it decides."""
-    return Hold(
+def _hold(repo, settle, *, release=None, reservation=5000, mark_departed=None):
+    """The hold under test. run_stream reports observations to it; it decides.
+
+    `mark_departed` is wired by default because production wires it on every route
+    (`mvp/anthropic.py`, `mvp/chat_completions.py`, `mvp/openai_responses.py` all pass
+    `_money.hold_departure_marker(...)`). A double that omitted it was not a simplified
+    hold, it was a hold that cannot retain — and while retention shipped off, that gap
+    was unreachable and so invisible. The default here records the calls instead of
+    writing to a store, so a test can assert on the departure without a table, and a
+    test that wants the no-marker path passes its own.
+    """
+    departures: list[str] = []
+
+    def _default_marker(state: str) -> bool:
+        departures.append(state)
+        return True
+
+    hold = Hold(
         user=_User(),
         tenants_repo=repo,
         reservation=reservation,
         model_id="test",
         settle=settle,
         release=release or (lambda ctx: setattr(ctx, "released", True)),
+        mark_departed=_default_marker if mark_departed is None else mark_departed,
     )
+    hold.recorded_departures = departures  # type: ignore[attr-defined]
+    return hold
 
 
 def _make_gen(stream_factory, settle_calls, repo):
@@ -137,7 +156,7 @@ def test_full_run_settle_count():
 
 
 @pytest.mark.parametrize("stop_after", list(range(1, 10)))
-def test_disconnect_at_every_yield_ends_the_reservation_exactly_once(stop_after):
+def test_disconnect_at_every_yield_ends_the_reservation_exactly_once(stop_after, monkeypatch):
     """GeneratorExit at any wire-chunk position ends the reservation exactly once.
 
     WHICH ending is not the same everywhere, and that is the point. The first yield
@@ -145,7 +164,14 @@ def test_disconnect_at_every_yield_ends_the_reservation_exactly_once(stop_after)
     abandoned there cannot have been billed, so the reservation is returned rather
     than settled at zero. Once the provider has been called, the consumer closing
     the stream is the measured disconnect case and the observation is charged.
+
+    This is about settle-exactly-once mechanics, not about `STRATOCLAVE_UNOBSERVED_HOLDS`
+    (covered separately in `test_money_lifecycle_discipline.py`); the test's own
+    `_hold()` helper never wires a `mark_departed` writer the way a real route does,
+    so the flag is turned off explicitly rather than left to whatever the ambient
+    default is.
     """
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     settle_calls = []
     repo = _FakeRepo()
     gen = _make_gen(_simple_stream, settle_calls, repo)
@@ -164,13 +190,18 @@ def test_disconnect_at_every_yield_ends_the_reservation_exactly_once(stop_after)
 # 1.2: Disconnect before metadata → settle uses observed-so-far
 # ---------------------------------------------------------------------------
 
-def test_disconnect_before_metadata_settles_with_zero():
+def test_disconnect_before_metadata_settles_with_zero(monkeypatch):
     """If metadata hasn't arrived, settle is called with 0 tokens.
 
     This documents the current behavior. In prod, Bedrock may have billed
     more — the orphan reaper or a future drain-to-metadata fix handles
     the gap. The key invariant is: settle fires exactly once, never leaks.
+
+    Retention (`STRATOCLAVE_UNOBSERVED_HOLDS`) is off here on purpose: this test
+    is about the settle-once mechanics, and the test's `_hold()` helper does not
+    wire a `mark_departed` writer the way a real route does.
     """
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     settle_calls = []
     repo = _FakeRepo()
     # Stop after prologue (2 frames) + first delta (1 frame) = 3 frames
@@ -192,8 +223,14 @@ def _raising_stream():
     raise RuntimeError("bedrock stream error mid-flight")
 
 
-def test_mid_stream_exception_settles_once():
-    """An exception during stream iteration → mid-stream settle path."""
+def test_mid_stream_exception_settles_once(monkeypatch):
+    """An exception during stream iteration → mid-stream settle path.
+
+    Retention off on purpose: this is about the settle-once mechanics, not
+    `STRATOCLAVE_UNOBSERVED_HOLDS`, and this file's `_hold()` helper does not
+    wire a `mark_departed` writer the way a real route does.
+    """
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     settle_calls = []
     repo = _FakeRepo()
     gen = _make_gen(_raising_stream, settle_calls, repo)
@@ -209,8 +246,18 @@ def test_mid_stream_exception_settles_once():
 # 1.4: invoke_stream raises → refund + release, no settle
 # ---------------------------------------------------------------------------
 
-def test_invoke_failure_refunds_and_releases():
-    """invoke_stream raises → refund + release, settle NOT called."""
+def test_invoke_failure_refunds_and_releases(monkeypatch):
+    """invoke_stream raises → refund + release, settle NOT called.
+
+    Retention off on purpose: a plain `RuntimeError` is not one of the exceptions
+    `classify_exception` recognises as pre-wire, so it falls to `SUBMITTED_UNSETTLED`
+    (the unknown is expensive by default) and would otherwise be retained rather
+    than refunded once `STRATOCLAVE_UNOBSERVED_HOLDS` is on — this test is about the
+    refund+release mechanics on an invoke failure, not about that flag, and this
+    file's `_hold()` helper does not wire a `mark_departed` writer the way a real
+    route does.
+    """
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     settle_calls = []
     repo = _FakeRepo()
 
@@ -262,12 +309,17 @@ def test_multi_block_stream_all_events_rendered():
 
 
 @pytest.mark.parametrize("stop_after", list(range(2, 15)))
-def test_multi_block_disconnect_settles_once(stop_after):
+def test_multi_block_disconnect_settles_once(stop_after, monkeypatch):
     """GeneratorExit during multi-block stream still settles exactly once.
 
     From yield 2 on: yield 1 is the prologue, before the provider call, and is
     covered by the test above (the reservation is returned, not settled).
+
+    Retention off on purpose: this is about the settle-once mechanics, not
+    `STRATOCLAVE_UNOBSERVED_HOLDS`, and this file's `_hold()` helper does not
+    wire a `mark_departed` writer the way a real route does.
     """
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     settle_calls = []
     repo = _FakeRepo()
     gen = _make_gen(_multi_block_stream, settle_calls, repo)

@@ -146,9 +146,9 @@ def test_policy_version_is_pinned():
 
 # --- the switch and the correlation handle ---------------------------------
 
-def test_enforcement_is_off_unless_asked_for(monkeypatch):
+def test_enforcement_is_on_unless_explicitly_turned_off(monkeypatch):
     monkeypatch.delenv(po.UNOBSERVED_HOLD_ENV, raising=False)
-    assert po.unobserved_holds_enforced() is False
+    assert po.unobserved_holds_enforced() is True
     monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "1")
     assert po.unobserved_holds_enforced() is True
     monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "no")

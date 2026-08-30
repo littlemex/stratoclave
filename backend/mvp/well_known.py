@@ -22,7 +22,7 @@ Schema (`schema_version = "1"`):
       "cli": {
         "default_model": "us.anthropic.claude-opus-4-7",
         "callback_port": 18080,
-        "codex": {                              // only when CODEX_ENABLED=true
+        "codex": {                              // only when STRATOCLAVE_CODEX_ENABLED=true
           "default_model":     "us.openai.gpt-5.6-sol",
           "openai_base_path":  "/openai/v1",
           "supported_regions": ["us-east-2", "us-west-2"]
@@ -176,15 +176,28 @@ def _require_env(name: str) -> str:
     return value
 
 
-def _resolve_codex_hints() -> Optional[CodexHints]:
-    """Return Codex CLI hints when CODEX_ENABLED, otherwise None.
+def _codex_enabled() -> bool:
+    """Mirrors `mvp/openai_responses.py::_codex_enabled` (kept local rather
+    than imported to avoid pulling the money-pipeline import graph into this
+    unauthenticated bootstrap route). `STRATOCLAVE_CODEX_ENABLED` is the
+    current name; the bare `CODEX_ENABLED` is a deprecated alias honoured
+    only when the new name is unset, with no separate deprecation warning
+    here — the route handler's own check already logs it once per process."""
+    value = os.getenv("STRATOCLAVE_CODEX_ENABLED")
+    if value is None:
+        value = os.getenv("CODEX_ENABLED")
+    return (value or "false").lower() == "true"
 
-    The route handler in `mvp/openai_responses.py` re-checks `CODEX_ENABLED`
-    on every request so this discovery omission is purely cosmetic — old
+
+def _resolve_codex_hints() -> Optional[CodexHints]:
+    """Return Codex CLI hints when codex is enabled, otherwise None.
+
+    The route handler in `mvp/openai_responses.py` re-checks the flag on
+    every request so this discovery omission is purely cosmetic — old
     CLIs that never see `cli.codex` simply never offer the codex
     subcommand bootstrap.
     """
-    if os.getenv("CODEX_ENABLED", "false").lower() != "true":
+    if not _codex_enabled():
         return None
     raw_regions = os.getenv(
         "OPENAI_BEDROCK_REGIONS", _DEFAULT_OPENAI_SUPPORTED_REGIONS

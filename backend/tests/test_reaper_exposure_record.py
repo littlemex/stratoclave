@@ -140,13 +140,23 @@ def test_a_hold_with_no_source_records_none_rather_than_guessing(dynamodb_mock):
     assert facts["amount_microusd"] == 250_000
 
 
-def test_the_pre_invoke_marker_survives_when_present(dynamodb_mock):
+def test_the_pre_invoke_marker_survives_when_present(dynamodb_mock, monkeypatch):
     """The one fact that separates a real leak from a harmless orphan.
 
     A request that died BEFORE the provider call cost nothing; one that died after
     may have been billed in full. Nothing can reconstruct which, later, so the
     marker has to be carried through the reclaim.
+
+    Pinned with `STRATOCLAVE_UNOBSERVED_HOLDS` off, because at the shipped default a
+    hold carrying this marker is not reclaimed at all — it is retained, which is the
+    whole point of the marker existing. What this test still covers is the other
+    configuration: an operator who turned retention off gets the reclaim, and the
+    reclaim must not lose the fact, or the record of a possible leak is destroyed by
+    the very sweep that caused it.
     """
+    from mvp import provider_outcome as _po
+
+    monkeypatch.setenv(_po.UNOBSERVED_HOLD_ENV, "0")
     user, period = _seed("acme-reap-marker")
     ctx = _reserve(user)
 

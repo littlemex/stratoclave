@@ -550,12 +550,32 @@ def test_every_route_consults_the_classifier_on_failure(route_module, monkeypatc
         user=_User(), tenants_repo=_Repo(), reservation=4000,
         model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     )
+    # A read timeout by definition happens after the request reached the transport,
+    # which every route announces immediately before invoking the provider client. The
+    # announcement is what separates a departed call from an exception raised by our own
+    # code beforehand, and retention requires it — see `Hold.provider_call_starting`.
+    hold.provider_call_starting()
     state = run_ending(hold.claim_unobserved(exc=ReadTimeoutError(endpoint_url="https://x")))
 
     assert seen == ["ReadTimeoutError"], f"{route_module} did not consult the classifier"
     assert state == po.SUBMITTED_UNSETTLED
     assert refunded == [], f"{route_module} returned a reservation that may have been billed"
-    assert released == []
+    assert released == [], f"{route_module} released a hold it was supposed to retain"
+
+    # The other half of the same route, which is new: the SAME exception without the
+    # announcement must be refunded, or a crash inside this gateway holds a tenant's
+    # budget until an operator releases it by hand.
+    never_left = route._open_hold(
+        user=_User(), tenants_repo=_Repo(), reservation=4000,
+        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    )
+    run_ending(never_left.claim_unobserved(exc=ReadTimeoutError(endpoint_url="https://x")))
+    assert refunded == [4000], (
+        f"{route_module} retained a reservation for a request that never reached the "
+        f"transport, so it invented a liability rather than recording one")
+    assert released == [True], (
+        f"{route_module} refunded the token reservation but never released the pool "
+        f"hold, so the pool slot is stranded until the reaper")
 
 
 # ---------------------------------------------------------------------------

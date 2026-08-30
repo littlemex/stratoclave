@@ -169,7 +169,7 @@ def main() -> None:
             print(f"  {body[:500]}")
             if status == 503 and "openai" in path:
                 print(
-                    "  This route is gated by CODEX_ENABLED=true "
+                    "  This route is gated by STRATOCLAVE_CODEX_ENABLED=true "
                     "(backend/mvp/openai_responses.py). docker-compose.yml sets "
                     "it for the gateway container; if you are running the "
                     "backend outside compose, set it yourself."

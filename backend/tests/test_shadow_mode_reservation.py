@@ -84,9 +84,10 @@ def _expected_legacy(*, input_tokens_est: int, max_output_tokens: int) -> int:
 def test_pool_row_with_gate_flag_off_is_shadow_not_enforced(
     seed_tenant_with_pool, monkeypatch,
 ):
-    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
+    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "0")
     assert dollar_pool_bound_state(seed_tenant_with_pool["tenant_id"]) == "shadow"
-    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "1")
+    # Unset is the new default: ON, without anyone having to say so.
+    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
     assert dollar_pool_bound_state(seed_tenant_with_pool["tenant_id"]) == "enforced"
 
 
@@ -105,7 +106,7 @@ def test_unsizeable_image_is_not_refused_in_shadow_but_is_refused_when_enforced(
     boundability = assess_boundability(unmeasurable_survey)
     assert boundability.refused  # sanity: this survey really is unbounded
 
-    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
+    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "0")
     shadow_state = dollar_pool_bound_state(tenant_id)
     assert shadow_state == "shadow"
     # This is the EXACT expression every route (`mvp.anthropic`,
@@ -113,7 +114,8 @@ def test_unsizeable_image_is_not_refused_in_shadow_but_is_refused_when_enforced(
     # raising 400 `unbounded_content`.
     assert not (boundability.refused and shadow_state == "enforced")
 
-    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "1")
+    # Unset is the new default: ON.
+    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
     enforced_state = dollar_pool_bound_state(tenant_id)
     assert enforced_state == "enforced"
     assert boundability.refused and enforced_state == "enforced"
@@ -127,7 +129,7 @@ def test_unsizeable_image_is_not_refused_in_shadow_but_is_refused_when_enforced(
 def test_shadow_reserves_the_legacy_estimate_and_still_records_the_bound(
     seed_tenant_with_pool, monkeypatch,
 ):
-    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
+    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "0")
     seed = seed_tenant_with_pool
     user = _user(seed)
     input_bytes = 20_000  # deliberately large: the bound must dwarf the estimate
@@ -275,7 +277,7 @@ def test_shadow_admits_a_request_enforced_would_refuse_for_headroom(
     assert exc_info.value.status_code == 402
     assert exc_info.value.detail["reason"] == "request_does_not_fit_pool_limit"
 
-    monkeypatch.delenv(HARD_CEILING_GATE_ENV, raising=False)
+    monkeypatch.setenv(HARD_CEILING_GATE_ENV, "0")
     shadow_user = _user(seed)
     ctx = reserve_credit_for_model(
         shadow_user, reservation_tokens=input_tokens_est + 1024,
