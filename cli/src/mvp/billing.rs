@@ -22,6 +22,12 @@ pub struct RatingComponent {
     pub tokens: i64,
     pub rate_microusd_per_mtok: i64,
     pub cost_microusd: i64,
+    /// Whether the PROVIDER reported this leg. `tokens: 0` cannot say it: some
+    /// models never report prompt-cache counts, and "reported as none" is a
+    /// measurement while "not reported" is not. `None` on an event written before
+    /// the gateway recorded the distinction — unknown, which is also not zero.
+    #[serde(default)]
+    pub reported: Option<bool>,
 }
 
 /// TENANT view — deliberately has NO cost/margin fields. `deny_unknown_fields`
@@ -123,6 +129,13 @@ pub async fn run_show(run_id: &str, json: bool) -> Result<()> {
         );
         let _ = &ev.pricing_key; // part of the contract; not shown in the table
         for (name, c) in &ev.components {
+            // A leg the provider never reported is worth one line: it is the
+            // difference between "this model does not cache" and "this request did
+            // not". A leg reported as zero stays hidden, as it always was.
+            if c.reported == Some(false) {
+                println!("      {name}: not reported by the provider");
+                continue;
+            }
             if c.tokens == 0 {
                 continue;
             }
