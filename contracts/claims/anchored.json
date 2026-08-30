@@ -1,0 +1,1013 @@
+{
+ "_comment": "Every guarantee-shaped sentence in README.md, docs/SCOPE.md and docs/design/hard-ceiling.md, with the reason it may say that. Enforced by backend/tests/test_claims_are_anchored.py (contract C10). contract:<clause> resolves in docs/design/CONTRACTS.md; evidence:<text> appears in docs/EVIDENCE.md; boundary:<why> requires the sentence to carry its own limit; descriptive:<why> means it makes no claim about this gateway; debt:<clause> means it is true as qualified and the clause is what would make it unconditional.",
+ "claims": [
+  {
+   "claim": "The ledger's transitions carry **Z3-checked invariants showing that the modelled reserve → settle transitions cannot double-count funds** — a proof over the money model, not over the deployment.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "the P subset; the sentence says the proof is over the model"
+  },
+  {
+   "claim": "Stratoclave is a self-hosted **inference gateway** that sits in the data path in front of Amazon Bedrock and adds the three things raw Bedrock does not give you on its own: **who called which model, under whose budget, and through which identity** — enforced *before* the model is invoked, on every single request.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "'enforced before the model is invoked, on every request'"
+  },
+  {
+   "claim": "### The narrow thing this project is for: a proven invariant on pre-flight budget enforcement",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "the heading names the proved invariant"
+  },
+  {
+   "claim": "That makes per-tenant cost control not a nice-to-have but the P&L core, and it is a distributed-systems problem: *record the billable event across a trust boundary, exactly once, against the right tenant, non-repudiably*.",
+   "file": "README.md",
+   "anchor": "descriptive:states the distributed-systems problem in the abstract",
+   "note": ""
+  },
+  {
+   "claim": "Stratoclave's differentiator is narrow, and it is a **guarantee level, not a feature nobody else has**: it reserves a tenant dollar pool **+** per-user token quota **+** per-model dollar quota in a **single DynamoDB `TransactWriteItems` before the model is invoked**.",
+   "file": "README.md",
+   "anchor": "contract:C1.2",
+   "note": "every configured limit in one TransactWriteItems"
+  },
+  {
+   "claim": "There is no client bypass and no check-then-act (TOCTOU) overspend race — an overshoot loses the conditional write and gets a `402`.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "A credential broker cannot do this at all — nothing is in the data path, so there is no request-time point to enforce at.",
+   "file": "README.md",
+   "anchor": "descriptive:about the credential-broker architecture",
+   "note": ""
+  },
+  {
+   "claim": "LiteLLM's admission counter is a `DualCache` (in-process + Redis) with the database as an authority that catches up; whether the ceiling holds through cache loss is not something we have verified, and we do not assert that it fails.",
+   "file": "README.md",
+   "anchor": "boundary:'we do not assert that it fails' — the property is stated unverified",
+   "note": ""
+  },
+  {
+   "claim": "Stratoclave puts the admission and the money move in the *same* authoritative store — a conditional DynamoDB transition — and carries Z3-checked invariants over that transition model showing it cannot double-count funds.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "scoped to the transition model in the sentence"
+  },
+  {
+   "claim": "Having a reservation and having a *machine-checked invariant* on the model of that reservation are different guarantee levels; this project provides the second one.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "Neither the implementation nor DynamoDB's own behaviour is inside the proof — see [EVIDENCE.md](docs/EVIDENCE.md) for where each claim actually stands.",
+   "file": "README.md",
+   "anchor": "boundary:names exactly what is outside the proof",
+   "note": ""
+  },
+  {
+   "claim": "**Shipped** — dedicated append-only ledger table; each money move (RESERVE/SETTLE/RELEASE/RECLAIM/LATE_SETTLE) is one event, duplicate-proof by a conditional write on its own key. RESERVE and the terminals are written in the same `TransactWriteItems` as the counter they move; the release path is two writes with the reaper as backstop, so a crash between them leaves the hold to be reclaimed rather than losing the event",
+   "file": "README.md",
+   "anchor": "boundary:'the release path is two writes with the reaper as backstop' states the limit",
+   "note": ""
+  },
+  {
+   "claim": "It is their configuration, not a guarantee either project makes to the other; Stratoclave's own failure behaviour is specified in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).",
+   "file": "README.md",
+   "anchor": "boundary:'not a guarantee either project makes' and it points at where the behaviour IS specified",
+   "note": ""
+  },
+  {
+   "claim": "Its money transitions carry a machine-checked invariant that double-counting cannot occur.",
+   "file": "README.md",
+   "anchor": "contract:C3.4",
+   "note": ""
+  },
+  {
+   "claim": "Separating \"proven\" from \"not yet built\" is the point of [EVIDENCE.md](docs/EVIDENCE.md).",
+   "file": "README.md",
+   "anchor": "evidence:The limit no timing calculation removes",
+   "note": "EVIDENCE.md separates proven from not-yet-built"
+  },
+  {
+   "claim": "## Why a gateway? (what a credential broker cannot do)",
+   "file": "README.md",
+   "anchor": "descriptive:a section heading",
+   "note": ""
+  },
+  {
+   "claim": "That single architectural choice is what unlocks the following, none of which a broker can offer because it has no request-time choke point:",
+   "file": "README.md",
+   "anchor": "descriptive:about brokers",
+   "note": ""
+  },
+  {
+   "claim": "- **Budget enforced *per request*, before the call — not after.** Every call reserves `max_tokens + input_estimate` with a conditional DynamoDB write *before* Bedrock is invoked, and refunds the unused remainder afterwards.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "- **App-layer model / capability policy.** The model allowlist, and (on the roadmap) per-tenant reasoning-effort and tool caps, are enforced in the request handler.",
+   "file": "README.md",
+   "anchor": "contract:C1.6",
+   "note": "roadmap items are marked as such in the sentence"
+  },
+  {
+   "claim": "IAM can allow or deny a *model ARN*, but it cannot express \"this tenant may not use `reasoning.effort = xhigh`\".",
+   "file": "README.md",
+   "anchor": "descriptive:about what IAM can express",
+   "note": ""
+  },
+  {
+   "claim": "- **Two-level credit governance, enforced pre-flight.** Every tenant has a default credit, every user can carry a per-user override, and every inference call — to `/v1/messages` (Anthropic), `/v1/chat/completions` (OpenAI Chat), or `/openai/v1/responses` (OpenAI Responses) — reserves tokens atomically with a conditional DynamoDB write *before* Bedrock is invoked (`backend/dynamo/user_tenants.py:reserve`).",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "Because the reservation is a conditional `UpdateItem`, concurrent requests that would push a balance past its limit lose the condition and are rejected — quotas cannot be raced past.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "What cannot be raced past is the amount the request was ADMITTED at.",
+   "file": "README.md",
+   "anchor": "contract:C1.5",
+   "note": "this sentence is the boundary itself"
+  },
+  {
+   "claim": "The bound gates admission only where the operator has turned it on (`STRATOCLAVE_HARD_CEILING_GATE`), because it also refuses requests it cannot size and an operator should measure that refusal rate on real traffic first — see [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md).",
+   "file": "README.md",
+   "anchor": "boundary:'only where the operator has turned it on'",
+   "note": ""
+  },
+  {
+   "claim": "Cost is derived from an admin-editable per-model price table (`PricingConfig`), so Opus and Haiku spend are counted differently — all in integer micro-USD, never floating point.",
+   "file": "README.md",
+   "anchor": "contract:C2.5",
+   "note": ""
+  },
+  {
+   "claim": "A **first-event commit** rule guarantees that once the first stream byte is sent, the target is locked — a mid-stream failure never silently re-runs the model or double-bills.",
+   "file": "README.md",
+   "anchor": "contract:C1.7"
+  },
+  {
+   "claim": "`eu-west-1`) never silently fails over into another jurisdiction.",
+   "file": "README.md",
+   "anchor": "contract:C11.2",
+   "note": ""
+  },
+  {
+   "claim": "For single-region **data residency**, set it to a same-jurisdiction list or to **`none`** (or an empty string) **to disable failover entirely** — then a streaming request never sends prompt bytes outside the primary region.",
+   "file": "README.md",
+   "anchor": "contract:C11.1",
+   "note": ""
+  },
+  {
+   "claim": "- **Per-model quotas + cascading model fallback.** \"Use Opus until its per-model budget is gone, then Sonnet, then Haiku.\" Each model has an optional per-tenant (and per-user) quota, charged in the *same* atomic `TransactWriteItems` as the budget reserve — so a request can never race past a per-model limit.",
+   "file": "README.md",
+   "anchor": "contract:C1.2",
+   "note": ""
+  },
+  {
+   "claim": "A quota is keyed on the **model**, not on the name a client used for it: every alias and Bedrock id of one registry entry counts against one counter, so a cap cannot be dodged by respelling its subject.",
+   "file": "README.md",
+   "anchor": "contract:C1.4",
+   "note": ""
+  },
+  {
+   "claim": "And because the routing config only ever *restricts* a request, a config the gateway cannot read is not treated as a tenant without restrictions — a task serves the last config it read, or fails closed with `503 routing_config_unavailable`.",
+   "file": "README.md",
+   "anchor": "contract:C7.2",
+   "note": ""
+  },
+  {
+   "claim": "The pin is validated against the tenant allowlist (`403` if not allowed) and the route's wire protocol (`400` if unservable) — it is never silently substituted.",
+   "file": "README.md",
+   "anchor": "contract:C1.8"
+  },
+  {
+   "claim": "Stratoclave's SSO flow does not parse AWS credentials and never holds an IdP refresh token.",
+   "file": "README.md",
+   "anchor": "contract:C6.5",
+   "note": ""
+  },
+  {
+   "claim": "EC2 instance profiles are rejected by default because they cannot be attributed to a single human.",
+   "file": "README.md",
+   "anchor": "boundary:'rejected by default' states the policy and its default",
+   "note": ""
+  },
+  {
+   "claim": "Because Stratoclave never stores an IdP refresh token, a full backend compromise cannot pivot into the customer's IAM Identity Center or SAML IdP.",
+   "file": "README.md",
+   "anchor": "contract:C6.5",
+   "note": ""
+  },
+  {
+   "claim": "Concurrent requests that would overshoot a quota cannot race.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "`UsageLogs` always records the actual spend, not the reservation.",
+   "file": "README.md",
+   "anchor": "contract:C4.5"
+  },
+  {
+   "claim": "### Dollar pool budgets and crash-safe accounting",
+   "file": "README.md",
+   "anchor": "descriptive:a section heading",
+   "note": ""
+  },
+  {
+   "claim": "When a tenant has a **dollar pool** for the current period, the same reservation additionally reserves the request's cost — priced from the per-model `PricingConfig` table — as integer **micro-USD** (1 USD = 1 000 000 micro-USD; never a float, and cost is rounded *up* so a request is never under-charged).",
+   "file": "README.md",
+   "anchor": "contract:C2.5",
+   "note": "integer micro-USD, rounded up"
+  },
+  {
+   "claim": "A killed request leaves its hold behind; later pooled requests run a small, bounded **sweep** that reclaims expired holds — decrement and delete in one conditional transaction, so a hold is reclaimed at most once and concurrent sweepers cannot double-credit the pool: the loser's transaction cancels.",
+   "file": "README.md",
+   "anchor": "boundary:names the one way the counter can still go negative",
+   "note": ""
+  },
+  {
+   "claim": "So on the transactional reserve path the ledger's \"exactly one terminal per hold\" mutual exclusion and the frozen-rating guarantees carry over unchanged, and the only genuinely new money code is one idempotency record and the rehydrate.",
+   "file": "README.md",
+   "anchor": "boundary:scopes the carry-over and names the PENDING gap",
+   "note": ""
+  },
+  {
+   "claim": "Idempotent authorize is enforced by an idempotency record written in the same transaction as the reserve, with a request fingerprint so reusing a key for a *different* body is a `422`, never a silent wrong replay.",
+   "file": "README.md",
+   "anchor": "contract:C5.3",
+   "note": ""
+  },
+  {
+   "claim": "- **The key identifies the operation, byte for byte.** The idempotency record is addressed by a digest of the raw `Idempotency-Key`, so two different keys are two different operations: an earlier version sanitised the key into a sort key, which merged `invoice/a` and `invoice?a` onto one record — the second authorize then either replayed the first, reporting success for an amount that was never held, or was refused as a reused key.",
+   "file": "README.md",
+   "anchor": "contract:C5.2",
+   "note": ""
+  },
+  {
+   "claim": "OpenAI `Chat Completions` payload on the **same** Bedrock converse backend. Streaming + tool calls. Unsupported params (`n>1`, `logprobs`, `response_format`, `image_url`) rejected with `400`, never silently dropped. Requires the `messages:send` scope.",
+   "file": "README.md",
+   "anchor": "contract:C13.1",
+   "note": ""
+  },
+  {
+   "claim": "> For **how far each differentiating claim below is actually verified today**",
+   "file": "README.md",
+   "anchor": "descriptive:a pointer to EVIDENCE.md",
+   "note": ""
+  },
+  {
+   "claim": "> (formal proof / gateway-live / direct baseline / moto·in-process / unverified),",
+   "file": "README.md",
+   "anchor": "descriptive:lists the evidence tiers used in EVIDENCE.md",
+   "note": ""
+  },
+  {
+   "claim": "**No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), but retaining their reservations is opt-in and off by default, so today such an outcome still returns its budget. See the crash-safe row below.",
+   "file": "README.md",
+   "anchor": "boundary:states that the ceiling is over the admitted amount",
+   "note": ""
+  },
+  {
+   "claim": "**No client bypass**, and **pre-call reservation is shipped** — `litellm/proxy/spend_tracking/budget_reservation.py` (first committed 2026-04-30) reserves before the call, fails closed when the reservation cannot be written, clamps adversarial `max_tokens`, and covers seven scopes. The admission counter is a `DualCache` (in-process + Redis) with the DB as an authority that catches up; the code documents recovery paths for Redis restart / cross-pod reset. **We have not tested whether the ceiling holds through cache loss, and we do not claim it fails.** The honest difference is the guarantee level, not the presence of a reservation. Verify against the version you deploy",
+   "file": "README.md",
+   "anchor": "boundary:'We have not tested whether the ceiling holds through cache loss'",
+   "note": ""
+  },
+  {
+   "claim": "**Deploy region is operator-chosen** (`STRATOCLAVE_REGION`; only the CLOUDFRONT-scope WAF is pinned to us-east-1). **Bedrock model region is independent** (`BEDROCK_PRIMARY_REGION`). Streaming failover is configurable (`STRATOCLAVE_FAILOVER_REGIONS`), and the default set is jurisdiction-filtered so a non-US primary never back-doors to the US. `STRATOCLAVE_RESIDENCY=strict` fails the synth if any Bedrock call region (model + failover + codex) leaves the deploy region, or if the model is a geo inference profile. **aws partition only** (GovCloud/China rejected)",
+   "file": "README.md",
+   "anchor": "contract:C11.4",
+   "note": ""
+  },
+  {
+   "claim": "**Reproducible Savings Report** (`mvp.learning.savings`; renamed from \"Savings Certificate\" in [docs/SCOPE.md](docs/SCOPE.md) — \"certificate\" overstates what the retention and export story currently support): a per-`(tenant, day)` **counterfactual** \"if you'd followed the routing advice\" figure over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted. Reproducible means replayable, not merely recomputable: the report embeds the four rate legs it priced each key at and the model resolutions it used, so `savings_cli --replay` reproduces the same figure at any later date and a rate change since issue cannot move it. A replay whose embedded basis is missing a key refuses rather than quietly pricing that row at today's rate. Detail rows beyond the stored cap are not retained, so a replay reproduces the figure and the classes, not every per-request line. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md)",
+   "file": "README.md",
+   "anchor": "boundary:'Reproducibility has a stated boundary'",
+   "note": ""
+  },
+  {
+   "claim": "The single thing neither competitor can easily replicate is the **atomic pre-flight reserve/settle with crash-safe HOLD rows and a quota-driven model cascade wired into it**.",
+   "file": "README.md",
+   "anchor": "contract:C1.2",
+   "note": ""
+  },
+  {
+   "claim": "A broker cannot do it *by construction* — it is not in the data path, so there is no request-time point to enforce at.",
+   "file": "README.md",
+   "anchor": "descriptive:about brokers",
+   "note": ""
+  },
+  {
+   "claim": "Comparing only *shipped* capability (not \"could be built\" — by that logic every product's features are possible in every other, which decides nothing), the broker's cap is a soft IAM/telemetry one because it has no request-time choke point at all, while LiteLLM and Stratoclave both reserve before the call.",
+   "file": "README.md",
+   "anchor": "boundary:'only shipped capability' scopes what is being compared",
+   "note": ""
+  },
+  {
+   "claim": "Between those two the difference is *where the enforcing state lives* — a cache with a catching-up database, versus a single authoritative store whose transition carries a machine-checked proof that double-counting cannot occur.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "**Pick Stratoclave** for an AWS-committed, Bedrock-first (self-hosted GPU / any OpenAI-compatible backend bindable to the same machine-checked transition model), single-region (operator-chosen) shop that needs hard per-tenant dollar caps enforced pre-flight so a request cannot be ADMITTED past them, and — unlike a post-hoc counter — cannot even transiently overshoot under concurrency (an application-level invariant: an atomic snapshot-locked reservation, not a database `ConditionExpression`) — e.g.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "'cannot be ADMITTED past them' is the admission clause"
+  },
+  {
+   "claim": "**Pick a credential broker** when you must distribute to a large fleet via MDM, need GovCloud / EU or multi-region data residency, or cannot accept any new component on the inference availability path — and post-hoc audit (Bedrock invocation logging + CloudTrail) is sufficient.",
+   "file": "README.md",
+   "anchor": "descriptive:when to pick a broker instead",
+   "note": ""
+  },
+  {
+   "claim": "The gating insight held: **semantic routing only *proves* a cost saving once the ledger and rating layers exist** — an un-provable saving cannot be billed — so the ledger/rating work was P0 and shipped first; the router is P1.",
+   "file": "README.md",
+   "anchor": "descriptive:why the ledger work preceded the router",
+   "note": ""
+  },
+  {
+   "claim": "Crash-safe HOLD + settle; single TERMINAL sk per hold is the idempotency key",
+   "file": "README.md",
+   "anchor": "contract:C3.4",
+   "note": ""
+  },
+  {
+   "claim": "Pins \"which price, when\" so a price change never breaks past invoices; also the basis for \"how much the router saved\"",
+   "file": "README.md",
+   "anchor": "contract:C2.2",
+   "note": ""
+  },
+  {
+   "claim": "Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box",
+   "file": "README.md",
+   "anchor": "boundary:'a partial-sum estimate, honestly labeled'",
+   "note": ""
+  },
+  {
+   "claim": "Source-agnostic `RouteDecision` port (`mvp/sr/`), per-tenant `sr_mode` tri-state (off/canary/active), deterministic session-sticky canary + breaker, SR-vs-ledger divergence evidence; money invariants proven (Z3 + Hypothesis) against a fake-SR harness",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "the money invariants named are the admission ones"
+  },
+  {
+   "claim": "Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch cost recorded on the decision as a comparison, never discounted off the reservation. Superseded by the real SR's own session-aware policy above; retained for its provider-state lock, which the replacement does not cover ([EVIDENCE.md](docs/EVIDENCE.md))",
+   "file": "README.md",
+   "anchor": "boundary:'kept as the interim until the SR eval client lands'",
+   "note": ""
+  },
+  {
+   "claim": "A central, external advisor can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money. Predates the real-SR integration; the eval-decide path above replaces it",
+   "file": "README.md",
+   "anchor": "contract:C1.6",
+   "note": "the suggestion passes the same policy set as a client pin"
+  },
+  {
+   "claim": "A local, rule-based judge records whether a cheaper same-family model would have sufficed — advisory only, never steering execution/routing/money — so the certificate reports a *potential* saving with no behaviour change",
+   "file": "README.md",
+   "anchor": "boundary:'advisory only, never steering execution/routing/money'",
+   "note": ""
+  },
+  {
+   "claim": "**Join SR's decision to the ledger by `span_id`** for the divergence metric and the Savings Certificate — SR's cost figure is evidence, never the charge.",
+   "file": "README.md",
+   "anchor": "contract:C2.2",
+   "note": "SR's figure is evidence; the charge comes from the frozen snapshot"
+  },
+  {
+   "claim": "The contract this gateway is judged against: every clause, the level it holds at, the test that fails if a proven or enforced clause stops holding (or, for a clause that holds only inside a configuration, that configuration), and the clauses it does not satisfy yet. Start here to know what is guaranteed and what is merely true today.",
+   "file": "README.md",
+   "anchor": "contract:C10.1",
+   "note": "the sentence describes the property C10.1 enforces"
+  },
+  {
+   "claim": "The dollar ceiling for strict-mode traffic: the reservation bound, what strict mode refuses, the assumptions the guarantee rests on, and the reaper's part in it.",
+   "file": "README.md",
+   "anchor": "descriptive:describes what hard-ceiling.md contains",
+   "note": ""
+  },
+  {
+   "claim": "The counterfactual savings report: what is potential, what is realised, and why they are never added.",
+   "file": "README.md",
+   "anchor": "descriptive:describes what the savings design document contains",
+   "note": ""
+  },
+  {
+   "claim": "Infrastructure-level hardening is enforced at synth time by `cdk-nag` (CommonSolutionsChecks) and, at runtime, by:",
+   "file": "README.md",
+   "anchor": "contract:C11.4",
+   "note": "synth-time hardening, same class as the residency check"
+  },
+  {
+   "claim": "- DynamoDB `RETAIN` on audit-critical tables (`usage-logs`, `api-keys`); PITR is always on for `api-keys` and enabled for `usage-logs` in production,",
+   "file": "README.md",
+   "anchor": "boundary:'enabled for usage-logs in production' states where it applies",
+   "note": ""
+  },
+  {
+   "claim": "- Bedrock bearer tokens minted with a 15-minute TTL (capped in `openai_responses.py`); the token lives only in the ECS task heap for the duration of one request and is never persisted to DynamoDB or logs,",
+   "file": "README.md",
+   "anchor": "contract:C12.5"
+  },
+  {
+   "claim": "Credit reservation is the ADMISSION ceiling — the amount a request is admitted at — and is always atomic in DynamoDB.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "+ quota-driven cascading fallback** (Opus → Sonnet → Haiku, priced and settled per candidate, across all three API surfaces); crash-safe hold sweep; staged budget breaker (tier cap at ≤25%, `402` at ≤5%); InfraRouter retry + cross-region failover with first-event commit; OpenAI Chat Completions and Responses (codex) surfaces; multi-task / multi-AZ ECS with DynamoDB-backed per-IP rate limiting; **request correlation** (client-supplied `x-sc-group-id` / `x-sc-workflow-run-id` headers, server-minted span id, echoed on the response); **dual-track observability** (per-request span records + per-workflow-run rollups, with a `canceled_by_client` flag) and a **write-only routing-signals log** for offline routing evaluation — all three fire-and-forget, DynamoDB-only, and money-neutral.",
+   "file": "README.md",
+   "anchor": "contract:C1.2",
+   "note": ""
+  },
+  {
+   "claim": "> only*: it records a counterfactual and never steers execution, routing, or",
+   "file": "README.md",
+   "anchor": "boundary:'advisory only' — it records and does not steer",
+   "note": ""
+  },
+  {
+   "claim": "Sticky per-session model choice with a tool-loop hard-lock, and the cost of switching recorded on the decision as a reproducible comparison; backed by a DynamoDB session-memory table.",
+   "file": "README.md",
+   "anchor": "contract:C2.2",
+   "note": "a comparison on the decision, not a discount on the reservation"
+  },
+  {
+   "claim": "Beyond the sticky/tool-loop core, SAAR also implements **idle-timeout reset**, **decision-drift reset**, and a **provider-state lock** — a request carrying a non-portable continuation id (an OpenAI Responses `previous_response_id`) is hard-locked to the backend that minted it, verified against the id the session actually minted (a forged/foreign id never locks) and bounded by a hard cap so a retired backend can never strand a session.",
+   "file": "README.md",
+   "anchor": "boundary:'bounded by a hard cap so a retired backend can never strand'",
+   "note": ""
+  },
+  {
+   "claim": "The suggestion is fed into the **same** resolver inputs as a client `x-sc-model-pin`, so it passes the same tenant allowlist + servability enforcement and can never expand model access or touch money.",
+   "file": "README.md",
+   "anchor": "contract:C1.6",
+   "note": ""
+  },
+  {
+   "claim": "A version-pin handshake (UNVERIFIED/VERIFIED/REFUSED) gates every consult; an unreachable or unpinned advisor degrades to normal Bedrock routing.",
+   "file": "README.md",
+   "anchor": "boundary:'degrades to normal Bedrock routing' states the failure behaviour",
+   "note": ""
+  },
+  {
+   "claim": "Per-tenant config is stored as an **opaque** S3 blob that Stratoclave never parses — save-time validation is delegated to the advisor's own `/v1/config/validate` (see [`docs/VSR_CONFIG_CONTRACT.md`](./docs/VSR_CONFIG_CONTRACT.md)).",
+   "file": "README.md",
+   "anchor": "boundary:'never parses' scopes what the gateway does with the blob",
+   "note": ""
+  },
+  {
+   "claim": "The package (`backend/mvp/sr/`) ships the source-agnostic `RouteDecision` port, the `sr_mode` tri-state (off/canary/active) with an operator kill-switch, a deterministic session-sticky canary + circuit breaker, and an SR-vs-ledger divergence evidence block; the money invariants (no forward without a reserve, final ≤ reserve, single settle) are proven with Z3 and Hypothesis against a fake-SR harness.",
+   "file": "README.md",
+   "anchor": "contract:C1.1",
+   "note": "the money invariants named are admission and single-settle"
+  },
+  {
+   "claim": "**Billing gateway.** Metering, rating (physical units → micro-USD, with margin / provider-cost allocation), pre-flight authorization (two-phase authorize/capture, tiered circuit breaker), and an event-sourced, idempotent, tenant-isolated credit ledger whose **zero-double-posting invariant is formally proven (Z3)**.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:describes the billing-gateway layer's job",
+   "note": ""
+  },
+  {
+   "claim": "The gateway is the *only* place that can completely observe \"which request routed where, cost how much, waited how long, and succeeded or not.\" That observation position is not replaceable by the VSR or by a learning system, so producing it — with a fixed schema, completeness, ordering, and re-delivery guarantees — is Stratoclave's job.",
+   "file": "docs/SCOPE.md",
+   "anchor": "contract:C4.4",
+   "note": ""
+  },
+  {
+   "claim": "Outcome-based pricing ($/resolved ticket) is explicitly out: verifying \"resolved\" needs business-domain ground truth the gateway cannot access, and it would make Stratoclave the arbiter of a billing dispute it has no evidence for.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'the gateway cannot access' business ground truth",
+   "note": ""
+  },
+  {
+   "claim": "If outcome billing is ever needed, it is an **external** layer that consumes the ledger export and joins on `span_id`; it is never built into the core.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a scope decision about where outcome billing would live",
+   "note": ""
+  },
+  {
+   "claim": "Bedrock, a self-hosted GPU (the `served_by=\"vllm\"` transport seam + `VLLM_ENDPOINTS` allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and any OpenAI-compatible endpoint all flow through the **same** reserve / rating / settle and the same ledger, whose money-transition model carries a machine-checked no-double-post invariant.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:describes the transport seam and its endpoint allowlist",
+   "note": ""
+  },
+  {
+   "claim": "The claim here is about *where the enforcing state lives*: their admission counter is a `DualCache` (in-process + Redis) with the database as an authority that catches up, while Stratoclave puts admission and the money move in one authoritative store whose transition carries a machine-checked proof.",
+   "file": "docs/SCOPE.md",
+   "anchor": "contract:C1.1",
+   "note": ""
+  },
+  {
+   "claim": "(An earlier version of this document called their billing best-effort; that was inaccurate and is withdrawn.) Whether their ceiling holds through cache loss is **unverified by us and we do not assert that it fails.** Binding an arbitrary backend under a proven charge of record remains the distinct capability.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'unverified by us and we do not assert that it fails'",
+   "note": ""
+  },
+  {
+   "claim": "For a claim-by-claim map of **how far each is verified today** (formal proof / gateway-live / direct baseline / moto·in-process / unverified), with commit SHAs and the exact limits of each measurement, see [EVIDENCE.md](EVIDENCE.md):",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a pointer to the verification map",
+   "note": ""
+  },
+  {
+   "claim": "**A ledger whose money transitions carry a machine-checked invariant.** LiteLLM's cost tracking is approximate observability that cannot stand as a charge of record.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a claim about LiteLLM's cost tracking",
+   "note": ""
+  },
+  {
+   "claim": "A pre-authorized, integer-exact ledger whose transitions carry a machine-checked proof is the \"buy\" side of build-vs-buy for any product that bills tenants for LLM usage.",
+   "file": "docs/SCOPE.md",
+   "anchor": "contract:C2.5",
+   "note": "integer micro-USD plus the machine-checked transition"
+  },
+  {
+   "claim": "Its in-flight migration (the PENDING protocol, which removes a permanent two-path flag) is being landed under a Z3 joint-transition **equivalence** proof — the old and new money paths are proven to move money identically before the old one is deleted (`27d86db`) — a proof over the modelled transitions, not over the shipped replay path.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'a proof over the modelled transitions, not over the shipped replay path'",
+   "note": ""
+  },
+  {
+   "claim": "That proof is over the modelled transitions: the shipped PENDING path still has a replay that reads an intent's presence rather than the pool marker, so it does not yet answer a retry the way the transactional path does ([CONTRACTS.md](design/CONTRACTS.md) C5.4).",
+   "file": "docs/SCOPE.md",
+   "anchor": "debt:C5.4",
+   "note": "the PENDING replay predicate reading the pool marker rather than the intent's presence, which is what would make the two protocol paths answer a retry identically"
+  },
+  {
+   "claim": "**What this loop produces: a Reproducible Savings Report.** (Renamed from \"Savings Certificate\": until the long-term immutable sink and the export contract land, \"certificate\" overstates it.) What is distinctive is not having a savings figure — LiteLLM ships `router_strategy/savings_baseline.py`, and an earlier claim here of \"a number LiteLLM structurally cannot produce\" was wrong and is withdrawn — but the **shape of the computation**: resolve=)` is a pure function taking normalized rows, a versioned rate table, and a resolver as explicit inputs, priced over each request's REAL billed tokens and joined to the ledger by `span_id`.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'until the long-term immutable sink and the export contract land'",
+   "note": ""
+  },
+  {
+   "claim": "It subtracts escalation loss (never hides it — `net` can be negative) and states its coverage.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'never hides it — net can be negative' and 'states its coverage'",
+   "note": ""
+  },
+  {
+   "claim": "**The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a compatibility shim for the non-OpenAI-compatible providers, after which that traffic flows through the same machine-checked money-transition model — a claim about the shape of the work rather than about how long anyone would take, since the estimate in quarters is withdrawn below.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'a claim about the shape of the work rather than about how long anyone would take' — the schedule estimate is withdrawn in the sentence",
+   "note": "the substantive claim is that a bound backend's traffic goes through the same admission; the effort figure is an estimate, stated as a range"
+  },
+  {
+   "claim": "For LiteLLM to absorb Stratoclave's edge — an event-sourced, idempotent, machine-checked-transition reserve/rating/settle ledger — would be a re-design rather than a retrofit.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'would be a re-design rather than' compares scope without claiming a date",
+   "note": ""
+  },
+  {
+   "claim": "But **stating that asymmetry as a fixed number of quarters was unfounded and is withdrawn**: LiteLLM has been extending reservation, dynamic routing, and Bedrock support quickly, and we cannot estimate another project's delivery speed from outside.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:the sentence withdraws the earlier claim",
+   "note": ""
+  },
+  {
+   "claim": "Two different p99 figures exist and must always be named with their metric, because quoting one for the other has caused confusion: the ledger `TransactWriteItems` is **p99 = 58 ms at the zero-contention floor**, while **end-to-end authorize is p99 = 225 ms** (see EVIDENCE.md).",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a rule for how to report the two figures",
+   "note": ""
+  },
+  {
+   "claim": "Honest current state: _correctness_ proven, _speed_ measured and **below target on the current synchronous four-item-transaction design** — closing it needs a design change (single-item conditional update where the money-move allows, and/or pool-row sharding), not tuning.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'below target on the current synchronous four-item-transaction path'",
+   "note": ""
+  },
+  {
+   "claim": "The discipline: dissatisfaction with a VSR verdict is expressed as feedback *on the decision record*, and the improvement is bet on the VSR's evolution — never on a home-grown classifier.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a working discipline, not a guarantee",
+   "note": ""
+  },
+  {
+   "claim": "Stratoclave wins on one thing only: **a ledger whose money-transition model carries a machine-checked no-double-post invariant, and a synchronous enforcement point, wired to an external judgment engine through a schema'd feedback loop.** The Z3-proven zero-double-posting invariant is diluted every time a feature adds code outside the proven region.",
+   "file": "docs/SCOPE.md",
+   "anchor": "boundary:'on one thing only' scopes the claim",
+   "note": ""
+  },
+  {
+   "claim": "**Before adding a feature, ask whether it carries a provable invariant.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a rule for deciding what to build",
+   "note": ""
+  },
+  {
+   "claim": "- **Open source (Apache 2.0).** The comparison is on capability, not on distribution; the ledger's proof and code are inspectable.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a note on what the comparison covers",
+   "note": ""
+  },
+  {
+   "claim": "- **Owned and built:** the AI-gateway core (unified API, adapters, streaming, virtual keys, fallback, rate limit); the billing core (metering, rating, two-phase authorize/capture, tiered breaker, a ledger with a Z3-checked no-double-post invariant over its transition model); LLM router execution (allowlist / breaker / VSR hard-pin / fallback chain); a transport seam (`served_by=\"vllm\"`) that binds a **self-hosted GPU / any OpenAI-compatible backend** to the *same* reserve/rating/settle path; version- pinned external VSR consult with the \"advice quality is the VSR's, honoring and charging is ours\" boundary; SAAR (sticky, tool-loop lock, idle reset, decision drift, provider-state lock) as routing-optimization state; the offline VSR billing reconciliation.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:an ownership list",
+   "note": ""
+  },
+  {
+   "claim": "\"A ledger with a machine-checked no-double-post invariant that you can afford on the hot path\" is the entire pitch, so this is the highest-leverage item: it needs a design change (single-item conditional update and/or pool-row sharding), not tuning.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:a statement about leverage",
+   "note": ""
+  },
+  {
+   "claim": "It fixes the VSR-integration *contract* in code before the integration deepens (so loose coupling is not dragged into the VSR's internal schema), reuses responsibility #2's \"never drop a fact\" muscle, and turns accumulated records into a time-compounding learning asset even while the VSR's accuracy is still low.",
+   "file": "docs/SCOPE.md",
+   "anchor": "descriptive:describes what the next piece of work does",
+   "note": ""
+  },
+  {
+   "claim": "The normative source for the dollar-ceiling behaviour: what strict mode guarantees, what it refuses, and the assumptions the guarantee rests on.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:describes what hard-ceiling.md is",
+   "note": ""
+  },
+  {
+   "claim": "The shadow measurement and the refusal-rate target are in section 9b, because the gate cannot be switched on responsibly without them.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'cannot be switched on responsibly without them'",
+   "note": ""
+  },
+  {
+   "claim": "The ceiling theorem's precondition is met only where the bound is computed from bytes — the `measured`, `shadow` and `enforced` states below.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "- **Retaining a reservation instead of returning it is not built.** [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far each claim is verified; where this document and that one disagree, that one is describing today.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "debt:C8.3",
+   "note": "retention of an unobserved-outcome hold, which the flag gates today"
+  },
+  {
+   "claim": "Every rule written for `enforced` applies in `shadow` except the refusals and the criteria that test them.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "`enforced` is per dimension, not per tenant: a tenant with a token quota and no pool is enforced on tokens and accounting on dollars, and touches the balance row but never the pool row.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'per dimension, not per tenant' scopes what enforced means",
+   "note": ""
+  },
+  {
+   "claim": "**Everything concerning the bound, `reserved_microusd`, the pool row, the refusals of section 6 and the reaper of section 5 belongs to the dollar dimension and applies only where a pool limit exists.** A tenant enforced on tokens alone gets none of it: no bound, no dollar reservation, no `reserved_microusd` on its terminal, and no new refusal.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "`strict` and `calibrated` are settings **within** `enforced`; they change how the bound is derived, not whether it gates.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "The provider cannot cache content it was not sent, so this covers any caching behaviour with no assumption about what it caches.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "If a route can produce a value the gateway cannot determine before the call, refuse rather than assume 1.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'refuse rather than assume' is the rule and its limit",
+   "note": ""
+  },
+  {
+   "claim": "- **Monotone in every input.** More bytes, a higher output ceiling or a larger effort multiplier may never decrease the bound.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "contract:C1.5",
+   "note": "monotonicity is a property of the bound the clause rests on"
+  },
+  {
+   "claim": "If the tenant's headroom cannot cover a second full reservation, the retry is refused; that is the correct outcome, not a regression.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "- **Fail closed.** An image whose dimensions cannot be determined — unsupported format, truncated or malformed header, a header disagreeing with the payload — is refused, never admitted with the term skipped.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "contract:C1.5",
+   "note": "fail closed on an unsizeable image is what makes the bound a bound"
+  },
+  {
+   "claim": "## 4. The assumptions the guarantee rests on",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:a section heading",
+   "note": ""
+  },
+  {
+   "claim": "Put these where a reader of the guarantee will see them.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "The guarantee is conditional on all four, and each is either checked or explicitly unchecked.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'each is either checked or explicitly unchecked'",
+   "note": ""
+  },
+  {
+   "claim": "- **A hold is not reaped while its charge can still arrive.** Enforced by section 5.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "**Tool use needs no special rule, and this was checked rather than assumed.** `_reject_server_side_tools` in `backend/mvp/anthropic.py` already refuses Anthropic's server-executed tools — web search, web fetch, code execution, computer, bash, text editor — on every route and in every mode, because Bedrock's Converse API cannot express them.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'checked rather than assumed' with the function that checks it",
+   "note": ""
+  },
+  {
+   "claim": "## 5. The reaper is part of the guarantee, not housekeeping",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:a section heading",
+   "note": ""
+  },
+  {
+   "claim": "Derive it from those values in code rather than choosing a constant, so a change to a timeout cannot silently invalidate it.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "A guarantee that depends on two independently configured durations must not depend on someone noticing.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:a design principle about configuration coupling",
+   "note": ""
+  },
+  {
+   "claim": "- A charge for an attempt that returned no usage block never appears in the ledger at all.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "debt:C3.5",
+   "note": "the durable dispatcher is what would put that charge on the ledger"
+  },
+  {
+   "claim": "That is **out of scope by the owner's decision**: what the gateway cannot observe is outside the cost model.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:states the scope boundary",
+   "note": ""
+  },
+  {
+   "claim": "## 6. What strict mode refuses, and what it guarantees",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:a section heading",
+   "note": ""
+  },
+  {
+   "claim": "Refused at admission, before any upstream call, **in `enforced` only**:",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "- an image whose dimensions cannot be read, or an S3-referenced image",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an item in the refusal list",
+   "note": ""
+  },
+  {
+   "claim": "- a request whose `effort_multiplier` cannot be determined before the call",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an item in the refusal list",
+   "note": ""
+  },
+  {
+   "claim": "That is not in tension with the rule that a high refusal *rate* is answered by a tighter bound and never by a larger limit: one is a single request that cannot fit, the other is a bound that is too loose.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "A request whose bound cannot be computed in `measured` is recorded with the bound absent and a reason, and proceeds.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "\"Every request either gets a bound or is refused\" is a rule of `enforced`.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'is a rule of enforced' scopes it to the mode",
+   "note": ""
+  },
+  {
+   "claim": "The guarantee, stated with its boundary rather than as a slogan: **for admitted requests, the pool cannot be overspent, except for two cases, both alarmed and both recorded with their own cause code — a charge whose hold was reaped before it settled, and a charge where the provider exceeded the output ceiling it was given.** Those are the visible failure modes; there are two, not one.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "Do not write \"overspend is impossible\" without naming both.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "And one limit that no rule in this document removes: **a charge landing at Bedrock and the ledger write recording it are not atomic.** If Bedrock bills a request and this process then dies, the hold is never settled, the reaper releases it, and the real spend vanishes from the ledger — after which later admissions can carry the pool past its limit with every invariant here still intact, because the ledger no longer holds the charge.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "Say so wherever the guarantee is stated; it is the ceiling on the ceiling.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "The principle, from which every rule below follows: **the only reason to serialise requests on a shared item is to prove that a limit was not exceeded.** Measurement needs no such proof, so measurement needs no serialisation.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "- no conditional write, even one whose condition cannot fail — an always-true condition still costs a round trip and still contends on the item",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:a performance rule for the hot path",
+   "note": ""
+  },
+  {
+   "claim": "**What measurement legitimately needs, and may always do:** write the usage row for the request.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:defines what the measurement mode is permitted to do",
+   "note": ""
+  },
+  {
+   "claim": "**Do not compute the bound where it cannot be enforced**, unless a measurement flag is on, default off.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "Computing it means serialising the outbound payload and parsing image headers, which is real work for a request that can never be refused.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an argument for not computing the bound where it cannot be enforced",
+   "note": ""
+  },
+  {
+   "claim": "A calibrated reservation can be smaller than a strict bound, so after a switch to strict the pool can hold pre-switch holds whose reservations were never sound.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:states a migration hazard that the following rule addresses",
+   "note": ""
+  },
+  {
+   "claim": "The rule: **a switch applies to admissions from that moment, and the guarantee is claimed only once every pre-switch hold has settled or been reaped.** Record the switch in the ledger with its timestamp so the boundary is reconstructible, and do not halt admissions, drain, or top up — those all cost availability to buy a property that waiting gives for free.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "It would be muted within a week, and the moment it is muted the one visible failure mode of the guarantee — a hold reaped while its charge was still coming — goes silent with it.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "In the ledger, in `enforced`: **hold creation and hold reaping events**, so that pool state is reconstructible from the ledger rather than only assertable.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "contract:C4.2",
+   "note": "what makes pool state reconstructible from the ledger"
+  },
+  {
+   "claim": "Enforcement cannot be switched on responsibly without knowing what it will refuse, and that knowledge cannot come from anywhere but real traffic.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:states why the gate ships off",
+   "note": ""
+  },
+  {
+   "claim": "Ship the bound, computing and recording it in `measured` for tenants that opt in, and in `enforced` **without gating** behind a flag that defaults to off.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "If it is not, tighten the bound — never raise a pool limit, which converts a correctness property into a capacity setting.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "descriptive:an instruction to implementers of this design",
+   "note": ""
+  },
+  {
+   "claim": "`enforced` with a pool limit, once gating is on: every request in section 6's refusal list is refused before any upstream call.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'once gating is on' scopes the refusal list to the mode",
+   "note": ""
+  },
+  {
+   "claim": "`accounting` and `measured`: no request is refused by this work, including requests whose bound cannot be computed.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:scoped to the two non-gating modes",
+   "note": ""
+  },
+  {
+   "claim": "`strict` with a pool limit, once gating is on: concurrent callers cannot drive `settled + reserved` above `pool_limit` in any state reconstructible from the ledger, excluding the two excluded cause codes.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:'excluding the two excluded cause codes' names what it omits",
+   "note": ""
+  },
+  {
+   "claim": "`enforced`: the non-image byte length and the payload hash recorded on the hold equal those of the outbound bytes captured **at the client-library boundary**, for every admitted request including retries.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "`enforced`: startup fails when the reap timeout does not exceed the request deadline plus the retry budget plus the skew margin.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "The reservation machinery is absent here, so the idempotency that protects `enforced` must be shown to protect the counts as well — a measurement tenant with double-counted tokens is worse than useless.",
+   "file": "docs/design/hard-ceiling.md",
+   "anchor": "boundary:the design document states the condition in the sentence",
+   "note": ""
+  },
+  {
+   "claim": "What differs is where the enforcing state lives and how the invariant is established.",
+   "anchor": "descriptive:names the axis of a comparison without asserting a property"
+  },
+  {
+   "claim": "The **ledger** is the charge of record: every event key is written under its own condition, and the task role's IAM policy excludes update, delete and batch-write on that table, and the code that writes the ledger contains no such call either, so a settled charge cannot be edited or removed — not by a compromised task, and not by a future edit that only looks harmless (C4.3, pinned from both sides).",
+   "anchor": "contract:C4.3"
+  },
+  {
+   "claim": "For a detailed walkthrough of components, data model, and invariants, see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).",
+   "anchor": "descriptive:a pointer to another document"
+  },
+  {
+   "claim": "`make prove` replays the Z3 invariant checks over the **money model**.",
+   "anchor": "boundary:'over the money model' states what the checks are over"
+  },
+  {
+   "claim": "Set a pool with `stratoclave admin tenant pool-budget set` or the web console; the `TenantBudgets` schema and the reclaim invariants are documented in [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md) and [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).",
+   "anchor": "descriptive:a pointer to where the schema and its invariants are documented"
+  },
+  {
+   "claim": "An expired (reaper-reclaimed) hold returns `410` and is deliberately **not** late-billed — an external capture window is unbounded, so late-billing a reclaimed hold could break the budget invariant.",
+   "anchor": "contract:C9.3"
+  },
+  {
+   "claim": "The port, `sr_mode` plumbing, canary/breaker, divergence evidence, and the Z3/property money proofs are built and dark; the remaining step is wiring the eval client.",
+   "anchor": "evidence:not about the router's behaviour"
+  },
+  {
+   "claim": "Money invariants for this path are proven (Z3 + Hypothesis) against a fake-SR harness, which establishes the reserve/settle behaviour for every decision the port can return — including a refusal and a timeout — and establishes nothing about the real router, whose client is unwritten ([EVIDENCE.md](docs/EVIDENCE.md) states where that boundary sits).",
+   "anchor": "evidence:not about the router's behaviour"
+  },
+  {
+   "claim": "Components, data model, auth flows, invariants.",
+   "anchor": "descriptive:a table of contents entry"
+  },
+  {
+   "claim": "Vouch-by-STS replay is closed by the `sso-nonces` table: each signed `GetCallerIdentity` request is consumed once (`attribute_not_exists(nonce)`, 10-minute TTL) and the check is fail-closed — if the nonce store is unreachable the exchange returns `401` rather than trusting the request.",
+   "anchor": "contract:C6.6"
+  },
+  {
+   "claim": "A general-purpose proxy *can*: as of 2026, LiteLLM ships pre-call budget reservation (fail-closed, seven scopes, adversarial `max_tokens` clamping), so \"only we reserve before the call\" is no longer true and this README no longer claims it.",
+   "anchor": "descriptive:describes LiteLLM's reservation feature"
+  },
+  {
+   "claim": "Delegate *which model* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (16-signal classifier, incl. its own session-aware policy) via its **decision-only** `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its **own** transport and settles from first-party usage. SR decides; the ledger stays the sole charge of record; routing fails open, money fails closed",
+   "anchor": "contract:C1.6"
+  },
+  {
+   "claim": "LiteLLM *connects* many backends and, as of 2026, also reserves budget before the call (`litellm/proxy/spend_tracking/budget_reservation.py`, first committed 2026-04-30: fail-closed, seven scopes, adversarial `max_tokens` clamping).",
+   "anchor": "descriptive:describes LiteLLM's reservation feature"
+  },
+  {
+   "claim": "Routing fails open (SR down/slow ⇒ the normal resolver), money fails closed (no new spend path is created — the reserve gate is exactly today's).",
+   "anchor": "contract:C1.6"
+  },
+  {
+   "claim": "They are also why the budget code looks the way it does — a reservation is ended through exactly one object, at most once, and an ending with no usage to charge asks a versioned liability table rather than assuming an error was free.",
+   "anchor": "contract:C3.1"
+  },
+  {
+   "claim": "The reclaim itself is exactly-once by conditional transaction, so a sweep racing a settle cannot return the same reservation twice ([CONTRACTS.md](./docs/design/CONTRACTS.md) C3.1, C3.2a).",
+   "anchor": "contract:C3.1"
+  }
+ ]
+}

@@ -204,8 +204,16 @@ def test_every_cited_test_name_exists():
         for name in set(TEST_NAME.findall(text)):
             if name in defined or name in modules:
                 continue
-            # `test_foo.py` is a module reference, already covered by the path checks.
+            # `test_foo.py` is a module reference rather than a function name. The
+            # path checks cover `.md` citations, NOT `.py` ones, so skipping it
+            # outright let a citation to a deleted test MODULE through — which is
+            # how `docs/design/CONTRACTS.md` could have named a test file that does
+            # not exist and still read as enforced. Check the module instead of
+            # exempting it.
             if re.search(re.escape(name) + r'\.py', text):
+                if name not in modules:
+                    dangling.setdefault(name + ".py", set()).add(
+                        str(path.relative_to(REPO_ROOT)))
                 continue
             dangling.setdefault(name, set()).add(str(path.relative_to(REPO_ROOT)))
     assert not dangling, (

@@ -277,6 +277,26 @@ docstrings so the failure mode stays visible. The lesson is recorded here becaus
 it applies to the whole formal layer: a proof whose sanity counterexample has
 nothing to search is not evidence.
 
+### Dark code: what is proven about a path that is not switched on (added 2026-08-30)
+
+Two routing features are built and dark, and this is where their claims stop, so a
+reader does not have to infer it from a status column.
+
+**The vLLM Semantic Router integration (`mvp/sr/`).** The money invariants for this
+path are proven (Z3 + Hypothesis) against a fake-SR harness, which means the
+reserve/settle behaviour is verified for every decision the port can return —
+including a refusal and a timeout — but nothing has yet been verified against the
+real `/api/v1/eval` surface, because the client that would call it is unwritten and
+`decide()` returns `NO_DECISION`. A proof against a harness is a proof about the
+port's contract, not about the router's behaviour.
+
+**Session-aware routing (SAAR).** Superseded by the real router's own session-aware
+policy, retained because its provider-state lock (`previous_response_id` pinning) is
+a correctness need the replacement does not cover. Its invariants were narrowed after
+the incident recorded above: they now prove that no SAAR state can move an admission
+amount, rather than bounding how much it may move one. Nothing about SAAR's routing
+policy is claimed to be better than the router it stands in for.
+
 ## The honest borders (stated once, plainly)
 
 - **`deployed-live` rows are the only ones that ran outside the process.** Everything else,

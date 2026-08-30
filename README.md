@@ -116,9 +116,12 @@ in the *same* authoritative store — a conditional DynamoDB transition — and
 carries Z3-checked invariants over that transition model showing it cannot
 double-count funds. Having a reservation and having a *machine-checked invariant*
 on the model of that reservation are different guarantee levels; this project
-provides the second one. Neither the implementation nor DynamoDB's own behaviour
-is inside the proof — see [EVIDENCE.md](docs/EVIDENCE.md) for where each claim
-actually stands.
+provides the second one. This holds for the artifact as shipped, with every money
+flag at its default: what those flags gate is a stronger and separate property — a
+bound on what the settle can charge, and retention of a charge the gateway could not
+observe — and both are stated where they are claimed. Neither the implementation nor
+DynamoDB's own behaviour is inside the proof — see
+[EVIDENCE.md](docs/EVIDENCE.md) for where each claim actually stands.
 
 Mapped to the canonical five-layer AI-billing gateway, Stratoclave now ships
 all five layers:
@@ -154,14 +157,20 @@ between judgment and enforcement. It is their configuration, not a guarantee
 either project makes to the other; Stratoclave's own failure behaviour is
 specified in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
-**What this project does not claim.** It is not audit-grade today. `usage-logs`
-carry a hardcoded 90-day TTL, records are overwritable via `PutItem`, and there is
-no immutable long-term sink. What exists is an in-path settlement ledger whose
-transitions are conditional writes, with a machine-checked proof that
-double-counting cannot occur. WORM export, configurable retention, and a frozen
-export contract for the decision log are tracked gaps, not shipped properties.
-Separating "proven" from "not yet built" is the point of
-[EVIDENCE.md](docs/EVIDENCE.md).
+**What this project does not claim.** Two stores are easy to conflate here, and
+they have different properties. The **ledger** is the charge of record: every event
+key is written under its own condition, and the task role's IAM policy excludes
+update, delete and batch-write on that table, and the code that writes the ledger
+contains no such call either, so a settled charge cannot be edited or removed —
+not by a compromised task, and not by a future edit that only looks harmless
+(C4.3, pinned from both sides). Its money transitions carry a
+machine-checked invariant that double-counting cannot occur. The **usage-log** is a
+projection for reporting, and it is the store with the caveats: a hardcoded 90-day
+TTL, records overwritable via `PutItem`, and no immutable long-term sink. So what
+is not claimed is *archival* audit-grade — WORM export, configurable retention, and
+a frozen export contract for the decision log are tracked gaps rather than shipped
+properties — not that the charge itself is mutable. Separating "proven" from "not
+yet built" is the point of [EVIDENCE.md](docs/EVIDENCE.md).
 
 ## Why a gateway? (what a credential broker cannot do)
 
@@ -207,8 +216,12 @@ for where a broker is the better choice.
 - **Anthropic-compatible endpoint.** `POST /v1/messages` and `GET /v1/models`
   accept the same payloads as `api.anthropic.com`. Point `ANTHROPIC_BASE_URL`
   at your deployment and the Anthropic SDKs, Claude Code, and Claude Desktop
-  work unchanged. Supports streaming, tool calling, vision (base64
-  images), extended thinking, and prompt caching (`cache_control`).
+  work unchanged — the response bytes are pinned against the API being emulated
+  by `test_anthropic_wire_bytes.py`, so an SDK validating its own contract sees a
+  conforming response rather than one that merely parses
+  ([CONTRACTS.md](./docs/design/CONTRACTS.md) C13.2). Supports streaming, tool
+  calling, vision (base64 images), extended thinking, and prompt caching
+  (`cache_control`).
 - **OpenAI Chat Completions endpoint.** `POST /v1/chat/completions` accepts
   the same payloads as the OpenAI Chat Completions API — point
   `OPENAI_BASE_URL` at your deployment and use the OpenAI SDKs directly.
@@ -308,9 +321,19 @@ for where a broker is the better choice.
 - **Crash-resilient budget accounting.** A pooled reservation writes a sibling
   *hold* record in the same atomic write; settle and release delete it, and if
   a task is killed (OOM, deploy drain) between reserve and settle, a bounded,
-  self-healing sweep on later requests reclaims the orphaned hold so a crash
-  can never permanently strand pool budget — with no reaper process, timer, or
-  any infrastructure beyond the single DynamoDB table.
+  self-healing sweep on later requests reclaims the orphaned hold — with no
+  reaper process, timer, or any infrastructure beyond the single DynamoDB table.
+  The reclaim itself is exactly-once by conditional transaction, so a sweep racing
+  a settle cannot return the same reservation twice
+  ([CONTRACTS.md](./docs/design/CONTRACTS.md) C3.1, C3.2a). Two dimensions are not
+  covered by it, and both are gaps rather than qualifications: the sweep runs on the
+  reserve path, so a tenant that goes quiet for a month strands its hold until a
+  scheduled reconciler picks it up (C3.3 — the reconciler exists for other work;
+  registering this scan in it is the fix), and the per-user token reservation has no
+  recovery path at all, because the hold row records the pool amount and not the
+  token amount (C3.2b — carrying two more attributes through the write that already
+  exists is the fix). Both are on the open-items list with the change named, not
+  with a test waiting to be written.
 - **Three role RBAC, tenant-scoped.** `admin`, `team_lead`, and `user` roles
   are normalized into DynamoDB from a versioned
   [`permissions.json`](./backend/permissions.json). Team leads see only the
@@ -342,8 +365,9 @@ for where a broker is the better choice.
   and UDP/53 (`allowAllOutbound: false`).
 - **Auditable by construction.** Every privileged action is emitted as a
   structured JSON log to CloudWatch, keyed by the correlation ID the backend
-  injects on ingress. Emails are redacted into stable SHA-256 markers so
-  logs never leak PII.
+  injects on ingress. Emails are recorded as stable SHA-256 markers rather
+  than plaintext (`core/logging.py`), and a usage row stores the marker
+  ([CONTRACTS.md](./docs/design/CONTRACTS.md) C12.1).
 
 ## Architecture at a glance
 
@@ -677,9 +701,12 @@ amount and an expiry encoded in the sort key. Settle and release delete the
 hold in the same transaction that adjusts the pool. A killed request leaves its
 hold behind; later pooled requests run a small, bounded **sweep** that reclaims
 expired holds — decrement and delete in one conditional transaction, so a hold
-is reclaimed at most once and the pool can never be double-credited or driven
-negative, even when many requests sweep concurrently. There is no reaper
-process, no timer, and no store beyond the single `TenantBudgets` table.
+is reclaimed at most once and concurrent sweepers cannot double-credit the pool:
+the loser's transaction cancels. There is no reaper process, no timer, and no
+store beyond the single `TenantBudgets` table. The counter can still be driven
+negative one way: an operator deleting and recreating a period's pool row while a
+reservation is in flight, because a hold does not name the incarnation of the row
+it debited ([CONTRACTS.md](./docs/design/CONTRACTS.md) C3.1).
 
 Set a pool with `stratoclave admin tenant pool-budget set` or the web console;
 the `TenantBudgets` schema and the reclaim invariants are documented in
@@ -704,9 +731,13 @@ The design rule is that **the money logic is not forked**: capture reuses the
 exact settle path an inline request uses, and void reuses the exact release
 path — only the reservation context's *construction* differs (rehydrated from
 the credit ledger across two HTTP calls, rather than held in memory within
-one). So the ledger's "exactly one terminal per hold" mutual exclusion and the
-frozen-rating guarantees carry over unchanged; the only genuinely new money
-code is one idempotency record and the rehydrate.
+one). So on the transactional reserve path the ledger's "exactly one terminal per
+hold" mutual exclusion and the frozen-rating guarantees carry over unchanged,
+and the only genuinely new money code is one idempotency record and the
+rehydrate. Under `STRATOCLAVE_RESERVE_PROTOCOL=pending` they do not yet carry
+over: one replay path reads the intent's presence rather than the pool marker,
+so a refused authorize can replay as authorized
+([CONTRACTS.md](./docs/design/CONTRACTS.md) C5.4).
 
 - **`authorization_id`** is an opaque token that self-describes its hold. It is
   addressing, not authorization — every ledger read is scoped to the
@@ -804,7 +835,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Guardrails / prompt caching / embeddings | Not built-in (roadmap) | **Guardrails hooks, prompt caching, embeddings/rerank/batch** | Delegated to Bedrock (Guardrails usable directly) |
 | Observability integrations | CloudWatch Logs + dual-track span/`workflow_run` cost telemetry (no third-party exporters yet) | **Langfuse / Datadog / Prometheus / OTEL** callbacks, dashboard | OTEL |
 | Advanced routing | Budget-/quota-driven per-model cascade + cross-region failover (streaming), all live. **Semantic routing** is being delegated to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (its 16-signal classifier is the meaning-based decide layer) rather than re-implemented; the integration (architecture A': consult SR's decision-only `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its own transport) is **built but dark** — the eval client is not yet wired (see "Semantic routing via the real SR" below). Routing is fail-open, which means **when SR is unreachable the cost optimization silently degrades** to the normal resolver — visible only via the coverage metric. A home-grown session-sticky router (SAAR) and an external advisor also ship dark as the superseded interim | **Latency-based LB, cross-provider fallback, cooldowns on all paths** — clear win today | None (client → Bedrock; CRIS only) |
-| Routing-savings **proof** | **Reproducible Savings Report** (`mvp.learning.savings`; renamed from "Savings Certificate" in [docs/SCOPE.md](docs/SCOPE.md) — "certificate" overstates what the retention and export story currently support): a per-`(tenant, day)` **counterfactual** "if you'd followed the routing advice" figure over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted. Reproducibility has a stated boundary: the figure is recomputable from the rows and a pinned rate table, and the report stamps the rate version it used — but the report does not yet EMBED the rates it priced with, so a re-run after a rate change reprices rather than replays, and detail rows beyond the stored cap are not retained. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md) | LiteLLM logs spend per request, but there is **no decision↔charge join contract** to make a routing counterfactual auditable (which cheaper model would have sufficed, priced against the *same* request's real billed tokens) | None |
+| Routing-savings **proof** | **Reproducible Savings Report** (`mvp.learning.savings`; renamed from "Savings Certificate" in [docs/SCOPE.md](docs/SCOPE.md) — "certificate" overstates what the retention and export story currently support): a per-`(tenant, day)` **counterfactual** "if you'd followed the routing advice" figure over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted. Reproducible means replayable, not merely recomputable: the report embeds the four rate legs it priced each key at and the model resolutions it used, so `savings_cli --replay` reproduces the same figure at any later date and a rate change since issue cannot move it. A replay whose embedded basis is missing a key refuses rather than quietly pricing that row at today's rate. Detail rows beyond the stored cap are not retained, so a replay reproduces the figure and the classes, not every per-request line. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md) | LiteLLM logs spend per request, but there is **no decision↔charge join contract** to make a routing counterfactual auditable (which cheaper model would have sufficed, priced against the *same* request's real billed tokens) | None |
 | Proxy latency overhead | One in-region hop (ALB → Fargate) + a synchronous DynamoDB reserve per call — the cost of a hard pre-flight budget | One proxy hop (+ cache/DB lookups) | **Zero** (no proxy in the path) |
 | License | **Apache 2.0 — all features OSS**, incl. the Vouch-by-STS identity path and JSON audit logging (framed honestly: identity *attestation* + *logging*, not a SAML-terminating SSO + an immutable audit store) | MIT core **+ Commercial** — SSO/SAML and audit logs are paid Enterprise | MIT (AWS Solutions sample) |
 
@@ -825,11 +856,13 @@ machine-checked proof that double-counting cannot occur.
 > weigh maturity separately for your own risk tolerance.
 
 **Pick Stratoclave** for an AWS-committed, Bedrock-first (self-hosted GPU / any
-OpenAI-compatible backend bindable to the same proven ledger), single-region
+OpenAI-compatible backend bindable to the same machine-checked transition model),
+single-region
 (operator-chosen) shop that needs hard per-tenant dollar caps enforced pre-flight
-so a user cannot exceed them, and — unlike a post-hoc counter — cannot even
-transiently overspend under concurrency (an application-level invariant: an
-atomic snapshot-locked reservation, not a database `ConditionExpression`) —
+so a request cannot be ADMITTED past them, and — unlike a post-hoc counter —
+cannot even transiently overshoot under concurrency (an application-level
+invariant: an atomic snapshot-locked reservation, not a database
+`ConditionExpression`) —
 e.g. an internal platform team reselling Claude/codex with chargeback, without
 running Postgres or paying for LiteLLM Enterprise. **Pick a credential broker** when you must distribute to a large
 fleet via MDM, need GovCloud / EU or multi-region data residency, or cannot
@@ -862,7 +895,7 @@ money proofs are built and dark; the remaining step is wiring the eval client.
 | **authorize/capture as an external API** | Layer 3 complete | Exposes the atomic reserve as a contract so tenants can authorize→capture non-LLM actions inside their own workflows | `TransactWriteItems` reserve = authorize; the unmodified settle = capture | **Shipped** |
 | **Routing decision log** | Bridge to Layer 5 + router | Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box | `resolve_model` is deterministic; the routing-signals append log is the sink | **Shipped** |
 | **Semantic routing via the real vLLM Semantic Router** (architecture A') | The meaning/difficulty decide axis | Delegate *which model* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (16-signal classifier, incl. its own session-aware policy) via its **decision-only** `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its **own** transport and settles from first-party usage. SR decides; the ledger stays the sole charge of record; routing fails open, money fails closed | Source-agnostic `RouteDecision` port (`mvp/sr/`), per-tenant `sr_mode` tri-state (off/canary/active), deterministic session-sticky canary + breaker, SR-vs-ledger divergence evidence; money invariants proven (Z3 + Hypothesis) against a fake-SR harness | **Built, dark** — the `/api/v1/eval` client is **not yet wired** (`decide()` returns `NO_DECISION`); ships behind `SEMANTIC_ROUTER_ENABLED` + `sr_mode`, both default off. See [`backend/mvp/sr/CONTRACT.md`](./backend/mvp/sr/CONTRACT.md) for the preconditions before enabling |
-| **Session-aware routing (SAAR, home-grown interim)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch cost recorded on the decision as a comparison, never discounted off the reservation. Superseded by the real SR's own session-aware policy above, kept as the interim until the SR eval client lands | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve; blog-scenario harness runs per commit | **Shipped, dark** (`SAAR_ENABLED`) |
+| **Session-aware routing (SAAR, home-grown interim)** | Router's session axis | Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch cost recorded on the decision as a comparison, never discounted off the reservation. Superseded by the real SR's own session-aware policy above; retained for its provider-state lock, which the replacement does not cover ([EVIDENCE.md](docs/EVIDENCE.md)) | Session key + a DynamoDB memory table; decision gated inside `resolve_model`/reserve; blog-scenario harness runs per commit | **Shipped, dark** (`SAAR_ENABLED`) |
 | **Hybrid serving (self-hosted vLLM)** | Transport axis | Route selected models to an internal vLLM endpoint instead of Bedrock, priced as operator cost-recovery, so the *same* budget/rating/settle path covers self-hosted inference | `served_by` seam on the target; one transport binding at `_attempt_invoke`; SSE→converse translation | **Shipped, dark** (`HYBRID_SERVING_ENABLED`) |
 | **External advisor consult** (version-pinned, home-grown interim) | Router's central-advice axis | A central, external advisor can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money. Predates the real-SR integration; the eval-decide path above replaces it | Fail-open consult (150 ms); version-pin handshake; per-tenant opaque config in S3, validated by the advisor itself | **Shipped, dark** (`EXTERNAL_VSR_ENABLED`) |
 | **Shadow judge** (local advisory, home-grown) | Feeds the Savings Certificate | A local, rule-based judge records whether a cheaper same-family model would have sufficed — advisory only, never steering execution/routing/money — so the certificate reports a *potential* saving with no behaviour change | Per-tenant tri-state toggle (UI + routing config), **on by default for new tenants**; per-request operator kill-switch (`STRATOCLAVE_SHADOW_VSR_FORCE_OFF`); advisory logged to the decision record, classified potential-only | **Shipped**, per-tenant (default-on for new tenants) |
@@ -889,9 +922,11 @@ and keeps only the money. The steps to make it real (not a demo):
 3. **Join SR's decision to the ledger by `span_id`** for the divergence metric and
    the Savings Certificate — SR's cost figure is evidence, never the charge.
 
-Money invariants for this path are already proven (Z3 + Hypothesis) against a
-fake-SR harness; the remaining work is the eval client + the decision→registry CI
-gate. Surface any routing savings to customers only after they are joined to the
+Money invariants for this path are proven (Z3 + Hypothesis) against a fake-SR
+harness, which establishes the reserve/settle behaviour for every decision the port
+can return — including a refusal and a timeout — and establishes nothing about the
+real router, whose client is unwritten ([EVIDENCE.md](docs/EVIDENCE.md) states where
+that boundary sits). The decision→registry CI gate is the other unwritten piece. Surface any routing savings to customers only after they are joined to the
 ledger — a saving without a ledger behind it is a billing dispute waiting to happen.
 
 ## Documentation
@@ -917,7 +952,7 @@ section. Changing the behaviour means changing the document first.
 
 | Document | Governs |
 |---|---|
-| [`docs/design/CONTRACTS.md`](./docs/design/CONTRACTS.md) | The contract this gateway is judged against: every clause, the level it holds at, the test that fails if it stops holding, and the clauses it does not satisfy yet. Start here to know what is guaranteed and what is merely true today. |
+| [`docs/design/CONTRACTS.md`](./docs/design/CONTRACTS.md) | The contract this gateway is judged against: every clause, the level it holds at, the test that fails if a proven or enforced clause stops holding (or, for a clause that holds only inside a configuration, that configuration), and the clauses it does not satisfy yet. Start here to know what is guaranteed and what is merely true today. |
 | [`docs/design/hard-ceiling.md`](./docs/design/hard-ceiling.md) | The dollar ceiling for strict-mode traffic: the reservation bound, what strict mode refuses, the assumptions the guarantee rests on, and the reaper's part in it. |
 | [`docs/design/calibrated-mode.md`](./docs/design/calibrated-mode.md) | Calibrated mode — a tighter bound that trades a stated margin for admission headroom — and how a shortage is told from a sizing problem. |
 | [`docs/design/charge-loss.md`](./docs/design/charge-loss.md) | Attempts, evidence and liability: what a provider call may have cost when the gateway did not observe its outcome. The measurements behind it are in [`docs/MEASUREMENTS.md`](./docs/MEASUREMENTS.md). |
@@ -982,13 +1017,19 @@ deliberately does **not** do today:
   Claude Desktop to thousands of managed laptops with per-device policy, a
   credential broker with MDM support fits that better; Stratoclave governs the
   *inference*, not the *endpoint fleet*.
-- **Single region (though multi-AZ within it).** The gateway runs multiple
-  Fargate tasks across availability zones in `us-east-1`, so a single task or
-  AZ is not a point of failure — but everything still lives in one region.
-  There is no GovCloud partition support and no EU/AU data-residency selection,
-  and because the gateway is in the data path, a full-region outage takes your
-  inference with it — a broker that lets clients call Bedrock directly has no
-  such in-path dependency.
+- **One region at a time (though multi-AZ within it).** The deploy region is
+  yours to choose (`STRATOCLAVE_REGION`; only the CLOUDFRONT-scope WAF stack is
+  pinned to `us-east-1`, because AWS requires it), and the gateway runs multiple
+  Fargate tasks across availability zones inside it, so a single task or AZ is not
+  a point of failure. What it does not do is run in two regions at once: there is
+  no GovCloud partition support, and because the gateway is in the data path, a
+  full-region outage takes your inference with it — a broker that lets clients
+  call Bedrock directly has no such in-path dependency. Bedrock model regions are
+  configured separately, and cross-region failover for streaming calls goes only
+  to regions you listed — an empty list means no prompt byte leaves the primary,
+  and an unset list is filtered to the primary's jurisdiction rather than
+  defaulting to US (C11.1, C11.2). A `strict` residency setting refuses the CDK
+  synth outright if any Bedrock call region leaves the deploy region (C11.4).
 - **The gateway sees prompt text.** Every request transits the FastAPI service,
   which is what makes pre-flight DLP and enforcement possible — but it also
   means the operator is in scope as a data processor. Weigh this for regulated
@@ -1000,8 +1041,8 @@ deliberately does **not** do today:
   counters in DynamoDB (shared across all tasks, no Redis) — enough to blunt
   credential stuffing and budget-row contention, but not a token-bucket or a
   per-tenant inference quota, and the inline LLM endpoints themselves are not
-  IP-capped. Credit reservation is the real spend ceiling and is always atomic
-  in DynamoDB.
+  IP-capped. Credit reservation is the ADMISSION ceiling — the amount a request is
+  admitted at — and is always atomic in DynamoDB.
 - **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
   commit, run it in an account you control, and read the threat model in
   [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.
@@ -1104,7 +1145,7 @@ touches neither execution nor money is default-on for new tenants):**
 - **Semantic routing via the real vLLM Semantic Router — architecture A'**
   (`SEMANTIC_ROUTER_ENABLED` + per-tenant `sr_mode`, both default off). This is
   the intended replacement for the two home-grown pieces above. "VSR" throughout
-  this project has always meant the real
+  this repository refers to the real
   [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) — a
   16-signal classifier (domain, PII, jailbreak, complexity, tool-use, a
   session-aware policy, …) that decides *which model* a request should use.

@@ -1,9 +1,15 @@
 # The contract this gateway is judged against
 
 This document is the upstream object. Everything below is a clause the code must
-satisfy, the guarantee level it holds at, and the test that fails if it stops
-holding. A clause with no test is a statement about one commit, not about the
-project, so the third column is part of the clause rather than a note on it.
+satisfy, the guarantee level it holds at, and what makes that level true. For a
+clause at **P** or **E** the third column names the test that fails if the clause
+stops holding, and `test_contract_clauses_cite_real_tests.py` checks that the named
+test exists — a citation that has drifted onto a deleted test is the failure this
+document is most likely to have. For a clause at **B** the third column states the
+configuration inside which it holds, and for one at **N** it states what is not
+guaranteed; neither is a test, and neither is written as though it were. A clause at
+P or E with no test is a statement about one commit, not about the project, so for
+those levels the third column is part of the clause rather than a note on it.
 
 It exists because reviewing slices of the code kept surfacing new instances of the
 same defect shapes: a value the gateway could not know, substituted by a default;
@@ -45,6 +51,8 @@ been decremented in one atomic, conditional write against the authoritative stor
 | **C1.4** The identity of a limit's subject is the subject, not the spelling the caller used. Respelling a model must not create a second, empty counter. | E | `test_routing_inputs_not_invented.py`, `test_contract_model_policy.py` |
 | **C1.5** The amount reserved is an upper bound on what the settle can charge for the same request. | **B — and NOT in the default deployment** | `test_billable_legs_registry.py`. Holds where a byte-count bound prices the reservation and `STRATOCLAVE_HARD_CEILING_GATE` gates admission. That flag ships OFF, so a default deployment prices admission with an estimate its own design document proves is not a bound — see [hard-ceiling.md](hard-ceiling.md) |
 | **C1.6** A request is served only by a model inside the tenant's configured policy set. An empty admissible set is a refusal, never a widening. | E | `test_contract_model_policy.py` |
+| **C1.7** One admitted reservation buys at most one billable provider attempt. The first delivered stream event is the commit point: before it, a retry or a failover reuses the same reservation; after it, a mid-stream failure propagates rather than re-running the model. | E | `test_infrarouter_faults.py::test_mid_stream_failure_no_retry` (a 500 after the first event does not fail over) and `::test_timeout_first_event_never_settles_as_success` (an attempt that never reached the commit point is not settled as a success). The README claims this and no clause governed it |
+| **C1.8** A hard pin is identity, not membership: a pinned request is served by exactly that model or refused, and the model on the charge is the model that was reserved. | E for pin-or-refuse; **B** for the reconciliation | `test_vsr_pin.py` (`test_unservable_pin_400`, `test_valid_pin_serves_200`) refuses rather than substituting. The billed-equals-reserved half is checked offline by `test_vsr_reconcile.py::test_hard_pin_violation_when_billed_differs_from_advice` over the decision→usage join, so it is an audit that detects a violation rather than a gate that prevents one |
 
 **Not guaranteed (N).** A bound on the *bill* rather than on admission. An outcome
 the gateway cannot observe is one it cannot price, and Bedrock bills some of those
@@ -60,7 +68,7 @@ price the request was admitted under.
 | --- | --- | --- |
 | **C2.1** The reservation price and the settle price are computed by the same code over the same rate document. | E | `test_contract_price_identity.py`, `test_rating_differential.py` |
 | **C2.2** The rate document that priced the admission is recorded with the reservation, and a live rate edit in between cannot change what this request is charged. A rate that cannot be frozen refuses the request before the provider is called. | E | `test_contract_price_identity.py::test_a_rate_flip_between_reserve_and_settle_does_not_move_the_charge` |
-| **C2.3** A published derived money figure is reproducible from stored facts. | B | Recomputable from the rows and a pinned rate table; the report does not yet embed the rates it priced with, and detail rows past the stored cap are not retained |
+| **C2.3** A published derived money figure is replayable from the artifact itself: the same facts, priced the way they were priced, give the same figure however long after issue. | E | `test_savings_certificate.py` (`test_a_replay_holds_its_number_across_a_rate_change`, mutation-checked): the report embeds the four rate legs per pricing key and the model resolutions it used, and a replay handed an incomplete basis raises rather than pricing the gap live. A version stamp alone would not carry this — the effective table is the bundled floor plus a live external source plus the version's override rows, and only the last is versioned. Detail rows past the stored cap are not retained, so a replay reproduces the figure and the class breakdown rather than every line |
 | **C2.4** The set of billable legs is declared in one place; adding a leg to the charge without adding it to the estimate is impossible to do silently. | E | `test_billable_legs_registry.py` |
 | **C2.5** A rate document is one complete validated value: every leg present, every rate a non-negative integer, a version read whole or refused, and a version's rows and row COUNT immutable once written. Validated at every boundary that consumes a row — including the point read that builds the frozen snapshot, not only the bulk load. An invalid document is not a transient, so it refuses admission instead of quietly leaving the previous rates in place. | E | `test_contract_price_identity.py` |
 
@@ -71,7 +79,7 @@ recovery.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C3.1** Exactly one ending per reservation. Two mechanisms must not both be able to end the same one. | E | `test_contract_termination.py`, `test_money_lifecycle_discipline.py` |
+| **C3.1** Exactly one ending per reservation. Two mechanisms must not both be able to end the same one. | E for the mechanisms; **B** against an operator recreating the pool row | `test_contract_termination.py`, `test_money_lifecycle_discipline.py`. A hold does not name the incarnation of the pool row it debited, so deleting and recreating a period's row while a reservation is in flight lets the settle apply to a row that never held the debit — see the open items |
 | **C3.2a** …for the tenant dollar pool. | B | The hold row plus the reaper, bounded by the TTL and the next pooled request from that tenant (see C3.3) |
 | **C3.2b** …for the per-user token reservation. | **N (today)** | Nothing reaches it. The hold row records only the pool amount and `credit_used` is not period-scoped, so a crash between reserve and settle debits a user permanently — see the open items below |
 | **C3.2c** …for the per-model quota counter. | **N (today)** | Same shape as C3.2b, bounded instead by the counter's monthly TTL |
@@ -87,8 +95,9 @@ The ledger is the charge of record; the counters are a cache of it.
 | --- | --- | --- |
 | **C4.1** Every **dollar-pool** counter move carries its ledger event. RESERVE and the terminals are in the same transaction as the move; the release path is two writes with the reaper as backstop. | B + E | `test_billing_write_discipline.py`. Scoped to the pool on purpose: the per-user token counter and the per-model quota counter move with NO ledger event, so the unqualified "every counter" reading of this clause is false |
 | **C4.2** The **dollar-pool** counters are reconstructible from the events alone for every period the system claims to cover. | B | Stated boundary for pre-P2 periods in `derived_totals`. The token and quota dimensions are not reconstructible at all (C4.1) |
-| **C4.3** Events are append-only by the mechanism the docs claim. | B | Per-write conditions on each event key; IAM excludes update/delete on the ledger table, and the idempotency-status update is the one write that needs it |
+| **C4.3** Events are append-only by the mechanism the docs claim, on both sides of the boundary: the deployed policy refuses a mutating write, and the code contains none. | E | Per-write conditions on each event key; the task role's policy DENIES `UpdateItem`/`DeleteItem`/`BatchWriteItem` on the ledger table (`iac/test/ecs-stack-ledger-append-only.test.ts`) and `test_ledger_is_append_only_in_code.py` refuses such a call in `dynamo/credit_ledger.py`. This used to read "except the idempotency-status update", which was an `UpdateItem` the policy denied and no reader consulted — so it failed silently in production while standing in the document as a permitted exception. It is deleted rather than exempted |
 | **C4.4** Every event answers, without the live rate table: what was charged, at which version, for which request — and does not assert a measurement nobody made. | E | `test_contract_reporting.py`, `test_rating_differential.py` |
+| **C4.5** The usage projection of a settle agrees with the ledger terminal it projects, and a projection that cannot be written does not change what the ledger charged. | E | `test_contract_usage_projection.py`. The projection is what the savings report and the reconcile join actually price against, so a row that disagreed with the charge of record would be an invisible second answer; the money move completes before the row is attempted, so an outage on the reporting table costs a row rather than freezing a reservation |
 
 ## C5 — Idempotency identity
 
@@ -113,6 +122,7 @@ grants and what its credential was scoped to.
 | **C6.3** No identity acquires a budget implicitly. Authentication is not registration, and admission does not repair a missing one: it reads authority rather than creating it. | E | `test_contract_authority.py` |
 | **C6.4** Revocation and demotion take effect on the next request. | E | `test_jwt_verify.py`, `test_api_key_tombstone.py` |
 | **C6.5** Nothing a client sets in a request changes which tenant, identity or budget it is accounted to. | E | `test_authz_lattice.py` |
+| **C6.6** An authentication artifact is single-use where the flow requires it, and the replay check fails CLOSED when its store is unreachable. | E | `test_sso_replay_failclosed.py::test_replay_detected_raises_401`, `::test_nonce_storage_unavailable_fails_closed`. The signed `GetCallerIdentity` vouch is the artifact; failing open on an unreachable nonce store would make a table blip into an unlimited replay window |
 
 ## C7 — Configuration authority
 
@@ -147,8 +157,8 @@ whether it had been audited at all.
 | --- | --- | --- |
 | **C9.1** Once a charge is committed, no later read of that authorization reports it as absent or as a different amount. | B | `test_billing_authorize.py`. Holds on the transactional path. Under the PENDING protocol a terminal-then-retry window can answer 404 before the asynchronous RESERVE projection lands — see the open items |
 | **C9.2** Every pair of concurrent operations on one authorization resolves to one terminal state, and the loser learns which state won. | E | `test_billing_authorize.py`, `test_billing_authorize_stateful.py` (a stateful model over interleaved capture / void / reap) |
-| **C9.3** Expiry means one thing, stated. | **N (today)** | It means "reclaimable after this instant", NOT "no capture after this instant": a capture that writes its terminal before the reaper wins, even past the expiry the API reported. Enforcing the other reading needs an expiry condition inside the external capture transaction |
-| **C9.4** A client-supplied field cannot produce an unhandled server error, and an amount cannot exceed what was authorized. | B | `test_billing_authorize.py` covers the over-capture refusal on both sides. `amount_microusd` has no upper bound, so a value beyond DynamoDB's numeric range is a client-triggered 500 |
+| **C9.3** Expiry means one thing: past the instant an authorization published, it cannot be captured, and the status read says so. | E | `test_billing_authorize.py` (`test_capture_past_expiry_is_refused_while_the_hold_is_still_live`, `test_status_of_a_live_hold_past_expiry_reads_expired`), both mutation-checked. It used to mean only "reclaimable after this instant", so a capture past the published expiry still charged whenever a sweep had not run — the answer to "can I still capture?" was decided by other tenants' traffic. Void is deliberately still allowed: it returns the headroom the reaper would have returned |
+| **C9.4** A client-supplied field cannot produce an unhandled server error, and an amount cannot exceed what was authorized. | E | `test_billing_authorize.py` covers the over-capture refusal on both sides, and `test_amount_above_the_ceiling_is_a_client_error` the amount ceiling (`MAX_AMOUNT_MICROUSD`, 1e15 micro-USD — under both DynamoDB's 38-digit Number and the exact range of the double a browser parses the body into). A value at the ceiling is still a well-formed request refused on budget, so the bound is validation rather than a business limit |
 | **C9.5** The answers do not depend on which internal protocol mode the deployment runs. | **N (today)** | C9.1 and C5.4 both differ by protocol mode |
 
 ## C10 — Claims
@@ -158,17 +168,54 @@ boundary at which its evidence stops.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C10.1** A verdict word in a comparison table is not contradicted by its own cell. | **N (today)** | Nothing checks it |
-| **C10.2** Every guarantee-shaped sentence anchors to an [EVIDENCE.md](../EVIDENCE.md) row or to a clause here. | **N (today)** | Nothing checks it |
+| **C10.1** Every guarantee-shaped sentence in the covered documents is registered with the reason it is allowed to say that — a clause here, a row in [EVIDENCE.md](../EVIDENCE.md), a limit stated in the sentence, or a named debt. | E | `test_claims_are_anchored.py` over `README.md`, `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, against `contracts/claims/anchored.json`. Adding or editing such a sentence fails the build until its author points at the reason |
+| **C10.2** A sentence qualified because the unconditional version is not true yet carries a `debt:` anchor naming the clause that would make it unconditional, and that clause is on the open-items list. | E | `test_claims_are_anchored.py`. This is the clause that keeps honesty from becoming retreat: a weakened sentence and the work that would strengthen it are the same list |
+| **C10.4** A clause's own citation resolves: a test named here exists, and a named node is a function defined in the suite. | E | `test_contract_clauses_cite_real_tests.py`. The failure this prevents is the one this document is most exposed to — a test is renamed or deleted, the row keeps citing it, and an unenforced clause goes on reading as enforced while looking audited. It also requires that a clause at P or E cites something at all |
+| **C10.3** A verdict word in a comparison table is not contradicted by its own cell. | **B** | The lint treats a table cell as a sentence, so the verdict is registered like any other claim; it cannot check that a cell agrees with itself |
 
-This is the one contract with no enforcement, which by this document's own opening
-rule makes it a statement about the present commit. Both reviewers of the audit said
-so independently. The mechanism that would fix it is a documentation lint — a test
-that fails when a guarantee-shaped sentence in README/SCOPE has no anchor — and it
-is not written yet. Until it is, C10 is held by review, and the record of what
-review found is [EVIDENCE.md](../EVIDENCE.md).
+The lint cannot tell whether a sentence is TRUE — only whether someone was made to
+point at the reason. That is its honest limit, and it is the difference between "we
+are careful" and "carelessness fails the build".
 
 ---
+
+## C11 — Residency
+
+Prompt bytes leave the operator's configured region set only where the operator
+configured that.
+
+| Clause | Level | Enforced by |
+| --- | --- | --- |
+| **C11.1** The failover set is the operator's list, and an empty list or a `none`/`disabled`/`off` sentinel means single-region: a streaming request then sends prompt bytes to no other region. | E | `test_failover_regions.py` |
+| **C11.2** When the failover list is UNSET, the built-in defaults are filtered to the primary's jurisdiction, so a non-US primary does not inherit a US failover. | E | `test_failover_regions.py`, `test_failover_catalog_property.py` |
+| **C11.3** A model that is not offered in the configured regions is not catalogued, rather than being served from a region the operator did not choose. | E | `test_failover_catalog_property.py`, `test_routing_inputs_not_invented.py` |
+| **C11.4** `STRATOCLAVE_RESIDENCY=strict` fails the CDK synth when any Bedrock call region leaves the deploy region. | B | A synth-time check in `iac/`, not a request-time property: it constrains what can be deployed, and says nothing about a deployment whose synth predates it |
+
+**Not guaranteed (N).** That a region name corresponds to a legal jurisdiction. The
+`_jurisdiction` helper is a coarse prefix (`us`, `eu`, `ap`) and does not distinguish
+the UK from the EU; it filters the built-in defaults and certifies nothing.
+
+## C12 — Log hygiene
+
+An identity is recorded as a marker, not as plaintext, and a secret is not recorded
+at all.
+
+| Clause | Level | Enforced by |
+| --- | --- | --- |
+| **C12.1** A usage row records an email as a stable digest, never the address. | E | `test_security_hardening_2026_06.py::test_usage_logs_record_stores_email_hash_not_plaintext` |
+| **C12.2** A bootstrap password is not written to any log. | E | `test_bootstrap_admin_password_not_logged.py` |
+| **C12.3** An error surfaced to a caller carries no internal detail that identifies a principal or a resource. | E | `test_error_sanitization.py` |
+| **C12.4** No structured log anywhere writes an email in plaintext. | **B** | `core/logging.py` provides the marker helper and the call sites use it, but nothing sweeps every logging call, so this is the helper plus discipline rather than a checked property |
+| **C12.5** Credential material the gateway mints or relays is never written to a persistent store or a log. | **B** | By construction: the ephemeral wrapper key and the provider bearer token exist only in the request's own memory, and no repository method takes them. There is no check that a future call site could not add one — what would make this E is a static sweep of the same shape as `test_ledger_is_append_only_in_code.py`, listed under the open items |
+
+## C13 — Wire compatibility
+
+A parameter this gateway cannot honour is refused, not dropped.
+
+| Clause | Level | Enforced by |
+| --- | --- | --- |
+| **C13.1** An unsupported request parameter is rejected with a 400 naming it, rather than silently ignored — a silently dropped parameter is a request the caller believes it made. | E | `test_chat_completions.py`, `test_openai_responses_models.py` |
+| **C13.2** The bytes on the wire match the API being emulated, so an SDK that validates its own contract sees a conforming response. | E | `test_anthropic_wire_bytes.py` |
 
 ## Open items, named rather than implied
 
@@ -178,7 +225,12 @@ because a contract that quietly omits its failures is worse than no contract.
 - **C3.2 for the per-user token reservation.** The admission transaction debits up
   to three counters; the hold row records only the pool amount, so a crash between
   reserve and settle leaves `credit_used` debited with nothing to reach it. The
-  counter is not period-scoped, so it never resets.
+  counter is not period-scoped, so it never resets. The change is small and named:
+  carry the token amount and the user key on the hold write that already happens,
+  and add one decrement item to the reclaim transaction that already happens. The
+  same edit closes C3.2c for the per-model counter. It is the largest distance in
+  these documents between how weak a sentence is and how little work would remove
+  the weakness, which is why it is stated this precisely.
 - **C3.3 reachability.** The reaper runs inside a pooled reserve and scans the
   current and previous period, so a hold orphaned in a quiet month is never
   reached. A scheduled reconciler already exists for other work; giving it the
@@ -192,19 +244,34 @@ because a contract that quietly omits its failures is worse than no contract.
 - **C5.4 under the PENDING protocol.** The intent is written before the commit
   point and finalized best-effort, and one replay path reads the intent's presence
   rather than the marker, so a refused authorize can replay as authorized.
-- **C2.3 embedding.** Published savings figures cite a rate version but do not
-  embed the rates they were computed from, so a re-run after a rate change
-  reprices rather than replays.
 - **C9.1 under the PENDING protocol.** A capture retry in the window after the
   terminal commits but before the asynchronous RESERVE projection lands answers 404
   for an authorization that has already been charged.
-- **C9.3 expiry.** The instant the API reports is when the reaper MAY reclaim, not
-  when capture stops being possible. Two readings of one field.
-- **C10 has no enforcement.** The documentation lint that would make it an E clause
-  does not exist, so the claim-versus-code gap is held closed by review.
+- **C3.1 pool-row incarnation.** A hold records the tenant and period it debited but
+  not WHICH incarnation of that row. An operator deleting and recreating a period's
+  pool row with a reservation in flight makes the settle apply to a row that never
+  held the debit: `pool_reserved` goes negative and headroom is minted. Fencing is an
+  id on the row, copied onto the hold, and an equality condition on every terminal.
+- **C8.3 retention of an unobserved outcome.** `STRATOCLAVE_UNOBSERVED_HOLDS` ships
+  off, so a reclaim of a hold whose provider call had departed returns the budget. The
+  outcome is classified and recorded either way; what the flag gates is whether the
+  headroom is held back. Retaining it is the work.
+- **C12.5 has no mechanism.** Credential material is kept out of every store and log
+  by construction, and nothing stops a future call site from putting it in one. A
+  static sweep — no repository or logger call takes a value derived from the wrapper
+  key or a provider token — is what would move it from B to E.
+- **C10's lint covers three documents.** `README.md`, `docs/SCOPE.md` and
+  `docs/design/hard-ceiling.md` are anchored. `ARCHITECTURE.md`, `ADMIN_GUIDE.md` and
+  `DEPLOYMENT.md` make narrower operational claims and are not swept yet.
 - **The default deployment does not exhibit C1.5.** `STRATOCLAVE_HARD_CEILING_GATE`
   ships off so admission is priced by an estimate, and `STRATOCLAVE_UNOBSERVED_HOLDS`
   ships off so a reclaim returns budget for a call the provider measurably billed.
-  Both defaults are deliberate — an operator measures a refusal rate before
-  enforcing one — but the headline guarantee belongs to the other position of both
-  flags, and that is a property of this artifact rather than a footnote.
+  Both defaults are deliberate — an operator measures a refusal rate before enforcing
+  one — and what the flags gate is C1.5 specifically: a *bound* on the settle, and
+  retention of an unobserved charge. They do not gate the differentiator. With every
+  flag at its shipped default, admission and the money move are still one conditional
+  transition in one authoritative store (C1.1, C1.3), a reservation still reaches
+  exactly one ending (C3.1), the ledger is still the charge of record (C4.1, C4.3),
+  and the Z3-checked no-double-post invariant still holds over the transition model
+  the default path takes. The distance between the default and C1.5 is a real gap and
+  it is stated; it is not the gap between this artifact and its own headline.

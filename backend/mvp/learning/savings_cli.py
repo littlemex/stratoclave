@@ -52,10 +52,38 @@ def main(argv: list[str] | None = None) -> int:
                          "traffic (default) or 'synthetic' (a seeded demo/sample). "
                          "A synthetic certificate is loudly marked so it can never "
                          "be mistaken for an audited number.")
+    ap.add_argument("--replay", metavar="CERT.json",
+                    help="re-run this (tenant, day) at the rates and model "
+                         "resolutions a PREVIOUS certificate recorded, instead of "
+                         "at today's. This is what makes the report reproducible "
+                         "rather than merely recomputable: the same facts priced "
+                         "the same way must give the same number however long ago "
+                         "it was issued, and a rate change since then must not "
+                         "move it. Exits 1 on a mismatch.")
     args = ap.parse_args(argv)
 
-    cert = sv.savings_certificate(tenant_id=args.tenant, day=args.day,
-                                  traffic=args.traffic)
+    prior = None
+    if args.replay:
+        with open(args.replay) as fh:
+            prior = json.load(fh)
+        # Accept either a bare certificate or a stored envelope carrying one.
+        prior = prior.get("certificate", prior)
+
+    cert = sv.savings_certificate(
+        tenant_id=args.tenant, day=args.day, traffic=args.traffic,
+        rate_table=(prior or {}).get("rate_table") if prior else None,
+        model_table=(prior or {}).get("model_table") if prior else None,
+    )
+    if prior is not None:
+        before = prior.get("savings", {}).get("net_saving_microusd")
+        after = cert["savings"]["net_saving_microusd"]
+        if before != after:
+            print(f"REPLAY MISMATCH: certificate says {before}, replay computed "
+                  f"{after}. The underlying facts changed (late-settled usage, a "
+                  f"re-reconciled day); the rates did not.")
+            return 1
+        print(f"REPLAY OK: net_saving_microusd {after} reproduced from the "
+              f"certificate's own rate table.")
     s = cert["savings"]
 
     if args.json:

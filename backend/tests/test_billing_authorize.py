@@ -1174,3 +1174,159 @@ def test_settle_external_rejects_over_capture_below_endpoint(dynamodb_mock):
     # No money moved: reserved still held, nothing settled.
     assert after["pool_reserved_microusd"] == before["pool_reserved_microusd"]
     assert after["pool_settled_microusd"] == before["pool_settled_microusd"]
+
+
+# --------------------------------------------------------------------------- C9.3 expiry means one thing
+
+
+def _age_hold_without_reaping(tenant_id, period, hold_id, hold_sk):
+    """Move a live hold's expiry into the past WITHOUT sweeping it.
+
+    This is the window C9.3 is about, and it is not a contrived one: the sweep is
+    inline and traffic-driven, so a tenant that goes quiet leaves every expired
+    hold sitting exactly here. Returns the re-addressed token."""
+    import time as _t
+
+    budgets = TenantBudgetsRepository()
+    item = budgets._table.get_item(Key={"tenant_id": tenant_id, "sk": hold_sk}).get("Item")
+    assert item is not None
+    past = int(_t.time()) - 10_000
+    new_sk = _hsk(period, past, hold_id)
+    item["sk"] = new_sk
+    item["expires_at"] = past
+    budgets._table.delete_item(Key={"tenant_id": tenant_id, "sk": hold_sk})
+    budgets._table.put_item(Item=item)
+    return _mk_id(hold_id, period, new_sk)
+
+
+def test_capture_past_expiry_is_refused_while_the_hold_is_still_live(dynamodb_mock, monkeypatch):
+    """C9.3. The hold has NOT been reclaimed — the reaper has not run — so before
+    this gate the capture succeeded and charged the pool, minutes or days after the
+    instant the API had published as the authorization's expiry. Whether a client
+    could still capture depended on whether someone else's request had happened to
+    drive a sweep."""
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
+    c = _client(monkeypatch)
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "x1"},
+               json={"amount_microusd": 900_000}).json()
+    hold_id, per, hold_sk = decode_authorization_id(a["authorization_id"])
+    aged = _age_hold_without_reaping(tenant, period, hold_id, hold_sk)
+
+    before = _pool(tenant, period)
+    r = c.post(f"/api/mvp/billing/authorizations/{aged}/capture",
+               json={"actual_amount_microusd": 500_000})
+    assert r.status_code == 410
+    after = _pool(tenant, period)
+    # Refused means refused: nothing settled, and the headroom is still held for
+    # the reaper to return (which is what `expired` promises the client).
+    assert after["pool_settled_microusd"] == before["pool_settled_microusd"]
+    assert after["pool_reserved_microusd"] == before["pool_reserved_microusd"]
+
+
+def test_status_of_a_live_hold_past_expiry_reads_expired(dynamodb_mock, monkeypatch):
+    """The read has to agree with what the write will do, or `expired` still means
+    two things — one to the status endpoint and another to capture."""
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
+    c = _client(monkeypatch)
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "x2"},
+               json={"amount_microusd": 700_000}).json()
+    hold_id, per, hold_sk = decode_authorization_id(a["authorization_id"])
+    live = c.get(f"/api/mvp/billing/authorizations/{a['authorization_id']}").json()
+    assert live["status"] == "authorized"
+
+    aged = _age_hold_without_reaping(tenant, period, hold_id, hold_sk)
+    g = c.get(f"/api/mvp/billing/authorizations/{aged}")
+    assert g.status_code == 200
+    body = g.json()
+    assert body["status"] == "expired"
+    # No terminal: nothing has ended this reservation yet. Reporting a terminal
+    # here would be inventing an ending the ledger does not have.
+    assert body["terminal"] is None
+    assert body["amount_microusd"] == 700_000
+
+
+def test_void_past_expiry_still_releases(dynamodb_mock, monkeypatch):
+    """Void is not gated on expiry, and that is a decision rather than an omission:
+    it returns the headroom the reaper would have returned, so refusing it would
+    only keep budget frozen for longer."""
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
+    c = _client(monkeypatch)
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "x3"},
+               json={"amount_microusd": 600_000}).json()
+    hold_id, per, hold_sk = decode_authorization_id(a["authorization_id"])
+    aged = _age_hold_without_reaping(tenant, period, hold_id, hold_sk)
+
+    v = c.post(f"/api/mvp/billing/authorizations/{aged}/void")
+    assert v.status_code == 200 and v.json()["terminal"] == "RELEASE"
+    assert _pool(tenant, period)["pool_reserved_microusd"] == 0
+
+
+def test_expiry_never_overrides_a_recorded_capture(dynamodb_mock, monkeypatch):
+    """Ordering. The expiry gate runs only while the hold is live, so a client
+    retrying a capture that already landed keeps getting its recorded outcome
+    however long it waits. A gate placed one branch earlier would answer 410 for a
+    charge the ledger holds — replacing one lie about expiry with another."""
+    import mvp.billing_authorize as ba
+
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
+    c = _client(monkeypatch)
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "x4"},
+               json={"amount_microusd": 400_000}).json()["authorization_id"]
+    first = c.post(f"/api/mvp/billing/authorizations/{a}/capture",
+                   json={"actual_amount_microusd": 250_000})
+    assert first.status_code == 200
+
+    real = ba._now_epoch()
+    monkeypatch.setattr(ba, "_now_epoch", lambda: real + 10_000_000)
+    replay = c.post(f"/api/mvp/billing/authorizations/{a}/capture",
+                    json={"actual_amount_microusd": 250_000})
+    assert replay.status_code == 200
+    assert replay.json()["captured_microusd"] == 250_000
+    assert c.get(f"/api/mvp/billing/authorizations/{a}").json()["status"] == "captured"
+
+
+# --------------------------------------------------------------------------- C9.4 a client field cannot 500
+
+
+def test_amount_above_the_ceiling_is_a_client_error(dynamodb_mock, monkeypatch):
+    """C9.4. `amount_microusd` is a client-controlled integer that ends up in a
+    DynamoDB Number and in a JSON body a browser parses as a double. Unbounded, a
+    large enough value is an unhandled serialization error — a 500 any caller can
+    produce on demand — so the ceiling is validation, and the answer is 422."""
+    from mvp.billing_authorize import MAX_AMOUNT_MICROUSD
+
+    _seed(tenant_id="acme-http")
+    c = _client(monkeypatch)
+    for amount in (MAX_AMOUNT_MICROUSD + 1, 10 ** 40):
+        r = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": f"big{amount}"},
+                   json={"amount_microusd": amount})
+        assert r.status_code == 422, (amount, r.status_code, r.text[:200])
+
+    # The ceiling is not a business limit: a value at the ceiling is a well-formed
+    # request, refused on budget (402) by the same conditional reserve as any other
+    # amount the pool cannot cover — not rejected as malformed.
+    at_ceiling = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "atmax"},
+                        json={"amount_microusd": MAX_AMOUNT_MICROUSD})
+    assert at_ceiling.status_code == 402, at_ceiling.text[:200]
+
+
+def test_capture_amount_above_the_ceiling_is_a_client_error(dynamodb_mock, monkeypatch):
+    """The same field on the capture body, where the ceiling is defence in depth
+    rather than the only guard: an oversized capture is already refused for
+    exceeding its authorization, so this pins the outcome (a 4xx, never a 500, and
+    no money moved) rather than which of the two checks produced it. The ceiling is
+    on the field anyway so both money fields validate identically — a future
+    capture mode not bounded by an authorization inherits the bound instead of
+    needing someone to remember it."""
+    from mvp.billing_authorize import MAX_AMOUNT_MICROUSD
+
+    tenant, period = _seed(tenant_id="acme-http", user_ids=("u-http",))
+    c = _client(monkeypatch)
+    a = c.post("/api/mvp/billing/authorize", headers={"Idempotency-Key": "capmax"},
+               json={"amount_microusd": 500_000}).json()["authorization_id"]
+    before = _pool(tenant, period)
+    for amount in (MAX_AMOUNT_MICROUSD + 1, 10 ** 40):
+        r = c.post(f"/api/mvp/billing/authorizations/{a}/capture",
+                   json={"actual_amount_microusd": amount})
+        assert 400 <= r.status_code < 500, (amount, r.status_code, r.text[:200])
+    assert _pool(tenant, period) == before

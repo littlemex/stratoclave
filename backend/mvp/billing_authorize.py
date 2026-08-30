@@ -30,16 +30,20 @@ TERMINAL sk with `attribute_not_exists`, so at most one of settle/release/reclai
 lands per hold. A loser reads the terminal and maps it to a deterministic
 response (see `_terminal_response`).
 
-Expiry (Fable authcap D): a RECLAIM'd (reaper-expired) external hold cannot be
-captured — it returns 410, and is deliberately NOT late-settled (the external
-capture window is tenant-controlled and unbounded, so late-billing could break
-the budget invariant). `_settle_pool_side` raises `ExternalHoldReclaimed` for
-that case; this module maps it to 410.
+Expiry (Fable authcap D; C9.3): `expires_at_epoch` means one thing — past that
+instant the authorization cannot be captured, whether or not a sweep has run.
+Two paths reach the same 410: a hold the reaper already RECLAIM'd (deliberately
+NOT late-settled — the external capture window is tenant-controlled and
+unbounded, so late-billing could break the budget invariant; `_settle_pool_side`
+raises `ExternalHoldReclaimed`), and a hold still live but past its published
+expiry (`_expired`). Void stays available either way, because releasing is what
+the reaper would have done anyway.
 """
 from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -64,6 +68,18 @@ _TTL_DEFAULT_SECONDS = 300
 
 _TOKEN_PREFIX = "auth_"
 _TOKEN_SEP = "|"
+
+# Ceiling on any client-supplied micro-USD amount (C9.4). Not a business limit —
+# a tenant's real limit is its pool, and the conditional reserve refuses anything
+# above the headroom. This exists because an amount is a client-controlled integer
+# that reaches a DynamoDB Number (38 significant digits) and a JSON body a browser
+# parses as a double (exact to 2**53 ≈ 9e15). Without a bound, a large enough
+# amount is an unhandled serialization error — a 500 the client can trigger at
+# will — and a merely huge one round-trips through a JS client with silently
+# changed digits. 1e15 micro-USD is $1,000,000,000 per authorization, which is
+# above any real one and below both limits, the same reasoning (and the same
+# number) as `dynamo.user_tenants.UNLIMITED_CREDIT` uses for the token cap.
+MAX_AMOUNT_MICROUSD = 1_000_000_000_000_000  # 10**15 micro-USD = $1e9
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +155,58 @@ def _expected_hold_sk_shape(period: str, hold_id: str, hold_sk: str) -> str:
     return "\x00invalid-hold-sk-binding"
 
 
+def _expiry_epoch(period: str, hold_id: str, hold_sk: str) -> int:
+    """The expiry instant this authorization was issued with, read back out of its
+    own sk (`HOLD#<period>#<expiry>#<hold_id>`) — the same number `authorize`
+    returned as `expires_at_epoch`, and the same one the reaper range-scans on.
+
+    Safe to parse without re-validating: `decode_authorization_id` has already
+    established that the middle segment is all digits, and every path into an
+    external endpoint goes through it. A hold whose sk somehow carried no expiry
+    would have 404'd there rather than arriving here."""
+    middle = hold_sk[len(f"HOLD#{period}#"):len(hold_sk) - len(f"#{hold_id}")]
+    return int(middle)
+
+
+def _expired(period: str, hold_id: str, hold_sk: str) -> bool:
+    """C9.3 — expiry means ONE thing: past this instant the authorization cannot be
+    captured. It used to mean only "the reaper MAY now reclaim", which left a
+    window where the status read said the hold was live, the client's own
+    `expires_at_epoch` had passed, and a capture still charged the pool. Which of
+    those a client saw depended on whether a sweep had run — the answer to "can I
+    still capture this?" was decided by traffic.
+
+    The check is a read of the clock rather than a condition inside the settle
+    transaction, and that is sufficient rather than a compromise: expiry is
+    monotone in time, so an observation that the instant has passed can never be
+    invalidated by a concurrent write. What the non-atomic check gives up is only
+    the boundary case — a capture admitted microseconds before the instant whose
+    transaction commits just after it — and that case is INSIDE the guarantee, not
+    outside it: the money moved for an authorization that was live when the gateway
+    began the move. (An expiry condition on the hold-delete item was the other
+    option and was rejected: `_settle_pool_side` disambiguates transaction
+    cancellations by item position, which is sound only while each item's condition
+    is single-clause. Buying atomicity we do not need by making that reasoning
+    unsound is the trade that produces the next defect.)
+
+    Void is deliberately NOT gated: it only returns headroom, which is exactly what
+    the reaper would do, so refusing it would strand budget to no one's benefit.
+
+    The instant comes out of the client's own token, so it is only trustworthy
+    where the caller has already been made to prove the token addresses a real
+    hold: both call sites read the HOLD row at exactly this sk first and only
+    consult the clock when that read returned a row, so the expiry compared here
+    is the one the gateway wrote. A token carrying a forged later expiry does not
+    buy a capture — it addresses a hold that does not exist."""
+    return _now_epoch() >= _expiry_epoch(period, hold_id, hold_sk)
+
+
+def _now_epoch() -> int:
+    """Wall clock as whole seconds. A named seam so a test can move the clock past
+    an authorization's expiry without touching the clock moto and botocore read."""
+    return int(time.time())
+
+
 # ---------------------------------------------------------------------------
 # request / response models
 # ---------------------------------------------------------------------------
@@ -146,7 +214,10 @@ def _expected_hold_sk_shape(period: str, hold_id: str, hold_sk: str) -> str:
 
 class AuthorizeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    amount_microusd: int = Field(..., gt=0, description="dollar amount to hold, micro-USD")
+    amount_microusd: int = Field(
+        ..., gt=0, le=MAX_AMOUNT_MICROUSD,
+        description="dollar amount to hold, micro-USD",
+    )
     ttl_seconds: Optional[int] = Field(default=None, ge=1)
     description: Optional[str] = Field(default=None, max_length=500)
     workflow_run_id: Optional[str] = Field(default=None, max_length=200)
@@ -166,7 +237,10 @@ class AuthorizeResponse(BaseModel):
 
 class CaptureRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    actual_amount_microusd: int = Field(..., ge=0, description="amount to capture, micro-USD")
+    actual_amount_microusd: int = Field(
+        ..., ge=0, le=MAX_AMOUNT_MICROUSD,
+        description="amount to capture, micro-USD",
+    )
 
 
 class CaptureResponse(BaseModel):
@@ -344,6 +418,14 @@ def capture(
             body.actual_amount_microusd,
         )
 
+    if _expired(period, hold_id, hold_sk):
+        # C9.3: the hold is still live (the reaper has not swept yet), but the
+        # instant this authorization published as its expiry has passed, so the
+        # answer is the same one a swept hold gives. Checked AFTER the terminal
+        # branch above so a replay of a capture that already landed still returns
+        # its recorded outcome instead of turning into a 410 later.
+        raise HTTPException(status_code=410, detail="authorization expired")
+
     actual = int(body.actual_amount_microusd)
     if actual > ctx.pool_reserved_microusd:
         # captured ≤ authorized (Fable authcap E). Over-capture would spend beyond
@@ -509,9 +591,16 @@ def get_authorization(
     reserve_evt = ledger.get_reserve(tenant_id=tenant_id, period=period, hold_id=hold_id)
     if hold is not None:
         amount = int(hold.get("amount_microusd", 0))
+        # A live hold past its published expiry reports `expired`, with no
+        # terminal: the reaper has not reclaimed it yet, so no ending has been
+        # recorded, but a capture will now be refused (C9.3). Reporting
+        # `authorized` here was the other half of expiry meaning two things — a
+        # client would read "authorized" and get a 410, or read it and capture,
+        # depending only on whether a sweep had run in between.
         return AuthorizationStatus(
             authorization_id=authorization_id, tenant_id=tenant_id,
-            amount_microusd=amount, status="authorized",
+            amount_microusd=amount,
+            status="expired" if _expired(period, hold_id, hold_sk) else "authorized",
         )
     amount = int((reserve_evt or {}).get("reserved_delta_microusd", 0))
     terminal = ledger.get_terminal(tenant_id=tenant_id, period=period, hold_id=hold_id)
