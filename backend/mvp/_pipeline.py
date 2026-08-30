@@ -4606,6 +4606,41 @@ def _reported_count(v: Optional[int]) -> Optional[int]:
     return max(int(v), 0)
 
 
+def _refuse_a_virtual_model_of_record(model_id: str) -> None:
+    """A virtual registry entry may never be the model a charge is recorded against.
+
+    A `served_by="semantic-router"` entry names a router POOL rather than a concrete
+    model. It exists to be a candidate chain and a reservation entry point, and the
+    model of record has to be whatever the router actually executed, normalised from
+    the replay evidence and priced at the snapshot the reservation froze. Pricing the
+    pool entry instead would make the bill say "what the router was asked for" rather
+    than "what ran" — the one substitution that turns routing from an input into a
+    source of money, and the reason a router can sit outside this gateway at all.
+
+    The registry already refuses to load a malformed `virtual` flag. That is a
+    different guarantee: it says the flag is well-formed, not that nothing bills
+    against it. This is the second half, at the only place a charge of record is
+    established, so an adapter written later cannot reach past it.
+
+    Raising rather than logging: there is no correct amount to charge here. A fallback
+    to the pool entry's own rate is exactly the convenience that would look harmless in
+    review and would silently invalidate every drift measurement taken against it.
+    """
+    try:
+        from .models import resolve_model
+    except Exception:  # noqa: BLE001 — a registry that cannot be imported is not
+        return          # something this guard should turn into a settle failure.
+    try:
+        entry = resolve_model(model_id)
+    except Exception:  # noqa: BLE001 — an unresolvable id is another layer's error;
+        return          # this guard only answers the virtual question.
+    if entry is not None and getattr(entry, "virtual", False):
+        raise ValueError(
+            f"{model_id!r} is a virtual registry entry and cannot be the model of "
+            f"record for a charge: settle with the model that actually executed, "
+            f"normalised from the router-replay evidence")
+
+
 def settle_reservation_and_log(
     *,
     user,
@@ -4642,6 +4677,7 @@ def settle_reservation_and_log(
     `tenants_repo` is accepted positionally for backward compatibility;
     `context` (returned by reserve_credit) drives the pool settlement.
     """
+    _refuse_a_virtual_model_of_record(model_id)
     actual = max(actual_input_tokens + actual_output_tokens, 0)
 
     # ----- token side (unchanged semantics) -----
