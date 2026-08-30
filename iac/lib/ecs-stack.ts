@@ -294,6 +294,84 @@ export class EcsStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    // RETENTION EXPOSURE (C8.3's missing watcher). `STRATOCLAVE_UNOBSERVED_HOLDS`
+    // defaults ON, so a reservation whose provider call departed and whose outcome was
+    // never observed is HELD rather than returned. That record is correct — an abandoned
+    // Bedrock call is billed for the full generation — but it moves the failure mode:
+    // retentions accumulate against a tenant's headroom and, without these alarms, the
+    // first signal an operator gets is a refusal for an unrelated request.
+    //
+    // The backend emits `retention_exposure` with the standing figures for one tenant and
+    // period: when a retention is taken, when one is resolved, and from a sweep at most
+    // once per minute per tenant per task so a persistent exposure keeps producing
+    // datapoints. That last part is why these alarms can use missing=NOT_BREACHING
+    // honestly: no retentions means no line, which really is nothing to report, while an
+    // UNRESOLVED retention keeps reporting and cannot clear the alarm by going quiet.
+    //
+    // The metrics carry NO tenant dimension, deliberately: a per-tenant dimension is
+    // unbounded cardinality on a filter that runs over every backend log line. So the
+    // alarm is on the WORST tenant (Maximum) and the log line names which one. That is the
+    // right shape anyway — one saturated tenant is the incident, not the fleet average.
+    const mkExposureFilter = (field: string, metricName: string) =>
+      logGroup.addMetricFilter(`RetentionMF${metricName}`, {
+        filterName: `${prefix}-retention-${metricName}`,
+        filterPattern: logs.FilterPattern.all(
+          logs.FilterPattern.stringValue('$.event', '=', 'retention_exposure'),
+          logs.FilterPattern.exists(`$.${field}`),
+        ),
+        metricNamespace: METRIC_NS,
+        metricName,
+        metricValue: `$.${field}`,
+        // No defaultValue: a gauge, so an unrelated log line must not push a zero into it
+        // and drag a Maximum down.
+      });
+
+    const heldFractionMf = mkExposureFilter('held_fraction', 'RetentionHeldFraction');
+    const retentionAgeMf = mkExposureFilter(
+      'oldest_retention_age_seconds', 'RetentionOldestAgeSeconds');
+    // Absolute exposure as a metric with no alarm: the fraction says who is at risk, this
+    // says how much money is parked, and an operator reconciling an invoice wants both.
+    mkExposureFilter('held_microusd', 'RetentionHeldMicroUsd');
+
+    // (1) Saturation: unresolved retentions are holding a quarter of some tenant's pool.
+    // Well before a refusal, and far enough above noise that a single stuck retention on a
+    // small pool does not page. 1-minute periods with 3/3 rather than 5-minute buckets,
+    // because the emission cadence is ~1/minute while retentions exist (the same reasoning
+    // as PoolItemSizeBytes above, in the other direction): a provider outage fills headroom
+    // in minutes, so the alarm has to be able to resolve in minutes.
+    new cloudwatch.Alarm(this, 'RetentionSaturation', {
+      alarmName: `${prefix}-RetentionHeldFraction`,
+      alarmDescription:
+        'Unresolved retained reservations are holding >25% of a tenant\'s dollar pool. The money may genuinely have been spent (an unobserved provider call is billed), so this is not necessarily a bug — but the headroom is gone until an operator settles each retention at the figure the provider\'s record shows or releases it when that record shows none. Find the tenant in the retention_exposure log line.',
+      metric: heldFractionMf.metric({
+        statistic: 'Maximum', period: cdk.Duration.minutes(1),
+      }),
+      threshold: 0.25,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // (2) Staleness: a retention nobody has resolved for two days. A different failure from
+    // saturation and not detectable by the same threshold — a high fraction that is minutes
+    // old is an incident in progress, the same fraction two weeks old is an operator who
+    // stopped looking, and only the age separates them. Hourly periods: this is a slow
+    // signal and paging on it inside a minute would be noise.
+    new cloudwatch.Alarm(this, 'RetentionStale', {
+      alarmName: `${prefix}-RetentionOldestAgeSeconds`,
+      alarmDescription:
+        'A retained reservation has gone unresolved for over 48 hours. Retention is not a state anything clears on its own: it ends only when an operator settles it at the provider\'s figure or releases it. Budget stays held until then.',
+      metric: retentionAgeMf.metric({
+        statistic: 'Maximum', period: cdk.Duration.hours(1),
+      }),
+      threshold: 48 * 60 * 60,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // RESERVE ORACLE mismatch (golden-reference migration, docs/design/
     // pending-protocol.md): the pending reserve's write-set diverged from what the
     // FROZEN transaction golden predicted for the same input. This is the signal

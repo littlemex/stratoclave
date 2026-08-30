@@ -29,6 +29,23 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
+## [Unreleased]
+
+### Added
+
+- **Exposure accounting and alarms for retained reservations.** `STRATOCLAVE_UNOBSERVED_HOLDS`
+  defaults on as of 1.0.0, so retentions hold budget; until now nothing pushed the held
+  amount anywhere and the first signal of an outage filling a tenant's headroom was a
+  refusal for an unrelated request. The backend emits `retention_exposure` with the
+  standing figures per tenant and period — when a retention is taken, when one is
+  resolved, and from a sweep while any remain unresolved so the metric cannot go silent
+  while the money is still held. Two alarms read it: saturation on the fraction of a pool
+  that retentions hold, and staleness on the oldest unresolved one, kept separate because
+  no single threshold distinguishes an incident in progress from an operator who stopped
+  looking. This is the accounting `charge-loss.md` section 7 names as the precondition for
+  ever releasing an unobserved hold automatically; the automatic release itself still
+  needs a capped write-off budget and remains unbuilt.
+
 ## [1.0.0] — 2026-08-31
 
 The first release that is not alpha. 290 commits since v0.2.0. The theme is that the
@@ -146,10 +163,12 @@ money paths lose nothing on the failure routes.
 Named here because they are the honest state, and in full at the bottom of
 [`CONTRACTS.md`](docs/design/CONTRACTS.md).
 
-- **Nothing watches `held_microusd`.** With retention on by default, a provider outage
-  accumulates retentions against a tenant's headroom and the first signal an operator
-  gets is a refusal. Retention is the correct behaviour — the money may really have been
-  spent — but the exposure needs an alarm, and that alarm is the next piece of work.
+- **Nothing drains the retention queue but a human.** The exposure is now reported and
+  alarmed (saturation on the fraction of a pool that retentions hold, staleness on the
+  oldest unresolved one), so a provider outage filling a tenant's headroom is visible
+  rather than arriving as a refusal. Ending a retention is still manual by design:
+  `charge-loss.md` section 7 requires a capped write-off budget before anything releases
+  an unobserved hold automatically, and that budget does not exist.
 - **The ledger's hot path pays for its atomicity.** The admission transaction is a
   multi-item `TransactWriteItems` on a hot row; single-item conditional updates and
   pool-row sharding are designed and not built.

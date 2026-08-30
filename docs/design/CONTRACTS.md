@@ -363,10 +363,9 @@ without paying a cost the clause names.
   clause rather than because the sentence is safe; the remaining nine are sentences a
   clause should not cover at all.
 - **C8.3 has no watcher on the retention.** The reaper holds a departed call's
-  reservation whose provider call departed, and nothing watches `held_microusd`, so a
-  provider outage can fill a tenant's headroom and the first signal is a refusal. See
-  the exposure item below: the flag now defaults on, so the watcher is no longer
-  optional.
+  reservation whose provider call departed. A provider outage can still fill a tenant's
+  headroom, but it is no longer silent: see the exposure item below for the alarms, and
+  note that draining the queue is still a human's job.
 - **C12.5 has no mechanism.** Credential material is kept out of every store and log
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper
@@ -393,11 +392,13 @@ without paying a cost the clause names.
   promise anything about it. The omission is named rather than silent —
   `guarantee_terms_deliberately_absent` in the same config — so a reader can tell the
   gap is a judgement made on purpose and not an oversight nobody noticed.
-- **Nothing watches `held_microusd`, and retention is now on by default.** This was
-  filed as the reason the flag stayed off. The flag no longer stays off, so the item
-  changed shape rather than closing: under a provider outage, retentions accumulate
-  against a tenant's headroom and the first signal an operator gets is a refusal.
-  Retention is correct — the money may really have been spent — but a mechanism whose
-  failure mode is a silent lockout needs the exposure surfaced. `held_microusd` is
-  reported; the alarm on it is the work, and it is now on the enforced path rather
-  than behind a flag nobody turned on.
+- **Retention exposure is reported and alarmed; what remains is that nothing ENDS a
+  retention but a human.** The watcher this item asked for exists: `retention_exposure`
+  carries the standing figures per tenant and period, and two alarms read it — saturation
+  on the fraction of a pool that retentions hold, and staleness on the oldest unresolved
+  one. Saturation and staleness are separate alarms because no single threshold separates
+  an incident in progress from an operator who stopped looking. What is still open is the
+  ending: a retention ends only when someone settles it at the figure the provider's own
+  record shows or releases it when that record shows none, and `charge-loss.md` section 7
+  is explicit that automating that needs a capped write-off budget on top of this
+  accounting. The alarms make the queue visible; they do not drain it.

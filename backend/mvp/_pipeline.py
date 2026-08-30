@@ -1016,6 +1016,11 @@ def resolve_retained_hold(
         # its own failure must not un-confirm a release that already landed.
         _reverse_retained_hold_counters_best_effort(
             hold, tenant_id=tenant_id, period=period, hold_id=hold_id)
+        # Exposure just fell. Forced, so the metric comes back DOWN promptly and an
+        # operator who resolved a retention sees the effect rather than waiting out a
+        # throttle window and wondering whether the resolution worked.
+        _exposure().emit_exposure(
+            budgets, tenant_id, period, reason="resolved_release", force=True)
         return outcome
     _settle_pool_side(
         _RetentionActor(tenant_id), ctx, actual,
@@ -1033,6 +1038,8 @@ def resolve_retained_hold(
             "attempt_marker": (retained or {}).get("attempt_marker"),
         },
     )
+    _exposure().emit_exposure(
+        budgets, tenant_id, period, reason="resolved_settle", force=True)
     return _resolution_outcome(ledger, tenant_id, period, hold_id,
                                expected="SETTLE", expected_amount=actual)
 
@@ -1403,6 +1410,11 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
     reclaimed = 0
     retained = 0
     now_epoch = int(time.time())
+    # Standing exposure, throttled to at most once per tenant/period per interval in this
+    # process. Before the early return below, so a tenant whose retentions are sitting
+    # there keeps producing datapoints: an alarm that stops receiving them treats the
+    # exposure as gone, which is the opposite of what a persistent retention means.
+    _exposure().emit_exposure(budgets, tenant_id, period, reason="sweep")
     # The SK embeds the (zero-padded) expiry, so this range scan returns only
     # already-expired holds, oldest-expiry first, and `Limit` bounds it by
     # expiry — no filter, no risk of an orphan being buried behind live holds.
@@ -1460,6 +1472,10 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
         # from the provider's bill, or release when the bill shows nothing).
         if _retain_instead_of_returning(budgets, tenant_id, period, hold, hold_id):
             retained += 1
+            # Exposure just rose. Forced: this is the edge an operator wants, and an
+            # outage is a burst of these inside one throttle window.
+            _exposure().emit_exposure(
+                budgets, tenant_id, period, reason="retained", force=True)
             continue
         try:
             _reaper_items = [
@@ -4604,6 +4620,14 @@ def _reported_count(v: Optional[int]) -> Optional[int]:
     if v is None:
         return None
     return max(int(v), 0)
+
+
+def _exposure():
+    """The exposure reporter, imported lazily so this module keeps its import graph and a
+    test can patch `mvp.retention_exposure` and have every call site see the patch."""
+    from . import retention_exposure
+
+    return retention_exposure
 
 
 def _refuse_a_virtual_model_of_record(model_id: str) -> None:
