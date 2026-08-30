@@ -790,7 +790,31 @@ def actual_cost_microusd(
     charge is pinned to the admitted version. Kept for callers that only need a
     quick estimate and do not span a reserve→settle boundary.
     """
-    rate = _cache.get(pricing_key, repo)
+    return actual_cost_from_rate(
+        _cache.get(pricing_key, repo),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
+
+
+def actual_cost_from_rate(
+    rate: object,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> int:
+    """Settled cost from real usage at a rate the caller already holds.
+
+    The counterpart of `estimate_cost_from_rates` on the settle side, and the one
+    entry point that lets a caller price at a rate it can name: a report that has
+    to be reproducible embeds the rates it used and prices through here, instead of
+    re-reading a table that has since moved. `actual_cost_microusd` is this
+    function over a live read, so the two can never diverge in arithmetic.
+    """
     return (
         _mtok_cost(max(input_tokens, 0), rate.input_per_mtok_microusd)
         + _mtok_cost(max(output_tokens, 0), rate.output_per_mtok_microusd)

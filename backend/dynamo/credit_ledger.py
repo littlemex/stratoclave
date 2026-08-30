@@ -650,7 +650,7 @@ class CreditLedgerRepository:
         expires_at_epoch: int, capture_mode: str, request_fingerprint: str,
         pricing_key: Optional[str] = None,
     ) -> None:
-        """Put the IDEMP intent row (status=IN_PROGRESS), conditional on
+        """Put the IDEMP intent row, conditional on
         attribute_not_exists(pk) — a duplicate Idempotency-Key raises the client's
         ConditionalCheckFailedException, which the caller resolves by reading
         state. Resource API (plain values)."""
@@ -669,38 +669,33 @@ class CreditLedgerRepository:
             "expires_at": int(expires_at_epoch),
             "capture_mode": capture_mode,
             "request_fingerprint": str(request_fingerprint),
-            "idemp_status": "IN_PROGRESS",
             "ts_ms": _now_ms(),
         }
         if pricing_key:
             item["pricing_key"] = str(pricing_key)
         self._table.put_item(Item=item, ConditionExpression="attribute_not_exists(pk)")
 
-    def mark_idemp_completed_best_effort(self, *, tenant_id, period, idempotency_key) -> None:
-        """IN_PROGRESS -> COMPLETED (best-effort; replay works off marker+status
-        even if this doesn't land). Never raises."""
-        self._set_idemp_status(tenant_id, period, idempotency_key, "COMPLETED")
-
-    def mark_idemp_failed_best_effort(self, *, tenant_id, period, idempotency_key) -> None:
-        """IN_PROGRESS -> FAILED so a replay of a genuinely-exhausted key replays
-        the 402 rather than re-attempting. Best-effort; never raises."""
-        self._set_idemp_status(tenant_id, period, idempotency_key, "FAILED")
-
-    def _set_idemp_status(self, tenant_id, period, idempotency_key, status) -> None:
-        # Try the current location, then the period partition a pre-migration
-        # intent would sit in, so finalizing an in-flight authorization written by
-        # the previous version still lands.
-        for pk in (idemp_pk(tenant_id), ledger_pk(tenant_id, period)):
-            try:
-                self._table.update_item(
-                    Key={"pk": pk, "sk": idemp_sk(idempotency_key)},
-                    UpdateExpression="SET idemp_status = :s",
-                    ConditionExpression="attribute_exists(pk)",
-                    ExpressionAttributeValues={":s": status},
-                )
-                return
-            except Exception:  # noqa: BLE001 — best-effort finalize
-                continue
+    # There is deliberately NO finalize-the-intent method. There used to be one —
+    # an UpdateItem setting `idemp_status` to COMPLETED or FAILED — and it was two
+    # things at once: a write no reader consulted, and the single write in this
+    # module that needed UpdateItem on a table whose deployed IAM policy explicitly
+    # DENIES UpdateItem (`CreditLedgerNoMutateOrDelete` in `iac/lib/ecs-stack.ts`).
+    # It was best-effort and swallowed its exception, so in production it failed
+    # silently on every call and nothing noticed, while the contract document cited
+    # it as the one legitimate exception to "the ledger is append-only". Two claims
+    # were false for the same reason.
+    #
+    # Deleting it rather than reshaping it into an append-only status event is the
+    # right move because the decisiveness it appeared to provide was never taken
+    # from here: `_pending_replay_result` branches on the pool marker and the HOLD
+    # row's own status, which lives in the budgets repository — a different table,
+    # where an update is permitted and is what `mark_pending_failed_best_effort`
+    # writes. The status on the ledger row was decoration on the one store where
+    # decoration is most expensive.
+    #
+    # `test_ledger_is_append_only_in_code.py` now makes that a mechanism: no write
+    # in this module may use UpdateItem or DeleteItem, so the Python side cannot
+    # drift back away from the IAM policy in silence.
 
     def get_terminal(
         self, *, tenant_id: str, period: str, hold_id: str

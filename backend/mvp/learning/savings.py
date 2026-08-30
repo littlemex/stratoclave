@@ -64,6 +64,108 @@ def _default_pricer() -> Callable[[str, int, int], int]:
     return _price
 
 
+def _recording_pricer() -> tuple[Callable[[str, int, int], int], dict[str, dict]]:
+    """A live pricer that also records the exact rate it used for each key.
+
+    This is what makes the report reproducible rather than merely recomputable. A
+    stamped version label is not enough on its own: the effective table is the
+    bundled floor, plus whatever an external price source is serving right now,
+    plus the version's override rows — and only the last of those three is
+    versioned and immutable. So a re-run "at the stamped version" would still
+    reprice any key the version did not override. Recording the four legs actually
+    charged, per key, is recoverable whatever the rate came from.
+    """
+    from ..pricing import actual_cost_from_rate, rate_for
+    from ..rates import RATE_FIELDS
+
+    used: dict[str, dict] = {}
+
+    def _price(pricing_key: str, input_tokens: int, output_tokens: int) -> int:
+        rate = rate_for(str(pricing_key))
+        used[str(pricing_key)] = {f: int(getattr(rate, f)) for f in RATE_FIELDS}
+        return actual_cost_from_rate(
+            rate, input_tokens=input_tokens, output_tokens=output_tokens)
+
+    return _price, used
+
+
+def _recording_resolver() -> tuple[Callable[[str], Optional[dict]], dict[str, Optional[dict]]]:
+    """The live model resolver, recording every answer it gave.
+
+    The rate table alone does not make the report reproducible: the fold also asks
+    the model registry which pricing key and which provider model id a name maps
+    to, and a model retired between the run and the re-run would silently move its
+    rows from `counterfactual` to `unpriceable`. The answers are part of the basis,
+    so they are recorded with the rates. A None is recorded too — "this model had
+    no registry entry then" is itself a fact the replay has to reproduce."""
+    resolve = _default_resolver()
+    seen: dict[str, Optional[dict]] = {}
+
+    def _r(model: str) -> Optional[dict]:
+        answer = resolve(str(model))
+        seen[str(model)] = answer
+        return answer
+
+    return _r, seen
+
+
+def _replay_resolver(model_table: dict) -> Callable[[str], Optional[dict]]:
+    """Resolve strictly from a previous report's recorded answers."""
+    table = {str(k): v for k, v in dict(model_table).items()}
+
+    def _r(model: str) -> Optional[dict]:
+        try:
+            return table[str(model)]
+        except KeyError:
+            raise UnresolvedModelOnReplay(
+                f"model {model!r} is not in the report's embedded model table, so "
+                "this run cannot be a replay of it"
+            ) from None
+
+    return _r
+
+
+class UnpricedKeyOnReplay(KeyError):
+    """A replay asked for a key the embedded table does not carry.
+
+    Raised rather than resolved live, because falling back to the live table is the
+    failure the embedding exists to prevent: it would produce a number that looks
+    like a replay and is partly a reprice, with nothing in the output saying which
+    rows were which."""
+
+
+class UnresolvedModelOnReplay(KeyError):
+    """A replay asked the registry about a model the embedded table does not carry.
+    Refused for the same reason as `UnpricedKeyOnReplay`."""
+
+
+def _replay_pricer(rate_table: dict) -> Callable[[str, int, int], int]:
+    """Price strictly from an embedded rate table (a previous report's own record).
+
+    Same arithmetic as the live pricer, by construction — both call
+    `actual_cost_from_rate`."""
+    from ..pricing import actual_cost_from_rate
+    from ..rates import Rate
+
+    rates = {
+        str(k): Rate(**{f: int(v[f]) for f in Rate.__dataclass_fields__})
+        for k, v in dict(rate_table).items()
+    }
+
+    def _price(pricing_key: str, input_tokens: int, output_tokens: int) -> int:
+        try:
+            rate = rates[str(pricing_key)]
+        except KeyError:
+            raise UnpricedKeyOnReplay(
+                f"pricing key {pricing_key!r} is not in the report's embedded rate "
+                "table, so this run cannot be a replay of it"
+            ) from None
+        return actual_cost_from_rate(
+            rate, input_tokens=input_tokens, output_tokens=output_tokens)
+
+    return _price
+
+
 def _default_resolver() -> Callable[[str], Optional[dict]]:
     """model alias/id -> {'pricing_key', 'bedrock_model_id'} or None. Injected."""
     from ..models import resolve_model
@@ -263,7 +365,9 @@ def _bump(d: dict, k: str) -> None:
 
 
 def savings_certificate(*, tenant_id: str, day: str,
-                        traffic: str = "real") -> dict[str, Any]:
+                        traffic: str = "real",
+                        rate_table: Optional[dict] = None,
+                        model_table: Optional[dict] = None) -> dict[str, Any]:
     """Assemble a (tenant, day) Savings Certificate: join VSR decisions against
     billed usage (`vsr_reconcile.reconcile_day`, which carries billed tokens),
     then fold the model-vs-model counterfactual. Stamps the rate-table version
@@ -281,9 +385,27 @@ def savings_certificate(*, tenant_id: str, day: str,
     from ..pricing import effective_rates
 
     report = vr.reconcile_day(tenant_id=tenant_id, day=day)
-    savings = summarize_savings(report["rows"])
+    if rate_table is None:
+        price, used_rates = _recording_pricer()
+        resolve, used_models = _recording_resolver()
+        replayed = False
+    else:
+        price, used_rates = _replay_pricer(rate_table), dict(rate_table)
+        resolve = _replay_resolver(model_table or {})
+        used_models = dict(model_table or {})
+        replayed = True
+    savings = summarize_savings(report["rows"], price=price, resolve=resolve)
     rate_version, _, _ = effective_rates()
     return {"tenant_id": tenant_id, "day": day,
             "traffic": traffic,
             "rate_version": rate_version or "builtin-defaults",
+            # The rates this number was computed at, per pricing key, embedded in
+            # the artifact (C2.3). Pass it back as `rate_table` to REPLAY the
+            # report — every leg the counterfactual arithmetic touched is here, so
+            # the re-run is the same computation and not a recomputation at
+            # whatever the table says today. `replayed` records which of the two
+            # this document is, because a reader cannot otherwise tell.
+            "rate_table": used_rates,
+            "model_table": used_models,
+            "replayed": replayed,
             "savings": savings, "reconcile": report["summary"]}

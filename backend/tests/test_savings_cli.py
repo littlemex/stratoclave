@@ -100,3 +100,74 @@ def test_synthetic_traffic_loudly_banners(monkeypatch, capsys):
     assert rc == 0
     # a synthetic sample can NEVER be mistaken for a real audited number.
     assert "TRAFFIC: SYNTHETIC" in out and "NOT A REAL" in out
+
+
+# ------------------------------------------------------------------ C2.3 replay
+
+
+def test_replay_passes_the_prior_basis_and_reports_agreement(monkeypatch, capsys, tmp_path):
+    """`--replay` is the operator-visible half of C2.3: it hands a previous report's
+    own rate and model tables back to the computation, so the figure is reproduced
+    rather than recomputed at today's prices."""
+    prior = _fake_cert(net=80_000, positive=80_000, negative=0)
+    prior["rate_table"] = {"claude-opus-4-7": {"input_per_mtok_microusd": 1}}
+    prior["model_table"] = {"claude-opus-4-7": {"pricing_key": "opus",
+                                               "bedrock_model_id": "us.x"}}
+    path = tmp_path / "cert.json"
+    path.write_text(json.dumps(prior))
+
+    seen: dict = {}
+
+    def _fake(**kw):
+        seen.update(kw)
+        return prior
+
+    monkeypatch.setattr(sv, "savings_certificate", _fake)
+    rc = savings_cli.main(["--tenant", "acme", "--day", "20260720",
+                          "--replay", str(path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert seen["rate_table"] == prior["rate_table"]
+    assert seen["model_table"] == prior["model_table"]
+    assert "REPLAY OK" in out
+
+
+def test_replay_reports_a_mismatch_as_a_failure(monkeypatch, capsys, tmp_path):
+    """A replay that does not reproduce the figure exits non-zero. The facts changed
+    (late-settled usage, a re-reconciled day) — the rates did not, which is exactly
+    what makes the disagreement worth surfacing rather than printing quietly."""
+    prior = _fake_cert(net=80_000, positive=80_000, negative=0)
+    prior["rate_table"] = {}
+    prior["model_table"] = {}
+    path = tmp_path / "cert.json"
+    path.write_text(json.dumps(prior))
+
+    monkeypatch.setattr(sv, "savings_certificate",
+                        lambda **kw: _fake_cert(net=70_000, positive=70_000, negative=0))
+    rc = savings_cli.main(["--tenant", "acme", "--day", "20260720",
+                          "--replay", str(path)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REPLAY MISMATCH" in out
+
+
+def test_replay_accepts_a_stored_envelope(monkeypatch, capsys, tmp_path):
+    """A persisted certificate is wrapped in an envelope (`certificate`, plus the
+    revision/supersedes chain), and that is the file an operator actually has. Both
+    shapes are accepted so reproducing a stored figure does not require unwrapping
+    it by hand first."""
+    prior = _fake_cert(net=80_000, positive=80_000, negative=0)
+    prior["rate_table"] = {"k": {"input_per_mtok_microusd": 1}}
+    prior["model_table"] = {"m": None}
+    path = tmp_path / "envelope.json"
+    path.write_text(json.dumps({"record_type": "savings_certificate", "revision": 0,
+                                "certificate": prior}))
+
+    seen: dict = {}
+    monkeypatch.setattr(sv, "savings_certificate",
+                        lambda **kw: (seen.update(kw), prior)[1])
+    rc = savings_cli.main(["--tenant", "acme", "--day", "20260720",
+                          "--replay", str(path)])
+    assert rc == 0
+    assert seen["rate_table"] == prior["rate_table"]
+    assert "REPLAY OK" in capsys.readouterr().out

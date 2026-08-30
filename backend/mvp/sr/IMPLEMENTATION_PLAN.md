@@ -80,7 +80,7 @@ def reserve_credit_for_pool(
     return PoolReservation._mint(inner, pool, max_tokens_cap)  # §3
 ```
 
-**CIゲート**: `tests/ci/test_sr_pool_pricing_gate.py` — SR pool config(全pool)の全 model_id について `registry.lookup(m).unit_price > 0` を assert。加えて「default fail-open model ∈ 各 tenant の C」を config lint で強制。これが割れたら **マージ不可**(money-path の前提破壊)。
+**CIゲート**(未実装・この計画を実装するときに書くもの): SR pool config(全pool)の全 model_id について `registry.lookup(m).unit_price > 0` を assert。加えて「default fail-open model ∈ 各 tenant の C」を config lint で強制。これが割れたら **マージ不可**(money-path の前提破壊)。
 
 ---
 
@@ -114,7 +114,7 @@ async def forward_to_sr(
 ) -> SRForwardResult: ...
 ```
 
-- **型**: mypy strict + `tests/typing/test_forward_requires_reservation.py`(`forward_to_sr(request=..., transport=...)` が `mypy --strict` でエラーになることを CI で assert する negative typing test)。`__init__` の raise でランタイム迂回も封鎖。
+- **型**: mypy strict + 未実装の型負テスト(`forward_to_sr(request=..., transport=...)` が `mypy --strict` でエラーになることを CI で assert する negative typing test)。`__init__` の raise でランタイム迂回も封鎖。
 - **network**: SR への egress は money-path service account の NetworkPolicy のみに許可。他 pod から SR へは L3 で到達不能。manifests は `deploy/netpol/sr-money-path.yaml` に置き、CI で「SR への egress を持つ SA が1つだけ」を検査。
 - **鍵**: forward リクエストに `x-strato-reservation-sig = HMAC(k, reservation_id|tenant|max_tokens|pool_hash)` を付与。鍵 `k` は money-path pod のみに mount(`ledger/hmac.py` 以外から import 不可)。SR 側は sig 無し/不正を 401。→ 仮に型・networkを迂回しても reservation_id 無しでは署名が作れない。
 

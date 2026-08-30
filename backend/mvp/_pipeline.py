@@ -3195,9 +3195,12 @@ def _reserve_external_pending(
     if outcome == budgets.RESERVE_EXHAUSTED:
         # Genuine exhaustion: no marker was written, pool untouched. Mark the
         # IDEMP intent + hold FAILED (leak-safe, replayable) and 402.
+        # The HOLD's status is what a replay reads (`_pending_replay_result`), and
+        # it lives on TenantBudgets where an update is permitted. There is no
+        # matching mark on the ledger intent: that row is append-only, and the
+        # status field it used to carry was written by an UpdateItem the deployed
+        # IAM policy denies and no reader consulted.
         budgets.mark_pending_failed_best_effort(tenant_id=tenant_id, sk=hold_sk)
-        ledger.mark_idemp_failed_best_effort(tenant_id=tenant_id, period=period,
-                                             idempotency_key=idempotency_key)
         raise _err_402("tenant_pool_exhausted")
     # RESERVE_APPLIED or RESERVE_ALREADY: the debit is a fact. Continue.
     try:
@@ -3220,10 +3223,8 @@ def _reserve_external_pending(
         logger.warning("pending_activate_transient", tenant_id=tenant_id,
                        period=period, hold_id=hold_id)
 
-    # Finalize the IDEMP intent (best-effort; replay works off intent + marker
-    # even if this doesn't land).
-    ledger.mark_idemp_completed_best_effort(tenant_id=tenant_id, period=period,
-                                            idempotency_key=idempotency_key)
+    # Nothing to finalize: a replay is decided by the pool marker and the hold's
+    # own status, so the intent row is written once and never touched again.
     return ExternalAuthorizeResult(
         authorization_id=authorization_id, hold_id=hold_id, hold_sk=hold_sk,
         period=period, amount_microusd=amount, expires_at_epoch=hold_expires_at,

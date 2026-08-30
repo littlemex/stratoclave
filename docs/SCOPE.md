@@ -137,16 +137,17 @@ error:
   self-hosted GPU (the `served_by="vllm"` transport seam + `VLLM_ENDPOINTS`
   allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and
   any OpenAI-compatible endpoint all flow through the **same** reserve / rating /
-  settle and the same Z3-proven ledger. LiteLLM *connects* many backends and, as
+  settle and the same ledger, whose money-transition model carries a machine-checked
+  no-double-post invariant. LiteLLM *connects* many backends and, as
   of 2026, also reserves budget before the call
   (`litellm/proxy/spend_tracking/budget_reservation.py`, first committed
-  2026-04-30: fail-closed, seven scopes, adversarial `max_tokens` clamping). So the
-  claim here is **not** that their billing is best-effort — that wording was
-  inaccurate and is withdrawn. The claim is narrower and about *where the enforcing
-  state lives*: their admission counter is a `DualCache` (in-process + Redis) with
-  the database as an authority that catches up, while Stratoclave puts admission
-  and the money move in one authoritative store whose transition carries a
-  machine-checked proof. Whether their ceiling holds through cache loss is
+  2026-04-30: fail-closed, seven scopes, adversarial `max_tokens` clamping). The
+  claim here is about *where the enforcing state lives*: their admission counter is
+  a `DualCache` (in-process + Redis) with the database as an authority that catches
+  up, while Stratoclave puts admission and the money move in one authoritative store
+  whose transition carries a machine-checked proof. (An earlier version of this
+  document called their billing best-effort; that was inaccurate and is withdrawn.)
+  Whether their ceiling holds through cache loss is
   **unverified by us and we do not assert that it fails.** Binding an arbitrary
   backend under a proven charge of record remains the distinct capability.
 
@@ -156,24 +157,31 @@ The three **weapons** LiteLLM does not have, all deriving from the strength of
 with commit SHAs and the exact limits of each measurement, see
 [EVIDENCE.md](EVIDENCE.md):
 
-1. **A formally-proven billing ledger.** LiteLLM's cost tracking is approximate
+1. **A ledger whose money transitions carry a machine-checked invariant.** LiteLLM's cost tracking is approximate
    observability that cannot stand as a charge of record. A pre-authorized,
-   exact, Z3-proven ledger is the "buy" side of build-vs-buy for any product
-   that bills tenants for LLM usage. Its in-flight migration (the PENDING
-   protocol, which removes a permanent two-path flag) is being landed under a
+   integer-exact ledger whose transitions carry a machine-checked proof is the
+   "buy" side of build-vs-buy for any product that bills tenants for LLM usage.
+   Its in-flight migration (the PENDING protocol, which removes a permanent
+   two-path flag) is being landed under a
    Z3 joint-transition **equivalence** proof — the old and new money paths are
-   proven to move money identically before the old one is deleted (`27d86db`).
+   proven to move money identically before the old one is deleted (`27d86db`) —
+   a proof over the modelled transitions, not over the shipped replay path.
+   That proof is over the modelled transitions: the shipped PENDING path still has
+   a replay that reads an intent's presence rather than the pool marker, so it does
+   not yet answer a retry the way the transactional path does
+   ([CONTRACTS.md](design/CONTRACTS.md) C5.4).
 2. **The decision log as a first-class data product.** LiteLLM logs spend per
    request; what we have not found there is a *decision-to-charge join contract*
    — a schema'd, exportable record that ties the advised model, the executed
    model, and the real billed amount together. Note that our own export contract
    is still unfixed (see "next"), so today this is a design intent on both sides,
    not a shipped advantage.
-3. **Executing someone else's routing verdict under budget.** The earlier wording
-   here — "LiteLLM routing is static rules plus load balancing" — was wrong and is
-   withdrawn: LiteLLM ships a complexity router (with its own evals), quality
-   tiers, an adaptive router, and a savings baseline. Stratoclave does not compete
-   on routing quality. It takes an external verdict and decides whether that
+3. **Executing someone else's routing verdict under budget.** Stratoclave does not
+   compete on routing quality — LiteLLM ships a complexity router (with its own
+   evals), quality tiers, an adaptive router, and a savings baseline, and an earlier
+   version of this document describing their routing as static rules plus load
+   balancing was wrong and is withdrawn. What Stratoclave does is take an external
+   verdict and decide whether that
    verdict is *permitted* under the current budget, model pin, session affinity,
    and provider state — and records which of `honored` / `overridden` / `denied`
    happened. Not building a router is a boundary, not a gap: it keeps the
@@ -194,10 +202,10 @@ the **architecture that keeps judgment (VSR) and execution+recording
 
 **What this loop produces: a Reproducible Savings Report.** (Renamed from
 "Savings Certificate": until the long-term immutable sink and the export contract
-land, "certificate" overstates it.) Computing a savings figure is **not** unique —
-LiteLLM ships `router_strategy/savings_baseline.py`, so "a number LiteLLM
-structurally cannot produce" was wrong and is withdrawn. What differs is the
-**shape of the computation**: `mvp.learning.savings.summarize_savings(rows, price=,
+land, "certificate" overstates it.) What is distinctive is not having a
+savings figure — LiteLLM ships `router_strategy/savings_baseline.py`, and an earlier
+claim here of "a number LiteLLM structurally cannot produce" was wrong and is
+withdrawn — but the **shape of the computation**:
 resolve=)` is a pure function taking normalized rows, a versioned rate table, and a
 resolver as explicit inputs, priced over each request's REAL billed tokens and
 joined to the ledger by `span_id`. Pin the inputs and anyone can recompute the same
@@ -221,10 +229,12 @@ with a real ledger can produce. That run is `gateway-live` but **in-process + mo
 [EVIDENCE.md](EVIDENCE.md) and a runnable offline demo in
 [demo/savings-vs-litellm.md](demo/savings-vs-litellm.md).
 
-**The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a thin
-compatibility shim for the non-OpenAI-compatible providers (weeks–months), and
-that traffic then flows through the proven ledger too. For LiteLLM to absorb
-Stratoclave's edge — an event-sourced, idempotent, formally-proven
+**The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a compatibility
+shim for the non-OpenAI-compatible providers, after which that traffic flows
+through the same machine-checked money-transition model — a claim about the
+shape of the work rather than about how long anyone would take, since the
+estimate in quarters is withdrawn below. For LiteLLM to absorb
+Stratoclave's edge — an event-sourced, idempotent, machine-checked-transition
 reserve/rating/settle ledger — would be a re-design rather than a retrofit. But
 **stating that asymmetry as a fixed number of quarters was unfounded and is
 withdrawn**: LiteLLM has been extending reservation, dynamic routing, and Bedrock
@@ -264,7 +274,8 @@ competitor:
 - **Toward commerce** — in-housing price models, seat management, invoicing.
   Endpoint: a worse Stripe.
 
-Stratoclave wins on one thing only: **a formally-proven ledger and a
+Stratoclave wins on one thing only: **a ledger whose money-transition model carries
+a machine-checked no-double-post invariant, and a
 synchronous enforcement point, wired to an external judgment engine through a
 schema'd feedback loop.** The Z3-proven zero-double-posting invariant is
 diluted every time a feature adds code outside the proven region. **Before
@@ -277,7 +288,8 @@ it is someone else's job.**
   distribution; the ledger's proof and code are inspectable.
 - **Owned and built:** the AI-gateway core (unified API, adapters, streaming,
   virtual keys, fallback, rate limit); the billing core (metering, rating,
-  two-phase authorize/capture, tiered breaker, Z3-proven ledger); LLM router
+  two-phase authorize/capture, tiered breaker, a ledger with a Z3-checked
+  no-double-post invariant over its transition model); LLM router
   execution (allowlist / breaker / VSR hard-pin / fallback chain); a transport
   seam (`served_by="vllm"`) that binds a **self-hosted GPU / any
   OpenAI-compatible backend** to the *same* reserve/rating/settle path; version-
@@ -297,7 +309,8 @@ it is someone else's job.**
   `TransactWriteItems` at the zero-contention floor and **225 ms end-to-end
   authorize**, worse under single-row contention, NOT CPU-bound, and not yet
   measured on the deployed Fargate path.
-  "A proven ledger you can afford on the hot path" is the entire pitch, so this
+  "A ledger with a machine-checked no-double-post invariant that you can afford on
+   the hot path" is the entire pitch, so this
   is the highest-leverage item: it needs a design change (single-item
   conditional update and/or pool-row sharding), not tuning.
 - **Hygiene, not features:** reconciliation runs from a manual CLI, not a
