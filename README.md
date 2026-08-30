@@ -8,7 +8,7 @@ Runnable on one machine against your own Bedrock — no always-on AWS infrastruc
 An AWS account with Bedrock access is still required; Bedrock usage is billed normally.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
+[![Status: 1.0](https://img.shields.io/badge/status-1.0-blue.svg)](#project-status)
 [![Backend: Python 3.11](https://img.shields.io/badge/backend-Python_3.11-3776AB.svg)](./backend)
 [![CLI: Rust](https://img.shields.io/badge/cli-Rust-dea584.svg)](./cli)
 [![Infra: AWS CDK v2](https://img.shields.io/badge/infra-AWS_CDK_v2-FF9900.svg)](./iac)
@@ -854,9 +854,10 @@ difference is *where the enforcing state lives* — a cache with a catching-up
 database, versus a single authoritative store whose transition carries a
 machine-checked proof that double-counting cannot occur.
 
-> **Maturity, stated plainly:** Stratoclave is alpha and young; LiteLLM is a
-> large, widely-deployed project. This table judges *capability*, not adoption —
-> weigh maturity separately for your own risk tolerance.
+> **Maturity, stated plainly:** Stratoclave is young and maintained by one person;
+> LiteLLM is a large, widely-deployed project. Leaving `0.x` says the interface is now
+> stable, not that the project is battle-tested. This table judges *capability*, not
+> adoption — weigh maturity separately for your own risk tolerance.
 
 **Pick Stratoclave** for an AWS-committed, Bedrock-first (self-hosted GPU / any
 OpenAI-compatible backend bindable to the same machine-checked transition model),
@@ -1047,8 +1048,9 @@ deliberately does **not** do today:
   per-tenant inference quota, and the inline LLM endpoints themselves are not
   IP-capped. Credit reservation is the ADMISSION ceiling — the amount a request is
   admitted at — and is always atomic in DynamoDB.
-- **Alpha, single-maintainer, no external audit.** Treat it accordingly: pin a
-  commit, run it in an account you control, and read the threat model in
+- **Single-maintainer, no external audit.** The 1.0 line commits to a compatibility
+  surface, not to having been reviewed by anyone outside this repository. Treat it
+  accordingly: pin a tag, run it in an account you control, and read the threat model in
   [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) before production use.
 
 If these are dealbreakers, the honest recommendation is a credential broker
@@ -1058,11 +1060,17 @@ control plane should enforce.
 
 ## Project status
 
-Stratoclave is **alpha** software. Public HTTP surfaces, DynamoDB schemas,
-and CDK construct props may still change between minor releases while on the
-`0.x` series. Breaking changes are called out in the release notes for each
-tagged version. Issues and pull requests are welcome; see
-[`CONTRIBUTING.md`](./CONTRIBUTING.md).
+Stratoclave is on the **1.0** line. What that commits to, and what it deliberately
+does not, is written out under *What 1.0 promises* in
+[`CHANGELOG.md`](./CHANGELOG.md): the clause levels in
+[`docs/design/CONTRACTS.md`](./docs/design/CONTRACTS.md) are the compatibility surface
+and are not lowered without a major bump — which is clause C10.5 there, with a test that
+fails on a quiet downgrade rather than a sentence asking you to trust one — and the three
+inference routes and their scope names do not change incompatibly within `1.x`. DynamoDB item shapes, internal
+storage layout, and anything already named in that document's open items are outside
+that promise and are expected to move. Defaults may change in a minor release, with the
+variable that restores the previous behaviour named in the release notes. Issues and
+pull requests are welcome; see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 **Shipped today:** dollar-pool + per-user-token budgets reserved pre-flight in
 one atomic `TransactWriteItems`; per-model micro-USD pricing; **per-model quotas

@@ -16,7 +16,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 - **The clause levels in [`CONTRACTS.md`](docs/design/CONTRACTS.md) are the surface.** A
   clause's guarantee level (**P** machine-checked, **E** a test fails if violated, **B**
   true inside a stated configuration, **N** deliberately not guaranteed) is not lowered
-  in a minor or patch release. Lowering one is a major version.
+  in a minor or patch release. Lowering one is a major version. This is clause C10.5 and
+  it is enforced: the levels are recorded, and `test_clause_levels_are_a_ratchet.py` fails
+  when one weakens while the released major has not moved. It does not check that a level
+  is CORRECT — that is a human reading the clause, and it is named as such.
 - **The HTTP surface is the second half of it.** The three inference routes, their
   request and response shapes, and the scope names that authorize them do not change
   incompatibly within 1.x.
