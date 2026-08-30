@@ -85,7 +85,7 @@ recovery.
 | **C3.2c** …for the per-model quota counter. | **N (today)** | Same shape as C3.2b, bounded instead by the counter's monthly TTL |
 | **C3.3** That mechanism's reachability does not depend on the tenant sending more traffic or on the calendar period. | N (today) | The sweep is request-driven and covers the current and previous period only — see the open items below |
 | **C3.4** An ended reservation cannot be ended again in either direction. | P + E | `test_billing_formal_z3.py`, `test_contract_termination.py` |
-| **C3.5** After any ending, counters and ledger agree. | **B** — for an ending whose terminal transaction COMMITTED | `test_billing_write_discipline.py`. A settle that exhausts its retries is not re-driven, so the reaper later ends the hold with a settled delta of zero and the observed usage never reaches the ledger. That is the negation of this clause, and it is in the open items rather than in this cell only because the cell cannot hold it |
+| **C3.5** After any ending, counters and ledger agree, including when the settle that observed the usage never committed. | E, with one stated residual | `test_billing_write_discipline.py`, and `test_contract_owed_settle.py` (`test_the_reaper_posts_the_charge_instead_of_asserting_zero`, `test_a_second_sweep_cannot_post_the_charge_twice`, both mutation-checked). A settle that exhausts its retries now records what it observed as an OWED_SETTLE row, and the reclaim that follows honours it through the existing LATE_SETTLE recovery instead of asserting a settled delta of zero. At-most-once comes from the LATE_SETTLE sort key, so the row needs no mutation to be marked done and the ledger stays append-only. **Residual:** a task that dies between observing the usage and writing that row still loses it; covering that needs a write-ahead on every settle, which is a cost on every request rather than on a rare one |
 
 ## C4 — Ledger sufficiency
 
@@ -108,7 +108,7 @@ One idempotency key means one authorization, for all time.
 | **C5.1** A retry that crosses a billing period resolves to the same authorization. | E for records written by this version or later; **B** for older ones until the backfill has run | `test_contract_idempotency.py`. Records written before the identity left the money partition are read where they were written, but only for the period supplied and the one before it — the reader cannot guess an older period. `scripts/local/backfill_idemp_partition.py` copies them into the permanent partition and closes that window; it is an upgrade step, listed in [DEPLOYMENT.md](../DEPLOYMENT.md) |
 | **C5.2** The mapping from a client key to a stored row is injective, and a replay verifies the key itself rather than the address it was found at. | E | `test_contract_idempotency.py` |
 | **C5.3** A replay returns the original outcome and never mints a second money move. | E | `test_contract_idempotency.py`, `test_billing_authorize.py` |
-| **C5.4** A retry can tell committed from not-committed without guessing. | B on the transactional path; **N under the PENDING protocol** | The transactional path writes the record inside the reserve transaction. Under `STRATOCLAVE_RESERVE_PROTOCOL=pending` the intent is written before the commit point and finalized best-effort, and one replay path reads the intent's presence rather than the marker — so a REFUSED authorize can replay as authorized. There is no configuration of that protocol in which this clause holds |
+| **C5.4** A retry can tell committed from not-committed without guessing, whichever protocol wrote the record. | E | `test_contract_idempotency.py::test_a_refused_authorize_replays_as_refused_under_pending`, `::test_an_in_flight_attempt_answers_retry_rather_than_success`, `::test_a_terminal_is_evidence_after_every_other_trace_is_gone`, `::test_the_transactional_path_is_unchanged`, all mutation-checked. One resolver decides for both protocols, and it reads durable evidence rather than the record's presence: a pool marker, an activated hold, a terminal event, or a RESERVE event — each protocol leaves at least one, and an ending is evidence its beginning happened. The ambiguous state (an intent written, the commit not yet reached) answers 503 with the same key, which is a stated non-verdict rather than a guess. Previously the entry point replayed any readable record as an authorization, so under the PENDING protocol a REFUSED authorize replayed as authorized |
 
 ## C6 — Authority
 
@@ -144,7 +144,7 @@ The gateway says what it observed, and no more.
 | --- | --- | --- |
 | **C8.1** A value the gateway did not observe is reported as absent, never as zero — and absence is the DEFAULT, so a transport that does not parse a leg cannot record a measured zero by omission. | E | `test_contract_reporting.py`, including `test_absence_survives_the_hold_seam`, which drives the real `Hold` rather than the pure rater: the snapshot every route settles through used to coerce the absence away one call before the ledger |
 | **C8.2** Any path or parameter the gateway names in an error is one it serves, including in a message relayed from upstream. | **B** | `test_contract_reporting.py` covers the OpenAI-compatible relay and the rewriter. Errors composed elsewhere in the codebase are not swept, so the universal reading is not established |
-| **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable. | E | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py` |
+| **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable, and the reservation behind it is not handed back on the assumption it was free. | E for the classification; **B** for holding the headroom — inside `STRATOCLAVE_UNOBSERVED_HOLDS=on`, which ships off | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py`, and `test_contract_owed_settle.py` (`test_a_departed_call_keeps_its_reservation_when_the_flag_is_on`, `test_a_retention_resolves_at_the_figure_an_operator_supplies`, `test_retention_is_off_by_default`, all mutation-checked) for the retention. The reaper used to return a reservation whose provider call had departed and record that nothing was charged; with the flag on it retains it instead — one conditional status write, no counter movement, so the amount goes on being counted against the limit exactly as it already was. A retention is ended deliberately, by an operator settling it at the figure the provider's own record shows or releasing it when that record shows no charge; the gateway supplies neither, which is why the reservation was held |
 
 ## C9 — External authorization
 
@@ -155,11 +155,11 @@ whether it had been audited at all.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C9.1** Once a charge is committed, no later read of that authorization reports it as absent or as a different amount. | B | `test_billing_authorize.py`. Holds on the transactional path. Under the PENDING protocol a terminal-then-retry window can answer 404 before the asynchronous RESERVE projection lands — see the open items |
+| **C9.1** Once a charge is committed, no later read of that authorization reports it as absent or as a different amount, on either protocol. | E | `test_billing_authorize.py`, and `test_pending_protocol_integration.py::test_a_captured_authorization_still_answers_after_its_hold_is_gone` (mutation-checked) for the window that used to break it: the capture's own transaction deletes the hold and the RESERVE event is an asynchronous projection under the PENDING protocol, so the only surviving record was the terminal — which the C-1 gate did not read (404) and the amount did not come from (zero). Both read it now, and `::test_an_inline_hold_is_still_refused_after_its_terminal` pins that evidence of EXISTENCE did not become evidence of EXTERNALITY |
 | **C9.2** Every pair of concurrent operations on one authorization resolves to one terminal state, and the loser learns which state won. | E | `test_billing_authorize.py`, `test_billing_authorize_stateful.py` (a stateful model over interleaved capture / void / reap) |
 | **C9.3** Expiry means one thing: past the instant an authorization published, it cannot be captured, and the status read says so. | E | `test_billing_authorize.py` (`test_capture_past_expiry_is_refused_while_the_hold_is_still_live`, `test_status_of_a_live_hold_past_expiry_reads_expired`), both mutation-checked. It used to mean only "reclaimable after this instant", so a capture past the published expiry still charged whenever a sweep had not run — the answer to "can I still capture?" was decided by other tenants' traffic. Void is deliberately still allowed: it returns the headroom the reaper would have returned |
 | **C9.4** A client-supplied field cannot produce an unhandled server error, and an amount cannot exceed what was authorized. | E | `test_billing_authorize.py` covers the over-capture refusal on both sides, and `test_amount_above_the_ceiling_is_a_client_error` the amount ceiling (`MAX_AMOUNT_MICROUSD`, 1e15 micro-USD — under both DynamoDB's 38-digit Number and the exact range of the double a browser parses the body into). A value at the ceiling is still a well-formed request refused on budget, so the bound is validation rather than a business limit |
-| **C9.5** The answers do not depend on which internal protocol mode the deployment runs. | **N (today)** | C9.1 and C5.4 both differ by protocol mode |
+| **C9.5** The answers do not depend on which internal protocol mode the deployment runs. | E | The two clauses that differed by mode were C9.1 and C5.4, and both now hold on either protocol by reading durable evidence rather than the witness one protocol happens to leave: `test_contract_idempotency.py::test_the_transactional_path_is_unchanged` and `::test_a_committed_reservation_still_replays_under_pending` are the same property asked of both modes |
 
 ## C10 — Claims
 
@@ -220,7 +220,10 @@ A parameter this gateway cannot honour is refused, not dropped.
 ## Open items, named rather than implied
 
 These are contract clauses the code does not satisfy yet. They are listed here
-because a contract that quietly omits its failures is worse than no contract.
+because a contract that quietly omits its failures is worse than no contract. A
+clause that has been closed leaves this list; a residual stated inside a clause's
+own cell is not an open item, because there is nothing outstanding to do about it
+without paying a cost the clause names.
 
 - **C3.2 for the per-user token reservation.** The admission transaction debits up
   to three counters; the hold row records only the pool amount, so a crash between
@@ -235,27 +238,11 @@ because a contract that quietly omits its failures is worse than no contract.
   current and previous period, so a hold orphaned in a quiet month is never
   reached. A scheduled reconciler already exists for other work; giving it the
   inline holds is the fix.
-- **C3.5 after a settle that never commits.** When the settle transaction exhausts
-  its retries, nothing re-drives it: the reaper later writes `RECLAIM` with a
-  settled delta of zero and the observed usage never reaches the ledger. (A
-  reservation restored from a PRE-SNAPSHOT ledger event is a different case and is
-  closed: it settles at the amount the admission debited, which is an upper bound,
-  rather than being refused into that same hole.)
-- **C5.4 under the PENDING protocol.** The intent is written before the commit
-  point and finalized best-effort, and one replay path reads the intent's presence
-  rather than the marker, so a refused authorize can replay as authorized.
-- **C9.1 under the PENDING protocol.** A capture retry in the window after the
-  terminal commits but before the asynchronous RESERVE projection lands answers 404
-  for an authorization that has already been charged.
 - **C3.1 pool-row incarnation.** A hold records the tenant and period it debited but
   not WHICH incarnation of that row. An operator deleting and recreating a period's
   pool row with a reservation in flight makes the settle apply to a row that never
   held the debit: `pool_reserved` goes negative and headroom is minted. Fencing is an
   id on the row, copied onto the hold, and an equality condition on every terminal.
-- **C8.3 retention of an unobserved outcome.** `STRATOCLAVE_UNOBSERVED_HOLDS` ships
-  off, so a reclaim of a hold whose provider call had departed returns the budget. The
-  outcome is classified and recorded either way; what the flag gates is whether the
-  headroom is held back. Retaining it is the work.
 - **C12.5 has no mechanism.** Credential material is kept out of every store and log
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper

@@ -48,9 +48,17 @@ fully switched on. As of 2026-08-30:
   carries `min(legs, tokens) - 1` microUSD of slack per group. Without it the "sound
   bound" was not an upper bound: three input-side legs at 1 microUSD/MTok with one
   token each settle at 3 while the group total rounds to 1.
-- **Retaining a reservation instead of returning it is not built.**
-  [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far each claim is
-  verified; where this document and that one disagree, that one is describing today.
+- **Retaining a reservation instead of returning it ships behind
+  `STRATOCLAVE_UNOBSERVED_HOLDS`, which is off by default.** With it on, a reaper that
+  meets a hold whose provider call had departed holds the reservation rather than
+  handing the budget back and recording that nothing was charged. Holding it costs no
+  new counter: the amount was already counted against the limit and goes on being
+  counted, so one conditional status write is the whole mechanism. What the gateway
+  cannot do is decide what the call cost, so a retention ends only when an operator
+  settles it at the figure the provider's own record shows or releases it when that
+  record shows none. [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far
+  each claim is verified; where this document and that one disagree, that one is
+  describing today.
 
 ## 0. Three states, named, because every rule below is scoped to one
 
@@ -249,8 +257,10 @@ booked. So:
   `settled + reserved > pool_limit`, so the acceptance criteria name this exception
   explicitly.
 - A charge for an attempt that returned no usage block never appears in the ledger at
-  all. That is **out of scope by the owner's decision**: what the gateway cannot
-  observe is outside the cost model. Do not attempt to infer it.
+  all, which is **out of scope by the owner's decision** rather than a gap waiting to
+  be closed: what the gateway cannot observe is outside the cost model. Do not attempt
+  to infer it. (An attempt whose usage WAS observed and whose settle failed to commit
+  is a different case and is closed — see C3.5.)
 
 ## 6. What strict mode refuses, and what it guarantees
 

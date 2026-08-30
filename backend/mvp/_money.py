@@ -258,6 +258,33 @@ class Ending:
             _logged()
 
 
+def hold_departure_marker(context: Any) -> Optional[Callable[[str], bool]]:
+    """The marker writer for one reservation, or None when there is nothing to mark.
+
+    Built here rather than in each route so all three get the same thing, and built
+    as a closure over the context so this module still holds no storage import — the
+    repository is resolved at call time, inside the closure, on a path that only runs
+    when an ending keeps its reservation.
+
+    None when the reservation has no durable hold (a request with no dollar pool has
+    nothing to retain), which is why the caller distinguishes "no writer" from "write
+    failed": the first is a request this does not apply to, the second is a
+    deployment that thinks retention is on and is wrong.
+    """
+    hold_sk = getattr(context, "hold_sk", None)
+    tenant_id = getattr(context, "tenant_id", None) or getattr(context, "org_id", None)
+    if not hold_sk or not tenant_id:
+        return None
+
+    def _mark(state: str) -> bool:
+        from dynamo.tenant_budgets import TenantBudgetsRepository
+
+        return TenantBudgetsRepository().hold_mark_departed(
+            tenant_id=str(tenant_id), sk=str(hold_sk), state=str(state))
+
+    return _mark
+
+
 class Hold:
     """A reserved amount of budget, and the only object allowed to end it.
 
@@ -277,6 +304,7 @@ class Hold:
         model_id: str,
         settle: Callable[..., Any],
         release: Callable[[Any], Any],
+        mark_departed: Optional[Callable[[str], bool]] = None,
         requested_model: Optional[str] = None,
         request_id: Optional[str] = None,
         route: Optional[str] = None,
@@ -291,6 +319,12 @@ class Hold:
         self.route = route
         self._settle = settle
         self._release = release
+        # Records on the durable hold that a provider call departed and its outcome
+        # was never seen. Injected like `settle`/`release` so this module keeps
+        # knowing nothing about storage. Absent means the deployment cannot record
+        # it, and then a retained reservation is unreachable — which `_keep_reservation`
+        # says out loud rather than degrading in silence.
+        self._mark_departed = mark_departed
         self._on_finalized = on_finalized
         self._lock = threading.Lock()
         self._finalized = False
@@ -413,10 +447,8 @@ class Hold:
             returnable = _outcome.refunds_immediately(resolved) or not enforced
             if returnable:
                 self._return_reservation()
-            # else: the reservation stays with the pool until the hold reaper
-            # reclaims it, which records the exposure with the hold's own facts
-            # (source, created_at, amount) rather than asserting a zero nobody
-            # observed.
+            else:
+                self._keep_reservation(resolved)
             logger.info(
                 "provider_attempt_failed",
                 extra={
@@ -630,6 +662,47 @@ class Hold:
                 )
             except Exception:
                 pass
+
+    def _keep_reservation(self, state: str) -> None:
+        """Leave the reservation with the pool, and record WHY on the hold itself.
+
+        Not returning it is only half of retaining it. The reaper meets this hold
+        later with no memory of this moment, and its default is to hand the budget
+        back and record that nothing was charged — the assertion measured to be
+        false for a call that departed. So the reason is written down where the
+        reaper will read it.
+
+        This is the only place that fact is established. The hold is created before
+        the call, when nothing knows whether one will depart; the classifier knows
+        here, and only here, and only for an outcome it could classify. A task that
+        dies with no ending at all leaves nothing, which is a stated residual rather
+        than a case this covers.
+
+        A failure is logged at error, not swallowed quietly: without the marker the
+        retention silently becomes the reclaim it was turned on to prevent, and a
+        feature that cannot fire is worse than one that is off, because the operator
+        believes it is on."""
+        sk = getattr(self.tenants_repo, "hold_sk", None)
+        if self._mark_departed is None or not sk:
+            logger.error(
+                "unobserved_hold_departure_unrecordable",
+                extra={"hold_id": self.hold_id, "outcome_state": state,
+                       "reason": "no marker writer" if self._mark_departed is None
+                                 else "no hold sk"},
+            )
+            return
+        try:
+            if not self._mark_departed(state):
+                logger.error(
+                    "unobserved_hold_departure_not_recorded",
+                    extra={"hold_id": self.hold_id, "outcome_state": state,
+                           "reason": "hold already ended"},
+                )
+        except BaseException:  # noqa: BLE001 — a claim is taken; this must not raise.
+            logger.error(
+                "unobserved_hold_departure_write_failed", exc_info=True,
+                extra={"hold_id": self.hold_id, "outcome_state": state},
+            )
 
     def _return_reservation(self) -> None:
         """Give the tokens back and drop the pool hold.

@@ -104,6 +104,30 @@ def late_settle_sk(hold_id: str) -> str:
     return f"EV#HOLD#{hold_id}#LATE_SETTLE"
 
 
+def retained_sk(hold_id: str) -> str:
+    """Sort key for the RETAINED record: a reservation deliberately not returned.
+
+    Outside the TERMINAL cell, because retaining is not an ending — the reservation
+    is still outstanding and still counted, which is the whole point. The terminal
+    comes later, when the retention is resolved into a charge or a release.
+    """
+    return f"EV#HOLD#{hold_id}#RETAINED"
+
+
+def owed_settle_sk(hold_id: str) -> str:
+    """Sort key for the OWED_SETTLE record: usage the gateway observed and could
+    not post, kept so that something other than a log line can re-drive it.
+
+    Its own namespace, outside the TERMINAL cell, because it is not a money move —
+    it moves no counter and asserts no charge. It is the statement "this much was
+    observed for this hold and the ledger does not have it yet", written when the
+    settle transaction is abandoned. What consumes it is a LATE_SETTLE, whose sk
+    is itself once-per-hold, so this row needs no mutation to be marked done and
+    the ledger stays append-only.
+    """
+    return f"EV#HOLD#{hold_id}#OWED_SETTLE"
+
+
 def _legacy_safe_idemp_token(idempotency_key: str) -> str:
     """The sanitising token this used to build, kept only to READ rows it wrote.
 
@@ -216,6 +240,7 @@ class CreditLedgerRepository:
         bound_mode: Optional[str] = None,
         estimate_inputs: Optional[dict] = None,
         reaped_hold_facts: Optional[dict] = None,
+        source: Optional[str] = None,
     ) -> dict[str, Any]:
         """Build the ledger Put for a terminal money move (SETTLE/RELEASE/RECLAIM).
 
@@ -306,6 +331,16 @@ class CreditLedgerRepository:
             ("settle_reason", settle_reason),
             ("reserve_pricing_version", reserve_pricing_version),
             ("bound_mode", bound_mode),
+            # WHICH SURFACE owned this reservation, recorded on the ending itself.
+            # The hold row and the RESERVE event both carry it, and both can be
+            # gone by the time someone asks: the hold is deleted by the terminal's
+            # own transaction, and under the PENDING protocol the RESERVE event is
+            # an asynchronous projection that may not have landed. That left a
+            # window in which a captured external authorization answered 404 to its
+            # own client, because nothing readable could still say it was external.
+            # An ending outlives everything it ended, so this is where the fact
+            # belongs.
+            ("source", source),
         ):
             if val:
                 item[key] = {"S": str(val)}
@@ -633,6 +668,130 @@ class CreditLedgerRepository:
             if item is not None:
                 return item
         return None
+
+    # ---- a reservation held back rather than returned (C8.3) ----
+
+    def put_retained(
+        self, *, tenant_id: str, period: str, hold_id: str,
+        amount_microusd: int, attempt_marker: Optional[str] = None,
+        model_id: Optional[str] = None, provider_invoked_at: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> None:
+        """Record that a reservation is being HELD rather than returned.
+
+        This asserts no charge and moves no counter — an amount the gateway did not
+        observe is not a charge, and inventing one here would be the same defect as
+        recording a zero. What it asserts is narrower and true: this much headroom is
+        still held, for an attempt that reached the provider, and nobody has decided
+        what it cost yet.
+
+        `attempt_marker` is the `sc_attempt_id` stamped into the provider call's
+        request metadata. It is the only handle that can attribute a charge the
+        gateway never saw, so it is recorded here: without it the retention is a
+        number an operator can neither confirm nor clear.
+
+        Conditional on its own absence, so a second sweep of the same hold does not
+        rewrite the record. Never raises — the sweep must not fail the live request
+        that drove it — but the status transition is what actually holds the money,
+        and this row is how it is explained.
+        """
+        item: dict[str, Any] = {
+            "pk": ledger_pk(tenant_id, period),
+            "sk": retained_sk(hold_id),
+            "event_type": "RETAINED",
+            "schema_version": SCHEMA_VERSION,
+            "tenant_id": tenant_id,
+            "period": period,
+            "hold_id": hold_id,
+            # The amount still held. NOT a settled or reserved delta: nothing moved.
+            "held_microusd": int(amount_microusd),
+            "ts_ms": _now_ms(),
+        }
+        for key, val in (("attempt_marker", attempt_marker), ("model_id", model_id),
+                         ("provider_invoked_at", provider_invoked_at),
+                         ("run_id", run_id)):
+            if val:
+                item[key] = str(val)
+        try:
+            self._table.put_item(
+                Item=item, ConditionExpression="attribute_not_exists(pk)")
+        except Exception:  # noqa: BLE001 — see the docstring.
+            pass
+
+    def get_retained(
+        self, *, tenant_id: str, period: str, hold_id: str
+    ) -> Optional[dict[str, Any]]:
+        """The RETAINED record for a hold, or None. ConsistentRead: an operator
+        resolving a retention reads it immediately after the sweep wrote it."""
+        resp = self._table.get_item(
+            Key={"pk": ledger_pk(tenant_id, period), "sk": retained_sk(hold_id)},
+            ConsistentRead=True,
+        )
+        return resp.get("Item")
+
+    # ---- observed usage the settle could not post (C3.5) ----
+
+    def put_owed_settle(
+        self, *, tenant_id: str, period: str, hold_id: str,
+        actual_microusd: int, run_id: str, run_id_is_fallback: bool,
+        facts: Optional[dict] = None,
+    ) -> None:
+        """Record usage the gateway observed and whose settle never committed.
+
+        Written once, when the settle transaction has exhausted its retries. Before
+        this row existed, that usage survived only in a log line: the reaper later
+        reclaimed the hold with a settled delta of zero, and the charge left the
+        system. The reaper reads this row and recovers the spend through the same
+        LATE_SETTLE path it already uses when it wins the race against a settle.
+
+        Conditional on `attribute_not_exists(pk)` so a second abandoned attempt for
+        the same hold cannot overwrite the first with a different figure — the first
+        observation is the one the provider reported, and a later attempt has no new
+        information. Never raises: this runs on a path that has already failed, and
+        an exception here would replace a recoverable loss with an unhandled one.
+        """
+        item: dict[str, Any] = {
+            "pk": ledger_pk(tenant_id, period),
+            "sk": owed_settle_sk(hold_id),
+            "event_type": "OWED_SETTLE",
+            "schema_version": SCHEMA_VERSION,
+            "tenant_id": tenant_id,
+            "period": period,
+            "hold_id": hold_id,
+            "settled_delta_microusd": int(actual_microusd),
+            "run_id": str(run_id),
+            "run_id_is_fallback": bool(run_id_is_fallback),
+            "ts_ms": _now_ms(),
+        }
+        for key in ("span_id", "request_id", "group_id", "model_id",
+                    "pricing_version", "pricing_key", "settle_reason"):
+            val = (facts or {}).get(key)
+            if val:
+                item[key] = str(val)
+        rating = (facts or {}).get("rating")
+        if rating is not None:
+            item["rating"] = _json_compact(rating)
+        for key in ("tokens_in", "tokens_out"):
+            val = (facts or {}).get(key)
+            if val is not None:
+                item[key] = int(val)
+        try:
+            self._table.put_item(
+                Item=item, ConditionExpression="attribute_not_exists(pk)")
+        except Exception:  # noqa: BLE001 — see the docstring.
+            pass
+
+    def get_owed_settle(
+        self, *, tenant_id: str, period: str, hold_id: str
+    ) -> Optional[dict[str, Any]]:
+        """The OWED_SETTLE record for a hold, or None. ConsistentRead: the reaper
+        reads it moments after a failing settle may have written it, and a stale
+        miss is a charge dropped."""
+        resp = self._table.get_item(
+            Key={"pk": ledger_pk(tenant_id, period), "sk": owed_settle_sk(hold_id)},
+            ConsistentRead=True,
+        )
+        return resp.get("Item")
 
     # ---- PENDING protocol IDEMP intent (docs/design/pending-protocol.md) ----
     # The transactional path writes the IDEMP row INSIDE the reserve txn (atomic).

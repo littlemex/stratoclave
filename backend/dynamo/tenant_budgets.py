@@ -1088,6 +1088,104 @@ class TenantBudgetsRepository:
         return self._status_transition(tenant_id=tenant_id, sk=sk,
                                         frm="PENDING", to="EXPIRED_UNCREDITED")
 
+    def hold_mark_departed(self, *, tenant_id: str, sk: str, state: str) -> bool:
+        """Record on the hold that a provider call left and its outcome was not seen.
+
+        The hold is written before the call, so at that point nothing knows whether a
+        call will depart. Only the ENDING knows, and only for the outcomes it could
+        classify — which is why this is written there and not on the way out: it costs
+        nothing on a request that completes normally.
+
+        This is the fact a reclaim needs later. Without it the reclaim can only assume
+        the call never happened, which is the assumption measured to be false; with it,
+        the reclaim can decline to hand the budget back. Nothing else establishes it,
+        and the retention that depends on it is unreachable if this write does not
+        happen — so a caller must treat a False as the degradation it is, not as a
+        detail.
+
+        Touches `provider_invoked_at` and `unobserved_state` only. No aggregate is
+        read or written here, which is why it is a single-item update rather than a
+        transaction. Conditional on the row still existing: a hold already ended by
+        someone else is not ours to annotate."""
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": sk},
+                UpdateExpression=(
+                    "SET provider_invoked_at = :now, unobserved_state = :state"),
+                ConditionExpression="attribute_exists(sk)",
+                ExpressionAttributeValues={":now": _now_iso(), ":state": str(state)},
+            )
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def hold_retain(self, *, tenant_id: str, sk: str) -> bool:
+        """ACTIVE (or the pre-PENDING implicit ACTIVE) -> RETAINED, pool UNTOUCHED.
+
+        The reservation stays exactly where it is, on the pool's reserved counter.
+        That is what makes this cheap and what makes it safe: retaining a reservation
+        needs no new counter, no change to the admission arithmetic, and no change to
+        the money model the proofs are over — the amount was already being counted
+        against the limit, and it goes on being counted. This write touches only
+        `status`, which is why it is a single-item update rather than a transaction:
+        it moves no money, and the money it declines to move is money that is
+        already, correctly, where it is.
+
+        What changes is only that the reaper stops offering to give it back. Every
+        sweep skips a hold whose status is not ACTIVE, so one conditional status
+        write is the whole mechanism.
+
+        Conditional on the row being ACTIVE or carrying no status at all, so it
+        cannot retain a PENDING hold (whose debit may never have committed) and
+        cannot race a settle that is deleting the row. Returns False when the
+        condition failed, which the caller must treat as "someone else ended it",
+        never as success."""
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": sk},
+                UpdateExpression="SET #st = :to, retained_at = :now",
+                ConditionExpression=(
+                    "attribute_exists(sk) AND "
+                    "(attribute_not_exists(#st) OR #st = :active)"),
+                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeValues={
+                    ":to": "RETAINED", ":active": "ACTIVE", ":now": _now_iso()},
+            )
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def list_retained_holds(
+        self, *, tenant_id: str, period: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Holds this tenant/period is holding budget for pending a resolution.
+
+        A retained hold has no ending yet on purpose, so nothing else will surface
+        it: an operator needs a list to act on, and a reconciliation needs a figure
+        to explain why `reserved` is not going down. Bounded and strongly
+        consistent; the caller is an admin read, not the request path."""
+        out: list[dict[str, Any]] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("tenant_id").eq(tenant_id)
+                & Key("sk").begins_with(hold_sk_prefix(period))
+            ),
+            "FilterExpression": Attr("status").eq("RETAINED"),
+            "ConsistentRead": True,
+        }
+        while len(out) < limit:
+            resp = self._table.query(**kwargs)
+            out.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+        return out[:limit]
+
     def list_holds(self, *, tenant_id: str, period: str) -> list[dict[str, Any]]:
         """All HOLD rows for a tenant/period (any status), strongly consistent.
         Used by the reconciler to sum ACTIVE and detect in-flight PENDING. A full
@@ -1168,14 +1266,28 @@ class TenantBudgetsRepository:
             (and already returned its reserved share), the condition fails, the
             whole transaction cancels, and the caller falls back to recording spend
             WITHOUT decrementing reserved again.
-          * `status = ACTIVE OR attribute_not_exists(status)` — existence alone is
-            not enough under the PENDING protocol, because its endings do not delete
-            the row: a fenced hold becomes `EXPIRED_UNCREDITED` and a retired one
-            `RECLAIMED`, both still present. `pool_credit_back` has already returned
-            the reservation by then, so a settle passing on existence alone returned
-            it a SECOND time and enlarged the tenant's effective budget. A
-            transactional (pre-PENDING) hold carries no status attribute at all, so
-            the second clause keeps this inert for today's data.
+          * `status IN (ACTIVE, RETAINED) OR attribute_not_exists(status)` —
+            existence alone is not enough under the PENDING protocol, because its
+            endings do not delete the row: a fenced hold becomes
+            `EXPIRED_UNCREDITED` and a retired one `RECLAIMED`, both still present.
+            `pool_credit_back` has already returned the reservation by then, so a
+            settle passing on existence alone returned it a SECOND time and enlarged
+            the tenant's effective budget. A transactional (pre-PENDING) hold carries
+            no status attribute at all, so the last clause keeps this inert for
+            today's data.
+
+            `RETAINED` is admitted for the same reason `ACTIVE` is, and the reason is
+            what the two states have in common: the debit committed and the
+            reservation has NOT been given back. A retention is ended by an operator
+            resolving it, and that resolution IS this settle (or the paired release),
+            so the status has to be part of the money transaction rather than flipped
+            back to `ACTIVE` first — a crash between two writes left an expired
+            `ACTIVE` hold, and the reaper then reclaimed automatically the very
+            reservation the retention existed to hold.
+
+            The reaper's `reclaim_hold_txn_item` deliberately does NOT admit
+            `RETAINED`, and the asymmetry is the point: a resolution may end a
+            retention and the reaper may not.
         """
         item: dict[str, Any] = {
             "Delete": {
@@ -1189,10 +1301,11 @@ class TenantBudgetsRepository:
         if require_exists:
             item["Delete"]["ConditionExpression"] = (
                 "attribute_exists(sk) AND "
-                "(#st = :active_h OR attribute_not_exists(#st))"
+                "(#st = :active_h OR #st = :retained_h OR attribute_not_exists(#st))"
             )
             item["Delete"]["ExpressionAttributeNames"] = {"#st": "status"}
-            item["Delete"]["ExpressionAttributeValues"] = {":active_h": {"S": "ACTIVE"}}
+            item["Delete"]["ExpressionAttributeValues"] = {
+                ":active_h": {"S": "ACTIVE"}, ":retained_h": {"S": "RETAINED"}}
         return item
 
     def reclaim_hold_txn_item(

@@ -703,3 +703,79 @@ def test_http_capture_idempotent_replay_flag_on(dynamodb_mock, monkeypatch):
                  json={"actual_amount_microusd": 100_000})
     assert cap.status_code == 200, cap.text
     assert _pool(tenant, current_period())["pool_reserved_microusd"] == 0  # debited once
+
+
+# --------------------------------------------------------- C9.1 the projection window
+
+
+def _delete_reserve_event(tenant, period, hold_id):
+    """Remove the RESERVE event, which is what the window looks like from the read
+    side: under this protocol the event is an asynchronous projection, so between
+    the terminal committing and the projection landing there is no reserve event to
+    read. Deleting it reproduces that state exactly rather than approximately."""
+    from dynamo.credit_ledger import ledger_pk, reserve_sk
+    import boto3
+
+    boto3.client("dynamodb", region_name="us-east-1").delete_item(
+        TableName=CreditLedgerRepository()._name,
+        Key={"pk": {"S": ledger_pk(tenant, period)}, "sk": {"S": reserve_sk(hold_id)}},
+    )
+
+
+def test_a_captured_authorization_still_answers_after_its_hold_is_gone(dynamodb_mock,
+                                                                      monkeypatch):
+    """C9.1. The capture's own transaction deletes the hold, and the RESERVE event
+    may not have been projected yet, so the only surviving record of the
+    authorization is its terminal. Reading it used to 404 — the client was told its
+    own charged authorization did not exist — and to report the amount as zero once
+    it did answer."""
+    _set_protocol(monkeypatch, "pending")
+    tenant, period = _seed("pend-c91")
+    r = _authorize(tenant, 640_000, "c91-key")
+
+    ctx = _pipeline.rehydrate_reservation_context(
+        tenant_id=tenant, period=period, hold_id=r.hold_id, hold_sk=r.hold_sk)
+    assert ctx is not None
+    from mvp.billing_authorize import _settle_external
+    _settle_external(ctx, 500_000)
+    _delete_reserve_event(tenant, period, r.hold_id)
+
+    from mvp.billing_authorize import get_authorization, _require_external
+    # The C-1 gate no longer refuses it...
+    _require_external(tenant, period, r.hold_id, r.hold_sk)
+    # ...and the amount is the one that was authorized, not zero.
+    from mvp.deps import AuthenticatedUser
+
+    user = AuthenticatedUser(
+        user_id="u", email="e@x.y", org_id=tenant, roles=["user"], raw_claims={},
+        auth_kind="jwt", key_scopes=None, api_key_hash=None)
+    status = get_authorization(r.authorization_id, user, user)
+    assert status.status == "captured"
+    assert status.terminal == "SETTLE"
+    assert status.captured_microusd == 500_000
+    assert status.amount_microusd == 640_000
+
+
+def test_an_inline_hold_is_still_refused_after_its_terminal(dynamodb_mock, monkeypatch):
+    """The gate stays fail-closed. Accepting a terminal as evidence of EXISTENCE
+    must not turn it into evidence of EXTERNALITY: an inline request's terminal
+    carries `source=inline`, and its (forgeable) token must still 404 on every
+    external endpoint."""
+    import fastapi
+
+    _set_protocol(monkeypatch, "pending")
+    tenant, period = _seed("pend-inline")
+    from dynamo.credit_ledger import CreditLedgerRepository as _L
+    ledger = _L()
+    import boto3
+    boto3.client("dynamodb", region_name="us-east-1").transact_write_items(
+        TransactItems=[ledger.terminal_event_txn_item(
+            tenant_id=tenant, period=period, hold_id="inline-hold",
+            event_type="SETTLE", reserved_delta_microusd=-1000,
+            settled_delta_microusd=900, run_id="r", run_id_is_fallback=True,
+            source="inline")])
+    from mvp.billing_authorize import _require_external
+    with pytest.raises(fastapi.HTTPException) as ei:
+        _require_external(tenant, period, "inline-hold",
+                          _hsk(period, int(time.time()) + 60, "inline-hold"))
+    assert ei.value.status_code == 404

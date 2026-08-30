@@ -602,8 +602,8 @@ def get_authorization(
             amount_microusd=amount,
             status="expired" if _expired(period, hold_id, hold_sk) else "authorized",
         )
-    amount = int((reserve_evt or {}).get("reserved_delta_microusd", 0))
     terminal = ledger.get_terminal(tenant_id=tenant_id, period=period, hold_id=hold_id)
+    amount = _authorized_amount(reserve_evt, terminal)
     et = (terminal or {}).get("event_type")
     if et == "SETTLE":
         return AuthorizationStatus(
@@ -634,6 +634,33 @@ def get_authorization(
 # ---------------------------------------------------------------------------
 
 
+def _authorized_amount(reserve_evt: Optional[dict], terminal: Optional[dict]) -> int:
+    """How much this authorization was for, from whichever record still exists.
+
+    The RESERVE event is the natural answer and it is not always there: under the
+    PENDING protocol it is an asynchronous projection, so a status read that lands
+    between the terminal and the projection had no reserve event and reported the
+    amount as ZERO — a captured authorization describing itself as being for
+    nothing. The terminal records the reservation it returned, so it can answer the
+    same question.
+
+    `reserved_delta_microusd` on a terminal is signed and negative (the reservation
+    coming off the counter), except on the reaper-race SETTLE that records
+    settled-only with a zero delta; `reserved_microusd` is the admission-checked
+    amount when the hard ceiling priced it. Both are tried before giving up, and
+    giving up returns zero only when no record carries the figure at all."""
+    if reserve_evt:
+        return int(reserve_evt.get("reserved_delta_microusd", 0))
+    if terminal:
+        delta = int(terminal.get("reserved_delta_microusd", 0))
+        if delta:
+            return abs(delta)
+        checked = terminal.get("reserved_microusd")
+        if checked is not None:
+            return int(checked)
+    return 0
+
+
 def _require_external(tenant_id: str, period: str, hold_id: str,
                       hold_sk: Optional[str] = None) -> None:
     """Raise 404 unless this hold was minted by the external authorize API
@@ -655,12 +682,49 @@ def _require_external(tenant_id: str, period: str, hold_id: str,
             if hold.get("source") != "external":
                 raise HTTPException(status_code=404, detail="authorization not found")
             return
+    ledger = CreditLedgerRepository()
     # Legacy fallback: no HOLD-carried source → the RESERVE event is the authority.
-    reserve_evt = CreditLedgerRepository().get_reserve(
+    reserve_evt = ledger.get_reserve(
         tenant_id=tenant_id, period=period, hold_id=hold_id
     )
-    if reserve_evt is None or reserve_evt.get("source") != "external":
-        raise HTTPException(status_code=404, detail="authorization not found")
+    if reserve_evt is not None:
+        if reserve_evt.get("source") != "external":
+            raise HTTPException(status_code=404, detail="authorization not found")
+        return
+    # The hold is gone and no RESERVE event is readable. That is not "no such
+    # authorization": the terminal transaction deletes the hold, and under the
+    # PENDING protocol the RESERVE event is an asynchronous projection, so a client
+    # capturing and then re-reading its own authorization landed in a window where
+    # the only surviving record of it was its ending — and that ending was not
+    # consulted. It is now. An ending cannot exist for a reservation that never
+    # began, so a terminal marked external is the same authority as a RESERVE event
+    # marked external (C9.1).
+    terminal = ledger.get_terminal(
+        tenant_id=tenant_id, period=period, hold_id=hold_id)
+    if terminal is not None and _terminal_source(terminal) == "external":
+        return
+    raise HTTPException(status_code=404, detail="authorization not found")
+
+
+def _terminal_source(terminal: dict) -> Optional[str]:
+    """Which surface owned the reservation this terminal ended.
+
+    Recorded on the terminal itself for endings written after that field existed.
+    A reaper RECLAIM has always copied the hold's own attributes into
+    `reaped_hold` before deleting the row, so that is read as the equivalent fact
+    rather than duplicated — the reclaim path was already carrying it."""
+    direct = terminal.get("source")
+    if direct:
+        return str(direct)
+    raw = terminal.get("reaped_hold")
+    if raw:
+        import json as _json
+
+        try:
+            return str(_json.loads(raw).get("source") or "") or None
+        except Exception:  # noqa: BLE001 — a corrupt blob is not an authority.
+            return None
+    return None
 
 
 def _no_terminal_error(tenant_id: str, period: str, hold_sk: str) -> HTTPException:

@@ -77,6 +77,11 @@ def _open_hold(**kwargs) -> _money.Hold:
     return _money.Hold(
         settle=lambda **kw: settle_reservation_and_log(**kw),
         release=lambda ctx: _release_pool(ctx),
+        # Records the departure on the durable hold when an ending keeps the
+        # reservation instead of returning it. Resolved from the context the
+        # route already has, so the retention the reaper later honours is
+        # reachable from a real request rather than only from a test.
+        mark_departed=_money.hold_departure_marker(kwargs.get("tenants_repo")),
         **kwargs,
     )
 
