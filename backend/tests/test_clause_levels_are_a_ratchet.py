@@ -111,7 +111,7 @@ def test_the_level_ratchet_is_not_vacuous():
         f"so the record has drifted into covering a fraction of it")
     assert "?" not in set(declared.values()), (
         f"a clause row has no parseable level: "
-        f"{sorted(c for c, l in declared.items() if l == '?')}")
+        f"{sorted(cid for cid, level in declared.items() if level == '?')}")
 
 
 def test_every_clause_level_is_recorded():
