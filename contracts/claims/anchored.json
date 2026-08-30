@@ -544,12 +544,6 @@
    "note": ""
   },
   {
-   "claim": "That proof is over the modelled transitions: the shipped PENDING path still has a replay that reads an intent's presence rather than the pool marker, so it does not yet answer a retry the way the transactional path does ([CONTRACTS.md](design/CONTRACTS.md) C5.4).",
-   "file": "docs/SCOPE.md",
-   "anchor": "debt:C5.4",
-   "note": "the PENDING replay predicate reading the pool marker rather than the intent's presence, which is what would make the two protocol paths answer a retry identically"
-  },
-  {
    "claim": "**What this loop produces: a Reproducible Savings Report.** (Renamed from \"Savings Certificate\": until the long-term immutable sink and the export contract land, \"certificate\" overstates it.) What is distinctive is not having a savings figure — LiteLLM ships `router_strategy/savings_baseline.py`, and an earlier claim here of \"a number LiteLLM structurally cannot produce\" was wrong and is withdrawn — but the **shape of the computation**: resolve=)` is a pure function taking normalized rows, a versioned rate table, and a resolver as explicit inputs, priced over each request's REAL billed tokens and joined to the ledger by `span_id`.",
    "file": "docs/SCOPE.md",
    "anchor": "boundary:'until the long-term immutable sink and the export contract land'",
@@ -652,10 +646,9 @@
    "note": ""
   },
   {
-   "claim": "- **Retaining a reservation instead of returning it is not built.** [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far each claim is verified; where this document and that one disagree, that one is describing today.",
+   "claim": "[`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far each claim is verified; where this document and that one disagree, that one is describing today.",
    "file": "docs/design/hard-ceiling.md",
-   "anchor": "debt:C8.3",
-   "note": "retention of an unobserved-outcome hold, which the flag gates today"
+   "anchor": "descriptive:a pointer to the document that records how far each claim is verified"
   },
   {
    "claim": "Every rule written for `enforced` applies in `shadow` except the refusals and the criteria that test them.",
@@ -760,16 +753,9 @@
    "note": ""
   },
   {
-   "claim": "- A charge for an attempt that returned no usage block never appears in the ledger at all.",
+   "claim": "- A charge for an attempt that returned no usage block never appears in the ledger at all, which is **out of scope by the owner's decision** rather than a gap waiting to be closed: what the gateway cannot observe is outside the cost model.",
    "file": "docs/design/hard-ceiling.md",
-   "anchor": "debt:C3.5",
-   "note": "the durable dispatcher is what would put that charge on the ledger"
-  },
-  {
-   "claim": "That is **out of scope by the owner's decision**: what the gateway cannot observe is outside the cost model.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:states the scope boundary",
-   "note": ""
+   "anchor": "boundary:'out of scope by the owner's decision' — the sentence states the limit and whose decision it is"
   },
   {
    "claim": "## 6. What strict mode refuses, and what it guarantees",
@@ -1008,6 +994,14 @@
   {
    "claim": "The reclaim itself is exactly-once by conditional transaction, so a sweep racing a settle cannot return the same reservation twice ([CONTRACTS.md](./docs/design/CONTRACTS.md) C3.1, C3.2a).",
    "anchor": "contract:C3.1"
+  },
+  {
+   "claim": "That proof is over the modelled transitions; the shipped replay path is a separate question, and it is answered separately: a retry now decides committed from not-committed by reading durable evidence — a pool marker, an activated hold, a terminal, or a RESERVE event — so both protocols answer a retry the same way ([CONTRACTS.md](design/CONTRACTS.md) C5.4, C9.5).",
+   "anchor": "contract:C5.4"
+  },
+  {
+   "claim": "What the gateway cannot do is decide what the call cost, so a retention ends only when an operator settles it at the figure the provider's own record shows or releases it when that record shows none.",
+   "anchor": "contract:C8.3"
   }
  ]
 }

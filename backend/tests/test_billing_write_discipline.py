@@ -148,6 +148,23 @@ ALLOWED_SITES = {
         # hold_put_txn_item's transactional sibling).
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_put_pending", "put_item"),
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository._status_transition", "update_item"),
+        # Retaining a hold instead of reclaiming it (C8.3): the SAME shape as the
+        # transitions above — a single-item conditional SET of `status` (plus a
+        # timestamp), naming no pool counter, so it is NOT in COUNTER_FUNCTIONS and
+        # A2 is not engaged. It is written out separately from `_status_transition`
+        # only because its condition accepts a row with NO status attribute (the
+        # pre-PENDING implicit ACTIVE), which that helper cannot express. What makes
+        # it sound is what it does not do: no money moves, and the money it declines
+        # to move is already where it belongs. Reviewed OK.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_retain", "update_item"),
+        # Recording that a provider call departed and its outcome was never seen
+        # (C8.3). Same shape again: a single-item conditional SET of two descriptive
+        # attributes, naming no pool counter, so it is NOT in COUNTER_FUNCTIONS and A2
+        # is not engaged. It is the fact the reaper's retention branch reads, and it
+        # exists because that branch was reading an attribute nothing wrote — see
+        # `test_money_branches_on_written_facts.py`, which is what now refuses that
+        # shape of defect rather than a reviewer having to notice it. Reviewed OK.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.hold_mark_departed", "update_item"),
     },
     # backend/migrations/backfill_pool_headroom.py makes NO raw write of its own
     # (see COUNTER_FUNCTIONS note): it backfills by delegating to the reviewed

@@ -125,7 +125,7 @@ class TestAReplayVerifiesTheKeyItself:
         not: two distinct keys could land on one row. The row stores the raw key
         precisely so a replay can check it rather than trusting the address it was
         found at."""
-        from mvp._pipeline import IdempotencyKeyReuse, _idemp_replay
+        from mvp._pipeline import IdempotencyKeyReuse, _idemp_identity_or_raise
 
         row = {
             "request_fingerprint": "fp-1",
@@ -134,10 +134,10 @@ class TestAReplayVerifiesTheKeyItself:
             "period": "2026-03", "amount_microusd": 1, "expires_at": 1,
         }
         with pytest.raises(IdempotencyKeyReuse):
-            _idemp_replay(row, "fp-1", idempotency_key="invoice/a")
+            _idemp_identity_or_raise(row, "fp-1", idempotency_key="invoice/a")
 
     def test_the_same_key_replays(self):
-        from mvp._pipeline import _idemp_replay
+        from mvp._pipeline import _idemp_identity_or_raise, _idemp_result
 
         row = {
             "request_fingerprint": "fp-1",
@@ -145,14 +145,15 @@ class TestAReplayVerifiesTheKeyItself:
             "authorization_id": "a", "hold_id": "h", "hold_sk": "HOLD#x",
             "period": "2026-03", "amount_microusd": 1, "expires_at": 1,
         }
-        out = _idemp_replay(row, "fp-1", idempotency_key=KEY)
+        _idemp_identity_or_raise(row, "fp-1", idempotency_key=KEY)
+        out = _idemp_result(row)
         assert out.replayed is True and out.authorization_id == "a"
 
     def test_a_row_with_no_stored_key_is_not_replayed(self):
         """Every row this code writes carries the raw key; an absent one is a
         partial or foreign write, and replaying it would hand back an
         authorization nobody can show belongs to this key."""
-        from mvp._pipeline import IdempotencyKeyReuse, _idemp_replay
+        from mvp._pipeline import IdempotencyKeyReuse, _idemp_identity_or_raise
 
         row = {
             "request_fingerprint": "fp-1",
@@ -160,4 +161,150 @@ class TestAReplayVerifiesTheKeyItself:
             "period": "2026-03", "amount_microusd": 1, "expires_at": 1,
         }
         with pytest.raises(IdempotencyKeyReuse):
-            _idemp_replay(row, "fp-1", idempotency_key=KEY)
+            _idemp_identity_or_raise(row, "fp-1", idempotency_key=KEY)
+
+
+# --------------------------------------------------------------------------- C5.4
+
+
+class TestARetryCanTellCommittedFromNotCommitted:
+    """C5.4, for both protocols.
+
+    The transactional path writes the record inside the reserve transaction, so its
+    presence means the debit landed. The PENDING protocol writes it BEFORE the
+    commit point, so its presence means only that an attempt began — and the entry
+    point used to replay any readable record as an authorization, which handed a
+    live `authorization_id` back for a debit that had been REFUSED. There was no
+    configuration of that protocol in which the clause held.
+
+    The verdict now comes from `_commit_evidence`: a pool marker, an activated hold,
+    a terminal event, or a RESERVE event. Any one is conclusive and each protocol
+    leaves at least one, so the same resolver answers for both.
+    """
+
+    def _seed(self, tenant, limit):
+        from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+        from dynamo.user_tenants import UserTenantsRepository
+
+        period = current_period()
+        UserTenantsRepository().ensure(user_id=f"u-{tenant}", tenant_id=tenant,
+                                       role="user", total_credit=10 ** 9)
+        TenantBudgetsRepository().set_pool_limit(
+            tenant_id=tenant, period=period, pool_limit_microusd=limit)
+        return period
+
+    def _authorize(self, tenant, amount, key):
+        from mvp import _pipeline
+        from mvp.billing_authorize import encode_authorization_id
+
+        return _pipeline.reserve_external_authorization(
+            tenant_id=tenant, amount_microusd=amount, idempotency_key=key,
+            request_fingerprint=f"fp-{key}",
+            authorization_id_factory=lambda h, p, sk: encode_authorization_id(
+                hold_id=h, period=p, hold_sk=sk),
+            ttl_seconds=3600,
+        )
+
+    def test_a_refused_authorize_replays_as_refused_under_pending(self, dynamodb_mock,
+                                                                 monkeypatch):
+        """The failure this clause is about. The intent row exists because the
+        attempt began; the debit was refused for want of headroom. A retry with the
+        same key must get the same refusal, not an authorization for money the pool
+        never held."""
+        import fastapi
+        from dynamo.tenant_budgets import TenantBudgetsRepository
+        from mvp import _pipeline
+
+        monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL", "pending")
+        tenant = "c54-refused"
+        period = self._seed(tenant, limit=1_000)
+
+        for attempt in range(2):
+            with pytest.raises(fastapi.HTTPException) as ei:
+                self._authorize(tenant, 500_000, "same-key")
+            assert ei.value.status_code == 402, f"attempt {attempt}"
+        # And no debit, on either attempt.
+        pool = TenantBudgetsRepository().pool_summary(tenant, period)
+        assert int(pool["pool_reserved_microusd"]) == 0
+        assert int(pool["pool_settled_microusd"]) == 0
+
+    def test_an_in_flight_attempt_answers_retry_rather_than_success(self, dynamodb_mock,
+                                                                   monkeypatch):
+        """An intent written and the commit not yet reached is the ambiguous state,
+        and the honest answer is 503 with the same key — not a verdict either way.
+        Reporting success here is the fail-open; reporting 402 would refuse a
+        reservation that may be about to land."""
+        import fastapi
+        from mvp import _pipeline
+
+        monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL", "pending")
+        tenant = "c54-inflight"
+        self._seed(tenant, limit=10 ** 9)
+
+        # Stop the attempt exactly between the intent and the commit point.
+        def _die(*a, **kw):
+            raise RuntimeError("task killed after the intent, before the commit")
+
+        monkeypatch.setattr(_pipeline, "_pending_commit_transact", _die)
+        with pytest.raises(RuntimeError):
+            self._authorize(tenant, 400_000, "inflight-key")
+
+        monkeypatch.undo()
+        monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL", "pending")
+        with pytest.raises(fastapi.HTTPException) as ei:
+            self._authorize(tenant, 400_000, "inflight-key")
+        assert ei.value.status_code == 503
+        assert ei.value.detail["reason"] == "pool_reservation_in_flight"
+
+    def test_a_committed_reservation_still_replays_under_pending(self, dynamodb_mock,
+                                                                monkeypatch):
+        """The other direction, so the fix is not simply refusing everything: a
+        debit that DID land replays the original authorization."""
+        from mvp import _pipeline
+
+        monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL", "pending")
+        tenant = "c54-committed"
+        period = self._seed(tenant, limit=10 ** 9)
+        first = self._authorize(tenant, 300_000, "ok-key")
+        again = self._authorize(tenant, 300_000, "ok-key")
+        assert again.replayed is True
+        assert again.authorization_id == first.authorization_id
+        from dynamo.tenant_budgets import TenantBudgetsRepository
+        assert int(TenantBudgetsRepository().pool_summary(
+            tenant, period)["pool_reserved_microusd"]) == 300_000
+
+    def test_a_terminal_is_evidence_after_every_other_trace_is_gone(self, dynamodb_mock,
+                                                                   monkeypatch):
+        """An ending is proof the beginning happened. Once an authorization has been
+        captured the hold is deleted and the marker settled, so an authorize retry
+        arriving then has only the terminal to go on — and it is enough. Without
+        this witness the retry would answer 404 for an authorization that was
+        charged, which is the same defect wearing a different status code."""
+        from mvp import _pipeline
+
+        monkeypatch.setattr(_pipeline, "_RESERVE_PROTOCOL", "pending")
+        tenant = "c54-terminal"
+        self._seed(tenant, limit=10 ** 9)
+        first = self._authorize(tenant, 200_000, "cap-key")
+
+        ctx = _pipeline.rehydrate_reservation_context(
+            tenant_id=tenant, period=first.period, hold_id=first.hold_id,
+            hold_sk=first.hold_sk)
+        assert ctx is not None
+        from mvp.billing_authorize import _settle_external
+        _settle_external(ctx, 150_000)
+
+        again = self._authorize(tenant, 200_000, "cap-key")
+        assert again.replayed is True
+        assert again.authorization_id == first.authorization_id
+
+    def test_the_transactional_path_is_unchanged(self, dynamodb_mock):
+        """The default protocol writes the record inside the reserve transaction, so
+        the resolver finds the RESERVE event it wrote there and replays. This is the
+        regression guard on unifying the two resolvers."""
+        tenant = "c54-txn"
+        self._seed(tenant, limit=10 ** 9)
+        first = self._authorize(tenant, 250_000, "txn-key")
+        again = self._authorize(tenant, 250_000, "txn-key")
+        assert again.replayed is True
+        assert again.authorization_id == first.authorization_id

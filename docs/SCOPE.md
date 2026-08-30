@@ -166,10 +166,11 @@ with commit SHAs and the exact limits of each measurement, see
    Z3 joint-transition **equivalence** proof — the old and new money paths are
    proven to move money identically before the old one is deleted (`27d86db`) —
    a proof over the modelled transitions, not over the shipped replay path.
-   That proof is over the modelled transitions: the shipped PENDING path still has
-   a replay that reads an intent's presence rather than the pool marker, so it does
-   not yet answer a retry the way the transactional path does
-   ([CONTRACTS.md](design/CONTRACTS.md) C5.4).
+   That proof is over the modelled transitions; the shipped replay path is a
+   separate question, and it is answered separately: a retry now decides committed
+   from not-committed by reading durable evidence — a pool marker, an activated
+   hold, a terminal, or a RESERVE event — so both protocols answer a retry the same
+   way ([CONTRACTS.md](design/CONTRACTS.md) C5.4, C9.5).
 2. **The decision log as a first-class data product.** LiteLLM logs spend per
    request; what we have not found there is a *decision-to-charge join contract*
    — a schema'd, exportable record that ties the advised model, the executed

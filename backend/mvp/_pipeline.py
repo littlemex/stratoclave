@@ -735,6 +735,7 @@ class ReservationContext:
                     run_id=_rel_hold_id,
                     run_id_is_fallback=True,
                     settle_reason="release",
+                    source=getattr(self, "source", None) or "inline",
                 )
             )
         try:
@@ -917,6 +918,303 @@ def _sweep_expired_holds(budgets, tenant_id: str, period: str) -> int:
         return 0
 
 
+class RetainedHoldNotFound(Exception):
+    """No retained hold with that id for this tenant/period."""
+
+
+class RetainedResolutionRaced(Exception):
+    """The hold stopped being RETAINED between the read and the write."""
+
+
+def list_retained_holds(tenant_id: str, period: str, *, limit: int = 100) -> list[dict]:
+    """The reservations this tenant/period is holding back, for an operator to act on.
+
+    A retained hold has no ending yet, by design, so nothing else surfaces it and
+    nothing will resolve it on its own. That is the trade the retention makes: the
+    budget is not handed back for a call that may have been billed, and in exchange
+    somebody has to decide what it cost. This is the list they decide from."""
+    return TenantBudgetsRepository().list_retained_holds(
+        tenant_id=tenant_id, period=period, limit=limit)
+
+
+def resolve_retained_hold(
+    tenant_id: str, period: str, hold_id: str, *,
+    charge_microusd: Optional[int] = None, release: bool = False,
+) -> tuple[str, int]:
+    """End a retained reservation, at a figure an operator supplies or at nothing.
+
+    Returns `(terminal, charged_microusd)`. Exactly one of the two arguments is
+    meaningful and the caller must choose: `charge_microusd` says "the provider's own
+    record shows this much", `release=True` says "the provider's record shows no
+    charge". The parameter is named for the provider's charge rather than for the
+    pool's counter, because it is neither computed by nor checked against this
+    gateway — it is testimony being entered into the ledger. The gateway cannot pick between them — that is why the retention exists
+    — so there is no default here and no inference.
+
+    Both branches go through the SAME money primitives the request path uses:
+    the settle is `_settle_pool_side`, which is where the reserved→settled move, the
+    hold delete and the terminal event live in one transaction with all their race
+    reconciliation; the release is `ReservationContext.release_pool`. Nothing about
+    the money is re-implemented for the admin path, so a retention resolves exactly
+    as a request would have.
+
+    An amount ABOVE what was reserved is refused rather than clamped. The reservation
+    is the amount the pool actually has held; settling above it would push the settled
+    side past what admission ever checked, and an operator who has a larger figure
+    from the provider is reporting an overrun, which is a different record.
+    """
+    if (charge_microusd is None) == (not release):
+        raise _err_400("resolve_requires_exactly_one_of_settled_or_release")
+    budgets = TenantBudgetsRepository()
+    ledger = _reaper_ledger()
+    retained = ledger.get_retained(
+        tenant_id=tenant_id, period=period, hold_id=hold_id)
+    holds = [
+        h for h in budgets.list_retained_holds(
+            tenant_id=tenant_id, period=period, limit=500)
+        if str(h.get("hold_id", "")) == hold_id
+    ]
+    if not holds:
+        raise RetainedHoldNotFound(hold_id)
+    hold = holds[0]
+    amount = int(hold.get("amount_microusd", 0))
+    actual = 0 if release else int(charge_microusd or 0)
+    if actual > amount:
+        raise _err_400("settled_exceeds_retained_reservation")
+
+    # There is deliberately NO status write before the money moves. Flipping the hold
+    # out of RETAINED first left a window: a crash between the two writes leaves an
+    # expired ACTIVE hold, which the reaper reclaims on its own — the exact thing
+    # retaining it was for. The settle and release primitives are status-agnostic
+    # (their hold delete is conditioned on the row existing, not on what it says), so
+    # the terminal cell is the only arbiter needed, and it is one the money
+    # transaction already carries. Two operators racing therefore resolve the way two
+    # racing settles do, and the loser is detected by reading what actually landed.
+    ctx = ReservationContext(
+        tenants_repo=UserTenantsRepository(),
+        reservation_tokens=0,
+        pool_reserved_microusd=amount,
+        period=period,
+        tenant_id=tenant_id,
+        pool_active=True,
+        hold_id=hold_id,
+        hold_sk=str(hold.get("sk", "")),
+        selected_model=str(hold.get("model_id") or "") or None,
+    )
+    if release:
+        ctx.release_pool()
+        return _resolution_outcome(ledger, tenant_id, period, hold_id,
+                                   expected="RELEASE", expected_amount=0)
+    _settle_pool_side(
+        _RetentionActor(tenant_id), ctx, actual,
+        ledger_facts={
+            "model_id": str(hold.get("model_id") or "") or None,
+            "pricing_version": None,
+            "pricing_key": None,
+            "rating": None,
+            # Named so the ledger says WHY a charge arrived long after the request,
+            # and at a figure nobody in the request path computed.
+            "settle_reason": "retention_resolved",
+            "run_id": str(hold.get("run_id") or "") or None,
+            "source": str(hold.get("source") or "inline"),
+            "retained_at": str(hold.get("retained_at") or "") or None,
+            "attempt_marker": (retained or {}).get("attempt_marker"),
+        },
+    )
+    return _resolution_outcome(ledger, tenant_id, period, hold_id,
+                               expected="SETTLE", expected_amount=actual)
+
+
+def _resolution_outcome(ledger, tenant_id: str, period: str, hold_id: str, *,
+                        expected: str, expected_amount: int) -> tuple[str, int]:
+    """Report the ending that actually landed, not the one this caller asked for.
+
+    The money primitives reconcile a terminal clash as "already finalized" and return
+    quietly, which is right for a request path — a request has nothing to tell anyone.
+    An operator does: two people resolving one retention would otherwise both be told
+    their own figure was recorded, and only one was. So the terminal is read back and
+    a disagreement is raised rather than reported."""
+    terminal = ledger.get_terminal(
+        tenant_id=tenant_id, period=period, hold_id=hold_id)
+    if terminal is None:
+        # No ending at all: the money transaction did not commit and did not raise
+        # (a throttle it swallowed). The retention is untouched and still resolvable.
+        raise HTTPException(status_code=503, detail={
+            "type": "retention_resolution_unavailable",
+            "message": "The resolution did not commit. Retry."})
+    landed = str(terminal.get("event_type", ""))
+    landed_amount = int(terminal.get("settled_delta_microusd", 0))
+    if landed != expected or landed_amount != int(expected_amount):
+        raise RetainedResolutionRaced(
+            f"{hold_id}: recorded {landed} at {landed_amount}, "
+            f"this request asked for {expected} at {expected_amount}")
+    return landed, landed_amount
+
+
+class _RetentionActor:
+    """Minimal principal for `_settle_pool_side`, which reads only `org_id`.
+
+    A retention is resolved at the tenant level by an operator; there is no acting
+    end-user whose token quota should move, and the audit trail for who did it is the
+    admin audit event, not this object."""
+
+    def __init__(self, tenant_id: str):
+        self.org_id = tenant_id
+        self.user_id = ""
+        self.email = ""
+
+
+def _retain_instead_of_returning(budgets, tenant_id: str, period: str,
+                                  hold: dict, hold_id: str) -> bool:
+    """Hold this reservation back rather than reclaiming it, if it should be.
+
+    Three conditions, all of them facts rather than judgements:
+
+      * the operator turned `STRATOCLAVE_UNOBSERVED_HOLDS` on. Off by default, so
+        merging this changes no deployment's behaviour;
+      * the hold records that a provider call departed (`provider_invoked_at`).
+        Absence means the gateway never saw one leave, and returning the budget for
+        a call that was never made is simply correct — this is the one place the
+        distinction is worth money;
+      * the hold is `inline`. An external authorization made no provider call at
+        all, so it cannot have been billed by one.
+
+    Returns whether the hold was retained. A False from the status write means
+    something else ended the hold first, and then the caller must go on and reclaim
+    normally rather than treat it as retained.
+    """
+    from . import provider_outcome as _outcome
+
+    if not _outcome.unobserved_holds_enforced():
+        return False
+    if not hold.get("provider_invoked_at"):
+        return False
+    if str(hold.get("source") or "inline") != "inline":
+        return False
+    sk = str(hold.get("sk", ""))
+    if not sk or not hold_id:
+        return False
+    try:
+        if not budgets.hold_retain(tenant_id=tenant_id, sk=sk):
+            return False
+    except Exception:  # noqa: BLE001 — a failed retain falls through to the reclaim.
+        logger.warning("pool_hold_retain_failed", tenant_id=tenant_id,
+                       period=period, hold_id=hold_id)
+        return False
+    _reaper_ledger().put_retained(
+        tenant_id=tenant_id, period=period, hold_id=hold_id,
+        amount_microusd=int(hold.get("amount_microusd", 0)),
+        attempt_marker=_outcome.attempt_request_metadata(
+            hold_id, tenant_id).get("sc_attempt_id"),
+        model_id=str(hold.get("model_id") or "") or None,
+        provider_invoked_at=str(hold.get("provider_invoked_at") or "") or None,
+        run_id=str(hold.get("run_id") or "") or None,
+    )
+    logger.error(
+        "pool_hold_retained",
+        tenant_id=tenant_id,
+        period=period,
+        hold_id=hold_id,
+        amount_microusd=int(hold.get("amount_microusd", 0)),
+        provider_invoked_at=str(hold.get("provider_invoked_at") or ""),
+    )
+    return True
+
+
+def _redrive_owed_after_late_reclaim(*, budgets, ledger, tenant_id: str,
+                                     period: str, hold_id: str) -> bool:
+    """Recover an owed charge when the reclaim beat the owed row into existence.
+
+    Called from the abandoned-settle path, immediately after that row is written. It
+    is the mirror of the reaper's own check and exists only to make the pair total:
+    the reaper checks after it commits, this checks after it writes, and a
+    strongly-consistent read means the second of the two always sees the first.
+
+    Never raises — the settle has already failed and its caller has already been
+    answered — but the recovery it delegates to is the same at-most-once transaction,
+    so running from both sides is safe rather than merely unlikely."""
+    try:
+        terminal = ledger.get_terminal(
+            tenant_id=tenant_id, period=period, hold_id=hold_id)
+    except Exception:  # noqa: BLE001 — a read failure leaves the row for the reaper.
+        return False
+    if not terminal or str(terminal.get("event_type", "")) != "RECLAIM":
+        return False
+    try:
+        return _recover_owed_settle_after_reclaim(
+            client=_low_level_client(), budgets=budgets, tenant_id=tenant_id,
+            period=period, hold_id=hold_id)
+    except Exception:  # noqa: BLE001 — logged inside; never fail the caller here.
+        return False
+
+
+def _recover_owed_settle_after_reclaim(*, client, budgets, tenant_id: str,
+                                       period: str, hold_id: str) -> bool:
+    """Post a charge the settle observed and could not commit, after its reclaim.
+
+    Returns whether a recovery was attempted. Never raises: it runs inside the
+    inline sweep, which must not be able to fail the request that happened to drive
+    it — but every outcome is logged, because a recovery that silently does not
+    happen is the defect this closes wearing a quieter face.
+    """
+    ledger = _reaper_ledger()
+    try:
+        owed = ledger.get_owed_settle(
+            tenant_id=tenant_id, period=period, hold_id=hold_id)
+    except Exception:  # noqa: BLE001 — a read failure is not "nothing owed".
+        logger.warning("owed_settle_read_failed", tenant_id=tenant_id,
+                       period=period, hold_id=hold_id)
+        return False
+    if not owed:
+        return False
+    actual = int(owed.get("settled_delta_microusd", 0))
+    if actual <= 0:
+        # An owed row for nothing is not a charge. Recorded rather than skipped
+        # silently, because it would mean the settle path wrote a figure it should
+        # not have.
+        logger.warning("owed_settle_nonpositive", tenant_id=tenant_id,
+                       period=period, hold_id=hold_id, actual_microusd=actual)
+        return False
+    facts = {
+        k: owed.get(k) for k in (
+            "span_id", "request_id", "group_id", "model_id", "pricing_version",
+            "pricing_key", "tokens_in", "tokens_out")
+        if owed.get(k) is not None
+    }
+    raw_rating = owed.get("rating")
+    if raw_rating:
+        import json as _json
+
+        try:
+            facts["rating"] = _json.loads(raw_rating)
+        except Exception:  # noqa: BLE001 — a corrupt rating must not block the money.
+            logger.warning("owed_settle_rating_unreadable", tenant_id=tenant_id,
+                           period=period, hold_id=hold_id)
+    for key in ("tokens_in", "tokens_out"):
+        if key in facts:
+            facts[key] = int(facts[key])
+    try:
+        _recover_spend_via_late_settle(
+            client=client,
+            ledger=ledger,
+            budgets_table_name=budgets.table_name,
+            tenant_id=tenant_id,
+            period=period,
+            hold_id=hold_id,
+            actual_microusd=actual,
+            run_id=str(owed.get("run_id") or hold_id),
+            run_is_fallback=bool(owed.get("run_id_is_fallback", True)),
+            facts=facts,
+        )
+    except Exception:  # noqa: BLE001 — the sweep is best-effort; the row survives.
+        logger.error("owed_settle_recovery_failed", tenant_id=tenant_id,
+                     period=period, hold_id=hold_id, actual_microusd=actual)
+        return True
+    logger.info("owed_settle_recovered", tenant_id=tenant_id, period=period,
+                hold_id=hold_id, actual_microusd=actual)
+    return True
+
+
 def _reaped_hold_facts(hold: dict) -> dict:
     """What a reclaim must copy out of the hold row before deleting it.
 
@@ -959,6 +1257,7 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
     if cap <= 0:
         return 0
     reclaimed = 0
+    retained = 0
     now_epoch = int(time.time())
     # The SK embeds the (zero-padded) expiry, so this range scan returns only
     # already-expired holds, oldest-expiry first, and `Limit` bounds it by
@@ -1005,6 +1304,19 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                 pass
             continue
         hold_id = str(hold.get("hold_id", ""))
+        # C8.3: this reclaim is about to return the reservation and record a settled
+        # delta of zero, which asserts the provider charged nothing. For a hold whose
+        # provider call had already departed, that assertion is measurably false —
+        # a Converse call abandoned at a 2 s read timeout was billed 1,493 output
+        # tokens. With `STRATOCLAVE_UNOBSERVED_HOLDS` on, the reservation is HELD
+        # instead: one conditional status write, no counter movement, so the amount
+        # goes on being counted against the limit exactly as it already was. The
+        # reaper skips a non-ACTIVE hold, so nothing offers to give it back again,
+        # and the retention is resolved deliberately (admin: settle at the figure
+        # from the provider's bill, or release when the bill shows nothing).
+        if _retain_instead_of_returning(budgets, tenant_id, period, hold, hold_id):
+            retained += 1
+            continue
         try:
             _reaper_items = [
                 _pool_settle_items(
@@ -1041,6 +1353,7 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                         run_id_is_fallback=True,
                         settle_reason="reaper_reclaim",
                         actor="reaper",
+                        source=str(hold.get("source") or "inline"),
                         # The Delete below destroys the hold row, so what this
                         # reclaim was ABOUT survives only here.
                         reaped_hold_facts=_reaped_hold_facts(hold),
@@ -1056,6 +1369,19 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
             # money-neutral — an EXPIRED hold is never EXPIRED_UNCREDITED).
             if _reserve_protocol_for(tenant_id) == "pending" and hold_id:
                 budgets.marker_settle_best_effort(tenant_id=tenant_id, hold_id=hold_id)
+            # C3.5: this reclaim just returned the reservation and recorded a
+            # settled delta of ZERO, which is the right record only if nothing was
+            # ever charged for it. A settle that observed usage and then failed to
+            # commit leaves an OWED_SETTLE row saying otherwise, and this is where
+            # that row is honoured — through the same LATE_SETTLE recovery the
+            # settle path uses when the reaper beats it, which is conditional on the
+            # terminal being the RECLAIM we just wrote and once-per-hold on its own
+            # sk. So a re-drive cannot double-post, and a reclaim of a hold with no
+            # owed row costs one point read.
+            if hold_id:
+                _recover_owed_settle_after_reclaim(
+                    client=client, budgets=budgets, tenant_id=tenant_id,
+                    period=period, hold_id=hold_id)
             # error level, with amount: an orphan means a request that reserved
             # budget then vanished. If the crash was AFTER a successful Bedrock
             # call, real spend happened but is recorded here as actual=0 — this
@@ -2741,8 +3067,17 @@ def reserve_external_authorization(
     # ORIGINAL (correctly settling against the period it reserved in).
     prior = _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key)
     if prior is not None:
-        return _idemp_replay(prior, request_fingerprint,
-                             idempotency_key=idempotency_key)
+        # The row's PRESENCE is not the same fact under both protocols, and this is
+        # the seam where that used to be assumed. The transactional path writes the
+        # row inside the reserve transaction, so its presence means the debit
+        # committed. The PENDING path writes it BEFORE the commit point, so its
+        # presence means only that an attempt began — and replaying it as an
+        # authorization handed back a live authorization_id for a debit that may
+        # have been refused (C5.4). `_replay_committed_or_refuse` asks the durable
+        # state instead of the row, so one resolver answers for both protocols.
+        return _replay_committed_or_refuse(
+            budgets, ledger, prior, request_fingerprint,
+            tenant_id=tenant_id, idempotency_key=idempotency_key)
 
     # PENDING protocol dispatch (docs/design/pending-protocol.md). Default
     # "transaction" falls through to the unchanged 4-item path below; a canary
@@ -2877,9 +3212,9 @@ def reserve_external_authorization(
                     ledger, tenant_id, period, idempotency_key
                 )
                 if winner is not None:
-                    return _idemp_replay(
-                        winner, request_fingerprint,
-                        idempotency_key=idempotency_key)
+                    return _replay_committed_or_refuse(
+                        budgets, ledger, winner, request_fingerprint,
+                        tenant_id=tenant_id, idempotency_key=idempotency_key)
                 # CCF but no readable row: get_idemp is ConsistentRead, so a CCF
                 # with no readable winner is a genuine transient (throttle) → retry
                 # (and count it as a throttle so exhaustion surfaces 503, not a
@@ -2958,57 +3293,6 @@ class _AmbiguousReserve(Exception):
 # authorize endpoint already clamps ttl to >= 30s, but pending re-asserts a floor
 # so a mis-wired caller cannot create a self-fencing hold.
 _PENDING_MIN_TTL_SECONDS = 30
-
-
-def _pending_replay_result(budgets, ledger, *, tenant_id, period, hold_id,
-                           idempotency_key, request_fingerprint, capture_mode):
-    """Resolve a duplicate Idempotency-Key (step-1 CCF) by READING state, never by
-    assuming success (Fable review bug 2/7). The IDEMP intent row (written before
-    the hold) carries the ORIGINAL, persisted hold_sk / amount / authorization_id,
-    so replay returns addressing that actually matches the durable row. Branch on
-    the hold's status + the pool marker so we only report success when the debit
-    is a proven fact:
-      * marker present (debit committed) -> success replay with persisted values.
-      * IDEMP intent present but no marker + hold still PENDING -> 503 in-flight
-        (the original attempt has not committed the debit yet; do NOT report
-        success — that would be the fail-open bug).
-      * hold FAILED -> replay the original 402.
-      * hold terminal/absent -> expired.
-    """
-    # Cross the period boundary, as the transactional replay paths do: a retry that
-    # arrives after the period rolled would otherwise miss its own intent and mint a
-    # second hold. `_read_idemp_with_prev_period` states why one period back is
-    # enough (the authorization's own 24h ceiling).
-    intent = _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key)
-    if intent is not None:
-        # fingerprint mismatch = same key, different body -> 422 (never replay).
-        fp = intent.get("request_fingerprint")
-        if fp is not None and fp != request_fingerprint:
-            raise IdempotencyKeyReuse(idempotency_key)
-        o_hold_sk = str(intent.get("hold_sk", ""))
-        o_amount = int(intent.get("amount_microusd", 0))
-        o_auth = str(intent.get("authorization_id", ""))
-        marker = budgets.pool_marker_amount(tenant_id=tenant_id, period=period, hold_id=hold_id)
-        hold = budgets.get_hold(tenant_id=tenant_id, sk=o_hold_sk) if o_hold_sk else None
-        h_status = str((hold or {}).get("status", "")) if hold else ""
-        if marker is not None or h_status == "ACTIVE":
-            # Debit is a fact: success replay with the PERSISTED addressing.
-            return ExternalAuthorizeResult(
-                authorization_id=o_auth, hold_id=hold_id, hold_sk=o_hold_sk,
-                period=period, amount_microusd=o_amount,
-                expires_at_epoch=int(intent.get("expires_at", 0)),
-                capture_mode=str(intent.get("capture_mode", capture_mode)),
-                replayed=True)
-        if h_status == "FAILED":
-            raise _err_402("tenant_pool_exhausted")   # replay the original failure
-        if h_status == "PENDING":
-            # In-flight: the original attempt has NOT committed the debit. Do NOT
-            # report success (fail-open). 503 so the client retries the SAME key.
-            raise HTTPException(status_code=503, detail={
-                "type": "budget_unavailable", "reason": "pool_reservation_in_flight",
-                "message": "A reservation for this Idempotency-Key is in flight. Retry shortly."})
-    # No IDEMP intent readable, or hold terminal/absent: treat as gone (expired).
-    raise HTTPException(status_code=404, detail="authorization not found")
 
 
 def _pending_commit_transact(budgets, *, tenant_id, period, hold_id, amount) -> str:
@@ -3159,10 +3443,23 @@ def _reserve_external_pending(
     except ClientError as e:
         if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
             raise
-        return _pending_replay_result(
-            budgets, ledger, tenant_id=tenant_id, period=period, hold_id=hold_id,
-            idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
-            capture_mode=capture_mode)
+        # The intent already exists: a concurrent attempt or an earlier one wrote
+        # it. Its presence is not evidence the debit landed (that is the whole
+        # shape of this protocol), so the same resolver the entry point uses reads
+        # the durable state and decides.
+        prior = _read_idemp_with_prev_period(
+            ledger, tenant_id, period, idempotency_key)
+        if prior is None:
+            # The Put CCF'd but the row is not readable on a consistent read. That
+            # is a transient, not a verdict — retrying the same key is safe because
+            # the intent Put is itself conditional.
+            raise HTTPException(status_code=503, detail={
+                "type": "budget_unavailable", "reason": "pool_reservation_in_flight",
+                "message": "A reservation for this Idempotency-Key is in flight. "
+                           "Retry shortly."})
+        return _replay_committed_or_refuse(
+            budgets, ledger, prior, request_fingerprint,
+            tenant_id=tenant_id, idempotency_key=idempotency_key)
 
     # STEP 1 (write-ahead intent): HOLD status=PENDING. A self SDK-retry / re-entry
     # CCFs; the marker read in step 2 makes that harmless (idempotent).
@@ -3195,7 +3492,7 @@ def _reserve_external_pending(
     if outcome == budgets.RESERVE_EXHAUSTED:
         # Genuine exhaustion: no marker was written, pool untouched. Mark the
         # IDEMP intent + hold FAILED (leak-safe, replayable) and 402.
-        # The HOLD's status is what a replay reads (`_pending_replay_result`), and
+        # The HOLD's status is what a replay reads (`_replay_committed_or_refuse`), and
         # it lives on TenantBudgets where an update is permitted. There is no
         # matching mark on the ledger intent: that row is append-only, and the
         # status field it used to carry was written by an UpdateItem the deployed
@@ -3288,9 +3585,96 @@ class IdempotencyKeyReuse(Exception):
     _safe_idemp_token collision handing back the wrong hold."""
 
 
-def _idemp_replay(
-    idemp_row: dict, request_fingerprint: str, *, idempotency_key: str
+def _commit_evidence(budgets, ledger, *, tenant_id: str, period: str,
+                     hold_id: str, hold_sk: str) -> Optional[str]:
+    """What durable fact proves this reservation's debit committed, or None.
+
+    "Committed" has four possible witnesses and they are not interchangeable — each
+    protocol leaves a different one — so the question is asked as "is there ANY
+    witness" rather than "is the witness I expect present":
+
+      * `marker`   — the PENDING protocol's commit point writes the pool debit and a
+                     fixed-size marker in one transaction, so the marker existing IS
+                     the debit existing.
+      * `hold`     — the hold has been activated, which only happens after the debit.
+      * `terminal` — the reservation has an ending. Nothing can end a debit that
+                     never happened, so a SETTLE/RELEASE/RECLAIM is a witness even
+                     after every other trace has been cleaned up. This is the one
+                     that matters for a capture retry arriving after the terminal
+                     landed but before the asynchronous RESERVE projection did.
+      * `reserve`  — the transactional path writes the RESERVE event inside the
+                     reserve transaction.
+
+    Read order is cheapest-and-most-local first; any hit is conclusive, so the later
+    reads are skipped."""
+    if hold_sk:
+        try:
+            if budgets.pool_marker_amount(
+                    tenant_id=tenant_id, period=period, hold_id=hold_id) is not None:
+                return "marker"
+        except Exception:  # noqa: BLE001 — a marker read failure is not a verdict.
+            pass
+        hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk)
+        if hold is not None and str(hold.get("status", "")) == "ACTIVE":
+            return "hold"
+    if ledger.get_terminal(tenant_id=tenant_id, period=period, hold_id=hold_id):
+        return "terminal"
+    if ledger.get_reserve(tenant_id=tenant_id, period=period, hold_id=hold_id):
+        return "reserve"
+    return None
+
+
+def _replay_committed_or_refuse(
+    budgets, ledger, idemp_row: dict, request_fingerprint: str, *,
+    tenant_id: str, idempotency_key: str,
 ) -> ExternalAuthorizeResult:
+    """Resolve a duplicate Idempotency-Key by reading state, for either protocol.
+
+    The identity checks come first and are unconditional: a key reused for a
+    different body, or a key that does not match the row it addressed, is a 422 and
+    never a replay — including when the debit did commit, because the caller would
+    otherwise receive an authorization it did not ask for.
+
+    Then the verdict, which is a read rather than an inference:
+
+      committed        -> replay the ORIGINAL authorization from the row.
+      hold FAILED      -> replay the original refusal (402). The attempt is over.
+      hold PENDING     -> 503 with the same key: the original attempt has not
+                          reached its commit point, and reporting success here is
+                          the fail-open this function exists to prevent.
+      nothing readable -> 404. The row addresses a reservation with no trace left.
+
+    "Committed" is `_commit_evidence`, not the row's own presence."""
+    _idemp_identity_or_raise(idemp_row, request_fingerprint,
+                             idempotency_key=idempotency_key)
+    hold_id = str(idemp_row.get("hold_id", ""))
+    hold_sk = str(idemp_row.get("hold_sk", ""))
+    period = str(idemp_row.get("period", ""))
+    if not hold_id or not period:
+        # A row that cannot say which reservation it addresses cannot be replayed
+        # into one. Refused for the same reason a row with no fingerprint is.
+        raise IdempotencyKeyReuse(
+            "the stored authorization does not name a reservation")
+
+    if _commit_evidence(budgets, ledger, tenant_id=tenant_id, period=period,
+                        hold_id=hold_id, hold_sk=hold_sk) is not None:
+        return _idemp_result(idemp_row)
+
+    hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk) if hold_sk else None
+    status = str((hold or {}).get("status", "")) if hold else ""
+    if status == "FAILED":
+        raise _err_402("tenant_pool_exhausted")
+    if status == "PENDING":
+        raise HTTPException(status_code=503, detail={
+            "type": "budget_unavailable", "reason": "pool_reservation_in_flight",
+            "message": "A reservation for this Idempotency-Key is in flight. "
+                       "Retry shortly."})
+    raise HTTPException(status_code=404, detail="authorization not found")
+
+
+def _idemp_identity_or_raise(
+    idemp_row: dict, request_fingerprint: str, *, idempotency_key: str
+) -> None:
     """Reconstruct an ExternalAuthorizeResult from a stored IDEMP row (a
     duplicate-key replay). The row froze everything the authorize response needs,
     so a replay is a pure read — no rehydrate, no second reserve.
@@ -3320,6 +3704,15 @@ def _idemp_replay(
         raise IdempotencyKeyReuse(
             "Idempotency-Key does not match the stored authorization's key"
         )
+    return None
+
+
+def _idemp_result(idemp_row: dict) -> ExternalAuthorizeResult:
+    """The authorize response a stored IDEMP row froze, replayed verbatim.
+
+    Separate from the identity checks because the two answer different questions —
+    "may this caller have this row" and "what did this row say" — and a resolver
+    that has to decide committed-or-not in between needs them apart."""
     return ExternalAuthorizeResult(
         authorization_id=str(idemp_row["authorization_id"]),
         hold_id=str(idemp_row["hold_id"]),
@@ -4568,6 +4961,11 @@ def _settle_pool_side(
                 reserve_pricing_version=facts.get("reserve_pricing_version"),
                 bound_mode=facts.get("bound_mode"),
                 estimate_inputs=facts.get("estimate_inputs"),
+                # Absence would have to mean "inline" if it were left unset, and a
+                # value that has to be inferred from absence is the defect shape
+                # this contract is organised around. The inline settle passes no
+                # source, so it is named here rather than implied.
+                source=facts.get("source") or "inline",
             )
 
         _ledger_item = _mk_settle_event(
@@ -4802,12 +5200,45 @@ def _settle_pool_side(
                 error_code=code,
             )
             continue
-    # Retries exhausted: an unsettled hold ties up pool budget until the reaper
-    # reclaims it at TTL. Emit a loud, structured record for reconciliation.
+    # Retries exhausted. The hold still ties up pool budget until the reaper
+    # reclaims it at TTL, and that reclaim records a settled delta of ZERO — so
+    # before this row existed, usage the provider had already reported left the
+    # system here, with a log line as its only trace (C3.5). The row is what the
+    # reaper reads to recover it through the LATE_SETTLE path it already uses when
+    # it wins the race against a settle: the charge is re-driven by durable state
+    # rather than by a human noticing an alarm.
+    #
+    # Written only on this path, so the happy path pays nothing for it. What it does
+    # NOT cover is stated rather than implied: a task that dies between learning the
+    # usage and writing this row still loses it, because covering that needs a
+    # write-ahead on every settle — a cost on every request, not a rare one.
+    if _hold_id:
+        _ledger.put_owed_settle(
+            tenant_id=user.org_id,
+            period=context.period,
+            hold_id=_hold_id,
+            actual_microusd=int(actual_cost_microusd),
+            run_id=_run_id,
+            run_id_is_fallback=_run_is_fallback,
+            facts=(ledger_facts or {}),
+        )
     logger.error(
         "pool_settle_failed",
         tenant_id=user.org_id,
         period=context.period,
         reserved_microusd=context.pool_reserved_microusd,
         actual_microusd=actual_cost_microusd,
+        owed_recorded=bool(_hold_id),
     )
+    # The reaper reads for an owed row AFTER it commits its RECLAIM, so one
+    # interleaving is left over: it read and found nothing, and this row was written
+    # a moment later. The hold is gone by then, so no later sweep revisits it and the
+    # charge would sit in a row nobody consults. Closing it needs no new mechanism,
+    # only the other order: this row was written before the read below, so if a
+    # RECLAIM is already visible here, the reclaim has happened and it is this side's
+    # turn to recover. Together the two orders are total — whichever party is second
+    # sees the other's write.
+    if _hold_id:
+        _redrive_owed_after_late_reclaim(
+            budgets=budgets, ledger=_ledger, tenant_id=user.org_id,
+            period=context.period, hold_id=_hold_id)

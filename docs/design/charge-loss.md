@@ -24,9 +24,23 @@ As of 2026-08-30:
   route.
 - **Withholding an unobserved hold is gated** by `STRATOCLAVE_UNOBSERVED_HOLDS`,
   **off by default**. With it off, an unobserved outcome still returns the
-  reservation — the automatic release section 7 forbids is therefore still the
-  default behaviour, and the capped write-off budget that section requires before
-  enabling it does not exist yet.
+  reservation, so the automatic release section 7 forbids is still the default
+  behaviour. With it **on**, section 7's first step now holds end to end: the ending
+  keeps the reservation, and the reaper no longer credits it back either — it moves
+  the hold to `RETAINED` and records a `RETAINED` ledger event carrying the attempt
+  marker, so the amount stays counted against the limit with no counter moving and
+  nothing offers to return it again. A retention ends only by an operator's
+  decision, at the figure the provider's own record shows (`POST
+  /admin/tenants/{t}/pool-retained/{hold_id}/resolve`) or as a release when that
+  record shows no charge; both go through the same money primitives a request uses.
+  There is **no automatic release**, by reaper, timer or policy, which is what
+  section 7 forbids.
+  **What still does not exist** is section 7's other half: exposure accounting with
+  saturation alarms. `GET /admin/tenants/{t}/pool-retained` reports `held_microusd`,
+  so the figure is available, but nothing watches it — a provider outage under the
+  flag can saturate a tenant's period budget and the first signal is a refusal.
+  That is the reason the flag is still off by default, and it is the work that would
+  change that.
 - **The per-attempt marker ships** (`attempt_request_metadata`), and the reaper
   records the reaped hold's own facts in its RECLAIM terminal rather than asserting
   a zero.

@@ -115,6 +115,55 @@ class UsageBucket(BaseModel):
     sample_size: int = 0
 
 
+class RetainedHoldItem(BaseModel):
+    """One reservation being held back pending a decision about what it cost."""
+
+    model_config = ConfigDict(extra="forbid")
+    hold_id: str
+    amount_microusd: int
+    # The `sc_attempt_id` stamped into the provider call's request metadata. It is
+    # the handle the provider's own invocation record can be found by, so it is what
+    # makes the retention resolvable rather than merely visible.
+    attempt_marker: Optional[str] = None
+    model_id: Optional[str] = None
+    provider_invoked_at: Optional[str] = None
+    retained_at: Optional[str] = None
+
+
+class RetainedHoldsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tenant_id: str
+    period: str
+    held_microusd: int
+    items: list[RetainedHoldItem]
+
+
+class ResolveRetainedRequest(BaseModel):
+    """How a retained reservation ends.
+
+    Exactly one of the two, because they are different claims and a caller must say
+    which one they are making: `charge_microusd` asserts a figure the operator got
+    from the provider's own record, and `release` asserts the provider's record shows
+    no charge. There is deliberately no default — the gateway cannot pick, and a
+    default would be a guess wearing an API's authority.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    charge_microusd: Optional[int] = Field(default=None, ge=0)
+    release: Optional[bool] = None
+    # Free-text, stored on the audit event: where the figure came from.
+    evidence: Optional[str] = Field(default=None, max_length=500)
+
+
+class ResolveRetainedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tenant_id: str
+    period: str
+    hold_id: str
+    terminal: str  # SETTLE | RELEASE
+    charged_microusd: int
+
+
 class SetPoolBudgetRequest(BaseModel):
     """Set a tenant's dollar pool budget for a period.
 
@@ -544,6 +593,112 @@ def set_pool_budget(
         },
     )
     return _pool_response(tenant_id, period, summary)
+
+
+def _attempt_marker(tenant_id: str, hold_id: str) -> Optional[str]:
+    from .provider_outcome import attempt_request_metadata
+
+    return attempt_request_metadata(hold_id, tenant_id).get("sc_attempt_id")
+
+
+@router.get("/{tenant_id}/pool-retained", response_model=RetainedHoldsResponse)
+def list_retained_holds(
+    tenant_id: str,
+    period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    _admin: AuthenticatedUser = Depends(require_permission("tenants:read-all")),
+) -> RetainedHoldsResponse:
+    """Reservations this tenant is holding budget for, pending a decision.
+
+    A reservation is retained rather than returned when the request that made it
+    vanished AFTER its provider call had departed: the gateway cannot know what that
+    call cost, and handing the budget back asserts it cost nothing — which was
+    measured to be false. Nothing resolves a retention on its own, on purpose, so
+    this list is where an operator sees what is held and what handle to look it up by
+    in the provider's own records.
+    """
+    from . import _pipeline
+
+    if not TenantsRepository().get(tenant_id):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    resolved = period or current_period()
+    items = _pipeline.list_retained_holds(tenant_id, resolved)
+    return RetainedHoldsResponse(
+        tenant_id=tenant_id,
+        period=resolved,
+        held_microusd=sum(int(h.get("amount_microusd", 0)) for h in items),
+        items=[
+            RetainedHoldItem(
+                hold_id=str(h.get("hold_id", "")),
+                amount_microusd=int(h.get("amount_microusd", 0)),
+                # Derived through the same function that stamps the provider call,
+                # so the handle an operator searches the provider's records by
+                # cannot drift from the one that was actually sent.
+                attempt_marker=_attempt_marker(tenant_id, str(h.get("hold_id", ""))),
+                model_id=str(h.get("model_id") or "") or None,
+                provider_invoked_at=str(h.get("provider_invoked_at") or "") or None,
+                retained_at=str(h.get("retained_at") or "") or None,
+            )
+            for h in items
+        ],
+    )
+
+
+@router.post("/{tenant_id}/pool-retained/{hold_id}/resolve",
+             response_model=ResolveRetainedResponse)
+def resolve_retained_hold(
+    tenant_id: str,
+    hold_id: str,
+    body: ResolveRetainedRequest,
+    actor: AuthenticatedUser = Depends(require_permission("tenants:update")),
+    period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+) -> ResolveRetainedResponse:
+    """End a retained reservation, at a figure the operator supplies or at nothing.
+
+    The two outcomes are different claims and the caller states which: a figure
+    asserts what the provider's own record shows was charged, and a release asserts
+    that record shows no charge. The gateway supplies neither — being unable to is
+    why the reservation was retained — so there is no default and nothing is
+    inferred. The figure may not exceed what was reserved: the pool holds exactly
+    that much, and a larger figure is an overrun, which is a different record.
+
+    Both outcomes go through the same money primitives a request uses, so a
+    resolution is not a second settle path. The audit event carries the evidence the
+    operator cited, because a charge that arrives days late at a figure no request
+    computed is one a reader will want to trace.
+    """
+    from . import _pipeline
+
+    if not TenantsRepository().get(tenant_id):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    resolved_period = period or current_period()
+    try:
+        terminal, settled = _pipeline.resolve_retained_hold(
+            tenant_id, resolved_period, hold_id,
+            charge_microusd=body.charge_microusd,
+            release=bool(body.release),
+        )
+    except _pipeline.RetainedHoldNotFound:
+        raise HTTPException(status_code=404, detail="No retained hold with that id")
+    except _pipeline.RetainedResolutionRaced:
+        raise HTTPException(
+            status_code=409,
+            detail={"type": "retention_already_resolved",
+                    "message": "This retention was resolved by another request."})
+
+    log_audit_event(
+        event="tenant_pool_retention_resolved",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=tenant_id,
+        target_type="tenant",
+        before={"hold_id": hold_id, "state": "RETAINED"},
+        after={"period": resolved_period, "terminal": terminal,
+               "charged_microusd": settled, "evidence": body.evidence},
+    )
+    return ResolveRetainedResponse(
+        tenant_id=tenant_id, period=resolved_period, hold_id=hold_id,
+        terminal=terminal, charged_microusd=settled,
+    )
 
 
 @router.get("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
