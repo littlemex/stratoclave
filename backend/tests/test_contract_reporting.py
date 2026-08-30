@@ -82,6 +82,56 @@ class TestAbsenceIsNotZero:
                                cache_read_tokens=0, cache_write_tokens=0)
         assert with_none.total_cost_microusd == with_zero.total_cost_microusd
 
+    def test_absence_survives_the_hold_seam(self):
+        """The seam every route settles through, which the earlier tests missed.
+
+        `rate_usage` handling `None` establishes nothing about production if the
+        object that calls it has already coerced the value: `Hold.claim_settle`
+        snapshotted usage with `int(x or 0)` over every field, so an unreported leg
+        became a measured zero one call before the ledger, on every transport. This
+        drives the real `Hold`, so the claim cannot be true of a helper and false of
+        the path."""
+        from mvp import _money
+
+        settled: list = []
+
+        class _Repo:
+            def refund(self, **kw):
+                pass
+
+        class _U:
+            user_id = "u"
+            org_id = "acme"
+
+        hold = _money.Hold(
+            user=_U(), tenants_repo=_Repo(), reservation=1000, model_id="m",
+            settle=lambda **k: settled.append(k),
+            release=lambda ctx: None,
+        )
+        ending = hold.claim_settle(_money.Usage(
+            input_tokens=10, output_tokens=20,
+            cache_read_tokens=None, cache_write_tokens=None,
+        ))
+        assert ending is not None
+        ending.run()
+        assert settled, "the settle never ran"
+        assert settled[0]["actual_cache_read_tokens"] is None, (
+            "the Hold coerced an unreported leg into a measured zero")
+        assert settled[0]["actual_cache_write_tokens"] is None
+        # A reported zero still arrives as a number.
+        settled.clear()
+        hold2 = _money.Hold(
+            user=_U(), tenants_repo=_Repo(), reservation=1000, model_id="m",
+            settle=lambda **k: settled.append(k),
+            release=lambda ctx: None,
+        )
+        e2 = hold2.claim_settle(_money.Usage(
+            input_tokens=10, output_tokens=20,
+            cache_read_tokens=0, cache_write_tokens=0,
+        ))
+        e2.run()
+        assert settled[0]["actual_cache_read_tokens"] == 0
+
     def test_there_is_one_extractor(self):
         """The Converse usage block was parsed by two copies of the same function,
         which is how one of them could keep collapsing absence into zero after the

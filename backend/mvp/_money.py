@@ -126,6 +126,31 @@ _TOKEN_FIELDS = (
     "cache_write_tokens",
 )
 
+#: The legs a provider may not report at all. For these, `None` is a value and not
+#: a missing number: some models never report prompt-cache counts, so "the provider
+#: said none" and "the provider said nothing" are different facts and only one of
+#: them is a measurement (contract C8.1). Input and output are always observed on
+#: any path that settles, so they are counts.
+_UNREPORTABLE_FIELDS = frozenset({"cache_read_tokens", "cache_write_tokens"})
+
+
+def _snapshot_tokens(observation: Any) -> dict:
+    """Freeze the usage an ending will charge, preserving "not reported".
+
+    `int(x or 0)` over every field turned an unreported leg into a measured zero
+    right here — at the seam every route passes through — so the absence the
+    transports carefully preserve died one call before the ledger. Reported counts
+    are clamped at zero as before; an unreportable leg that is `None` stays `None`.
+    """
+    out = {}
+    for name in _TOKEN_FIELDS:
+        raw = getattr(observation, name, 0)
+        if raw is None and name in _UNREPORTABLE_FIELDS:
+            out[name] = None
+            continue
+        out[name] = int(raw or 0)
+    return out
+
 
 class Ending:
     """A claimed ending, and the three ways it can reach the store.
@@ -321,7 +346,7 @@ class Hold:
         """
         if observation is None:
             observation = Usage()
-        tokens = {name: int(getattr(observation, name, 0) or 0) for name in _TOKEN_FIELDS}
+        tokens = _snapshot_tokens(observation)
         if not self._claim(_outcome.SETTLED_FINAL):
             return None
         self._notify(status, observation)
@@ -453,7 +478,9 @@ class Hold:
         """
         if not sent:
             return self.claim_not_submitted(observation)
-        observed = any(int(getattr(observation, name, 0) or 0) > 0 for name in _TOKEN_FIELDS)
+        observed = any(
+            int(v or 0) > 0 for v in _snapshot_tokens(observation).values()
+        )
         if observed:
             return self.claim_settle(observation, status=status)
         if not _outcome.unobserved_holds_enforced():
