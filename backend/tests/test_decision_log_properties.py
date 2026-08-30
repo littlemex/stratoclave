@@ -107,10 +107,17 @@ def test_savings_reconstructs_from_item():
 
 
 def test_counterfactual_recomputable_from_persisted_tokens(dynamodb_mock):
-    """Provability (Fable RDL review High): the counterfactual is recomputable
-    from the outcome item ALONE — the actual tokens + effort are persisted, so
-    estimate_cost(baseline_pricing_key, item tokens, item effort) reproduces the
-    stored counterfactual without any ledger join."""
+    """Provability (Fable RDL review High): the counterfactual is recomputable from
+    the outcome item ALONE — the actual tokens are persisted, so
+    actual_cost(baseline_pricing_key, item tokens) reproduces the stored
+    counterfactual without any ledger join.
+
+    It is the CHARGING fold, not the reservation estimator, and effort is not an
+    input. The estimator prices every input-side token at the worst input-side rate
+    because at reserve time the provider has not chosen a leg yet; here it has, and
+    the tokens are counted. Pricing a baseline at reservation rates, times an effort
+    multiplier applied to output that was already generated, inflated the saving.
+    """
     from mvp import pricing
 
     o = dl.build_outcome_item(
@@ -125,14 +132,21 @@ def test_counterfactual_recomputable_from_persisted_tokens(dynamodb_mock):
     # Recompute opus's counterfactual purely from the item's persisted tokens.
     pricing.reset_cache()
     pricing.reset_version_cache()
-    recomputed = pricing.estimate_cost_microusd(
+    recomputed = pricing.actual_cost_microusd(
+        pricing_key="opus",
+        input_tokens=o["actual_input_tokens"],
+        output_tokens=o["actual_output_tokens"],
+    )
+    # opus default: 5M in + 25M out per MTok, at 1 MTok each = 30M.
+    assert recomputed == 30_000_000
+    # And the reservation estimator, on the same tokens, is HIGHER — which is why it
+    # is the wrong function here. It prices the input side at the cache-write rate.
+    assert pricing.estimate_cost_microusd(
         pricing_key="opus",
         input_tokens_est=o["actual_input_tokens"],
         max_output_tokens=o["actual_output_tokens"],
         effort_multiplier=o["effort"],
-    )
-    # opus default: 5M in + 25M out per MTok, at 1 MTok each = 30M.
-    assert recomputed == 30_000_000
+    ) > recomputed
 
 
 def test_savings_may_be_negative_on_escalation():
@@ -146,10 +160,22 @@ def test_savings_may_be_negative_on_escalation():
     assert o["savings_vs_requested_microusd"] == -4000
 
 
-def test_savings_none_when_effort_unknown(dynamodb_mock, monkeypatch):
-    """M2 (Fable RDL review-2): if effort could not be recovered from the decision
-    facts, the counterfactual must NOT be computed with an assumed effort=1 (which
-    would record a self-consistent WRONG savings). No effort → savings None."""
+def test_savings_survives_an_unknown_effort_because_effort_is_not_priced(
+    dynamodb_mock, monkeypatch,
+):
+    """What replaced M2 (Fable RDL review-2).
+
+    M2 said: if effort could not be recovered from the decision facts, the
+    counterfactual must not be computed with an assumed effort=1, because that would
+    record a self-consistent WRONG savings. The guard was right about the arithmetic
+    of the day — the counterfactual priced `actual_output_tokens * effort` — and the
+    arithmetic was the defect. A baseline is not charged for output that was never
+    generated, so effort does not belong in the comparison at all.
+
+    With effort out of the formula, a missing effort no longer makes the saving
+    unknowable: it is recomputable from the persisted tokens alone. The record still
+    carries `effort: None` honestly, so nothing is invented about the reservation.
+    """
     class _Ctx:
         tenant_id = "t"
         workflow_run_id = "r"
@@ -171,9 +197,15 @@ def test_savings_none_when_effort_unknown(dynamodb_mock, monkeypatch):
         actual_input_tokens=1_000_000, actual_output_tokens=1_000_000,
         ledger_pricing_version="builtin",
     )
-    assert captured.get("savings_vs_requested_microusd") is None
-    assert captured.get("savings_vs_max_servable_microusd") is None
-    assert captured.get("effort") is None
+    # opus at 1 MTok in + 1 MTok out = 30,000,000 microUSD; the chosen model settled
+    # at 500, so the recorded saving is the difference and not a null.
+    assert captured.get("counterfactual_vs_requested_microusd") == 30_000_000
+    assert captured.get("savings_vs_requested_microusd") == 30_000_000 - 500
+    assert captured.get("savings_vs_max_servable_microusd") == 30_000_000 - 500
+    assert captured.get("effort") is None, (
+        "effort must still be recorded as unknown rather than defaulted — it is "
+        "evidence about the reservation, and only the counterfactual stopped needing it"
+    )
 
 
 def test_null_savings_when_no_baseline():

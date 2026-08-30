@@ -38,19 +38,34 @@ _TOKENS_PER_MTOK = 1_000_000
 # recomputing against an independent reference fold.
 # ---------------------------------------------------------------------------
 
-def _ref_cost(rate, input_tokens, max_output, warm) -> int:
+def _ref_cost(rate, input_tokens, max_output) -> int:
+    """The reservation, recomputed independently: every input-side token at the worst
+    rate an input-side leg can bill it at, the output allowance at the output rate,
+    plus the whole microUSD that per-leg rounding at settle can add over one rounding
+    of a group total (capped by the token count — n tokens cannot make more than n
+    legs round up).
+
+    The input-side rate fields are named literally rather than read from
+    `BILLABLE_LEGS`, so a leg dropped from the registry shows up here as a
+    disagreement rather than as agreement about the wrong number.
+    """
     def ceil_mtok(tokens, per):
         if tokens <= 0:
             return 0
         return -(-(tokens * per) // _TOKENS_PER_MTOK)
 
     total_input = max(input_tokens, 0)
-    w = min(max(warm, 0), total_input)
-    fresh = total_input - w
+    reserved_output = max(max_output, 0)
+    worst_input_side = max(
+        rate.input_per_mtok_microusd,
+        rate.cache_read_per_mtok_microusd,
+        rate.cache_write_per_mtok_microusd,
+    )
     return (
-        ceil_mtok(fresh, rate.input_per_mtok_microusd)
-        + ceil_mtok(w, rate.cache_read_per_mtok_microusd)
-        + ceil_mtok(max(max_output, 0), rate.output_per_mtok_microusd)
+        ceil_mtok(total_input, worst_input_side)
+        + ceil_mtok(reserved_output, rate.output_per_mtok_microusd)
+        + max(min(3, total_input) - 1, 0)       # three input-side legs
+        + max(min(1, reserved_output) - 1, 0)   # one output-side leg: never any
     )
 
 
@@ -67,7 +82,7 @@ def test_money_parity_vllm_equals_bedrock_same_key(input_tokens, max_output):
         max_output_tokens=max_output,
     )
     rate = pricing._cache.get("default")
-    assert got == _ref_cost(rate, input_tokens, max_output, 0)
+    assert got == _ref_cost(rate, input_tokens, max_output)
 
 
 # ---------------------------------------------------------------------------

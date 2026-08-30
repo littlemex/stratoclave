@@ -11,6 +11,8 @@ Focus (per Fable design E): the risk here is LEAKAGE (redaction) and access
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 import os
 from pathlib import Path
 
@@ -234,6 +236,40 @@ def _norm(b):
     for e in b["events"]:
         e["ts_ms"] = 0
     return b
+
+
+def test_the_rust_reader_accepts_every_field_the_fixture_carries():
+    """The other half of the cross-layer gate, from this side.
+
+    The committed fixtures are parsed by a Rust struct that uses
+    `deny_unknown_fields`, so ADDING a field to the API response and regenerating
+    the fixtures breaks the CLI build — and the failure surfaces in another
+    language's test suite, after the fixture is already committed. That is exactly
+    what happened when `reported` was added to a rating component.
+
+    So the field sets are compared here, where the change is made. The Rust struct
+    is read as text rather than compiled: this test must run in a Python-only
+    environment, and what it needs to know is which names the reader accepts.
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    rust = (root / "cli" / "src" / "mvp" / "billing.rs").read_text()
+    block = rust.split("pub struct RatingComponent {", 1)[1].split("}", 1)[0]
+    accepted = set(re.findall(r"pub (\w+):", block))
+
+    in_fixtures: set[str] = set()
+    for name in ("run_tenant.json", "run_admin.json"):
+        body = json.loads((FIXTURE_DIR / name).read_text())
+        for event in body.get("events", []):
+            for component in (event.get("components") or {}).values():
+                in_fixtures |= set(component)
+
+    assert in_fixtures, "fixtures carry no rating components to check"
+    missing = in_fixtures - accepted
+    assert not missing, (
+        f"the Rust CLI's RatingComponent does not accept {sorted(missing)}; it uses "
+        "deny_unknown_fields, so the committed fixture would fail to deserialize. "
+        "Add the field to cli/src/mvp/billing.rs in the same change."
+    )
 
 
 def test_golden_fixtures_match_committed_contract(dynamodb_mock, monkeypatch):

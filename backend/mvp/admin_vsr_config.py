@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from dynamo import TenantsRepository
 
-from .authz import get_current_user, log_audit_event
+from .authz import _permission_matches, get_current_user, log_audit_event
 from .deps import AuthenticatedUser
 from .vsr import config_store as store
 
@@ -46,13 +46,27 @@ def _require_enabled() -> None:
         raise HTTPException(status_code=404, detail="vsr config not available")
 
 
-def _authorize(tenant_id: str, user: AuthenticatedUser) -> None:
+def _authorize(
+    tenant_id: str, user: AuthenticatedUser, *, permission: str
+) -> None:
     """Allow: an admin for any id (incl. ``default``); a tenant owner for their
     OWN tenant. Everything else -> unified 404 (enumeration defense), matching
     ``require_tenant_owner``.
 
     ``default`` is admin-only: it is not a real tenant, so no team_lead can own
-    it, and a non-admin must not read/alter the org-wide fallback."""
+    it, and a non-admin must not read/alter the org-wide fallback.
+
+    An API key must ALSO carry `permission` in its scopes. The role tests below are
+    blind to them: a key carries its owner's roles, so an admin's key narrowed to
+    `messages:send` satisfied `"admin" in user.roles` and could write this config.
+    Authority is the intersection of the role and the credential's scope, and every
+    gate has to evaluate it (contract C6.1) — including a helper that is not a
+    FastAPI dependency. Only the scope side is added here: for a bearer token the
+    roles ARE the authority, and the ownership rules below already express it."""
+    if user.auth_kind == "api_key" and not _permission_matches(
+            user.key_scopes or [], permission):
+        raise HTTPException(
+            status_code=403, detail=f"Missing permission: {permission}")
     # Shape-guard the id BEFORE it reaches DynamoDB (same charset/length as the
     # S3-key guard): an unbounded/garbage path param must never become a
     # GetItem lookup surface. A non-conforming id maps to the same uniform 404
@@ -124,7 +138,7 @@ def get_vsr_config(
     """Raw config text for this tenant (or ``default``). 404 if none is stored
     (the UI then offers to create one / shows the default read-only)."""
     _require_enabled()
-    _authorize(tenant_id, user)
+    _authorize(tenant_id, user, permission="tenants:read-own")
     try:
         got = store.get_config(tenant_id)
     except store.VsrConfigError as exc:
@@ -145,7 +159,7 @@ async def put_vsr_config(
     """Validate the raw blob via the pinned VSR, then store it in S3. Rejects
     (never stores) an unvalidated blob. Returns the new S3 version id."""
     _require_enabled()
-    _authorize(tenant_id, user)
+    _authorize(tenant_id, user, permission="tenants:update")
     blob = await _read_body(request)
     try:
         version_id = store.put_config(tenant_id, blob)
@@ -169,7 +183,7 @@ def delete_vsr_config(
 ) -> dict:
     """Remove a tenant's override so it reverts to ``default`` at the VSR."""
     _require_enabled()
-    _authorize(tenant_id, user)
+    _authorize(tenant_id, user, permission="tenants:update")
     try:
         store.delete_config(tenant_id)
     except store.VsrConfigError as exc:
@@ -194,7 +208,7 @@ async def validate_vsr_config(
     "Check" button). Same authz as PUT so it can't be used to probe the VSR
     outside a tenant's scope."""
     _require_enabled()
-    _authorize(tenant_id, user)
+    _authorize(tenant_id, user, permission="tenants:update")
     blob = await _read_body(request)
     try:
         store.validate_blob(blob)

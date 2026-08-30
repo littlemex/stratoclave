@@ -486,6 +486,7 @@ aws cognito-idp admin-set-user-password \
 | Admin UI tiles look wrong after the initial deploy | Hard-reload with `Cmd+Shift+R` / `Ctrl+Shift+R` to bust CloudFront's cache of the SPA bundle. |
 | Admin actions return `403` while other requests succeed | Your user record still has `roles=["user"]`. Use the web UI or call `PATCH /api/mvp/admin/users/{user_id}/roles` to add `admin`. |
 | SSO login is rejected with `sso_login_denied` | Inspect the `reason` field in the matching `sso_login_denied` audit event. Common causes: trusted-account entry missing, role pattern mismatch, or identity type not opted in. |
+| Inference returns `503 budget_unavailable` with `reason: routing_config_unavailable` | The task could not read the tenant's routing config and had no previously-read copy to fall back on. Requests fail closed rather than run without the tenant's allowlist and per-model quotas, so check the user-tenants table's health (throttling, IAM) — the condition clears on its own once reads succeed. Tasks that had already read the config keep serving from that copy and log `routing_config_read_failed_serving_stale`. |
 
 Still stuck? Open an issue at [`littlemex/stratoclave`](https://github.com/littlemex/stratoclave/issues) with the `request_id` from the relevant audit event.
 

@@ -54,9 +54,13 @@ BUILTIN_VERSION = "builtin"
 # can tell them apart (Fable review-2 N2/N3) — never the pricing_key (bug#1).
 #   UNVERSIONED_SENTINEL: an explicit caller-supplied cost, or a legacy
 #     reservation that predates snapshotting — no version was in play.
-#   SNAPSHOT_FAILED_SENTINEL: reserve tried to freeze a rate but the rate table
-#     read failed; the settle then charged via the live-rate fallback. This is a
-#     degraded path that MUST be alarmed, so it gets its own label.
+#   SNAPSHOT_FAILED_SENTINEL: RETIRED as a label a new charge can carry. It named
+#     the path where reserve failed to freeze a rate and the settle charged from
+#     the live table instead — which let a rate edit between admission and settle
+#     change what a request was charged. Freezing is now a precondition of
+#     admission, so there is no such charge to label; the constant stays only
+#     because ledger events written before that change still carry it and a
+#     reader must keep recognising it. Nothing may stamp it.
 UNVERSIONED_SENTINEL = "unversioned-legacy"
 SNAPSHOT_FAILED_SENTINEL = "snapshot-failed"
 # External authorize/capture in AMOUNT mode: the settled figure is a
@@ -77,6 +81,85 @@ RESERVED_VERSIONS = frozenset(
     {BUILTIN_VERSION, UNVERSIONED_SENTINEL, SNAPSHOT_FAILED_SENTINEL,
      EXTERNAL_AMOUNT_SENTINEL, PRICE_SOURCE_SENTINEL}
 )
+
+
+#: Which token counts are billed, what each is billed at, and which pool of tokens
+#: bounds it. ONE definition, read by both sides of the money path: `rate_usage`
+#: charges from it at settle, and `mvp.reservation_bound` prices the reservation from
+#: it at admission.
+#:
+#: This exists because the two sides used to enumerate the legs separately, and they
+#: disagreed. The estimator priced three legs while the rater charged four, so a
+#: request that wrote prompt cache settled above what was reserved for it — the
+#: premise of the ceiling theorem, false in the shipped code. Adding a leg here is
+#: now the only way to add one, and `tests/test_billable_legs_registry.py` fails the
+#: build if a rate column exists without a leg or a leg without a bound group.
+#:
+#: `group` is the token pool whose SIZE bounds the leg at reserve time. The
+#: input-side legs share one pool: the provider classifies each token it was SENT
+#: into exactly one of fresh input / cache read / cache write, so their counts
+#: partition the prompt (assumption 2 of the strict-mode guarantee) and one bound on
+#: the total covers all three. Output is its own pool, bounded by max_output_tokens.
+INPUT_SIDE = "input_side"
+OUTPUT_SIDE = "output_side"
+
+
+@dataclass(frozen=True)
+class BillableLeg:
+    """One billed token count: its name in the usage block and the rating record,
+    the snapshot field holding its rate, and the token pool that bounds it."""
+
+    name: str
+    rate_field: str
+    group: str
+
+
+BILLABLE_LEGS: tuple["BillableLeg", ...] = (
+    BillableLeg("input", "input_per_mtok_microusd", INPUT_SIDE),
+    BillableLeg("cache_read", "cache_read_per_mtok_microusd", INPUT_SIDE),
+    BillableLeg("cache_write", "cache_write_per_mtok_microusd", INPUT_SIDE),
+    BillableLeg("output", "output_per_mtok_microusd", OUTPUT_SIDE),
+)
+
+
+def legs_in_group(group: str) -> tuple["BillableLeg", ...]:
+    return tuple(leg for leg in BILLABLE_LEGS if leg.group == group)
+
+
+def worst_rate_in_group(rates: object, group: str) -> int:
+    """The highest rate any leg in `group` can bill a token at.
+
+    Reads the legs from the registry rather than naming them, so a fourth
+    input-side leg cannot be left out of the worst case — which is exactly how the
+    cache-write leg came to be missing from the reservation while the settle
+    charged it. Accepts anything carrying the rate fields (a live `Rate` or a
+    frozen `RateSnapshot`).
+    """
+    return max(
+        int(getattr(rates, leg.rate_field)) for leg in legs_in_group(group)
+    )
+
+
+def rounding_slack_microusd(group: str, tokens: int) -> int:
+    """What per-leg rounding can add over a single rounding of the group total.
+
+    `rate_usage` rounds EACH leg up; a bound that rounds the group's total once is
+    not an upper bound on that sum, because ceiling is not subadditive. With all
+    rates equal to 1 microUSD/MTok and one token on each of k legs, the group total
+    rounds to 1 while the per-leg sum is k.
+
+    Each nonzero leg's own ceiling adds strictly less than 1 microUSD, so n nonzero
+    legs add strictly less than n, while rounding the total once already covers the
+    exact value — leaving at most n-1 whole microUSD of difference.
+
+    `tokens` caps n: `tokens` tokens cannot make more than `tokens` legs nonzero. So
+    the slack is `min(legs, tokens) - 1`, floored at zero. A side with no tokens
+    needs none, and a side with one token needs none either, because that token lands
+    on exactly one leg whose own ceiling is the group's. Tight: the case above
+    attains it.
+    """
+    nonzero_legs = min(len(legs_in_group(group)), max(int(tokens), 0))
+    return max(nonzero_legs - 1, 0)
 
 
 @dataclass(frozen=True)
@@ -345,6 +428,8 @@ class _RateCache:
         return active_source_name()
 
     def _refresh_locked(self, repo: PricingConfigRepository) -> None:
+        from dynamo.pricing_config import RateDocumentInvalid
+
         from .price_sources import PriceSourceConfigError
 
         # Fail-static across the ENTIRE refresh (Fable #66 rev1 BUG1): a throw
@@ -380,12 +465,13 @@ class _RateCache:
                 self._version = version
                 self._overrides = dict(overrides)
                 self._override_keys = frozenset(overrides)
-        except PriceSourceConfigError:
-            # A misconfigured price source is not a transient. It must reach the
-            # caller: absorbing it here would charge the bundled floor for as long as
-            # nobody reads the logs, which is the silent fallback this module forbids.
-            # Re-raised BEFORE the catch-all because it is a ValueError and would
-            # otherwise be swallowed by it.
+        except (PriceSourceConfigError, RateDocumentInvalid):
+            # Neither is a transient. A misconfigured price source and an invalid
+            # rate document will both still be invalid on the next tick, so absorbing
+            # them here would charge the bundled floor for as long as nobody reads
+            # the logs — the silent fallback this module forbids. Re-raised BEFORE
+            # the catch-all because both are ValueErrors and would otherwise be
+            # swallowed by it; the reserve path turns them into a refusal.
             raise
         except Exception:  # noqa: BLE001 — table missing / transient: keep last-good map.
             pass
@@ -541,7 +627,20 @@ def _mtok_cost(tokens: int, per_mtok_microusd: int) -> int:
     Rounding up (ceil) is deliberate: a budget must never be under-charged by
     integer truncation, or a caller could nibble past a limit one sub-MTok
     request at a time.
+
+    A negative rate is refused rather than computed. Ceil rounding and integer
+    micro-USD are the mechanisms behind "a request is never under-charged", and a
+    negative leg defeats both by minting credit: `_mtok_cost(1000, -5_000_000)`
+    used to return −5,000 and the ledger recorded it as truth. The defence was
+    that no rate document had ever held one, which is a discipline, not a
+    mechanism. Refusing here makes it a mechanism on every charging path,
+    whatever wrote the document.
     """
+    if per_mtok_microusd < 0:
+        raise ValueError(
+            f"negative rate: {per_mtok_microusd} micro-USD per MTok. A rate that "
+            "credits an account is not a price; reject the rate document."
+        )
     if tokens <= 0:
         return 0
     numerator = tokens * per_mtok_microusd
@@ -565,7 +664,6 @@ def estimate_cost_microusd(
     input_tokens_est: int,
     max_output_tokens: int,
     effort_multiplier: int = 1,
-    warm_prefix_tokens: int = 0,
     repo: Optional[PricingConfigRepository] = None,
 ) -> int:
     """Up-front reservation cost in micro-USD for a request.
@@ -576,22 +674,66 @@ def estimate_cost_microusd(
     rate. Reasoning-effort multipliers (1/2/4/8 on the OpenAI route) apply to
     the output leg only, matching where the extra tokens are actually spent.
 
-    SAAR (Fable design §4): ``warm_prefix_tokens`` splits the input leg — up to
-    that many input tokens are expected to hit the model's warm prefix cache and
-    so re-bill at the discounted ``cache_read`` rate, not the full input rate.
-    The estimate for STAYING on a warm model is therefore cheaper than SWITCHING
-    to a cold one (where warm=0 ⇒ every input token is full-price). ``warm=0`` (the
-    default, and always in P0 until cache evidence lands) makes this byte-identical
-    to the pre-SAAR estimate. Clamped so warm can never exceed the input estimate."""
-    rate = _cache.get(pricing_key, repo)
+    Every input-side token is priced at the WORST rate any input-side leg can bill it
+    at, read from the same leg registry the settle rater charges from. The gateway
+    does not decide which leg a token lands on — the provider does, and it reports
+    that afterwards — so pricing the estimate at the input rate reserved below the
+    charge for any request that wrote prompt cache: 7,500 microUSD reserved against
+    38,750 settled, on the success path, with nothing to notice.
+
+    What this does NOT establish is premise (P) of the ceiling theorem. This function
+    prices an ESTIMATED token count, and an estimate is not a bound: a prompt that
+    tokenises to more than ``input_tokens_est`` still settles above its reservation.
+    Only `mvp.reservation_bound`, which prices a ceiling on the token count rather
+    than a guess, carries the ceiling claim — see `dollar_pool_bound_state`.
+
+    This function also does not take cache evidence. It used to: SAAR passed
+    ``warm_prefix_tokens`` and that many input tokens were re-priced at the cheaper
+    ``cache_read`` rate, so staying on a warm model reserved LESS than switching to a
+    cold one. A discount applied at reserve time to a leg the provider has not yet
+    chosen is a reservation below the possible charge, which is not a reservation.
+    The warm preference belongs in which candidate is CHOSEN, and the money claim
+    about it belongs in `switch_cost_delta_microusd` — a comparison recorded on the
+    decision, not an amount that gates admission.
+
+    This wrapper reads the LIVE table and is for callers that are not admitting a
+    request (a comparison, an operator view). The admission path must call
+    `estimate_cost_from_rates` with the snapshot it froze, so the amount that gates
+    admission and the amount the settle charges cannot come from two different
+    documents — see that function."""
+    return estimate_cost_from_rates(
+        _cache.get(pricing_key, repo),
+        input_tokens_est=input_tokens_est,
+        max_output_tokens=max_output_tokens,
+        effort_multiplier=effort_multiplier,
+    )
+
+
+def estimate_cost_from_rates(
+    rates: object,
+    *,
+    input_tokens_est: int,
+    max_output_tokens: int,
+    effort_multiplier: int = 1,
+) -> int:
+    """`estimate_cost_microusd`'s arithmetic over rates the caller already holds.
+
+    `rates` is any object carrying the four per-MTok fields — a `Rate` or a frozen
+    `RateSnapshot` — which is the whole point: the reserve chokepoint freezes a
+    snapshot and prices the admission from THAT object, so the price that admits a
+    request and the price that charges it are one document by construction. Pricing
+    the admission with a separate live read left a window in which a rate refresh
+    landing between the two reads sized the reservation at one rate and charged it
+    at another, and recorded, as "the version that priced this admission", a
+    version that priced nothing.
+    """
     reserved_output = max(max_output_tokens, 0) * max(effort_multiplier, 1)
     total_input = max(input_tokens_est, 0)
-    warm = min(max(warm_prefix_tokens, 0), total_input)
-    fresh_input = total_input - warm
     return (
-        _mtok_cost(fresh_input, rate.input_per_mtok_microusd)
-        + _mtok_cost(warm, rate.cache_read_per_mtok_microusd)
-        + _mtok_cost(reserved_output, rate.output_per_mtok_microusd)
+        _mtok_cost(total_input, worst_rate_in_group(rates, INPUT_SIDE))
+        + _mtok_cost(reserved_output, rates.output_per_mtok_microusd)
+        + rounding_slack_microusd(INPUT_SIDE, total_input)
+        + rounding_slack_microusd(OUTPUT_SIDE, reserved_output)
     )
 
 
@@ -706,16 +848,25 @@ def snapshot_rates(
                     f"pricing row key mismatch: asked ({version!r},{pricing_key!r}) "
                     f"got ({row.get('version')!r},{row.get('pricing_key')!r})"
                 )
+            # Validate the row this snapshot is built from, with the same rule the
+            # bulk load applies. A `.get(leg, 0)` here substituted a rate of ZERO
+            # for a leg the document does not carry — the one place where a partial
+            # or hand-written row becomes the price a request is admitted and
+            # charged at, and the boundary `load_rates` validates does not cover it
+            # because the snapshot is a point read.
+            from dynamo.pricing_config import validate_rate_row_legs
+
+            validate_rate_row_legs(row, version=version, pricing_key=pricing_key)
             snap = RateSnapshot(
                 version=version,
                 pricing_key=pricing_key,
-                input_per_mtok_microusd=int(row.get("input_per_mtok_microusd", 0)),
-                output_per_mtok_microusd=int(row.get("output_per_mtok_microusd", 0)),
+                input_per_mtok_microusd=int(row["input_per_mtok_microusd"]),
+                output_per_mtok_microusd=int(row["output_per_mtok_microusd"]),
                 cache_read_per_mtok_microusd=int(
-                    row.get("cache_read_per_mtok_microusd", 0)
+                    row["cache_read_per_mtok_microusd"]
                 ),
                 cache_write_per_mtok_microusd=int(
-                    row.get("cache_write_per_mtok_microusd", 0)
+                    row["cache_write_per_mtok_microusd"]
                 ),
                 cost_input_per_mtok_microusd=_opt_int(row.get("cost_input_per_mtok_microusd")),
                 cost_output_per_mtok_microusd=_opt_int(row.get("cost_output_per_mtok_microusd")),
@@ -776,8 +927,8 @@ def rate_usage(
     *,
     input_tokens: int,
     output_tokens: int,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
+    cache_read_tokens: Optional[int] = 0,
+    cache_write_tokens: Optional[int] = 0,
 ) -> RatingRecord:
     """PURE function: rate real usage against a FROZEN snapshot (no table read).
 
@@ -785,23 +936,47 @@ def rate_usage(
     same usage → same RatingRecord, so SETTLE and a reaper-race LATE_SETTLE that
     restore the same snapshot charge identically (INV-R6). ceil rounding per
     component (never under-charge by truncation).
+
+    A token count of `None` means the provider did not report that leg — some
+    models never report prompt-cache counts at all. It costs the same as zero,
+    because there is nothing to charge, but the component records
+    `reported: False` so the ledger does not assert a measurement nobody made. A
+    reader comparing models needs "not reported" and "reported as none" to be
+    different facts; they are the difference between "this model does not cache"
+    and "this model did not cache this time".
     """
     # The snapshot froze a rounding policy; refuse to silently charge under an
     # unknown one (Fable review M4). Only ceil is implemented today — a future
     # policy would ship with its own branch AND a new pricing version.
     if snapshot.rounding != "ceil":
         raise ValueError(f"unsupported rating rounding policy: {snapshot.rounding!r}")
+    # Iterate the ONE leg registry rather than a second literal list. The list that
+    # used to live here was the settle side of a disagreement: the estimator had its
+    # own, shorter one, and the missing cache-write leg is what broke the ceiling.
+    observed = {
+        "input": input_tokens,
+        "output": output_tokens,
+        "cache_read": cache_read_tokens,
+        "cache_write": cache_write_tokens,
+    }
     comp = {}
     total = 0
     for name, tokens, rate in (
-        ("input", input_tokens, snapshot.input_per_mtok_microusd),
-        ("output", output_tokens, snapshot.output_per_mtok_microusd),
-        ("cache_read", cache_read_tokens, snapshot.cache_read_per_mtok_microusd),
-        ("cache_write", cache_write_tokens, snapshot.cache_write_per_mtok_microusd),
+        (leg.name, observed[leg.name], getattr(snapshot, leg.rate_field))
+        for leg in BILLABLE_LEGS
     ):
-        t = max(int(tokens), 0)
+        reported = tokens is not None
+        t = max(int(tokens or 0), 0)
         cost = _mtok_cost(t, int(rate))
-        comp[name] = {"tokens": t, "rate_microusd_per_mtok": int(rate), "cost_microusd": cost}
+        comp[name] = {
+            "tokens": t,
+            "rate_microusd_per_mtok": int(rate),
+            "cost_microusd": cost,
+            # Whether the PROVIDER reported this leg. `tokens: 0` alone cannot say
+            # it: an absent count and a reported zero are different facts and only
+            # one of them is a measurement.
+            "reported": reported,
+        }
         total += cost
 
     provider_cost = None
@@ -820,7 +995,7 @@ def rate_usage(
             (cache_read_tokens, snapshot.cost_cache_read_per_mtok_microusd),
             (cache_write_tokens, snapshot.cost_cache_write_per_mtok_microusd),
         ):
-            pc += _mtok_cost(max(int(tokens), 0), int(rate or 0))
+            pc += _mtok_cost(max(int(tokens or 0), 0), int(rate or 0))
         provider_cost = pc
         margin = total - pc
 

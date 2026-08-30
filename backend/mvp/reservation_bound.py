@@ -154,18 +154,40 @@ ASSUMPTIONS_THE_GUARANTEE_RESTS_ON = (
 # character can cost more than one token.
 
 
+def _rounding_slack_microusd(input_tokens: int, output_tokens: int) -> int:
+    """The whole microUSD per-leg rounding can add over rounding a group total once.
+
+    Settle rounds EACH leg up; this bound rounds each GROUP's total up once. Ceiling
+    is not subadditive, so without this the bound is not an upper bound on the settle
+    — the smallest counter-example is three input-side legs at 1 microUSD/MTok with
+    one token each: the group total rounds to 1 microUSD while the per-leg sum is 3.
+    Every rate that is not a multiple of 1,000,000 exposes it, which is every
+    realistic rate.
+
+    Bounded by the token counts as well as by the leg counts, so a request that
+    reserves nothing reserves nothing rather than a few stray microUSD — see
+    `pricing.rounding_slack_microusd` for why `min(legs, tokens) - 1` is both sound
+    and tight.
+    """
+    from .pricing import INPUT_SIDE, OUTPUT_SIDE, rounding_slack_microusd
+
+    return (rounding_slack_microusd(INPUT_SIDE, input_tokens)
+            + rounding_slack_microusd(OUTPUT_SIDE, output_tokens))
+
+
 def worst_input_side_rate_microusd(rate: Rate) -> int:
-    """The rate every input-side token is bounded at: the most expensive of the
-    three legs a sent token can be billed under (fresh input / cache_read /
-    cache_write). Reads the LIVE table rather than hard-coding which leg is
-    worst, so a future rate edit that changes the ordering (or adds a fifth
-    leg some day) cannot quietly reopen the cache-write gap this bound exists
-    to close."""
-    return max(
-        rate.input_per_mtok_microusd,
-        rate.cache_read_per_mtok_microusd,
-        rate.cache_write_per_mtok_microusd,
-    )
+    """The rate every input-side token is bounded at: the most expensive leg a sent
+    token can be billed under.
+
+    Delegates to `mvp.pricing`'s leg registry rather than naming the legs. It used to
+    name three — and claimed in this docstring that a fifth leg could not quietly
+    reopen the cache-write gap, while hard-coding exactly the list that would leave
+    one out. The registry is now the single definition both this bound and the settle
+    rater read, so a leg cannot exist on one side only.
+    """
+    from .pricing import INPUT_SIDE, worst_rate_in_group
+
+    return worst_rate_in_group(rate, INPUT_SIDE)
 
 
 def output_bound_tokens(max_output_tokens: int, effort_multiplier: int = 1) -> int:
@@ -205,7 +227,9 @@ def strict_reservation_microusd(
         rate.output_per_mtok_microusd,
         "ceil",
     )
-    return input_cost + output_cost
+    return input_cost + output_cost + _rounding_slack_microusd(
+        input_tokens_bound, output_bound_tokens(max_output_tokens, effort_multiplier)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +343,13 @@ def calibrated_reservation_microusd(
         rate.output_per_mtok_microusd,
         "ceil",
     )
-    return input_cost + output_cost
+    # Calibrated mode reserves less than strict by design, but it rounds the same
+    # way, so it needs the same slack: without it the same three-legs-at-one-token
+    # case puts settle above this reservation for a reason that has nothing to do
+    # with the calibration being wrong.
+    return input_cost + output_cost + _rounding_slack_microusd(
+        input_tokens_bound, output_bound_tokens(max_output_tokens, effort_multiplier)
+    )
 
 
 def realized_tokens_per_byte(

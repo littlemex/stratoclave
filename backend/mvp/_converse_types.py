@@ -48,8 +48,8 @@ class NormalizedResult:
     stop_reason: str  # Bedrock stop reason (adapter maps to its wire vocabulary)
     input_tokens: int
     output_tokens: int
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +149,10 @@ class Usage(StreamEvent):
 
     input: int
     output: int
-    cache_read: int = 0
-    cache_write: int = 0
+    # `None` = the provider did not report this leg (distinct from a reported zero;
+    # see `_converse_core.cache_tokens_from_usage`).
+    cache_read: Optional[int] = None
+    cache_write: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -170,8 +172,10 @@ class UsageAccumulator:
 
     input_tokens: int = 0
     output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    # Start as "not reported": a stream that never carries a prompt-cache count must
+    # not settle as though the provider had reported zero.
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
     stop_reason: Optional[str] = None
     # P0-14: True once a terminal Usage event has landed. Bedrock emits usage
     # exactly once (metadata, ahead of MessageStop), so any Usage marks the
@@ -183,8 +187,12 @@ class UsageAccumulator:
             # Bedrock reports the running totals, not increments; take the latest.
             self.input_tokens = event.input or self.input_tokens
             self.output_tokens = event.output or self.output_tokens
-            self.cache_read_tokens = event.cache_read or self.cache_read_tokens
-            self.cache_write_tokens = event.cache_write or self.cache_write_tokens
+            # `or` would treat a reported 0 as "keep the previous value"; an
+            # explicit report — including zero — is what the provider said.
+            if event.cache_read is not None:
+                self.cache_read_tokens = event.cache_read
+            if event.cache_write is not None:
+                self.cache_write_tokens = event.cache_write
             self.saw_final_usage = True
         elif isinstance(event, MessageStop):
             self.stop_reason = event.stop_reason

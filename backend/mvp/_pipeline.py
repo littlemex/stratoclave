@@ -505,10 +505,6 @@ class ReservationContext:
     # the price. Serialized onto the RESERVE ledger event; None only for
     # non-priced/legacy reservations.
     rate_snapshot: Optional["RateSnapshot"] = None
-    # True when a rate snapshot was attempted at reserve but the rate-table read
-    # failed — settle then charges via the live-rate fallback and labels the
-    # terminal with the snapshot-failed sentinel (distinct from legacy).
-    rate_snapshot_failed: bool = False
     tenant_id: str = ""
     pool_active: bool = False
     quota_lines: list = None  # list[dict] of per-model quota txn items (None = no quota)
@@ -1357,6 +1353,24 @@ def _err_403(reason: str) -> HTTPException:
     )
 
 
+def _err_503(reason: str) -> HTTPException:
+    """503 for a routing input the gateway could not read.
+
+    Same `type` as the contended-reservation 503s so a client's retry logic keys
+    on one shape: the request was not refused on its merits and retrying is the
+    right response. The `reason` distinguishes which input was missing."""
+    return HTTPException(
+        status_code=503,
+        detail={
+            "type": "budget_unavailable",
+            "reason": reason,
+            "message": (
+                "Routing policy is temporarily unavailable. Retry shortly."
+            ),
+        },
+    )
+
+
 class QuotaExhausted(Exception):
     """A per-model quota condition failed during reserve — the caller's
     cascading fallback should try the next model. Carries which model's quota
@@ -1408,7 +1422,6 @@ def reserve_credit_for_model(
     workflow_run_id: Optional[str] = None,
     group_id: Optional[str] = None,
     request_id: Optional[str] = None,
-    saar_warm_prefix_tokens: int = 0,
     saar_prefer_model: Optional[str] = None,
     vsr_decision: Optional[dict] = None,
     input_bytes: Optional[int] = None,
@@ -1505,7 +1518,11 @@ def reserve_credit_for_model(
     """
     from .models import resolve_model as _resolve_pricing
     from .pricing import estimate_cost_microusd
-    from .routing.config import get_tenant_routing_config, get_user_routing_config
+    from .routing.config import (
+        RoutingConfigUnavailable,
+        get_tenant_routing_config,
+        get_user_routing_config,
+    )
 
     # Resolved ONCE per request, not per cascade candidate: a tenant's bound
     # mode is one fact, and switching bounding strategy mid-cascade would make
@@ -1532,30 +1549,51 @@ def reserve_credit_for_model(
 
         _bound_mode = resolve_bound_mode(user.org_id)
 
-    def _legacy_estimate(model: str, pk: str) -> int:
+    def _freeze(pk: str) -> "RateSnapshot":
+        """The rate this request is admitted at, frozen before anything is priced.
+
+        Every amount this function's callers compute — the legacy estimate, the
+        sound bound, the `shadow_mode` amount — is priced from the object returned
+        here, and the same object travels to the settle. Pricing the admission from
+        a live read and freezing a second one afterwards left a window in which the
+        two disagreed, and the failure of the freeze was then absorbed by charging
+        at whatever the table said at settle time. A rate the gateway cannot freeze
+        is a request it cannot price: fail closed, before the provider is called.
+        """
+        from .pricing import snapshot_rates
+
+        try:
+            return snapshot_rates(pk)
+        except Exception as e:  # noqa: BLE001 — classified into one refusal below.
+            logger.error("RateSnapshotFailed", pricing_key=pk, error=str(e))
+            raise _err_503("pricing_unavailable") from None
+
+    def _legacy_estimate(snap: "RateSnapshot") -> int:
         # Factored out of the `input_bytes is None` branch below so
         # `shadow_mode` can compute this EXACT same number for the reservation
         # while the hard-ceiling branch, a few lines down, still computes and
         # returns the sound bound for recording — see `_price`'s own
-        # docstring. Byte-for-byte the call this function made before the
-        # hard-ceiling bound existed; SAAR: when this request is served by the
-        # session's warm model, `saar_warm_prefix_tokens` of the input estimate
-        # re-bill at the cheaper cache-read rate — so staying warm reserves
-        # LESS than switching cold, and a switch that would breach the pool
-        # while a stay would fit is naturally gated at the 402. In P0 this is
-        # always 0 (cache evidence lands in P1), so the estimate is
-        # byte-identical to pre-SAAR. The discount applies ONLY to the warm
-        # model itself — the tool-loop hard pin (`vsr_hard_model`) or the
-        # sticky soft preference (`saar_prefer_model`) — never to a cold
-        # candidate.
-        warm_model = vsr_hard_model or saar_prefer_model
-        warm = saar_warm_prefix_tokens if (warm_model and model == warm_model) else 0
-        return estimate_cost_microusd(
-            pricing_key=pk,
+        # docstring.
+        #
+        # This used to discount the warm model's input leg by SAAR's cache
+        # evidence, so that a switch which would breach the pool was gated at the
+        # 402 while a stay fitted. The discount is gone: the provider decides at
+        # settle which leg each token bills at, so reserving the cheaper leg
+        # reserves below the charge. The warm preference is expressed by candidate
+        # ORDER (`vsr_hard_model`, `saar_prefer_model`), which is where it was
+        # always doing the real work, and the money claim about staying warm is
+        # `switch_cost_delta_microusd` on the decision record.
+        #
+        # Priced from the FROZEN snapshot, not from a live read: this number gates
+        # admission, and the settle charges from `snap`, so the two must be one
+        # document. See `_freeze`.
+        from .pricing import estimate_cost_from_rates
+
+        return estimate_cost_from_rates(
+            snap,
             input_tokens_est=input_tokens_est,
             max_output_tokens=max_output_tokens,
             effort_multiplier=effort_multiplier,
-            warm_prefix_tokens=warm,
         )
 
     def _price(
@@ -1581,12 +1619,15 @@ def reserve_credit_for_model(
         except ValueError:
             pk = "default"
         if input_bytes is None:
-            # Legacy path, byte-for-byte unchanged for a caller not yet
-            # migrated to supply a byte count. No rate snapshot is frozen here
-            # (None): `reserve_credit` freezes its own, exactly as it always
-            # has for this path. No bound exists to record either (None):
-            # this is the `accounting` state, where nothing is computed at all.
-            return pk, _legacy_estimate(model, pk), None, None
+            # Legacy path for a caller not yet migrated to supply a byte count: no
+            # bound exists to record (None) — this is the `accounting` state, where
+            # nothing is bounded at all. The RATE, though, is frozen here like
+            # everywhere else and the estimate is priced from it, so this path can
+            # no longer size a reservation at one document and charge it at
+            # another (it used to leave `snap=None` and let `reserve_credit` freeze
+            # a second, possibly different one).
+            snap = _freeze(pk)
+            return pk, _legacy_estimate(snap), snap, None
         # Hard-ceiling path (docs/design/hard-ceiling.md item 1). Deliberately no
         # warm/cold split here — a SAAR "this will hit the cache" expectation
         # is exactly the kind of provider-behaviour assumption a SOUND bound
@@ -1608,7 +1649,6 @@ def reserve_credit_for_model(
         # edit that lands between pricing this candidate and committing the
         # reserve transaction cannot make settle charge above what was bounded
         # — the edit is simply not visible to either side of this request.
-        from .pricing import rate_for, snapshot_rates
         from .reservation_bound import (
             calibrated_reservation_microusd,
             calibration_store,
@@ -1617,24 +1657,19 @@ def reserve_credit_for_model(
         from .rates import Rate as _Rate
         from dynamo.tenants import BOUND_MODE_CALIBRATED
 
-        try:
-            snap = snapshot_rates(pk)
-            rate = _Rate(
-                input_per_mtok_microusd=snap.input_per_mtok_microusd,
-                output_per_mtok_microusd=snap.output_per_mtok_microusd,
-                cache_read_per_mtok_microusd=snap.cache_read_per_mtok_microusd,
-                cache_write_per_mtok_microusd=snap.cache_write_per_mtok_microusd,
-            )
-        except Exception:  # noqa: BLE001 — pricing must never break admission
-            # A rate-table blip must not fail the reserve (same invariant the
-            # legacy path already gives every caller). Degrade to a live read
-            # for the bound math ONLY; `snap` stays None, so `reserve_credit`
-            # below will attempt its OWN `snapshot_rates` call and — most
-            # likely hitting the same failure — mark this reservation
-            # `rate_snapshot_failed` and settle via the live-rate fallback,
-            # exactly the existing degraded path (Fable review-2 N3).
-            snap = None
-            rate = rate_for(pk)
+        # `_freeze` refuses the request when the rate cannot be frozen. There used
+        # to be a degraded branch here that priced the bound from a live read and
+        # left `snap=None`, so the reservation was labelled `snapshot-failed` and
+        # the settle charged from whatever the table said later — a rate edit
+        # between admission and settle then changed what this request was charged,
+        # which is the one thing the frozen rate exists to prevent.
+        snap = _freeze(pk)
+        rate = _Rate(
+            input_per_mtok_microusd=snap.input_per_mtok_microusd,
+            output_per_mtok_microusd=snap.output_per_mtok_microusd,
+            cache_read_per_mtok_microusd=snap.cache_read_per_mtok_microusd,
+            cache_write_per_mtok_microusd=snap.cache_write_per_mtok_microusd,
+        )
         if _bound_mode == BOUND_MODE_CALIBRATED:
             bound_cost = calibrated_reservation_microusd(
                 rate,
@@ -1660,20 +1695,25 @@ def reserve_credit_for_model(
         # `dollar_pool_bound_should_gate` for the refusal check above this
         # call), threaded straight through rather than re-derived here, so
         # this chokepoint and the route's refusal check can never disagree
-        # about which state a request is in. The legacy estimate is priced
-        # from the LIVE rate table via `_legacy_estimate` (unchanged from the
-        # `input_bytes is None` branch above), not from the frozen `rate`
-        # used for the bound — that frozen snapshot is still returned as
-        # `snap` regardless, so settle still charges at the reserve-time
-        # rates the bound was priced from (section 8), even though the
-        # reserved AMOUNT in `shadow_mode` came from a different, live-rated
-        # computation.
-        reserved_cost = (
-            _legacy_estimate(model, pk) if shadow_mode else bound_cost
-        )
+        # about which state a request is in. In `shadow_mode` the reserved AMOUNT
+        # is the legacy estimate rather than the bound — a different STRATEGY, on
+        # purpose — but it is priced from the SAME frozen snapshot the bound and
+        # the settle use, so strategy is the only thing that differs. It used to
+        # be priced from a live read as well, which made the reservation and the
+        # charge disagree about the rate on top of the token count.
+        reserved_cost = _legacy_estimate(snap) if shadow_mode else bound_cost
         return pk, reserved_cost, snap, bound_cost
 
-    tenant_cfg = get_tenant_routing_config(user.org_id)
+    # A routing config that could not be read is not a config: its quotas and its
+    # allowlist only ever restrict this request, so proceeding without it would
+    # admit exactly what the tenant configured against. The loader serves a
+    # last-known-good value when it has one and raises otherwise; fail closed on a
+    # retryable 503 rather than route unrestricted.
+    try:
+        tenant_cfg = get_tenant_routing_config(user.org_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed", tenant_id=user.org_id)
+        raise _err_503("routing_config_unavailable") from None
 
     # VSR hard pin (P0-15): validate, then force the candidate list to exactly
     # [pin] and fall through to the same reserve loop (pricing + quota + atomic
@@ -1792,7 +1832,14 @@ def reserve_credit_for_model(
             bound_microusd=bound,
         ))
 
-    user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    # Same discipline as the tenant config: a user chain NARROWS the candidate
+    # set, so serving the request without it would widen what this user may reach.
+    try:
+        user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed",
+                       tenant_id=user.org_id, user_id=user.user_id)
+        raise _err_503("routing_config_unavailable") from None
     candidates = _resolve_candidate_chain(
         requested_model=model_name,
         tenant_cfg=tenant_cfg,
@@ -1827,6 +1874,7 @@ def _reserve_over_candidates(
     if every candidate's quota is exhausted, 402 `model_quota_exhausted` (for a
     single-element pin list that means: the pinned model's quota is gone, no
     fallback — the hard-pin contract)."""
+    from .models import canonical_model_id as _canonical_model_id
     from .routing import quota as _quota
 
     period = current_period()
@@ -1842,8 +1890,28 @@ def _reserve_over_candidates(
     for idx, model in enumerate(candidates):
         pk, cost, snap, bound = price(model)
         priced_tried.append((model, pk, cost))
-        q = tenant_cfg.quotas.get(model)
+        # Look the limit up under the model's CANONICAL spelling. The admin write
+        # path stores quota keys canonicalised, while a candidate can be the raw
+        # `body.model` (a tenant with quotas but no chain routes the requested
+        # model as-is), so a raw-string lookup found nothing whenever the client
+        # spelled the model any other way — no quota line, request unmetered.
+        # Keying on the model rather than on its spelling closes that, and the
+        # counter key (`quota._sk`) canonicalises identically.
+        q = tenant_cfg.quotas.get(_canonical_model_id(model))
         tenant_limit = q.limit if q else None
+        if q is not None and tenant_limit is not None:
+            # The cap must be enforced in the denomination it was WRITTEN in. This
+            # loop reserves micro-USD, and nothing used to read `unit`: a row
+            # saying `tokens` was enforced as dollars, so the cap in force differed
+            # from the configured one by the price per token — while the operator's
+            # console still showed their number. The admin write path pins
+            # `usd_micro`, so a row in any other unit predates that pin or arrived
+            # out of band; refuse rather than enforce a cap nobody configured.
+            unit = str(getattr(q, "unit", _quota.RESERVED_UNIT) or "")
+            if unit != _quota.RESERVED_UNIT:
+                logger.error("quota_unit_unsupported", tenant_id=user.org_id,
+                             model=_canonical_model_id(model), unit=unit)
+                raise _err_503("quota_unit_unsupported")
         quota_lines = (
             _quota.build_reserve_txn_items(
                 tenant_id=user.org_id, user_id=user.user_id, model=model,
@@ -2027,37 +2095,63 @@ def _resolve_candidate_chain(
     model registry, or (b) — when `wire_protocol` is given — doesn't speak this
     route's wire protocol. The requested model is exempt from the protocol drop
     (it was already validated by the route) so a bad chain entry never fails an
-    otherwise-valid direct request. If filtering empties the chain, we keep the
-    requested model as the sole candidate.
-    """
-    from .models import resolve_model as _resolve_registry
-    from .routing.model_resolver import _resolve_chain, resolve_model
+    otherwise-valid direct request.
 
+    EVERY FILTER HERE NARROWS. An empty admissible set is a refusal, never a
+    widening: this function used to fall back to the top of the chain after the
+    allowlist filter and to the REQUESTED model after the servability filter, so a
+    tenant whose allowlisted models did not all speak this route's protocol ended
+    up serving the model the client named — outside the allowlist the operator
+    wrote, and with no per-model quota line, because no quota was configured for a
+    model the tenant never expected to serve. The pin path already refuses rather
+    than substitutes (`_validate_model_pin`); this is the same rule for the
+    ordinary path.
+
+    Allowlist membership is decided on the model, not on its spelling: the admin
+    write path stores canonical ids, so a client naming the same model by another
+    alias is naming an allowed model.
+    """
+    from .models import canonical_model_id as _canonical_model_id
+    from .models import resolve_model as _resolve_registry
+    from .routing.model_resolver import _resolve_chain
+
+    _tenant_id = getattr(tenant_cfg, "tenant_id", None)
     fallback_allowed = (tenant_cfg.fallback_default == "on")
     if user_cfg and user_cfg.fallback is not None:
         fallback_allowed = (user_cfg.fallback == "on")
 
-    selection = resolve_model(
-        requested_model=requested_model,
-        tenant_config=tenant_cfg,
-        user_config=user_cfg,
-        breaker_max_tier=breaker_max_tier,
-        fallback_allowed=fallback_allowed,
-    )
-
+    # `model_resolver.resolve_model` used to be consulted here purely to supply a
+    # substitute when a filter emptied the list. There is no substitute any more —
+    # an empty admissible set is a refusal — so the head-selection helper is not
+    # part of this path; `_resolve_chain` already applies the chain, the user
+    # override and the start position.
     candidates = _resolve_chain(requested_model, tenant_cfg, user_cfg)
     if tenant_cfg.allowlist:
-        candidates = [m for m in candidates if m in tenant_cfg.allowlist] or [selection.selected_model]
+        allowed = {_canonical_model_id(m) for m in tenant_cfg.allowlist}
+        candidates = [m for m in candidates if _canonical_model_id(m) in allowed]
+        if not candidates:
+            # Nothing the client can reach on this route is inside the tenant's
+            # policy. Refusing is the whole point of an allowlist; substituting a
+            # model the client did not ask for, or serving the one it did ask for,
+            # both answer a question the operator already answered with "no".
+            logger.info("model_not_allowed", tenant_id=_tenant_id,
+                        requested_model=requested_model)
+            raise _err_403("model_not_allowed")
     if breaker_max_tier is not None:
         # Candidates are model NAMES here, not pricing keys — use the name-aware
         # tier lookup so an alias is resolved through the registry rather than
-        # string-matched.
+        # string-matched. A cap that excludes everything is advisory, not policy:
+        # the breaker shapes routing, it does not define what the tenant may use,
+        # so an empty result keeps the (already policy-filtered) list.
         from .routing.chains import _tier_for_model
         capped = [m for m in candidates if _tier_for_model(m) <= breaker_max_tier]
         candidates = capped or candidates
     if not fallback_allowed:
         candidates = candidates[:1]
-    candidates = candidates or [selection.selected_model]
+    if not candidates:
+        logger.info("model_not_allowed", tenant_id=_tenant_id,
+                    requested_model=requested_model)
+        raise _err_403("model_not_allowed")
 
     def _servable(model: str) -> bool:
         # The requested model is exempt: the route already validated it.
@@ -2086,7 +2180,16 @@ def _resolve_candidate_chain(
         return True
 
     servable = [m for m in candidates if _servable(m)]
-    return servable or [requested_model]
+    if not servable:
+        # The requested model is exempt from the protocol drop, so reaching here
+        # means every candidate — including the requested one when it was
+        # admissible — cannot be served on this route. Serving the requested model
+        # anyway is how an allowlist was escaped: it was policy-filtered OUT above
+        # and then re-admitted here as a fallback.
+        logger.info("no_servable_candidate", tenant_id=_tenant_id,
+                    requested_model=requested_model, wire_protocol=wire_protocol)
+        raise _err_403("model_not_allowed")
+    return servable
 
 
 def reserve_credit(
@@ -2138,7 +2241,16 @@ def reserve_credit(
         else (int(cost_microusd) if cost_microusd is not None else None)
     )
     repo = UserTenantsRepository()
-    repo.ensure(user_id=user.user_id, tenant_id=user.org_id)
+    # Admission READS authority; it does not create it. This used to call
+    # `ensure()`, which creates the membership and seeds it with the tenant's
+    # default credit — so an identity with a profile row but no membership (an admin
+    # creation that crashed between its two writes, or a row written out of band)
+    # was granted a budget by making a request. Provisioning happens in the admin
+    # API and the SSO exchange, both of which say which tenant and how much.
+    if repo.get(user.user_id, user.org_id) is None:
+        logger.info("identity_not_provisioned", user_id=user.user_id,
+                    tenant_id=user.org_id)
+        raise _err_403("identity_not_provisioned")
 
     period = current_period()
     # Layer 5: freeze the rate NOW (reserve time) so settle rates the charge at
@@ -2146,30 +2258,26 @@ def reserve_credit(
     # pricing_key is known (priced reservation); a rate-table blip must never fail
     # the reserve, so a snapshot failure degrades to None (settle then falls back
     # to the legacy live-rate path). Shared across every context return below.
-    from .pricing import (
-        SNAPSHOT_FAILED_SENTINEL as _SNAP_FAILED,
-        UNVERSIONED_SENTINEL as _UNVERSIONED,
-    )
+    from .pricing import UNVERSIONED_SENTINEL as _UNVERSIONED
 
     if rate_snapshot is not None:
         _rate_snap = rate_snapshot
-        _snap_failed = False
     else:
         _rate_snap = None
-        _snap_failed = False
         if pricing_key:
             try:
                 from .pricing import snapshot_rates
                 _rate_snap = snapshot_rates(pricing_key)
-            except Exception:  # noqa: BLE001 — pricing must never break admission
-                # DEGRADED PATH (Fable review-2 N3): the rate table read failed, so
-                # settle will charge via the live-rate fallback and the terminal is
-                # labeled `snapshot-failed` (a DISTINCT sentinel from legacy). error
-                # level (not warning) so a CloudWatch metric filter can alarm — a
-                # persistent rate-table outage silently degrading all charging is the
-                # exact failure mode Layer 5 must not hide.
-                _snap_failed = True
-                logger.error("RateSnapshotFailed", pricing_key=pricing_key)
+            except Exception as e:  # noqa: BLE001 — one refusal, stated once.
+                # There is no honest reservation without the rate it was admitted
+                # at. This used to degrade: the terminal was labelled
+                # `snapshot-failed` and the settle charged from the live table, so
+                # a rate edit between admission and settle changed what the request
+                # was charged — the one thing freezing exists to prevent. A rate
+                # the gateway cannot read is a request it cannot price.
+                logger.error("RateSnapshotFailed", pricing_key=pricing_key,
+                             error=str(e))
+                raise _err_503("pricing_unavailable") from None
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
@@ -2199,7 +2307,6 @@ def reserve_credit(
             period=period,
             pricing_key=pricing_key,
             rate_snapshot=_rate_snap,
-            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
@@ -2434,9 +2541,12 @@ def reserve_credit(
                     # snapshot serialized so a cross-process recovery can restore
                     # it (Fable review H1). Distinct sentinel per cause when no
                     # snapshot was frozen (review-2 N2/N3).
+                    # Layer 5: the frozen VERSION. A priced reservation always
+                    # carries a snapshot now (pricing fails closed), so the only
+                    # remaining sentinel is the honest one for a reservation that
+                    # was never priced at all.
                     pricing_version=(
-                        _rate_snap.version if _rate_snap is not None
-                        else (_SNAP_FAILED if _snap_failed else _UNVERSIONED)
+                        _rate_snap.version if _rate_snap is not None else _UNVERSIONED
                     ),
                     rate_snapshot=(
                         _rate_snap.to_ledger_dict() if _rate_snap is not None else None
@@ -2497,7 +2607,6 @@ def reserve_credit(
             period=period,
             pricing_key=pricing_key,
             rate_snapshot=_rate_snap,
-            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=True,
             hold_id=hold_id,
@@ -2537,7 +2646,6 @@ def reserve_credit(
             period=period,
             pricing_key=pricing_key,
             rate_snapshot=_rate_snap,
-            rate_snapshot_failed=_snap_failed,
             tenant_id=user.org_id,
             pool_active=False,
             selected_model=selected_model,
@@ -2633,7 +2741,8 @@ def reserve_external_authorization(
     # ORIGINAL (correctly settling against the period it reserved in).
     prior = _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key)
     if prior is not None:
-        return _idemp_replay(prior, request_fingerprint)
+        return _idemp_replay(prior, request_fingerprint,
+                             idempotency_key=idempotency_key)
 
     # PENDING protocol dispatch (docs/design/pending-protocol.md). Default
     # "transaction" falls through to the unchanged 4-item path below; a canary
@@ -2768,7 +2877,9 @@ def reserve_external_authorization(
                     ledger, tenant_id, period, idempotency_key
                 )
                 if winner is not None:
-                    return _idemp_replay(winner, request_fingerprint)
+                    return _idemp_replay(
+                        winner, request_fingerprint,
+                        idempotency_key=idempotency_key)
                 # CCF but no readable row: get_idemp is ConsistentRead, so a CCF
                 # with no readable winner is a genuine transient (throttle) → retry
                 # (and count it as a throttle so exhaustion surfaces 503, not a
@@ -3149,10 +3260,13 @@ class ExternalAuthorizeNoPool(Exception):
 
 
 def _read_idemp_with_prev_period(ledger, tenant_id, period, idempotency_key):
-    """Read the IDEMP row for a key in `period`, falling back to the previous
-    period (Fable authcap review-1 H-2: a retry crossing a month boundary must
-    still find the original). Both reads are ConsistentRead. Returns the row or
-    None. ttl_max is 24h so the original can only be one period back."""
+    """Read the IDEMP row for a key, then for the previous period.
+
+    `get_idemp` now looks in the period-independent partition first, so the key's
+    identity no longer expires with the period and this second call covers only
+    rows written BEFORE that change (they sit in the money partition, and a retry
+    across a boundary would otherwise miss them). Kept for exactly that window;
+    both reads are ConsistentRead."""
     row = ledger.get_idemp(
         tenant_id=tenant_id, period=period, idempotency_key=idempotency_key
     )
@@ -3173,7 +3287,9 @@ class IdempotencyKeyReuse(Exception):
     _safe_idemp_token collision handing back the wrong hold."""
 
 
-def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthorizeResult:
+def _idemp_replay(
+    idemp_row: dict, request_fingerprint: str, *, idempotency_key: str
+) -> ExternalAuthorizeResult:
     """Reconstruct an ExternalAuthorizeResult from a stored IDEMP row (a
     duplicate-key replay). The row froze everything the authorize response needs,
     so a replay is a pure read — no rehydrate, no second reserve.
@@ -3184,11 +3300,24 @@ def _idemp_replay(idemp_row: dict, request_fingerprint: str) -> ExternalAuthoriz
     A MISSING stored fingerprint is also a mismatch (Fable authcap review-4 M-C):
     every IDEMP row this code writes carries one, so an absent fingerprint means
     a partial write / hand-inserted / foreign row — replaying it could hand back
-    an authorization for a different body, so reject rather than skip the check."""
+    an authorization for a different body, so reject rather than skip the check.
+
+    It then verifies the KEY itself. The row is addressed by a digest, which is
+    collision-free, but the pre-digest sanitised address was not: two distinct keys
+    could resolve to one row, and a fingerprint match would then let the second key
+    replay the first one's authorization. The raw key is stored for exactly this
+    check, so a replay proves the row belongs to THIS key rather than trusting the
+    address it was found at. A row with no stored key is refused for the same
+    reason the missing fingerprint is."""
     stored_fp = str(idemp_row.get("request_fingerprint", ""))
     if stored_fp != request_fingerprint:
         raise IdempotencyKeyReuse(
             "Idempotency-Key reused for a different request"
+        )
+    stored_key = idemp_row.get("idempotency_key")
+    if stored_key is None or str(stored_key) != str(idempotency_key):
+        raise IdempotencyKeyReuse(
+            "Idempotency-Key does not match the stored authorization's key"
         )
     return ExternalAuthorizeResult(
         authorization_id=str(idemp_row["authorization_id"]),
@@ -3885,6 +4014,18 @@ def _recover_spend_via_late_settle(
     raise RuntimeError(f"late-settle recovery exhausted retries for hold {hold_id}")
 
 
+def _reported_count(v: Optional[int]) -> Optional[int]:
+    """A reported token count, clamped at zero — or None when nothing was reported.
+
+    `max(v, 0)` cannot be used directly any more: `None` is now a distinct value
+    meaning "the provider did not report this leg", and it must survive to the
+    rating record rather than being coerced into a measured zero.
+    """
+    if v is None:
+        return None
+    return max(int(v), 0)
+
+
 def settle_reservation_and_log(
     *,
     user,
@@ -3895,8 +4036,11 @@ def settle_reservation_and_log(
     model_id: str,
     context: Optional[ReservationContext] = None,
     actual_cost_microusd: Optional[int] = None,
-    actual_cache_read_tokens: int = 0,
-    actual_cache_write_tokens: int = 0,
+    # `None` means the provider did not report that leg — distinct from a reported
+    # zero, and carried through to the rating record so the ledger does not assert a
+    # measurement nobody made (see `mvp.pricing.rate_usage`).
+    actual_cache_read_tokens: Optional[int] = None,
+    actual_cache_write_tokens: Optional[int] = None,
     requested_model: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> None:
@@ -3970,7 +4114,7 @@ def settle_reservation_and_log(
     # function, no live-table read) so a rate flip between reserve and settle
     # cannot change the price. `_rating` is the frozen breakdown embedded on the
     # ledger terminal; its total IS the settled amount (single source of truth).
-    from .pricing import SNAPSHOT_FAILED_SENTINEL, UNVERSIONED_SENTINEL
+    from .pricing import UNVERSIONED_SENTINEL
 
     _rating = None
     if (
@@ -3986,22 +4130,31 @@ def settle_reservation_and_log(
                 context.rate_snapshot,
                 input_tokens=actual_input_tokens,
                 output_tokens=actual_output_tokens,
-                cache_read_tokens=max(actual_cache_read_tokens, 0),
-                cache_write_tokens=max(actual_cache_write_tokens, 0),
+                cache_read_tokens=_reported_count(actual_cache_read_tokens),
+                cache_write_tokens=_reported_count(actual_cache_write_tokens),
             )
             actual_cost_microusd = _rating.total_cost_microusd
         else:
-            # Legacy / snapshot-less reservation: fall back to the live-rate path
-            # (pre-Layer-5 behaviour). No frozen rating record is produced.
-            from .pricing import actual_cost_microusd as _price_actual
-
-            actual_cost_microusd = _price_actual(
+            # A reservation admitted by THIS version always carries the rate it was
+            # admitted at, because pricing fails closed. Reaching here means the
+            # reservation predates that: a RESERVE event written by the previous
+            # version during a rate-table failure, or before snapshots existed,
+            # restored from the ledger after a deploy. Charging it from the live table
+            # is the C2.2 violation this branch removed — and refusing is worse,
+            # because nothing re-drives a failed settle, so the reaper would end it as
+            # a reclaim with a settled delta of zero and the usage the gateway DID
+            # observe would leave the ledger entirely.
+            #
+            # It settles at the amount the admission already debited. That is an upper
+            # bound on any charge this request could have had (the pool was gated on
+            # it), it needs no rate read at all, and the terminal carries the honest
+            # `unversioned-legacy` label because no version priced it.
+            logger.warning(
+                "settle_without_frozen_rate_charging_reserved",
                 pricing_key=context.pricing_key,
-                input_tokens=actual_input_tokens,
-                output_tokens=actual_output_tokens,
-                cache_read_tokens=max(actual_cache_read_tokens, 0),
-                cache_write_tokens=max(actual_cache_write_tokens, 0),
+                reserved_microusd=int(context.pool_reserved_microusd or 0),
             )
+            actual_cost_microusd = int(context.pool_reserved_microusd or 0)
 
     if (
         context is not None
@@ -4114,8 +4267,8 @@ def settle_reservation_and_log(
 
                 _realized_input_tokens = (
                     int(actual_input_tokens)
-                    + max(actual_cache_read_tokens, 0)
-                    + max(actual_cache_write_tokens, 0)
+                    + max(actual_cache_read_tokens or 0, 0)
+                    + max(actual_cache_write_tokens or 0, 0)
                 )
                 _ratio = realized_tokens_per_byte(
                     _realized_input_tokens, context.reserved_input_bytes
@@ -4149,19 +4302,18 @@ def settle_reservation_and_log(
                     # at. It is set ONLY when we produced a frozen-snapshot rating
                     # for THIS settle (`_rating is not None`). When the charge did
                     # NOT go through the snapshot — an explicit caller-supplied
-                    # cost, or a snapshot-less legacy reservation — we must NOT
-                    # stamp a version the amount was not derived from (that would
-                    # be a false dispute label AND relapse bug#1 by writing the
-                    # pricing_key). Use a DISTINCT sentinel per cause instead
-                    # (Fable review-2 N2/N3): snapshot-failed vs unversioned-legacy.
+                    # cost, or an unpriced reservation — we must NOT stamp a
+                    # version the amount was not derived from (that would be a
+                    # false dispute label AND relapse bug#1 by writing the
+                    # pricing_key). The honest sentinel is the only remaining
+                    # case: a reservation that carried no rate at all. There is no
+                    # longer a `snapshot-failed` case to distinguish, because a
+                    # rate that cannot be frozen now refuses the request instead of
+                    # charging from a live read later.
                     "pricing_version": (
                         _rating.pricing_version
                         if _rating is not None
-                        else (
-                            SNAPSHOT_FAILED_SENTINEL
-                            if context.rate_snapshot_failed
-                            else UNVERSIONED_SENTINEL
-                        )
+                        else UNVERSIONED_SENTINEL
                     ),
                     "pricing_key": context.pricing_key,
                     "rating": _rating.to_ledger_dict() if _rating is not None else None,

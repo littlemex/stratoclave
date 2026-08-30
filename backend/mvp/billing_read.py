@@ -66,6 +66,11 @@ class RatingComponentView(BaseModel):
     tokens: int
     rate_microusd_per_mtok: int
     cost_microusd: int
+    # Whether the PROVIDER reported this leg. `tokens: 0` cannot say it: some
+    # models never report prompt-cache counts, and a reader comparing models needs
+    # "not reported" and "reported as none" to be different facts. `None` on an
+    # event written before the flag existed — unknown, which is also not zero.
+    reported: Optional[bool] = None
 
 
 class RunEventTenant(BaseModel):

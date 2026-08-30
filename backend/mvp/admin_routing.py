@@ -129,12 +129,14 @@ def _canon(model_id: str, field: str) -> str:
 def _canon_soft(model_id: str) -> str:
     """Canonical id for already-stored config; tolerate registry drift (an
     unresolvable stored id maps to itself so it simply never matches a live
-    model rather than raising)."""
-    try:
-        entry = resolve_model(model_id)
-        return entry.aliases[0] if entry.aliases else entry.bedrock_model_id
-    except ValueError:
-        return model_id
+    model rather than raising).
+
+    Thin alias for `mvp.models.canonical_model_id`: the write path here and the
+    enforcement path must canonicalise identically or a stored quota key stops
+    matching the model it was written for."""
+    from .models import canonical_model_id
+
+    return canonical_model_id(model_id)
 
 
 def _validate_model_list(models: list[str], field: str) -> list[str]:

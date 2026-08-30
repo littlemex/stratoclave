@@ -287,6 +287,11 @@ export interface RatingComponentView {
   tokens: number
   rate_microusd_per_mtok: number
   cost_microusd: number
+  // Whether the PROVIDER reported this leg. `tokens: 0` cannot say it: some models
+  // never report prompt-cache counts, and "reported as none" is a measurement while
+  // "not reported" is not. Absent/null on an event written before the gateway
+  // recorded the distinction — unknown, which is also not zero.
+  reported?: boolean | null
 }
 
 // TENANT view: NO provider_cost / margin fields — redaction is enforced by the

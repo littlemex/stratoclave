@@ -11,30 +11,41 @@ It touches no DynamoDB and no budget state — money orchestration lives in
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncGenerator, Iterator
+from typing import Optional, Any, AsyncGenerator, Iterator
 
 from . import _converse_types as t
 
 
-def cache_tokens_from_usage(usage: dict[str, Any]) -> tuple[int, int]:
+def cache_tokens_from_usage(
+    usage: dict[str, Any],
+) -> tuple[Optional[int], Optional[int]]:
     """Extract (cache_read, cache_write) token counts from a Bedrock usage block.
 
     Bedrock's Converse usage reports prompt-cache activity as
-    `cacheReadInputTokens` / `cacheWriteInputTokens` (0 or absent when caching is
-    not used). Returning them lets settle price cached traffic at its own rate
-    instead of billing it at zero. Bad/missing values collapse to 0.
+    `cacheReadInputTokens` / `cacheWriteInputTokens`. Returning them lets settle
+    price cached traffic at its own rate instead of billing it at zero.
+
+    An ABSENT or unparseable field returns `None`, not 0. Some models report these
+    counts and some never do, and whether a model caches is the single largest term
+    in its economics — so a caller comparing models has to tell "the provider said
+    nothing was cached" from "the provider does not report caching". Collapsing
+    both into 0 made the second look like the first. Zero is a measurement; absence
+    is not. The charge for an absent leg is still nothing (`rate_usage` costs it at
+    zero) — what changes is that the record no longer claims the provider said so.
     """
 
-    def _int(v) -> int:
+    def _count(v) -> Optional[int]:
+        if v is None:
+            return None
         try:
             n = int(v)
         except (TypeError, ValueError):
-            return 0
+            return None
         return n if n > 0 else 0
 
     return (
-        _int(usage.get("cacheReadInputTokens")),
-        _int(usage.get("cacheWriteInputTokens")),
+        _count(usage.get("cacheReadInputTokens")),
+        _count(usage.get("cacheWriteInputTokens")),
     )
 
 

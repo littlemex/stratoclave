@@ -253,6 +253,32 @@ aws ecs update-service \
 
 ---
 
+## Upgrade step: idempotency records
+
+Deployments that ran a version before the one carrying
+`scripts/local/backfill_idemp_partition.py` stored external-authorize idempotency
+records inside each period's money partition, which made a client key's identity
+expire with the billing period. Records are written to a permanent per-tenant
+partition now, and the reader still checks the old locations — but only for the
+period it was handed and the one before it, because nothing tells it which older
+period a given record was written in.
+
+Run the backfill once per ledger table after deploying:
+
+```bash
+python3 scripts/local/backfill_idemp_partition.py --dry-run
+python3 scripts/local/backfill_idemp_partition.py
+```
+
+It copies each old record into the permanent partition, conditional on the target
+not existing, so re-running is safe and a record written by the new code is never
+overwritten by an older copy. Sources are left in place because the ledger table is
+append-only. Until it has run, a retry of a PRE-UPGRADE key more than one period
+after its first use can mint a second authorization for that key — the boundary is
+stated in [`docs/design/CONTRACTS.md`](design/CONTRACTS.md) under C5.1.
+
+---
+
 ## Regional constraints
 
 Stratoclave deploys to an operator-chosen **body region** `R`. Only one piece is

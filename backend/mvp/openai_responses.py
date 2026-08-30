@@ -506,7 +506,6 @@ async def create_response(
     sctx = None
     saar_hard = None
     saar_prefer = None
-    saar_warm = 0
     prev_response_id = _previous_response_id(body)
     try:
         from .routing import saar as _saar
@@ -521,7 +520,6 @@ async def create_response(
         if sctx is not None:
             saar_hard = sctx.decision.hard_model
             saar_prefer = sctx.decision.prefer_model
-            saar_warm = int(sctx.decision.warm_prefix_tokens)
     except Exception:  # noqa: BLE001 — SAAR must never break the request.
         sctx = None
 
@@ -612,7 +610,6 @@ async def create_response(
         # Hard-pin precedence: explicit client pin > SAAR provider-state lock.
         vsr_hard_model=model_pin or saar_hard,
         saar_prefer_model=saar_prefer,
-        saar_warm_prefix_tokens=saar_warm,
         # L5-d: per-run billing attribution.
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
@@ -748,7 +745,9 @@ async def create_response(
     # would strand the hold and the pool slot until the reaper.
     try:
         data = resp.json()
-        input_tokens, output_tokens = _extract_usage(data.get("usage", {}))
+        _usage_block = data.get("usage", {})
+        input_tokens, output_tokens = _extract_usage(_usage_block)
+        _cache_read, _cache_write = _openai_transport.extract_cache_usage(_usage_block)
     except Exception as e:  # noqa: BLE001
         ending = hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED)
         if ending is not None:
@@ -758,7 +757,11 @@ async def create_response(
             detail=f"malformed upstream response: {sanitize_exception_message(str(e))}",
         )
     ending = hold.claim_settle(
-        _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+        # `None` for a cache leg means this transport did not report it — stated
+        # rather than defaulted, so the ledger does not record a measured zero for a
+        # field nobody read (contract C8.1).
+        _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens,
+                     cache_read_tokens=_cache_read, cache_write_tokens=_cache_write)
     )
     if ending is not None:
         await ending.awaited()

@@ -1159,12 +1159,23 @@ class TenantBudgetsRepository:
 
         Composed alongside the aggregate settle/release so the hold and its
         aggregate share disappear together. With `require_exists=True` (the
-        default) the Delete is gated on `attribute_exists(sk)`: this is the
-        latch that keeps the paired aggregate decrement from applying twice. If
-        the reaper already reclaimed this hold (and already returned its
-        reserved share), the condition fails, the whole transaction cancels, and
-        the caller falls back to recording spend WITHOUT decrementing reserved
-        again — the fix for the settle/reclaim double-subtract.
+        default) the Delete is gated on the SAME two facts `reclaim_hold_txn_item`
+        gates on, so the settle side and the reaper cannot both believe they are the
+        one ending this reservation:
+
+          * `attribute_exists(sk)` — the latch that keeps the paired aggregate
+            decrement from applying twice. If the reaper already reclaimed this hold
+            (and already returned its reserved share), the condition fails, the
+            whole transaction cancels, and the caller falls back to recording spend
+            WITHOUT decrementing reserved again.
+          * `status = ACTIVE OR attribute_not_exists(status)` — existence alone is
+            not enough under the PENDING protocol, because its endings do not delete
+            the row: a fenced hold becomes `EXPIRED_UNCREDITED` and a retired one
+            `RECLAIMED`, both still present. `pool_credit_back` has already returned
+            the reservation by then, so a settle passing on existence alone returned
+            it a SECOND time and enlarged the tenant's effective budget. A
+            transactional (pre-PENDING) hold carries no status attribute at all, so
+            the second clause keeps this inert for today's data.
         """
         item: dict[str, Any] = {
             "Delete": {
@@ -1176,7 +1187,12 @@ class TenantBudgetsRepository:
             }
         }
         if require_exists:
-            item["Delete"]["ConditionExpression"] = "attribute_exists(sk)"
+            item["Delete"]["ConditionExpression"] = (
+                "attribute_exists(sk) AND "
+                "(#st = :active_h OR attribute_not_exists(#st))"
+            )
+            item["Delete"]["ExpressionAttributeNames"] = {"#st": "status"}
+            item["Delete"]["ExpressionAttributeValues"] = {":active_h": {"S": "ACTIVE"}}
         return item
 
     def reclaim_hold_txn_item(

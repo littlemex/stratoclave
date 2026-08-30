@@ -183,11 +183,13 @@ def _resolve_chain(
 
 def _canonical_model_id(model_id: str) -> str:
     """Canonical id (registry primary alias) for spelling-insensitive matching;
-    the raw id if it doesn't resolve (so an unknown id simply won't match)."""
-    from ..models import resolve_model
+    the raw id if it doesn't resolve (so an unknown id simply won't match).
 
-    try:
-        entry = resolve_model(model_id)
-        return entry.aliases[0] if entry.aliases else entry.bedrock_model_id
-    except ValueError:
-        return model_id
+    Thin alias for `mvp.models.canonical_model_id` — the single definition every
+    layer shares, so chain matching, config serialisation and the quota counter
+    cannot drift into three different ideas of "the same model" (a local copy
+    here and in `admin_routing` was exactly how the quota key and the request
+    spelling came to disagree)."""
+    from ..models import canonical_model_id
+
+    return canonical_model_id(model_id)
