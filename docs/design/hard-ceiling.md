@@ -56,7 +56,10 @@ fully switched on. As of 2026-08-30:
   counted, so one conditional status write is the whole mechanism. What the gateway
   cannot do is decide what the call cost, so a retention ends only when an operator
   settles it at the figure the provider's own record shows or releases it when that
-  record shows none. [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far
+  record shows none. The departure is recorded by the ENDING, which is the only moment
+  anything knows a call left, so a task that dies with no ending at all records nothing
+  and its hold still reclaims — the same residual C3.5 names, for the same reason.
+  [`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far
   each claim is verified; where this document and that one disagree, that one is
   describing today.
 
