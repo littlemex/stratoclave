@@ -955,6 +955,7 @@ section. Changing the behaviour means changing the document first.
 
 | Document | Governs |
 |---|---|
+| [`CHANGELOG.md`](./CHANGELOG.md) | What changed in each release, and what the current major version promises: which guarantees may not weaken without a major bump, and which surfaces are deliberately not covered. |
 | [`docs/design/CONTRACTS.md`](./docs/design/CONTRACTS.md) | The contract this gateway is judged against: every clause, the level it holds at, the test that fails if a proven or enforced clause stops holding (or, for a clause that holds only inside a configuration, that configuration), and the clauses it does not satisfy yet. Start here to know what is guaranteed and what is merely true today. |
 | [`docs/design/hard-ceiling.md`](./docs/design/hard-ceiling.md) | The dollar ceiling for strict-mode traffic: the reservation bound, what strict mode refuses, the assumptions the guarantee rests on, and the reaper's part in it. |
 | [`docs/design/calibrated-mode.md`](./docs/design/calibrated-mode.md) | Calibrated mode — a tighter bound that trades a stated margin for admission headroom — and how a shortage is told from a sizing problem. |

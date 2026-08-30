@@ -1569,6 +1569,11 @@
    "id": "cl-ca57d6f86167",
    "claim": "The gate is `STRATOCLAVE_HARD_CEILING_GATE` and it is **on by default**, so a tenant with a dollar pool sits in `enforced` without an operator configuring anything.",
    "anchor": "contract:C1.5@9cd99058"
+  },
+  {
+   "id": "cl-3cd1b2ad25b5",
+   "claim": "What changed in each release, and what the current major version promises: which guarantees may not weaken without a major bump, and which surfaces are deliberately not covered.",
+   "anchor": "descriptive:describes what the changelog contains, not what the gateway does"
   }
  ]
 }

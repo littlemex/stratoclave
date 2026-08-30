@@ -927,6 +927,9 @@
   },
   "cl-4f0dad7b3f88": {
    "first_seen": "added when the money flags became the default"
+  },
+  "cl-3cd1b2ad25b5": {
+   "first_seen": "added with CHANGELOG.md at v1.0.0"
   }
  },
  "retired": {
