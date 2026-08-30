@@ -6,7 +6,9 @@ authentication layer:
   - GET /openai/v1/models requires `responses:send` and lists only
     `provider="openai"` entries from the registry.
   - A `messages:send`-scoped API key cannot reach `POST /openai/v1/responses`.
-  - When `CODEX_ENABLED` is unset/false, the route returns HTTP 503.
+  - When `STRATOCLAVE_CODEX_ENABLED` is unset/false, the route returns HTTP 503.
+  - The deprecated bare `CODEX_ENABLED` name is honoured as a fallback and
+    logs a deprecation warning exactly once per process.
 """
 from __future__ import annotations
 
@@ -55,7 +57,7 @@ def _make_app(monkeypatch, *, scope_holder: list[str], codex_enabled: bool) -> T
     """Build a FastAPI app exposing only the OpenAI Responses router with
     auth + RBAC stubbed out. `scope_holder[0]` is the scope set returned
     by the mocked authentication."""
-    monkeypatch.setenv("CODEX_ENABLED", "true" if codex_enabled else "false")
+    monkeypatch.setenv("STRATOCLAVE_CODEX_ENABLED", "true" if codex_enabled else "false")
     monkeypatch.setenv("DEFAULT_CODEX_MODEL", "openai.gpt-5.6-sol")
 
     _patch_authz(monkeypatch, allow={"responses:send"})
@@ -86,6 +88,54 @@ def test_codex_disabled_returns_503(monkeypatch):
         json={"model": "openai.gpt-5.6-sol", "input": "hi", "max_output_tokens": 4},
     )
     assert resp.status_code == 503
+
+
+def test_codex_defaults_disabled_when_unset(monkeypatch):
+    """Route exposure must be opted into: neither env var set => 503, matching
+    the money flags' conservative-by-default posture (this used to default
+    enabled, which was the dangerous outlier)."""
+    from mvp.openai_responses import _codex_enabled
+
+    monkeypatch.delenv("STRATOCLAVE_CODEX_ENABLED", raising=False)
+    monkeypatch.delenv("CODEX_ENABLED", raising=False)
+    assert _codex_enabled() is False
+
+
+def test_codex_deprecated_bare_name_is_honoured_as_fallback(monkeypatch):
+    """The old, unnamespaced `CODEX_ENABLED` still works when the new name is
+    unset, so an un-migrated deployment does not lose the route on upgrade —
+    but the new name always wins when both are set."""
+    from mvp import openai_responses
+
+    monkeypatch.delenv("STRATOCLAVE_CODEX_ENABLED", raising=False)
+    monkeypatch.setenv("CODEX_ENABLED", "true")
+    assert openai_responses._codex_enabled() is True
+
+    monkeypatch.setenv("STRATOCLAVE_CODEX_ENABLED", "false")
+    assert openai_responses._codex_enabled() is False  # new name wins
+
+
+def test_codex_deprecated_bare_name_warns_once_per_process(monkeypatch):
+    """`CODEX_ENABLED` is read at request time, so a naive per-call warning
+    would flood the log. The deprecation warning must fire exactly once per
+    process, not once per `_codex_enabled()` call."""
+    from mvp import openai_responses
+
+    monkeypatch.delenv("STRATOCLAVE_CODEX_ENABLED", raising=False)
+    monkeypatch.setenv("CODEX_ENABLED", "true")
+    # Force the "not yet warned" state regardless of module import order
+    # across the test session.
+    monkeypatch.setattr(openai_responses, "_codex_enabled_alias_warned", False)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        openai_responses.logger, "warning", lambda event, **kw: calls.append(event)
+    )
+
+    for _ in range(5):
+        assert openai_responses._codex_enabled() is True
+
+    assert calls == ["codex_enabled_env_deprecated"]
 
 
 # ---------------------------------------------------------------------------

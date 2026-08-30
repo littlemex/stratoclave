@@ -649,6 +649,13 @@ class TenantBudgetsRepository:
         payload_bytes: Optional[int] = None,
         run_id: Optional[str] = None,
         run_id_is_fallback: bool = False,
+        model_id: Optional[str] = None,
+        reserved_tokens: Optional[int] = None,
+        hold_user_id: Optional[str] = None,
+        quota_period: Optional[str] = None,
+        quota_amount: Optional[int] = None,
+        quota_tenant_scope: Optional[bool] = None,
+        quota_user_scope: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Transaction item that records a per-reservation hold.
 
@@ -678,6 +685,29 @@ class TenantBudgetsRepository:
             than merely trusted to be.
           * `payload_bytes` — the paired byte length for that same inline hash
             (contract section 7: recorded so the reservation is recomputable).
+          * `model_id` — the canonical model this reservation was priced/quota'd
+            against. Read back by the retained-hold admin path (display/ledger
+            attribution) and by the per-model quota reversal below; a hold with
+            no configured quota still benefits from carrying it for the former.
+          * `reserved_tokens` / `hold_user_id` — the amount this hold's reserve
+            added to the OWNER's `credit_used` (a UserTenants row, a different
+            table keyed by user+tenant) and whose row it is. The reaper's reclaim
+            and a released retention are the only readers: neither one is the
+            request that made this reservation, so without these two facts frozen
+            here neither can know what to give back on that counter — and it is
+            not period-scoped and carries no TTL, so a leak there is permanent,
+            unlike the pool amount this Put's sibling counters already recover.
+          * `quota_period` / `quota_amount` / `quota_tenant_scope` /
+            `quota_user_scope` — the per-model quota reservation (if any) this
+            hold's reserve committed alongside the pool debit: the period and
+            amount it moved, and which of the tenant-scope / user-scope `used`
+            rows actually received it (`build_reserve_txn_items` writes one, the
+            other, or both, depending on which limits are configured for
+            `model_id` — a reversal that assumed both would be writing into
+            a per-model quota row this hold never touched whenever only one
+            scope was ever configured). `quota_tenant_scope`/`quota_user_scope`
+            are only meaningful together with `quota_amount`; a caller with no
+            quota reservation to record leaves all four unset.
 
         Inline holds pass `source="inline"` plus `payload_hash`/`payload_bytes`;
         external authorize passes the full legacy set. Absent args are simply
@@ -711,6 +741,20 @@ class TenantBudgetsRepository:
             item["run_id"] = {"S": str(run_id)}
             if run_id_is_fallback:
                 item["run_id_source"] = {"S": "hold_id_fallback"}
+        if model_id:
+            item["model_id"] = {"S": str(model_id)}
+        if reserved_tokens is not None:
+            item["reserved_tokens"] = {"N": str(int(reserved_tokens))}
+        if hold_user_id:
+            item["user_id"] = {"S": str(hold_user_id)}
+        if quota_period:
+            item["quota_period"] = {"S": str(quota_period)}
+        if quota_amount is not None:
+            item["quota_amount"] = {"N": str(int(quota_amount))}
+        if quota_tenant_scope is not None:
+            item["quota_tenant_scope"] = {"BOOL": bool(quota_tenant_scope)}
+        if quota_user_scope is not None:
+            item["quota_user_scope"] = {"BOOL": bool(quota_user_scope)}
         return {
             "Put": {
                 "TableName": self._name,
@@ -741,6 +785,13 @@ class TenantBudgetsRepository:
         payload_hash: Optional[str] = None,
         run_id: Optional[str] = None,
         run_id_is_fallback: bool = False,
+        model_id: Optional[str] = None,
+        reserved_tokens: Optional[int] = None,
+        hold_user_id: Optional[str] = None,
+        quota_period: Optional[str] = None,
+        quota_amount: Optional[int] = None,
+        quota_tenant_scope: Optional[bool] = None,
+        quota_user_scope: Optional[bool] = None,
     ) -> None:
         """Step 1 of the PENDING protocol: Put a HOLD with ``status=PENDING``,
         uncontended, ``attribute_not_exists(sk)``. The WRITE-AHEAD INTENT — it MUST
@@ -753,7 +804,15 @@ class TenantBudgetsRepository:
         rehydrate from the HOLD alone. The ONLY difference from the transactional
         builder is the explicit ``status`` attribute (the transactional HOLD is
         implicitly ACTIVE = absent status). Uses the resource API (plain values,
-        auto-serialized) so it always binds to the same session as the repo."""
+        auto-serialized) so it always binds to the same session as the repo.
+
+        `model_id` / `reserved_tokens` / `hold_user_id` / `quota_period` /
+        `quota_amount` / `quota_tenant_scope` / `quota_user_scope` carry the exact
+        same facts `hold_put_txn_item` documents, so a hold reserved under
+        `STRATOCLAVE_RESERVE_PROTOCOL=pending` is reclaimable by the same reaper
+        logic as a transactional one — a caller that reserves per-user tokens or a
+        per-model quota alongside a pending pool debit must not lose reclaim
+        coverage a transactional reserve already has."""
         item: dict[str, Any] = {
             "tenant_id": tenant_id,
             "sk": hold_sk(period, expires_at_epoch, hold_id),
@@ -776,6 +835,20 @@ class TenantBudgetsRepository:
             item["run_id"] = str(run_id)
             if run_id_is_fallback:
                 item["run_id_source"] = "hold_id_fallback"
+        if model_id:
+            item["model_id"] = str(model_id)
+        if reserved_tokens is not None:
+            item["reserved_tokens"] = int(reserved_tokens)
+        if hold_user_id:
+            item["user_id"] = str(hold_user_id)
+        if quota_period:
+            item["quota_period"] = str(quota_period)
+        if quota_amount is not None:
+            item["quota_amount"] = int(quota_amount)
+        if quota_tenant_scope is not None:
+            item["quota_tenant_scope"] = bool(quota_tenant_scope)
+        if quota_user_scope is not None:
+            item["quota_user_scope"] = bool(quota_user_scope)
         self._table.put_item(Item=item, ConditionExpression=Attr("sk").not_exists())
 
     # Sentinel returned by reserve_commit_transact to distinguish the three

@@ -451,6 +451,48 @@ class UserTenantsRepository:
             }
         }
 
+    def reverse_reservation_txn_item(
+        self, *, user_id: str, tenant_id: str, tokens: int
+    ) -> dict[str, Any]:
+        """Transaction item that gives back a LEAKED `credit_used` debit.
+
+        For a reservation whose owning request died before it could settle or
+        release itself (the reaper's reclaim), or whose reservation was
+        deliberately retained past that point and is only now being resolved:
+        neither caller is the request that made the reservation, so there is no
+        live in-process amount to refund with — the amount has to come from
+        wherever it was frozen when the reservation was made (the HOLD row; see
+        `dynamo.tenant_budgets.hold_put_txn_item`'s `reserved_tokens`).
+
+        Reuses `refund()`'s underflow guard (`credit_used >= tokens`) rather than
+        settling for the unconditional pattern `settle_txn_item` uses: the
+        request that made this reservation is not the one giving it back, so
+        the "bounded by the prior reservation by construction" argument that
+        justifies going unconditional there does not carry over here — the row
+        may have been reset (an admin `overwrite_credit(reset_used=True)`) in
+        the interim, and this must not be the write that drives it negative.
+        A caller composing this into a larger TransactWriteItems (the reaper) is
+        responsible for degrading gracefully when this item's condition is what
+        cancels the transaction, exactly as a legacy hold with no facts to
+        reverse is handled — never guess a smaller amount and retry with that.
+        """
+        return {
+            "Update": {
+                "TableName": self._table.name,
+                "Key": {
+                    "user_id": {"S": user_id},
+                    "tenant_id": {"S": tenant_id},
+                },
+                "UpdateExpression": "ADD credit_used :neg_tokens SET updated_at = :now",
+                "ConditionExpression": "credit_used >= :tokens",
+                "ExpressionAttributeValues": {
+                    ":neg_tokens": {"N": str(-int(tokens))},
+                    ":tokens": {"N": str(int(tokens))},
+                    ":now": {"S": _now_iso()},
+                },
+            }
+        }
+
     def credit_summary(self, user_id: str, tenant_id: str) -> dict[str, int]:
         item = self.get(user_id, tenant_id)
         if not item:

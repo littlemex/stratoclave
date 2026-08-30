@@ -199,10 +199,15 @@ class TestopenaiPassThrough:
         exc, _, _, _ = self._expect_failure(_FakeResponse(503, {"error": {"message": "busy"}}))
         assert exc.status_code == 502
 
-    def test_200_with_unparseable_body_refunds_instead_of_stranding_the_hold(self):
+    def test_200_with_unparseable_body_refunds_with_the_gate_off(self, monkeypatch):
         """A 200 whose body is not JSON (truncated body, an LB's HTML error page)
         has no usage to settle against. Letting the parse error escape would leave
-        the hold and the pool slot stranded."""
+        the hold and the pool slot stranded. With `STRATOCLAVE_UNOBSERVED_HOLDS` off,
+        that is resolved exactly as it was before the flag existed: refund."""
+        from mvp import provider_outcome as po
+
+        monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
+
         class _Garbage(_FakeResponse):
             def json(self):
                 raise ValueError("not json")
@@ -212,6 +217,25 @@ class TestopenaiPassThrough:
         settle.assert_not_called()
         repo.refund.assert_called_once()
         release.assert_called_once()
+
+    def test_200_with_unparseable_body_is_retained_when_enforced(self, monkeypatch):
+        """The route classifies this as `SUBMITTED_UNSETTLED` (the model ran and its
+        usage cannot be read) — the exact state `STRATOCLAVE_UNOBSERVED_HOLDS`
+        exists to stop being refunded on faith. With the flag on (the default),
+        the reservation is retained instead of refunded."""
+        from mvp import provider_outcome as po
+
+        monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "1")
+
+        class _Garbage(_FakeResponse):
+            def json(self):
+                raise ValueError("not json")
+
+        exc, settle, release, repo = self._expect_failure(_Garbage(200, {}))
+        assert exc.status_code == 502
+        settle.assert_not_called()
+        repo.refund.assert_not_called()
+        release.assert_not_called()
 
     def test_a_read_timeout_is_not_refunded_when_enforcement_is_on(self, monkeypatch):
         """The route's own error path must reach the liability policy.
@@ -251,7 +275,7 @@ class TestopenaiPassThrough:
 
         from mvp import provider_outcome as po
 
-        monkeypatch.delenv(po.UNOBSERVED_HOLD_ENV, raising=False)
+        monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
         repo = MagicMock()
         client = MagicMock()
         client.post.side_effect = ReadTimeoutError(endpoint_url="https://x")
@@ -457,13 +481,32 @@ class TestopenaiStreaming:
         release.assert_called_once()
         settle.assert_not_called()
 
-    def test_partial_stream_settles_what_was_produced(self):
-        """A stream that dies after some tokens is not a free request; it settles
-        with what was seen rather than refunding everything."""
+    def test_partial_stream_settles_zero_with_the_gate_off(self, monkeypatch):
+        """A stream that dies before anything was observed used to settle at zero
+        rather than refund. With `STRATOCLAVE_UNOBSERVED_HOLDS` off, that is exactly
+        what still happens."""
+        from mvp import provider_outcome as po
+
+        monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
         _, _, settle, release, repo, _ = self._run(
             _body(stream=True), [], raise_mid=True)
         assert settle.call_count == 1
         repo.refund.assert_not_called()
+
+    def test_partial_stream_with_nothing_observed_is_retained_when_enforced(self, monkeypatch):
+        """Settling a zero for a stream that never proved it produced nothing is the
+        "free tokens" defect `claim_stream_interrupted` names — the request was
+        sent but the fake transport raises before any event arrives, so nothing was
+        observed and the outcome classifies as `SUBMITTED_UNSETTLED`. With the gate
+        on (the default), that is retained rather than settled at an invented zero."""
+        from mvp import provider_outcome as po
+
+        monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "1")
+        _, _, settle, release, repo, _ = self._run(
+            _body(stream=True), [], raise_mid=True)
+        settle.assert_not_called()
+        repo.refund.assert_not_called()
+        release.assert_not_called()
 
     def test_the_pooled_client_outlives_the_stream(self):
         """Only the stream is scoped to the request; the client is process-wide.

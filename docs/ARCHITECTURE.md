@@ -745,7 +745,7 @@ persisted to DynamoDB or logs.
 - Streaming relays SSE events byte-for-byte after sanitizing
   `event: error` lines through `core.error_handler.sanitize_exception_message`
   to scrub ARNs and account IDs.
-- The route is gated by the `CODEX_ENABLED` ECS env flag; when off, both
+- The route is gated by the `STRATOCLAVE_CODEX_ENABLED` ECS env flag; when off, both
   `POST /openai/v1/responses` and `GET /openai/v1/models` return HTTP 503.
 - Image / file inputs are rejected at the Pydantic layer (HTTP 422); the
   proxy does not yet model image-token cost.
@@ -923,7 +923,7 @@ Response shape (schema_version = `"1"`):
 }
 ```
 
-The `cli.codex` block is present **only when `CODEX_ENABLED=true`** is set on
+The `cli.codex` block is present **only when `STRATOCLAVE_CODEX_ENABLED=true`** is set on
 the ECS task; it is absent entirely when the OpenAI Responses path is
 disabled. Old CLIs that never see `cli.codex` simply never offer the
 `codex` subcommand bootstrap.

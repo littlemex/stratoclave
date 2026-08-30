@@ -36,9 +36,9 @@ import pytest
 
 
 # Codex must be flipped on at module import time — the route reads
-# `CODEX_ENABLED` per request via os.getenv, but the tests are clearer
-# with the env set globally for the file.
-os.environ["CODEX_ENABLED"] = "true"
+# `STRATOCLAVE_CODEX_ENABLED` per request via os.getenv, but the tests are
+# clearer with the env set globally for the file.
+os.environ["STRATOCLAVE_CODEX_ENABLED"] = "true"
 
 
 from fastapi import FastAPI
@@ -507,13 +507,24 @@ def record_reservation_endings(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_a_200_the_route_cannot_parse_still_ends_the_reservation(
-    install_openai_stream, stub_auth_user, record_reservation_endings
+    monkeypatch, install_openai_stream, stub_auth_user, record_reservation_endings
 ):
     """A 200 with an unreadable body used to let the exception escape, stranding
     the hold and the pool slot until the reaper. The model ran, so this is not a
-    free failure either: it ends as an unobserved outcome."""
+    free failure either: it ends as an unobserved outcome.
+
+    What this test is about is that SOMETHING ends the hold rather than leaving it
+    for the reaper, which is true either way the retention flag is set. It is
+    pinned here with the flag explicitly OFF because the refund is what the
+    "something happened" assertion can observe; the retained path on this route is
+    covered separately. Explicit rather than inherited: this test used to rely on
+    the flag's default being off, and became wrong the moment the default flipped."""
     app = install_openai_stream(b"this is not json", status=200)
     _override_auth(app, stub_auth_user)
+
+    from mvp import provider_outcome as _po
+
+    monkeypatch.setenv(_po.UNOBSERVED_HOLD_ENV, "0")
 
     from fastapi.testclient import TestClient
 
@@ -523,8 +534,6 @@ def test_a_200_the_route_cannot_parse_still_ends_the_reservation(
     )
     assert resp.status_code == 502, resp.text
     assert "malformed upstream response" in resp.text
-    # With the enforcement gate off (the default) an unobserved outcome still
-    # returns the reservation — the point is that SOMETHING ended the hold.
     assert record_reservation_endings["refunded"], "the hold was left for the reaper"
     assert record_reservation_endings["released"]
 

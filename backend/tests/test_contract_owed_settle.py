@@ -254,6 +254,12 @@ def _end_unobserved_through_the_hold(user, ctx):
     from any request — which is exactly what it did prove, until this was rewritten.
     So the fault is injected where a real one arrives (the transport raised a read
     timeout) and everything after that is production code.
+
+    `provider_call_starting()` is called for the same reason, and stands for the same
+    production line: every route announces the hand-off immediately before invoking the
+    provider client, and a read timeout by definition happens after it. Retention
+    requires that fact, because without it an exception raised by our own code before
+    the call would hold a tenant's budget for a request that never left.
     """
     from botocore.exceptions import ReadTimeoutError
     from mvp import _money
@@ -268,6 +274,7 @@ def _end_unobserved_through_the_hold(user, ctx):
         mark_departed=_money.hold_departure_marker(ctx),
         route="messages",
     )
+    hold.provider_call_starting()
     ending = hold.claim_unobserved(
         exc=ReadTimeoutError(endpoint_url="https://bedrock.example"))
     assert ending is not None, "the hold should have had an ending to give"
@@ -322,11 +329,33 @@ def test_a_departed_call_keeps_its_reservation_when_the_flag_is_on(dynamodb_mock
         int(before["pool_reserved_microusd"])
 
 
-def test_retention_is_off_by_default(dynamodb_mock, monkeypatch):
-    """The flag ships off, so merging this changes no deployment's behaviour: the same
-    unobserved ending returns the reservation immediately and leaves nothing behind —
-    not even the departure marker, because there is no retention for it to serve."""
+def test_retention_is_on_by_default(dynamodb_mock, monkeypatch):
+    """The flag ships ON, so an operator who configures nothing already gets this: an
+    unobserved ending keeps its reservation and records the departure, rather than
+    handing back budget for a call the provider may well have billed. An unset
+    environment is not an escape from retention."""
     monkeypatch.delenv("STRATOCLAVE_UNOBSERVED_HOLDS", raising=False)
+    period = _seed()
+    user = _user()
+    ctx = _reserve(user)
+    _end_unobserved_through_the_hold(user, ctx)
+
+    budgets = TenantBudgetsRepository()
+    live = budgets._table.get_item(
+        Key={"tenant_id": TENANT, "sk": ctx.hold_sk}).get("Item")
+    assert live is not None, "an unobserved ending must not delete its hold"
+    assert live.get("provider_invoked_at"), (
+        "nothing recorded the departure, so the reaper cannot know it happened")
+    assert int(budgets.pool_summary(TENANT, period)["pool_reserved_microusd"]) > 0
+
+
+def test_the_old_refund_behaviour_is_still_reachable_by_turning_the_flag_off(
+        dynamodb_mock, monkeypatch):
+    """The opt-out, pinned. An operator who wants the pre-retention behaviour sets the
+    flag falsy and gets exactly it back: the reservation returns immediately and
+    nothing is left behind, not even the departure marker, because there is no
+    retention for it to serve."""
+    monkeypatch.setenv("STRATOCLAVE_UNOBSERVED_HOLDS", "0")
     period = _seed()
     user = _user()
     ctx = _reserve(user)

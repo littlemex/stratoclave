@@ -28,8 +28,10 @@ fully switched on. As of 2026-08-30:
 
 - **The three states below are implemented** in
   `backend/mvp/reservation_bound.dollar_pool_bound_state`. The gate is
-  `STRATOCLAVE_HARD_CEILING_GATE` and it is **off by default**, so a deployment sits
-  in `accounting` until an operator turns on measurement or the gate itself.
+  `STRATOCLAVE_HARD_CEILING_GATE` and it is **on by default**, so a tenant with a
+  dollar pool sits in `enforced` without an operator configuring anything. Setting
+  that variable to a falsy value puts a pooled tenant in `shadow` instead, which is
+  the deliberate way to measure a refusal rate before refusing anyone.
 - **The bound, the payload survey and rate pinning ship**, and the reaper writes its
   RECLAIM terminal in the same transaction as the counter move (section 5).
 - **Premise (P) holds on the rate axis and not on the token axis.** It used to fail on
@@ -48,10 +50,13 @@ fully switched on. As of 2026-08-30:
   carries `min(legs, tokens) - 1` microUSD of slack per group. Without it the "sound
   bound" was not an upper bound: three input-side legs at 1 microUSD/MTok with one
   token each settle at 3 while the group total rounds to 1.
-- **Retaining a reservation instead of returning it ships behind
-  `STRATOCLAVE_UNOBSERVED_HOLDS`, which is off by default.** With it on, a reaper that
-  meets a hold whose provider call had departed holds the reservation rather than
-  handing the budget back and recording that nothing was charged. Holding it costs no
+- **Retaining a reservation instead of returning it is on by default**, under
+  `STRATOCLAVE_UNOBSERVED_HOLDS`. A reaper that meets a hold whose provider call had
+  departed holds the reservation rather than handing the budget back and recording
+  that nothing was charged. Departure is a recorded fact rather than an inference from
+  the exception type: each route announces the hand-off immediately before invoking the
+  provider client, so an exception raised by this gateway's own code beforehand is
+  refunded rather than held against a tenant. Holding it costs no
   new counter: the amount was already counted against the limit and goes on being
   counted, so one conditional status write is the whole mechanism. What the gateway
   cannot do is decide what the call cost, so a retention ends only when an operator

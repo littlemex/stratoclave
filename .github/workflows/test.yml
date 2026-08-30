@@ -78,7 +78,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
       AWS_REGION: us-east-1
       ENVIRONMENT: ci
-      CODEX_ENABLED: "true"
+      STRATOCLAVE_CODEX_ENABLED: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6

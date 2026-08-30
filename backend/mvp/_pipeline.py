@@ -1003,8 +1003,20 @@ def resolve_retained_hold(
     )
     if release:
         ctx.release_pool()
-        return _resolution_outcome(ledger, tenant_id, period, hold_id,
-                                   expected="RELEASE", expected_amount=0)
+        outcome = _resolution_outcome(ledger, tenant_id, period, hold_id,
+                                      expected="RELEASE", expected_amount=0)
+        # The pool side is confirmed landed (the line above raises otherwise).
+        # A retained hold's per-user token debit and any per-model quota
+        # reservation were deliberately left untouched when it was retained —
+        # that is what retaining IS — so releasing it must close those two
+        # counters too, or "release" quietly means "give back only a third of
+        # what this reservation held." Best-effort and separate from the pool
+        # transaction above (matching the existing non-transactional
+        # quota-release convention every other release path already uses);
+        # its own failure must not un-confirm a release that already landed.
+        _reverse_retained_hold_counters_best_effort(
+            hold, tenant_id=tenant_id, period=period, hold_id=hold_id)
+        return outcome
     _settle_pool_side(
         _RetentionActor(tenant_id), ctx, actual,
         ledger_facts={
@@ -1251,6 +1263,138 @@ def _reaped_hold_facts(hold: dict) -> dict:
     return facts
 
 
+def _reverse_retained_hold_counters_best_effort(
+    hold: dict, *, tenant_id: str, period: str, hold_id: str
+) -> None:
+    """Give back a retained hold's per-user token debit and per-model quota
+    reservation once an operator has released it — the reaper's facts-driven
+    reversal (`_hold_counter_reversal_items`), reused here because retaining a
+    hold is exactly the same kind of gap the reaper closes, opened on purpose
+    instead of by a crash: the pool stays reserved (that is what retention
+    means) but so, until this runs, does everything else this reservation
+    touched. Best-effort and logged, never raised — the pool side is already
+    confirmed landed by the caller before this is reached."""
+    items = _hold_counter_reversal_items(
+        hold, tenant_id=tenant_id, period=period, hold_id=hold_id)
+    if not items:
+        return
+    try:
+        _low_level_client().transact_write_items(
+            TransactItems=items,
+            ClientRequestToken=_fresh_idempotency_token(),
+        )
+    except Exception:  # noqa: BLE001 — best-effort; the pool release already landed
+        logger.error(
+            "retained_hold_counter_giveback_failed",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+        )
+
+
+def _hold_counter_reversal_items(
+    hold: dict, *, tenant_id: str, period: str, hold_id: str
+) -> list[dict]:
+    """The extra TransactWriteItems that give back this hold's per-user token
+    debit (`UserTenants.credit_used`) and per-model quota reservation
+    (`used`), built from the facts frozen on the hold at reserve time
+    (`dynamo.tenant_budgets.hold_put_txn_item`). The caller composes these into
+    the SAME TransactWriteItems as the pool restore and the hold Delete, so the
+    give-back is atomic with them — a separate, non-transactional write here
+    would leave a window where the pool heals but a crash before a second
+    write leaves the other two counters exactly as leaked as before this fix.
+
+    A hold written before this enrichment shipped (or one missing a fact this
+    needs) contributes nothing for that counter; `_log_incomplete_hold_facts`
+    below is what records that on the caller's behalf. Never guesses a token
+    amount or a quota amount that was not actually recorded on the hold.
+    """
+    items: list[dict] = []
+    reserved_tokens = hold.get("reserved_tokens")
+    hold_user_id = hold.get("user_id")
+    if reserved_tokens is not None and hold_user_id:
+        tokens = int(reserved_tokens)
+        if tokens > 0:
+            items.append(
+                UserTenantsRepository().reverse_reservation_txn_item(
+                    user_id=str(hold_user_id), tenant_id=tenant_id, tokens=tokens
+                )
+            )
+
+    model_id = hold.get("model_id")
+    quota_period = hold.get("quota_period")
+    quota_amount = hold.get("quota_amount")
+    tenant_scope = bool(hold.get("quota_tenant_scope"))
+    user_scope = bool(hold.get("quota_user_scope"))
+    if model_id and quota_period and quota_amount is not None and (tenant_scope or user_scope):
+        amount = int(quota_amount)
+        if amount > 0:
+            from .routing import quota as _quota
+
+            items.extend(
+                _quota.build_reverse_txn_items(
+                    tenant_id,
+                    str(hold_user_id) if hold_user_id else None,
+                    str(model_id),
+                    str(quota_period),
+                    amount,
+                    tenant_scope=tenant_scope,
+                    user_scope=user_scope,
+                )
+            )
+    _log_incomplete_hold_facts(hold, tenant_id=tenant_id, period=period, hold_id=hold_id)
+    return items
+
+
+def _log_incomplete_hold_facts(hold: dict, *, tenant_id: str, period: str, hold_id: str) -> None:
+    """Error-level breadcrumbs for the two ways a hold can leave a counter
+    unreversed, so an operator can reconcile `credit_used` (never period-
+    scoped, no TTL — a leak here is permanent) or the per-model `used` counter
+    by hand: the hold predates this enrichment entirely (neither fact was ever
+    written), or it carries a partial/inconsistent set of facts this code
+    never itself produces."""
+    reserved_tokens = hold.get("reserved_tokens")
+    hold_user_id = hold.get("user_id")
+    if (reserved_tokens is not None) != bool(hold_user_id):
+        logger.error(
+            "pool_hold_reclaim_credit_facts_incomplete",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            reserved_tokens=reserved_tokens, has_user_id=bool(hold_user_id),
+        )
+    if reserved_tokens is None and not hold.get("model_id"):
+        logger.error(
+            "pool_hold_reclaimed_without_counter_facts",
+            tenant_id=tenant_id, period=period, hold_id=hold_id,
+            amount_microusd=int(hold.get("amount_microusd", 0)),
+            note=("pre-enrichment hold: the per-user token debit and any "
+                  "per-model quota reservation were not reversed by this "
+                  "reclaim; reconcile by hand"),
+        )
+
+
+def _should_retry_reclaim_without_counter_giveback(
+    e: ClientError, *, n_required: int, n_optional: int
+) -> bool:
+    """True iff a reclaim's cancellation was caused ONLY by the optional
+    counter-giveback items' own ConditionExpression (e.g. the `credit_used`
+    underflow guard, or a quota row whose TTL already reaped it) — never by
+    the pool/hold/terminal side. Dropping the optional items and retrying then
+    still heals the pool and clears the hold; the give-back that could not be
+    proven safe is skipped and logged, exactly as a legacy hold with no facts
+    at all is (see `_log_incomplete_hold_facts`). A give-back must never be
+    the reason the pool itself stays leaked."""
+    if e.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return False
+    if n_optional <= 0:
+        return False
+    reasons = _cancellation_codes(e)
+    if len(reasons) != n_required + n_optional:
+        return False
+    required_reasons = reasons[:n_required]
+    optional_reasons = reasons[n_required:]
+    if any(r == "ConditionalCheckFailed" for r in required_reasons):
+        return False
+    return any(r == "ConditionalCheckFailed" for r in optional_reasons)
+
+
 def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
     """Reclaim up to `cap` expired holds for one tenant/period. See
     `_sweep_expired_holds` for the contract; this is the per-period worker."""
@@ -1359,10 +1503,31 @@ def _sweep_one_period(budgets, tenant_id: str, period: str, cap: int) -> int:
                         reaped_hold_facts=_reaped_hold_facts(hold),
                     )
                 )
-            client.transact_write_items(
-                TransactItems=_reaper_items,
-                ClientRequestToken=_fresh_idempotency_token(),
+            _optional_items = _hold_counter_reversal_items(
+                hold, tenant_id=tenant_id, period=period, hold_id=hold_id
             )
+            try:
+                client.transact_write_items(
+                    TransactItems=_reaper_items + _optional_items,
+                    ClientRequestToken=_fresh_idempotency_token(),
+                )
+            except ClientError as _giveback_err:
+                if not _should_retry_reclaim_without_counter_giveback(
+                    _giveback_err, n_required=len(_reaper_items),
+                    n_optional=len(_optional_items),
+                ):
+                    raise
+                logger.error(
+                    "pool_hold_reclaim_counter_giveback_dropped",
+                    tenant_id=tenant_id, period=period, hold_id=hold_id,
+                    note=("credit_used/quota-used reversal was blocked by its "
+                          "own guard; the pool was healed anyway, reconcile "
+                          "the counter by hand"),
+                )
+                client.transact_write_items(
+                    TransactItems=_reaper_items,
+                    ClientRequestToken=_fresh_idempotency_token(),
+                )
             reclaimed += 1
             # PENDING protocol (PR-1): the reclaim above returned this ACTIVE hold's
             # headroom atomically; settle its separate marker as cleanup (best-effort,
@@ -2821,6 +2986,20 @@ def reserve_credit(
             period=period,
             amount_microusd=cost,
         )
+        # Freeze the facts a later reclaim (or a released retention) will need
+        # to give back this hold's OTHER two counters — the per-user token
+        # debit this same attempt is about to add to `credit_used`, and which
+        # of the per-model quota's tenant/user rows `quota_lines` actually
+        # writes to. Neither is derivable from the pool amount alone (see
+        # `dynamo.tenant_budgets.hold_put_txn_item`'s docstring); this is the
+        # ONLY point where the money that just moved and the hold that will
+        # outlive this process are in the same scope together.
+        _quota_scopes = None
+        if quota_lines:
+            from .routing import quota as _quota_facts
+
+            _quota_scopes = _quota_facts.reserved_scopes(
+                user.org_id, user.user_id, quota_model, period, quota_lines)
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=user.org_id,
             period=period,
@@ -2840,6 +3019,13 @@ def reserve_credit(
             # reservation's durable record.
             payload_hash=payload_hash,
             payload_bytes=payload_bytes,
+            model_id=selected_model,
+            reserved_tokens=reservation_tokens,
+            hold_user_id=user.user_id,
+            quota_period=period if quota_lines else None,
+            quota_amount=cost if quota_lines else None,
+            quota_tenant_scope=(_quota_scopes["tenant"] if _quota_scopes else None),
+            quota_user_scope=(_quota_scopes["user"] if _quota_scopes else None),
         )
         txn_items = [user_txn, pool_txn, hold_txn]
         _quota_start = len(txn_items)

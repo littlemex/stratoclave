@@ -170,7 +170,7 @@ async def _drive(gen, *, stop_after=None) -> list:
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("stop_after", [2, 3, 4, 5, 6, 7, None])
 def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
-    seed_tenant_with_pool, stop_after
+    seed_tenant_with_pool, stop_after, monkeypatch
 ):
     """Disconnecting at ANY yield after the provider call (or running to
     completion, stop_after=None) must settle the reservation exactly once and leave
@@ -179,7 +179,18 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
     `stop_after=1` is excluded and covered by the test below: the first yield is
     the wire prologue, which precedes the provider call, so that ending is a return
     rather than a settle.
+
+    Pinned with `STRATOCLAVE_UNOBSERVED_HOLDS` explicitly OFF, because that is the
+    configuration this characterisation is about. With the flag at its shipped
+    default an early disconnect — before the provider's usage event arrives — is a
+    departed call whose cost was never observed, and it is retained rather than
+    settled at zero; the test below covers that. Making the flag explicit here also
+    fixes the way this file broke when the default flipped: it depended on a default
+    without naming it, so a grep for the flag name did not find it.
     """
+    from mvp import provider_outcome as _po
+
+    monkeypatch.setenv(_po.UNOBSERVED_HOLD_ENV, "0")
     seed = seed_tenant_with_pool
     user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
     reservation = 4000
@@ -206,6 +217,47 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
     summary = _pool(seed)
     assert summary["pool_reserved_microusd"] == 0, "pool_reserved must not go negative"
     assert summary["pool_reserved_microusd"] >= 0
+
+
+@pytest.mark.parametrize("stop_after", [2, 3, 4])
+def test_a_disconnect_before_the_usage_event_is_retained_by_default(
+    seed_tenant_with_pool, stop_after
+):
+    """The shipped default, on the same disconnects the test above pins with the flag
+    off. The provider call departed and the client stopped listening before the usage
+    event arrived, so what it cost is exactly the thing nobody observed — an abandoned
+    Bedrock call is billed for the full generation. Settling zero would record that the
+    call was free. The reservation is retained instead, and an operator ends it at the
+    figure the provider's own record shows.
+
+    Later disconnects (5, 6, 7, and running to completion) are NOT parametrized here on
+    purpose: by then the usage event has arrived, the cost IS observed, and those settle
+    normally at their default. That the split falls exactly at the usage event is the
+    property worth pinning — retention is scoped to what was not seen, not to every
+    failure."""
+    seed = seed_tenant_with_pool
+    user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
+    reservation = 4000
+    ctx = reserve_credit(user, reservation, pricing_key="opus", cost_microusd=2_000_000)
+
+    settle_calls, counting_settle = _make_settle_counter()
+    fake = _FakeBedrock(stream=_SuccessStream())
+
+    gen = _budget_flow.run_stream(
+        body=_make_body(),
+        model_id="us.anthropic.claude-opus-4-7",
+        hold=_hold(user, ctx, reservation, counting_settle,
+                   release=lambda c: release_pool(c)),
+        invoke_stream=lambda *, body, model_id: fake.converse_stream(),
+        adapter=_TestAdapter(),
+    )
+    asyncio.run(_drive(gen, stop_after=stop_after))
+
+    assert settle_calls["n"] == 0, (
+        f"a disconnect after {stop_after} chunks observed no usage, so settling it "
+        f"records a cost nobody measured")
+    assert _pool(seed)["pool_reserved_microusd"] == 2_000_000, (
+        "the reservation must still be held: the money may have been spent")
 
 
 def test_a_disconnect_before_the_provider_call_returns_the_reservation(
@@ -283,8 +335,15 @@ def test_invoke_time_failure_releases_pool_and_does_not_settle(
 # mid-stream failure: partial settle once, NO release.
 # ---------------------------------------------------------------------------
 def test_mid_stream_failure_settles_once_and_does_not_release(
-    seed_tenant_with_pool,
+    seed_tenant_with_pool, monkeypatch,
 ):
+    """Pinned with retention explicitly OFF: what this characterises is that the
+    ending runs once and settle owns the hold, which is a property of the flow rather
+    than of the flag. The stub raises before delivering any event, so nothing was
+    observed and the shipped default retains instead — covered by the test below."""
+    from mvp import provider_outcome as _po
+
+    monkeypatch.setenv(_po.UNOBSERVED_HOLD_ENV, "0")
     seed = seed_tenant_with_pool
     user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
     reservation = 4000
@@ -306,4 +365,37 @@ def test_mid_stream_failure_settles_once_and_does_not_release(
     assert release_calls["n"] == 0, "mid-stream failure must NOT release (settle owns the hold)"
     summary = _pool(seed)
     assert summary["pool_reserved_microusd"] == 0
+    assert any(b"error" in c for c in chunks), "an error event must be emitted"
+
+
+def test_a_mid_stream_break_with_nothing_observed_is_retained_by_default(
+    seed_tenant_with_pool,
+):
+    """The shipped default on the same break. The call returned, so the request left
+    and the model may have run to completion; the stream then died before a single
+    event, so its cost was never observed. Settling zero here is the record this
+    retention exists to stop making. Note the exception is a bare `RuntimeError`,
+    which `classify_exception` cannot distinguish from a departed call — the departure
+    evidence is what carries that judgement, not the exception type."""
+    seed = seed_tenant_with_pool
+    user = _User(user_id=seed["user_id"], org_id=seed["tenant_id"])
+    reservation = 4000
+    ctx = reserve_credit(user, reservation, pricing_key="opus", cost_microusd=2_000_000)
+
+    settle_calls, counting_settle = _make_settle_counter()
+    release_calls, counting_release = _make_release_counter()
+
+    gen = _budget_flow.run_stream(
+        body=_make_body(),
+        model_id="us.anthropic.claude-opus-4-7",
+        hold=_hold(user, ctx, reservation, counting_settle, release=counting_release),
+        invoke_stream=lambda *, body, model_id: {"stream": _RaisingMidStream()},
+        adapter=_TestAdapter(),
+    )
+    chunks = asyncio.run(_drive(gen))
+
+    assert settle_calls["n"] == 0, "nothing was observed, so nothing may be settled"
+    assert release_calls["n"] == 0, "the reservation is retained, not released"
+    assert _pool(seed)["pool_reserved_microusd"] == 2_000_000, (
+        "the reservation must still be held: the money may have been spent")
     assert any(b"error" in c for c in chunks), "an error event must be emitted"

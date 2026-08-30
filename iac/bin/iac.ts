@@ -82,6 +82,21 @@ const failoverRegionsEnv = regionCfg.failoverRegionsEnv;
 const codexEnabled = regionCfg.codexEnabled;
 const residencyWarnings = regionCfg.residencyWarnings;
 
+// Deprecated bare env-var names (e.g. CODEX_ENABLED -> STRATOCLAVE_CODEX_ENABLED)
+// used as a fallback this synth. Surfaced immediately as CDK Annotations on the
+// app so they show up in `cdk synth`/`cdk diff` regardless of which stacks end
+// up being created.
+for (const w of regionCfg.deprecationWarnings) {
+  cdk.Annotations.of(app).addWarning(w);
+}
+if (process.env.STRATOCLAVE_VLLM_ENDPOINTS === undefined && process.env.VLLM_ENDPOINTS !== undefined) {
+  cdk.Annotations.of(app).addWarning(
+    'VLLM_ENDPOINTS is deprecated; set STRATOCLAVE_VLLM_ENDPOINTS instead. ' +
+      'The bare name is still passed through to the task for this synth but ' +
+      'support for it will be removed in a future release.',
+  );
+}
+
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: bodyRegion,
@@ -462,14 +477,20 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // Hybrid serving (self-hosted vLLM) master switch. Ships DARK: when 'false'
     // every vLLM registry entry is unservable and the invoke path is
     // byte-behaviour-identical to Bedrock-only. Flip to 'true' (and populate
-    // VLLM_ENDPOINTS) to route vLLM-served models to an internal endpoint.
+    // STRATOCLAVE_VLLM_ENDPOINTS) to route vLLM-served models to an internal
+    // endpoint.
     HYBRID_SERVING_ENABLED: process.env.HYBRID_SERVING_ENABLED || 'false',
     // Operator allowlist of internal vLLM endpoints as a JSON object
     // {"<endpoint_key>": "<internal-url>"}. The URL set is closed here (SSRF
     // guard): the registry and clients only ever reference the opaque key.
     // Passed through ONLY when set, so unset => no vLLM endpoints => all vLLM
-    // entries unservable.
-    ...(process.env.VLLM_ENDPOINTS
+    // entries unservable. VLLM_ENDPOINTS (bare) is the deprecated predecessor
+    // name; the backend (mvp/serving/vllm.py) reads it as a fallback when
+    // STRATOCLAVE_VLLM_ENDPOINTS is unset, so passing through whichever the
+    // operator set keeps an un-migrated deployment working.
+    ...(process.env.STRATOCLAVE_VLLM_ENDPOINTS
+      ? { STRATOCLAVE_VLLM_ENDPOINTS: process.env.STRATOCLAVE_VLLM_ENDPOINTS }
+      : process.env.VLLM_ENDPOINTS
       ? { VLLM_ENDPOINTS: process.env.VLLM_ENDPOINTS }
       : {}),
     // External VSR (Value/Session Router) master switch. Ships DARK: when
@@ -534,14 +555,20 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // DISPLAY-ONLY hint surfaced to the CLI via /.well-known/stratoclave-config
     // (read only in well_known.py). RESIDENCY NOTE: the codex path is therefore
     // hardwired to us-east-2/us-west-2 and cannot be relocated by an env var —
-    // the only residency lever for codex is CODEX_ENABLED=false (see the
-    // residency analysis above).
+    // the only residency lever for codex is STRATOCLAVE_CODEX_ENABLED=false
+    // (see the residency analysis above).
     // Pass the SAME normalized boolean the residency analysis used (`codexEnabled`),
     // not the raw operator string. This makes the task-def value provably equal to
     // what STRATOCLAVE_RESIDENCY=strict assumed — otherwise strict could pass with
     // codex "off" at synth while the container runs it "on" (NEW-8). The backend
     // parses it as `.lower() == "true"`, so 'true'/'false' are exact. (NEW-8/NEW-11)
-    CODEX_ENABLED: String(codexEnabled),
+    // Injected under the new namespaced name only: the container reads
+    // STRATOCLAVE_CODEX_ENABLED first and CODEX_ENABLED only as a fallback
+    // when the new name is entirely unset, so writing the normalized boolean
+    // under the new name here is what a fresh deploy should do; an operator
+    // upgrading an existing task definition in place (outside this CDK app)
+    // is the only path that would still be relying on the bare name.
+    STRATOCLAVE_CODEX_ENABLED: String(codexEnabled),
     DEFAULT_CODEX_MODEL: process.env.DEFAULT_CODEX_MODEL || 'openai.gpt-5.6-sol',
     OPENAI_BEDROCK_REGIONS:
       process.env.OPENAI_BEDROCK_REGIONS || 'us-east-2,us-west-2',

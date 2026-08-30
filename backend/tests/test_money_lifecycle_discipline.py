@@ -150,7 +150,16 @@ class _User:
     org_id = "acme"
 
 
-def _hold(**kw):
+def _hold(*, departed: bool = True, **kw):
+    """A hold whose provider call has already been handed to the transport.
+
+    `departed=True` is the default because every test in this file models a failure
+    that came back FROM a provider — a read timeout, a 5xx, a stream that produced
+    nothing — and retention is scoped to requests that actually left. A test for the
+    other case (an exception raised before the call, where holding the tenant's budget
+    would invent a liability) passes `departed=False`; see
+    `test_retention_requires_departure.py` for that axis in full.
+    """
     repo = kw.pop("repo", None) or _Repo()
     settled: list[dict] = []
     released: list[bool] = []
@@ -161,6 +170,8 @@ def _hold(**kw):
         release=lambda ctx: released.append(True),
         **kw,
     )
+    if departed:
+        hold.provider_call_starting()
     return hold, repo, settled, released
 
 
@@ -205,7 +216,7 @@ def test_a_read_timeout_keeps_the_reservation_once_enforcement_is_on(monkeypatch
 def test_the_same_read_timeout_still_refunds_with_the_gate_off(monkeypatch):
     """Merging the unification moves no money: with the gate off the behaviour is
     what it was, and the classification is still recorded."""
-    monkeypatch.delenv(po.UNOBSERVED_HOLD_ENV, raising=False)
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     hold, repo, _settled, released = _hold()
     run_ending(hold.claim_unobserved(exc=ReadTimeoutError(endpoint_url="https://x")))
     assert repo.refunded == [4000] and released == [True]
@@ -263,7 +274,7 @@ def test_a_stream_that_produced_nothing_is_not_silently_free(monkeypatch):
 
 
 def test_and_with_the_gate_off_it_settles_its_zero_exactly_as_before(monkeypatch):
-    monkeypatch.delenv(po.UNOBSERVED_HOLD_ENV, raising=False)
+    monkeypatch.setenv(po.UNOBSERVED_HOLD_ENV, "0")
     hold, _repo, settled, _released = _hold()
     hold.claim_stream_interrupted(
         _money.Usage(), provider_responded=False, exc=RuntimeError("cut")

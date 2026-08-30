@@ -78,23 +78,52 @@ describe('resolveRegionConfig — region decoupling', () => {
     );
   });
 
-  test('CODEX_ENABLED matches the backend exactly: enabled IFF "true"', () => {
+  test('STRATOCLAVE_CODEX_ENABLED matches the backend exactly: enabled IFF "true"', () => {
     // Backend (mvp/openai_responses.py) is `.lower() == "true"`. We must match:
     // only "true"/"TRUE" enable; everything else (including 0/no/off) disables.
-    // Using `!== 'false'` would flip an existing CODEX_ENABLED=0 deployment to
+    // Using `!== 'false'` would flip an existing ..._ENABLED=0 deployment to
     // enabled on the next synth and silently leak codex prompts. (Fable B-1)
-    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).codexEnabled).toBe(true);
-    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'true' })).codexEnabled).toBe(true);
-    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'TRUE' })).codexEnabled).toBe(true);
-    // Any explicit non-"true" value disables codex (backend parity). NOTE:
-    // empty string is falsy in JS `||`, so it takes the IaC default ('true') —
-    // the container then receives 'true' too (String(codexEnabled)), so IaC and
-    // the task agree. An operator disabling codex uses 'false', not ''.
-    const disabledValues = ['false', 'FALSE', '0', 'no', 'off'];
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', STRATOCLAVE_CODEX_ENABLED: 'true' })).codexEnabled).toBe(true);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', STRATOCLAVE_CODEX_ENABLED: 'TRUE' })).codexEnabled).toBe(true);
+    // Any explicit non-"true" value disables codex (backend parity).
+    const disabledValues = ['false', 'FALSE', '0', 'no', 'off', ''];
     const computed = disabledValues.map(
-      (v) => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: v })).codexEnabled,
+      (v) => resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', STRATOCLAVE_CODEX_ENABLED: v })).codexEnabled,
     );
     expect(computed).toEqual(disabledValues.map(() => false));
+  });
+
+  test('STRATOCLAVE_CODEX_ENABLED defaults to false: route exposure must be opted into', () => {
+    // This is the flipped default (NEW): every other flag that gates money or
+    // route exposure (STRATOCLAVE_HARD_CEILING_GATE, STRATOCLAVE_UNOBSERVED_HOLDS,
+    // STRATOCLAVE_RESIDENCY, STRATOCLAVE_RESERVE_PROTOCOL) ships conservative;
+    // codex used to be the one flag that defaulted ON. An operator who never
+    // set this var gets codex OFF, matching the backend's own bare-getenv default.
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).codexEnabled).toBe(false);
+    expect(resolveRegionConfig(baseEnv()).codexEnabled).toBe(false);
+  });
+
+  test('CODEX_ENABLED (deprecated bare name) is honoured as a fallback', () => {
+    // An existing deployment that never renamed its env var must not lose the
+    // route on the next synth. Precedence: the new name always wins.
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'true' })).codexEnabled).toBe(true);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'false' })).codexEnabled).toBe(false);
+    expect(
+      resolveRegionConfig(
+        baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'true', STRATOCLAVE_CODEX_ENABLED: 'false' }),
+      ).codexEnabled,
+    ).toBe(false);
+    // Setting the deprecated name surfaces a deprecation warning; setting only
+    // the new name (or neither) does not.
+    expect(
+      resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', CODEX_ENABLED: 'true' })).deprecationWarnings
+        .join('\n'),
+    ).toMatch(/CODEX_ENABLED is deprecated/);
+    expect(
+      resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1', STRATOCLAVE_CODEX_ENABLED: 'true' }))
+        .deprecationWarnings,
+    ).toEqual([]);
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).deprecationWarnings).toEqual([]);
   });
 });
 
@@ -144,7 +173,7 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
           STRATOCLAVE_REGION: 'eu-west-1',
           BEDROCK_PRIMARY_REGION: 'eu-west-1',
           STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-          CODEX_ENABLED: 'false',
+          STRATOCLAVE_CODEX_ENABLED: 'false',
           STRATOCLAVE_RESIDENCY: 'strict',
         }),
       ),
@@ -157,7 +186,7 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
         STRATOCLAVE_REGION: 'eu-west-1',
         BEDROCK_PRIMARY_REGION: 'eu-west-1',
         STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-        CODEX_ENABLED: 'false',
+        STRATOCLAVE_CODEX_ENABLED: 'false',
         STRATOCLAVE_RESIDENCY: 'strict',
         STRATOCLAVE_ALLOW_GEO_INFERENCE: 'true',
       }),
@@ -171,7 +200,7 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
         STRATOCLAVE_REGION: 'eu-west-1',
         BEDROCK_PRIMARY_REGION: 'eu-west-1',
         STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
-        CODEX_ENABLED: 'false',
+        STRATOCLAVE_CODEX_ENABLED: 'false',
         STRATOCLAVE_RESIDENCY: 'strict',
         DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
       }),
@@ -181,7 +210,9 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
 
   test('NEW-1: codex enabled defeats residency even with everything else pinned', () => {
     // OPENAI_BEDROCK_REGIONS is a no-op hint; codex is registry-pinned to
-    // us-west-2/us-east-2, so strict must still throw.
+    // us-west-2/us-east-2, so strict must still throw. Codex must be
+    // EXPLICITLY enabled here: the default flipped to false, so this case no
+    // longer exercises itself for free the way it did when codex defaulted on.
     expect(() =>
       resolveRegionConfig(
         baseEnv({
@@ -191,6 +222,7 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
           DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
           STRATOCLAVE_RESIDENCY: 'strict',
           OPENAI_BEDROCK_REGIONS: 'eu-west-1',
+          STRATOCLAVE_CODEX_ENABLED: 'true',
         }),
       ),
     ).toThrow(/us-west-2\(codex\)|us-east-2\(codex\)|Bedrock is reachable/);

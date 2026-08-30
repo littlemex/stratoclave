@@ -112,8 +112,8 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     except Exception:  # noqa: BLE001 — pricing import optional in some minimal test envs
         pass
     # Hybrid-serving (vLLM) caches the parsed endpoint allowlist + pooled httpx
-    # clients as module globals; reset so a test varying VLLM_ENDPOINTS/flag
-    # does not leak into the next.
+    # clients as module globals; reset so a test varying
+    # STRATOCLAVE_VLLM_ENDPOINTS/flag does not leak into the next.
     try:
         from mvp.serving import vllm as _vllm
         _vllm.reset_for_test()

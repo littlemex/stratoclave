@@ -349,9 +349,6 @@
   "cl-621ced26d3d6": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
-  "cl-63f15d5323aa": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
   "cl-643342baf90b": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -700,9 +697,6 @@
   "cl-cb57bfd8b0ca": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
-  "cl-cd0412ec7f22": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
   "cl-cd99f98f645e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -924,6 +918,15 @@
   },
   "cl-261415bbe25e": {
    "first_seen": "added when the blockquote splitter was fixed"
+  },
+  "cl-ca57d6f86167": {
+   "first_seen": "added when the money flags became the default"
+  },
+  "cl-d2d92e0588ee": {
+   "first_seen": "added when the money flags became the default"
+  },
+  "cl-4f0dad7b3f88": {
+   "first_seen": "added when the money flags became the default"
   }
  },
  "retired": {
@@ -951,6 +954,16 @@
    "disposition": "reworded-to",
    "target": "cl-73adf5790f11",
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
+  },
+  "cl-63f15d5323aa": {
+   "disposition": "reworded-to",
+   "target": "cl-4f0dad7b3f88",
+   "why": "the two money flags were flipped to default on and renamed into the STRATOCLAVE_ namespace, so the sentence stating the default changed"
+  },
+  "cl-cd0412ec7f22": {
+   "disposition": "reworded-to",
+   "target": "cl-d2d92e0588ee",
+   "why": "the two money flags were flipped to default on and renamed into the STRATOCLAVE_ namespace, so the sentence stating the default changed"
   }
  },
  "detector": {

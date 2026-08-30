@@ -30,11 +30,17 @@ A clause at **B** is honest. A clause claimed unconditionally in the docs while
 holding only at **B** in the code is the defect [C10](#c10--claims) is about.
 
 **The level answers "what can this code do", not "what does a default deployment
-do."** Two of the clauses below hold at **B** where the stated configuration is not
-the shipped default (`STRATOCLAVE_HARD_CEILING_GATE` and
-`STRATOCLAVE_UNOBSERVED_HOLDS` are both off), so the default artifact does not
-exhibit them. Where that is the case the clause says so in its own row rather than
-leaving a reader to assemble it from the flag documentation.
+do."** These are not the same question, and where a clause's answer differs between
+them the clause says so in its own row rather than leaving a reader to assemble it
+from the flag documentation.
+
+For the two money flags they now agree. `STRATOCLAVE_HARD_CEILING_GATE` and
+`STRATOCLAVE_UNOBSERVED_HOLDS` both default ON, so the default artifact exhibits the
+properties they gate: admission is priced from a byte-count bound rather than an
+estimate, and an outcome the gateway could not observe keeps its reservation instead
+of being handed back as though the call were free. Both remain configurable off, which
+is a **B** in the opposite direction — an operator who sets either flag falsy gets the
+weaker behaviour back, deliberately.
 
 ---
 
@@ -49,7 +55,7 @@ been decremented in one atomic, conditional write against the authoritative stor
 | **C1.2** Every limit CONFIGURED for the request participates in that write. A limit present in configuration that contributes no transaction item is a bypass. | E | `test_quota_cascade.py`, `test_contract_model_policy.py` |
 | **C1.3** An input the gateway could not read is never treated as an absent restriction. Unknown ⇒ fail closed. | E | `test_routing_inputs_not_invented.py`, `test_contract_price_identity.py` |
 | **C1.4** The identity of a limit's subject is the subject, not the spelling the caller used. Respelling a model must not create a second, empty counter. | E | `test_routing_inputs_not_invented.py`, `test_contract_model_policy.py` |
-| **C1.5** The amount reserved is an upper bound on what the settle can charge for the same request. | **B — and NOT in the default deployment** | `test_billable_legs_registry.py`. Holds where a byte-count bound prices the reservation and `STRATOCLAVE_HARD_CEILING_GATE` gates admission. That flag ships OFF, so a default deployment prices admission with an estimate its own design document proves is not a bound — see [hard-ceiling.md](hard-ceiling.md) |
+| **C1.5** The amount reserved is an upper bound on what the settle can charge for the same request. | E in the default deployment; **B** if an operator turns the gate off | `test_billable_legs_registry.py`, `test_reservation_bound_formal_z3.py`, `test_hard_ceiling_pipeline.py::test_enforcement_active_iff_pool_row_exists` (which pins the default). Holds where a byte-count bound prices the reservation, and `STRATOCLAVE_HARD_CEILING_GATE` now defaults ON, so a pooled tenant gets the bound without configuring anything. Setting that flag falsy returns admission to the legacy estimate, which the design document proves is not a bound — an operator can choose that, and the clause then holds only at B for them. See [hard-ceiling.md](hard-ceiling.md) |
 | **C1.6** A request is served only by a model inside the tenant's configured policy set. An empty admissible set is a refusal, never a widening. | E | `test_contract_model_policy.py` |
 | **C1.7** One admitted reservation buys at most one billable provider attempt. The first delivered stream event is the commit point: before it, a retry or a failover reuses the same reservation; after it, a mid-stream failure propagates rather than re-running the model. | E | `test_infrarouter_faults.py::test_mid_stream_failure_no_retry` (a 500 after the first event does not fail over) and `::test_timeout_first_event_never_settles_as_success` (an attempt that never reached the commit point is not settled as a success). The README claims this and no clause governed it |
 | **C1.8** A hard pin is identity, not membership: a pinned request is served by exactly that model or refused, and the model on the charge is the model that was reserved. | E for pin-or-refuse; **B** for the reconciliation | `test_vsr_pin.py` (`test_unservable_pin_400`, `test_valid_pin_serves_200`) refuses rather than substituting. The billed-equals-reserved half is checked offline by `test_vsr_reconcile.py::test_hard_pin_violation_when_billed_differs_from_advice` over the decision→usage join, so it is an audit that detects a violation rather than a gate that prevents one |
@@ -146,7 +152,7 @@ The gateway says what it observed, and no more.
 | --- | --- | --- |
 | **C8.1** A value the gateway did not observe is reported as absent, never as zero — and absence is the DEFAULT, so a transport that does not parse a leg cannot record a measured zero by omission. | E | `test_contract_reporting.py`, including `test_absence_survives_the_hold_seam`, which drives the real `Hold` rather than the pure rater: the snapshot every route settles through used to coerce the absence away one call before the ledger |
 | **C8.2** Any path or parameter the gateway names in an error is one it serves, including in a message relayed from upstream. | **B** | `test_contract_reporting.py` covers the OpenAI-compatible relay and the rewriter. Errors composed elsewhere in the codebase are not swept, so the universal reading is not established |
-| **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable, and the reservation behind it is not handed back on the assumption it was free. | E for the classification; **B** for holding the headroom — inside `STRATOCLAVE_UNOBSERVED_HOLDS=on`, which ships off | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py`, and `test_contract_owed_settle.py` for the retention, driven through the real `Hold` (`test_a_departed_call_keeps_its_reservation_when_the_flag_is_on`, `test_retention_is_off_by_default`, `test_a_retention_resolves_at_the_figure_an_operator_supplies`, mutation-checked), plus `test_money_branches_on_written_facts.py` for the seam those tests used to fake. The ending records the departure on the hold — the only moment anything knows it, and a path a completed request never takes — and the reaper then retains rather than crediting back: one conditional status write, no counter movement, since the amount was already counted against the limit. A retention ends only by an operator settling it at the figure the provider's own record shows or releasing it when that record shows none, and the status is part of that money transaction rather than flipped back first, so there is no window in which the reaper can end it instead. **Residuals:** a task that dies with no ending at all records nothing, so its hold still reclaims; and a retention is long-lived by design, which makes C3.1 (a hold does not name the incarnation of the pool row it debited) the expected lifecycle for exactly these holds rather than an edge case; and nothing watches `held_microusd`, which is why the flag stays off |
+| **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable, and the reservation behind it is not handed back on the assumption it was free — provided something reached the provider transport. | E in the default deployment for both halves; **B** if an operator turns retention off | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py`, and `test_contract_owed_settle.py` for the retention, driven through the real `Hold` (`test_a_departed_call_keeps_its_reservation_when_the_flag_is_on`, `test_retention_is_on_by_default`, `test_a_retention_resolves_at_the_figure_an_operator_supplies`, mutation-checked), plus `test_money_branches_on_written_facts.py` for the seam those tests used to fake, and `test_retention_requires_departure.py` for the proviso. That proviso is load-bearing rather than decorative: `classify_exception` ends in the expensive state rather than in a guess, so an exception raised by this gateway's own code before the call reached the transport used to be indistinguishable from a read timeout on a completed generation, and retaining it would consume a tenant's budget for a request that never left. Each route announces the hand-off immediately before invoking the provider client (`Hold.provider_call_starting`), retention requires that fact, and `test_retention_requires_departure.py` fails if a module that ends an unobserved outcome does not announce. The ending records the departure on the hold — the only moment anything knows it, and a path a completed request never takes — and the reaper then retains rather than crediting back: one conditional status write, no counter movement, since the amount was already counted against the limit. A retention ends only by an operator settling it at the figure the provider's own record shows or releasing it when that record shows none, and the status is part of that money transaction rather than flipped back first, so there is no window in which the reaper can end it instead. **Residuals:** a task that dies with no ending at all records nothing, so its hold still reclaims; and a retention is long-lived by design, which makes C3.1 (a hold does not name the incarnation of the pool row it debited) the expected lifecycle for exactly these holds rather than an edge case; and nothing watches `held_microusd`, and the flag now defaults ON, so that watcher stopped being optional — it is the open item below rather than a deferred nicety |
 
 ## C9 — External authorization
 
@@ -357,9 +363,10 @@ without paying a cost the clause names.
   clause rather than because the sentence is safe; the remaining nine are sentences a
   clause should not cover at all.
 - **C8.3 has no watcher on the retention.** The reaper holds a departed call's
-  reservation when the flag is on, and nothing watches `held_microusd`, so a provider
-  outage can fill a tenant's headroom and the first signal is a refusal. That is why
-  the flag stays off by default, and the watcher is the work.
+  reservation whose provider call departed, and nothing watches `held_microusd`, so a
+  provider outage can fill a tenant's headroom and the first signal is a refusal. See
+  the exposure item below: the flag now defaults on, so the watcher is no longer
+  optional.
 - **C12.5 has no mechanism.** Credential material is kept out of every store and log
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper
@@ -386,15 +393,11 @@ without paying a cost the clause names.
   promise anything about it. The omission is named rather than silent —
   `guarantee_terms_deliberately_absent` in the same config — so a reader can tell the
   gap is a judgement made on purpose and not an oversight nobody noticed.
-- **The default deployment does not exhibit C1.5.** `STRATOCLAVE_HARD_CEILING_GATE`
-  ships off so admission is priced by an estimate, and `STRATOCLAVE_UNOBSERVED_HOLDS`
-  ships off so a reclaim returns budget for a call the provider measurably billed.
-  Both defaults are deliberate — an operator measures a refusal rate before enforcing
-  one — and what the flags gate is C1.5 specifically: a *bound* on the settle, and
-  retention of an unobserved charge. They do not gate the differentiator. With every
-  flag at its shipped default, admission and the money move are still one conditional
-  transition in one authoritative store (C1.1, C1.3), a reservation still reaches
-  exactly one ending (C3.1), the ledger is still the charge of record (C4.1, C4.3),
-  and the Z3-checked no-double-post invariant still holds over the transition model
-  the default path takes. The distance between the default and C1.5 is a real gap and
-  it is stated; it is not the gap between this artifact and its own headline.
+- **Nothing watches `held_microusd`, and retention is now on by default.** This was
+  filed as the reason the flag stayed off. The flag no longer stays off, so the item
+  changed shape rather than closing: under a provider outage, retentions accumulate
+  against a tenant's headroom and the first signal an operator gets is a refusal.
+  Retention is correct — the money may really have been spent — but a mechanism whose
+  failure mode is a silent lockout needs the exposure surfaced. `held_microusd` is
+  reported; the alarm on it is the work, and it is now on the enforced path rather
+  than behind a flag nobody turned on.

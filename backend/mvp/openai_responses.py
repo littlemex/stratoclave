@@ -89,10 +89,24 @@ def _open_hold(**kwargs) -> _money.Hold:
 # ---------------------------------------------------------------------------
 # Feature flag — true rollback gate
 # ---------------------------------------------------------------------------
-# `CODEX_ENABLED` is checked at request time (not module load) so an
-# operator can flip the flag via ECS task-definition env without re-importing
-# the module. Matches the `ENABLE_WAF` / `ENABLE_ECS_EXEC` pattern in
-# `iac/bin/iac.ts`.
+# `STRATOCLAVE_CODEX_ENABLED` is checked at request time (not module load) so
+# an operator can flip the flag via ECS task-definition env without
+# re-importing the module. Matches the `ENABLE_WAF` / `ENABLE_ECS_EXEC`
+# pattern in `iac/bin/iac.ts`.
+#
+# Default is FALSE: this flag gates route exposure (an OpenAI-compatible
+# surface), so it follows the same conservative, opt-in posture as the
+# money flags (STRATOCLAVE_HARD_CEILING_GATE, STRATOCLAVE_UNOBSERVED_HOLDS,
+# STRATOCLAVE_RESIDENCY, STRATOCLAVE_RESERVE_PROTOCOL) rather than defaulting
+# to on.
+#
+# `CODEX_ENABLED` (bare, unnamespaced) is the deprecated predecessor name.
+# It is honoured as a fallback so an existing deployment does not silently
+# lose the route on upgrade, but only when the new name is unset — and only
+# logged once per process, since this function is read on every request.
+
+_codex_enabled_alias_warned = False
+
 
 def _shadow_tenant_pref(org_id: str):
     """The tenant's per-tenant shadow_vsr preference (True/False/None) via the
@@ -104,7 +118,21 @@ def _shadow_tenant_pref(org_id: str):
 
 
 def _codex_enabled() -> bool:
-    return os.getenv("CODEX_ENABLED", "false").lower() == "true"
+    global _codex_enabled_alias_warned
+
+    value = os.getenv("STRATOCLAVE_CODEX_ENABLED")
+    if value is None:
+        legacy = os.getenv("CODEX_ENABLED")
+        if legacy is not None:
+            value = legacy
+            if not _codex_enabled_alias_warned:
+                _codex_enabled_alias_warned = True
+                logger.warning(
+                    "codex_enabled_env_deprecated",
+                    old_name="CODEX_ENABLED",
+                    new_name="STRATOCLAVE_CODEX_ENABLED",
+                )
+    return (value or "false").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +720,9 @@ async def create_response(
         client = _openai_client(entry.bedrock_region)
         auth = await _openai_auth(entry.bedrock_region)
         sent = True
+        # About to reach the provider transport: from here a failure may have been
+        # billed, before here it cannot have been. See `Hold.provider_call_starting`.
+        hold.provider_call_starting()
         resp = await client.post(
             "/responses", json=payload, headers=auth,
             timeout=_openai_transport.nonstream_timeout(),

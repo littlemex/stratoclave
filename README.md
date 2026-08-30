@@ -246,9 +246,10 @@ for where a broker is the better choice.
   transport. The `stratoclave codex` CLI
   subcommand wraps the `codex` binary against this endpoint with an ephemeral
   key; the `--codex` flag on `stratoclave setup` patches `~/.codex/config.toml`
-  for direct use. Controlled by the `CODEX_ENABLED` ECS env flag, which
-  **defaults to `true`**; set `CODEX_ENABLED=false` to disable the OpenAI
-  routes (they then return `503`).
+  for direct use. Controlled by the `STRATOCLAVE_CODEX_ENABLED` ECS env flag, which
+  **defaults to `false`**: a route that exposes a provider surface is opted into, the
+  same way the money flags are conservative. Set `STRATOCLAVE_CODEX_ENABLED=true` to
+  serve the OpenAI routes; until then they return `503`.
 - **Two-level credit governance, enforced pre-flight.** Every tenant has a
   default credit, every user can carry a per-user override, and every
   inference call — to `/v1/messages` (Anthropic), `/v1/chat/completions`
@@ -269,10 +270,12 @@ for where a broker is the better choice.
   exceed it depends on how that amount was priced: a reservation priced from a
   byte-count *bound* dominates any usage the provider can report, while the older
   estimate is a guess at the token count and a prompt that tokenises above it
-  settles above its reservation. The bound gates admission only where the operator
-  has turned it on (`STRATOCLAVE_HARD_CEILING_GATE`), because it also refuses
-  requests it cannot size and an operator should measure that refusal rate on real
-  traffic first — see [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md). Cost is derived from
+  settles above its reservation. The bound gates admission by default
+  (`STRATOCLAVE_HARD_CEILING_GATE`), so a tenant with a dollar pool is reserved against
+  a bound rather than a guess without configuring anything; it also refuses requests it
+  cannot size, and an operator who wants to measure that refusal rate on real traffic
+  before refusing anyone sets the flag falsy to run in shadow — see
+  [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md). Cost is derived from
   an admin-editable per-model price table (`PricingConfig`), so Opus and Haiku
   spend are counted differently — all in integer micro-USD, never floating
   point. A tenant with no pool row keeps the token-only behaviour unchanged
@@ -618,7 +621,7 @@ print(resp.output_text)
 
 The `responses:send` scope is required; all three roles (`admin`, `team_lead`,
 `user`) carry it by default. GPT-5.x, xAI Grok, and Google Gemma are served via
-the OpenAI-compatible endpoint on bedrock-runtime and gated by the `CODEX_ENABLED` feature flag on the
+the OpenAI-compatible endpoint on bedrock-runtime and gated by the `STRATOCLAVE_CODEX_ENABLED` feature flag on the
 ECS task. The default codex model is `openai.gpt-5.6-sol` (override per call with
 `--model`, or per deployment with the `DEFAULT_CODEX_MODEL` env). See
 [`docs/CODEX_GUIDE.md`](./docs/CODEX_GUIDE.md) for the full codex setup.
@@ -782,7 +785,7 @@ from a human form is a typo risk.
 | `POST /v1/messages`                    | Anthropic `Messages API` payload; translated to Bedrock `converse` / `converseStream`. Tools, vision (base64), thinking, prompt caching. Requires the `messages:send` scope. |
 | `POST /v1/chat/completions`            | OpenAI `Chat Completions` payload on the **same** Bedrock converse backend. Streaming + tool calls. Unsupported params (`n>1`, `logprobs`, `response_format`, `image_url`) rejected with `400`, never silently dropped. Requires the `messages:send` scope. |
 | `GET  /v1/models`                      | Returns the Claude-family inference profiles mapped by the backend. |
-| `POST /openai/v1/responses`            | OpenAI Responses API payload; forwarded to `bedrock-runtime.{region}.amazonaws.com/openai/v1`. Requires the `responses:send` scope. Gated by the `CODEX_ENABLED` ECS env flag. |
+| `POST /openai/v1/responses`            | OpenAI Responses API payload; forwarded to `bedrock-runtime.{region}.amazonaws.com/openai/v1`. Requires the `responses:send` scope. Gated by the `STRATOCLAVE_CODEX_ENABLED` ECS env flag. |
 | `GET  /openai/v1/models`               | Returns OpenAI-family entries from the model registry, in the OpenAI `/v1/models` shape. Requires the `responses:send` scope. |
 | `GET  /.well-known/stratoclave-config` | Unauthenticated discovery document; drives `stratoclave setup`.    |
 | `POST /api/mvp/auth/sso-exchange`      | Vouch-by-STS entry point for CLI SSO login.                         |
@@ -1106,7 +1109,7 @@ touches neither execution nor money is default-on for new tenants):**
   eval-decide integration below is designed to supersede.
 - **Hybrid serving — self-hosted vLLM** (`HYBRID_SERVING_ENABLED`). A registry
   entry can declare `served_by="vllm"` + an `endpoint_key`; the target then
-  routes to an internal vLLM endpoint (from an operator allowlist, `VLLM_ENDPOINTS`)
+  routes to an internal vLLM endpoint (from an operator allowlist, `STRATOCLAVE_VLLM_ENDPOINTS`)
   instead of Bedrock, priced as operator cost-recovery so the same
   reserve/rating/settle path applies. The one transport seam is
   `infrarouter._attempt_invoke`; the OpenAI SSE stream is translated into the
