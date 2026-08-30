@@ -85,7 +85,7 @@ recovery.
 | **C3.2c** …for the per-model quota counter. | **N (today)** | Same shape as C3.2b, bounded instead by the counter's monthly TTL |
 | **C3.3** That mechanism's reachability does not depend on the tenant sending more traffic or on the calendar period. | N (today) | The sweep is request-driven and covers the current and previous period only — see the open items below |
 | **C3.4** An ended reservation cannot be ended again in either direction. | P + E | `test_billing_formal_z3.py`, `test_contract_termination.py` |
-| **C3.5** After any ending, counters and ledger agree, including when the settle that observed the usage never committed. | E, with one stated residual | `test_billing_write_discipline.py`, and `test_contract_owed_settle.py` (`test_the_reaper_posts_the_charge_instead_of_asserting_zero`, `test_a_second_sweep_cannot_post_the_charge_twice`, both mutation-checked). A settle that exhausts its retries now records what it observed as an OWED_SETTLE row, and the reclaim that follows honours it through the existing LATE_SETTLE recovery instead of asserting a settled delta of zero. At-most-once comes from the LATE_SETTLE sort key, so the row needs no mutation to be marked done and the ledger stays append-only. **Residual:** a task that dies between observing the usage and writing that row still loses it; covering that needs a write-ahead on every settle, which is a cost on every request rather than on a rare one |
+| **C3.5** After any ending, counters and ledger agree, including when the settle that observed the usage never committed. | E, with one stated residual | `test_billing_write_discipline.py`, and `test_contract_owed_settle.py` (`test_the_reaper_posts_the_charge_instead_of_asserting_zero`, `test_a_second_sweep_cannot_post_the_charge_twice`, both mutation-checked). A settle that exhausts its retries now records what it observed as an OWED_SETTLE row, and the reclaim that follows honours it through the existing LATE_SETTLE recovery instead of asserting a settled delta of zero. At-most-once comes from the LATE_SETTLE sort key, so the row needs no mutation to be marked done and the ledger stays append-only. Both orders of the race are covered rather than one: the reaper looks for an owed row after it commits its reclaim, and the abandoned settle looks for a reclaim after it writes the row, so whichever party is second sees the other's write (`_redrive_owed_after_late_reclaim`). Checking only from the reaper's side left the interleaving where it read first and the row arrived a moment later, after which the hold was gone and nothing revisited it. **Residual:** a task that dies between observing the usage and writing that row still loses it; covering that needs a write-ahead on every settle, which is a cost on every request rather than on a rare one |
 
 ## C4 — Ledger sufficiency
 
@@ -123,6 +123,8 @@ grants and what its credential was scoped to.
 | **C6.4** Revocation and demotion take effect on the next request. | E | `test_jwt_verify.py`, `test_api_key_tombstone.py` |
 | **C6.5** Nothing a client sets in a request changes which tenant, identity or budget it is accounted to. | E | `test_authz_lattice.py` |
 | **C6.6** An authentication artifact is single-use where the flow requires it, and the replay check fails CLOSED when its store is unreachable. | E | `test_sso_replay_failclosed.py::test_replay_detected_raises_401`, `::test_nonce_storage_unavailable_fails_closed`. The signed `GetCallerIdentity` vouch is the artifact; failing open on an unreachable nonce store would make a table blip into an unlimited replay window |
+| **C6.7** A principal's authority comes from the store this gateway controls. An assertion inside a token the caller presents is proof of authentication and nothing else. | E | `test_contract_authority_source.py::test_a_group_claim_in_the_token_grants_nothing` drives a principal whose own token claims `admin` and is refused, and `::test_the_authorization_path_does_not_read_group_claims_at_all` reads the authorization modules and refuses the string at all — a behavioural test samples the inputs, the static one closes the class. Both mutation-checked. The claim had been asserted in `ARCHITECTURE.md` on the strength of a docstring |
+| **C6.8** No AWS credential is presented to this gateway on the vouch path: the caller signs a `GetCallerIdentity` request locally and the gateway forwards the signature. | E | `test_contract_authority_source.py::test_the_sso_exchange_has_nowhere_to_put_a_credential`. Structural rather than behavioural because the guarantee is structural: an endpoint with no field a secret could arrive in cannot be sent one, and a field added later fails there rather than in a review someone skipped |
 
 ## C7 — Configuration authority
 
@@ -144,7 +146,7 @@ The gateway says what it observed, and no more.
 | --- | --- | --- |
 | **C8.1** A value the gateway did not observe is reported as absent, never as zero — and absence is the DEFAULT, so a transport that does not parse a leg cannot record a measured zero by omission. | E | `test_contract_reporting.py`, including `test_absence_survives_the_hold_seam`, which drives the real `Hold` rather than the pure rater: the snapshot every route settles through used to coerce the absence away one call before the ledger |
 | **C8.2** Any path or parameter the gateway names in an error is one it serves, including in a message relayed from upstream. | **B** | `test_contract_reporting.py` covers the OpenAI-compatible relay and the rewriter. Errors composed elsewhere in the codebase are not swept, so the universal reading is not established |
-| **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable, and the reservation behind it is not handed back on the assumption it was free. | E for the classification; **B** for holding the headroom — inside `STRATOCLAVE_UNOBSERVED_HOLDS=on`, which ships off | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py`, and `test_contract_owed_settle.py` (`test_a_departed_call_keeps_its_reservation_when_the_flag_is_on`, `test_a_retention_resolves_at_the_figure_an_operator_supplies`, `test_retention_is_off_by_default`, all mutation-checked) for the retention. The reaper used to return a reservation whose provider call had departed and record that nothing was charged; with the flag on it retains it instead — one conditional status write, no counter movement, so the amount goes on being counted against the limit exactly as it already was. A retention is ended deliberately, by an operator settling it at the figure the provider's own record shows or releasing it when that record shows no charge; the gateway supplies neither, which is why the reservation was held |
+| **C8.3** An outcome the gateway could not observe is classified and recorded rather than assumed free or assumed chargeable, and the reservation behind it is not handed back on the assumption it was free. | E for the classification; **B** for holding the headroom — inside `STRATOCLAVE_UNOBSERVED_HOLDS=on`, which ships off | `test_provider_outcome_formal.py`, `test_money_lifecycle_discipline.py`, and `test_contract_owed_settle.py` for the retention, driven through the real `Hold` (`test_a_departed_call_keeps_its_reservation_when_the_flag_is_on`, `test_retention_is_off_by_default`, `test_a_retention_resolves_at_the_figure_an_operator_supplies`, mutation-checked), plus `test_money_branches_on_written_facts.py` for the seam those tests used to fake. The ending records the departure on the hold — the only moment anything knows it, and a path a completed request never takes — and the reaper then retains rather than crediting back: one conditional status write, no counter movement, since the amount was already counted against the limit. A retention ends only by an operator settling it at the figure the provider's own record shows or releasing it when that record shows none, and the status is part of that money transaction rather than flipped back first, so there is no window in which the reaper can end it instead. **Residuals:** a task that dies with no ending at all records nothing, so its hold still reclaims; and a retention is long-lived by design, which makes C3.1 (a hold does not name the incarnation of the pool row it debited) the expected lifecycle for exactly these holds rather than an edge case; and nothing watches `held_microusd`, which is why the flag stays off |
 
 ## C9 — External authorization
 
@@ -168,7 +170,7 @@ boundary at which its evidence stops.
 
 | Clause | Level | Enforced by |
 | --- | --- | --- |
-| **C10.1** Every guarantee-shaped sentence in the covered documents is registered with the reason it is allowed to say that — a clause here, a row in [EVIDENCE.md](../EVIDENCE.md), a limit stated in the sentence, or a named debt. | E | `test_claims_are_anchored.py` over `README.md`, `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, against `contracts/claims/anchored.json`. Adding or editing such a sentence fails the build until its author points at the reason |
+| **C10.1** A sentence that matches the guarantee lexicon declared in [`contracts/claims/config.json`](../../contracts/claims/config.json), found in one of the six documents that same file names as covered, is registered with the reason it is allowed to say that — a clause here, a row in [EVIDENCE.md](../EVIDENCE.md), a limit stated in the sentence, or a named debt. "Guarantee-shaped" means "matches that lexicon", not "reads like a promise", so this clause is true of a declared vocabulary over six named files — never of every guarantee this project's documents make, and never of a document outside the six, which is not read at all. | E | `test_claims_are_anchored.py`, reading the lexicon and the file list from `contracts/claims/config.json` rather than carrying its own copy — currently `README.md`, `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, `docs/ARCHITECTURE.md`, `docs/ADMIN_GUIDE.md`, `docs/DEPLOYMENT.md` — against `contracts/claims/anchored.json`. Adding or editing a matching sentence in one of those files fails the build until its author points at the reason |
 | **C10.2** A sentence qualified because the unconditional version is not true yet carries a `debt:` anchor naming the clause that would make it unconditional, and that clause is on the open-items list. | E | `test_claims_are_anchored.py`. This is the clause that keeps honesty from becoming retreat: a weakened sentence and the work that would strengthen it are the same list |
 | **C10.4** A clause's own citation resolves: a test named here exists, and a named node is a function defined in the suite. | E | `test_contract_clauses_cite_real_tests.py`. The failure this prevents is the one this document is most exposed to — a test is renamed or deleted, the row keeps citing it, and an unenforced clause goes on reading as enforced while looking audited. It also requires that a clause at P or E cites something at all |
 | **C10.3** A verdict word in a comparison table is not contradicted by its own cell. | **B** | The lint treats a table cell as a sentence, so the verdict is registered like any other claim; it cannot check that a cell agrees with itself |
@@ -176,6 +178,54 @@ boundary at which its evidence stops.
 The lint cannot tell whether a sentence is TRUE — only whether someone was made to
 point at the reason. That is its honest limit, and it is the difference between "we
 are careful" and "carelessness fails the build".
+
+### The permanent human obligations
+
+The mechanism above resolves citations, pins clause wording, and fails a build when
+an anchor is missing or a citation has rotted. None of that touches the four
+judgements the mechanism sits on top of, and no later version of it will reach them
+either — they are not gaps to be closed, they are the floor the closing stops at.
+
+Whether a clause is true is decided by a human reading it. No layer of this
+mechanism has ever checked truth and none will: a test witnesses the instances it
+runs, and a clause at **E** claims a universal over those and every instance that
+was never run. `test_billing_formal_z3.py` staying green forever is a fact about the
+model it proves something over, not about whether the shipped code still matches
+that model.
+
+Whether a sentence needs a `contract:` anchor at all — rather than `descriptive:`,
+`boundary:`, or nothing — is a human judgement, made once by whoever wrote the
+sentence and once by whoever reviewed it. The protected-subject floor
+(`test_a_protected_subject_cannot_rest_on_a_judgement`: a guarantee word next to a
+protected subject — credential, budget, admission, ledger, identity — may not rest
+on `descriptive:` or a bare `boundary:`) is a floor under that judgement, not a
+detector standing in for it. A claim about a protected subject phrased without any
+of the listed words still slips past it unnoticed, the same way `records` and
+`ships` slipped past the guarantee lexicon itself until someone went and read what
+`every`/`all` had newly caught. CI validates the consequences of a declared status —
+that a `contract:` id resolves, that a `boundary:` sentence carries a limit word —
+never whether that status was the right one to declare.
+
+Whether a cited test meaningfully enforces its clause is a human reading of the
+test. `test_contract_clauses_cite_real_tests.py` and `test_doc_references_resolve.py`
+check that a citation resolves: the file exists, the function is defined. Neither
+reads what the function's body asserts. A test that exists, is named for the right
+clause, and asserts nothing about it would pass every check this repository runs.
+
+Whether a retirement preserved a claim or retracted it is a human reading of both
+endpoints — the sentence that left and the successor that is supposed to carry it
+forward. The mechanism for this is not conditional: every retired claim in
+`contracts/claims/snapshot.json` carries a typed disposition (`replaced-by`,
+`moved-to-clause`, `document-removed`, `retracted-false`, `reworded-to`), and
+`test_claim_obligations_ratchet.py` verifies that a `replaced-by` or `moved-to-clause`
+disposition's target resolves — the named successor claim or clause exists and is
+live. What it verifies stops there. Whether that successor says what the claim it
+replaced said is not something the mechanism reads; it is the human reading of both
+endpoints this paragraph opened with.
+
+Put plainly, because the rest of this document leans on a test for everything else
+and cannot lean on one here: **the mechanical layer verifies everything about a
+clause except whether it is true.**
 
 ---
 
@@ -216,6 +266,7 @@ A parameter this gateway cannot honour is refused, not dropped.
 | --- | --- | --- |
 | **C13.1** An unsupported request parameter is rejected with a 400 naming it, rather than silently ignored — a silently dropped parameter is a request the caller believes it made. | E | `test_chat_completions.py`, `test_openai_responses_models.py` |
 | **C13.2** The bytes on the wire match the API being emulated, so an SDK that validates its own contract sees a conforming response. | E | `test_anthropic_wire_bytes.py` |
+| **C13.3** A completeness claim the README makes about itself is checked against the table that carries the evidence. | E | `test_contract_layer_claim.py`: "ships all five layers" is true iff the five-layer table has five rows and each says shipped, so a layer demoted to a roadmap item fails rather than leaving the prose quietly false. It does not establish that a row marked shipped is shipped — the same residue every clause here carries, which is why the status is written where a reader can see it |
 
 ## Open items, named rather than implied
 
@@ -225,8 +276,9 @@ clause that has been closed leaves this list; a residual stated inside a clause'
 own cell is not an open item, because there is nothing outstanding to do about it
 without paying a cost the clause names.
 
-- **C3.2 for the per-user token reservation.** The admission transaction debits up
-  to three counters; the hold row records only the pool amount, so a crash between
+- **C3.2b and C3.2c, for the per-user token reservation and the per-model counter.**
+  The admission transaction debits up to three counters; the hold row records only the
+  pool amount, so a crash between
   reserve and settle leaves `credit_used` debited with nothing to reach it. The
   counter is not period-scoped, so it never resets. The change is small and named:
   carry the token amount and the user key on the hold write that already happens,
@@ -243,13 +295,97 @@ without paying a cost the clause names.
   pool row with a reservation in flight makes the settle apply to a row that never
   held the debit: `pool_reserved` goes negative and headroom is minted. Fencing is an
   id on the row, copied onto the hold, and an equality condition on every terminal.
+- **The lexicon still decides what counts as a claim.** `every` and `all` are now in it,
+  restricted to quantification over behaviour, which is what brought "Every route
+  enforces per-user token quotas …" and "Every call is recorded as a structured JSON log"
+  into the registry. Two things about that are worth stating rather than leaving for
+  someone to discover. The restriction was necessary because the unrestricted quantifier
+  also captured statements of configuration ("every table is provisioned in
+  `PAY_PER_REQUEST` mode"), which are facts rather than promises and have no honest anchor
+  kind — so a judgement about which quantified sentences are guarantees is now encoded in a
+  regular expression, and a guarantee phrased outside it is still invisible. And the
+  boundary this clause has is a declared word list over six named files, which is a
+  narrower thing than the sentence "every guarantee is anchored" would suggest — C10.1 now
+  says so in its own row.
+- **The joint enforcement point has no clause.** `README.md`'s "who called which model,
+  under whose budget, and through which identity — enforced before the model is invoked,
+  on every single request" cited C1.1 alone when this list was first written, which was
+  wrong in two ways; the first is now fixed and the second is why this item stays. The
+  anchor now names every clause its conjuncts need — `contract:C1.1,C6.2,C6.5,C4.4`, each
+  pinned — so a reader is no longer told that one clause covers three promises. What
+  remains has no clause to name: each conjunct maps to one (the attribution record to
+  C4.4, the budget decrement to C1.1 and its tenant scoping to C6.2, the identity a
+  request is accounted to under C6.5), but the
+  sentence's strongest word is none of those — it is that the three share ONE enforcement
+  point ahead of invocation, with no gap between them in which one check has resolved and
+  another has not. No clause says that. A clause that covered it would have to state that
+  identity resolution, tenant and budget attribution, and admission complete inside a
+  single gate that runs to completion before the provider is called, rather than as three
+  checks that could in principle run at three separate points with daylight between them.
+  Anchoring the three conjuncts to their separate clauses is honest about each part and
+  silent about the part that makes the sentence worth writing as one sentence rather than
+  three.
+- **The operator's duty not to list a directly-assumable role pattern has no clause and
+  no test.** `docs/ARCHITECTURE.md` and the allowed-role-patterns row in
+  `docs/ADMIN_GUIDE.md` each tell the operator not to list a role pattern for a role whose
+  trust policy lets a principal assume it directly, because every identity on that path is
+  read out of `RoleSessionName`, and a role reachable by a direct `sts:AssumeRole` call
+  lets the caller set that string itself — listing such a pattern hands the session name,
+  and therefore every identity it can spell, to whoever can assume the role. A clause that
+  covered this would have to say the gateway inspects the trust policy of every configured
+  role pattern and refuses to admit one it cannot show is restricted to an identity
+  provider, rather than accepting the operator's list on faith. Nothing does that today:
+  the gateway reads whatever patterns are configured and treats the operator's list as
+  correct. The duty rests on the operator reading the documentation, and it rests there
+  now — not as an interim state before a clause arrives, but as the thing this item is
+  naming.
+- **The protected-subject floor now carries an enumerated exemption list.**
+  `contracts/claims/config.json` lists eleven claim ids under `floor_exemptions`, each
+  with a reason of its own, for sentences that trip the guarantee-vocabulary-plus-
+  protected-subject rule without being a money or identity guarantee this document should
+  cover: a compound sentence whose logging half has no clause, a mechanism detail, a
+  rate-limiting granularity no clause addresses, idempotency on the accounting path where
+  no reservation exists, a sequencing rationale, the site an unbuilt layer would occupy, a
+  pair of evidence-territory latency figures, a licensing statement, an alarm-muting
+  caution, and the operator's duty named in the item above, twice — once for each document
+  it appears in. Widening the floor's rule to pass all eleven for everyone would have
+  buried the reasoning inside the detector, invisible until someone re-derived the rule
+  from scratch; an enumerated list is reviewable one id at a time, and
+  `test_claim_judgement_worklist.py` prints it, so the population stays visible instead of
+  growing one exemption at a time with nobody watching the count. Two of the eleven —
+  `cl-a12e772054af` and `cl-1ffbef41ba3a` — are the real gap, filed here for lack of a
+  clause rather than because the sentence is safe; the remaining nine are sentences a
+  clause should not cover at all.
+- **C8.3 has no watcher on the retention.** The reaper holds a departed call's
+  reservation when the flag is on, and nothing watches `held_microusd`, so a provider
+  outage can fill a tenant's headroom and the first signal is a refusal. That is why
+  the flag stays off by default, and the watcher is the work.
 - **C12.5 has no mechanism.** Credential material is kept out of every store and log
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper
   key or a provider token — is what would move it from B to E.
-- **C10's lint covers three documents.** `README.md`, `docs/SCOPE.md` and
-  `docs/design/hard-ceiling.md` are anchored. `ARCHITECTURE.md`, `ADMIN_GUIDE.md` and
-  `DEPLOYMENT.md` make narrower operational claims and are not swept yet.
+- **C10's lint reaches six documents, not every document.** `README.md`,
+  `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, `docs/ARCHITECTURE.md`,
+  `docs/ADMIN_GUIDE.md` and `docs/DEPLOYMENT.md` are read. The ones a reader also
+  consults and this lint does not are named here rather than counted, because a bare
+  number goes stale silently the day someone adds a document and forgets the list:
+  `docs/MEASUREMENTS.md`, `docs/MEASUREMENTS.ja.md`, `docs/CLI_GUIDE.md`,
+  `docs/CODEX_GUIDE.md`, `docs/COWORK_INTEGRATION.md`, `docs/GETTING_STARTED.md`,
+  `docs/LOCAL.md`, `docs/VSR_CONFIG_CONTRACT.md`, `docs/design/calibrated-mode.md`,
+  `docs/design/charge-loss.md`, `docs/design/gateway-capacity.md`,
+  `docs/design/ledger-hot-path.md`, `docs/design/pending-protocol.md` and
+  `docs/design/vsr-savings-certificate.md`. The list lives in
+  `contracts/claims/config.json` under `uncovered_documents_named`, and the covered
+  set grows by a document's name entering `covered_documents` there — never by a
+  count going up on its own.
+
+  The guarantee lexicon also deliberately leaves out two ordinary absolutes,
+  `records` and `ships`: they match product-status assertions ("records the
+  outcome", "ships all five layers") far more often than invariants, so widening the
+  lexicon by them would register sentences that describe what shipped rather than
+  promise anything about it. The omission is named rather than silent —
+  `guarantee_terms_deliberately_absent` in the same config — so a reader can tell the
+  gap is a judgement made on purpose and not an oversight nobody noticed.
 - **The default deployment does not exhibit C1.5.** `STRATOCLAVE_HARD_CEILING_GATE`
   ships off so admission is priced by an estimate, and `STRATOCLAVE_UNOBSERVED_HOLDS`
   ships off so a reclaim returns budget for a call the provider measurably billed.

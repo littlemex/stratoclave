@@ -2,1006 +2,1568 @@
  "_comment": "Every guarantee-shaped sentence in README.md, docs/SCOPE.md and docs/design/hard-ceiling.md, with the reason it may say that. Enforced by backend/tests/test_claims_are_anchored.py (contract C10). contract:<clause> resolves in docs/design/CONTRACTS.md; evidence:<text> appears in docs/EVIDENCE.md; boundary:<why> requires the sentence to carry its own limit; descriptive:<why> means it makes no claim about this gateway; debt:<clause> means it is true as qualified and the clause is what would make it unconditional.",
  "claims": [
   {
+   "id": "cl-7d6e43a6cffe",
    "claim": "The ledger's transitions carry **Z3-checked invariants showing that the modelled reserve → settle transitions cannot double-count funds** — a proof over the money model, not over the deployment.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
+   "anchor": "contract:C1.1@a32b5b92",
    "note": "the P subset; the sentence says the proof is over the model"
   },
   {
+   "id": "cl-c61d6bb43892",
    "claim": "Stratoclave is a self-hosted **inference gateway** that sits in the data path in front of Amazon Bedrock and adds the three things raw Bedrock does not give you on its own: **who called which model, under whose budget, and through which identity** — enforced *before* the model is invoked, on every single request.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": "'enforced before the model is invoked, on every request'"
+   "anchor": "contract:C1.1@a32b5b92,C6.2@6d6b51ff,C6.5@cd7deacf,C4.4@eb3300c1",
+   "note": "C4.4 covers 'who called which model' (the per-request charge record naming what was charged, at which version, for which request); C1.1 covers 'under whose budget' (the atomic pre-invocation decrement against the authoritative store); C6.2 further scopes that budget to the tenant's own principals; C6.5 covers 'through which identity' (nothing a client sets changes which identity a request is accounted to). No clause states the fourth, joint claim in the sentence -- that the three checks share ONE gate ahead of invocation rather than being three separately-true checks that could sit at different points. A covering clause would have to say that the admission decrement, the identity binding, and the per-request attribution record are all evaluated together, at the same point, before the provider is called; no clause in CONTRACTS.md says that today."
   },
   {
+   "id": "cl-ff2dcb6dd80a",
    "claim": "### The narrow thing this project is for: a proven invariant on pre-flight budget enforcement",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
+   "anchor": "contract:C1.1@a32b5b92",
    "note": "the heading names the proved invariant"
   },
   {
+   "id": "cl-3e5c0142aa79",
    "claim": "That makes per-tenant cost control not a nice-to-have but the P&L core, and it is a distributed-systems problem: *record the billable event across a trust boundary, exactly once, against the right tenant, non-repudiably*.",
-   "file": "README.md",
-   "anchor": "descriptive:states the distributed-systems problem in the abstract",
-   "note": ""
+   "anchor": "descriptive:states the distributed-systems problem in the abstract"
   },
   {
+   "id": "cl-6fdc5e1b20ed",
    "claim": "Stratoclave's differentiator is narrow, and it is a **guarantee level, not a feature nobody else has**: it reserves a tenant dollar pool **+** per-user token quota **+** per-model dollar quota in a **single DynamoDB `TransactWriteItems` before the model is invoked**.",
-   "file": "README.md",
-   "anchor": "contract:C1.2",
+   "anchor": "contract:C1.2@f5b97cc2",
    "note": "every configured limit in one TransactWriteItems"
   },
   {
+   "id": "cl-59b075b1ab2c",
    "claim": "There is no client bypass and no check-then-act (TOCTOU) overspend race — an overshoot loses the conditional write and gets a `402`.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-72b71ad48346",
    "claim": "A credential broker cannot do this at all — nothing is in the data path, so there is no request-time point to enforce at.",
-   "file": "README.md",
-   "anchor": "descriptive:about the credential-broker architecture",
-   "note": ""
+   "anchor": "descriptive:about the credential-broker architecture"
   },
   {
+   "id": "cl-621ced26d3d6",
    "claim": "LiteLLM's admission counter is a `DualCache` (in-process + Redis) with the database as an authority that catches up; whether the ceiling holds through cache loss is not something we have verified, and we do not assert that it fails.",
-   "file": "README.md",
-   "anchor": "boundary:'we do not assert that it fails' — the property is stated unverified",
-   "note": ""
+   "anchor": "descriptive:describes LiteLLM's admission counter and where its authority lives, not this gateway's"
   },
   {
+   "id": "cl-e26e9149d2f6",
    "claim": "Stratoclave puts the admission and the money move in the *same* authoritative store — a conditional DynamoDB transition — and carries Z3-checked invariants over that transition model showing it cannot double-count funds.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
+   "anchor": "contract:C1.1@a32b5b92",
    "note": "scoped to the transition model in the sentence"
   },
   {
+   "id": "cl-2917f020edf6",
    "claim": "Having a reservation and having a *machine-checked invariant* on the model of that reservation are different guarantee levels; this project provides the second one.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-ae7da09d31b0",
    "claim": "Neither the implementation nor DynamoDB's own behaviour is inside the proof — see [EVIDENCE.md](docs/EVIDENCE.md) for where each claim actually stands.",
-   "file": "README.md",
-   "anchor": "boundary:names exactly what is outside the proof",
-   "note": ""
+   "anchor": "boundary:names exactly what is outside the proof"
   },
   {
+   "id": "cl-a3b79bb83649",
    "claim": "**Shipped** — dedicated append-only ledger table; each money move (RESERVE/SETTLE/RELEASE/RECLAIM/LATE_SETTLE) is one event, duplicate-proof by a conditional write on its own key. RESERVE and the terminals are written in the same `TransactWriteItems` as the counter they move; the release path is two writes with the reaper as backstop, so a crash between them leaves the hold to be reclaimed rather than losing the event",
-   "file": "README.md",
-   "anchor": "boundary:'the release path is two writes with the reaper as backstop' states the limit",
-   "note": ""
+   "anchor": "contract:C4.1@758a15de,C4.3@65517bb0"
   },
   {
+   "id": "cl-0cd7980c4e9a",
    "claim": "It is their configuration, not a guarantee either project makes to the other; Stratoclave's own failure behaviour is specified in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).",
-   "file": "README.md",
-   "anchor": "boundary:'not a guarantee either project makes' and it points at where the behaviour IS specified",
-   "note": ""
+   "anchor": "boundary:'not a guarantee either project makes' and it points at where the behaviour IS specified"
   },
   {
+   "id": "cl-6e79f0a30214",
    "claim": "Its money transitions carry a machine-checked invariant that double-counting cannot occur.",
-   "file": "README.md",
-   "anchor": "contract:C3.4",
-   "note": ""
+   "anchor": "contract:C3.4@5dccb5dd"
   },
   {
+   "id": "cl-8384b6250719",
    "claim": "Separating \"proven\" from \"not yet built\" is the point of [EVIDENCE.md](docs/EVIDENCE.md).",
-   "file": "README.md",
    "anchor": "evidence:The limit no timing calculation removes",
    "note": "EVIDENCE.md separates proven from not-yet-built"
   },
   {
+   "id": "cl-16abaf3cd2d4",
    "claim": "## Why a gateway? (what a credential broker cannot do)",
-   "file": "README.md",
-   "anchor": "descriptive:a section heading",
-   "note": ""
+   "anchor": "descriptive:a section heading"
   },
   {
+   "id": "cl-c8014693e4d9",
    "claim": "That single architectural choice is what unlocks the following, none of which a broker can offer because it has no request-time choke point:",
-   "file": "README.md",
-   "anchor": "descriptive:about brokers",
-   "note": ""
+   "anchor": "descriptive:about brokers"
   },
   {
+   "id": "cl-d96d2635a141",
    "claim": "- **Budget enforced *per request*, before the call — not after.** Every call reserves `max_tokens + input_estimate` with a conditional DynamoDB write *before* Bedrock is invoked, and refunds the unused remainder afterwards.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-5a991bf46a1b",
    "claim": "- **App-layer model / capability policy.** The model allowlist, and (on the roadmap) per-tenant reasoning-effort and tool caps, are enforced in the request handler.",
-   "file": "README.md",
-   "anchor": "contract:C1.6",
+   "anchor": "contract:C1.6@fabb0bb4",
    "note": "roadmap items are marked as such in the sentence"
   },
   {
+   "id": "cl-f6b264feea30",
    "claim": "IAM can allow or deny a *model ARN*, but it cannot express \"this tenant may not use `reasoning.effort = xhigh`\".",
-   "file": "README.md",
-   "anchor": "descriptive:about what IAM can express",
-   "note": ""
+   "anchor": "descriptive:about what IAM can express"
   },
   {
+   "id": "cl-0c66e2b2da77",
    "claim": "- **Two-level credit governance, enforced pre-flight.** Every tenant has a default credit, every user can carry a per-user override, and every inference call — to `/v1/messages` (Anthropic), `/v1/chat/completions` (OpenAI Chat), or `/openai/v1/responses` (OpenAI Responses) — reserves tokens atomically with a conditional DynamoDB write *before* Bedrock is invoked (`backend/dynamo/user_tenants.py:reserve`).",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-6d91f148a230",
    "claim": "Because the reservation is a conditional `UpdateItem`, concurrent requests that would push a balance past its limit lose the condition and are rejected — quotas cannot be raced past.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-afa6822fcaaf",
    "claim": "What cannot be raced past is the amount the request was ADMITTED at.",
-   "file": "README.md",
-   "anchor": "contract:C1.5",
+   "anchor": "contract:C1.5@75c6b04a",
    "note": "this sentence is the boundary itself"
   },
   {
+   "id": "cl-63f15d5323aa",
    "claim": "The bound gates admission only where the operator has turned it on (`STRATOCLAVE_HARD_CEILING_GATE`), because it also refuses requests it cannot size and an operator should measure that refusal rate on real traffic first — see [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md).",
-   "file": "README.md",
-   "anchor": "boundary:'only where the operator has turned it on'",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-e2c45e0f9f81",
    "claim": "Cost is derived from an admin-editable per-model price table (`PricingConfig`), so Opus and Haiku spend are counted differently — all in integer micro-USD, never floating point.",
-   "file": "README.md",
-   "anchor": "contract:C2.5",
-   "note": ""
+   "anchor": "contract:C2.5@31c6f879"
   },
   {
+   "id": "cl-086504ab12fc",
    "claim": "A **first-event commit** rule guarantees that once the first stream byte is sent, the target is locked — a mid-stream failure never silently re-runs the model or double-bills.",
-   "file": "README.md",
-   "anchor": "contract:C1.7"
+   "anchor": "contract:C1.7@7de394a0"
   },
   {
+   "id": "cl-5b9575b3ce75",
    "claim": "`eu-west-1`) never silently fails over into another jurisdiction.",
-   "file": "README.md",
-   "anchor": "contract:C11.2",
-   "note": ""
+   "anchor": "contract:C11.2@033a2944"
   },
   {
+   "id": "cl-22477f2ab539",
    "claim": "For single-region **data residency**, set it to a same-jurisdiction list or to **`none`** (or an empty string) **to disable failover entirely** — then a streaming request never sends prompt bytes outside the primary region.",
-   "file": "README.md",
-   "anchor": "contract:C11.1",
-   "note": ""
+   "anchor": "contract:C11.1@11d071f4"
   },
   {
+   "id": "cl-a9defdc482e0",
    "claim": "- **Per-model quotas + cascading model fallback.** \"Use Opus until its per-model budget is gone, then Sonnet, then Haiku.\" Each model has an optional per-tenant (and per-user) quota, charged in the *same* atomic `TransactWriteItems` as the budget reserve — so a request can never race past a per-model limit.",
-   "file": "README.md",
-   "anchor": "contract:C1.2",
-   "note": ""
+   "anchor": "contract:C1.2@f5b97cc2"
   },
   {
+   "id": "cl-bc616662c2a8",
    "claim": "A quota is keyed on the **model**, not on the name a client used for it: every alias and Bedrock id of one registry entry counts against one counter, so a cap cannot be dodged by respelling its subject.",
-   "file": "README.md",
-   "anchor": "contract:C1.4",
-   "note": ""
+   "anchor": "contract:C1.4@706c84c6"
   },
   {
+   "id": "cl-37aecbee2731",
    "claim": "And because the routing config only ever *restricts* a request, a config the gateway cannot read is not treated as a tenant without restrictions — a task serves the last config it read, or fails closed with `503 routing_config_unavailable`.",
-   "file": "README.md",
-   "anchor": "contract:C7.2",
-   "note": ""
+   "anchor": "contract:C7.2@64862ee3"
   },
   {
+   "id": "cl-8d9b42f9afcf",
    "claim": "The pin is validated against the tenant allowlist (`403` if not allowed) and the route's wire protocol (`400` if unservable) — it is never silently substituted.",
-   "file": "README.md",
-   "anchor": "contract:C1.8"
+   "anchor": "contract:C1.8@d8bffeca"
   },
   {
+   "id": "cl-b6aae92284ce",
    "claim": "Stratoclave's SSO flow does not parse AWS credentials and never holds an IdP refresh token.",
-   "file": "README.md",
-   "anchor": "contract:C6.5",
-   "note": ""
+   "anchor": "contract:C6.5@cd7deacf"
   },
   {
+   "id": "cl-00a4fd0cc226",
    "claim": "EC2 instance profiles are rejected by default because they cannot be attributed to a single human.",
-   "file": "README.md",
-   "anchor": "boundary:'rejected by default' states the policy and its default",
-   "note": ""
+   "anchor": "boundary:'rejected by default' states the policy and its default"
   },
   {
+   "id": "cl-1d0fce10f192",
    "claim": "Because Stratoclave never stores an IdP refresh token, a full backend compromise cannot pivot into the customer's IAM Identity Center or SAML IdP.",
-   "file": "README.md",
-   "anchor": "contract:C6.5",
-   "note": ""
+   "anchor": "contract:C6.5@cd7deacf"
   },
   {
+   "id": "cl-2697088eaa5a",
    "claim": "Concurrent requests that would overshoot a quota cannot race.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-d6fbad895438",
    "claim": "`UsageLogs` always records the actual spend, not the reservation.",
-   "file": "README.md",
-   "anchor": "contract:C4.5"
+   "anchor": "contract:C4.5@4450b984"
   },
   {
+   "id": "cl-70a63b5822c1",
    "claim": "### Dollar pool budgets and crash-safe accounting",
-   "file": "README.md",
-   "anchor": "descriptive:a section heading",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92,C3.2a@b34d2f58,C4.1@758a15de"
   },
   {
+   "id": "cl-ef46b30f7d7e",
    "claim": "When a tenant has a **dollar pool** for the current period, the same reservation additionally reserves the request's cost — priced from the per-model `PricingConfig` table — as integer **micro-USD** (1 USD = 1 000 000 micro-USD; never a float, and cost is rounded *up* so a request is never under-charged).",
-   "file": "README.md",
-   "anchor": "contract:C2.5",
+   "anchor": "contract:C2.5@31c6f879",
    "note": "integer micro-USD, rounded up"
   },
   {
+   "id": "cl-405e956c1399",
    "claim": "A killed request leaves its hold behind; later pooled requests run a small, bounded **sweep** that reclaims expired holds — decrement and delete in one conditional transaction, so a hold is reclaimed at most once and concurrent sweepers cannot double-credit the pool: the loser's transaction cancels.",
-   "file": "README.md",
-   "anchor": "boundary:names the one way the counter can still go negative",
-   "note": ""
+   "anchor": "contract:C3.1@c99b5ea8,C3.4@5dccb5dd"
   },
   {
+   "id": "cl-8036c0219ac0",
    "claim": "So on the transactional reserve path the ledger's \"exactly one terminal per hold\" mutual exclusion and the frozen-rating guarantees carry over unchanged, and the only genuinely new money code is one idempotency record and the rehydrate.",
-   "file": "README.md",
-   "anchor": "boundary:scopes the carry-over and names the PENDING gap",
-   "note": ""
+   "anchor": "contract:C3.1@c99b5ea8,C3.4@5dccb5dd,C2.2@e1d34134"
   },
   {
+   "id": "cl-8a7eca468f0e",
    "claim": "Idempotent authorize is enforced by an idempotency record written in the same transaction as the reserve, with a request fingerprint so reusing a key for a *different* body is a `422`, never a silent wrong replay.",
-   "file": "README.md",
-   "anchor": "contract:C5.3",
-   "note": ""
+   "anchor": "contract:C5.3@b955ce39"
   },
   {
+   "id": "cl-ba03fbba1061",
    "claim": "- **The key identifies the operation, byte for byte.** The idempotency record is addressed by a digest of the raw `Idempotency-Key`, so two different keys are two different operations: an earlier version sanitised the key into a sort key, which merged `invoice/a` and `invoice?a` onto one record — the second authorize then either replayed the first, reporting success for an amount that was never held, or was refused as a reused key.",
-   "file": "README.md",
-   "anchor": "contract:C5.2",
-   "note": ""
+   "anchor": "contract:C5.2@4699cd71"
   },
   {
+   "id": "cl-fc429b8bdd2d",
    "claim": "OpenAI `Chat Completions` payload on the **same** Bedrock converse backend. Streaming + tool calls. Unsupported params (`n>1`, `logprobs`, `response_format`, `image_url`) rejected with `400`, never silently dropped. Requires the `messages:send` scope.",
-   "file": "README.md",
-   "anchor": "contract:C13.1",
-   "note": ""
+   "anchor": "contract:C13.1@71541376"
   },
   {
-   "claim": "> For **how far each differentiating claim below is actually verified today**",
-   "file": "README.md",
-   "anchor": "descriptive:a pointer to EVIDENCE.md",
-   "note": ""
+   "id": "cl-2f9e315b4448",
+   "claim": "For **how far each differentiating claim below is actually verified today** (formal proof / gateway-live / direct baseline / moto·in-process / unverified), with commit SHAs and the exact limits of every measurement, see the reach-map: [`docs/EVIDENCE.md`](./docs/EVIDENCE.md).",
+   "anchor": "descriptive:a pointer to the reach-map in EVIDENCE.md and the tiers it uses"
   },
   {
-   "claim": "> (formal proof / gateway-live / direct baseline / moto·in-process / unverified),",
-   "file": "README.md",
-   "anchor": "descriptive:lists the evidence tiers used in EVIDENCE.md",
-   "note": ""
-  },
-  {
+   "id": "cl-96868f70bb83",
    "claim": "**No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), but retaining their reservations is opt-in and off by default, so today such an outcome still returns its budget. See the crash-safe row below.",
-   "file": "README.md",
-   "anchor": "boundary:states that the ceiling is over the admitted amount",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92,C1.2@f5b97cc2,C1.5@75c6b04a,C8.3@a3881eee"
   },
   {
+   "id": "cl-3655fa510675",
    "claim": "**No client bypass**, and **pre-call reservation is shipped** — `litellm/proxy/spend_tracking/budget_reservation.py` (first committed 2026-04-30) reserves before the call, fails closed when the reservation cannot be written, clamps adversarial `max_tokens`, and covers seven scopes. The admission counter is a `DualCache` (in-process + Redis) with the DB as an authority that catches up; the code documents recovery paths for Redis restart / cross-pod reset. **We have not tested whether the ceiling holds through cache loss, and we do not claim it fails.** The honest difference is the guarantee level, not the presence of a reservation. Verify against the version you deploy",
-   "file": "README.md",
-   "anchor": "boundary:'We have not tested whether the ceiling holds through cache loss'",
-   "note": ""
+   "anchor": "descriptive:describes LiteLLM's own pre-call reservation feature and where its code lives"
   },
   {
+   "id": "cl-1853d80f4ec0",
    "claim": "**Deploy region is operator-chosen** (`STRATOCLAVE_REGION`; only the CLOUDFRONT-scope WAF is pinned to us-east-1). **Bedrock model region is independent** (`BEDROCK_PRIMARY_REGION`). Streaming failover is configurable (`STRATOCLAVE_FAILOVER_REGIONS`), and the default set is jurisdiction-filtered so a non-US primary never back-doors to the US. `STRATOCLAVE_RESIDENCY=strict` fails the synth if any Bedrock call region (model + failover + codex) leaves the deploy region, or if the model is a geo inference profile. **aws partition only** (GovCloud/China rejected)",
-   "file": "README.md",
-   "anchor": "contract:C11.4",
-   "note": ""
+   "anchor": "contract:C11.4@d9fa3030"
   },
   {
+   "id": "cl-198144923a40",
    "claim": "**Reproducible Savings Report** (`mvp.learning.savings`; renamed from \"Savings Certificate\" in [docs/SCOPE.md](docs/SCOPE.md) — \"certificate\" overstates what the retention and export story currently support): a per-`(tenant, day)` **counterfactual** \"if you'd followed the routing advice\" figure over each request's REAL billed tokens (joined to the ledger by `span_id`), escalation loss **subtracted not hidden** (`net` can be negative), coverage spend-weighted. Reproducible means replayable, not merely recomputable: the report embeds the four rate legs it priced each key at and the model resolutions it used, so `savings_cli --replay` reproduces the same figure at any later date and a rate change since issue cannot move it. A replay whose embedded basis is missing a key refuses rather than quietly pricing that row at today's rate. Detail rows beyond the stored cap are not retained, so a replay reproduces the figure and the classes, not every per-request line. Quality parity is a separate tenant eval; no saving is claimed until measured. Shadow mode emits it with zero behaviour change. Reproducible one-command demo: [`docs/demo/savings-vs-litellm.md`](docs/demo/savings-vs-litellm.md)",
-   "file": "README.md",
-   "anchor": "boundary:'Reproducibility has a stated boundary'",
-   "note": ""
+   "anchor": "contract:C2.3@6121c34e,C4.4@eb3300c1"
   },
   {
+   "id": "cl-2e376a8e476a",
    "claim": "The single thing neither competitor can easily replicate is the **atomic pre-flight reserve/settle with crash-safe HOLD rows and a quota-driven model cascade wired into it**.",
-   "file": "README.md",
-   "anchor": "contract:C1.2",
-   "note": ""
+   "anchor": "contract:C1.2@f5b97cc2"
   },
   {
+   "id": "cl-4e128200130f",
    "claim": "A broker cannot do it *by construction* — it is not in the data path, so there is no request-time point to enforce at.",
-   "file": "README.md",
-   "anchor": "descriptive:about brokers",
-   "note": ""
+   "anchor": "descriptive:about brokers"
   },
   {
+   "id": "cl-f62782d64e7e",
    "claim": "Comparing only *shipped* capability (not \"could be built\" — by that logic every product's features are possible in every other, which decides nothing), the broker's cap is a soft IAM/telemetry one because it has no request-time choke point at all, while LiteLLM and Stratoclave both reserve before the call.",
-   "file": "README.md",
-   "anchor": "boundary:'only shipped capability' scopes what is being compared",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-489b7b86c750",
    "claim": "Between those two the difference is *where the enforcing state lives* — a cache with a catching-up database, versus a single authoritative store whose transition carries a machine-checked proof that double-counting cannot occur.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-6499e7bde5b4",
    "claim": "**Pick Stratoclave** for an AWS-committed, Bedrock-first (self-hosted GPU / any OpenAI-compatible backend bindable to the same machine-checked transition model), single-region (operator-chosen) shop that needs hard per-tenant dollar caps enforced pre-flight so a request cannot be ADMITTED past them, and — unlike a post-hoc counter — cannot even transiently overshoot under concurrency (an application-level invariant: an atomic snapshot-locked reservation, not a database `ConditionExpression`) — e.g.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
+   "anchor": "contract:C1.1@a32b5b92",
    "note": "'cannot be ADMITTED past them' is the admission clause"
   },
   {
+   "id": "cl-272069c192b8",
    "claim": "**Pick a credential broker** when you must distribute to a large fleet via MDM, need GovCloud / EU or multi-region data residency, or cannot accept any new component on the inference availability path — and post-hoc audit (Bedrock invocation logging + CloudTrail) is sufficient.",
-   "file": "README.md",
-   "anchor": "descriptive:when to pick a broker instead",
-   "note": ""
+   "anchor": "descriptive:when to pick a broker instead"
   },
   {
+   "id": "cl-e9f7ad8f6b71",
    "claim": "The gating insight held: **semantic routing only *proves* a cost saving once the ledger and rating layers exist** — an un-provable saving cannot be billed — so the ledger/rating work was P0 and shipped first; the router is P1.",
-   "file": "README.md",
-   "anchor": "descriptive:why the ledger work preceded the router",
-   "note": ""
+   "anchor": "descriptive:why the ledger work preceded the router"
   },
   {
+   "id": "cl-4bddc706fbd9",
    "claim": "Crash-safe HOLD + settle; single TERMINAL sk per hold is the idempotency key",
-   "file": "README.md",
-   "anchor": "contract:C3.4",
-   "note": ""
+   "anchor": "contract:C3.4@5dccb5dd"
   },
   {
+   "id": "cl-0ffa6f76fd6a",
    "claim": "Pins \"which price, when\" so a price change never breaks past invoices; also the basis for \"how much the router saved\"",
-   "file": "README.md",
-   "anchor": "contract:C2.2",
-   "note": ""
+   "anchor": "contract:C2.2@e1d34134"
   },
   {
+   "id": "cl-bedc0822b3ab",
    "claim": "Records chosen vs rejected models + cost delta, so router savings are *provable* (a partial-sum estimate, honestly labeled), not a black box",
-   "file": "README.md",
-   "anchor": "boundary:'a partial-sum estimate, honestly labeled'",
-   "note": ""
+   "anchor": "boundary:'a partial-sum estimate, honestly labeled'"
   },
   {
+   "id": "cl-ef5b5b0d943e",
    "claim": "Source-agnostic `RouteDecision` port (`mvp/sr/`), per-tenant `sr_mode` tri-state (off/canary/active), deterministic session-sticky canary + breaker, SR-vs-ledger divergence evidence; money invariants proven (Z3 + Hypothesis) against a fake-SR harness",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
+   "anchor": "contract:C1.1@a32b5b92",
    "note": "the money invariants named are the admission ones"
   },
   {
+   "id": "cl-4dfe70573bf1",
    "claim": "Sticky per-session model choice + tool-loop hard-lock so an agentic loop doesn't thrash models mid-task; plus idle/drift reset and a verified, bounded provider-state lock for continuation ids; switch cost recorded on the decision as a comparison, never discounted off the reservation. Superseded by the real SR's own session-aware policy above; retained for its provider-state lock, which the replacement does not cover ([EVIDENCE.md](docs/EVIDENCE.md))",
-   "file": "README.md",
-   "anchor": "boundary:'kept as the interim until the SR eval client lands'",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-6eb9864ae5f2",
    "claim": "A central, external advisor can *suggest* a routing pin; the suggestion passes the same allowlist as a client pin, so it can never expand access or touch money. Predates the real-SR integration; the eval-decide path above replaces it",
-   "file": "README.md",
-   "anchor": "contract:C1.6",
+   "anchor": "contract:C1.6@fabb0bb4",
    "note": "the suggestion passes the same policy set as a client pin"
   },
   {
+   "id": "cl-1ed6a28203c7",
    "claim": "A local, rule-based judge records whether a cheaper same-family model would have sufficed — advisory only, never steering execution/routing/money — so the certificate reports a *potential* saving with no behaviour change",
-   "file": "README.md",
-   "anchor": "boundary:'advisory only, never steering execution/routing/money'",
-   "note": ""
+   "anchor": "boundary:'advisory only, never steering execution/routing/money'"
   },
   {
+   "id": "cl-95aa99b30929",
    "claim": "**Join SR's decision to the ledger by `span_id`** for the divergence metric and the Savings Certificate — SR's cost figure is evidence, never the charge.",
-   "file": "README.md",
-   "anchor": "contract:C2.2",
+   "anchor": "contract:C2.2@e1d34134",
    "note": "SR's figure is evidence; the charge comes from the frozen snapshot"
   },
   {
+   "id": "cl-8cb957c0a3dd",
    "claim": "The contract this gateway is judged against: every clause, the level it holds at, the test that fails if a proven or enforced clause stops holding (or, for a clause that holds only inside a configuration, that configuration), and the clauses it does not satisfy yet. Start here to know what is guaranteed and what is merely true today.",
-   "file": "README.md",
-   "anchor": "contract:C10.1",
+   "anchor": "contract:C10.1@03b8ff5d",
    "note": "the sentence describes the property C10.1 enforces"
   },
   {
+   "id": "cl-52ae05b86355",
    "claim": "The dollar ceiling for strict-mode traffic: the reservation bound, what strict mode refuses, the assumptions the guarantee rests on, and the reaper's part in it.",
-   "file": "README.md",
-   "anchor": "descriptive:describes what hard-ceiling.md contains",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-d0612c7444cb",
    "claim": "The counterfactual savings report: what is potential, what is realised, and why they are never added.",
-   "file": "README.md",
-   "anchor": "descriptive:describes what the savings design document contains",
-   "note": ""
+   "anchor": "descriptive:describes what the savings design document contains"
   },
   {
+   "id": "cl-e8bbe2d2fa24",
    "claim": "Infrastructure-level hardening is enforced at synth time by `cdk-nag` (CommonSolutionsChecks) and, at runtime, by:",
-   "file": "README.md",
-   "anchor": "contract:C11.4",
+   "anchor": "contract:C11.4@d9fa3030",
    "note": "synth-time hardening, same class as the residency check"
   },
   {
+   "id": "cl-9f3a064825f8",
    "claim": "- DynamoDB `RETAIN` on audit-critical tables (`usage-logs`, `api-keys`); PITR is always on for `api-keys` and enabled for `usage-logs` in production,",
-   "file": "README.md",
-   "anchor": "boundary:'enabled for usage-logs in production' states where it applies",
-   "note": ""
+   "anchor": "boundary:'enabled for usage-logs in production' states where it applies"
   },
   {
+   "id": "cl-99cc36f57540",
    "claim": "- Bedrock bearer tokens minted with a 15-minute TTL (capped in `openai_responses.py`); the token lives only in the ECS task heap for the duration of one request and is never persisted to DynamoDB or logs,",
-   "file": "README.md",
-   "anchor": "contract:C12.5"
+   "anchor": "contract:C12.5@60b55405"
   },
   {
+   "id": "cl-1763ff51d73a",
    "claim": "Credit reservation is the ADMISSION ceiling — the amount a request is admitted at — and is always atomic in DynamoDB.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-23e1ba1c8f45",
    "claim": "+ quota-driven cascading fallback** (Opus → Sonnet → Haiku, priced and settled per candidate, across all three API surfaces); crash-safe hold sweep; staged budget breaker (tier cap at ≤25%, `402` at ≤5%); InfraRouter retry + cross-region failover with first-event commit; OpenAI Chat Completions and Responses (codex) surfaces; multi-task / multi-AZ ECS with DynamoDB-backed per-IP rate limiting; **request correlation** (client-supplied `x-sc-group-id` / `x-sc-workflow-run-id` headers, server-minted span id, echoed on the response); **dual-track observability** (per-request span records + per-workflow-run rollups, with a `canceled_by_client` flag) and a **write-only routing-signals log** for offline routing evaluation — all three fire-and-forget, DynamoDB-only, and money-neutral.",
-   "file": "README.md",
-   "anchor": "contract:C1.2",
-   "note": ""
+   "anchor": "contract:C1.2@f5b97cc2"
   },
   {
-   "claim": "> only*: it records a counterfactual and never steers execution, routing, or",
-   "file": "README.md",
-   "anchor": "boundary:'advisory only' — it records and does not steer",
-   "note": ""
+   "id": "cl-261415bbe25e",
+   "claim": "**Current state in one line:** the only routing features that *do something* when enabled today are **home-grown**: SAAR and the external advisor (both flag-gated, default off) and the shadow judge (default-on for new tenants — but *advisory only*: it records a counterfactual and never steers execution, routing, or money).",
+   "anchor": "boundary:'*advisory only*: it records a counterfactual and never steers execution, routing, or money' is the limit stated in the sentence"
   },
   {
+   "id": "cl-c106b884421a",
    "claim": "Sticky per-session model choice with a tool-loop hard-lock, and the cost of switching recorded on the decision as a reproducible comparison; backed by a DynamoDB session-memory table.",
-   "file": "README.md",
-   "anchor": "contract:C2.2",
+   "anchor": "contract:C2.2@e1d34134",
    "note": "a comparison on the decision, not a discount on the reservation"
   },
   {
+   "id": "cl-bc3eec3c6ac7",
    "claim": "Beyond the sticky/tool-loop core, SAAR also implements **idle-timeout reset**, **decision-drift reset**, and a **provider-state lock** — a request carrying a non-portable continuation id (an OpenAI Responses `previous_response_id`) is hard-locked to the backend that minted it, verified against the id the session actually minted (a forged/foreign id never locks) and bounded by a hard cap so a retired backend can never strand a session.",
-   "file": "README.md",
-   "anchor": "boundary:'bounded by a hard cap so a retired backend can never strand'",
-   "note": ""
+   "anchor": "boundary:'bounded by a hard cap so a retired backend can never strand'"
   },
   {
+   "id": "cl-f152308ecb07",
    "claim": "The suggestion is fed into the **same** resolver inputs as a client `x-sc-model-pin`, so it passes the same tenant allowlist + servability enforcement and can never expand model access or touch money.",
-   "file": "README.md",
-   "anchor": "contract:C1.6",
-   "note": ""
+   "anchor": "contract:C1.6@fabb0bb4"
   },
   {
+   "id": "cl-26c409e3b11f",
    "claim": "A version-pin handshake (UNVERIFIED/VERIFIED/REFUSED) gates every consult; an unreachable or unpinned advisor degrades to normal Bedrock routing.",
-   "file": "README.md",
-   "anchor": "boundary:'degrades to normal Bedrock routing' states the failure behaviour",
-   "note": ""
+   "anchor": "boundary:'degrades to normal Bedrock routing' states the failure behaviour"
   },
   {
+   "id": "cl-551f98239fac",
    "claim": "Per-tenant config is stored as an **opaque** S3 blob that Stratoclave never parses — save-time validation is delegated to the advisor's own `/v1/config/validate` (see [`docs/VSR_CONFIG_CONTRACT.md`](./docs/VSR_CONFIG_CONTRACT.md)).",
-   "file": "README.md",
-   "anchor": "boundary:'never parses' scopes what the gateway does with the blob",
-   "note": ""
+   "anchor": "boundary:'never parses' scopes what the gateway does with the blob"
   },
   {
+   "id": "cl-e1802cd9e100",
    "claim": "The package (`backend/mvp/sr/`) ships the source-agnostic `RouteDecision` port, the `sr_mode` tri-state (off/canary/active) with an operator kill-switch, a deterministic session-sticky canary + circuit breaker, and an SR-vs-ledger divergence evidence block; the money invariants (no forward without a reserve, final ≤ reserve, single settle) are proven with Z3 and Hypothesis against a fake-SR harness.",
-   "file": "README.md",
-   "anchor": "contract:C1.1",
+   "anchor": "contract:C1.1@a32b5b92",
    "note": "the money invariants named are admission and single-settle"
   },
   {
+   "id": "cl-7dfac2830a5b",
    "claim": "**Billing gateway.** Metering, rating (physical units → micro-USD, with margin / provider-cost allocation), pre-flight authorization (two-phase authorize/capture, tiered circuit breaker), and an event-sourced, idempotent, tenant-isolated credit ledger whose **zero-double-posting invariant is formally proven (Z3)**.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:describes the billing-gateway layer's job",
-   "note": ""
+   "anchor": "contract:C9.1@b1de7fbe,C4.1@758a15de,C5.3@b955ce39,C6.2@6d6b51ff,C3.4@5dccb5dd"
   },
   {
+   "id": "cl-8526289ec2c3",
    "claim": "The gateway is the *only* place that can completely observe \"which request routed where, cost how much, waited how long, and succeeded or not.\" That observation position is not replaceable by the VSR or by a learning system, so producing it — with a fixed schema, completeness, ordering, and re-delivery guarantees — is Stratoclave's job.",
-   "file": "docs/SCOPE.md",
-   "anchor": "contract:C4.4",
-   "note": ""
+   "anchor": "contract:C4.4@eb3300c1"
   },
   {
+   "id": "cl-56fbc20b27d1",
    "claim": "Outcome-based pricing ($/resolved ticket) is explicitly out: verifying \"resolved\" needs business-domain ground truth the gateway cannot access, and it would make Stratoclave the arbiter of a billing dispute it has no evidence for.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'the gateway cannot access' business ground truth",
-   "note": ""
+   "anchor": "boundary:'the gateway cannot access' business ground truth"
   },
   {
+   "id": "cl-13017a66e28e",
    "claim": "If outcome billing is ever needed, it is an **external** layer that consumes the ledger export and joins on `span_id`; it is never built into the core.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a scope decision about where outcome billing would live",
-   "note": ""
+   "anchor": "descriptive:a scope decision about where outcome billing would live"
   },
   {
+   "id": "cl-cd0412ec7f22",
    "claim": "Bedrock, a self-hosted GPU (the `served_by=\"vllm\"` transport seam + `VLLM_ENDPOINTS` allowlist — vLLM speaks OpenAI-compatible, so effectively any open model), and any OpenAI-compatible endpoint all flow through the **same** reserve / rating / settle and the same ledger, whose money-transition model carries a machine-checked no-double-post invariant.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:describes the transport seam and its endpoint allowlist",
-   "note": ""
+   "anchor": "descriptive:describes the transport seam and its endpoint allowlist"
   },
   {
+   "id": "cl-f20e1e2ddda6",
    "claim": "The claim here is about *where the enforcing state lives*: their admission counter is a `DualCache` (in-process + Redis) with the database as an authority that catches up, while Stratoclave puts admission and the money move in one authoritative store whose transition carries a machine-checked proof.",
-   "file": "docs/SCOPE.md",
-   "anchor": "contract:C1.1",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-5a3d215ceae1",
    "claim": "(An earlier version of this document called their billing best-effort; that was inaccurate and is withdrawn.) Whether their ceiling holds through cache loss is **unverified by us and we do not assert that it fails.** Binding an arbitrary backend under a proven charge of record remains the distinct capability.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'unverified by us and we do not assert that it fails'",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92,C4.3@65517bb0"
   },
   {
+   "id": "cl-cb57bfd8b0ca",
    "claim": "For a claim-by-claim map of **how far each is verified today** (formal proof / gateway-live / direct baseline / moto·in-process / unverified), with commit SHAs and the exact limits of each measurement, see [EVIDENCE.md](EVIDENCE.md):",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a pointer to the verification map",
-   "note": ""
+   "anchor": "descriptive:a pointer to the verification map"
   },
   {
+   "id": "cl-df7313d64164",
    "claim": "**A ledger whose money transitions carry a machine-checked invariant.** LiteLLM's cost tracking is approximate observability that cannot stand as a charge of record.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a claim about LiteLLM's cost tracking",
-   "note": ""
+   "anchor": "descriptive:a claim about LiteLLM's cost tracking"
   },
   {
+   "id": "cl-0a50052d1a77",
    "claim": "A pre-authorized, integer-exact ledger whose transitions carry a machine-checked proof is the \"buy\" side of build-vs-buy for any product that bills tenants for LLM usage.",
-   "file": "docs/SCOPE.md",
-   "anchor": "contract:C2.5",
+   "anchor": "contract:C2.5@31c6f879",
    "note": "integer micro-USD plus the machine-checked transition"
   },
   {
+   "id": "cl-18fda3937065",
    "claim": "Its in-flight migration (the PENDING protocol, which removes a permanent two-path flag) is being landed under a Z3 joint-transition **equivalence** proof — the old and new money paths are proven to move money identically before the old one is deleted (`27d86db`) — a proof over the modelled transitions, not over the shipped replay path.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'a proof over the modelled transitions, not over the shipped replay path'",
-   "note": ""
+   "anchor": "boundary:'a proof over the modelled transitions, not over the shipped replay path'"
   },
   {
+   "id": "cl-e60594a8829a",
    "claim": "**What this loop produces: a Reproducible Savings Report.** (Renamed from \"Savings Certificate\": until the long-term immutable sink and the export contract land, \"certificate\" overstates it.) What is distinctive is not having a savings figure — LiteLLM ships `router_strategy/savings_baseline.py`, and an earlier claim here of \"a number LiteLLM structurally cannot produce\" was wrong and is withdrawn — but the **shape of the computation**: resolve=)` is a pure function taking normalized rows, a versioned rate table, and a resolver as explicit inputs, priced over each request's REAL billed tokens and joined to the ledger by `span_id`.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'until the long-term immutable sink and the export contract land'",
-   "note": ""
+   "anchor": "contract:C4.4@eb3300c1"
   },
   {
+   "id": "cl-24afdaf407a1",
    "claim": "It subtracts escalation loss (never hides it — `net` can be negative) and states its coverage.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'never hides it — net can be negative' and 'states its coverage'",
-   "note": ""
+   "anchor": "boundary:'never hides it — net can be negative' and 'states its coverage'"
   },
   {
+   "id": "cl-06e2ab16e510",
    "claim": "**The asymmetry.** For Stratoclave to absorb LiteLLM's edge is a compatibility shim for the non-OpenAI-compatible providers, after which that traffic flows through the same machine-checked money-transition model — a claim about the shape of the work rather than about how long anyone would take, since the estimate in quarters is withdrawn below.",
-   "file": "docs/SCOPE.md",
    "anchor": "boundary:'a claim about the shape of the work rather than about how long anyone would take' — the schedule estimate is withdrawn in the sentence",
    "note": "the substantive claim is that a bound backend's traffic goes through the same admission; the effort figure is an estimate, stated as a range"
   },
   {
+   "id": "cl-0ad52e878f85",
    "claim": "For LiteLLM to absorb Stratoclave's edge — an event-sourced, idempotent, machine-checked-transition reserve/rating/settle ledger — would be a re-design rather than a retrofit.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'would be a re-design rather than' compares scope without claiming a date",
-   "note": ""
+   "anchor": "contract:C4.1@758a15de,C5.3@b955ce39,C3.4@5dccb5dd,C2.1@10963aad"
   },
   {
+   "id": "cl-b756f1d21d7e",
    "claim": "But **stating that asymmetry as a fixed number of quarters was unfounded and is withdrawn**: LiteLLM has been extending reservation, dynamic routing, and Bedrock support quickly, and we cannot estimate another project's delivery speed from outside.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:the sentence withdraws the earlier claim",
-   "note": ""
+   "anchor": "descriptive:withdraws an estimate about LiteLLM's delivery speed; a statement about another project"
   },
   {
+   "id": "cl-ff15588c7ab4",
    "claim": "Two different p99 figures exist and must always be named with their metric, because quoting one for the other has caused confusion: the ledger `TransactWriteItems` is **p99 = 58 ms at the zero-contention floor**, while **end-to-end authorize is p99 = 225 ms** (see EVIDENCE.md).",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a rule for how to report the two figures",
-   "note": ""
+   "anchor": "descriptive:a rule for how to report the two figures"
   },
   {
+   "id": "cl-10aa973cee91",
    "claim": "Honest current state: _correctness_ proven, _speed_ measured and **below target on the current synchronous four-item-transaction design** — closing it needs a design change (single-item conditional update where the money-move allows, and/or pool-row sharding), not tuning.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'below target on the current synchronous four-item-transaction path'",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-4d34794abaf3",
    "claim": "The discipline: dissatisfaction with a VSR verdict is expressed as feedback *on the decision record*, and the improvement is bet on the VSR's evolution — never on a home-grown classifier.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a working discipline, not a guarantee",
-   "note": ""
+   "anchor": "descriptive:a working discipline, not a guarantee"
   },
   {
+   "id": "cl-40484fbed54b",
    "claim": "Stratoclave wins on one thing only: **a ledger whose money-transition model carries a machine-checked no-double-post invariant, and a synchronous enforcement point, wired to an external judgment engine through a schema'd feedback loop.** The Z3-proven zero-double-posting invariant is diluted every time a feature adds code outside the proven region.",
-   "file": "docs/SCOPE.md",
-   "anchor": "boundary:'on one thing only' scopes the claim",
-   "note": ""
+   "anchor": "contract:C3.4@5dccb5dd,C1.1@a32b5b92"
   },
   {
+   "id": "cl-1164c66ebdb7",
    "claim": "**Before adding a feature, ask whether it carries a provable invariant.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a rule for deciding what to build",
-   "note": ""
+   "anchor": "descriptive:a rule for deciding what to build"
   },
   {
+   "id": "cl-6d79e3ad9ae5",
    "claim": "- **Open source (Apache 2.0).** The comparison is on capability, not on distribution; the ledger's proof and code are inspectable.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a note on what the comparison covers",
-   "note": ""
+   "anchor": "descriptive:a note on what the comparison covers"
   },
   {
+   "id": "cl-e3169ca3623c",
    "claim": "- **Owned and built:** the AI-gateway core (unified API, adapters, streaming, virtual keys, fallback, rate limit); the billing core (metering, rating, two-phase authorize/capture, tiered breaker, a ledger with a Z3-checked no-double-post invariant over its transition model); LLM router execution (allowlist / breaker / VSR hard-pin / fallback chain); a transport seam (`served_by=\"vllm\"`) that binds a **self-hosted GPU / any OpenAI-compatible backend** to the *same* reserve/rating/settle path; version- pinned external VSR consult with the \"advice quality is the VSR's, honoring and charging is ours\" boundary; SAAR (sticky, tool-loop lock, idle reset, decision drift, provider-state lock) as routing-optimization state; the offline VSR billing reconciliation.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:an ownership list",
-   "note": ""
+   "anchor": "descriptive:an ownership list"
   },
   {
+   "id": "cl-b8f46fa96f04",
    "claim": "\"A ledger with a machine-checked no-double-post invariant that you can afford on the hot path\" is the entire pitch, so this is the highest-leverage item: it needs a design change (single-item conditional update and/or pool-row sharding), not tuning.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:a statement about leverage",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92,C3.4@5dccb5dd"
   },
   {
+   "id": "cl-837bde6539e7",
    "claim": "It fixes the VSR-integration *contract* in code before the integration deepens (so loose coupling is not dragged into the VSR's internal schema), reuses responsibility #2's \"never drop a fact\" muscle, and turns accumulated records into a time-compounding learning asset even while the VSR's accuracy is still low.",
-   "file": "docs/SCOPE.md",
-   "anchor": "descriptive:describes what the next piece of work does",
-   "note": ""
+   "anchor": "descriptive:describes what the next piece of work does"
   },
   {
+   "id": "cl-9b8b3f610444",
    "claim": "The normative source for the dollar-ceiling behaviour: what strict mode guarantees, what it refuses, and the assumptions the guarantee rests on.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:describes what hard-ceiling.md is",
-   "note": ""
+   "anchor": "descriptive:describes what hard-ceiling.md is"
   },
   {
+   "id": "cl-fd8352d0c0eb",
    "claim": "The shadow measurement and the refusal-rate target are in section 9b, because the gate cannot be switched on responsibly without them.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'cannot be switched on responsibly without them'",
-   "note": ""
+   "anchor": "boundary:'cannot be switched on responsibly without them'"
   },
   {
+   "id": "cl-d425bf7cc48e",
    "claim": "The ceiling theorem's precondition is met only where the bound is computed from bytes — the `measured`, `shadow` and `enforced` states below.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-e4483197674c",
    "claim": "[`../EVIDENCE.md`](../EVIDENCE.md) is the live map of how far each claim is verified; where this document and that one disagree, that one is describing today.",
-   "file": "docs/design/hard-ceiling.md",
    "anchor": "descriptive:a pointer to the document that records how far each claim is verified"
   },
   {
+   "id": "cl-2118f476a32b",
    "claim": "Every rule written for `enforced` applies in `shadow` except the refusals and the criteria that test them.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-aa1140cddac1",
    "claim": "`enforced` is per dimension, not per tenant: a tenant with a token quota and no pool is enforced on tokens and accounting on dollars, and touches the balance row but never the pool row.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'per dimension, not per tenant' scopes what enforced means",
-   "note": ""
+   "anchor": "contract:C1.2@f5b97cc2"
   },
   {
+   "id": "cl-e61bb4f40686",
    "claim": "**Everything concerning the bound, `reserved_microusd`, the pool row, the refusals of section 6 and the reaper of section 5 belongs to the dollar dimension and applies only where a pool limit exists.** A tenant enforced on tokens alone gets none of it: no bound, no dollar reservation, no `reserved_microusd` on its terminal, and no new refusal.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-1e4645a2920a",
    "claim": "`strict` and `calibrated` are settings **within** `enforced`; they change how the bound is derived, not whether it gates.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-ebb863b192bf",
    "claim": "The provider cannot cache content it was not sent, so this covers any caching behaviour with no assumption about what it caches.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-949c87bd5cb6",
    "claim": "If a route can produce a value the gateway cannot determine before the call, refuse rather than assume 1.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'refuse rather than assume' is the rule and its limit",
-   "note": ""
+   "anchor": "boundary:'refuse rather than assume' is the rule and its limit"
   },
   {
+   "id": "cl-67dc5b80353c",
    "claim": "- **Monotone in every input.** More bytes, a higher output ceiling or a larger effort multiplier may never decrease the bound.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "contract:C1.5",
+   "anchor": "contract:C1.5@75c6b04a",
    "note": "monotonicity is a property of the bound the clause rests on"
   },
   {
+   "id": "cl-ada22f10e9ee",
    "claim": "If the tenant's headroom cannot cover a second full reservation, the retry is refused; that is the correct outcome, not a regression.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-e3c118c0aa96",
    "claim": "- **Fail closed.** An image whose dimensions cannot be determined — unsupported format, truncated or malformed header, a header disagreeing with the payload — is refused, never admitted with the term skipped.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "contract:C1.5",
+   "anchor": "contract:C1.5@75c6b04a",
    "note": "fail closed on an unsizeable image is what makes the bound a bound"
   },
   {
+   "id": "cl-5f8c881307c4",
    "claim": "## 4. The assumptions the guarantee rests on",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:a section heading",
-   "note": ""
+   "anchor": "descriptive:a section heading"
   },
   {
+   "id": "cl-97adc1d3af72",
    "claim": "Put these where a reader of the guarantee will see them.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "descriptive:an instruction to implementers of this design"
   },
   {
+   "id": "cl-1bc5b4c84831",
    "claim": "The guarantee is conditional on all four, and each is either checked or explicitly unchecked.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'each is either checked or explicitly unchecked'",
-   "note": ""
+   "anchor": "boundary:'each is either checked or explicitly unchecked'"
   },
   {
+   "id": "cl-05db3a17573e",
    "claim": "- **A hold is not reaped while its charge can still arrive.** Enforced by section 5.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-81664db7c2fc",
    "claim": "**Tool use needs no special rule, and this was checked rather than assumed.** `_reject_server_side_tools` in `backend/mvp/anthropic.py` already refuses Anthropic's server-executed tools — web search, web fetch, code execution, computer, bash, text editor — on every route and in every mode, because Bedrock's Converse API cannot express them.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'checked rather than assumed' with the function that checks it",
-   "note": ""
+   "anchor": "boundary:'checked rather than assumed' with the function that checks it"
   },
   {
+   "id": "cl-6dfd17c9db62",
    "claim": "## 5. The reaper is part of the guarantee, not housekeeping",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:a section heading",
-   "note": ""
+   "anchor": "descriptive:a section heading"
   },
   {
+   "id": "cl-4bb0d2d2eec0",
    "claim": "Derive it from those values in code rather than choosing a constant, so a change to a timeout cannot silently invalidate it.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "descriptive:an instruction to implementers of this design"
   },
   {
+   "id": "cl-c3d40e1cfbd5",
    "claim": "A guarantee that depends on two independently configured durations must not depend on someone noticing.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:a design principle about configuration coupling",
-   "note": ""
+   "anchor": "descriptive:a design principle about configuration coupling"
   },
   {
+   "id": "cl-23c5e2b6a6ef",
    "claim": "- A charge for an attempt that returned no usage block never appears in the ledger at all, which is **out of scope by the owner's decision** rather than a gap waiting to be closed: what the gateway cannot observe is outside the cost model.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'out of scope by the owner's decision' — the sentence states the limit and whose decision it is"
+   "anchor": "contract:C4.4@eb3300c1"
   },
   {
+   "id": "cl-eb2cb4edb356",
    "claim": "## 6. What strict mode refuses, and what it guarantees",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:a section heading",
-   "note": ""
+   "anchor": "descriptive:a section heading"
   },
   {
+   "id": "cl-323ec00356a7",
    "claim": "Refused at admission, before any upstream call, **in `enforced` only**:",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-091436a9cb9f",
    "claim": "- an image whose dimensions cannot be read, or an S3-referenced image",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an item in the refusal list",
-   "note": ""
+   "anchor": "descriptive:an item in the refusal list"
   },
   {
+   "id": "cl-e766e0469b71",
    "claim": "- a request whose `effort_multiplier` cannot be determined before the call",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an item in the refusal list",
-   "note": ""
+   "anchor": "descriptive:an item in the refusal list"
   },
   {
+   "id": "cl-dddf8c03c811",
    "claim": "That is not in tension with the rule that a high refusal *rate* is answered by a tighter bound and never by a larger limit: one is a single request that cannot fit, the other is a bound that is too loose.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-592905afcd5c",
    "claim": "A request whose bound cannot be computed in `measured` is recorded with the bound absent and a reason, and proceeds.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-fdfee6a207d1",
    "claim": "\"Every request either gets a bound or is refused\" is a rule of `enforced`.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'is a rule of enforced' scopes it to the mode",
-   "note": ""
+   "anchor": "boundary:'is a rule of enforced' scopes it to the mode"
   },
   {
+   "id": "cl-0a98f90f1b0e",
    "claim": "The guarantee, stated with its boundary rather than as a slogan: **for admitted requests, the pool cannot be overspent, except for two cases, both alarmed and both recorded with their own cause code — a charge whose hold was reaped before it settled, and a charge where the provider exceeded the output ceiling it was given.** Those are the visible failure modes; there are two, not one.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92,C1.5@75c6b04a"
   },
   {
+   "id": "cl-4b532d43a8b5",
    "claim": "Do not write \"overspend is impossible\" without naming both.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "descriptive:an instruction to implementers of this design"
   },
   {
+   "id": "cl-e44c42c8d665",
    "claim": "And one limit that no rule in this document removes: **a charge landing at Bedrock and the ledger write recording it are not atomic.** If Bedrock bills a request and this process then dies, the hold is never settled, the reaper releases it, and the real spend vanishes from the ledger — after which later admissions can carry the pool past its limit with every invariant here still intact, because the ledger no longer holds the charge.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C3.5@366e2c08"
   },
   {
+   "id": "cl-e82055c4eab3",
    "claim": "Say so wherever the guarantee is stated; it is the ceiling on the ceiling.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "descriptive:an instruction to implementers of this design"
   },
   {
+   "id": "cl-745a02b59475",
    "claim": "The principle, from which every rule below follows: **the only reason to serialise requests on a shared item is to prove that a limit was not exceeded.** Measurement needs no such proof, so measurement needs no serialisation.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-ef22e1dbaee1",
    "claim": "- no conditional write, even one whose condition cannot fail — an always-true condition still costs a round trip and still contends on the item",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:a performance rule for the hot path",
-   "note": ""
+   "anchor": "descriptive:a performance rule for the hot path"
   },
   {
+   "id": "cl-c24697803543",
    "claim": "**What measurement legitimately needs, and may always do:** write the usage row for the request.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:defines what the measurement mode is permitted to do",
-   "note": ""
+   "anchor": "descriptive:defines what the measurement mode is permitted to do"
   },
   {
+   "id": "cl-8c79b9056787",
    "claim": "**Do not compute the bound where it cannot be enforced**, unless a measurement flag is on, default off.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-fd6a1222ecbd",
    "claim": "Computing it means serialising the outbound payload and parsing image headers, which is real work for a request that can never be refused.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an argument for not computing the bound where it cannot be enforced",
-   "note": ""
+   "anchor": "descriptive:an argument for not computing the bound where it cannot be enforced"
   },
   {
+   "id": "cl-23bb4f76f570",
    "claim": "A calibrated reservation can be smaller than a strict bound, so after a switch to strict the pool can hold pre-switch holds whose reservations were never sound.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:states a migration hazard that the following rule addresses",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-bdd8b5e03923",
    "claim": "The rule: **a switch applies to admissions from that moment, and the guarantee is claimed only once every pre-switch hold has settled or been reaped.** Record the switch in the ledger with its timestamp so the boundary is reconstructible, and do not halt admissions, drain, or top up — those all cost availability to buy a property that waiting gives for free.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-539d5ac64207",
    "claim": "It would be muted within a week, and the moment it is muted the one visible failure mode of the guarantee — a hold reaped while its charge was still coming — goes silent with it.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-1084eb803f56",
    "claim": "In the ledger, in `enforced`: **hold creation and hold reaping events**, so that pool state is reconstructible from the ledger rather than only assertable.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "contract:C4.2",
+   "anchor": "contract:C4.2@5f5d866f",
    "note": "what makes pool state reconstructible from the ledger"
   },
   {
+   "id": "cl-c39c37ffe2fb",
    "claim": "Enforcement cannot be switched on responsibly without knowing what it will refuse, and that knowledge cannot come from anywhere but real traffic.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:states why the gate ships off",
-   "note": ""
+   "anchor": "boundary:states why the gate ships off"
   },
   {
+   "id": "cl-e33a705d4f55",
    "claim": "Ship the bound, computing and recording it in `measured` for tenants that opt in, and in `enforced` **without gating** behind a flag that defaults to off.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "descriptive:an instruction to implementers of this design"
   },
   {
+   "id": "cl-7620455b9388",
    "claim": "If it is not, tighten the bound — never raise a pool limit, which converts a correctness property into a capacity setting.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "descriptive:an instruction to implementers of this design",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-935565ea2272",
    "claim": "`enforced` with a pool limit, once gating is on: every request in section 6's refusal list is refused before any upstream call.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'once gating is on' scopes the refusal list to the mode",
-   "note": ""
+   "anchor": "contract:C1.1@a32b5b92"
   },
   {
+   "id": "cl-95ee4421f4a9",
    "claim": "`accounting` and `measured`: no request is refused by this work, including requests whose bound cannot be computed.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:scoped to the two non-gating modes",
-   "note": ""
+   "anchor": "boundary:scoped to the two non-gating modes"
   },
   {
+   "id": "cl-f7f2e33dd83d",
    "claim": "`strict` with a pool limit, once gating is on: concurrent callers cannot drive `settled + reserved` above `pool_limit` in any state reconstructible from the ledger, excluding the two excluded cause codes.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:'excluding the two excluded cause codes' names what it omits",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-a5345ade4766",
    "claim": "`enforced`: the non-image byte length and the payload hash recorded on the hold equal those of the outbound bytes captured **at the client-library boundary**, for every admitted request including retries.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-d63dc2ce720f",
    "claim": "`enforced`: startup fails when the reap timeout does not exceed the request deadline plus the retry budget plus the skew margin.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "contract:C1.5@75c6b04a"
   },
   {
+   "id": "cl-bbe3384c9c76",
    "claim": "The reservation machinery is absent here, so the idempotency that protects `enforced` must be shown to protect the counts as well — a measurement tenant with double-counted tokens is worse than useless.",
-   "file": "docs/design/hard-ceiling.md",
-   "anchor": "boundary:the design document states the condition in the sentence",
-   "note": ""
+   "anchor": "boundary:the design document states the condition in the sentence"
   },
   {
+   "id": "cl-f5e973aff4cf",
    "claim": "What differs is where the enforcing state lives and how the invariant is established.",
    "anchor": "descriptive:names the axis of a comparison without asserting a property"
   },
   {
+   "id": "cl-cafe46c6ef05",
    "claim": "The **ledger** is the charge of record: every event key is written under its own condition, and the task role's IAM policy excludes update, delete and batch-write on that table, and the code that writes the ledger contains no such call either, so a settled charge cannot be edited or removed — not by a compromised task, and not by a future edit that only looks harmless (C4.3, pinned from both sides).",
-   "anchor": "contract:C4.3"
+   "anchor": "contract:C4.3@65517bb0"
   },
   {
+   "id": "cl-85b7805bbc6f",
    "claim": "For a detailed walkthrough of components, data model, and invariants, see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).",
    "anchor": "descriptive:a pointer to another document"
   },
   {
+   "id": "cl-b5d1a00985f0",
    "claim": "`make prove` replays the Z3 invariant checks over the **money model**.",
    "anchor": "boundary:'over the money model' states what the checks are over"
   },
   {
+   "id": "cl-ef59f500f8b0",
    "claim": "Set a pool with `stratoclave admin tenant pool-budget set` or the web console; the `TenantBudgets` schema and the reclaim invariants are documented in [`docs/ADMIN_GUIDE.md`](./docs/ADMIN_GUIDE.md) and [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).",
-   "anchor": "descriptive:a pointer to where the schema and its invariants are documented"
+   "anchor": "contract:C3.2a@b34d2f58"
   },
   {
+   "id": "cl-34f893134a9a",
    "claim": "An expired (reaper-reclaimed) hold returns `410` and is deliberately **not** late-billed — an external capture window is unbounded, so late-billing a reclaimed hold could break the budget invariant.",
-   "anchor": "contract:C9.3"
+   "anchor": "contract:C9.3@e691e466"
   },
   {
+   "id": "cl-375164bcd2bb",
    "claim": "The port, `sr_mode` plumbing, canary/breaker, divergence evidence, and the Z3/property money proofs are built and dark; the remaining step is wiring the eval client.",
    "anchor": "evidence:not about the router's behaviour"
   },
   {
+   "id": "cl-661f461fd6ee",
    "claim": "Money invariants for this path are proven (Z3 + Hypothesis) against a fake-SR harness, which establishes the reserve/settle behaviour for every decision the port can return — including a refusal and a timeout — and establishes nothing about the real router, whose client is unwritten ([EVIDENCE.md](docs/EVIDENCE.md) states where that boundary sits).",
    "anchor": "evidence:not about the router's behaviour"
   },
   {
+   "id": "cl-f5dd20e3016f",
    "claim": "Components, data model, auth flows, invariants.",
    "anchor": "descriptive:a table of contents entry"
   },
   {
+   "id": "cl-a94986be4aab",
    "claim": "Vouch-by-STS replay is closed by the `sso-nonces` table: each signed `GetCallerIdentity` request is consumed once (`attribute_not_exists(nonce)`, 10-minute TTL) and the check is fail-closed — if the nonce store is unreachable the exchange returns `401` rather than trusting the request.",
-   "anchor": "contract:C6.6"
+   "anchor": "contract:C6.6@610e00e8"
   },
   {
+   "id": "cl-77556ccb4a6c",
    "claim": "A general-purpose proxy *can*: as of 2026, LiteLLM ships pre-call budget reservation (fail-closed, seven scopes, adversarial `max_tokens` clamping), so \"only we reserve before the call\" is no longer true and this README no longer claims it.",
    "anchor": "descriptive:describes LiteLLM's reservation feature"
   },
   {
+   "id": "cl-2ab16d248e89",
    "claim": "Delegate *which model* to the real [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) (16-signal classifier, incl. its own session-aware policy) via its **decision-only** `/api/v1/eval`, then Stratoclave reserves + executes the chosen model on its **own** transport and settles from first-party usage. SR decides; the ledger stays the sole charge of record; routing fails open, money fails closed",
-   "anchor": "contract:C1.6"
+   "anchor": "contract:C1.6@fabb0bb4"
   },
   {
+   "id": "cl-7eaba524c73a",
    "claim": "LiteLLM *connects* many backends and, as of 2026, also reserves budget before the call (`litellm/proxy/spend_tracking/budget_reservation.py`, first committed 2026-04-30: fail-closed, seven scopes, adversarial `max_tokens` clamping).",
    "anchor": "descriptive:describes LiteLLM's reservation feature"
   },
   {
+   "id": "cl-39c150194f02",
    "claim": "Routing fails open (SR down/slow ⇒ the normal resolver), money fails closed (no new spend path is created — the reserve gate is exactly today's).",
-   "anchor": "contract:C1.6"
+   "anchor": "contract:C1.6@fabb0bb4"
   },
   {
+   "id": "cl-bf009df8ee4f",
    "claim": "They are also why the budget code looks the way it does — a reservation is ended through exactly one object, at most once, and an ending with no usage to charge asks a versioned liability table rather than assuming an error was free.",
-   "anchor": "contract:C3.1"
+   "anchor": "contract:C3.1@c99b5ea8"
   },
   {
+   "id": "cl-d69a5cd45b03",
    "claim": "The reclaim itself is exactly-once by conditional transaction, so a sweep racing a settle cannot return the same reservation twice ([CONTRACTS.md](./docs/design/CONTRACTS.md) C3.1, C3.2a).",
-   "anchor": "contract:C3.1"
+   "anchor": "contract:C3.1@c99b5ea8"
   },
   {
+   "id": "cl-151f28450237",
    "claim": "That proof is over the modelled transitions; the shipped replay path is a separate question, and it is answered separately: a retry now decides committed from not-committed by reading durable evidence — a pool marker, an activated hold, a terminal, or a RESERVE event — so both protocols answer a retry the same way ([CONTRACTS.md](design/CONTRACTS.md) C5.4, C9.5).",
-   "anchor": "contract:C5.4"
+   "anchor": "contract:C5.4@4e290eb2"
   },
   {
+   "id": "cl-bf38720e7a0b",
    "claim": "What the gateway cannot do is decide what the call cost, so a retention ends only when an operator settles it at the figure the provider's own record shows or releases it when that record shows none.",
-   "anchor": "contract:C8.3"
+   "anchor": "contract:C8.3@a3881eee"
+  },
+  {
+   "id": "cl-68f925b85fb8",
+   "claim": "This holds for the artifact as shipped, with every money flag at its default: what those flags gate is a stronger and separate property — a bound on what the settle can charge, and retention of a charge the gateway could not observe — and both are stated where they are claimed.",
+   "anchor": "contract:C1.1@a32b5b92,C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-562564e9abde",
+   "claim": "Two dimensions are not covered by it, and both are gaps rather than qualifications: the sweep runs on the reserve path, so a tenant that goes quiet for a month strands its hold until a scheduled reconciler picks it up (C3.3 — the reconciler exists for other work; registering this scan in it is the fix), and the per-user token reservation has no recovery path at all, because the hold row records the pool amount and not the token amount (C3.2b — carrying two more attributes through the write that already exists is the fix).",
+   "anchor": "debt:C3.2b,C3.3",
+   "note": "carrying the token amount and the user key on the hold write that already happens, and registering the inline holds with the scheduled reconciler that already exists"
+  },
+  {
+   "id": "cl-bef9ad011cd6",
+   "claim": "- **Passthrough mode** — a tenant with no chain, no quotas, and fallback off is served its requested model on every request, with no fallback or downgrade (an allowlist may still be configured purely as a gate).",
+   "anchor": "contract:C1.6@fabb0bb4"
+  },
+  {
+   "id": "cl-b611579a0588",
+   "claim": "It is addressing, not authorization — every ledger read is scoped to the authenticated tenant's partition, so a token can only ever reach the caller's own holds, and only holds this API itself created (an inline LLM hold's token is rejected).",
+   "anchor": "contract:C6.2@6d6b51ff"
+  },
+  {
+   "id": "cl-8fe0fe2a42fd",
+   "claim": "- **Rate limiting is coarse.** The auth endpoints and the external billing write verbs (`authorize` / `capture` / `void`) carry per-IP fixed-window counters in DynamoDB (shared across all tasks, no Redis) — enough to blunt credential stuffing and budget-row contention, but not a token-bucket or a per-tenant inference quota, and the inline LLM endpoints themselves are not IP-capped.",
+   "anchor": "boundary:'not a token-bucket or a per-tenant inference quota' states what the limiter is not"
+  },
+  {
+   "id": "cl-7958023f966b",
+   "claim": "It is the single pass-through point for a tenant's LLM traffic, and it turns every pass-through into fact recorded in three ledgers: the **money** ledger, the **operational** ledger (the gateway itself), and the **learning** ledger.",
+   "anchor": "contract:C4.1@758a15de,C4.4@eb3300c1"
+  },
+  {
+   "id": "cl-bbde3b3fa31d",
+   "claim": "Both sides now read one leg registry (`mvp.pricing.BILLABLE_LEGS`) and every input-side token is priced at the worst rate an input-side leg can bill it at, so no classification the provider chooses can push the settle above the reservation.",
+   "anchor": "contract:C2.4@93158fc1"
+  },
+  {
+   "id": "cl-43831b7ca0f8",
+   "claim": "The departure is recorded by the ENDING, which is the only moment anything knows a call left, so a task that dies with no ending at all records nothing and its hold still reclaims — the same residual C3.5 names, for the same reason.",
+   "anchor": "contract:C8.3@a3881eee"
+  },
+  {
+   "id": "cl-21820ce93823",
+   "claim": "A non-monotone bound lets a caller shrink its reservation by sending more, which is the shape of every quota-evasion bug.",
+   "anchor": "contract:C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-0e217409923b",
+   "claim": "- **Every charge passes through reserve.** Audited by section 7.",
+   "anchor": "contract:C4.1@758a15de"
+  },
+  {
+   "id": "cl-3f2e749d99f4",
+   "claim": "A tenant with both absent is a **pure accounting tenant**: every token is still recorded and every charge still rated, and nothing is ever refused for budget.",
+   "anchor": "contract:C1.2@f5b97cc2"
+  },
+  {
+   "id": "cl-29bd463d87fd",
+   "claim": "So: **the bound gates admission only where a limit exists**, and section 0's table says where it is computed at all.",
+   "anchor": "contract:C1.2@f5b97cc2"
+  },
+  {
+   "id": "cl-291082ea88b2",
+   "claim": "Rating the charge is arithmetic and needs no item at all.",
+   "anchor": "contract:C2.1@10963aad"
+  },
+  {
+   "id": "cl-9c179ef121d8",
+   "claim": "This overrides the \"record the bound for every request\" line in section 7a: compute it where it gates admission, or where measurement is deliberately switched on and someone has accepted the cost.",
+   "anchor": "contract:C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-21f41dac9be9",
+   "claim": "The rule: **settle at the reserve-time pinned snapshot.** The snapshot mechanism appears to do this already — verify it and report whether it holds on every path including late settle.",
+   "anchor": "contract:C2.2@e1d34134"
+  },
+  {
+   "id": "cl-4160e51faec8",
+   "claim": "In `accounting` every settle legitimately arrives with no reservation behind it, so a single code meaning \"no reservation found\" would fire on every request of every accounting tenant.",
+   "anchor": "contract:C8.1@66732b35"
+  },
+  {
+   "id": "cl-122a71dc6e17",
+   "claim": "`strict`, with a pool limit: for every admitted request, the amount settled is not greater than the amount admission checked, excluding charges whose cause code is `hold reaped before settle` or `provider exceeded the output ceiling`.",
+   "anchor": "contract:C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-3d99fa090c2c",
+   "claim": "This document describes the components, the data model, the authentication and authorization flows, and the invariants Stratoclave relies on.",
+   "anchor": "descriptive:states what this document contains"
+  },
+  {
+   "id": "cl-b7a29a08a4d4",
+   "claim": "Credentials are never transmitted to Stratoclave.",
+   "anchor": "contract:C6.8@3a775df6"
+  },
+  {
+   "id": "cl-e09f5a8e830d",
+   "claim": "**deny** — an empty list denies every assumed-role identity",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-745072b5abcb",
+   "claim": "So listing a role pattern is an assertion by the operator: *for these roles, the session name is set by an identity provider rather than by the caller.* It holds for IAM Identity Center roles (`AWSReservedSSO_*`), whose trust policy admits only the Identity Center SAML provider, so `AssumeRole` cannot be called against them directly; it holds for SAML federation roles configured the same way.",
+   "anchor": "contract:C6.5@cd7deacf"
+  },
+  {
+   "id": "cl-a12e772054af",
+   "claim": "**It does not hold for a role whose trust policy lets a principal assume it directly — listing such a pattern hands that principal every identity the account can name.** An empty list used to mean \"no restriction\", which is the one setting this gate cannot have, so it now denies.",
+   "anchor": "boundary:'It does not hold for' names the case the guarantee excludes"
+  },
+  {
+   "id": "cl-c00400dfbd94",
+   "claim": "The `x-api-key` header is accepted as an alternative to `Authorization: Bearer` for clients that cannot set the `Authorization` header.",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-3becf4c607ac",
+   "claim": "Every inference route — Messages, Chat Completions, Responses, streaming and non-streaming, both transports — ends its reservation through one object, `mvp._money.Hold`.",
+   "anchor": "contract:C3.1@c99b5ea8"
+  },
+  {
+   "id": "cl-229c0e495aad",
+   "claim": "classifies how far the request got (`mvp/provider_outcome.py`). The classification is **always** recorded; whether the reservation is withheld is the gate's decision — with `STRATOCLAVE_UNOBSERVED_HOLDS` off it is returned as before, with it on only a state that cannot have been billed is returned",
+   "anchor": "contract:C8.3@a3881eee"
+  },
+  {
+   "id": "cl-5ada9462a9f5",
+   "claim": "**The liability policy is not reachable around**: `claim_unobserved` is the only path that returns a reservation, and a static guard (`backend/tests/test_money_lifecycle_discipline.py`) scans every module under `mvp/` and fails the build when one calls `refund` / `release_pool` / `settle_reservation_and_log` outside its single hold factory.",
+   "anchor": "contract:C3.1@c99b5ea8"
+  },
+  {
+   "id": "cl-cfcb81cf5049",
+   "claim": "And there is **exactly one claimed ending, dispatched at most once** — not \"one write\": returning a reservation is two writes, the token credit and then the pool hold.",
+   "anchor": "contract:C3.4@5dccb5dd"
+  },
+  {
+   "id": "cl-3a120ae2128f",
+   "claim": "The hold latches inside a lock before any write, so a streaming request's four endings and a generator `finally` re-entering after a cancellation cannot produce two.",
+   "anchor": "contract:C3.4@5dccb5dd"
+  },
+  {
+   "id": "cl-5624b9f97e03",
+   "claim": "- Refund and settle are latched to be mutually exclusive and run at most once, so an upstream 4xx mid-stream cannot both refund the hold and settle it again.",
+   "anchor": "contract:C3.4@5dccb5dd"
+  },
+  {
+   "id": "cl-98723c33000c",
+   "claim": "The backend sets it to `null` so that creator logs, screenshots, and shell history never contain a reusable credential.",
+   "anchor": "contract:C12.2,C12.5"
+  },
+  {
+   "id": "cl-f772f79858dc",
+   "claim": "Calls `AdminUserGlobalSignOut` to invalidate all of the user's sessions, forcing them to re-authenticate.",
+   "anchor": "contract:C6.4@c10f347a"
+  },
+  {
+   "id": "cl-d6cb9ab5807e",
+   "claim": "It is **advisory only**: it never changes which model runs, how the request is routed, or what is billed — the client's model is always what executes and what is charged.",
+   "anchor": "contract:C7.2@64862ee3"
+  },
+  {
+   "id": "cl-d87d72230755",
+   "claim": "Because it never acts, it cannot overspend, mis-route, or corrupt the ledger.",
+   "anchor": "contract:C7.2@64862ee3"
+  },
+  {
+   "id": "cl-8a910fed394c",
+   "claim": "The task could not read the tenant's routing config and had no previously-read copy to fall back on. Requests fail closed rather than run without the tenant's allowlist and per-model quotas, so check the user-tenants table's health (throttling, IAM) — the condition clears on its own once reads succeed. Tasks that had already read the config keep serving from that copy and log `routing_config_read_failed_serving_stale`.",
+   "anchor": "contract:C7.2@64862ee3"
+  },
+  {
+   "id": "cl-4e04cd51c253",
+   "claim": "DynamoDB table backing the per-IP auth rate limiter (`backend/core/rate_limit_ddb.py`). Fixed-window counters with a TTL attribute (`expires_at`) are **shared across every ECS task**, so caps hold under multi-task / multi-AZ scale-out with no Redis. Failure policy: a **misconfiguration** (missing/mis-named table, missing IAM grant → `ResourceNotFound`/`AccessDenied`/`Validation`) fails **CLOSED** — auth endpoints return `429` — so a broken limiter can't silently run unlimited. **⚠️ If every login/SSO returns 429 right after a deploy, check this table name + the task role's DynamoDB grant first.** A **transient outage** (connectivity/timeout) degrades to an in-process per-task limiter (not fully open). Wire a CloudWatch metric filter + alarm on the log line `rate_limit_degrade_to_local` to detect degraded mode.",
+   "anchor": "contract:C6.6@610e00e8"
+  },
+  {
+   "id": "cl-4a21d1bbc3e9",
+   "claim": "Whether a reservation is **kept** when the gateway never observed the provider's outcome (a read timeout, a 5xx, a 200 it could not parse). Default **off**, in which case the outcome is still classified and logged (`provider_attempt_failed`) but the reservation is returned exactly as before. Turning it on makes the dollar ceiling bind on calls that may have been billed while the caller saw nothing, and the reaper no longer hands the headroom back either: a hold whose provider call had departed moves to `RETAINED` and is ended only by an operator, at the figure the provider's own record shows or as a release when it shows none (`GET`/`POST /api/mvp/admin/tenants/{tenant_id}/pool-retained…`). So read [`design/charge-loss.md`](design/charge-loss.md) section 7 first: the exposure accounting and saturation alarms it asks for do not exist yet, so under a provider outage a tenant's headroom can fill with retentions and the first signal is a refusal. `held_microusd` on the list endpoint is the figure to watch. Measured evidence for the rows this reads: [`MEASUREMENTS.md`](MEASUREMENTS.md).",
+   "anchor": "contract:C8.3@a3881eee"
+  },
+  {
+   "id": "cl-ad4fb83134ab",
+   "claim": "Turns the sound reservation **bound** into an admission gate, so a request that cannot fit the pool is refused with `402 request_does_not_fit_pool_limit` instead of admitted on an estimate. Default **off**. Do not enable it without first running the shadow measurement — [`design/hard-ceiling.md`](design/hard-ceiling.md) section 9b states the refusal-rate target, and section 4 the assumptions the guarantee rests on.",
+   "anchor": "contract:C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-a01f39da8b46",
+   "claim": "Upper bound on how many expired holds one reaper pass reclaims (default `5`), so a backlog cannot turn into one unbounded transaction.",
+   "anchor": "contract:C3.2a@b34d2f58"
+  },
+  {
+   "id": "cl-74efbb2d0940",
+   "claim": "Every call is recorded as a structured JSON log to CloudWatch, and three orthogonal identity paths are accepted: Amazon Cognito password, AWS identity attestation via a Vault-style STS vouch (aws sso / saml2aws / IAM user — **not** SAML/OIDC SSO to Stratoclave itself), and long-lived `sk-stratoclave-*` keys.",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-7c0ed6a263fa",
+   "claim": "Stratoclave is deliberately AWS-native and small: a single region in your own account, one FastAPI service on ECS Fargate, DynamoDB for all state, Cognito for token issuance, and AWS CDK v2 for the entire topology.",
+   "anchor": "boundary:'state' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-34c36cc338e5",
+   "claim": "A broker can only check a counter at credential **refresh** time (≈ every hour), and its usage numbers come from client-side telemetry the user can simply stop sending.",
+   "anchor": "descriptive:describes what a credential broker can and cannot observe, not this gateway"
+  },
+  {
+   "id": "cl-349c6701f51b",
+   "claim": "Only the WAF stack is pinned to `us-east-1`, because AWS requires CLOUDFRONT-scope WebACLs to live there; every other stack deploys to your chosen region.",
+   "anchor": "boundary:'Only' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-9413b8599453",
+   "claim": "The `responses:send` scope is required; all three roles (`admin`, `team_lead`, `user`) carry it by default.",
+   "anchor": "boundary:'by default' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-15f5eb6c7143",
+   "claim": "the AWS *Guidance for Claude Code with Amazon Bedrock*) is not a proxy at all — it federates identities to short-lived STS credentials and the client calls Bedrock directly.",
+   "anchor": "descriptive:describes the AWS Guidance sample's architecture, which is not a proxy"
+  },
+  {
+   "id": "cl-6f68f3109486",
+   "claim": "**The pool reservation, yes; the charge, no** — a killed request's *pool* reservation self-heals via an *inline lazy* sweep on the reserve path (no separate reaper), while the per-user token reservation has no recovery path at all and the spend the provider billed can leave the ledger entirely (see [CONTRACTS.md](./docs/design/CONTRACTS.md) C3.2b and C3.5). Not instant: reclaim happens on the next reserve (≥ a 1800s TTL floor before a hold is sweep-eligible), so an idle tenant with no further traffic reclaims late, and a burst of crashes drains a few holds per reserve. **The reclaim records `actual = 0`, which asserts the provider charged nothing — and that assertion is measurably false for a request that died after its bytes left.** Measured on real Bedrock: a Converse call abandoned at a 2 s client read timeout was billed 1,493 output tokens while its caller received nothing. The reclaim therefore returns budget the account may have spent. Every reclaim now records whether the hold backed a provider call, so the size of that exposure is derivable from the ledger; holding it instead of returning it is not yet built",
+   "anchor": "debt:C8.3",
+   "note": "watching held_microusd, which is what would let the flag default on; the retention itself now ships behind it"
+  },
+  {
+   "id": "cl-1358b63b868a",
+   "claim": "## 0. Three states, named, because every rule below is scoped to one",
+   "anchor": "boundary:'states' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-0ef0b4d30b07",
+   "claim": "**This is the `strict` bound.** Calibrated mode replaces the derivation with a measured one and gives up soundness deliberately; soundness is required here and in every criterion that names `strict`.",
+   "anchor": "boundary:'`strict`' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-d8b23d49d399",
+   "claim": "- **Every billable component has a term.** Today: input, output, cache_read, cache_write — and not as a list written here and repeated in two functions.",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-a62797e45983",
+   "claim": "To make this guarantee safe, resource names must not contain `-` or `_` (actions may).",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-ac8707176500",
+   "claim": "The two are independent: a key issued with only `messages:send` cannot reach the OpenAI route, and vice versa.",
+   "anchor": "boundary:'only' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-692085924daa",
+   "claim": "This means a permission change is effective across all Fargate tasks within that TTL without any coordination.",
+   "anchor": "boundary:'within' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-17ad15ca0268",
+   "claim": "The net result is that the balance never permanently exceeds `total_credit` except for the bounded, logged overrun case.",
+   "anchor": "boundary:'except' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-12b4b11c9c30",
+   "claim": "The token TTL is capped at 15 minutes; the token is held only on the request stack and is never persisted to DynamoDB or logs.",
+   "anchor": "boundary:'only' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-23c601137fc3",
+   "claim": "The `bedrock-runtime:CallWithBearerToken` IAM action does not currently support resource-level conditions (verified at deploy time, 2026-06), so the task role's policy uses `Resource: '*'` for that action only.",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-e91923a74c6c",
+   "claim": "- Entries the route cannot serve are rejected before the reservation: `served_by != \"bedrock\"` (self-hosted vLLM has no Bedrock region) and `virtual` pool placeholders (never a charge-of-record model) return HTTP 400, and an unknown `wire_protocol` returns 500 rather than defaulting to a transport.",
+   "anchor": "contract:C1.3@1c9459ea,C13.1@71541376"
+  },
+  {
+   "id": "cl-d0eb970e217d",
+   "claim": "Without it an OpenAI-compatible stream carries no usage block, so every streamed request would settle at zero — a full refund of the hold.",
+   "anchor": "boundary:'Without' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-fb6f2d64f693",
+   "claim": "When the gateway injects the option it also swallows the terminal usage-only event, so a caller that never asked for usage does not start seeing it.",
+   "anchor": "boundary:'only' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-9eba20ef70eb",
+   "claim": "For `messages` entries it is advisory: every Converse target is built from the operator's configured primary plus `STRATOCLAVE_FAILOVER_REGIONS` (`backend/mvp/routing/chains.py`), and the invoke uses that same deployment region, so the catalogue and the client cannot disagree.",
+   "anchor": "boundary:'advisory' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-3ca03cd79190",
+   "claim": "- **Users are created once, never renamed.** The PK is Cognito's immutable `sub`; an email change updates the `email-index` but not the PK.",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-0c77b8220efd",
+   "claim": "All three are within Cognito's default admin-API rate limits for realistic workloads (login is infrequent compared to `/v1/messages`).",
+   "anchor": "boundary:'within' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-e91e86bd31ab",
+   "claim": "- **Bedrock.** Model access limits are enforced by Bedrock itself; Stratoclave surfaces 4xx/5xx responses to callers but does not retry.",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-3cd41cc27be6",
+   "claim": "The plaintext never touches disk, never appears in a log, and is returned only in the create response.",
+   "anchor": "boundary:'only' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-d37b13839190",
+   "claim": "- Scope narrowing (owner roles ∩ key scopes) means a compromised key cannot exceed the current privileges of its owner.",
+   "anchor": "boundary:'scopes' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-7631be7f1513",
+   "claim": "The SPA is built without any inline `<script>`; the CSP has been verified with production builds.",
+   "anchor": "boundary:'without' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-5d4826a27d6f",
+   "claim": "The check is **fail-closed**: if the nonce store is unreachable for any reason (DynamoDB error, IAM drift, unprovisioned table), the entire SSO exchange returns 401 rather than silently degrading to skew-only protection.",
+   "anchor": "boundary:'rather than' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-43603e4ad319",
+   "claim": "- **Verified Permissions.** For deployments that need conditional authorization (e.g.",
+   "anchor": "descriptive:names AWS Verified Permissions as an option for deployments that need it"
+  },
+  {
+   "id": "cl-619c66256099",
+   "claim": "\"allow up to $X per day\"), integrate Amazon Verified Permissions at the `require_permission` boundary.",
+   "anchor": "boundary:'boundary' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-dee31906e6b6",
+   "claim": "Manage only tenants they own: invite or remove members, adjust credits, view per-tenant usage. Cannot see other tenants.",
+   "anchor": "boundary:'only' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-1ffbef41ba3a",
+   "claim": "Glob patterns matched against the assumed-role name. **Required: an empty list denies every assumed-role login.** Listing a pattern asserts that these roles' `RoleSessionName` is set by an identity provider (`AWSReservedSSO_*`, or a SAML federation role whose trust policy admits only the identity provider) — every identity on this path is read out of that session name, and whoever can call `sts:AssumeRole` on a role directly chooses it. Do not list a role that a principal can assume directly.",
+   "anchor": "boundary:'assum' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-863d34271dfa",
+   "claim": "The two scopes are independent — a key with one cannot reach the route gated by the other.",
+   "anchor": "boundary:'scopes' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-9d60f69d307d",
+   "claim": "23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff)",
+   "anchor": "boundary:'in production' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-24bea37d2376",
+   "claim": "Several archived stacks (RDS, Redis, CodeBuild, Verified Permissions) live under `iac/lib/_archived/` and are **not** deployed by default.",
+   "anchor": "boundary:'not' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-3f02b74be308",
+   "claim": "It copies each old record into the permanent partition, conditional on the target not existing, so re-running is safe and a record written by the new code is never overwritten by an older copy.",
+   "anchor": "boundary:'conditional' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-97843e025e44",
+   "claim": "the default `us.anthropic.claude-opus-4-7`) is a *geography* cross-region inference profile — AWS routes inference to any region within that geography at its discretion, so no single-region guarantee is possible.",
+   "anchor": "boundary:'within' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-73adf5790f11",
+   "claim": "A replacement rotates the client ID and immediately invalidates every active user session.",
+   "anchor": "descriptive:describes what replacing the Cognito app client does to existing sessions"
+  },
+  {
+   "id": "cl-71b298129e4f",
+   "claim": "Input-size ceiling below which the advisory shadow judge treats a request as simple enough for the cheapest tier to be a defensible counterfactual (default `1500`). Advisory only: it never steers execution, routing, or money.",
+   "anchor": "boundary:'advisory' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-b1b4479b8c6d",
+   "claim": "Every route enforces per-user token quotas and optional per-tenant **dollar pool** and **per-model** budgets with atomic DynamoDB reservations; **streaming** Bedrock calls additionally get retry + cross-region failover with quota-driven per-model fallback (the non-streaming Anthropic path is single-region — see the comparison table).",
+   "anchor": "contract:C1.1@a32b5b92,C1.2@f5b97cc2"
+  },
+  {
+   "id": "cl-4b0cc58e6492",
+   "claim": "- a dedicated `responses:send` scope on `POST /openai/v1/responses` and `GET /openai/v1/models`; all three identity paths (Cognito, STS vouch, `sk-stratoclave-*`) must carry this scope to reach the OpenAI routes.",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-951e3b34d8ce",
+   "claim": "- **Token accounting.** Settle records Bedrock's own usage block — `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens` — so every token the provider billed is already captured, including injected and image tokens.",
+   "anchor": "contract:C8.1@66732b35,C4.4@eb3300c1"
+  },
+  {
+   "id": "cl-fdfbbf3b3d25",
+   "claim": "**Cognito is for token issuance, DynamoDB is the source of truth.** Stratoclave *never* reads `cognito:groups` or relies on Cognito for authorization.",
+   "anchor": "contract:C6.7@38c21107"
+  },
+  {
+   "id": "cl-a5f9a0f08d9e",
+   "claim": "- Resolve each authenticated request to an `AuthenticatedUser` whose roles come from DynamoDB, never from Cognito groups.",
+   "anchor": "contract:C6.7@38c21107"
+  },
+  {
+   "id": "cl-354ef80cc4bb",
+   "claim": "The CLI exists to absorb the three jobs that a browser cannot comfortably do: calling AWS SDK APIs (`sts:GetCallerIdentity` for SSO Vouch), launching Claude tools with `ANTHROPIC_BASE_URL` set, and launching OpenAI codex with `CODEX_HOME` pointed at an ephemeral config and `STRATOCLAVE_OPENAI_KEY` holding a short-lived `responses:send` key.",
+   "anchor": "contract:C6.8@3a775df6"
+  },
+  {
+   "id": "cl-842631d54523",
+   "claim": "The route exists so that an OpenAI-compatible client which cannot speak the Responses API still reaches those models through the gateway, with the same reserve/settle accounting as every other route.",
+   "anchor": "contract:C13.1@71541376"
+  },
+  {
+   "id": "cl-257f80bc423d",
+   "claim": "Mapped to the canonical five-layer AI-billing gateway, Stratoclave now ships all five layers:",
+   "anchor": "contract:C13.3@911ed8be"
+  },
+  {
+   "id": "cl-e709a956a07b",
+   "claim": "Stratoclave takes the other route: it is a **gateway** that terminates every inference call.",
+   "anchor": "contract:C1.1@a32b5b92"
+  },
+  {
+   "id": "cl-cfdaa87f1743",
+   "claim": "The trade-off is honest and stated up front: a gateway is a component **you** run and secure, it sits on the availability path of every call, and it sees prompt text.",
+   "anchor": "descriptive:describes what any in-path gateway costs its operator, not a property of this one"
+  },
+  {
+   "id": "cl-d760ab6ed2ee",
+   "claim": "All Bedrock calls originate from the single Fargate task; no second control-plane region is deployed.",
+   "anchor": "contract:C11.4@d9fa3030"
+  },
+  {
+   "id": "cl-38019d314b68",
+   "claim": "**CloudTrail + Bedrock invocation logging** — AWS-native, tamper-evident, compliance-grade (every InvokeModel is recorded by the platform; strong for regulated audits)",
+   "anchor": "descriptive:describes what AWS-native logging gives, not what this gateway does"
+  },
+  {
+   "id": "cl-0e65437eb82d",
+   "claim": "Stratoclave now ships all five layers of the billing gateway (above).",
+   "anchor": "contract:C13.3@911ed8be"
+  },
+  {
+   "id": "cl-5d4c77e2d2d6",
+   "claim": "- **The gateway sees prompt text.** Every request transits the FastAPI service, which is what makes pre-flight DLP and enforcement possible — but it also means the operator is in scope as a data processor.",
+   "anchor": "boundary:'but it also means the operator is in scope as a data processor' states the cost"
+  },
+  {
+   "id": "cl-643342baf90b",
+   "claim": "- **All input-side tokens are priced at the worst input-side rate**, `max(input, cache_read, cache_write)`.",
+   "anchor": "contract:C2.4@93158fc1"
+  },
+  {
+   "id": "cl-faed8ef493dc",
+   "claim": "- **Total.** Every request either gets a bound or is refused.",
+   "anchor": "contract:C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-f4b000ee6fdc",
+   "claim": "Between those points the gateway may add a system prompt, retrieved context, tool schemas, a guardrail wrapper or a converted image, and every one of those is billed.",
+   "anchor": "contract:C1.5@75c6b04a"
+  },
+  {
+   "id": "cl-b4c9b93161d8",
+   "claim": "**AuthContext** accepts `access_token` through three ingress paths: (1) a `?ui_ticket=<nonce>` URL parameter written by the CLI during `stratoclave ui open` — the SPA exchanges the nonce for the real token bundle via `POST /api/mvp/auth/ui-ticket/consume`, then strips the query parameter from `window.location` immediately so the plaintext token never appears in the URL bar or server access logs (session-fixation fix, P0-8 2026-04 review; nonce has a 30-second TTL and is single-use), (2) the Cognito Hosted UI callback with PKCE, and (3) a previously saved token in `localStorage`.",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-84b8fada9c5f",
+   "claim": "The backend enforces `token_use=access`, so the frontend never passes `id_token`.",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-7c971e1854d8",
+   "claim": "**Dependency order** (enforced by `addDependency`): `network → dynamodb → ecr → alb → frontend → cognito → ecs → config`.",
+   "anchor": "descriptive:names the deploy ordering the CDK app enforces, not a request-time property"
+  },
+  {
+   "id": "cl-74ebc0c7d8c8",
+   "claim": "API paths (`/api/*`, `/v1/*`, `/openai/*`, `/.well-known/*`) pass through untouched, so legitimate `403` / `404` responses from the backend are never rewritten to `index.html`.",
+   "anchor": "contract:C8.2@3ee4c167"
+  },
+  {
+   "id": "cl-9ed98762cbb6",
+   "claim": "Existing invitations are always consulted before the account-level policy — this is intentional so that administrators can mix \"auto-provision this role pattern, but invite these named individuals\" on the same account.",
+   "anchor": "contract:C6.3@01fed050"
+  },
+  {
+   "id": "cl-1c8d0abbc0d4",
+   "claim": "Rows provisioned before the id was recorded are compared on the ARN, as they always were, and are upgraded by their next successful login.",
+   "anchor": "contract:C6.5@cd7deacf"
+  },
+  {
+   "id": "cl-6e3690082e1f",
+   "claim": "The plaintext of an API key is returned **once**, in the response to `POST /api/mvp/me/api-keys`, and is never stored on the server.",
+   "anchor": "contract:C12.5@60b55405"
+  },
+  {
+   "id": "cl-3702dca544a0",
+   "claim": "The seed is idempotent: re-running it (by redeploying or restarting) is always safe, and it is a no-op when the version is already current.",
+   "anchor": "contract:C7.4@0aca25b5"
+  },
+  {
+   "id": "cl-ac86e4fc530a",
+   "claim": "The caller cannot distinguish \"this tenant doesn't exist\" from \"this tenant isn't yours\".",
+   "anchor": "contract:C12.3@68956db1"
+  },
+  {
+   "id": "cl-b1ca382b1544",
+   "claim": "Team-lead listings query by the caller's own `user_id`, so other tenants are never fetched server-side in the first place.",
+   "anchor": "contract:C6.2@6d6b51ff"
+  },
+  {
+   "id": "cl-964972efded8",
+   "claim": "If a key was issued with `apikeys:*` at the time an admin owned it, the scope narrowing ensures that the key cannot exceed the owner's current privileges — the next request after the demotion will fail the `owner_roles.covers(permission)` side of the AND.",
+   "anchor": "contract:C6.4@c10f347a"
+  },
+  {
+   "id": "cl-db7266d1fc30",
+   "claim": "If the balance is insufficient the request is refused immediately with **HTTP 402**; the Bedrock API is never reached.",
+   "anchor": "contract:C1.1@a32b5b92"
+  },
+  {
+   "id": "cl-e33dab58a2e9",
+   "claim": "A route reports what it observed and never decides what that costs:",
+   "anchor": "contract:C8.1@66732b35"
+  },
+  {
+   "id": "cl-dfcc2840df03",
+   "claim": "A claim whose write is then interrupted is completed from the same `finally`, so an ending cannot be claimed and dropped.",
+   "anchor": "contract:C3.4@5dccb5dd"
+  },
+  {
+   "id": "cl-3d06766a3720",
+   "claim": "`resolve_bedrock_model()` filters the registry on `provider == \"anthropic\"`, so `/v1/messages` cannot see Nemotron or Qwen3 and never has to answer for a non-Anthropic wire shape.",
+   "anchor": "contract:C1.6@fabb0bb4"
+  },
+  {
+   "id": "cl-e9197975739b",
+   "claim": "Every audit event carries `timestamp` in RFC 3339 UTC.",
+   "anchor": "descriptive:names the timestamp format an audit row carries, not a behavioural promise"
+  },
+  {
+   "id": "cl-71990fc61876",
+   "claim": "Old CLIs that never see `cli.codex` simply never offer the `codex` subcommand bootstrap.",
+   "anchor": "contract:C13.2@b8001a99"
+  },
+  {
+   "id": "cl-84f82546642d",
+   "claim": "The App Client Stratoclave uses is a *public* client (no client secret), as is standard for SPA + PKCE + native CLI.",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-192b660ec030",
+   "claim": "Long-lived API keys; plaintext never stored",
+   "anchor": "contract:C12.5@60b55405"
+  },
+  {
+   "id": "cl-1438d80bb82d",
+   "claim": "Vouch-by-STS replay defence. 10-minute TTL. Written with `attribute_not_exists(nonce)` before the STS round trip — a second submission of the same signed request returns 401. Fail-closed: any store error returns 401.",
+   "anchor": "contract:C6.6@610e00e8"
+  },
+  {
+   "id": "cl-a5f92213e6ca",
+   "claim": "CLI→SPA one-time handoff. Plaintext nonce (`stt_` prefix + 32 CSPRNG bytes) is returned to the CLI and placed in the `?ui_ticket=` URL parameter. SPA exchanges it via `POST /api/mvp/auth/ui-ticket/consume` (atomic delete-and-return). 30-second TTL. Plaintext never stored on the backend.",
+   "anchor": "contract:C6.6@610e00e8"
+  },
+  {
+   "id": "cl-d60a15fce23f",
+   "claim": "- **`default-org` always exists.** The seed inserts it with `ConditionExpression = attribute_not_exists(tenant_id)`.",
+   "anchor": "contract:C7.4@0aca25b5"
+  },
+  {
+   "id": "cl-bf5315f3bf1b",
+   "claim": "A tenant deletion will never remove `default-org`.",
+   "anchor": "contract:C7.4@0aca25b5"
+  },
+  {
+   "id": "cl-c64f79b501cb",
+   "claim": "Every protected route uses `require_permission(\"...\")` as a FastAPI `Depends`.",
+   "anchor": "contract:C6.1@65486e7a"
+  },
+  {
+   "id": "cl-bbb411d2649c",
+   "claim": "- All input models use `ConfigDict(extra=\"forbid\")`, so unexpected request fields are rejected at the edge.",
+   "anchor": "contract:C8.2@3ee4c167"
+  },
+  {
+   "id": "cl-ba2d629a19ba",
+   "claim": "Send messages, view their own usage, rotate their own API keys. Cannot see other users.",
+   "anchor": "contract:C6.2@6d6b51ff"
+  },
+  {
+   "id": "cl-c5f46776f54e",
+   "claim": "The `default-org` tenant is seeded automatically on first backend startup and cannot be deleted; it is the fallback for users with no explicit tenant assignment.",
+   "anchor": "contract:C7.4@0aca25b5"
+  },
+  {
+   "id": "cl-4a82b1186fce",
+   "claim": "The `default-org` tenant cannot be archived.",
+   "anchor": "contract:C7.4@0aca25b5"
+  },
+  {
+   "id": "cl-b5b90dd0ba55",
+   "claim": "The provisioning write is an explicit, audited, non-clobbering single-attribute update — it never overwrites an existing routing config.",
+   "anchor": "contract:C6.3@01fed050"
+  },
+  {
+   "id": "cl-b893fd4b0c2b",
+   "claim": "**Invites always win.** Even under `auto_provision`, if an invite exists for the incoming email, its role, tenant, and credit override the account-level default.",
+   "anchor": "contract:C6.3@01fed050"
+  },
+  {
+   "id": "cl-e9afc40b2bc0",
+   "claim": "The backend exposes `POST /api/mvp/admin/users/{user_id}/api-keys` for proxy issuance, useful for onboarding a headless service account that will never log in interactively.",
+   "anchor": "descriptive:names an endpoint and what it is useful for"
+  },
+  {
+   "id": "cl-57f3273eb2a5",
+   "claim": "Always pass `--tenant` or `--user` when possible to avoid table scans.",
+   "anchor": "descriptive:operational advice about avoiding a table scan"
+  },
+  {
+   "id": "cl-e4f2b49f8e49",
+   "claim": "Every event carries `request_id` (propagated from the ALB header) so you can correlate a UI or CLI action with the exact backend log line.",
+   "anchor": "contract:C12.1@de23c6cb"
+  },
+  {
+   "id": "cl-57e257229b82",
+   "claim": "S3 bucket (private, SSL-enforced), CloudFront distribution (**OAC**, minTLS 1.2_2021, ResponseHeadersPolicy with HSTS 730 d + preload + strict CSP + `frame-ancestors 'none'`), SPA fallback function",
+   "anchor": "descriptive:lists the frontend delivery stack's settings"
+  },
+  {
+   "id": "cl-19076cf18bc4",
+   "claim": "Every `cdk synth` / `cdk deploy` runs the `AwsSolutionsChecks` Aspect from `cdk-nag`.",
+   "anchor": "contract:C7.4@0aca25b5"
+  },
+  {
+   "id": "cl-1a808bb92565",
+   "claim": "Known, documented tradeoffs (default CloudFront cert, managed-prefix-list ingress, non-ENFORCED Cognito advanced security, etc.) are suppressed in `iac/bin/iac.ts` with rationale comments; any **new** `[Error at ...]` from cdk-nag will fail `cdk synth`.",
+   "anchor": "descriptive:lists the deployment tradeoffs the stack accepts, and names them as tradeoffs"
+  },
+  {
+   "id": "cl-cd99f98f645e",
+   "claim": "Arbitrary outbound TCP is blocked; a compromised container cannot exfiltrate data over non-standard ports.",
+   "anchor": "descriptive:describes the egress rules of the network the task runs in"
+  },
+  {
+   "id": "cl-c675dbae7f65",
+   "claim": "The **OpenAI/codex path is different**: its call region is hardwired per-model in the backend registry (`backend/mvp/models.py` — currently `us-west-2` / `us-east-2`) and **cannot be relocated by an environment variable**.",
+   "anchor": "contract:C11.3@5b06ed7e"
+  },
+  {
+   "id": "cl-1c9336f659ff",
+   "claim": "Region Claude models are invoked in — the **model** primary region, independent of the deploy region. Always set explicitly by CDK. See `STRATOCLAVE_REGION` / `BEDROCK_PRIMARY_REGION`.",
+   "anchor": "contract:C11.4@d9fa3030"
+  },
+  {
+   "id": "cl-d69b265c90f3",
+   "claim": "Body-stack deploy region `R` (Network/DynamoDB/ECR/ALB/Frontend/Cognito/ECS/Config). Falls back to `CDK_DEFAULT_REGION`, then `us-east-1`. The WAF stack always stays in `us-east-1`. GovCloud/China partitions are rejected. When `R != us-east-1` you must `cdk bootstrap` both `R` and `us-east-1`. See [Regional constraints](#regional-constraints).",
+   "anchor": "descriptive:names which stacks a deploy-region variable governs"
+  },
+  {
+   "id": "cl-f77ba67fcf2a",
+   "claim": "Comma-separated cross-region Bedrock failover targets for the **streaming** path, in preference order (the primary `BEDROCK_REGION` is always tried first and is stripped if listed). Default `us-west-2,eu-west-1`. **Data residency:** set a same-jurisdiction list, or **`none`/`disabled`/`off`** (or an empty string) **to disable failover entirely** — single-region, streaming requests never send prompt bytes to another region. Prefer the `none` sentinel over `\"\"` if your deploy tooling strips empty env vars. Non-streaming requests are single-region regardless. The effective set is logged at startup (`failover_regions_effective`). See `backend/mvp/routing/chains.py`.",
+   "anchor": "contract:C11.1@11d071f4"
+  },
+  {
+   "id": "cl-f85dec6606e9",
+   "claim": "If it 502s, the task never bound to port 8000.",
+   "anchor": "descriptive:a troubleshooting symptom and its cause"
   }
  ]
 }
