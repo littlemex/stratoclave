@@ -32,7 +32,7 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
-## [Unreleased]
+## [1.1.0] — 2026-08-31
 
 ### Added
 
@@ -188,6 +188,7 @@ the commits in `v0.1.0..v0.2.0`.
 
 First tagged release. See the tag annotation.
 
+[1.1.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.1.0
 [1.0.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.0.0
 [0.2.0]: https://github.com/littlemex/stratoclave/releases/tag/v0.2.0
 [0.1.0]: https://github.com/littlemex/stratoclave/releases/tag/v0.1.0
