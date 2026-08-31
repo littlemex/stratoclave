@@ -1,0 +1,254 @@
+{
+ "modelId": "anthropic.claude-sonnet-4-6",
+ "offers": [
+  {
+   "offerId": "offer-ldnd26nhxx676",
+   "termDetails": {
+    "usageBasedPricingTerm": {
+     "rateCard": [
+      {
+       "description": "Million Batch Input Tokens Global",
+       "dimension": "USE1_InputTokenCount_Global_Batch",
+       "price": "1.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Response Tokens Global",
+       "dimension": "USE1_OutputTokenCount_Global_Batch",
+       "price": "7.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Input Tokens Long Context Global",
+       "dimension": "USE1_InputTokenCount_LCtx_Global_Batch",
+       "price": "1.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Output Tokens Long Context Global",
+       "dimension": "USE1_OutputTokenCount_LCtx_Global_Batch",
+       "price": "7.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Input Tokens Global",
+       "dimension": "USE1_InputTokenCount_Global",
+       "price": "3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Response Tokens Global",
+       "dimension": "USE1_OutputTokenCount_Global",
+       "price": "15",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Read Input Tokens Global",
+       "dimension": "USE1_CacheReadInputTokenCount_Global",
+       "price": "0.3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Write Input Tokens Global",
+       "dimension": "USE1_CacheWriteInputTokenCount_Global",
+       "price": "3.75",
+       "unit": "Units"
+      },
+      {
+       "description": "Million 1 hour Cache Write Input Tokens Global",
+       "dimension": "USE1_CacheWrite1hInputTokenCount_Global",
+       "price": "6",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Input Tokens Long Context Global",
+       "dimension": "USE1_InputTokenCount_LCtx_Global",
+       "price": "3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Output Tokens Long Context Global",
+       "dimension": "USE1_OutputTokenCount_LCtx_Global",
+       "price": "15",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Read Input Tokens Long Context Global",
+       "dimension": "USE1_CacheReadInputTokenCount_LCtx_Global",
+       "price": "0.3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Write Input Tokens Long Context Global",
+       "dimension": "USE1_CacheWriteInputTokenCount_LCtx_Global",
+       "price": "3.75",
+       "unit": "Units"
+      },
+      {
+       "description": "Million 1 Hour Cache Write Input Tokens Long Context Global",
+       "dimension": "USE1_CacheWrite1hInputTokenCount_LCtx_Global",
+       "price": "6",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Input Tokens Global",
+       "dimension": "USW2_InputTokenCount_Global_Batch",
+       "price": "1.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Response Tokens Global",
+       "dimension": "USW2_OutputTokenCount_Global_Batch",
+       "price": "7.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Input Tokens Long Context Global",
+       "dimension": "USW2_InputTokenCount_LCtx_Global_Batch",
+       "price": "1.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Output Tokens Long Context Global",
+       "dimension": "USW2_OutputTokenCount_LCtx_Global_Batch",
+       "price": "7.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Input Tokens Global",
+       "dimension": "USW2_InputTokenCount_Global",
+       "price": "3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Response Tokens Global",
+       "dimension": "USW2_OutputTokenCount_Global",
+       "price": "15",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Read Input Tokens Global",
+       "dimension": "USW2_CacheReadInputTokenCount_Global",
+       "price": "0.3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Write Input Tokens Global",
+       "dimension": "USW2_CacheWriteInputTokenCount_Global",
+       "price": "3.75",
+       "unit": "Units"
+      },
+      {
+       "description": "Million 1 hour Cache Write Input Tokens Global",
+       "dimension": "USW2_CacheWrite1hInputTokenCount_Global",
+       "price": "6",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Input Tokens Long Context Global",
+       "dimension": "USW2_InputTokenCount_LCtx_Global",
+       "price": "3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Output Tokens Long Context Global",
+       "dimension": "USW2_OutputTokenCount_LCtx_Global",
+       "price": "15",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Read Input Tokens Long Context Global",
+       "dimension": "USW2_CacheReadInputTokenCount_LCtx_Global",
+       "price": "0.3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Write Input Tokens Long Context Global",
+       "dimension": "USW2_CacheWriteInputTokenCount_LCtx_Global",
+       "price": "3.75",
+       "unit": "Units"
+      },
+      {
+       "description": "Million 1 Hour Cache Write Input Tokens Long Context Global",
+       "dimension": "USW2_CacheWrite1hInputTokenCount_LCtx_Global",
+       "price": "6",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Input Tokens Regional CRIS",
+       "dimension": "USE1_InputTokenCount_Batch",
+       "price": "1.65",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Response Tokens Regional CRIS",
+       "dimension": "USE1_OutputTokenCount_Batch",
+       "price": "8.25",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Input Tokens Long Context Regional CRIS",
+       "dimension": "USE1_InputTokenCount_LCtx_Batch",
+       "price": "1.65",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Batch Output Tokens Long Context Regional CRIS",
+       "dimension": "USE1_OutputTokenCount_LCtx_Batch",
+       "price": "8.25",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Input Tokens Regional CRIS",
+       "dimension": "USE1_InputTokenCount",
+       "price": "3.3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Response Tokens Regional CRIS",
+       "dimension": "USE1_OutputTokenCount",
+       "price": "16.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Read Input Tokens Regional CRIS",
+       "dimension": "USE1_CacheReadInputTokenCount",
+       "price": "0.33",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Write Input Tokens Regional CRIS",
+       "dimension": "USE1_CacheWriteInputTokenCount",
+       "price": "4.125",
+       "unit": "Units"
+      },
+      {
+       "description": "Million 1 hour Cache Write Input Tokens Regional CRIS",
+       "dimension": "USE1_CacheWrite1hInputTokenCount",
+       "price": "6.6",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Input Tokens Long Context Regional CRIS",
+       "dimension": "USE1_InputTokenCount_LCtx",
+       "price": "3.3",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Output Tokens Long Context Regional CRIS",
+       "dimension": "USE1_OutputTokenCount_LCtx",
+       "price": "16.5",
+       "unit": "Units"
+      },
+      {
+       "description": "Million Cache Read Input Tokens Long Context Regional CRIS",
+       "dimension": "USE1_CacheReadInputTokenCount_LCtx",
+       "price": "0.33",
+       "unit": "Units"
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

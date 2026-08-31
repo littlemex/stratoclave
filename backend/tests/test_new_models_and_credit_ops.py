@@ -380,8 +380,13 @@ def test_pricing_conversion_gpt56_sol_exact():
 
     snap = snapshot_rates("gpt-5.6-sol")
     rec = rate_usage(snap, input_tokens=1_000_000, output_tokens=100_000)
-    # input: 1M tok * 4.40 $/MTok = 4_400_000 ; output: 0.1M * 22.00 = 2_200_000
-    assert rec.total_cost_microusd == 4_400_000 + 2_200_000
+    # 1 MTok at the input rate plus 0.1 MTok at the output rate. The rates come from
+    # the floor because that is where the measured list price lives: the row was
+    # $4.40/$22.00 while it was read off a model card, and the model's own agreement
+    # rate card says $5.50/$33.00 in-region. Pinning the arithmetic rather than the
+    # dollars is what keeps this a digit-slip guard instead of a price mirror.
+    assert rec.total_cost_microusd == (snap.input_per_mtok_microusd
+                                      + snap.output_per_mtok_microusd // 10)
 
 
 def test_users_star_grants_update_own_tenant_but_update_does_not():

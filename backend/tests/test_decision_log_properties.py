@@ -137,8 +137,10 @@ def test_counterfactual_recomputable_from_persisted_tokens(dynamodb_mock):
         input_tokens=o["actual_input_tokens"],
         output_tokens=o["actual_output_tokens"],
     )
-    # opus default: 5M in + 25M out per MTok, at 1 MTok each = 30M.
-    assert recomputed == 30_000_000
+    # One MTok on each side, so the counterfactual is the input rate plus the output
+    # rate at the floor. Derived rather than pinned: the floor carries measured prices.
+    opus = pricing.baseline_rates()["opus"]
+    assert recomputed == opus.input_per_mtok_microusd + opus.output_per_mtok_microusd
     # And the reservation estimator, on the same tokens, is HIGHER — which is why it
     # is the wrong function here. It prices the input side at the cache-write rate.
     assert pricing.estimate_cost_microusd(
@@ -197,11 +199,16 @@ def test_savings_survives_an_unknown_effort_because_effort_is_not_priced(
         actual_input_tokens=1_000_000, actual_output_tokens=1_000_000,
         ledger_pricing_version="builtin",
     )
-    # opus at 1 MTok in + 1 MTok out = 30,000,000 microUSD; the chosen model settled
-    # at 500, so the recorded saving is the difference and not a null.
-    assert captured.get("counterfactual_vs_requested_microusd") == 30_000_000
-    assert captured.get("savings_vs_requested_microusd") == 30_000_000 - 500
-    assert captured.get("savings_vs_max_servable_microusd") == 30_000_000 - 500
+    # opus at 1 MTok in + 1 MTok out is the input rate plus the output rate at the
+    # floor; the chosen model settled at 500, so the recorded saving is the difference
+    # and not a null. Derived rather than pinned: the floor carries measured prices.
+    from mvp import pricing as _pricing
+
+    opus = _pricing.baseline_rates()["opus"]
+    counterfactual = opus.input_per_mtok_microusd + opus.output_per_mtok_microusd
+    assert captured.get("counterfactual_vs_requested_microusd") == counterfactual
+    assert captured.get("savings_vs_requested_microusd") == counterfactual - 500
+    assert captured.get("savings_vs_max_servable_microusd") == counterfactual - 500
     assert captured.get("effort") is None, (
         "effort must still be recorded as unknown rather than defaulted — it is "
         "evidence about the reservation, and only the counterfactual stopped needing it"

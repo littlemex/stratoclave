@@ -59,16 +59,16 @@ The team's six requests fold into a Savings Certificate. Expected output:
 [COST]  (runs today — real Savings Certificate engine)
   rate version:            builtin
   priced requests (base):  3
-  NET saving if followed:  $0.030000
-    (+ cheaper-if-followed $0.086000 / - dearer $0.056000)
-  potential (advice only): $0.064000 (never in headline)
+  NET saving if followed:  $0.033000
+    (+ cheaper-if-followed $0.094600 / - dearer $0.061600)
+  potential (advice only): $0.070400 (never in headline)
   request classes:         {'counterfactual': 4, 'followed': 1, 'no_suggestion': 1}
   quality measured:        False
 ```
 
-Read it honestly: the **net** ($0.030) is what the *enacted* advice saved — the
-cheaper-if-followed total ($0.086) minus a real **escalation loss** ($0.056)
-where the router advised the *dearer* model. The shadow-only advice ($0.064
+Read it honestly: the **net** ($0.033) is what the *enacted* advice saved — the
+cheaper-if-followed total ($0.0946) minus a real **escalation loss** ($0.0616)
+where the router advised the *dearer* model. The shadow-only advice ($0.0704
 `potential`) is kept out of the headline. `quality measured: False` — the cost is
 proven; the quality is not claimed.
 

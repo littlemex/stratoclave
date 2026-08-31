@@ -101,7 +101,10 @@ def test_endpoint_defaults(client):
     by_key = {row["pricing_key"]: row for row in body["rates"]}
     # opus default rate + source + a model mapped to it
     assert by_key["opus"]["source"] == "default"
-    assert by_key["opus"]["input_per_mtok_microusd"] == 5_000_000
+    from mvp.pricing import baseline_rates
+
+    assert (by_key["opus"]["input_per_mtok_microusd"]
+            == baseline_rates()["opus"].input_per_mtok_microusd)
     assert any("opus" in m for m in by_key["opus"]["models"])
 
 

@@ -59,6 +59,8 @@ class UsageLogsRepository:
         model_id: str,
         input_tokens: int,
         output_tokens: int,
+        cache_read_tokens: Optional[int] = None,
+        cache_write_tokens: Optional[int] = None,
         request_id: Optional[str] = None,
         cost_microusd: Optional[int] = None,
         requested_model_id: Optional[str] = None,
@@ -111,6 +113,16 @@ class UsageLogsRepository:
             "recorded_at": now,
             "ttl": _ttl_epoch(),
         }
+        # The cache legs are written only when the provider reported them, and are
+        # recorded because this row's stated purpose is that spend be re-derivable from
+        # it: a charge that included cached tokens cannot be re-derived from input and
+        # output alone. Absent means "not reported", which is a different fact from zero
+        # — the difference between a model that does not cache and a request that did
+        # not hit the cache.
+        if cache_read_tokens is not None:
+            item["cache_read_tokens"] = Decimal(int(cache_read_tokens))
+        if cache_write_tokens is not None:
+            item["cache_write_tokens"] = Decimal(int(cache_write_tokens))
         if cost_microusd is not None:
             item["cost_microusd"] = Decimal(int(cost_microusd))
         if requested_model_id is not None:

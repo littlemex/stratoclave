@@ -144,6 +144,18 @@ async def lifespan(app: FastAPI):
 
     _configure_capacity()
 
+    # Make the live feed's name resolvable before the price source is validated.
+    # Registration is not activation: the source only serves traffic when
+    # STRATOCLAVE_PRICE_SOURCE names it, and the default install still reads the
+    # bundled document with no AWS call on the pricing path. Doing it here rather than
+    # on import keeps offline tools (and the tests) free of it.
+    try:
+        from mvp.pricing_feeds import register as _register_price_feeds
+
+        _register_price_feeds(replace=True)
+    except Exception as exc:  # noqa: BLE001 — an unregistered name fails below, loudly.
+        logger.warning("price_feed_registration_failed", error=str(exc))
+
     # Fail the deployment on a misconfigured price source rather than letting live
     # traffic be charged at the bundled floor. The request path degrades on pricing
     # failures by design, so startup is the only place this can be a hard error.

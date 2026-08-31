@@ -51,16 +51,16 @@ python scenarios/usage/small-team/run.py --json     # 生 JSON
 [COST]  (runs today — real Savings Certificate engine)
   rate version:            builtin
   priced requests (base):  3
-  NET saving if followed:  $0.030000
-    (+ cheaper-if-followed $0.086000 / - dearer $0.056000)
-  potential (advice only): $0.064000 (never in headline)
+  NET saving if followed:  $0.033000
+    (+ cheaper-if-followed $0.094600 / - dearer $0.061600)
+  potential (advice only): $0.070400 (never in headline)
   request classes:         {'counterfactual': 4, 'followed': 1, 'no_suggestion': 1}
   quality measured:        False
 ```
 
-正直に読む: **net**（$0.030）は *実際に enact された* 助言が節約した額 —— cheaper-if-followed
-合計（$0.086）から、ルーターが *より高い* モデルを勧めた実際の **escalation loss**（$0.056）を
-引いたもの。shadow 助言のみの分（$0.064 `potential`）は headline に含めない。
+正直に読む: **net**（$0.033）は *実際に enact された* 助言が節約した額 —— cheaper-if-followed
+合計（$0.0946）から、ルーターが *より高い* モデルを勧めた実際の **escalation loss**（$0.0616）を
+引いたもの。shadow 助言のみの分（$0.0704 `potential`）は headline に含めない。
 `quality measured: False` —— コストは証明するが、品質は主張しない。
 
 ### 2. 性能 —— offline では TTFT/TPOT は未測定、live baseline で実測する

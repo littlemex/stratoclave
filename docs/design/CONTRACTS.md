@@ -77,6 +77,28 @@ price the request was admitted under.
 | **C2.3** A published derived money figure is replayable from the artifact itself: the same facts, priced the way they were priced, give the same figure however long after issue. | E | `test_savings_certificate.py` (`test_a_replay_holds_its_number_across_a_rate_change`, mutation-checked): the report embeds the four rate legs per pricing key and the model resolutions it used, and a replay handed an incomplete basis raises rather than pricing the gap live. A version stamp alone would not carry this — the effective table is the bundled floor plus a live external source plus the version's override rows, and only the last is versioned. Detail rows past the stored cap are not retained, so a replay reproduces the figure and the class breakdown rather than every line |
 | **C2.4** The set of billable legs is declared in one place; adding a leg to the charge without adding it to the estimate is impossible to do silently. | E | `test_billable_legs_registry.py` |
 | **C2.5** A rate document is one complete validated value: every leg present, every rate a non-negative integer, a version read whole or refused, and a version's rows and row COUNT immutable once written. Validated at every boundary that consumes a row — including the point read that builds the frozen snapshot, not only the bulk load. An invalid document is not a transient, so it refuses admission instead of quietly leaving the previous rates in place. | E | `test_contract_price_identity.py` |
+| **C2.6** A rate is resolved through a fixed ladder — admin override, then a fresh fetch, then the current stored version, then the bundled floor — and a missing rate falls DOWN it. No layer's absence lowers a price: a feed that fails, a rate name in a grammar this build cannot read, a token class the provider does not publish, and a region set that cannot be read each keep the value from the layer below, per leg, and never become zero. A leg with no sourced number at all removes its key from the fetch rather than charging zero. | E | `test_pricing_feeds_composite.py`, `test_pricing_feeds_snapshot.py`. The ladder and the measured behaviour of each price API are documented in [`price-feeds.md`](price-feeds.md) |
+| **C2.9** A stored rate version is cut when prices CHANGE, not when they are checked: the version id is the digest of the table and each version is written once, so polling adds no rows and a superseded version stays readable. | E | `test_pricing_feeds_snapshot.py::test_an_unchanged_table_cuts_no_new_version`, `::test_a_changed_price_cuts_a_version_and_moves_the_pointer` |
+| **C2.10** A charge is recomputable from what was stored: every terminal money event carries, per leg, the token count and the rate applied, so a period can be repriced at any other table — including a superseded stored version — as arithmetic over recorded facts rather than a reconstruction. The recompute is read-only; the charge of record is not edited. | E | `test_reprice.py`, and `dynamo/credit_ledger.py::rating_replay_mismatches` for the replay of each event against its own rate |
+| **C2.7** Where a rate could be one of several published numbers, the charged one is the dearest: across the regions a request can fail over to, across the models that share a pricing key, and when a model id does not say which scope it is billed at. Conversion to integer micro-USD rounds up. | E | `test_pricing_feeds_dimensions.py`, `test_pricing_feeds_composite.py` |
+| **C2.8** The bundled floor is a measured list price with its provenance recorded, not a placeholder, and a pricing key holds one price point. A key whose models are published at different prices is charged at the dearest and reported (`price_feed_key_spans_prices`) so it is split rather than left to over-charge the cheaper member. | E | `test_pricing_floor.py`, `test_pricing_feeds_composite.py::test_two_models_on_one_key_are_charged_at_the_dearer` |
+
+**Not guaranteed (N).** That a long-context request is charged at the long-context rate.
+Bedrock prices a request above a model's long-context threshold at a higher rate per leg
+(for Claude Sonnet 4.6, double the standard input rate), and the rate table holds ONE rate
+per leg, so such a request is charged at the standard rate — the only systematic
+UNDER-charge in this subsystem, and it is named here rather than hidden. The feed parses
+long-context rate names and excludes them deliberately (it does not mistake them for the
+standard rate, which would over-charge every ordinary request). Closing it needs a leg per
+context band in the rate type and in the estimator, which is a money-path change with its
+own proof obligations; it is on the open-items list.
+
+**Not guaranteed (N).** That a rate follows the market. No Bedrock API publishes when a
+promotional price ends — every offer's `effectiveDate` reads as the first of the current
+month — so a change is visible only as a difference between two fetches, and a model no
+feed covers (or whose offer this account may not read) keeps the floor until an operator
+edits it. That the published list price is what the account actually pays is also outside
+this contract: private pricing, credits and commitments are not in any price list.
 
 ## C3 — Termination and recovery
 
@@ -282,6 +304,14 @@ because a contract that quietly omits its failures is worse than no contract. A
 clause that has been closed leaves this list; a residual stated inside a clause's
 own cell is not an open item, because there is nothing outstanding to do about it
 without paying a cost the clause names.
+
+- **The long-context rate band, for C2 (see the N note there).** Bedrock charges a
+  request past a model's long-context threshold at a higher rate per leg; the rate type
+  holds one rate per leg, so those requests are charged at the standard rate. This is the
+  only systematic under-charge in the pricing subsystem. Closing it means a leg per context
+  band through `Rate`, `RateSnapshot`, the estimator and the settle path — a money-path
+  change that carries the same proof obligations as the rest of that path, which is why it
+  is here rather than done quietly.
 
 - **C3.2b and C3.2c, for the per-user token reservation and the per-model counter.**
   The admission transaction debits up to three counters; the hold row records only the

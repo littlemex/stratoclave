@@ -32,6 +32,68 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
+## Unreleased
+
+### Added
+
+- **Live price feeds behind the existing source seam** (`backend/mvp/pricing_feeds/`).
+  `STRATOCLAVE_PRICE_SOURCE=bedrock-live` resolves rates from
+  `bedrock:ListFoundationModelAgreementOffers` — the only place every current Claude
+  price and the OpenAI GPT-5.x prices are published — from the Price List API's
+  `AmazonBedrock` offer for the families AWS bills directly, and from an operator
+  document for self-hosted vLLM capacity, all through one `Feed` contract. Off by
+  default. New IAM: two read-only price actions;
+  `bedrock:CreateFoundationModelAgreement` is deliberately not granted, because the
+  agreement response carries the signed token that action consumes.
+- **A durable last-known-good rate snapshot** (DynamoDB, its own partition of the
+  pricing-config table). A restarted task reads the last successful fetch instead of
+  falling back to the bundled document, and the stored table is the UNION of what was
+  known and what was just read, so a pass that lost coverage cannot erase it. Clauses
+  C2.6-C2.8 in [`docs/design/CONTRACTS.md`](docs/design/CONTRACTS.md), design in
+  [`docs/design/price-feeds.md`](docs/design/price-feeds.md).
+- `python -m mvp.pricing_feeds.fetch [--apply] [--json] [--strict]`: fetch prices now,
+  diff against the stored snapshot, optionally store it. `--strict` exits 2 when the pass
+  found something a person has to act on, so it works as a deploy gate.
+- **Events that make a silent price failure visible**: `price_feed_coverage_regression`
+  (a key stopped being readable), `price_feed_leg_regression` (one leg of a key did, and
+  is now being charged from the stored value — the shape a lapsed promotional rate takes),
+  `price_feed_key_spans_prices`, `price_feed_scope_widened`,
+  `price_feed_unparsed_names`, `price_feed_not_authorized`, `price_table_changed`.
+- `price_model_id` on a model registry entry: the id the price APIs know a model by, for
+  the case where the billed spelling differs from the invoked one.
+- **`python -m mvp.reprice`**: recompute a period's charges at another rate table — a
+  stored version, the current effective table, or the floor — from the per-leg token counts
+  the ledger already stores, reporting as-charged against as-repriced. Read-only: the charge
+  of record stands, and a correction remains a separate, idempotent adjustment event.
+  Clauses C2.9 and C2.10.
+- The usage row now records `cache_read_tokens` and `cache_write_tokens` when the provider
+  reported them. That row's stated purpose is that spend be re-derivable from it, and two
+  legs out of four could only re-derive a request that used no prompt cache.
+
+### Changed
+
+- **The bundled rate table now holds measured in-region list prices.** Every row was read
+  from the provider's own APIs on 2026-08-31 and is pinned with its provenance in
+  `tests/test_pricing_floor.py`. Notable corrections: GPT-5.6 sol was carried at
+  $4.40/$22.00 per MTok and lists at $5.50/$33.00; Gemma, Nemotron and Qwen defaulted to
+  the Opus tier for want of a published price and list at $0.14-$0.15 input, so they were
+  over-charged by roughly 35x; the Claude tiers moved from the global rate to the
+  in-region rate this gateway's `us.` profiles are actually billed at.
+- **A pricing key is now one price point, not a family.** A shared key can only be
+  charged at its dearest member, so `opus` covering Claude Opus 4.1 ($15/$75) and Opus 5
+  ($5.50/$27.50) charged every Opus 5 request at nearly three times its rate. The registry
+  splits `opus-legacy`, `sonnet-3`, `haiku-3-5` and `haiku-3` out, and a live fetch that
+  finds a key whose models disagree now reports which models they are.
+- **Claude Sonnet 5 has its own key at $2.20/$11.00 per MTok.** It lists BELOW Sonnet 4.5
+  and 4.6 and was charged at their $3.30/$16.50 — 50% over — while it shared the `sonnet`
+  key. Found by the new key-disagreement check on its first run against the real APIs,
+  which is why that check reports structurally instead of only logging.
+- **Cost tiers follow, because `_tier_for` derives a tier from the price rather than the
+  name.** Gemma, Nemotron and Qwen move from tier 3 to tier 1, so a breaker downgrade now
+  reaches the models it exists to reach.
+- `default` is now priced at the dearest rate any registry entry is billed at rather than
+  at the Opus tier, because Opus is no longer the ceiling.
+
 ## [1.1.0] — 2026-08-31
 
 ### Added

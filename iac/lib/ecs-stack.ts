@@ -730,6 +730,32 @@ export class EcsStack extends cdk.Stack {
       }),
     );
 
+    // Read-only price discovery for the live rate feed
+    // (`STRATOCLAVE_PRICE_SOURCE=bedrock-live`, see docs/design/price-feeds.md).
+    //
+    // Two APIs, because Bedrock publishes its prices in two places and neither covers
+    // everything: `ListFoundationModelAgreementOffers` carries the Marketplace-metered
+    // families (every current Claude model, and GPT-5.x) while the Price List carries
+    // the ones AWS bills directly (Nova, Llama, Mistral, Qwen, Grok, ...).
+    //
+    // `bedrock:CreateFoundationModelAgreement` is deliberately NOT granted. The
+    // agreement response carries a signed `offerToken` that that action consumes, so
+    // granting it would turn reading a price into subscribing to a paid product. Both
+    // actions here are reads; neither is resource-scopeable in a way that has been
+    // tested, so they follow the `*` precedent above rather than a guess that fails
+    // closed at refresh time.
+    this.taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowReadOnlyPriceDiscovery',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:ListFoundationModelAgreementOffers',
+          'pricing:GetProducts',
+        ],
+        resources: ['*'],
+      }),
+    );
+
     // SSM messages permissions required by ECS Exec
     // (`enableExecuteCommand: true`).
     //

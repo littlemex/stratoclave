@@ -49,10 +49,10 @@ not enacted), and 1 with no routing at all.
 
 | Model | Requests | Billed spend |
 |---|---|---|
-| claude-opus-4-7 | 6 | $0.537500 |
-| claude-haiku-4-5 | 2 | $0.025500 |
-| claude-sonnet-4-5 | 1 | $0.036000 |
-| **Total** | **9** | **$0.599000** |
+| claude-opus-4-7 | 6 | $0.591250 |
+| claude-haiku-4-5 | 2 | $0.028050 |
+| claude-sonnet-4-5 | 1 | $0.039600 |
+| **Total** | **9** | **$0.658900** |
 
 That is the whole truth a spend log holds: money that actually moved. There is no
 column for "what following the advice would have cost", because a passthrough
@@ -65,11 +65,11 @@ gateway never priced the counterfactual model over these same tokens.
   *** TRAFFIC: SYNTHETIC — SEEDED SAMPLE, NOT A REAL AUDITED TENANT NUMBER ***
   rate version:             builtin
   priced requests (base):   4
-  billed over priced base:  $0.339000
-  total billed (all reqs):  $0.599000
-  NET saving:               $0.138000
-    (+ cheaper-if-followed: $0.204000)
-    (- dearer-if-followed:  $0.066000)
+  billed over priced base:  $0.372900
+  total billed (all reqs):  $0.658900
+  NET saving:               $0.151800
+    (+ cheaper-if-followed: $0.224400)
+    (- dearer-if-followed:  $0.072600)
   net saving vs priced base: 40.7%
   request classes:          counterfactual=6, followed=2, no_suggestion=1
   quality measured:         False
@@ -80,10 +80,10 @@ Per-request (from `--detail`), every counterfactual is `recompute(billed_model)
 
 | span | suggested → billed | recompute(billed) | recompute(suggested) | saving |
 |---|---|---|---|---|
-| req-save-0 | haiku → opus | $0.100000 | $0.020000 | **+$0.080000** |
-| req-save-1 | haiku → opus | $0.087500 | $0.017500 | **+$0.070000** |
-| req-save-2 | sonnet → opus | $0.135000 | $0.081000 | **+$0.054000** |
-| req-loss-0 | opus → haiku | $0.016500 | $0.082500 | **−$0.066000** |
+| req-save-0 | haiku → opus | $0.110000 | $0.022000 | **+$0.088000** |
+| req-save-1 | haiku → opus | $0.096250 | $0.019250 | **+$0.077000** |
+| req-save-2 | sonnet → opus | $0.148500 | $0.089100 | **+$0.059400** |
+| req-loss-0 | opus → haiku | $0.018150 | $0.090750 | **−$0.072600** |
 
 The escalation row (`req-loss-0`) is where the router advised the *dearer* model:
 following it would have cost **more**, so it is **subtracted** from the net, not
