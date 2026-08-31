@@ -141,6 +141,17 @@ different useful signal and not one this subsystem consumes today.
    the price list disagree.
 4. **Where a choice exists, the dearer number wins.** Across the regions a Converse
    request could fail over to, and across the models that share a pricing key.
+4b. **A pass that saw less than the whole picture may raise a rate and never lower one.**
+    The published number is a maximum — over the models sharing a key, over the regions a
+    request can reach — so a pass that missed a member, could not read a region, or had to
+    widen a leg computed that maximum over less than the truth, and is clamped to at least
+    what the layer below holds. Completeness is judged **per key from positive evidence per
+    member**: every model sharing the key produced a selection, and the feed that answered
+    for it did not report its own answer as partial. Not from a flag for the whole pass — a
+    pagination limit in an offer that prices nothing we asked about would otherwise freeze a
+    model another feed read completely, turning a safety clamp into a permanent over-charge.
+    A genuine price drop lands on the next complete pass, which is how Claude Sonnet 5
+    listing below Sonnet 4.6 still propagates.
 5. **Rounding to integer micro-USD rounds up.** Truncation is a discount nobody granted.
 6. **A pricing key is a price point, not a family.** A shared key can only be charged
    at its dearest member, so `opus` covering Claude Opus 4.1 ($15/MTok input) and Opus 5
@@ -148,10 +159,13 @@ different useful signal and not one this subsystem consumes today.
    registry now splits them, and a live fetch that finds a key whose models disagree
    emits `price_feed_key_spans_prices` naming the models.
 7. **The scope follows the inference profile.** A model addressed through `us.` is
-   billed at the in-region rate, `global.` at the global rate, and the two differ by
-   ~10%. An id carrying a prefix this build does not recognise — AWS keeps adding
-   them — has that prefix stripped for the query anyway (so the model does not silently
-   drop off the feed) and is treated as scope-unknown, which takes the dearer of the two.
+   billed at the in-region rate, `global.` at the global rate, and the two differ by ~10%.
+   An id carrying a prefix this build does not recognise — AWS keeps adding them — is
+   **rejected at registry load** unless the entry declares `price_model_id`. It is not
+   stripped on a guess: `xai.grok-4.6` is a bare id whose second dot belongs to a version
+   number, so a "strip the first segment" rule mangles it. Both outcomes of guessing end
+   with the model quietly on the bundled floor, so the registry is made to state the id the
+   price APIs know instead.
 8. **A billed id that differs from the invoked one is declared, never guessed.**
    `qwen.qwen3-next-80b-a3b` is billed as `...-a3b-instruct`, and the registry says so
    in `price_model_id`. The alternative — absorbing unexpected segments after a prefix
@@ -195,6 +209,18 @@ times prices moved", and `first_seen_at` keeps saying when a stable table appear
 than when it was last confirmed. It is the same shape as the admin override rows beside it,
 for the same reason: an immutable version is what a dispute is answered against.
 
+Both reads are strongly consistent, and the pointer moves under a compare-and-set fenced on
+the version the pass STARTED from. Neither is decoration. The pointer is written after the
+version row it names, so an eventually-consistent pair can show a reader a pointer at a
+version it cannot see yet — and this module's answer to a missing version is "no stored
+version", which drops the whole table to the floor. And the fence has to be the pass's
+starting point rather than a timestamp or the value read just before writing: a CAS against a
+just-read value has the same hole as no CAS at all, because the late writer reads the winner's
+version and then satisfies its own condition, while a clock-based guard hands ordering to
+whichever task has the worst clock, where a single future-dated write locks the pointer until
+wall time catches up. A pass that loses the fence adopts the stored winner instead of serving
+a table nothing else can see.
+
 The history exists because **tokens are the record of origin**. Every terminal money event
 carries, per leg, the token count and the rate it was charged at, so a charge is arithmetic
 over recorded facts rather than an opaque number. Two replays follow from that, and the
@@ -204,7 +230,12 @@ difference between them is the point:
   rate and proves the arithmetic still reproduces. A healthy ledger returns nothing.
 - `mvp/reprice.py` replays the same tokens against a **different** table — a stored
   version, the current effective table, or the floor — and reports as-charged against
-  as-repriced, broken down per pricing key:
+  as-repriced, broken down per pricing key. As-charged is the ledger's own settled delta,
+  not the rating's self-report: they must agree, and when they do not, the money that moved
+  is the charge of record and the rating is the thing in doubt. Every money event in the
+  period is counted whether or not it carries a rating, and the report says whether it is
+  `complete`, because a difference measured over part of a period is a different question
+  from the one that was asked:
 
 ```bash
 python -m mvp.reprice --tenant acme --period 2026-08 --at-version <digest>

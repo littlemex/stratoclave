@@ -337,3 +337,67 @@ def test_a_real_card_leaves_the_unparsed_counter_at_zero():
             FeedRequest(model_ids=frozenset({doc["modelId"]})))
         assert result.unparsed == 0, (fixture, result.unparsed_samples)
         assert result.cards, fixture
+
+
+def test_the_price_list_grammar_treats_the_default_ttl_as_the_base_cache_write():
+    """Stated in one grammar and not the other is how a leg ends up frozen on the floor
+    while the provider publishes it. 5 minutes is Bedrock's default prompt-cache TTL."""
+    assert parse_price_list_usagetype(
+        "USE1-vendor.model-cache-write-tokens-5m-standard", "vendor.model") == (
+        "us-east-1", RateDimension("cache_write", "geo"))
+    assert parse_price_list_usagetype(
+        "USE1-vendor.model-cache-write-tokens-1h-standard", "vendor.model") is EXCLUDED
+
+
+def test_a_row_that_names_our_model_but_cannot_be_read_is_not_silent():
+    """Another model's row is noise. OUR model's row in a shape this build cannot read is
+    the only warning that a grammar changed, so the feed counts it."""
+    from mvp.pricing_feeds.base import FeedRequest
+    from mvp.pricing_feeds.price_list import PriceListFeed
+
+    product = {
+        "product": {"attributes": {
+            "usagetype": "USE1-vendor.model-input-tokens-quantum-standard",
+            "regionCode": "us-east-1"}},
+        "terms": {"OnDemand": {"t": {"priceDimensions": {"d": {
+            "unit": "1K tokens", "pricePerUnit": {"USD": "0.001"}}}}}},
+    }
+
+    class _Client:
+        def get_products(self, **kwargs):
+            return {"PriceList": [json.dumps(product)]}
+
+    feed = PriceListFeed(_Client())
+    result = feed.fetch(FeedRequest(model_ids=frozenset({"vendor.model"}),
+                                   regions=frozenset({"us-east-1"})))
+    assert result.unparsed >= 1, result.unparsed_samples
+    assert not result.cards
+
+
+def test_a_registry_entry_with_an_unknown_profile_prefix_is_refused_at_load(tmp_path):
+    """Guessing which segment to strip ends with the model on the bundled floor either way —
+    stripped and unmatched, or unstripped and rejected by the price API. The registry is made
+    to say the id the price APIs know instead, at load, where it is a build failure rather
+    than a quiet under- or over-charge."""
+    from mvp.models import load_registry
+
+    doc = {
+        "schema_version": 1,
+        "models": [{
+            "provider": "anthropic",
+            "bedrock_model_id": "mx.anthropic.claude-opus-5",
+            "bedrock_region": "us-east-1",
+            "aliases": ["claude-opus-5-mx"],
+            "wire_protocol": "messages",
+            "pricing_key": "opus",
+        }],
+    }
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="price_model_id"):
+        load_registry(str(path))
+
+    # Declaring the billed id settles it, and the entry loads.
+    doc["models"][0]["price_model_id"] = "anthropic.claude-opus-5"
+    path.write_text(json.dumps(doc))
+    assert load_registry(str(path))[0].price_model_id == "anthropic.claude-opus-5"

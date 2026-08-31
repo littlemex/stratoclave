@@ -145,11 +145,11 @@
       "notes": "Self-hosted capacity. This is a cost-recovery rate the operator sets, not a list price; the cache legs MUST stay zero because vLLM reports no Bedrock-style cache split. STRATOCLAVE_SELFHOSTED_RATES_PATH lets a deployment publish its own figure through the same feed pipeline."
     },
     "default": {
-      "input_per_mtok_microusd": 5500000,
-      "output_per_mtok_microusd": 33000000,
-      "cache_read_per_mtok_microusd": 550000,
-      "cache_write_per_mtok_microusd": 6875000,
-      "notes": "Conservative fallback so a model with no row never under-charges a budget. Set to the dearest per-token rate any registry entry is billed at (GPT-5.6 sol output), not to the Opus tier, because \"default\" is what an unregistered key is charged and Opus is no longer the ceiling."
+      "input_per_mtok_microusd": 15000000,
+      "output_per_mtok_microusd": 75000000,
+      "cache_read_per_mtok_microusd": 1500000,
+      "cache_write_per_mtok_microusd": 18750000,
+      "notes": "The fallback for a pricing key that exists nowhere, which in practice means a typo. It DOMINATES every provider row in this document, leg by leg (the dearest is the legacy Opus tier at $15/$75), because the stated rule is that an unpriced model over-charges rather than under-charges — and a fallback that is cheaper than a real tier breaks exactly that rule for the models that tier covers. test_pricing_floor.py enforces the domination."
     }
   }
 }

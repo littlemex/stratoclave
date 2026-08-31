@@ -26,7 +26,7 @@ _PERIOD = "2026-08"
 def _seed(repo, *, hold_id: str, pricing_key: str, tokens: dict[str, int],
          rates: Rate, rounding: str = "ceil") -> int:
     """Write one terminal event the way the settle path does, and return its charge."""
-    from dynamo.credit_ledger import ledger_pk, terminal_sk
+    from dynamo.credit_ledger import EV_SETTLE, ledger_pk, terminal_sk
     from mvp.pricing import mtok_cost_for_rounding
 
     components = {}
@@ -41,7 +41,7 @@ def _seed(repo, *, hold_id: str, pricing_key: str, tokens: dict[str, int],
         "pk": ledger_pk(_TENANT, _PERIOD),
         "sk": terminal_sk(hold_id),
         "hold_id": hold_id,
-        "event_type": "TERMINAL",
+        "event_type": EV_SETTLE,
         "settled_delta_microusd": total,
         "rating": json.dumps({
             "pricing_version": "builtin",
@@ -134,16 +134,84 @@ def test_a_key_the_target_table_does_not_price_is_reported_not_skipped(repo):
 
 
 def test_an_unreadable_rating_is_counted_rather_than_dropped(repo):
-    from dynamo.credit_ledger import ledger_pk, terminal_sk
+    from dynamo.credit_ledger import EV_SETTLE, ledger_pk, terminal_sk
 
     repo._table.put_item(Item={
         "pk": ledger_pk(_TENANT, _PERIOD), "sk": terminal_sk("h1"),
-        "hold_id": "h1", "event_type": "TERMINAL", "rating": "{not json",
+        "hold_id": "h1", "event_type": EV_SETTLE, "settled_delta_microusd": 7,
+        "rating": "{not json",
     })
     report = reprice.reprice_period(tenant_id=_TENANT, period=_PERIOD,
                                     target_rates={}, target_label="test", repo=repo)
     assert report.not_repriced == {"unparseable_rating": 1}
     assert report.events_priced == 0
+    # The money still moved, so it is in the as-charged total and the report says it is
+    # not complete. A difference measured against a smaller period than the one asked
+    # about is a wrong number that looks like a right one.
+    assert report.as_charged_microusd == 7
+    assert report.events_seen == 1
+    assert report.complete is False
+
+
+def test_as_charged_is_the_settled_delta_not_the_rating_s_self_report(repo):
+    """The charge of record is the ledger's money move. When a rating disagrees with it —
+    a bad total, a `true` where a number belongs — the rating is the thing in doubt, and
+    its token counts stop being evidence of what the charge was for."""
+    from dynamo.credit_ledger import EV_SETTLE, ledger_pk, terminal_sk
+
+    repo._table.put_item(Item={
+        "pk": ledger_pk(_TENANT, _PERIOD), "sk": terminal_sk("h1"),
+        "hold_id": "h1", "event_type": EV_SETTLE,
+        "settled_delta_microusd": 11_000_000,
+        "rating": json.dumps({
+            "pricing_key": "haiku", "rounding": "ceil",
+            # `int(True)` is 1: a bool must be refused rather than read as one micro-USD.
+            "total_cost_microusd": True,
+            "components": {"input": {"tokens": 1_000_000,
+                                     "rate_microusd_per_mtok": 1_000_000,
+                                     "cost_microusd": 1_000_000, "reported": True}},
+        }),
+    })
+    report = reprice.reprice_period(
+        tenant_id=_TENANT, period=_PERIOD,
+        target_rates={"haiku": Rate(1_000_000, 1, 1, 1)}, target_label="test", repo=repo)
+    assert report.as_charged_microusd == 11_000_000
+    assert report.as_repriced_microusd == 0
+    assert report.not_repriced == {"rating_disagrees_with_settled_delta": 1}
+    assert report.complete is False
+
+
+def test_a_terminal_with_no_rating_is_counted_and_marks_the_report_incomplete(repo):
+    from dynamo.credit_ledger import EV_SETTLE, ledger_pk, terminal_sk
+
+    repo._table.put_item(Item={
+        "pk": ledger_pk(_TENANT, _PERIOD), "sk": terminal_sk("h1"),
+        "hold_id": "h1", "event_type": EV_SETTLE,
+        "settled_delta_microusd": 5_000_000,
+    })
+    report = reprice.reprice_period(tenant_id=_TENANT, period=_PERIOD,
+                                    target_rates={}, target_label="test", repo=repo)
+    assert report.as_charged_microusd == 5_000_000
+    assert report.not_repriced == {"missing_rating": 1}
+    assert report.complete is False
+
+
+def test_the_effective_target_neither_fetches_nor_persists(dynamodb_mock, monkeypatch):
+    """A tool that prints "read-only" must not write the state charging depends on.
+    Resolving the active price source would run a live fetch on a cold process and store a
+    new version, so the layers are read directly instead."""
+    from mvp.pricing_feeds import composite
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("the effective target must not resolve the live source")
+
+    monkeypatch.setattr(composite.LivePriceSource, "load", _explode)
+    monkeypatch.setattr(composite.LivePriceSource, "refresh", _explode)
+    rates, label = reprice.target_from_effective()
+    assert rates, "the floor at least must answer"
+    # Named for what it can see: a task that failed to persist a fresh fetch charges from
+    # its own memory, and no report can read another process's memory.
+    assert label.startswith("durable-effective(")
 
 
 def test_the_recompute_writes_nothing(repo):
@@ -208,3 +276,61 @@ def test_the_usage_row_records_every_leg_it_was_charged_on(dynamodb_mock):
     )
     assert "cache_read_tokens" not in bare
     assert "cache_write_tokens" not in bare
+
+
+def test_a_real_settle_event_is_counted(repo):
+    """The event type comes from the ledger's own constants. This module once read
+    `"TERMINAL"` — the name of a SORT KEY, not of any event the writer emits — so every
+    real charge was invisible and the report still said `complete`. The fixture below
+    writes what the settle path writes."""
+    from dynamo.credit_ledger import EV_SETTLE, ledger_pk, terminal_sk
+
+    rate = Rate(1_000_000, 1_000_000, 1_000_000, 1_000_000)
+    repo._table.put_item(Item={
+        "pk": ledger_pk(_TENANT, _PERIOD), "sk": terminal_sk("h1"),
+        "hold_id": "h1", "event_type": EV_SETTLE,
+        "settled_delta_microusd": 5_000_000,
+        "rating": json.dumps({
+            "pricing_key": "haiku", "rounding": "ceil",
+            "total_cost_microusd": 5_000_000,
+            "components": {"input": {"tokens": 5_000_000,
+                                     "rate_microusd_per_mtok": 1_000_000,
+                                     "cost_microusd": 5_000_000, "reported": True}},
+        }),
+    })
+    report = reprice.reprice_period(tenant_id=_TENANT, period=_PERIOD,
+                                    target_rates={"haiku": rate}, target_label="test",
+                                    repo=repo)
+    assert report.events_seen == report.events_priced == 1
+    assert report.as_charged_microusd == 5_000_000
+    assert report.as_repriced_microusd == 5_000_000
+    assert report.complete is True
+
+
+def test_an_owed_settle_is_not_counted_twice_after_the_late_settle_lands(repo):
+    """`OWED_SETTLE` is evidence that a charge is owed, not money that moved. Counting it
+    doubles a period the moment the reaper posts the real one."""
+    from dynamo.credit_ledger import (EV_LATE_SETTLE, ledger_pk, late_settle_sk,
+                                      owed_settle_sk)
+
+    rating = json.dumps({
+        "pricing_key": "haiku", "rounding": "ceil", "total_cost_microusd": 1_000_000,
+        "components": {"input": {"tokens": 1_000_000,
+                                 "rate_microusd_per_mtok": 1_000_000,
+                                 "cost_microusd": 1_000_000, "reported": True}},
+    })
+    repo._table.put_item(Item={
+        "pk": ledger_pk(_TENANT, _PERIOD), "sk": owed_settle_sk("h1"),
+        "hold_id": "h1", "event_type": "OWED_SETTLE",
+        "settled_delta_microusd": 1_000_000, "rating": rating,
+    })
+    repo._table.put_item(Item={
+        "pk": ledger_pk(_TENANT, _PERIOD), "sk": late_settle_sk("h1"),
+        "hold_id": "h1", "event_type": EV_LATE_SETTLE,
+        "settled_delta_microusd": 1_000_000, "rating": rating,
+    })
+    report = reprice.reprice_period(
+        tenant_id=_TENANT, period=_PERIOD,
+        target_rates={"haiku": Rate(1_000_000, 1, 1, 1)}, target_label="test", repo=repo)
+    assert report.events_seen == 1
+    assert report.as_charged_microusd == 1_000_000

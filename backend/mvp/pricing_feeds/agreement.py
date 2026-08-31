@@ -146,6 +146,8 @@ class AgreementFeed:
                                     thread_name_prefix="price-agreement") as pool:
                 list(pool.map(one, wanted))
         if skipped:
+            # A skipped model produced no card at all, so the fold already treats its key
+            # as incomplete; the flag is for the report and the deploy gate.
             result.truncated = True
             result.note_error(f"stopped at the fetch budget with {skipped} model(s) unasked")
         return result

@@ -51,12 +51,11 @@ MEASURED = {
 # from a measurement without opening the JSON.
 CACHE_LEGS_ASSUMED = {"haiku-3", "gemma", "nemotron", "qwen", "grok"}
 
-# Keys dearer than `default`. `default` is what an unregistered pricing key is
-# charged, so it wants to be an upper bound — but Fable and the legacy Opus tier
-# genuinely cost more than any current model, and raising `default` to $15/$75 would
-# over-charge a typo by 3x rather than guard it. The exception is named instead of
-# being quietly true.
-DEARER_THAN_DEFAULT = {"fable", "opus-legacy"}
+# `default` is what a pricing key that exists nowhere is charged, which in practice means
+# a typo. The document says an unpriced model over-charges rather than under-charges, so
+# `default` has to dominate every provider row leg by leg — a fallback cheaper than a real
+# tier under-charges exactly the models that tier covers. There is no exception list: an
+# exception here is the rule not holding.
 
 
 @pytest.mark.parametrize("key", sorted(MEASURED))
@@ -95,16 +94,23 @@ def test_no_leg_is_free_except_self_hosted_cache():
         assert rate.cache_write_per_mtok_microusd > 0, key
 
 
-def test_default_is_an_upper_bound_except_where_it_is_documented_not_to_be():
+def test_default_dominates_every_bundled_provider_rate_leg():
+    """A pricing key that exists nowhere is charged at `default`, and the document promises
+    that such a model over-charges. That promise is only true if `default` is at least as
+    dear as every provider row, on every leg — otherwise a typo in the registry
+    under-charges by the difference, silently, for as long as it goes unnoticed."""
+    from mvp.rates import RATE_FIELDS
+
     floor = baseline_rates()
     default = floor["default"]
     for key, rate in floor.items():
-        if key in DEARER_THAN_DEFAULT or key in {"default", "vllm"}:
+        if key in {"default", "vllm"}:      # vllm is operator cost recovery, not a list price
             continue
-        assert rate.output_per_mtok_microusd <= default.output_per_mtok_microusd, (
-            f"{key} out-prices `default`, so a typo'd pricing key would UNDER-charge. "
-            f"Either raise `default` or add {key} to DEARER_THAN_DEFAULT with a reason."
-        )
+        for leg in RATE_FIELDS:
+            assert getattr(rate, leg) <= getattr(default, leg), (
+                f"{key}.{leg} out-prices `default`, so a pricing key that exists nowhere "
+                f"would UNDER-charge. Raise `default` to at least the dearest row."
+            )
 
 
 def test_assumed_cache_legs_are_declared_in_the_document():

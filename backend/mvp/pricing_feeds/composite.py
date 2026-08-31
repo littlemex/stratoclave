@@ -270,6 +270,14 @@ class LivePriceSource:
             entries = [e for e in self._entries() if not getattr(e, "virtual", False)]
             feeds = self._feeds if self._feeds is not None else self._default_feeds()
             wanted = frozenset(_price_model_id(e) for e in entries)
+            # ONE reading of the region policy per pass, shared by the feeds and by the
+            # fold. Reading it twice let a routing config that recovered mid-pass turn an
+            # incomplete regional catalogue into a "complete" answer — priced at the
+            # maximum over a smaller set than the truth, which is the one way this source
+            # can publish a rate that is too low.
+            regions_by_entry = {
+                id(entry): _candidate_regions(entry) for entry in entries
+            }
             for entry in entries:
                 prefix = unknown_profile_prefix(entry.bedrock_model_id)
                 if prefix and not getattr(entry, "price_model_id", None):
@@ -298,14 +306,15 @@ class LivePriceSource:
                     results.append((name, feed.fetch(FeedRequest(
                         model_ids=wanted,
                         regions=frozenset(
-                            r for e in entries for r in (_candidate_regions(e) or ())),
+                            r for e in entries
+                            for r in (regions_by_entry[id(e)] or ())),
                         deadline=deadline,
                     ))))
                 except Exception as exc:  # noqa: BLE001 — a feed contract violation.
                     result = FeedResult()
                     result.note_error(f"feed raised: {exc}")
                     results.append((name, result))
-            self._build(entries, results, report)
+            self._build(entries, results, report, regions_by_entry)
         except Exception as exc:  # noqa: BLE001 — never take charging down.
             logger.warning("price_feed_fetch_failed", error=str(exc))
             report.feed_errors.setdefault("composite", []).append(str(exc)[:300])
@@ -334,7 +343,8 @@ class LivePriceSource:
         return _positive_env(REFRESH_BUDGET_ENV, DEFAULT_REFRESH_BUDGET_SECONDS)
 
     def _build(self, entries: Sequence, results: Sequence[tuple[str, FeedResult]],
-              report: FetchReport) -> None:
+              report: FetchReport,
+              regions_by_entry: Optional[dict] = None) -> None:
         # Report ids in ONE namespace: the registry spelling a reader recognises, not the
         # price-API spelling this module resolved internally. The same model appearing as
         # two strings in two lists is a report nobody can act on.
@@ -351,6 +361,23 @@ class LivePriceSource:
             if result.unparsed:
                 report.unparsed[name] = result.unparsed
                 report.unparsed_samples[name] = list(result.unparsed_samples)
+        # Whether this pass saw everything a key's rate depends on. A key may only LOWER a
+        # stored rate when it did: the published value is a maximum over the models sharing
+        # the key and over the regions a request can reach, so a pass that missed a member,
+        # missed a region, or had to widen a leg computed that maximum over less than the
+        # truth. Such a pass may raise a rate and never lower one, and a genuine drop lands
+        # on the next complete pass.
+        #
+        # Per KEY and from positive evidence per MEMBER, not from a flag for the whole pass:
+        # a pagination limit in an offer that prices nothing we asked about must not freeze
+        # the price of a model another feed read completely, or a safety clamp becomes a
+        # permanent over-charge. `complete` starts empty and a key is complete only if every
+        # one of its members produced a selection from a feed that called its own answer
+        # complete.
+        complete: dict[str, bool] = {}
+        incomplete_models = {
+            model for _, result in results for model in result.incomplete_models
+        }
         # pricing key -> per-field maximum over the models that share the key, plus
         # which token classes any feed actually published and which feeds answered.
         folded: dict[str, dict[str, int]] = {}
@@ -363,12 +390,19 @@ class LivePriceSource:
         for entry in entries:
             model_id = _price_model_id(entry)
             answered = False
+            # "A feed answered" is not "this member contributed a rate". A card that exists
+            # but yields no standard-tier selection leaves the key's maximum short by that
+            # member, and reading `answered` as completeness is how a $15 tier gets
+            # re-published at $5.
+            member_selected = False
             for name, result in results:
                 card = result.cards.get(model_id)
                 if not card:
                     continue
                 answered = True
-                regions = _candidate_regions(entry)
+                regions = ((regions_by_entry or {}).get(id(entry))
+                           if regions_by_entry is not None
+                           else _candidate_regions(entry))
                 if regions is None:
                     # The set of regions this request could be billed in is unknown, and
                     # the selector prices at the maximum over that set. Pricing from a
@@ -393,6 +427,7 @@ class LivePriceSource:
                     )
                     continue
                 report.unpriced.pop(entry.bedrock_model_id, None)
+                member_selected = True
                 current = folded.setdefault(entry.pricing_key, {})
                 for field_name, token_class in _FIELD_BY_CLASS.items():
                     if token_class not in selection.rates:
@@ -402,6 +437,7 @@ class LivePriceSource:
                         current[field_name] = value
                     live_classes.setdefault(entry.pricing_key, set()).add(token_class)
                 if selection.widened:
+                    complete[entry.pricing_key] = False
                     widened = report.widened.setdefault(entry.pricing_key, [])
                     for token_class in sorted(selection.widened):
                         if token_class not in widened:
@@ -411,6 +447,13 @@ class LivePriceSource:
                     _to_micro(selection.rates[c]) if c in selection.rates else None
                     for c in ("input", "output")
                 )
+            if not member_selected or model_id in incomplete_models:
+                # This member did not contribute a rate, or the feed that answered for it
+                # said its own answer may be partial. Either way the key's maximum was
+                # computed over less than the models and regions it covers.
+                complete[entry.pricing_key] = False
+            else:
+                complete.setdefault(entry.pricing_key, True)
             if entry.pricing_key in folded:
                 # Priced by one feed and refused by another: the model is not unpriced,
                 # and leaving it on that list turns a report an operator acts on into
@@ -431,7 +474,11 @@ class LivePriceSource:
                     )
                 report.unpriced.setdefault(entry.bedrock_model_id, reason)
         completed = {
-            key: self._complete(key, values, live_classes.get(key, set()))
+            key: self._complete(
+                key, values, live_classes.get(key, set()),
+                # Absent means no member was evaluated at all, which cannot be complete.
+                may_lower=complete.get(key, False),
+            )
             for key, values in folded.items()
         }
         report.rates = {key: rate for key, rate in completed.items() if rate is not None}
@@ -452,7 +499,7 @@ class LivePriceSource:
         }
 
     def _complete(self, key: str, published: dict[str, int],
-                 live: set[str]) -> Optional[Rate]:
+                 live: set[str], *, may_lower: bool = True) -> Optional[Rate]:
         """Fill the legs no feed published from the layer underneath, or give up.
 
         The order is the same ladder the whole source follows — last-known-good
@@ -462,11 +509,21 @@ class LivePriceSource:
         would turn "the provider does not publish a cache rate" into "cached tokens are
         free" — a discount nobody granted — and it is reachable, because the floor loader
         absorbs a read failure and returns nothing on a broken deploy.
+
+        `may_lower=False` clamps every leg to at least what the layer below holds. It is
+        set when this pass did not see everything the key's rate is a maximum over — a
+        member of a shared key missing, a region unread, a leg widened out of scope — and
+        it is the difference between "prices fell" and "we looked at less of the world".
         """
         values: dict[str, int] = {}
         for field_name, token_class in _FIELD_BY_CLASS.items():
             if token_class in live and field_name in published:
-                values[field_name] = published[field_name]
+                value = published[field_name]
+                if not may_lower:
+                    floor_value = self._fallback_leg(key, field_name)
+                    if floor_value is not None and floor_value > value:
+                        value = floor_value
+                values[field_name] = value
                 continue
             fallback = self._fallback_leg(key, field_name)
             if fallback is None:

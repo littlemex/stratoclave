@@ -176,3 +176,62 @@ def test_digest_changes_only_when_a_rate_changes():
     assert digest_of(_RATES) == digest_of(dict(_RATES))
     moved = dict(_RATES, opus=Rate(5_500_001, 27_500_000, 550_000, 6_875_000))
     assert digest_of(moved) != digest_of(_RATES)
+
+
+def test_both_reads_are_strongly_consistent(dynamodb_mock, monkeypatch):
+    """The pointer is written after the version row it names, so an eventually-consistent
+    pair can show a reader the new pointer and not yet the version — and this module's
+    answer to a missing version row is "no stored version", which drops the whole table to
+    the floor. A read that can invent that state is not a read worth having."""
+    store = SnapshotStore()
+    store.save(_RATES, {})
+    table = store._get_table()
+    seen: list[bool] = []
+    original = table.get_item
+
+    def watched(**kwargs):
+        seen.append(bool(kwargs.get("ConsistentRead")))
+        return original(**kwargs)
+
+    monkeypatch.setattr(table, "get_item", watched)
+    assert store.load() is not None
+    assert seen == [True, True], "both the pointer and the version must be read strongly"
+
+
+def test_a_pass_that_started_earlier_cannot_repoint_current_backwards(dynamodb_mock):
+    """Two passes begin from the same active version. One finishes and moves the pointer; the
+    other, which began before that and is carrying older prices, must step aside.
+
+    The fence is the version each pass STARTED from, not a timestamp and not the value read a
+    microsecond before writing. A CAS against a just-read value has the same hole as no CAS
+    at all — the late writer reads the winner's version and then satisfies its own condition —
+    and a clock-based guard hands ordering to whichever task has the worst clock, where one
+    future-dated write freezes the pointer until the world catches up.
+    """
+    store = SnapshotStore()
+    stale = {"opus": Rate(1_000_000, 1_000_000, 1_000_000, 1_000_000)}
+    fresh = {"opus": Rate(9_000_000, 9_000_000, 9_000_000, 9_000_000)}
+    store.save(_RATES, {}, now=1_000_000.0, fenced_on=None)
+    fence = digest_of(_RATES)                    # what both passes saw when they started
+
+    assert store.save(fresh, {}, now=1_000_100.0, fenced_on=fence) is not None
+    # The other pass, still fenced on the version it started from, has been overtaken.
+    assert store.save(stale, {}, now=1_000_200.0, fenced_on=fence) is None
+    current = store.load()
+    assert current is not None
+    assert current.rates == fresh, "a later write must not win with older prices"
+    # Its version row still exists, so nothing was lost — only the pointer was defended.
+    assert store.load_version(digest_of(stale)) is not None
+
+
+def test_a_skewed_clock_cannot_freeze_the_pointer(dynamodb_mock):
+    """Ordering must not depend on client clocks. A task whose clock is years ahead writes a
+    version, and the next correct task still moves the pointer — with a timestamp guard it
+    would have been locked out until wall time caught up."""
+    store = SnapshotStore()
+    from_the_future = {"opus": Rate(1, 1, 1, 1)}
+    store.save(from_the_future, {}, now=4_000_000_000.0, fenced_on=None)
+    correct = {"opus": Rate(2_000_000, 2, 2, 2)}
+    stored = store.save(correct, {}, now=1_800_000_000.0,
+                        fenced_on=digest_of(from_the_future))
+    assert stored is not None and stored.rates == correct

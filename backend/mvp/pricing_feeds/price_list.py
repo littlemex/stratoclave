@@ -30,7 +30,7 @@ from typing import Iterable, Optional
 from core.logging import get_logger
 
 from .base import Card, FeedRequest, FeedResult
-from .dimensions import parse_price_list_usagetype, per_mtok
+from .dimensions import EXCLUDED, parse_price_list_usagetype, per_mtok
 
 logger = get_logger(__name__)
 
@@ -93,11 +93,13 @@ class PriceListFeed:
         for region in sorted({r for r in regions if r}):
             if request.out_of_time():
                 result.truncated = True
+                result.incomplete_models.update(model_ids)
                 result.note_error("stopped at the fetch budget with regions unread")
                 break
             for offer in _offers():
                 if request.out_of_time():
                     result.truncated = True
+                    result.incomplete_models.update(model_ids)
                     result.note_error(
                         f"{region}: stopped at the fetch budget before offer {offer}")
                     break
@@ -120,6 +122,7 @@ class PriceListFeed:
             pages += 1
             if deadline is not None and time.time() >= deadline:
                 result.truncated = True
+                result.incomplete_models.update(model_ids)
                 result.note_error(f"{offer}/{region}: stopped at the fetch budget after "
                                   f"{pages - 1} page(s)")
                 return
@@ -133,6 +136,11 @@ class PriceListFeed:
             try:
                 response = client.get_products(**kwargs)
             except Exception as exc:  # noqa: BLE001 — see the feed contract.
+                # This region is now unread, so every model's answer may be missing the
+                # region it is dearest in. Saying so is what keeps the fold from reading a
+                # smaller maximum as a price cut.
+                result.truncated = True
+                result.incomplete_models.update(model_ids)
                 result.note_error(f"{offer}/{region}: get_products failed: {exc}")
                 return
             for raw in response.get("PriceList", ()):
@@ -141,6 +149,7 @@ class PriceListFeed:
             if not token:
                 return
         result.truncated = True
+        result.incomplete_models.update(model_ids)
         result.note_error(f"{offer}/{region}: stopped after {max_pages} pages")
 
 
@@ -158,7 +167,14 @@ def _absorb_product(raw: object, model_ids: frozenset[str], result: FeedResult) 
     # longer one is the specific model the row is about.
     for model_id in sorted(model_ids, key=len, reverse=True):
         parsed = parse_price_list_usagetype(usagetype, model_id)
+        if parsed is EXCLUDED:
+            return          # recognised, not charged, and not a grammar problem
         if parsed is None:
+            if _names_model(usagetype, model_id):
+                # The row is about one of OUR models and could not be read: that is the
+                # signal a grammar changed, and dropping it silently is how a leg freezes.
+                result.note_unparsed(usagetype)
+                return
             continue
         region, slot = parsed
         for value in _prices(product, usagetype, result):
@@ -201,3 +217,13 @@ def _max_pages() -> int:
         except ValueError:
             pass
     return DEFAULT_MAX_PAGES_PER_REGION
+
+
+def _names_model(usagetype: str, model_id: str) -> bool:
+    """Is this usage type about `model_id` at all?
+
+    Used to tell "another model's row" from "our model's row in a shape we cannot read".
+    The first is noise; the second is the only warning that a grammar changed.
+    """
+    _, _, rest = usagetype.partition("-")
+    return rest.startswith(model_id) and rest[len(model_id):].startswith("-")

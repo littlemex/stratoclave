@@ -84,6 +84,12 @@ class FeedResult:
     # cap. Set by the feed rather than inferred by the caller, because only the feed knows
     # whether what it returned is all there was.
     truncated: bool = False
+    # Models whose answer this feed knows may be partial: a region it could not read, a
+    # page cap, a spent deadline. Per model rather than one flag for the pass, because a
+    # pagination limit in an offer that prices nothing we asked about must not freeze the
+    # price of a model another feed read completely — that turns a safety clamp into a
+    # permanent over-charge.
+    incomplete_models: set[str] = field(default_factory=set)
     # Why a SPECIFIC model produced nothing, keyed by model id. Separate from `errors`
     # because that list is capped — a burst of failures would push the tenth one out and
     # leave a model reading as "no feed priced this", which is the least useful sentence a

@@ -50,6 +50,10 @@ _POINTER_SK = "CURRENT"
 _VERSION_SK_PREFIX = "__ratefeed__"
 SCHEMA_VERSION = 1
 
+# Sentinel for "this caller never read the pointer, so do not fence on it". Distinct from
+# `None`, which is a real fence meaning "there was no version when I started".
+_UNFENCED = "\x00unfenced"
+
 # How stale the current version may be before it is REPORTED as stale. Not an expiry:
 # expiring a version would change the amount charged with nobody deciding to, which is
 # the one thing this subsystem must not do quietly. It also bounds how often the pointer
@@ -145,7 +149,13 @@ class SnapshotStore:
     def load(self) -> Optional[Snapshot]:
         """The current version, or `None` when there is not one to read."""
         try:
-            pointer = (self._get_table().get_item(Key={"pk": _PK, "sk": _POINTER_SK})
+            # Strong reads on BOTH steps. The pointer is written after the version row, so
+            # an eventually-consistent pair can show a reader the new pointer and not yet
+            # the version it names — and this module's answer to a missing version row is
+            # "no stored version", which drops the whole table to the floor. A read that
+            # can invent that state is not a read worth having.
+            pointer = (self._get_table()
+                       .get_item(Key={"pk": _PK, "sk": _POINTER_SK}, ConsistentRead=True)
                        .get("Item"))
         except Exception as exc:  # noqa: BLE001 — no stored version is a valid state.
             logger.warning("price_feed_snapshot_read_failed", error=str(exc))
@@ -163,7 +173,8 @@ class SnapshotStore:
         """A specific version, for a recompute against a table that is no longer current."""
         try:
             item = (self._get_table()
-                    .get_item(Key={"pk": _PK, "sk": _version_sk(version)})
+                    .get_item(Key={"pk": _PK, "sk": _version_sk(version)},
+                              ConsistentRead=True)
                     .get("Item"))
         except Exception as exc:  # noqa: BLE001
             logger.warning("price_feed_snapshot_read_failed", error=str(exc),
@@ -204,11 +215,18 @@ class SnapshotStore:
     # ----- write --------------------------------------------------------------
     def save(self, rates: Mapping[str, Rate], provenance: Mapping[str, str],
              live_classes: Optional[Mapping[str, frozenset[str]]] = None,
-             *, now: Optional[float] = None) -> Optional[Snapshot]:
+             *, now: Optional[float] = None,
+             fenced_on: Optional[str] = _UNFENCED) -> Optional[Snapshot]:
         """Store `rates`, cutting a version only if these numbers are new.
 
-        Returns the stored snapshot — newly cut or already there — or `None` on failure.
-        Usually zero or one write, never more than three:
+        `fenced_on` is the active version this pass STARTED from — its fence. The pointer
+        moves only if that is still the active version, which makes ordering a fact about the
+        data rather than about clocks: a pass that began before another finished finds the
+        pointer moved and steps aside. `None` means "there was no version when I started";
+        omitting it skips the fence, which only a caller that never read the pointer should do.
+
+        Returns the stored snapshot — newly cut or already there — or `None` on failure or on
+        a lost fence. Usually zero or one write, never more than three:
 
         1. the version row, `attribute_not_exists`-guarded, so an unchanged table costs
            nothing and two tasks racing in the same second cannot both create it;
@@ -236,8 +254,11 @@ class SnapshotStore:
         created = self._put_version_if_new(table, snapshot, moment)
         if created is None:
             return None
-        stored = self._advance_pointer(table, snapshot, moment, version_is_new=created)
-        return stored or snapshot
+        # Exactly what the pointer says, never the local table. Returning the caller's own
+        # numbers after a refused pointer move would tell it that what it fetched is
+        # current when something newer is — and the caller adopts this as its stored rung.
+        return self._advance_pointer(table, snapshot, moment, version_is_new=created,
+                                     fenced_on=fenced_on)
 
     def _put_version_if_new(self, table, snapshot: Snapshot,
                             moment: float) -> Optional[bool]:
@@ -270,10 +291,12 @@ class SnapshotStore:
         return True
 
     def _advance_pointer(self, table, snapshot: Snapshot, moment: float,
-                         *, version_is_new: bool) -> Optional[Snapshot]:
+                         *, version_is_new: bool,
+                         fenced_on: Optional[str] = _UNFENCED) -> Optional[Snapshot]:
         current = None
         try:
-            current = table.get_item(Key={"pk": _PK, "sk": _POINTER_SK}).get("Item")
+            current = table.get_item(Key={"pk": _PK, "sk": _POINTER_SK},
+                                     ConsistentRead=True).get("Item")
         except Exception as exc:  # noqa: BLE001 — treated as "no pointer yet".
             logger.warning("price_feed_pointer_read_failed", error=str(exc))
         active = (current or {}).get("active_version")
@@ -297,10 +320,36 @@ class SnapshotStore:
         }
         if isinstance(active, str) and active:
             item["previous_version"] = active
+        # Compare-and-set on the version this pass STARTED from, not on the one read a
+        # microsecond ago. An unconditional put lets two tasks race and the last writer win
+        # regardless of which fetch was newer, which is how a stale pass re-points CURRENT at
+        # yesterday's prices; a CAS against a just-read value has the same hole, because the
+        # stale writer reads the winner's version and then satisfies its own condition.
+        # Fencing on the pass's starting point closes it without asking a client clock to be
+        # right — a future-dated write would otherwise lock the pointer until the world
+        # caught up.
+        expected = active if fenced_on is _UNFENCED else fenced_on
+        condition = "attribute_not_exists(sk)"
+        values: dict[str, object] = {}
+        if isinstance(expected, str) and expected:
+            condition = "active_version = :expected"
+            values = {":expected": expected}
         try:
-            table.put_item(Item=item)
-        except Exception as exc:  # noqa: BLE001 — the version row is stored, so a task
-            # that restarts reads the OLD pointer: a real table, not a wrong one.
+            if values:
+                table.put_item(Item=item, ConditionExpression=condition,
+                               ExpressionAttributeValues=values)
+            else:
+                table.put_item(Item=item, ConditionExpression=condition)
+        except Exception as exc:  # noqa: BLE001
+            if _is_conditional_failure(exc):
+                # Another pass moved the pointer since this one started. Its version row is
+                # stored either way, so nothing is lost; the loser steps aside rather than
+                # overwrite a decision that may rest on a newer fetch than its own.
+                logger.info("price_feed_pointer_race_lost", version=snapshot.digest,
+                            fenced_on=expected, active_now=active)
+                return None
+            # The version row is stored, so a task that restarts reads the OLD pointer: a
+            # real table, not a wrong one.
             logger.warning("price_feed_pointer_write_failed", error=str(exc))
             return None
         logger.info("price_feed_version_activated", version=snapshot.digest,

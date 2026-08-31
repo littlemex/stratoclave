@@ -65,6 +65,9 @@ class RepriceReport:
     # rather than merely stated.
     by_pricing_key: dict[str, dict[str, int]] = field(default_factory=dict)
     events_priced: int = 0
+    # Every terminal money event in the period, whether or not it could be repriced. The
+    # denominator: a total that silently drops part of a period looks like a total.
+    events_seen: int = 0
     # Events the recompute could not cover, by reason. Reported rather than skipped: a
     # total that silently omits part of a period is worse than no total, because it looks
     # like one.
@@ -76,6 +79,16 @@ class RepriceReport:
     def difference_microusd(self) -> int:
         return self.as_repriced_microusd - self.as_charged_microusd
 
+    @property
+    def complete(self) -> bool:
+        """True when every event in the period was repriced.
+
+        Reported rather than assumed. A difference computed over some of a period is not a
+        smaller version of the right answer, it is a different question, and the caller has
+        to be able to tell which one it got.
+        """
+        return self.events_seen == self.events_priced and not self.not_repriced
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "tenant_id": self.tenant_id,
@@ -86,6 +99,8 @@ class RepriceReport:
             "difference_microusd": self.difference_microusd,
             "by_pricing_key": self.by_pricing_key,
             "events_priced": self.events_priced,
+            "events_seen": self.events_seen,
+            "complete": self.complete,
             "not_repriced": self.not_repriced,
             "keys_missing_from_target": sorted(self.keys_missing_from_target),
         }
@@ -110,18 +125,42 @@ def reprice_period(
     repo = repo or CreditLedgerRepository()
     report = RepriceReport(tenant_id=tenant_id, period=period, target=target_label)
     missing: set[str] = set()
-    for event in _rated_events(repo, ledger_pk(tenant_id, period)):
+    for event in _charge_events(repo, ledger_pk(tenant_id, period)):
+        report.events_seen += 1
+        # As-charged is the ledger's own money move, not the rating's self-report. They
+        # must agree (the ledger's replay audit checks exactly that), and when they do not,
+        # the charge of record is the settled delta and the rating is the thing in doubt.
+        charged = _nonneg_int(event.get("settled_delta_microusd"))
+        if charged is None:
+            _count(report.not_repriced, "settled_delta_unreadable")
+            continue
+        report.as_charged_microusd += charged
+        raw_rating = event.get("rating")
+        if not raw_rating:
+            # A terminal that moved money with no frozen rating cannot be repriced — and it
+            # still belongs in the as-charged total, or the difference is measured against
+            # a smaller period than the one asked about.
+            _count(report.not_repriced, "missing_rating")
+            continue
         try:
-            rating = json.loads(event["rating"])
+            rating = json.loads(raw_rating)
             components = rating["components"]
-            charged = int(rating["total_cost_microusd"])
             rounding = str(rating.get("rounding", "ceil"))
             pricing_key = str(rating.get("pricing_key") or "")
+            rating_total = _nonneg_int(rating.get("total_cost_microusd"))
         except (ValueError, KeyError, TypeError):
             _count(report.not_repriced, "unparseable_rating")
             continue
+        if rating_total is None or rating_total != charged:
+            # The rating does not describe the money that moved, so its token counts are
+            # not evidence of what this charge was for.
+            _count(report.not_repriced, "rating_disagrees_with_settled_delta")
+            continue
         if not pricing_key:
             _count(report.not_repriced, "rating_without_pricing_key")
+            continue
+        if not isinstance(components, Mapping) or not components:
+            _count(report.not_repriced, "rating_without_components")
             continue
         target = target_rates.get(pricing_key)
         if target is None:
@@ -137,9 +176,9 @@ def reprice_period(
                 # at three legs out of four.
                 ok = False
                 break
-            try:
-                tokens = int(component["tokens"])
-            except (KeyError, TypeError, ValueError):
+            tokens = _nonneg_int((component or {}).get("tokens")
+                                 if isinstance(component, Mapping) else None)
+            if tokens is None:
                 ok = False
                 break
             repriced += mtok_cost_for_rounding(
@@ -148,7 +187,6 @@ def reprice_period(
             _count(report.not_repriced, "unknown_component_leg")
             continue
         report.events_priced += 1
-        report.as_charged_microusd += charged
         report.as_repriced_microusd += repriced
         bucket = report.by_pricing_key.setdefault(
             pricing_key, {"as_charged_microusd": 0, "as_repriced_microusd": 0, "events": 0})
@@ -158,30 +196,72 @@ def reprice_period(
     report.keys_missing_from_target = sorted(missing)
     logger.info("reprice_report", tenant_id=tenant_id, period=period,
                 target=target_label, events=report.events_priced,
+                events_seen=report.events_seen, complete=report.complete,
                 difference_microusd=report.difference_microusd,
                 not_repriced=report.not_repriced)
     return report
 
 
-def _rated_events(repo, pk: str) -> Iterable[Mapping[str, Any]]:
-    """Every ledger event in the partition that carries a rating.
+def _charge_event_types() -> frozenset[str]:
+    """The event types whose settled delta IS the period's charge.
 
-    Paged and projected: a period can hold a lot of events, and this only needs the
-    rating and enough to name the event.
+    Taken from the ledger's own constants rather than spelled out here. Spelling them out
+    is how this module shipped reading `"TERMINAL"` — the name of a SORT KEY, not of any
+    event type the writer emits — so every real charge was invisible and the report said
+    `complete`. A name this module invents cannot disagree with the ledger's writer, which
+    is exactly why it must not invent one.
+
+    `SETTLE` and `LATE_SETTLE` only. `RELEASE` and `RECLAIM` return a reservation rather
+    than charging for usage; `OWED_SETTLE` and `RETAINED` are evidence of a charge that has
+    not been posted, so counting them would double the money once the real settle lands.
     """
+    from dynamo.credit_ledger import EV_LATE_SETTLE, EV_SETTLE
+
+    return frozenset({EV_SETTLE, EV_LATE_SETTLE})
+
+
+def _charge_events(repo, pk: str) -> Iterable[Mapping[str, Any]]:
+    """Every event in the partition whose settled delta is part of the charge, rated or not.
+
+    Read strongly and paged. Strongly because a report that quietly omits a settle written
+    a second ago reads as a complete period; rated-or-not because an event with no frozen
+    rating still moved money, and leaving it out of the as-charged total would measure the
+    difference against a period that is not the one asked about.
+    """
+    charge_types = _charge_event_types()
     kwargs: dict[str, Any] = {
         "KeyConditionExpression": Key("pk").eq(pk),
-        "ProjectionExpression": "sk, hold_id, event_type, rating",
+        "ConsistentRead": True,
+        "ProjectionExpression": ("sk, hold_id, event_type, rating, "
+                                 "settled_delta_microusd"),
     }
     while True:
         response = repo._table.query(**kwargs)
         for item in response.get("Items", ()):
-            if item.get("rating"):
-                yield item
+            if item.get("settled_delta_microusd") is None:
+                continue
+            if str(item.get("event_type") or "") not in charge_types:
+                continue
+            yield item
         last = response.get("LastEvaluatedKey")
         if not last:
             return
         kwargs["ExclusiveStartKey"] = last
+
+
+def _nonneg_int(value: Any) -> Optional[int]:
+    """`value` as a non-negative int, or `None`.
+
+    Rejects bool explicitly: `int(True)` is 1, and a rating whose total is `true` would
+    otherwise be read as one micro-USD and quietly become part of a difference report.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out >= 0 else None
 
 
 def _count(counter: dict[str, int], reason: str) -> None:
@@ -197,11 +277,39 @@ def target_from_floor() -> tuple[dict[str, Rate], str]:
 
 
 def target_from_effective() -> tuple[dict[str, Rate], str]:
-    """What this deployment would charge right now (floor + source + admin overrides)."""
-    from .pricing import effective_rates
+    """The DURABLE effective table: floor, then the stored version, then admin overrides.
 
-    version, rates, _ = effective_rates()
-    return rates, f"effective(version={version or 'builtin'})"
+    Named for what it can see. A task that fetched fresh prices and failed to persist them
+    charges from its own memory, and no report can read another process's memory — so this
+    is what a restarting task would charge, not a guarantee about what every task is
+    charging this second. The label says `durable-effective` for that reason.
+
+    Assembled here rather than through `mvp.pricing.effective_rates`, which resolves the
+    active price source: on a cold process that would run a live fetch and persist a new
+    stored version, so a tool that says it writes nothing would write the very state
+    charging depends on. The layers are read directly instead — the bundled floor, then the
+    current stored version, then the admin overrides — which is the same order and none of
+    the side effects.
+    """
+    from dynamo.pricing_config import PricingConfigRepository
+
+    from .pricing_feeds.snapshot import SnapshotStore
+
+    rates, _ = target_from_floor()
+    labels = ["floor"]
+    stored = SnapshotStore().load()
+    if stored is not None:
+        rates = {**rates, **stored.rates}
+        labels.append(f"feed-version({stored.digest})")
+    repo = PricingConfigRepository()
+    try:
+        version = repo.current_version()
+        if version:
+            rates = {**rates, **repo.load_rates(version)}
+            labels.append(f"override({version})")
+    except Exception as exc:  # noqa: BLE001 — a report must not fail on a missing table.
+        logger.warning("reprice_override_read_failed", error=str(exc))
+    return rates, "durable-effective(" + " + ".join(labels) + ")"
 
 
 def target_from_feed_version(version: str) -> tuple[dict[str, Rate], str]:

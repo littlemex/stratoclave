@@ -220,6 +220,20 @@ def _parse_entry(path: str, index: int, raw: object) -> ModelEntry:
             _fail(path, f"{where} is virtual, so it must name the pool it stands for in sr_pool_ref")
     elif raw.get("sr_pool_ref"):
         _fail(path, f"{where} sets sr_pool_ref but is not virtual")
+    # An id whose first segment looks like an inference-profile prefix this build does not
+    # know cannot be priced: the price APIs reject a prefixed id, and stripping an unknown
+    # prefix on a guess mangles a bare id whose second dot is a version number
+    # (`xai.grok-4.6`). Either outcome ends with the model on the bundled floor for as long
+    # as nobody notices, so the entry has to say which id the price APIs know it by.
+    if served_by == "bedrock" and not raw.get("price_model_id"):
+        from .pricing_feeds.dimensions import unknown_profile_prefix
+
+        unknown = unknown_profile_prefix(raw["bedrock_model_id"])
+        if unknown:
+            _fail(path, f"{where}.bedrock_model_id starts with {unknown!r}, which is not a "
+                        f"known inference-profile prefix. Set price_model_id to the id the "
+                        f"price APIs know this model by; guessing which segment to strip "
+                        f"silently prices the model at the bundled floor")
     # Checked here as well as in `_validate_registry` so the message names the file
     # and the entry index; a self-hosted entry without an endpoint key would otherwise be
     # routed as if it were Bedrock.

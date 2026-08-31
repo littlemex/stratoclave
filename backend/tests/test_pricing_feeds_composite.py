@@ -454,3 +454,129 @@ def test_a_coverage_regression_is_on_the_report_not_only_in_a_log():
     source.load()
     report = source.last_report()
     assert report is not None and report.coverage_regressions == ["sonnet"]
+
+
+def test_a_widened_leg_cannot_replace_a_dearer_stored_leg():
+    """Widening prices a leg from outside the scope asked for. That is worth doing rather
+    than dropping the model — but the number it produces is not evidence that the in-scope
+    rate fell, so it may raise a stored leg and never lower one."""
+    card = {
+        (None, RateDimension("input", "global")): Decimal("5"),
+        (None, RateDimension("output", "global")): Decimal("25"),
+        (None, RateDimension("cache_read", "global")): Decimal("0.5"),
+        (None, RateDimension("cache_write", "global")): Decimal("6.25"),
+    }
+    stored = Snapshot(rates={"opus": Rate(5_500_000, 27_500_000, 550_000, 6_875_000)},
+                      fetched_at=1.0, digest="d",
+                      live_classes={"opus": frozenset({"input", "output", "cache_read",
+                                                       "cache_write"})})
+    source = LivePriceSource([_Feed("f", {"anthropic.m": card})], store=_Store(stored),
+                            registry=[_entry("us.anthropic.m", "opus")],
+                            interval_seconds=0)
+    rate = source.load()["opus"]
+    assert rate.input_per_mtok_microusd == 5_500_000, (
+        "the geo rate this request is billed at must not be replaced by the global one"
+    )
+    assert rate.output_per_mtok_microusd == 27_500_000
+
+
+def test_a_feed_that_calls_its_own_answer_partial_cannot_lower_that_model_s_rate():
+    """The published rate is a maximum over the regions a request can reach. A feed that
+    could not read one of them computed that maximum over less than the truth for the models
+    it was asked about, and it says so per model."""
+    result = FeedResult()
+    result.cards["anthropic.m"] = _full_card("1", "1", "1", "1")
+    result.truncated = True
+    result.incomplete_models.add("anthropic.m")
+    stored = Snapshot(rates={"opus": Rate(2_000_000, 2_000_000, 2_000_000, 2_000_000)},
+                      fetched_at=1.0, digest="d")
+    source = LivePriceSource([_Feed("f", {}, result=result)], store=_Store(stored),
+                            registry=[_entry("us.anthropic.m", "opus")],
+                            interval_seconds=0)
+    assert source.load()["opus"].input_per_mtok_microusd == 2_000_000
+
+
+def test_an_unrelated_partial_feed_does_not_freeze_a_complete_key():
+    """A pagination limit in an offer that prices nothing we asked about must not freeze the
+    price of a model another feed read completely — a clamp that fires on unrelated trouble
+    is a permanent over-charge, not a safety property."""
+    unrelated = FeedResult()
+    unrelated.truncated = True
+    unrelated.note_error("hit the page cap in an offer we do not price from")
+    complete = FeedResult()
+    complete.cards["anthropic.m"] = _full_card("1", "1", "1", "1")
+    stored = Snapshot(rates={"opus": Rate(2_000_000, 2_000_000, 2_000_000, 2_000_000)},
+                      fetched_at=1.0, digest="d")
+    source = LivePriceSource(
+        [_Feed("complete", {}, result=complete), _Feed("unrelated", {}, result=unrelated)],
+        store=_Store(stored), registry=[_entry("us.anthropic.m", "opus")],
+        interval_seconds=0)
+    assert source.load()["opus"].input_per_mtok_microusd == 1_000_000
+
+
+def test_a_member_whose_card_yields_no_selection_keeps_the_key_from_dropping():
+    """"A feed answered" is not "this member contributed a rate". A card that exists but
+    yields no standard-tier selection leaves the key's maximum short by that member, which
+    is how a $15 tier gets re-published at $5."""
+    result = FeedResult()
+    result.cards["anthropic.cheap"] = _full_card("5", "25", "0.5", "6.25")
+    # Present, answered, and unusable: output only, so no selection can be made.
+    result.cards["anthropic.dear"] = {
+        (None, RateDimension("output", "geo")): Decimal("75"),
+    }
+    stored = Snapshot(rates={"opus": Rate(15_000_000, 75_000_000, 1_500_000, 18_750_000)},
+                      fetched_at=1.0, digest="d")
+    source = LivePriceSource([_Feed("f", {}, result=result)], store=_Store(stored), registry=[
+        _entry("us.anthropic.cheap", "opus"), _entry("us.anthropic.dear", "opus"),
+    ], interval_seconds=0)
+    assert source.load()["opus"].input_per_mtok_microusd == 15_000_000
+
+
+def test_a_shared_key_missing_its_dearer_member_keeps_the_stored_rate():
+    """A key's rate is the maximum over the models that share it. If only the cheap member
+    answered, the maximum is over one model instead of two — which is how a key that covers
+    a $15/MTok model gets re-published at $5."""
+    stored = Snapshot(rates={"opus": Rate(15_000_000, 75_000_000, 1_500_000, 18_750_000)},
+                      fetched_at=1.0, digest="d")
+    feed = _Feed("f", {"anthropic.cheap": _full_card("5", "25", "0.5", "6.25")})
+    source = LivePriceSource([feed], store=_Store(stored), registry=[
+        _entry("us.anthropic.cheap", "opus"), _entry("us.anthropic.dear", "opus"),
+    ], interval_seconds=0)
+    assert source.load()["opus"].input_per_mtok_microusd == 15_000_000
+
+
+def test_a_complete_pass_may_lower_a_rate():
+    """The clamp is about incompleteness, not about refusing good news: a pass that saw
+    every member and every region publishes the drop. Claude Sonnet 5 listing below Sonnet
+    4.6 is a real example — a gateway that could never lower a rate would over-charge it
+    forever."""
+    stored = Snapshot(rates={"sonnet": Rate(3_300_000, 16_500_000, 330_000, 4_125_000)},
+                      fetched_at=1.0, digest="d")
+    feed = _Feed("f", {"anthropic.s5": _full_card("2.2", "11", "0.22", "2.75")})
+    source = LivePriceSource([feed], store=_Store(stored),
+                            registry=[_entry("us.anthropic.s5", "sonnet")],
+                            interval_seconds=0)
+    assert source.load()["sonnet"].input_per_mtok_microusd == 2_200_000
+
+
+def test_the_region_set_is_read_once_per_pass(monkeypatch):
+    """Read twice, a routing config that recovers mid-pass turns an incomplete regional
+    catalogue into a "complete" answer — priced at the maximum over a smaller set than the
+    truth, which is the one way this source can publish a rate that is too low."""
+    from mvp.pricing_feeds import composite as mod
+
+    calls = {"n": 0}
+
+    def flaky(entry):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else frozenset({"us-east-1", "us-west-2"})
+
+    monkeypatch.setattr(mod, "_candidate_regions", flaky)
+    stored = Snapshot(rates={"opus": Rate(2_000_000, 2, 2, 2)}, fetched_at=1.0, digest="d")
+    feed = _Feed("f", {"anthropic.m": _full_card("1", "1", "1", "1", region="us-east-1")})
+    source = LivePriceSource([feed], store=_Store(stored),
+                            registry=[_entry("us.anthropic.m", "opus", wire="messages")],
+                            interval_seconds=0)
+    table = source.load()
+    assert table["opus"].input_per_mtok_microusd == 2_000_000
+    assert calls["n"] == 1, "the region policy must be read once per pass, not per use"

@@ -307,8 +307,9 @@ _USAGE_TTL = re.compile(r"^\d+[mh]$")
 _ALLOWED_ID_SUFFIX_SEGMENTS = frozenset(_load_id_suffix_segments())
 
 
-def parse_price_list_usagetype(usagetype: str,
-                              model_id: str) -> Optional[tuple[str, RateDimension]]:
+def parse_price_list_usagetype(
+    usagetype: str, model_id: str,
+) -> Optional[tuple[str, RateDimension]] | _Excluded:
     """Parse one Price List `usagetype` for an exact billed model id.
 
     `model_id` must be the id the row is billed under, not merely a prefix of it: the
@@ -316,6 +317,11 @@ def parse_price_list_usagetype(usagetype: str,
     billed as `...-a3b-instruct`), and that difference is declared in the registry
     rather than absorbed here, because absorbing it cannot tell a variant of the same
     model from a different, dearer one.
+
+    Three answers, same meanings as `parse_agreement_dimension`: a dimension, `EXCLUDED`
+    for a product this gateway recognises and does not charge, and `None` for a shape it
+    cannot read — which the caller counts, because a row that names one of OUR models and
+    cannot be read is the signal a grammar changed.
     """
     if not isinstance(usagetype, str) or "-" not in usagetype:
         return None
@@ -333,6 +339,8 @@ def parse_price_list_usagetype(usagetype: str,
     segments = [seg for seg in remainder.lstrip("-").split("-") if seg]
     if not segments:
         return None
+    # From here the row is about a model we asked about, so an unreadable remainder is a
+    # grammar problem rather than someone else's row, and the caller counts it.
     while segments and segments[0] in _ALLOWED_ID_SUFFIX_SEGMENTS:
         segments.pop(0)
     if not segments:
@@ -355,7 +363,11 @@ def parse_price_list_usagetype(usagetype: str,
         elif token in MODES:
             mode = token
         elif _USAGE_TTL.match(token) and token_class == "cache_write":
-            return None
+            # The default TTL IS the base cache write; a longer one is another product.
+            # Same rule as the agreement grammar — stating it in one place and not the
+            # other is how a leg ends up frozen on the floor while the provider publishes it.
+            if token != DEFAULT_CACHE_TTL:
+                return EXCLUDED
         else:
             return None
     return region, RateDimension(token_class, scope, mode=mode)
