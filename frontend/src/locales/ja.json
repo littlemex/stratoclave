@@ -201,7 +201,15 @@
       "apply": "保存",
       "applying": "保存中…",
       "error_fallback": "プール予算の設定に失敗しました",
-      "invalid_amount": "有効なドル金額を入力してください(小数点以下2桁まで)。"
+      "invalid_amount": "有効なドル金額を入力してください(小数点以下2桁まで)。",
+      "available_label": "利用可能額",
+      "seats_label": "シート数",
+      "seats_value": "{{count}}（{{entitlement}} 相当）",
+      "granted_label": "追加付与額",
+      "over_ceiling_by": "上限を {{amount}} 超過しています。確定済みの消費が上限を超えているため、期間が切り替わるか上限を引き上げるまで、新規リクエストはすべて拒否されます。",
+      "entitlement_outgrew_figure": "現在のシート数に対する相当額は {{entitlement}} で、手動設定値より大きいため、小さい手動設定値が上限となっています。",
+      "follow_seats_button": "シート数に従うに戻す",
+      "latch_warning": "金額を保存すると、この上限はテナントのシート数に従わなくなります。0 も有効な金額で、すべてのリクエストを拒否します。シート数に戻す場合は数値を入力せず、「シート数に従うに戻す」を使ってください。"
     }
   },
   "error_toast": {

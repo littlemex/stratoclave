@@ -210,9 +210,31 @@ export interface PoolBudget {
   pool_limit_microusd: number
   pool_reserved_microusd: number
   pool_settled_microusd: number
+  // SIGNED and never clamped. A ceiling lowered below committed spend leaves a
+  // deficit, and its magnitude is what an operator acts on: floored at zero,
+  // "nothing left" and "already $400 over" read identically.
   remaining_microusd: number
+  available_microusd: number
+  over_ceiling_microusd: number
   pool_limit_usd_cents: number
   remaining_usd_cents: number
+  // The ceiling's composition, so the total beside it can be checked. The mode is
+  // a SENTENCE and not a state name: a field spelling "per_seat" named a state and
+  // told the reader nothing they could act on.
+  mode_sentence: string
+  seat_tracked: boolean
+  seat_count: number
+  seat_rate_microusd: number
+  seat_entitlement_microusd: number
+  // null exactly when the ceiling follows the seats: ABSENCE is the sentinel, and
+  // zero is a figure meaning every request refused.
+  manual_limit_microusd: number | null
+  // Zero until grants exist; rendered anyway so the parts always add up to the
+  // total printed beside them.
+  pool_granted_microusd: number
+  baseline_microusd: number
+  entitlement_exceeds_figure: boolean
+  resume_action: string | null
 }
 
 // P0-11: tenant/user routing config (chain, quotas, allowlist). This is the
@@ -636,9 +658,14 @@ export const api = {
         `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/pool-budget${q}`,
       )
     },
+    // Exactly one of `limit_usd_cents` (a figure; zero means every request
+    // refused) and `follow_seats: true` (the reversal). The backend refuses a body
+    // carrying both or neither, rather than picking one.
     setPoolBudget: (
       tenant_id: string,
-      body: { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' },
+      body:
+        | { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' }
+        | { follow_seats: true; period?: string },
     ) =>
       jsonRequest<PoolBudget>(
         `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/pool-budget`,
@@ -857,6 +884,29 @@ export const api = {
         `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}`,
         {
           method: 'PATCH',
+          headers: jsonHeaders,
+          body: JSON.stringify(body),
+        },
+      ),
+    // A team lead can SET this ceiling, and setting it is the write that ends seat
+    // tracking -- so without the read, the one role that can silently leave seat
+    // tracking is the one role that cannot see it happened.
+    getPoolBudget: (tenant_id: string, period?: string) => {
+      const q = period ? `?period=${encodeURIComponent(period)}` : ''
+      return jsonRequest<PoolBudget>(
+        `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}/pool-budget${q}`,
+      )
+    },
+    setPoolBudget: (
+      tenant_id: string,
+      body:
+        | { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' }
+        | { follow_seats: true; period?: string },
+    ) =>
+      jsonRequest<PoolBudget>(
+        `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}/pool-budget`,
+        {
+          method: 'PUT',
           headers: jsonHeaders,
           body: JSON.stringify(body),
         },

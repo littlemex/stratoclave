@@ -201,7 +201,15 @@
       "apply": "Save",
       "applying": "Saving…",
       "error_fallback": "Failed to set pool budget",
-      "invalid_amount": "Enter a valid dollar amount (up to 2 decimals)."
+      "invalid_amount": "Enter a valid dollar amount (up to 2 decimals).",
+      "available_label": "Available",
+      "seats_label": "Seats",
+      "seats_value": "{{count}} (entitling {{entitlement}})",
+      "granted_label": "Granted",
+      "over_ceiling_by": "Over ceiling by {{amount}}. Committed spend exceeds the ceiling, so every new request is refused until the period rolls over or the ceiling is raised.",
+      "entitlement_outgrew_figure": "The seats now entitle this tenant to {{entitlement}}, which is more than the figure it is held at. The figure is the smaller of the two.",
+      "follow_seats_button": "Follow the seat count again",
+      "latch_warning": "Saving a figure stops this ceiling following the tenant's seat count. Zero is a figure and means every request is refused; to go back to the seat count, use “Follow the seat count again” rather than typing a number."
     }
   },
   "error_toast": {

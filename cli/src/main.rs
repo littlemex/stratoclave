@@ -9,6 +9,7 @@
 //!   ├── admin
 //!   │   ├── user   { create | list | show | delete | assign-tenant | set-credit }
 //!   │   ├── tenant { create | list | show | delete | set-owner | members | usage | pool-budget }
+//!   │   │       pool-budget { set | show | follow-seats }
 //!   │   └── usage  show [--tenant T] [--user U] [--since X] [--until Y] [--limit N]
 //!   ├── team-lead
 //!   │   └── tenant { create | list | show | members | usage }
@@ -519,6 +520,19 @@ enum AdminPoolBudgetAction {
         #[arg(long)]
         period: Option<String>,
     },
+    /// Return the ceiling to the tenant's seat count, clearing a hand-set figure
+    ///
+    /// The reversal. Setting a figure stops the ceiling following the seat count;
+    /// this is what starts it again, so a tenant that has grown is not held at a
+    /// number chosen when it was smaller. It is a separate subcommand rather than
+    /// `set --limit-usd 0`, because zero is a legal ceiling meaning every request
+    /// refused.
+    FollowSeats {
+        tenant_id: String,
+        /// Billing period YYYY-MM (UTC). Defaults to the current month.
+        #[arg(long)]
+        period: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -891,6 +905,13 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 ),
                 AdminPoolBudgetAction::Show { tenant_id, period } => wrap(
                     mvp::admin::tenant_pool_budget_show(&tenant_id, period.as_deref()).await,
+                ),
+                AdminPoolBudgetAction::FollowSeats { tenant_id, period } => wrap(
+                    mvp::admin::tenant_pool_budget_follow_seats(
+                        &tenant_id,
+                        period.as_deref(),
+                    )
+                    .await,
                 ),
             },
             AdminTenantAction::RoutingConfig(action) => match action {

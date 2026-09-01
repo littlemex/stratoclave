@@ -32,6 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { PoolBudgetCard } from '@/components/common/PoolBudgetCard'
 import { api, type TenantItem } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { MAX_TOKEN_CREDIT } from '@/lib/limits'
@@ -69,6 +70,25 @@ export default function TeamLeadTenantDetail() {
     queryKey: ['team-lead', 'tenants', 'usage', tenantId, days],
     queryFn: () => api.teamLead.usage(tenantId, days),
     enabled: !!tenantId && tenantQuery.isSuccess,
+  })
+
+  // A team lead can SET this ceiling through `PUT .../pool-budget`, and that write
+  // is what ends seat tracking for the row. Without this read, the one role that
+  // can silently leave seat tracking would be the one role unable to see it
+  // happened. A 404 means no pool for the period, which is a state and not an
+  // error, so it is not retried and renders as the card's empty case.
+  const poolQuery = useQuery({
+    queryKey: ['team-lead', 'tenants', 'pool', tenantId],
+    queryFn: async () => {
+      try {
+        return await api.teamLead.getPoolBudget(tenantId)
+      } catch (err: unknown) {
+        if ((err as { status?: number } | null)?.status === 404) return null
+        throw err
+      }
+    },
+    enabled: !!tenantId && tenantQuery.isSuccess,
+    retry: false,
   })
 
   const invalidateTenant = () => {
@@ -179,6 +199,21 @@ export default function TeamLeadTenantDetail() {
       </section>
 
       <EditButton tenant={tenant} onDone={invalidateTenant} />
+
+      {/* The same card the admin console renders, from the same component: two
+          renderings of one row would eventually disagree, and this role needs the
+          mode sentence for exactly the reason the admin does. */}
+      <PoolBudgetCard
+        tenantId={tenant.tenant_id}
+        pool={poolQuery.data ?? null}
+        isLoading={poolQuery.isLoading}
+        poolApi={api.teamLead}
+        onChanged={() =>
+          void qc.invalidateQueries({
+            queryKey: ['team-lead', 'tenants', 'pool', tenantId],
+          })
+        }
+      />
 
       <Card>
         <CardHeader className="flex flex-row items-start justify-between space-y-0">
