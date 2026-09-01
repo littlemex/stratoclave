@@ -279,6 +279,14 @@ def classify_for_backfill(item: dict[str, Any], *, rate: int) -> dict[str, Any]:
                     "reason": (f"pool_limit {limit} is not a whole multiple of the "
                                f"seat rate {rate} ({limit / rate:.4f} seats)")}
         return {"action": "seat_tracked", "seat_count": limit // rate}
+    if sizing is not None and sizing != _SIZING_FIXED:
+        # An unrecognised mode. Falling through to "operator figure" would be a
+        # guess, and the guess would produce a well-formed row: the figure would
+        # look chosen by a person when nobody knows what wrote it. Adjudicate.
+        return {"action": "adjudicate",
+                "reason": f"unrecognised sizing value {sizing!r}: neither "
+                          f"{_SIZING_PER_SEAT!r} nor {_SIZING_FIXED!r}, so what "
+                          f"this row's ceiling was meant to be is unknown"}
     # `fixed`, or NO sizing attribute at all: an operator's figure either way.
     return {"action": "operator_figure", "manual_limit_microusd": limit}
 
