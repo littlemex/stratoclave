@@ -37,6 +37,40 @@ One check survives, and it is a check rather than a watcher: a literal can repea
 name, and the comprehension would silently keep whichever entry came last. There is
 no laxer way to answer that than to ask it.
 
+AN ENTRY ADDED TO EXPLAIN A FUTURE OBLIGATION DISCHARGES IT. This is a set of
+obligations, not a set of notes. An attribute that does not exist yet must NOT be
+pre-registered with a placeholder writer and an exemption saying its real check is
+coming, because the completeness test then passes the moment the attribute appears --
+so the change that adds the real writers can forget the real check, and nothing
+anywhere says so. That loud failure at the next merge is the entire reason this shape
+was chosen over an appendable list, and a helpful placeholder is what quietly trades
+it away. Guidance about a future attribute goes HERE, where it informs whoever
+classifies it without telling the test that somebody already has.
+
+GUIDANCE FOR THE ATTRIBUTES NOT YET CLASSIFIED. Two arrive with granting, and each
+carries a decision that would be expensive to rediscover:
+
+  * `pool_granted_microusd` -- the approved raise, added on top of the baseline.
+    Classify it as RESET, and reset it BY OMISSION rather than by writing a zero:
+    absence and zero mean the same thing for this attribute, since `ADD` on a missing
+    numeric attribute creates it, so the cheaper reading is free. That is exactly what
+    is NOT true of `manual_limit_microusd`, where zero is a figure meaning "refuse
+    every request" and absence means "follow the seats". Getting the two backwards
+    inverts the feature, which is why each has to say which it is where it is
+    declared. And resetting it at the period boundary is safe ONLY because a grant's
+    `expires_at` is pinned to at most the period end -- without that pin, the
+    rollover's reset destroys live granted capacity every 1st, silently, on every
+    granted row at once. If that pin is ever loosened, this classification has to
+    change with it.
+  * the aggregate grant cap -- the ceiling on what any approver may grant. Its
+    ABSENCE means "derived from the baseline, evaluated now" rather than a stored
+    default, because a materialised default freezes at backfill time: a tenant that
+    later hires would keep a cap sized to the baseline it had when the backfill ran,
+    quietly wrong in the direction of refusing legitimate approvals. Classify it as
+    CARRIED at rollover -- it is the attribute whose evaporation on the 1st would be
+    hardest to see, because a missing cap reads as a derived one rather than as an
+    error.
+
 WHY THIS IS ITS OWN MODULE, and it is load-bearing rather than tidiness. If the
 declaration lived inside `tenant_budgets.py` and the size guard read a second
 copy from somewhere else, the guard would be measuring a row shape the rollover
@@ -203,20 +237,6 @@ _DECLARATIONS: tuple[PoolAttribute, ...] = (
              "deploy, which is what makes the boot-time refusal honest",
     ),
     PoolAttribute(
-        name=POOL_GRANTED_ATTR,
-        rollover=ROLLOVER_RESET,
-        reset_by=RESET_BY_OMISSION,
-        writers=("(F2: the grant apply and revoke writers)",),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        exemption="no writer exists until F2, which registers the grant-sum check "
-                  "against its own ACTIVE grants at that point",
-        note="RESET BY OMISSION, never by writing 0: absence and zero mean the same "
-             "thing here, which is exactly what is NOT true of manual_limit. Safe to "
-             "reset at the boundary ONLY because F2 pins a grant's expires_at to at "
-             "most the period end; without that pin this reset destroys live granted "
-             "capacity every 1st.",
-    ),
-    PoolAttribute(
         name="pool_limit_microusd",
         rollover=ROLLOVER_DERIVED,
         writers=(
@@ -345,10 +365,15 @@ if len(POOL_ROW_ATTRIBUTES) != len(_DECLARATIONS):
         f"_DECLARATIONS declares {_dupes} more than once; one attribute has one "
         f"classification, and the mapping would have silently kept the last")
 
-#: The attributes that MOVE THE CEILING, derived from the declaration rather than
-#: restated. The ceiling-writer document test reads this, so a writer added to
-#: `pool_limit_microusd` above appears in the document's obligation immediately
-#: and a hardcoded list cannot go green while naming a subset.
+#: The attributes that MOVE THE CEILING. Names only -- an attribute bears the ceiling
+#: whether or not it has been classified yet, which is why `POOL_GRANTED_ATTR` is here
+#: while it is deliberately absent from `_DECLARATIONS`. Classifying it later feeds its
+#: writers into `ceiling_writers()` with no further edit to this list.
+#:
+#: The writer list itself is DERIVED from the classification rather than restated. The
+#: ceiling-writer document test reads it, so a writer added to `pool_limit_microusd`
+#: appears in the document's obligation immediately, and a hardcoded list cannot go
+#: green while naming a subset.
 CEILING_ATTRS: tuple[str, ...] = (
     "pool_limit_microusd", "pool_headroom_microusd", MANUAL_LIMIT_ATTR,
     SEAT_COUNT_ATTR, SEAT_RATE_ATTR, POOL_GRANTED_ATTR,
