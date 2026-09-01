@@ -409,8 +409,11 @@ def seed_tenant_with_pool(dynamodb_mock) -> dict:
     UserTenantsRepository().ensure(
         user_id=user_id, tenant_id=tenant_id, role="user", total_credit=1_000_000_000
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=pool_limit_microusd
+    # An operator's own figure, which is what this fixture always seeded: the
+    # ceiling is $5.00 because a test said so, not because of a seat count. Same
+    # effective ceiling as before, through the setter that now writes a figure.
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=pool_limit_microusd
     )
     return {
         "user_id": user_id,
