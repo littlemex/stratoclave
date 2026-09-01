@@ -47,13 +47,14 @@ was chosen over an appendable list, and a helpful placeholder is what quietly tr
 it away. Guidance about a future attribute goes HERE, where it informs whoever
 classifies it without telling the test that somebody already has.
 
-GUIDANCE FOR THE ATTRIBUTES NOT YET CLASSIFIED. Two arrive with granting, and each
-carries a decision that would be expensive to rediscover:
+THE TWO GRANT ATTRIBUTES ARE NOW CLASSIFIED, and the guidance that was here is
+kept as the reasoning behind their entries rather than deleted, because each
+decision would be expensive to rediscover:
 
   * `pool_granted_microusd` -- the approved raise, added on top of the baseline.
-    Classify it as RESET, and reset it BY OMISSION rather than by writing a zero:
-    absence and zero mean the same thing for this attribute, since `ADD` on a missing
-    numeric attribute creates it, so the cheaper reading is free. That is exactly what
+    RESET, and reset BY OMISSION rather than by writing a zero: absence and zero
+    mean the same thing for this attribute, since `ADD` on a missing numeric
+    attribute creates it, so the cheaper reading is free. That is exactly what
     is NOT true of `manual_limit_microusd`, where zero is a figure meaning "refuse
     every request" and absence means "follow the seats". Getting the two backwards
     inverts the feature, which is why each has to say which it is where it is
@@ -62,14 +63,14 @@ carries a decision that would be expensive to rediscover:
     rollover's reset destroys live granted capacity every 1st, silently, on every
     granted row at once. If that pin is ever loosened, this classification has to
     change with it.
-  * the aggregate grant cap -- the ceiling on what any approver may grant. Its
-    ABSENCE means "derived from the baseline, evaluated now" rather than a stored
-    default, because a materialised default freezes at backfill time: a tenant that
-    later hires would keep a cap sized to the baseline it had when the backfill ran,
-    quietly wrong in the direction of refusing legitimate approvals. Classify it as
-    CARRIED at rollover -- it is the attribute whose evaporation on the 1st would be
-    hardest to see, because a missing cap reads as a derived one rather than as an
-    error.
+  * `grant_cap_microusd` -- the ceiling on what any approver may grant IN
+    AGGREGATE. Its ABSENCE means "derived from the baseline, evaluated now" rather
+    than a stored default, because a materialised default freezes at backfill time:
+    a tenant that later hires would keep a cap sized to the baseline it had when
+    the backfill ran, quietly wrong in the direction of refusing legitimate
+    approvals. CARRIED at rollover -- it is the attribute whose evaporation on the
+    1st would be hardest to see, because a missing cap reads as a derived one
+    rather than as an error.
 
 WHY THIS IS ITS OWN MODULE, and it is load-bearing rather than tidiness. If the
 declaration lived inside `tenant_budgets.py` and the size guard read a second
@@ -99,6 +100,12 @@ MANUAL_LIMIT_ATTR = "manual_limit_microusd"
 SEAT_COUNT_ATTR = "seat_count"
 SEAT_RATE_ATTR = "seat_rate_microusd"
 POOL_GRANTED_ATTR = "pool_granted_microusd"
+#: The ceiling on what approvers may grant IN AGGREGATE. Its ABSENCE is a
+#: sentinel meaning "derived from the baseline, evaluated now", so like
+#: `MANUAL_LIMIT_ATTR` it is referenced by name everywhere and spelled inline
+#: nowhere -- the two sentinels mean opposite things and getting them the wrong
+#: way round inverts a feature.
+GRANT_CAP_ATTR = "grant_cap_microusd"
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +310,50 @@ _DECLARATIONS: tuple[PoolAttribute, ...] = (
         writers=("mvp._pipeline:_reclaim_expired_holds",),
         max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
         exemption="reconciled against the credit ledger; same owner as reserved",
+    ),
+    PoolAttribute(
+        name=POOL_GRANTED_ATTR,
+        rollover=ROLLOVER_RESET,
+        reset_by=RESET_BY_OMISSION,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository.grant_apply_txn_item",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.grant_revoke_txn_item",
+        ),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        check="pool_granted_matches_active_grants",
+        note="reset BY OMISSION and never by writing a zero: `ADD` on a missing "
+             "numeric attribute creates it, so absence and zero mean the same "
+             "thing here -- the exact opposite of manual_limit, where zero is a "
+             "figure. The reset is safe ONLY because a grant's expires_at is "
+             "pinned to at most the period end (mvp.grants."
+             "latest_permissible_expiry_for_period); loosen that pin and this "
+             "reset destroys live granted capacity every 1st, silently, on every "
+             "granted row at once. Two writers, not four: an expiry revoke, an "
+             "early revoke and a hand-repair all go through the one revoke "
+             "builder, which is what keeps the subtraction from being written "
+             "three times.",
+    ),
+    PoolAttribute(
+        name=GRANT_CAP_ATTR,
+        rollover=ROLLOVER_CARRIED,
+        # No code writes this. An operator sets it out of band today, and that is
+        # a stated gap rather than a hidden one -- there is no surface for it in
+        # this change. The parenthesised form is the declaration's way of saying
+        # "no writer to derive a ceiling obligation from", the same shape `sizing`
+        # uses, and `ceiling_writers()` skips it: this attribute BOUNDS grants, it
+        # does not move the ceiling, so it is deliberately absent from
+        # CEILING_ATTRS.
+        writers=("(none: no code writes it; an operator sets it out of band, and "
+                 "no surface for it ships in this change)",),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        check="grant_cap_not_exceeded",
+        note="ABSENCE means 'derived from the baseline, evaluated now', not zero "
+             "and not unlimited. A materialised default would freeze at the "
+             "moment it was written, so a tenant that later hired would keep a "
+             "cap sized to its old baseline -- quietly wrong in the direction of "
+             "refusing legitimate approvals. CARRIED because an explicitly-set "
+             "cap evaporating on the 1st is the hardest failure here to see: a "
+             "missing cap reads as a derived one rather than as an error.",
     ),
     PoolAttribute(
         name="status",

@@ -102,6 +102,7 @@ from .client import get_dynamodb_resource, tenant_budgets_table_name
 # this split exists to collapse.
 from . import pool_row_schema
 from .pool_row_schema import (
+    GRANT_CAP_ATTR,
     MANUAL_LIMIT_ATTR,
     POOL_GRANTED_ATTR,
     SEAT_COUNT_ATTR,
@@ -177,6 +178,39 @@ def expected_pool_limit_microusd(item: dict[str, Any]) -> int:
     """`baseline + coalesce(granted, 0)` -- what `pool_limit_microusd` must equal.
     The reconciler's identity check compares the stored figure to this."""
     return baseline_microusd(item) + granted_microusd(item)
+
+
+def grant_cap_microusd(item: dict[str, Any]) -> Optional[int]:
+    """The operator's own aggregate grant cap, or None when the row carries none.
+
+    None is a MEANING and not a missing value: it says "derive the cap from this
+    row's baseline, now". Returned as None rather than coalesced to a number here
+    so a caller that has to render the distinction -- a surface saying whether the
+    cap is a figure somebody chose -- can, and so the two sentinels on this row
+    stay visibly opposite. Absence of `manual_limit` means follow the seats;
+    absence of the cap means follow the baseline; a stored zero in either case is
+    a figure.
+    """
+    v = (item or {}).get(GRANT_CAP_ATTR)
+    return None if v is None else int(v)
+
+
+def effective_grant_cap_for_row(item: dict[str, Any]) -> int:
+    """The cap in force for this row: the stored figure, else its baseline.
+
+    A PURE function of the row, so the approval guard, the daily check and every
+    read surface resolve the cap the same way from the same input. The
+    alternative -- each caller reading the attribute and falling back on its own
+    idea of the default -- is three defaults that agree until one of them is
+    edited.
+
+    Derived from `baseline_microusd` rather than from `pool_limit_microusd`,
+    which matters: the limit already CONTAINS the granted term, so capping
+    against it would let each approval enlarge the cap for the next one, and a
+    tenant could walk its ceiling up without limit one grant at a time.
+    """
+    stored = grant_cap_microusd(item)
+    return baseline_microusd(item) if stored is None else stored
 
 
 class SeatRateMismatchError(RuntimeError):
@@ -635,6 +669,19 @@ class TenantBudgetsRepository:
             "seat_tracked": manual is None,
             "pool_granted_microusd": granted_microusd(item),
             "baseline_microusd": baseline_microusd(item),
+            # The cap, with its absent-default made EXPLICIT rather than left for
+            # a reader to infer. Three fields because there are three facts and
+            # collapsing them loses the one that matters: `grant_cap_microusd` is
+            # None exactly when nobody set a figure, `effective_...` is the number
+            # in force either way, and `cap_is_derived` says which of those two a
+            # surface is looking at. Without the third, a console showing "cap:
+            # $1,000" cannot tell an operator whether that number will move when
+            # the tenant hires.
+            "grant_cap_microusd": grant_cap_microusd(item),
+            "effective_grant_cap_microusd": effective_grant_cap_for_row(item),
+            "grant_cap_is_derived": grant_cap_microusd(item) is None,
+            "remaining_grant_cap_microusd": max(
+                0, effective_grant_cap_for_row(item) - granted_microusd(item)),
         }
 
     # ----- write: the two ceiling writers -----
@@ -660,6 +707,7 @@ class TenantBudgetsRepository:
         status: str = "active",
         seat_count: int = 0,
         seat_rate: Optional[int] = None,
+        carried: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Create the period's pool row, iff nobody else just created it.
 
@@ -669,6 +717,19 @@ class TenantBudgetsRepository:
         `manual_limit_microusd=None` seeds a seat-tracked row -- by leaving the
         attribute OFF, which is the sentinel, rather than by writing a zero that
         would mean "refuse every request".
+
+        `carried` is how the ROLLOVER hands over an attribute this signature has
+        no parameter for, and it exists because the alternative was a silent
+        failure with the declaration's own name on it. The rollover collects the
+        attributes the declaration classifies as CARRIED and calls this; every
+        carried attribute that also happened to be a parameter here arrived, and
+        any that did not was collected and then dropped on the floor. That was
+        true of nothing until the aggregate grant cap was classified as carried,
+        at which point an explicitly-set cap would have evaporated on the 1st --
+        the exact failure the closed-world declaration was built to make
+        impossible, arriving through the consumer that reads it. Values in
+        `carried` never override an attribute this method computes, so it cannot
+        become a second way to set the ceiling.
 
         Returns True if this call created the row, False if it lost the race.
         """
@@ -693,6 +754,9 @@ class TenantBudgetsRepository:
         }
         if manual_limit_microusd is not None:
             item[MANUAL_LIMIT_ATTR] = Decimal(int(manual_limit_microusd))
+        for name, value in (carried or {}).items():
+            if name not in item:
+                item[name] = value
         try:
             self._table.put_item(
                 Item=item, ConditionExpression="attribute_not_exists(tenant_id)")
@@ -956,6 +1020,125 @@ class TenantBudgetsRepository:
                 raise
         return False
 
+    # ----- write: the grant writers -----
+    # A grant moves the ceiling WITHOUT touching the baseline, and that is why
+    # these two are pure `ADD`s while every writer above them takes a CAS. The
+    # writers above compute a BASELINE delta from values that can move under
+    # them, so they have to check those values are still what they read. A grant
+    # is +G or -G on top of whatever baseline is in force at the instant it
+    # commits, so it composes with a concurrent hire, a concurrent operator set
+    # and a concurrent reserve rather than racing any of them. There is nothing
+    # for a CAS to protect.
+    #
+    # They live HERE, on the repository that owns this row, rather than on the
+    # repository that owns the grant record. The declaration in
+    # `pool_row_schema` names the writers of this row, and a writer in another
+    # module is a writer that declaration cannot see -- which is the second
+    # authority over the row's shape that the declaration exists to prevent.
+
+    def grant_apply_txn_item(
+        self, *, target_pk: str, target_sk: str, approved_amount_microusd: int,
+        cap_minus_amount: int,
+    ) -> dict[str, Any]:
+        """Transaction fragment applying a grant of `approved_amount_microusd`.
+
+        Moves all three attributes by the SAME amount: the granted term, the
+        ceiling, and the headroom. Moving the ceiling without the headroom would
+        raise a limit the admission gate never sees, since the gate reads headroom
+        alone.
+
+        THE CAP GUARD DOES NOT MENTION THE CAP, and that is the shape B1 requires
+        rather than an omission. An absent cap means "derived from the baseline",
+        so a condition referencing `grant_cap_microusd` would fail outright on
+        every row that has never had one set -- which is every row. The caller
+        resolves the cap and passes `cap_minus_amount`; the condition then compares
+        the row's LIVE granted sum against that literal, so a concurrent approval
+        that already moved it is still caught at commit.
+
+        The `attribute_not_exists` half of that condition is load-bearing and is
+        the easy thing to get wrong. `pool_granted_microusd` is RESET BY OMISSION
+        at every period boundary, so on the first grant of any period the
+        attribute is absent -- and a DynamoDB comparison against a missing
+        attribute FAILS. A guard written as `pool_granted_microusd <= :cap` alone
+        would therefore refuse the first grant of every month on every tenant,
+        reporting it as the cap being exceeded when nothing had been granted at
+        all.
+        """
+        amount = int(approved_amount_microusd)
+        return {
+            "Update": {
+                "TableName": self._name,
+                "Key": {"tenant_id": {"S": target_pk}, "sk": {"S": target_sk}},
+                "UpdateExpression": (
+                    "ADD pool_granted_microusd :g, pool_limit_microusd :g, "
+                    "pool_headroom_microusd :g SET updated_at = :now"
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(pool_limit_microusd) AND "
+                    "(attribute_not_exists(pool_granted_microusd) OR "
+                    "pool_granted_microusd <= :cap_minus_g)"
+                ),
+                "ExpressionAttributeValues": {
+                    ":g": {"N": str(amount)},
+                    ":cap_minus_g": {"N": str(int(cap_minus_amount))},
+                    ":now": {"S": _now_iso()},
+                },
+            }
+        }
+
+    def grant_revoke_txn_item(
+        self, *, target_pk: str, target_sk: str, approved_amount_microusd: int,
+    ) -> dict[str, Any]:
+        """Transaction fragment giving a grant's capacity back.
+
+        The exact reverse of the apply, on the row the grant was PINNED to rather
+        than on the current period's -- the caller passes the keys the grant row
+        carries, so a grant approved in July and revoked in August moves July's
+        row.
+
+        `pool_granted_microusd >= :g` is the floor. Without it a revoke of a grant
+        whose apply never landed -- or a second revoke that somehow passed the
+        grant row's own condition -- would drive the granted term negative and,
+        with it, the ceiling and the headroom: a tenant refused below its own
+        baseline, with every equation over the row still balancing.
+        """
+        amount = int(approved_amount_microusd)
+        return {
+            "Update": {
+                "TableName": self._name,
+                "Key": {"tenant_id": {"S": target_pk}, "sk": {"S": target_sk}},
+                "UpdateExpression": (
+                    "ADD pool_granted_microusd :neg, pool_limit_microusd :neg, "
+                    "pool_headroom_microusd :neg SET updated_at = :now"
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(pool_limit_microusd) AND "
+                    "pool_granted_microusd >= :g"
+                ),
+                "ExpressionAttributeValues": {
+                    ":g": {"N": str(amount)},
+                    ":neg": {"N": str(-amount)},
+                    ":now": {"S": _now_iso()},
+                },
+            }
+        }
+
+    def get_by_key(
+        self, target_pk: str, target_sk: str, *, consistent_read: bool = True
+    ) -> Optional[dict[str, Any]]:
+        """Read a pool row by the exact key a grant was pinned to.
+
+        The orphan hunt's primitive. `get(tenant_id, period)` would work only by
+        reconstructing the sort key from the period, which is the recomputation
+        the pinning exists to avoid: a grant records the keys it raised, and
+        reading them back is what makes "does this row still exist" a question
+        about the same row the revoke would move.
+        """
+        resp = self._table.get_item(
+            Key={"tenant_id": target_pk, "sk": target_sk},
+            ConsistentRead=consistent_read)
+        return resp.get("Item")
+
     # ----- period rollover -----
     # R16's named owner. Nothing rolled a period over before this: a new month
     # simply had no row, and a membership change against a missing row was a
@@ -992,7 +1175,7 @@ class TenantBudgetsRepository:
             if name in source:
                 seed[name] = source[name]
         manual = seed.get(MANUAL_LIMIT_ATTR)
-        self._seed_pool_row(
+        created = self._seed_pool_row(
             tenant_id=tenant_id,
             period=to_period,
             # Carried by ABSENCE as well as by value: a seat-tracked row must
@@ -1002,8 +1185,29 @@ class TenantBudgetsRepository:
             status=str(seed.get("status", "active")),
             seat_count=int(seed.get(SEAT_COUNT_ATTR, 0)),
             seat_rate=int(seed[SEAT_RATE_ATTR]) if SEAT_RATE_ATTR in seed else None,
+            # Every carried attribute, including the ones this signature has no
+            # parameter for. Reading the declaration and then handing only four of
+            # its answers to the writer was a list in disguise: the declaration
+            # said "carried" and the row it produced did not carry it.
+            carried=seed,
         )
-        return self.get(tenant_id, to_period)
+        new_row = self.get(tenant_id, to_period)
+        if created and new_row is not None:
+            # The declaration is only worth its cost if a consumer that ignores
+            # part of it FAILS. Nothing else can notice this: a carried attribute
+            # that did not arrive leaves a row that looks entirely well-formed,
+            # and for the grant cap it looks like a DERIVED cap rather than like
+            # an error. So the rollover checks its own work.
+            lost = [name for name in pool_row_schema.carried_attributes()
+                    if name in source and name not in new_row]
+            if lost:
+                raise RuntimeError(
+                    f"roll_period_forward carried {sorted(lost)} out of "
+                    f"{from_period} and the new {to_period} row does not have "
+                    f"them. The declaration classifies them as carried, so this "
+                    f"is the rollover failing to honour it -- not an optional "
+                    f"attribute. Carry them in _seed_pool_row.")
+        return new_row
 
     def ensure_current_period_row(
         self, *, tenant_id: str, period: Optional[str] = None
