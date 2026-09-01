@@ -259,6 +259,20 @@ class PoolBudgetResponse(BaseModel):
     # does not equal its parts.
     pool_granted_microusd: int
     baseline_microusd: int
+    # The aggregate grant cap, with its absent-default made EXPLICIT. Three fields
+    # because there are three facts and collapsing them loses the one that matters:
+    # `grant_cap_microusd` is None exactly when nobody set a figure,
+    # `effective_grant_cap_microusd` is the number in force either way, and
+    # `grant_cap_is_derived` says which of those two a surface is looking at.
+    # Without the third, a console showing a cap cannot tell an operator whether
+    # that number will move when the tenant hires.
+    grant_cap_microusd: Optional[int]
+    effective_grant_cap_microusd: int
+    grant_cap_is_derived: bool
+    # What an approver still has room to grant. Rendered beside the ceiling because
+    # an approval surface that pre-fills more than this asks for an amount
+    # guaranteed to be refused, and the requester learns that a day later.
+    remaining_grant_cap_microusd: int
     # True when a manual figure has been outgrown by what the seats now entitle
     # the tenant to -- the state an operator wants to know about, since the
     # figure they chose is now smaller than the default would have been.
@@ -388,6 +402,18 @@ def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetRes
         manual_limit_microusd=None if manual is None else int(manual),
         pool_granted_microusd=int(summary.get("pool_granted_microusd", 0)),
         baseline_microusd=int(summary.get("baseline_microusd", limit)),
+        # Read straight off the summary, which resolves the cap through the one
+        # pure function every other reader of it uses. A second resolution here --
+        # "the attribute, or else the baseline" spelled again -- would be a second
+        # default that agrees until one of them is edited.
+        grant_cap_microusd=(
+            None if summary.get("grant_cap_microusd") is None
+            else int(summary["grant_cap_microusd"])),
+        effective_grant_cap_microusd=int(
+            summary.get("effective_grant_cap_microusd", 0)),
+        grant_cap_is_derived=bool(summary.get("grant_cap_is_derived", True)),
+        remaining_grant_cap_microusd=int(
+            summary.get("remaining_grant_cap_microusd", 0)),
         entitlement_exceeds_figure=(
             not seat_tracked and entitlement > int(manual or 0)),
         # Named on the read rather than only documented, so a surface can offer
@@ -622,6 +648,37 @@ def archive_tenant(
     item = repo.get(tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Live grants are given back BEFORE the tenant goes, and the retirement is
+    # refused while any remain. Archiving over a live grant leaves a grant row
+    # pinned to a pool row nobody will look at again: the sweeper will still try to
+    # revoke it, the reconciler will still count it against a cap for a tenant that
+    # no longer exists, and its capacity is never released because release means
+    # moving a ceiling on a retired tenant.
+    #
+    # The drain starts FROM GRANTS rather than from the tenant's pool rows, because
+    # a grant pinned to a period whose row is already gone is exactly the one a
+    # pool-row-first sweep has no row to start at.
+    from . import grants as _grants
+
+    drain = _grants.revoke_all_active_grants(tenant_id=tenant_id, actor=actor)
+    if drain["remaining_count"]:
+        # Refused rather than archived-anyway. A grant that could not be given back
+        # is capacity still counted against this tenant's ceiling, and completing
+        # the retirement would make that permanent and unobservable.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "type": "active_grants_remain",
+                "message": (
+                    f"{drain['remaining_count']} grant(s) still bear capacity on "
+                    f"this tenant's pool and could not be revoked. Retiring the "
+                    f"tenant now would leave that capacity granted with nothing "
+                    f"able to release it. Repair or revoke them first."),
+                "revoked_count": drain["revoked_count"],
+                "remaining": drain["remaining"],
+            })
+
     repo.archive(tenant_id)
     log_audit_event(
         event="tenant_archived",
@@ -629,6 +686,12 @@ def archive_tenant(
         actor_email=actor.email,
         target_id=tenant_id,
         target_type="tenant",
+        # What the retirement gave back, on the retirement's own event. A revoke
+        # recorded only under its own event name would leave a reader of the
+        # archive unable to tell a tenant that held no grants from one whose
+        # grants this request released.
+        details={"grants_revoked": drain["revoked_count"],
+                 "grant_ids": drain["revoked"]},
     )
     return Response(status_code=204)
 
@@ -758,6 +821,40 @@ def apply_pool_budget_request(
     repo = TenantBudgetsRepository()
     before = repo.pool_summary(tenant_id, period)
     was_seat_tracked = bool((before or {}).get("seat_tracked", True))
+
+    # A figure that EQUALS the ceiling currently in force, while part of that
+    # ceiling is granted, is almost certainly a figure copied off a screen. The
+    # operator means "make the baseline this"; the setter would read it as "make
+    # the baseline this, on top of which the grant still sits" -- so the grant is
+    # silently re-based on itself and the ceiling jumps by the granted amount. Then
+    # at expiry it drops by that amount again and lands below the figure the
+    # operator typed, which is the shape of the case this guard exists for: a $950
+    # figure set while $450 was granted became $1,400, then $950 minus the grant.
+    #
+    # Refused rather than reinterpreted, because both readings are plausible and
+    # picking one silently is how an operator's number becomes a number nobody
+    # chose. The refusal names the composition so the next request can be exact.
+    granted_now = int((before or {}).get("pool_granted_microusd", 0))
+    if (not body.follow_seats) and granted_now > 0:
+        asked_microusd = int(body.limit_usd_cents or 0) * _MICRO_USD_PER_CENT
+        if asked_microusd == int((before or {}).get("pool_limit_microusd", -1)):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "type": "figure_includes_active_grant",
+                    "message": (
+                        "That figure is the ceiling currently in force, and part of "
+                        "it is granted rather than baseline. Setting it would add "
+                        "the granted amount on top of itself, and the tenant would "
+                        "lose it twice when the grant expires. Send the baseline you "
+                        "want instead."),
+                    "figure_microusd": asked_microusd,
+                    "pool_limit_microusd": int(
+                        (before or {}).get("pool_limit_microusd", 0)),
+                    "pool_granted_microusd": granted_now,
+                    "baseline_microusd": int(
+                        (before or {}).get("baseline_microusd", 0)),
+                })
 
     if body.follow_seats:
         if before is None:

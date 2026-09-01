@@ -853,9 +853,40 @@ def approve_limit_raise(
             "An approval cannot exceed the amount that was asked for.",
             approved_amount_microusd=amount, asked_amount_microusd=asked)
 
+    # The period the grant will target, and therefore the period whose end bounds
+    # its window. Resolved before anything is read so R11's refusal does not depend
+    # on the pool row existing: a caller who asked for an impossible expiry has the
+    # same thing to fix whether or not the tenant is pooled.
+    period = current_period()
+
+    now = _now_epoch()
+    ceiling = latest_permissible_expiry_for_period(now, period)
+    earliest = now + MIN_GRANT_WINDOW_SECONDS
+    expires = int(expires_at)
+    if ceiling < earliest:
+        raise GrantWindowTooShort(
+            f"There are fewer than {MIN_GRANT_WINDOW_SECONDS} seconds left in "
+            f"{period}, and a grant may not outlive the period it was granted in "
+            f"-- so no expiry is satisfiable for this request today.",
+            earliest_permissible=earliest, latest_permissible=ceiling,
+            period=period)
+    if expires < earliest or expires > ceiling:
+        raise GrantWindowTooShort(
+            f"A grant must expire at least {MIN_GRANT_WINDOW_SECONDS} seconds "
+            f"from now and no later than the end of {period}.",
+            requested_expires_at=expires, earliest_permissible=earliest,
+            latest_permissible=ceiling, period=period)
+
     # R26: a decision that gives less than was asked has to say why. The full
     # amount does not, because "yes" needs no explanation; anything less is a
     # number the requester did not choose and cannot plan against without one.
+    #
+    # ORDER MATTERS HERE and it is worth stating. Every guard above this point is a
+    # property of the caller's own input; everything below it needs the tenant's
+    # stored state. Checking them in that order means a caller fixing one refusal
+    # at a time is never told about a stale figure while their own request is still
+    # malformed -- and, more usefully, that the refusal a caller gets does not
+    # depend on which of two unrelated mistakes the code happened to look at first.
     if amount < asked and not (decision_comment or "").strip():
         raise DecisionCommentRequired(
             "Approving for less than was asked requires a comment saying why, "
@@ -863,7 +894,6 @@ def approve_limit_raise(
             "choose and no way to find out how it was arrived at.")
 
     budgets = TenantBudgetsRepository()
-    period = current_period()
     # Lazily roll the period forward if the scheduled job has not reached this
     # tenant yet. F1 already owns this mechanism and calls it from the seat-delta
     # path for the same reason: an approval at five past midnight on the 1st
@@ -887,24 +917,6 @@ def approve_limit_raise(
             f"while holding the tenant's cap headroom.",
             tenant_id=tenant_id, period=period,
             status=str(row.get("status") or ""))
-
-    now = _now_epoch()
-    ceiling = latest_permissible_expiry_for_period(now, period)
-    earliest = now + MIN_GRANT_WINDOW_SECONDS
-    expires = int(expires_at)
-    if ceiling < earliest:
-        raise GrantWindowTooShort(
-            f"There are fewer than {MIN_GRANT_WINDOW_SECONDS} seconds left in "
-            f"{period}, and a grant may not outlive the period it was granted in "
-            f"-- so no expiry is satisfiable for this request today.",
-            earliest_permissible=earliest, latest_permissible=ceiling,
-            period=period)
-    if expires < earliest or expires > ceiling:
-        raise GrantWindowTooShort(
-            f"A grant must expire at least {MIN_GRANT_WINDOW_SECONDS} seconds "
-            f"from now and no later than the end of {period}.",
-            requested_expires_at=expires, earliest_permissible=earliest,
-            latest_permissible=ceiling, period=period)
 
     # B1's caller-side cap. The condition sent to DynamoDB compares the row's
     # LIVE granted sum against `cap - amount`, so a concurrent approval that

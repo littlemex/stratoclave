@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-23.1",
+  "version": "2026-09-02.1",
   "roles": {
     "admin": {
       "description": "Root: manages all tenants, users, SSO trusted accounts, and API keys.",
@@ -12,7 +12,8 @@
         "apikeys:*",
         "billing:*",
         "messages:send",
-        "responses:send"
+        "responses:send",
+        "limits:*"
       ]
     },
     "team_lead": {
@@ -30,7 +31,9 @@
         "billing:read",
         "billing:write",
         "messages:send",
-        "responses:send"
+        "responses:send",
+        "limits:raise-self",
+        "limits:approve-own"
       ]
     },
     "user": {
@@ -41,7 +44,8 @@
         "usage:read-self",
         "apikeys:read-self",
         "apikeys:create-self",
-        "apikeys:revoke-self"
+        "apikeys:revoke-self",
+        "limits:raise-self"
       ]
     }
   }

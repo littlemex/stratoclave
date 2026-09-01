@@ -73,6 +73,7 @@ _TABLE_ENVS = {
     "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
     "DYNAMODB_SAAR_MEMORY_TABLE": "stratoclave-saar-memory",
     "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
+    "DYNAMODB_QUOTA_EVENTS_TABLE": "stratoclave-quota-events",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -270,6 +271,63 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
                         {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
                     ],
                     "Projection": {"ProjectionType": "ALL"},
+                },
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # QuotaEvents: PK pk, SK sk, holding three row kinds in one collection —
+        # a user's daily raise slot, a raise request, and the grant an approval
+        # produces. Two indexes, and the SPARSENESS of each is load-bearing rather
+        # than an optimisation:
+        #   tenant-status-index (tenant_id, status#created_at) — an approver's
+        #     queue. Slot rows deliberately do not write the bare `tenant_id`, so
+        #     they are absent from it by construction.
+        #   grant-expiry-index (grant_status, expires_at) — the sweeper's work
+        #     list. `grant_status` is written only while a grant is ACTIVE and
+        #     REMOVEd in the same transaction as every terminal transition, so a
+        #     revoked grant leaves the index rather than being filtered out of it.
+        # In the SHARED fixture and not a private one: a grant row is a thing
+        # cross-part tests have to be able to seed, and a fixture inside one test
+        # file would pass that file and leave every other one unable to.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_QUOTA_EVENTS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "tenant_id", "AttributeType": "S"},
+                {"AttributeName": "status_created_at", "AttributeType": "S"},
+                {"AttributeName": "grant_status", "AttributeType": "S"},
+                {"AttributeName": "expires_at", "AttributeType": "N"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "tenant-status-index",
+                    "KeySchema": [
+                        {"AttributeName": "tenant_id", "KeyType": "HASH"},
+                        {"AttributeName": "status_created_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+                {
+                    "IndexName": "grant-expiry-index",
+                    "KeySchema": [
+                        {"AttributeName": "grant_status", "KeyType": "HASH"},
+                        {"AttributeName": "expires_at", "KeyType": "RANGE"},
+                    ],
+                    # The projection the sweeper needs to revoke without a second
+                    # read: the amount to subtract and the row to subtract it from.
+                    "Projection": {
+                        "ProjectionType": "INCLUDE",
+                        "NonKeyAttributes": [
+                            "grant_id", "tenant_id", "approved_amount_microusd",
+                            "target_pk", "target_sk", "period",
+                        ],
+                    },
                 },
             ],
             BillingMode="PAY_PER_REQUEST",

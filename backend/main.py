@@ -44,6 +44,8 @@ from mvp.admin_pricing import router as mvp_admin_pricing_router
 from mvp.admin_routing import router as mvp_admin_routing_router
 from mvp.admin_usage import router as mvp_admin_usage_router
 from mvp.team_lead import router as mvp_team_lead_router
+# Money-ceiling raises: the request, the approval, and the grant that expires.
+from mvp.grants import router as mvp_grants_router
 from mvp.cognito_auth import router as mvp_cognito_auth_router
 # Phase S: AWS SSO / STS login.
 from mvp.sso_exchange import router as mvp_sso_exchange_router
@@ -469,6 +471,7 @@ app.include_router(mvp_admin_routing_router)     # /api/mvp/admin/tenants/{id}[/
 app.include_router(mvp_admin_usage_router)       # /api/mvp/admin/usage-logs
 app.include_router(mvp_admin_pricing_router)     # /api/mvp/admin/pricing-config (read-only)
 app.include_router(mvp_team_lead_router)         # /api/mvp/team-lead/tenants[*]
+app.include_router(mvp_grants_router)            # /api/mvp/{me,admin,team-lead}/limit-{raises,grants}[*]
 app.include_router(mvp_cognito_auth_router)      # /api/mvp/auth/login, /respond
 # Phase S
 app.include_router(mvp_sso_exchange_router)              # POST /api/mvp/auth/sso-exchange
