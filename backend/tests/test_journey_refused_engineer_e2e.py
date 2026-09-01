@@ -109,7 +109,8 @@ def _journey_client(monkeypatch) -> tuple[TestClient, _Seat]:
 
 
 def _seed_tenant_with_spent_pool(monkeypatch, *, limit_micro: int,
-                                 settled_micro: int) -> str:
+                                 settled_micro: int,
+                                 her_token_credit: int = 1_000_000_000) -> str:
     """The personas' running scenario: a pool with real money already spent on
     it, so the wall she hits is the wall a live tenant hits.
 
@@ -127,8 +128,12 @@ def _seed_tenant_with_spent_pool(monkeypatch, *, limit_micro: int,
         tenant_id=TENANT, name="Journey", team_lead_user_id=HIM,
         default_credit=1_000_000, created_by=HIM,
     )
+    # `ensure` is create-if-missing, so her allowance has to be right the first
+    # time: a later call with a different figure is a silent no-op, and a
+    # journey seeded that way would meet the wrong wall.
     UserTenantsRepository().ensure(
-        user_id=HER, tenant_id=TENANT, role="user", total_credit=1_000_000_000,
+        user_id=HER, tenant_id=TENANT, role="user",
+        total_credit=her_token_credit,
     )
     repo = TenantBudgetsRepository()
     repo.set_pool_limit(
@@ -544,13 +549,11 @@ def test_journey_the_token_wall_never_sells_her_a_money_raise(monkeypatch,
     request that would actually help, today. The last step is the journey: a
     refused misdirected ask must not consume the slot.
     """
+    # Money in the pool, nothing on her personal token allowance: the wall she
+    # meets is the ungrantable one, which is the whole premise of this journey.
     period = _seed_tenant_with_spent_pool(
-        monkeypatch, limit_micro=100_000_000, settled_micro=0
-    )
-    # Money in the pool, nothing left on her personal token allowance: the
-    # wall she meets is the ungrantable one.
-    UserTenantsRepository().ensure(
-        user_id=HER, tenant_id=TENANT, role="user", total_credit=1,
+        monkeypatch, limit_micro=100_000_000, settled_micro=0,
+        her_token_credit=1,
     )
     client, seat = _journey_client(monkeypatch)
 
