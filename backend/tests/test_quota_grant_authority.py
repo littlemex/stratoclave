@@ -96,7 +96,7 @@ def _build_full_transaction(*, actor_user_id: str, actor_is_admin: bool, tenant_
     )
     pool_apply = repo.grant_apply_pool_txn_item(
         target_pk=tenant_id, target_sk=budget_sk(PERIOD),
-        amount_microusd=amount, cap_minus_amount=10_000_000 - amount,
+        approved_amount_microusd=amount, cap_minus_amount=10_000_000 - amount,
     )
     return [condition_check, grant_put, pool_apply]
 

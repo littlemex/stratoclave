@@ -154,13 +154,18 @@ def test_b8_capacity_bearing_sum_includes_revoke_blocked_so_drift_is_zero(
 
 def test_b8_is_capacity_bearing_is_one_shared_predicate(dynamodb_mock, quota_events_table):
     """The predicate itself, directly: True for ACTIVE and REVOKE_BLOCKED,
-    False for the two terminal states."""
-    from dynamo.quota_events import QuotaEventsRepository
+    False for the two terminal states. Defined in `mvp.grants` — the
+    question ("does this grant currently contribute to pool_granted") is a
+    lifecycle rule, not a storage fact, so it does not live on
+    `QuotaEventsRepository` (see `test_quota_wall_taxonomy.py`'s
+    `test_u1_is_capacity_bearing_is_defined_in_mvp_grants_and_nowhere_else`
+    for the "defined here and nowhere else" half of this)."""
+    from mvp.grants import is_capacity_bearing
 
-    assert QuotaEventsRepository.is_capacity_bearing("ACTIVE") is True
-    assert QuotaEventsRepository.is_capacity_bearing("REVOKE_BLOCKED") is True
-    assert QuotaEventsRepository.is_capacity_bearing("EXPIRED") is False
-    assert QuotaEventsRepository.is_capacity_bearing("REVOKED") is False
+    assert is_capacity_bearing("ACTIVE") is True
+    assert is_capacity_bearing("REVOKE_BLOCKED") is True
+    assert is_capacity_bearing("EXPIRED") is False
+    assert is_capacity_bearing("REVOKED") is False
 
 
 def test_b8_reconciliation_is_per_target_row_a_late_swept_grant_is_seen_on_the_prior_period(

@@ -189,3 +189,79 @@ def test_r27_wall_is_a_required_argument():
 
     with pytest.raises(TypeError):
         _err_402("personal_budget_exhausted")  # no wall= supplied
+
+
+# ---------------------------------------------------------------------------
+# U1 — `mvp/grants.py`'s exact public surface: `RaiseHint` is a named model,
+# not a dict `_err_402` invents inline, and `is_capacity_bearing` is DEFINED
+# in `mvp.grants` — not re-exported from the `dynamo` layer, which does not
+# carry it at all (a follow-up correction: three independent consumers of a
+# single-source-of-fact predicate must import ONE name, not two paths to the
+# same object — see `test_u1_is_capacity_bearing_is_defined_in_mvp_grants_and_nowhere_else`).
+# ---------------------------------------------------------------------------
+
+def test_u1_raise_hint_is_importable_and_shaped_per_b4():
+    from mvp.grants import RaiseHint, RaiseHintCandidate
+
+    hint = RaiseHint(
+        candidates=[RaiseHintCandidate(wall="tenant_dollar_pool")],
+        remaining_cap_microusd=7_000_000,
+    )
+    dumped = hint.model_dump()
+    assert dumped == {
+        "candidates": [{"wall": "tenant_dollar_pool", "model": None, "shortfall_microusd": None}],
+        "remaining_cap_microusd": 7_000_000,
+    }
+
+
+def test_u1_err_402_raise_hint_body_is_exactly_a_raisehint_dump():
+    """The dict `_err_402` puts under `raise_hint` must be byte-identical to
+    what constructing a `RaiseHint` and dumping it produces — the model is
+    the shape, not a second, parallel one `_err_402` maintains by hand."""
+    from mvp._pipeline import _err_402
+    from mvp.grants import RaiseHint, RaiseHintCandidate
+
+    exc = _err_402(
+        "tenant_pool_exhausted", wall="tenant_dollar_pool",
+        pool_granted_microusd=3_000_000, effective_cap_microusd=10_000_000,
+    )
+    expected = RaiseHint(
+        candidates=[RaiseHintCandidate(wall="tenant_dollar_pool")],
+        remaining_cap_microusd=7_000_000,
+    ).model_dump()
+    assert exc.detail["raise_hint"] == expected
+
+
+def test_u1_is_capacity_bearing_is_defined_in_mvp_grants_and_nowhere_else():
+    """Corrected conclusion (this test originally asserted the OPPOSITE — a
+    re-export from `dynamo.quota_events` — and that was the wrong side: the
+    question `is_capacity_bearing` answers ("does this grant currently
+    contribute to pool_granted") is a lifecycle rule that happens to read
+    stored fields, not a fact about storage, and all three consumers (F2's
+    own grant lifecycle code, F1's reconciler, F3's inventory) live in the
+    `mvp` layer. A re-export is fine for a function whose behaviour is
+    settled and whose location is incidental; it is wrong for anything that
+    exists to BE the single source of a fact — three independent consumers
+    must import ONE name, never two paths to the same object, or the day
+    someone changes the predicate they change one path and not the other.
+    So: `mvp.grants.is_capacity_bearing` must exist, must be DEFINED there
+    (`__module__ == "mvp.grants"`, not imported from elsewhere under an
+    alias), and `dynamo.quota_events` must carry no such attribute at all."""
+    from mvp.grants import is_capacity_bearing
+
+    assert is_capacity_bearing.__module__ == "mvp.grants", (
+        "must be DEFINED in mvp.grants, not imported/aliased from another module"
+    )
+    assert is_capacity_bearing("ACTIVE") is True
+    assert is_capacity_bearing("EXPIRED") is False
+
+    import dynamo.quota_events as quota_events_module
+
+    assert not hasattr(quota_events_module, "is_capacity_bearing"), (
+        "the storage layer must not carry this lifecycle predicate at all — "
+        "not as a re-export, not as a module-level alias"
+    )
+    assert not hasattr(quota_events_module.QuotaEventsRepository, "is_capacity_bearing"), (
+        "nor on the repository class itself — a predicate three independent "
+        "consumers must never restate needs exactly one name, defined once"
+    )

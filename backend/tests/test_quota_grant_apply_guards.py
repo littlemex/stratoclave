@@ -113,7 +113,7 @@ def test_r32_grant_apply_cap_condition_refuses_over_cap(dynamodb_mock, quota_eve
     repo = QuotaEventsRepository()
     item = repo.grant_apply_pool_txn_item(
         target_pk=TENANT, target_sk=budget_sk(PERIOD),
-        amount_microusd=20, cap_minus_amount=100 - 20,
+        approved_amount_microusd=20, cap_minus_amount=100 - 20,
     )
     assert item["Update"]["ConditionExpression"] == (
         "attribute_exists(pool_limit_microusd) AND "
@@ -147,7 +147,7 @@ def test_r32_grant_apply_cap_condition_admits_up_to_cap(dynamodb_mock, quota_eve
     repo = QuotaEventsRepository()
     item = repo.grant_apply_pool_txn_item(
         target_pk=TENANT, target_sk=budget_sk(PERIOD),
-        amount_microusd=10, cap_minus_amount=100 - 10,
+        approved_amount_microusd=10, cap_minus_amount=100 - 10,
     )
     client = boto3.client("dynamodb", region_name="us-east-1")
     client.transact_write_items(TransactItems=[item])
@@ -176,7 +176,7 @@ def test_r32_negative_ADD_is_not_floored_by_dynamodb(dynamodb_mock, quota_events
     # item is ever built by `approve_limit_raise`.
     bad_item = repo.grant_apply_pool_txn_item(
         target_pk=TENANT, target_sk=budget_sk(PERIOD),
-        amount_microusd=-500_000, cap_minus_amount=10_000_000 - (-500_000),
+        approved_amount_microusd=-500_000, cap_minus_amount=10_000_000 - (-500_000),
     )
     client = boto3.client("dynamodb", region_name="us-east-1")
     client.transact_write_items(TransactItems=[bad_item])  # DynamoDB does not refuse this
@@ -433,3 +433,61 @@ def test_b1_effective_cap_is_evaluated_live_not_frozen_at_any_earlier_instant(
         "the derived cap must move the INSTANT the baseline does, with no "
         "intervening backfill/materialisation step to go stale"
     )
+
+
+# ---------------------------------------------------------------------------
+# U1 — `latest_permissible_expiry_for_period` is R11's rule expressed as a
+# function, so F3's DISPLAY of it computes rather than reimplements the
+# calendar arithmetic. Until now R11 was proven only through
+# `approve_limit_raise`'s refusal (test_r11_*, above); a rule another part
+# calls as a function needs to be tested as one.
+# ---------------------------------------------------------------------------
+
+def test_u1_latest_permissible_expiry_is_seven_days_out_mid_period(dynamodb_mock, quota_events_table):
+    from mvp.grants import latest_permissible_expiry_for_period
+
+    now = _MID_PERIOD_EPOCH
+    assert latest_permissible_expiry_for_period(now, PERIOD) == now + 7 * 24 * 3600
+
+
+def test_u1_latest_permissible_expiry_is_capped_at_period_end_near_the_boundary(
+    dynamodb_mock, quota_events_table,
+):
+    period = "2026-09"
+    period_end = _period_end_epoch(period)
+    now = period_end - 60  # 60 seconds left in the period
+    from mvp.grants import latest_permissible_expiry_for_period
+
+    assert latest_permissible_expiry_for_period(now, period) == period_end, (
+        "with fewer than 7 days left in the period, the ceiling is the "
+        "period's own end, not now+7d — the same min() approve_limit_raise "
+        "enforces as a refusal (test_r11_last_300_seconds_of_period_..., above)"
+    )
+
+
+def test_u1_approve_limit_raises_own_ceiling_is_exactly_this_function(
+    dynamodb_mock, quota_events_table,
+):
+    """The two must never drift apart: `approve_limit_raise`'s own R11 upper
+    bound is computed by calling `latest_permissible_expiry_for_period`, not
+    by a second, independent calendar computation. Proven by making the
+    function return an intentionally-wrong value and observing the refusal
+    boundary move with it."""
+    from mvp import grants
+
+    _seed_pending_request_for_approval("req-u1", tenant=TENANT, period=PERIOD)
+    original = grants.latest_permissible_expiry_for_period
+    try:
+        grants.latest_permissible_expiry_for_period = lambda now_epoch, period: now_epoch + 1_000
+        with pytest.raises(grants.GrantWindowTooShort):
+            # 1_001s out would be fine under the REAL 7-day ceiling, but the
+            # monkeypatched ceiling above (now+1_000) refuses it — proving
+            # approve_limit_raise reads the ceiling from this exact function
+            # rather than from an independently inlined 7-day constant.
+            grants.approve_limit_raise(
+                actor=_admin_actor(), request_id="req-u1",
+                approved_amount_microusd=1_000,
+                expires_at=_MID_PERIOD_EPOCH + 1_001, now_epoch=_MID_PERIOD_EPOCH,
+            )
+    finally:
+        grants.latest_permissible_expiry_for_period = original
