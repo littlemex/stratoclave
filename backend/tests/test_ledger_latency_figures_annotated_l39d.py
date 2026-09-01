@@ -120,12 +120,15 @@ def test_every_named_figure_states_its_schema_and_remeasurement_status():
     )
 
 
-#: The rate is matched loosely (F1 has not named it in a contract F4 may read) rather
-#: than by an exact attribute name, the same hedge the F4 design note already uses for
-#: `manual_limit`/`pool_granted`'s possible `_microusd` suffix. F1's three (seat_count,
-#: manual_limit, the rate) are present under EVERY shape, so this is checked
-#: unconditionally, unlike the two grant attributes below.
-_RATE_MENTION = re.compile(r"seat.{0,20}rate|rate.{0,20}seat", re.IGNORECASE)
+#: The stored seat rate's attribute name is CONFIRMED as `seat_rate_microusd`
+#: (F1 has landed elsewhere; not merged into this worktree) — matched by exact
+#: name first, with the looser "seat...rate" phrasing kept as a fallback for a
+#: human-written annotation that describes it without the literal identifier.
+#: F1's three (`seat_count`, `manual_limit_microusd`, `seat_rate_microusd`) are
+#: present under EVERY shape, so this is checked unconditionally, unlike the
+#: two grant attributes below (which F1 deliberately leaves unclassified).
+_RATE_MENTION = re.compile(
+    r"seat_rate_microusd|seat.{0,20}rate|rate.{0,20}seat", re.IGNORECASE)
 
 #: Exactly one of these three must be named — "post-epic" alone names no attribute
 #: set, since the two grant attributes are absent by default, not zero (S2).

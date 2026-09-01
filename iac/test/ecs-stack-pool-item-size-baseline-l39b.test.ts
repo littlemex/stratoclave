@@ -15,33 +15,44 @@ import { EcsStack } from '../lib/ecs-stack';
  *     threshold: 2048,   // "2KB is a generous ceiling..."
  *
  * That number knows nothing about which attributes the pool item is declared to carry.
- * The quota-raise epic deletes `sizing` and adds THREE attributes to the same item —
- * `seat_count`, `manual_limit`, `pool_granted`, PLUS the stored seat rate (amendment A5,
- * seeded at M1, carried forward by R16 — CONTRACT-F4-claims (F4's contract document)'s "Seam amendments" B2
- * corrects an earlier count of two) — an INTENDED size change. R39b's whole point is
- * that an intended change like this must not need a human to also remember to bump
- * `2048` by hand (and no test currently would catch it if they forgot, because a static
- * threshold is not wrong until the item is bigger than 2048 bytes, which this epic's own
- * attributes do not come close to — so the current 2048 silently tolerates ANY schema
- * change up to that ceiling, intended or not, which is the OTHER failure mode R39b
- * names: "an unintended one still is [an alarm]").
+ * F1 deletes `sizing` and adds its OWN three attributes to the same item —
+ * `seat_count`, `manual_limit_microusd`, `seat_rate_microusd` (the stored seat rate,
+ * carried across a period boundary) — an INTENDED size change, with F2 adding two more
+ * (`pool_granted_microusd`, an aggregate cap) later. R39b's whole point is that an
+ * intended change like this must not need a human to also remember to bump `2048` by
+ * hand (and no test currently would catch it if they forgot, because a static threshold
+ * is not wrong until the item is bigger than 2048 bytes, which these attributes do not
+ * come close to — so the current 2048 silently tolerates ANY schema change up to that
+ * ceiling, intended or not, which is the OTHER failure mode R39b names: "an unintended
+ * one still is [an alarm]").
  *
- * WHAT IS DESIGNED (the F4 design note section 3, corrected by amendment B1) but not
- * implemented by this contract
+ * WHAT IS DESIGNED (the F4 design note section 3, corrected by amendment B1) — and, per
+ * an integration update, now PARTIALLY LANDED, though not in this worktree
  *
  * `CONTRACT-F4-claims (F4's contract document)` amendment B1 (`SEAMS (the integration owner's seam-review document)` S1) reassigns the declared-attribute
  * list itself to F1: F1 ships a CLOSED-WORLD schema declaration for the pool row
- * (proposed module `backend/dynamo/pool_row_schema.py` — an earlier draft of this test
- * named `POOL_ITEM_DECLARED_ATTRIBUTES` in `backend/dynamo/tenant_budgets.py` instead,
- * which was F4 inventing its own copy of a declaration that belongs to the part that
- * OWNS the schema). The CDK stack's alarm threshold is DERIVED from that same
- * declaration — via a second emitted metric (`PoolItemSizeBaselineBytes`) and a
- * metric-math ratio alarm, so the threshold moves the moment F1's declaration changes,
- * with no `ecs-stack.ts` edit and no redeploy required for the schema-aware part. The
- * mechanics asserted below (a second metric, a non-literal threshold, a threshold that
- * moves when the schema does) do not depend on which module ships the declaration, only
- * on there BEING one that both the alarm and the document (see
- * `backend/tests/test_ledger_hot_path_flatness_claim_l39a.py`) derive from.
+ * (`backend/dynamo/pool_row_schema.py` — confirmed real elsewhere as of F1's landing,
+ * with `POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute]` and a live
+ * `worst_case_pool_item_bytes()`; an earlier draft of this test instead proposed F4
+ * inventing its own `POOL_ITEM_DECLARED_ATTRIBUTES` tuple in
+ * `backend/dynamo/tenant_budgets.py`, which would have been a second, competing copy of
+ * a declaration that belongs to the part that OWNS the schema). F1 deliberately does
+ * NOT yet classify `pool_granted_microusd` or the aggregate cap — pre-classifying an
+ * attribute F2 owns would let F2's merge add writers for it and forget the completeness
+ * check with nothing loud saying so — so the declared worst case TODAY is smaller than
+ * the eventual post-F2 worst case, and is expected to grow when F2 lands; that growth
+ * is the mechanism working, not drift. The CDK stack's alarm threshold is DERIVED from
+ * that same declaration — via a second emitted metric (`PoolItemSizeBaselineBytes`) and
+ * a metric-math ratio alarm, so the threshold moves the moment F1's (then F2's)
+ * declaration changes, with no `ecs-stack.ts` edit and no redeploy required for the
+ * schema-aware part. This dynamic-derivation design is not optional now that the
+ * classified set is confirmed to change shape across merges — a threshold baked in at
+ * `cdk deploy` time would need a manual bump exactly when F2 lands, the same defect this
+ * whole design exists to remove. The mechanics asserted below (a second metric, a
+ * non-literal threshold, a threshold that moves when the schema does) do not depend on
+ * which module ships the declaration, only on there BEING one that both the alarm and
+ * the document (see `backend/tests/test_ledger_hot_path_flatness_claim_l39a.py`) derive
+ * from — this test never asserts the number the declaration currently produces.
  *
  * WHY THIS FAILS TODAY
  *

@@ -7,15 +7,32 @@ WHAT DEFECT THIS CLOSES
 `pool_item_size` gauge comment, and `iac/lib/ecs-stack.ts`'s alarm comment all
 repeat a version of "a fixed-size item cannot grow" as the reason the
 WCU-proportional-to-size argument holds and the published
-`docs/benchmarks/ledger-latency.md` figures stay comparable. The quota-raise
-epic deletes `sizing` and adds THREE attributes to that same item — not two:
-`seat_count`, `manual_limit`, `pool_granted`, PLUS the stored seat rate
-(amendment A5, seeded at M1 and carried forward by R16) — so "cannot grow"
-becomes literally false the moment F1 lands, even though the CONCLUSION it
-protects (the item stays inside DynamoDB's first 1,024-byte write unit) still
-holds. (B2, `CONTRACT-F4-claims (F4's contract document)`'s "Seam amendments": an earlier version of
-this file's docstring named only two attributes, missing the rate — the same
-class of over-precision this part already corrected once for the byte count.)
+`docs/benchmarks/ledger-latency.md` figures stay comparable. F1 deletes
+`sizing` and adds its OWN three attributes to that same item — `seat_count`,
+`manual_limit_microusd`, `seat_rate_microusd` (the stored seat rate; carried
+across a period boundary) — so "cannot grow" becomes literally false the
+moment F1 lands, even though the CONCLUSION it protects (the item stays
+inside DynamoDB's first 1,024-byte write unit) still holds. F2 later adds two
+more (`pool_granted_microusd`, and an aggregate cap) — deliberately NOT
+declared by F1 (see the update below), so F1's merge only ever falsifies the
+wording with respect to its OWN three, and F2's merge falsifies it further.
+
+UPDATE (F1 has landed — elsewhere; NOT in this worktree, which stays pre-F1
+per §0 below): `backend/dynamo/pool_row_schema.py` is real. `POOL_ROW_ATTRIBUTES`
+is a `dict[str, PoolAttribute]` (a dict, not the tuple an earlier draft of
+this file proposed — a key cannot disagree with a name), and
+`worst_case_pool_item_bytes()` derives its answer from each entry's declared
+maximum value width. **F1 deliberately does NOT classify
+`pool_granted_microusd` or the aggregate cap** — pre-classifying an attribute
+a LATER part owns would let F2's merge add the writers and forget the
+completeness check with nothing saying so; leaving it unclassified is what
+makes F2's merge fail loudly instead. So the declared worst case today is the
+worst case of what is CURRENTLY classified, not of the whole post-epic row —
+it grows by exactly the two attributes F2 classifies when F2 lands, and that
+growth is the mechanism working, not drift to pin down. This file's guard
+therefore asserts against the LIVE FUNCTION result, never a literal number
+(528, as of F1's landing, is cited here for context only — it is not asserted
+anywhere below, and must not become a hardcoded expectation).
 
 SEAM CORRECTION B1 — WHY THIS FILE ASSERTS A DERIVATION, NOT A NUMBER
 
@@ -29,16 +46,19 @@ exist when the epic lands" — and F4 could not have done otherwise, since this
 worktree branches from `origin/main`, where the new row has no definition.
 
 The fix is structural, not a bigger fixture: F1 now ships a closed-world
-declaration of the pool row (S1 in `SEAMS (the integration owner's seam-review document)`) that names every attribute and
+declaration of the pool row (S1 in `SEAMS (the integration owner's seam-review document)`) that names every CLASSIFIED attribute and
 its maximum value width, and this test asserts against a WORST-CASE SIZE
 COMPUTED FROM THAT DECLARATION, not a number anyone typed in. Three things
 derive from the same declaration (F1's, not F4's): the gauge baseline and its
 alarm threshold (`iac/test/ecs-stack-pool-item-size-baseline-l39b.test.ts`),
 the computed worst-case size asserted under 1024 bytes with the margin
 printed (this file), and the figure the document states. So this test's guard
-rides F1's (and F2's, once `pool_granted` lands) schema changes instead of
-failing twice on the way to the real schema, and it protects the CONCLUSION —
-one write unit — rather than rubber-stamping a byte count.
+rides F1's (and F2's, once F2 classifies `pool_granted_microusd` and the
+aggregate cap) schema changes instead of failing twice on the way to the real
+schema, and it protects the CONCLUSION — one write unit — rather than
+rubber-stamping a byte count. **The subject of this guard is "the declared
+row fits in one write unit", not any particular number** — the number moving
+between F1's merge and F2's is the declaration doing its job.
 
 SEAM CORRECTION B3 — WHO OWNS THE FIX
 
@@ -52,11 +72,11 @@ for writing the replacement text — that design work moved to F1's contract.
 
 WHY THIS FAILS TODAY
 
-`docs/design/ledger-hot-path.md` names no measured byte size at all, and no
-`backend.dynamo.pool_row_schema` (F1's expected closed-world declaration
-module — the name the F4 design note section 1 proposes, to be confirmed or renamed
-by F1's own contract) exists in this worktree yet. Both are correct failures:
-this worktree is pre-F1.
+`docs/design/ledger-hot-path.md` names no measured byte size at all, and
+`backend.dynamo.pool_row_schema` — confirmed real elsewhere, per the update
+above — does not exist in THIS worktree yet, which stays pinned to
+`origin/main` (see §0 in the F4 design note). Both are correct failures: this
+worktree is pre-F1, and will not itself synthesize F1's code by report alone.
 """
 from __future__ import annotations
 
@@ -119,12 +139,13 @@ def test_the_document_names_a_measured_byte_size_and_the_1kib_boundary():
 
 def test_the_document_no_longer_claims_a_fixed_size_item_cannot_grow():
     """The specific false claim this part anchors rather than authors (B3). Once
-    F1 deletes `sizing` and adds three attributes (`seat_count`, `manual_limit`,
-    `pool_granted`, and the stored seat rate — B2), "a fixed-size item cannot
+    F1 deletes `sizing` and adds its three attributes (`seat_count`,
+    `manual_limit_microusd`, `seat_rate_microusd`), "a fixed-size item cannot
     grow" is untrue of the shipped schema, and this document must not repeat
-    it. The REPLACEMENT wording is F1's design work; this test only refuses
-    the false sentence's survival, so it is agnostic to exactly what F1 writes
-    instead."""
+    it — and it becomes MORE untrue again once F2 classifies
+    `pool_granted_microusd` and the aggregate cap. The REPLACEMENT wording is
+    F1's design work; this test only refuses the false sentence's survival,
+    so it is agnostic to exactly what F1 writes instead."""
     text = _doc_text()
     assert not FALSE_CLAIM.search(text), (
         f"{DOC} still claims a fixed-size item cannot grow, which the quota-raise "
@@ -142,14 +163,21 @@ def test_the_documents_worst_case_figure_is_derived_from_f1s_schema_declaration(
     closed-world schema declaration — the same source the gauge baseline, the
     alarm threshold, and this document are all supposed to derive from (B1) —
     and requires the document's stated figure to EQUAL that computed value,
-    to be under 1024 bytes, and to state the margin.
+    to be under 1024 bytes, and to state the EXACT margin (not merely mention
+    one) below the boundary.
+
+    The subject here is "the currently-declared row fits in one write unit",
+    never a literal byte count: F1's declaration does not yet classify
+    `pool_granted_microusd` or the aggregate cap (deliberately — see the
+    module docstring's UPDATE), so `worst_case_pool_item_bytes()` returns the
+    worst case of what is classified TODAY, and is expected to grow when F2
+    lands. This test must keep passing across that growth without editing,
+    because it never hardcodes the number — only F1's/F2's own function does.
 
     Fails today for the correct reason: F1's declaration module does not
-    exist in this worktree (pre-F1), so there is nothing to derive from and
-    nothing for the document to match yet. Once F1 lands
-    `backend.dynamo.pool_row_schema` (or whatever name F1's own contract
-    gives it — this import path is F4's proposal, not a constraint on F1),
-    this test starts deriving instead of guessing."""
+    exist in THIS worktree (pre-F1 — confirmed real elsewhere, not merged
+    here), so there is nothing to derive from and nothing for the document
+    to match yet."""
     try:
         from dynamo import pool_row_schema  # type: ignore
     except ImportError:
@@ -159,7 +187,9 @@ def test_the_documents_worst_case_figure_is_derived_from_f1s_schema_declaration(
             "yet. The gauge baseline, its alarm threshold, and this "
             "document's worst-case figure are all supposed to derive from "
             "it (CONTRACT-F4-claims (F4's contract document) amendment B1) — until it lands, "
-            "there is nothing to derive from."
+            "there is nothing to derive from. (Confirmed to exist elsewhere, "
+            "returning a live value as of F1's landing — but this worktree "
+            "does not merge that code, so importing it here must still fail.)"
         )
 
     computed = pool_row_schema.worst_case_pool_item_bytes()
@@ -167,23 +197,34 @@ def test_the_documents_worst_case_figure_is_derived_from_f1s_schema_declaration(
         f"F1's declared schema computes a worst-case pool item of {computed} "
         f"bytes, which is NOT under the 1,024-byte write-unit boundary — the "
         f"one-write-unit conclusion this whole part exists to keep honest "
-        f"would be false. This is a finding for F1, not a wording fix for F4."
+        f"would be false. This is a finding for F1 (or F2, once its two "
+        f"attributes are classified), not a wording fix for F4."
     )
-    margin = 1024 - computed
+    expected_margin = 1024 - computed
 
     text = _doc_text()
     figures = {int(m.group(1).replace(",", "")) for m in BYTE_FIGURE.finditer(text)}
     assert computed in figures, (
-        f"F1's schema declaration computes a worst-case pool item of "
-        f"{computed} bytes, but docs/design/ledger-hot-path.md does not "
+        f"F1's schema declaration currently computes a worst-case pool item "
+        f"of {computed} bytes, but docs/design/ledger-hot-path.md does not "
         f"state that number — the document's figure must be DERIVED from "
-        f"the declaration (re-run whenever the declaration changes), not "
-        f"independently chosen."
+        f"the declaration (re-run whenever the declaration changes, e.g. "
+        f"when F2 classifies its two attributes), never independently chosen "
+        f"or hand-reconstructed."
     )
-    assert MARGIN_MENTION.search(text), (
+    margin_match = MARGIN_MENTION.search(text)
+    assert margin_match, (
         f"the document states a worst-case figure but not the margin below "
-        f"the 1,024-byte boundary ({margin} bytes at the currently-declared "
-        f"schema) — R39a's 'Verified by' requires the boundary to be stated, "
-        f"and a margin makes that boundary a checkable number rather than a "
-        f"bare 'it fits'."
+        f"the 1,024-byte boundary ({expected_margin} bytes at the "
+        f"currently-declared schema) — R39a's 'Verified by' requires the "
+        f"boundary to be stated, and a margin makes that boundary a "
+        f"checkable number rather than a bare 'it fits'."
+    )
+    stated_margin = int((margin_match.group(1) or margin_match.group(2)).replace(",", ""))
+    assert stated_margin == expected_margin, (
+        f"the document states a margin of {stated_margin} bytes, but "
+        f"1024 - worst_case_pool_item_bytes() is {expected_margin} bytes at "
+        f"the currently-declared schema — the stated margin must be computed "
+        f"from the SAME live figure as the worst-case number, not a separate "
+        f"number that happened to be true once."
     )
