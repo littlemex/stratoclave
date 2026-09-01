@@ -164,6 +164,18 @@ async def lifespan(app: FastAPI):
     _active_price_source = _validate_price_source()
     logger.info("price_source_active", source=_active_price_source)
 
+    # Refuse to serve traffic when this task's configured per-seat rate disagrees
+    # with the rate the stored pool rows were computed at. Same posture, and the
+    # same reason, as the price source above: the request path cannot detect a
+    # ceiling computed at the wrong rate, because such a ceiling is a perfectly
+    # plausible number. Startup is the only place this can be a hard error, and a
+    # check that lives only in a repository module is a check production never
+    # runs.
+    from dynamo.tenant_budgets import assert_seat_rate_in_force
+
+    _rate_in_force = assert_seat_rate_in_force()
+    logger.info("seat_rate_in_force", rate_microusd=_rate_in_force)
+
     # External VSR (task #13): perform the version-pin handshake at startup so a
     # consult can be honored only after the running VSR's contract+build match
     # the pinned set. INERT unless EXTERNAL_VSR_ENABLED — handshake() checks the

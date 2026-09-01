@@ -484,6 +484,72 @@ def expected_pool_limit_microusd(item: dict[str, Any]) -> int:
     return baseline_microusd(item) + granted_microusd(item)
 
 
+class SeatRateMismatchError(RuntimeError):
+    """Raised when this process's `STRATOCLAVE_SEAT_MONTHLY_USD` disagrees with
+    the rate in force on the stored rows.
+
+    Not a warning, because the alternative is worse than a refusal: a process
+    that accepts the disagreement recomputes seat-scaled ceilings at a figure
+    nobody chose, and every resulting ceiling looks entirely well-formed. A
+    plausible value standing in for a failure is the one thing that cannot be
+    detected afterwards, so the rate becomes a migration rather than a knob.
+    """
+
+
+#: Set this when the migration that recomputes every seat-tracked row is the
+#: thing running. Nothing else may set it: it is the one door through which the
+#: rate in force is allowed to change.
+SEAT_RATE_MIGRATION_ENV = "STRATOCLAVE_SEAT_RATE_MIGRATION"
+
+# The rate in force is one fact about the deployment, so it is stored once, on a
+# control item, and read at boot. Each pool row ALSO carries the rate its own
+# ceiling was computed at, because that is what makes the ceiling reproducible
+# after the rate moves; the reconciler's `seat_rate_matches_rate_in_force` check
+# is what keeps the two from drifting.
+SEAT_RATE_CONTROL_PK = "__CONTROL__"
+SEAT_RATE_CONTROL_SK = "SEAT_RATE"
+
+
+def seat_rate_migration_allowed() -> bool:
+    return str(os.getenv(SEAT_RATE_MIGRATION_ENV, "")).strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def assert_seat_rate_in_force() -> Optional[int]:
+    """Refuse to start when this process's configured seat rate disagrees with the
+    rate the stored rows were computed at. Returns the rate in force, or None when
+    nothing has recorded one yet.
+
+    The rate is not a live knob. A process configured with a different figure does
+    not gently start using it: every seat-scaled ceiling it then writes is computed
+    at a number nobody chose, and each one looks entirely well-formed, so nothing
+    afterwards can tell those ceilings from correct ones. Changing the rate is
+    therefore a migration -- which recomputes every seat-tracked row and records the
+    new rate -- and this refusal is what makes that the only path.
+
+    Called from the boot path (`main.py`). A check no boot path calls is a check
+    that passes in CI and is absent in production, which is the failure this
+    deployment has already had once: a hardcoded value in the CDK made a knob inert
+    exactly where it mattered.
+    """
+    configured = seat_rate_microusd()
+    in_force = TenantBudgetsRepository().rate_in_force_microusd()
+    if in_force is None or in_force == configured:
+        return in_force
+    if seat_rate_migration_allowed():
+        return in_force
+    raise SeatRateMismatchError(
+        f"STRATOCLAVE_SEAT_MONTHLY_USD is ${seat_monthly_usd()} "
+        f"({configured} micro-USD/seat/month) but the rate in force on the stored "
+        f"pool rows is {in_force} micro-USD/seat/month. The rate is not a live "
+        f"knob: starting with this disagreement would recompute seat-scaled "
+        f"ceilings at a figure nobody chose. Either restore the configured value, "
+        f"or run `python -m migrations.pool_ceiling_migration --recompute-seat-rate "
+        f"--apply` with {SEAT_RATE_MIGRATION_ENV}=1 set, which recomputes every "
+        f"seat-tracked row and records the new rate."
+    )
+
+
 class PoolLimitExceedsMaximumError(ValueError):
     """Raised when seats x SEAT_MONTHLY_USD would exceed MAX_POOL_BUDGET_USD_CENTS
     (L8). Validated together at the creation path so a seat-scaled figure can
@@ -739,6 +805,39 @@ class TenantBudgetsRepository:
             ConsistentRead=consistent_read,
         )
         return resp.get("Item")
+
+    # ----- the seat rate in force -----
+    def rate_in_force_microusd(self) -> Optional[int]:
+        """The per-seat rate the stored rows were computed at, or None if nothing
+        has recorded one yet (a deployment M1 has not run against).
+
+        Stored on ONE control item rather than inferred from a sample of rows,
+        because a boot check cannot scan a fleet and a sampled answer would make
+        the refusal depend on which row it happened to read. Each pool row still
+        carries its OWN rate -- that is what makes an individual ceiling
+        reproducible -- and the reconciler's `seat_rate_matches_rate_in_force`
+        check is what stops the two from drifting apart.
+        """
+        resp = self._table.get_item(
+            Key={"tenant_id": SEAT_RATE_CONTROL_PK, "sk": SEAT_RATE_CONTROL_SK},
+            ConsistentRead=True,
+        )
+        item = resp.get("Item")
+        if not item:
+            return None
+        v = item.get(SEAT_RATE_ATTR)
+        return None if v is None else int(v)
+
+    def record_rate_in_force(self, *, rate_microusd: int) -> None:
+        """Record the rate in force. The migration is the only caller: this is the
+        one door through which the rate is allowed to change, which is what makes
+        the boot-time refusal below honest rather than an obstacle."""
+        self._table.put_item(Item={
+            "tenant_id": SEAT_RATE_CONTROL_PK,
+            "sk": SEAT_RATE_CONTROL_SK,
+            SEAT_RATE_ATTR: Decimal(int(rate_microusd)),
+            "updated_at": _now_iso(),
+        })
 
     def pool_summary(self, tenant_id: str, period: str) -> Optional[dict[str, Any]]:
         """The pool's ceiling, its composition and its live usage in micro-USD,
