@@ -1023,6 +1023,39 @@
   },
   "cl-246a00ba5c5b": {
    "first_seen": "the rate-basis row in the README comparison table"
+  },
+  "cl-45cba8a73adb": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-6d7e9e9d91ab": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-eee5b421c76f": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-990ca4b30a94": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-aca38f5d7f56": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-dbc638e1e95c": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-5d5d5ab9f311": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-f539a741d035": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-8e2e2bf04268": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-14c90d8583f8": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-373c5642b9cd": {
+   "first_seen": "docs/design/limits.md (money-first defaults, C14)"
   }
  },
  "retired": {
@@ -1155,6 +1188,7 @@
     "docs/DEPLOYMENT.md",
     "docs/SCOPE.md",
     "docs/design/hard-ceiling.md",
+    "docs/design/limits.md",
     "docs/design/price-feeds.md"
    ],
    "protected_subjects": [
@@ -1247,7 +1281,13 @@
     "C9.2": "E",
     "C9.3": "E",
     "C9.4": "E",
-    "C9.5": "E"
+    "C9.5": "E",
+    "C14.1": "B",
+    "C14.2": "B",
+    "C14.3": "B",
+    "C14.4": "E",
+    "C14.5": "E",
+    "C14.6": "E"
    }
   },
   "retired": {},

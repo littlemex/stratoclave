@@ -31,6 +31,12 @@ from dynamo import (
     UsageLogsRepository,
     current_period,
 )
+from dynamo.tenant_budgets import (
+    SIZING_FIXED,
+    SIZING_PER_SEAT,
+    PoolLimitExceedsMaximumError,
+    seat_pool_limit_microusd,
+)
 from limits import MAX_POOL_BUDGET_USD_CENTS, MAX_TOKEN_CREDIT
 
 from .authz import log_audit_event, require_permission
@@ -198,6 +204,12 @@ class PoolBudgetResponse(BaseModel):
     # Convenience mirrors in USD cents for admin surfaces that prefer dollars.
     pool_limit_usd_cents: int
     remaining_usd_cents: int
+    # "per_seat" | "fixed" (L3/L4): whether this row still auto-adjusts with
+    # membership, or an explicit set_pool_limit call has stopped that.
+    sizing: str
+    # The tenant's current active membership count. Only populated by the GET
+    # endpoint (a live membership count on a PUT write path would be an extra
+    # query with no reader for it); omitted (None) elsewhere.
 
 
 class PoolReconciliationResponse(BaseModel):
@@ -250,6 +262,7 @@ def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetRes
         remaining_microusd=remaining,
         pool_limit_usd_cents=limit // _MICRO_USD_PER_CENT,
         remaining_usd_cents=remaining // _MICRO_USD_PER_CENT,
+        sizing=str(summary.get("sizing", SIZING_FIXED)),
     )
 
 
@@ -350,12 +363,62 @@ def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
             pass
 
 
+def _provision_seat_pool(
+    tenant_id: str, *, pool_limit_microusd: int, actor: AuthenticatedUser
+) -> None:
+    """Write the tenant's default dollar pool at creation (L3): a `sizing="per_seat"`
+    row for the current period, at ZERO seats. It reaches `seats x SEAT_MONTHLY_USD`
+    through the same ±1-seat delta every membership change applies, so the ceiling
+    equals the seat count at every moment rather than at creation only. Shared by
+    both create_tenant routes (admin and team-lead) so the pool a tenant gets does
+    not depend on which route created it.
+
+    `pool_limit_microusd` is computed and L8-validated by the CALLER before the
+    Tenants row is written (see `create_tenant`), so a misconfigured
+    SEAT_MONTHLY_USD refuses loudly with no tenant created at all — this
+    function's own write is not where that check happens.
+    """
+    period = current_period()
+    TenantBudgetsRepository().set_pool_limit(
+        tenant_id=tenant_id,
+        period=period,
+        pool_limit_microusd=pool_limit_microusd,
+        sizing=SIZING_PER_SEAT,
+    )
+    log_audit_event(
+        event="tenant_pool_provisioned",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=tenant_id,
+        target_type="tenant",
+        after={
+            "period": period,
+            "pool_limit_microusd": pool_limit_microusd,
+            "sizing": SIZING_PER_SEAT,
+            "seats": 0,
+        },
+    )
+
+
 @router.post("", response_model=TenantItem, status_code=201)
 def create_tenant(
     body: CreateTenantRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
 ) -> TenantItem:
     _verify_team_lead(body.team_lead_user_id)
+    # L8: validate ONE seat against MAX_POOL_BUDGET_USD_CENTS before writing
+    # anything, so a misconfigured SEAT_MONTHLY_USD refuses loudly rather than
+    # creating a tenant with a silently-clamped pool.
+    try:
+        seat_pool_limit_microusd(1)
+    except PoolLimitExceedsMaximumError as e:
+        raise HTTPException(status_code=422, detail=f"seat_pool_limit_exceeds_maximum: {e}")
+    # The pool is written at ZERO seats and reaches its size through the same
+    # ±1-seat delta every later membership change uses. Writing one seat here
+    # instead would count the owner twice: a fresh tenant has no memberships yet,
+    # and the first `ensure` adds its own seat. Zero is also the honest ceiling
+    # for a tenant nobody is a member of — there is no caller to admit.
+    pool_limit_microusd = seat_pool_limit_microusd(0)
     try:
         item = TenantsRepository().create(
             name=body.name,
@@ -374,6 +437,7 @@ def create_tenant(
         details={"name": body.name, "team_lead_user_id": body.team_lead_user_id},
     )
     # after the create audit so the log reads create -> provision.
+    _provision_seat_pool(item["tenant_id"], pool_limit_microusd=pool_limit_microusd, actor=actor)
     _provision_shadow_default(item["tenant_id"], actor_id=actor.user_id)
     return _to_tenant_item(item)
 
@@ -572,6 +636,10 @@ def set_pool_budget(
         period=period,
         pool_limit_microusd=limit_microusd,
         status=body.status,
+        # An explicit admin PUT always stops the per-seat auto-adjust for this
+        # row (L4) — this is the ONE thing an admin figure and a team-lead
+        # figure (below) agree on.
+        sizing=SIZING_FIXED,
     )
     summary = repo.pool_summary(tenant_id, period)
     assert summary is not None  # just written
@@ -585,11 +653,13 @@ def set_pool_budget(
         before={
             "pool_limit_microusd": (before or {}).get("pool_limit_microusd"),
             "status": (before or {}).get("status"),
+            "sizing": (before or {}).get("sizing"),
         },
         after={
             "period": period,
             "pool_limit_microusd": limit_microusd,
             "status": body.status,
+            "sizing": SIZING_FIXED,
         },
     )
     return _pool_response(tenant_id, period, summary)
@@ -724,7 +794,9 @@ def get_pool_budget(
             status_code=404,
             detail=f"No pool budget set for tenant {tenant_id} period {resolved_period}",
         )
-    return _pool_response(tenant_id, resolved_period, summary)
+    return _pool_response(
+        tenant_id, resolved_period, summary
+    )
 
 
 def _read_counters(repo: "TenantBudgetsRepository", tenant_id: str, period: str) -> dict:

@@ -112,6 +112,22 @@ ALLOWED_SITES = {
         ("backend/mvp/_pipeline.py", "_reverse_retained_hold_counters_best_effort", "transact_write_items"),
     },
     "backend/dynamo/tenant_budgets.py": {
+        # Seat-scaled ceiling delta (C14.4). A single-item conditional UpdateItem:
+        # `ADD pool_limit_microusd :d, pool_headroom_microusd :d` guarded on
+        # `sizing = "per_seat"`. It touches NEITHER pool_reserved NOR pool_settled.
+        # A2: it cannot perturb the reserve/settle serialisation the proof is about,
+        # because it writes none of the counters the proof reasons over; and being a
+        # pure ADD rather than a CAS on a read-back snapshot, it composes with a
+        # concurrent reserve's own headroom ADD instead of clobbering it — the exact
+        # failure the headroom design exists to avoid.
+        # A5: no dedup token, and none is correct here. This write is deliberately
+        # NOT idempotent: a second hire is a second seat, so a replay is a different
+        # fact rather than a retry. At-most-once comes from the caller, which invokes
+        # it once per COMMITTED membership transition. A lost ack therefore leaves
+        # the ceiling one seat SMALLER than the seat count — under-granting capacity,
+        # which is the safe direction (a refusal, never an over-admission).
+        # Reviewed OK.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.adjust_pool_for_seat_delta", "update_item"),
         # set_pool_limit CREATE branch: conditional put_item seeding a brand-new
         # pool row (attribute_not_exists(tenant_id)). reserved=settled=0 literals
         # are correct at creation (there is no prior row to preserve), verified by

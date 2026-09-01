@@ -20,6 +20,7 @@
       "permissions": [
         "tenants:create",
         "tenants:read-own",
+        "tenants:update-own",
         "users:update-own-tenant",
         "usage:read-own-tenant",
         "usage:read-self",

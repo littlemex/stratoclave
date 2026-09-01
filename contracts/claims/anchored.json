@@ -1736,6 +1736,70 @@
    "id": "cl-246a00ba5c5b",
    "claim": "**The broker needs no request-time price at all**: its quota is a token count checked at the credential layer, from client-emitted telemetry rather than AWS-metered cost (per its guidance README), and the dollars arrive **post-facto from the bill** — per-IAM-principal via CUR 2.0 in Cost Explorer. Exact and AWS-authoritative, but never pre-flight",
    "anchor": "descriptive:about the credential broker's own quota and cost attribution, as documented in its guidance README, and it names the broker rather than this gateway"
+  },
+  {
+   "id": "cl-45cba8a73adb",
+   "claim": "The per-user token quota remains, at a deliberately loose ten million tokens (`DEFAULT_TENANT_CREDIT`), as a fairness device between a tenant's users rather than as a budget: a token count cannot state a cost, since one million tokens is $0.25 of Haiku input and $27.50 of Opus output at this repository's own measured prices.",
+   "anchor": "contract:C14.2,C2.8",
+   "note": "C14.2 for the token quota being loose rather than the binding ceiling; C2.8 for the two prices, which are the bundled floor's own measured per-leg figures rather than an illustration"
+  },
+  {
+   "id": "cl-6d7e9e9d91ab",
+   "claim": "A request is admitted only if every configured ceiling has room for it, and the ceilings are not all denominated in the same thing.",
+   "anchor": "contract:C1.1,C1.2",
+   "note": "one clause per conjunct: C1.1 that admission and the decrement are the same write, C1.2 that every configured limit participates in it"
+  },
+  {
+   "id": "cl-eee5b421c76f",
+   "claim": "That difference is the source of every confusion this document exists to end: **one unit can bound the bill and the other cannot.**",
+   "anchor": "descriptive:states a property of the two units of measurement, not a behaviour of this gateway"
+  },
+  {
+   "id": "cl-990ca4b30a94",
+   "claim": "That is why the per-user quota came first, and it is still the only quantity that can be reserved with no price lookup at all.",
+   "anchor": "contract:C14.2",
+   "note": "the reason the token quota exists at all is what C14.2 governs; being reservable with no price lookup is what makes it a fairness device rather than a ceiling"
+  },
+  {
+   "id": "cl-aca38f5d7f56",
+   "claim": "But a token count cannot say what it costs.",
+   "anchor": "descriptive:a property of tokens as a unit; makes no claim about this gateway"
+  },
+  {
+   "id": "cl-dbc638e1e95c",
+   "claim": "**Tokens are therefore a per-request bound and a fairness device, never a money ceiling.** The money ceiling is the dollar pool.",
+   "anchor": "contract:C14.1,C14.2",
+   "note": "C14.1 that the money ceiling is the one on by default, C14.2 that the token quota's default is loose and not the binding ceiling"
+  },
+  {
+   "id": "cl-5d5d5ab9f311",
+   "claim": "Everything downstream agrees with that reading already: the ledger, the rating path, `reprice`, the savings report and the per-model quota are all integer micro-USD, and the per-model quota's write path refuses any other unit outright rather than reinterpreting a token figure as dollars.",
+   "anchor": "contract:C1.3,C2.10",
+   "note": "C1.3 for the refusal (a unit this build did not write is not treated as an absent restriction), C2.10 for the recompute being arithmetic over recorded micro-USD facts"
+  },
+  {
+   "id": "cl-f539a741d035",
+   "claim": "It is set **below** the sum of any per-user money ceilings a later change may add, because a per-seat pool equal to the sum of the individual ceilings can never bind — the individuals would exhaust themselves first, and a ceiling that cannot bind is decoration.",
+   "anchor": "contract:C14.1",
+   "note": "how the creation-time figure is chosen; the sentence carries its own conditionality in 'a later change may add'"
+  },
+  {
+   "id": "cl-8e2e2bf04268",
+   "claim": "The pool bounds **admission**: no request is admitted whose priced reservation does not fit.",
+   "anchor": "contract:C1.1,C1.5",
+   "note": "C1.1 for the atomic admission decrement, C1.5 for the reserved amount bounding what the settle can charge"
+  },
+  {
+   "id": "cl-14c90d8583f8",
+   "claim": "It is not a bound on the invoice, because an outcome the gateway cannot observe is one it cannot price — that boundary is stated in [CONTRACTS.md](CONTRACTS.md) under C1 and measured in [MEASUREMENTS.md](../MEASUREMENTS.md).",
+   "anchor": "contract:C1.5",
+   "note": "restates C1's own Not-guaranteed (N) boundary and points at it; the sentence is the boundary rather than a claim past it"
+  },
+  {
+   "id": "cl-373c5642b9cd",
+   "claim": "Nothing counts seats by querying them, which is why the figure cannot drift from the memberships that produced it.",
+   "anchor": "contract:C14.4",
+   "note": "the delta is the only writer of the seat-scaled figure, so there is no second derivation to disagree with it; C14.4 is what the delta's exactness is recorded as"
   }
  ]
 }

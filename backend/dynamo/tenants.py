@@ -53,9 +53,31 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def default_tenant_credit() -> int:
+    """THE per-user token backstop, in tokens. One definition, read at call time.
+
+    Two call sites need this number: `TenantsRepository.create` stamps it onto a
+    new tenant's `default_credit`, and `UserTenantsRepository._resolve_tenant_default`
+    falls back to it for a tenant row that carries none. They were separate
+    literals (100,000 here and 100,000 there), so raising one would have left a
+    membership resolved through the other at the old ceiling. Read at call time,
+    not bound at import, so an operator's `DEFAULT_TENANT_CREDIT` takes effect
+    without a redeploy of the reader.
+
+    Raised from 100,000 to 10,000,000 (docs/design/limits.md, L2): the per-user
+    token quota is a loose fairness backstop, not the binding ceiling — the
+    tenant dollar pool is (docs/design/limits.md states which ceiling protects what). Deliberately loose
+    rather than unlimited: with it removed, a single user could consume the
+    whole tenant pool with no fairness device to replace it. Raising this
+    default changes no admission arithmetic; it is still the same per-user
+    token item, at a bigger number.
+    """
+    return int(os.getenv("DEFAULT_TENANT_CREDIT", "10000000"))
+
+
 def _default_credit_fallback() -> int:
-    """Last-resort fallback value for Tenant.default_credit."""
-    return int(os.getenv("DEFAULT_TENANT_CREDIT", "100000"))
+    """Historical name kept for existing call sites; see `default_tenant_credit`."""
+    return default_tenant_credit()
 
 
 def _tenants_table_name() -> str:

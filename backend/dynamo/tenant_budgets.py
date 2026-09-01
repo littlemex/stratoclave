@@ -10,6 +10,14 @@ Layout:
                                   (mirror, for the read API + audit reconciliation)
         pool_settled_microusd   : sum of settled (actual) spend (mirror)
         status                  : "active" | "suspended"
+        sizing                  : "per_seat" | "fixed" (docs/design/limits.md, L3/L4).
+                                  "per_seat": written at tenant creation, and a
+                                  membership add/remove still moves this row's
+                                  limit/headroom by SEAT_MONTHLY_USD. "fixed":
+                                  an explicit set_pool_limit call has stopped
+                                  that. ABSENT (every row from before this
+                                  change) means "fixed" -- never inferred as
+                                  "per_seat".
         version                 : schema/version marker
 
 Invariant enforced at reserve time (inside a DynamoDB transaction):
@@ -49,6 +57,7 @@ All amounts are integer micro-USD; this module never introduces a float.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -57,6 +66,59 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource, tenant_budgets_table_name
+
+# Pool sizing modes (docs/design/limits.md, L3/L4). "per_seat" means the pool's
+# ceiling was written by the seat-scaled default at tenant creation and still
+# auto-follows membership changes; "fixed" means an explicit `set_pool_limit`
+# call (an admin's own figure) has stopped that. A row with NO `sizing`
+# attribute at all -- every row written before this change -- is treated as
+# "fixed": a pre-existing pool an operator set by hand must never start
+# following seats behind their back just because this code shipped.
+SIZING_PER_SEAT = "per_seat"
+SIZING_FIXED = "fixed"
+
+# The tenant pool's per-seat monthly figure (L3/L4 Interface). Read fresh on
+# every call (not cached) -- an admin write and a membership delta are both
+# rare, so there is no hot-path cost to paying for a live env read, and a
+# changed env var takes effect immediately rather than only after a restart.
+_SEAT_MONTHLY_USD_DEFAULT = 200
+
+
+def seat_monthly_usd() -> int:
+    return int(os.getenv("STRATOCLAVE_SEAT_MONTHLY_USD", str(_SEAT_MONTHLY_USD_DEFAULT)))
+
+
+class PoolLimitExceedsMaximumError(ValueError):
+    """Raised when seats x SEAT_MONTHLY_USD would exceed MAX_POOL_BUDGET_USD_CENTS
+    (L8). Validated together at the creation path so a seat-scaled figure can
+    never silently clamp to a smaller number than the seats imply -- a tenant
+    whose seat count would exceed the maximum is refused loudly instead."""
+
+
+def seat_pool_limit_microusd(seats: int) -> int:
+    """`seats x SEAT_MONTHLY_USD`, in integer micro-USD.
+
+    Raises `PoolLimitExceedsMaximumError` if that figure exceeds
+    `MAX_POOL_BUDGET_USD_CENTS` (L8) -- the one place seats and the pool
+    maximum are validated together, so a caller cannot construct a ceiling the
+    pool item would then silently clamp.
+    """
+    from limits import MAX_POOL_BUDGET_USD_CENTS  # local import: dynamo/ does not
+    # otherwise depend on the API-layer validation module (see limits.py's own
+    # docstring for why it lives outside dynamo/).
+
+    seats_int = int(seats)
+    if seats_int < 0:
+        raise ValueError(f"seats must be >= 0, got {seats_int}")
+    rate = seat_monthly_usd()
+    limit_microusd = seats_int * rate * 1_000_000
+    max_microusd = int(MAX_POOL_BUDGET_USD_CENTS) * 10_000  # 1 cent = 10_000 microUSD
+    if limit_microusd > max_microusd:
+        raise PoolLimitExceedsMaximumError(
+            f"{seats_int} seats x ${rate}/seat/mo = {limit_microusd} microUSD, "
+            f"which exceeds MAX_POOL_BUDGET_USD_CENTS={MAX_POOL_BUDGET_USD_CENTS}"
+        )
+    return limit_microusd
 
 # set_pool_limit is a conditional CAS on the pool ceiling (Fable review finding
 # 3). Concurrent admin writes to the SAME period's ceiling are rare, so a small
@@ -309,6 +371,10 @@ class TenantBudgetsRepository:
                                                    limit - reserved - settled)),
             "remaining_microusd": remaining,
             "status": item.get("status", "active"),
+            # A row with no `sizing` attribute predates this change (L4): treat
+            # it as "fixed" so a pre-existing, hand-set pool never starts
+            # auto-following seats just because this code shipped.
+            "sizing": item.get("sizing", SIZING_FIXED),
         }
 
     # ----- write (admin) -----
@@ -319,6 +385,7 @@ class TenantBudgetsRepository:
         period: str,
         pool_limit_microusd: int,
         status: str = "active",
+        sizing: str = SIZING_FIXED,
     ) -> dict[str, Any]:
         """Create or update a tenant's pool limit for a period.
 
@@ -330,6 +397,16 @@ class TenantBudgetsRepository:
         touching the reserved/settled mirrors; raising or lowering the limit
         shifts headroom by the same delta (a lower limit can make headroom
         negative, which correctly refuses all new admissions).
+
+        `sizing` (L3/L4) is written on every branch alongside the limit itself:
+        the default is `"fixed"`, so every EXPLICIT caller of this method (the
+        admin and team-lead pool-budget endpoints) stops this row's membership
+        auto-adjust the moment a human sets a figure by hand, exactly once, on
+        the same write that sets the figure. The ONE caller that wants the
+        seat-scaled default instead (tenant creation) passes `sizing="per_seat"`
+        explicitly. This never introduces a second stored figure (no
+        `pool_base`, nothing derived from `reserved`/`settled`) — `sizing` is a
+        label on the existing limit/headroom pair, not a new counter.
 
         RACE-SAFETY (Fable review, finding 3): this used to be a read-then-put
         that rewrote headroom from the read-back mirrors, so a reserve/settle
@@ -366,6 +443,7 @@ class TenantBudgetsRepository:
                             # see marker_sk / reserve_commit_txn_items). Nothing seeds a
                             # map here anymore.
                             "status": status,
+                            "sizing": sizing,
                             "version": "2",
                             "updated_at": _now_iso(),
                         },
@@ -394,7 +472,7 @@ class TenantBudgetsRepository:
                         UpdateExpression=(
                             "SET pool_limit_microusd = :new, "
                             "pool_headroom_microusd = :h, #st = :status, "
-                            "version = :ver, updated_at = :now"
+                            "sizing = :sizing, version = :ver, updated_at = :now"
                         ),
                         ConditionExpression="attribute_not_exists(pool_headroom_microusd)",
                         ExpressionAttributeNames={"#st": "status"},
@@ -402,6 +480,7 @@ class TenantBudgetsRepository:
                             ":new": Decimal(new_limit),
                             ":h": Decimal(headroom),
                             ":status": status,
+                            ":sizing": sizing,
                             ":ver": "2",
                             ":now": _now_iso(),
                         },
@@ -423,7 +502,7 @@ class TenantBudgetsRepository:
                     Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
                     UpdateExpression=(
                         "SET pool_limit_microusd = :new, #st = :status, "
-                        "version = :ver, updated_at = :now "
+                        "sizing = :sizing, version = :ver, updated_at = :now "
                         "ADD pool_headroom_microusd :delta"
                     ),
                     ConditionExpression="pool_limit_microusd = :old",
@@ -433,6 +512,7 @@ class TenantBudgetsRepository:
                         ":old": Decimal(old_limit),
                         ":delta": Decimal(delta),
                         ":status": status,
+                        ":sizing": sizing,
                         ":ver": "2",
                         ":now": _now_iso(),
                     },
@@ -447,6 +527,58 @@ class TenantBudgetsRepository:
             f"set_pool_limit: lost the limit CAS {_SET_LIMIT_MAX_RETRIES}x for "
             f"{tenant_id}/{period}; concurrent admin writes to the same pool ceiling"
         )
+
+    def adjust_pool_for_seat_delta(
+        self, *, tenant_id: str, period: str, seat_delta: int
+    ) -> bool:
+        """Apply a membership change to a `sizing="per_seat"` pool (L4):
+        `ADD pool_limit_microusd ±seat, pool_headroom_microusd ±seat`, both by
+        the SAME amount (`seat_delta x SEAT_MONTHLY_USD` micro-USD), in one
+        conditional UpdateItem guarded on `sizing = "per_seat"`.
+
+        Deliberately a PURE ADD, not `set_pool_limit`'s CAS-on-old-value: a
+        delta needs no read-back snapshot to be safe -- ADD composes with any
+        concurrent ADD to the same attribute (a live reserve's
+        `pool_headroom -= amount`, or another membership delta), so there is no
+        read-then-write window in which a concurrent move is lost. This is
+        rule 3's "guarded delta" shape carried to its natural conclusion: no
+        `pool_base` is stored and headroom is never recomputed from
+        `reserved`/`settled` -- both counters simply move by the same amount.
+
+        No-ops (returns False, never raises) when:
+          * the row has no `sizing` attribute at all -- a pool written before
+            this change, or by a caller that never set it. Absence means
+            "fixed" (L4), so it must never start auto-following seats.
+          * `sizing = "fixed"` -- an explicit `set_pool_limit` call has stopped
+            the auto-adjust for this row.
+          * no BUDGET row exists for `period` -- the tenant is unlimited at the
+            pool level for that period; there is nothing to adjust.
+        A membership write (add/remove a user) must never fail, or be forced
+        to retry, because of the pool's unrelated state -- this method is
+        built to be safe to call unconditionally after one.
+        """
+        if seat_delta == 0:
+            return False
+        delta_microusd = int(seat_delta) * seat_monthly_usd() * 1_000_000
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                UpdateExpression=(
+                    "ADD pool_limit_microusd :d, pool_headroom_microusd :d "
+                    "SET updated_at = :now"
+                ),
+                ConditionExpression="sizing = :per_seat",
+                ExpressionAttributeValues={
+                    ":d": Decimal(delta_microusd),
+                    ":per_seat": SIZING_PER_SEAT,
+                    ":now": _now_iso(),
+                },
+            )
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False  # fixed / no sizing attribute / no row at all
+            raise
 
     def reconcile_headroom(self, tenant_id: str, period: str) -> dict[str, Any]:
         """Repair `pool_headroom` to the invariant `limit - reserved - settled`,

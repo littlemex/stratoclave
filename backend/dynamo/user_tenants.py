@@ -76,7 +76,11 @@ class CreditExhaustedError(Exception):
 
 
 class UserTenantsRepository:
-    DEFAULT_CREDIT = 100_000  # Last-resort fallback (no tenant default and no individual override)
+    #: Historical constant. The live value comes from
+    #: `dynamo.tenants.default_tenant_credit()`, which reads
+    #: `DEFAULT_TENANT_CREDIT` at call time; this name is kept because external
+    #: readers reference it, and it is deliberately the same default.
+    DEFAULT_CREDIT = 10_000_000
 
     def __init__(self, table_name: Optional[str] = None) -> None:
         self._table = get_dynamodb_resource().Table(
@@ -161,6 +165,8 @@ class UserTenantsRepository:
                 "updated_at": now,
             }
             self._table.put_item(Item=item)
+            # A brand-new active membership is +1 seat (L4 membership delta).
+            self._adjust_pool_seat_delta_best_effort(tenant_id=tenant_id, seat_delta=1)
             return item
 
         if existing.get("status") == "archived":
@@ -204,9 +210,13 @@ class UserTenantsRepository:
                 },
                 ReturnValues="ALL_NEW",
             )
+            # A resurrected membership is also +1 seat (L4): it was archived
+            # (0 seats) and is active again.
+            self._adjust_pool_seat_delta_best_effort(tenant_id=tenant_id, seat_delta=1)
             return resp.get("Attributes", {})
 
-        # Already active — return as-is (credit is not modified).
+        # Already active — return as-is (credit is not modified, and no
+        # membership state changed, so no seat delta).
         return existing
 
     def _resolve_tenant_default(self, tenant_id: str) -> tuple[int, str]:
@@ -220,7 +230,37 @@ class UserTenantsRepository:
             default_credit = tenant.get("default_credit")
             if default_credit is not None:
                 return int(default_credit), "tenant_default"
-        return self.DEFAULT_CREDIT, "global_default"
+        from .tenants import default_tenant_credit
+
+        # NOT `self.DEFAULT_CREDIT`: that constant is bound at import, so an
+        # operator's `DEFAULT_TENANT_CREDIT` would move the value a tenant row is
+        # stamped with at creation and leave this branch — the branch a tenant
+        # row with no `default_credit` resolves through — at the old number.
+        return default_tenant_credit(), "global_default"
+
+    def _adjust_pool_seat_delta_best_effort(self, *, tenant_id: str, seat_delta: int) -> None:
+        """Apply a membership change to `tenant_id`'s CURRENT-period dollar pool
+        (L4), if that pool is `sizing="per_seat"`.
+
+        Best-effort and silent by design: a membership write (a user gaining or
+        losing an active row) must never fail, or be forced to retry, because of
+        the tenant pool's unrelated state.
+        `TenantBudgetsRepository.adjust_pool_for_seat_delta` already no-ops
+        safely when the pool is `sizing="fixed"`, has no `sizing` attribute, or
+        has no row for the period at all; any OTHER, unexpected error is
+        swallowed here rather than surfacing on a request whose own write (the
+        membership row itself) already committed successfully.
+        """
+        try:
+            from .tenant_budgets import TenantBudgetsRepository, current_period
+
+            TenantBudgetsRepository().adjust_pool_for_seat_delta(
+                tenant_id=tenant_id,
+                period=current_period(),
+                seat_delta=seat_delta,
+            )
+        except Exception:  # noqa: BLE001 — never fail a membership write for this
+            pass
 
     # ----- credit operations -----
     def remaining_credit(self, user_id: str, tenant_id: str) -> int:
@@ -692,6 +732,16 @@ class UserTenantsRepository:
                     f"Tenant switch transaction failed: reasons={reasons}"
                 )
             raise
+
+        # A switch is a membership change on BOTH tenants at once (L4): the old
+        # tenant loses the seat that just archived, the new one gains the seat
+        # that just went active. The transaction above already guarantees the
+        # old row WAS active (its ConditionExpression requires it, or this
+        # would have raised above) and the new row IS active now, so both
+        # deltas are unconditionally correct here — applied AFTER the
+        # transaction commits, best-effort, exactly like ensure()'s.
+        self._adjust_pool_seat_delta_best_effort(tenant_id=old_tenant_id, seat_delta=-1)
+        self._adjust_pool_seat_delta_best_effort(tenant_id=new_tenant_id, seat_delta=1)
 
         # Fetch the newly written UserTenants record to return.
         resp = self._table.get_item(

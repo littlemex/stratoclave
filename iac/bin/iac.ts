@@ -539,9 +539,16 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     ALLOW_ADMIN_CREATION: allowAdminCreation,
     ALLOW_ADMIN_CREATION_UNTIL: allowAdminCreationUntil,
 
-    // Tenant
+    // Tenant. The per-user token quota is a loose fairness backstop, not the
+    // binding ceiling — that is the seat-scaled dollar pool a tenant now gets at
+    // creation (docs/design/limits.md, C14). A hardcoded '100000' here would have
+    // pinned every deployment to the old ceiling no matter what the application
+    // default says, so the figure is forwarded from the deploy environment with
+    // the SAME default the application uses.
     DEFAULT_ORG_ID: 'default-org',
-    DEFAULT_TENANT_CREDIT: '100000',
+    DEFAULT_TENANT_CREDIT: String(optionalPositiveIntFromEnv('DEFAULT_TENANT_CREDIT') ?? 10_000_000),
+    STRATOCLAVE_SEAT_MONTHLY_USD: String(
+      optionalPositiveIntFromEnv('STRATOCLAVE_SEAT_MONTHLY_USD') ?? 200),
 
     // Bedrock (Anthropic / Claude). BEDROCK_REGION is ALWAYS set explicitly to
     // the model primary region (which is independent of the deploy region) — it
