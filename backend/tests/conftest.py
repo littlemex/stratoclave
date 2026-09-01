@@ -174,7 +174,12 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
         _rl._rl_client = None
         dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
-        # UserTenants: PK user_id, SK tenant_id
+        # UserTenants: PK user_id, SK tenant_id. `tenant-id-index` mirrors
+        # iac/lib/dynamodb-stack.ts (PK tenant_id, SK user_id) -- production
+        # code (admin_tenants.list_tenant_users, team_lead's equivalent, and
+        # F1's seat-count reconciler) queries it for a tenant's live
+        # membership; it was missing from this mock table entirely (nothing
+        # under moto exercised that query path before F1).
         dynamodb.create_table(
             TableName=_TABLE_ENVS["DYNAMODB_USER_TENANTS_TABLE"],
             KeySchema=[
@@ -184,6 +189,16 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             AttributeDefinitions=[
                 {"AttributeName": "user_id", "AttributeType": "S"},
                 {"AttributeName": "tenant_id", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "tenant-id-index",
+                    "KeySchema": [
+                        {"AttributeName": "tenant_id", "KeyType": "HASH"},
+                        {"AttributeName": "user_id", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
             ],
             BillingMode="PAY_PER_REQUEST",
         )
