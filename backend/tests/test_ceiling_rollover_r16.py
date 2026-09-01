@@ -37,10 +37,24 @@ other, plus a third piece neither one is:
      `TenantBudgetsRepository.previously_pooled(tenant_id, period) -> bool`.
      `mvp/_pipeline.py`'s reserve gate consults this on a miss: no prior-
      period row -> unchanged fail-open (never pooled, correct); a
-     prior-period row DID exist -> refuse (`_err_402
-     ("tenant_pool_row_missing")`) rather than silently unpooling. This is
+     prior-period row DID exist -> refuse (`_err_503
+     ("pool_period_row_missing")`) rather than silently unpooling. This is
      what keeps the scheduled pass's once-a-day lateness SAFE rather than
      merely usual.
+
+     The refusal is 503 `budget_unavailable`, not the 402 `credit_exhausted`
+     this file's first draft asked for, and the difference is not cosmetic.
+     402 means a figure was exhausted, and says so to the caller
+     ("Insufficient budget for this request. Contact your admin.") -- but
+     nothing is exhausted here: the pool may hold its entire limit, and an
+     admin sent to look would find a budget with nothing wrong with it. A
+     row that has not been created yet is precisely what `_err_503`
+     already exists for, "a routing input the gateway could not read", and
+     it is the class an alarm watches, which is what makes the failure LOUD
+     rather than merely recorded. C14.13 in docs/design/CONTRACTS.md fixes
+     the `reason` -- `pool_period_row_missing`, which is the identifier this
+     codebase treats as contract-bearing -- and deliberately leaves the
+     status class to the taxonomy in `_pipeline.py`.
 
 Design note: /Users/akazawt/tmp/stratoneed/change-pipeline/quota-raise-and-archive/design-F1.md
 section 4.
@@ -285,11 +299,14 @@ def test_reserve_refuses_rather_than_silently_unpooling_a_stable_membership_tena
     """THE regression test for the defect itself, end to end through the real
     admission chokepoint. A tenant had a pool last period, has STABLE
     membership (no hire/departure -> the lazy path never fires), and nobody
-    has run the scheduled pass yet for this period. Today this call is
-    ADMITTED with no pool debit at all (fail-open) -- it must instead be
-    REFUSED, because a tenant that was pooled does not silently become
-    unlimited just because a row did not roll forward in time."""
+    has run the scheduled pass yet for this period. Without the read-path
+    guard this call is ADMITTED with no pool debit at all (fail-open) -- it
+    must instead be REFUSED, because a tenant that was pooled does not
+    silently become unlimited just because a row did not roll forward in
+    time."""
     from dataclasses import dataclass
+
+    from fastapi import HTTPException
 
     from dynamo.tenants import TenantsRepository
     from mvp import _pipeline
@@ -306,31 +323,59 @@ def test_reserve_refuses_rather_than_silently_unpooling_a_stable_membership_tena
         tenant_id=tenant_id, name="Stable Membership Co",
         team_lead_user_id="admin-owned", default_credit=10**12, created_by="test",
     )
-    _seed_row(tenant_id, prev, seat_count=3)  # pooled last period
-    # No row seeded for `cur` -- nobody hired or left, so the lazy path never
-    # fired, and (in this test) the scheduled pass has not run either.
-    assert TenantBudgetsRepository().get(tenant_id, cur) is None
 
+    # ORDER IS THE SETUP HERE, NOT AN INCIDENTAL DETAIL.
+    #
+    # `reserve_credit` reads authority and refuses an identity with no membership
+    # (403 `identity_not_provisioned`), so the membership must exist before the
+    # call. But `ensure` IS a membership change, and a membership change is the
+    # LAZY path's one and only trigger (`_adjust_pool_seat_delta_best_effort` ->
+    # `ensure_current_period_row`, which the lazy-path test above pins). Run
+    # against a tenant that already holds a prior-period row, it rolls that row
+    # forward and hands this test the very current-period row whose ABSENCE is
+    # the condition under test -- the guard is then never reached, the request is
+    # admitted against a real 3-seat ceiling with ample headroom, and the test
+    # reads as the fail-open defect while actually proving nothing.
+    #
+    # Provisioned BEFORE any BUDGET row exists in any period, `ensure` creates no
+    # period row at all (the last test in this file pins exactly that), so the
+    # membership lands without disturbing the period state. Seeding the prior
+    # period afterwards is then what leaves "pooled last period, no row this
+    # period" actually standing at the moment of the call.
     UserTenantsRepository().ensure(
         user_id="stable-user", tenant_id=tenant_id, role="user", total_credit=10**12,
     )
+    _seed_row(tenant_id, prev, seat_count=3)  # pooled last period
+    # No row seeded for `cur` -- nobody hired or left, so the lazy path never
+    # fired, and (in this test) the scheduled pass has not run either.
+    assert TenantBudgetsRepository().get(tenant_id, cur) is None, (
+        "fixture precondition: the current period's row must still be absent at "
+        "the moment reserve_credit is called, or this test proves nothing"
+    )
+
     user = _User(user_id="stable-user", org_id=tenant_id)
 
-    raised_402 = False
     try:
         _pipeline.reserve_credit(user, 2500, cost_microusd=28_502)
-    except Exception as e:  # noqa: BLE001 -- FastAPI HTTPException, imported lazily below
-        from fastapi import HTTPException
-        if isinstance(e, HTTPException) and e.status_code == 402:
-            raised_402 = True
-        else:
-            raise
+    except HTTPException as e:
+        refusal = e
+    else:
+        refusal = None
 
-    assert raised_402, (
+    assert refusal is not None, (
         "a stable-membership tenant that was pooled last period, with no row "
         "for the current period, was ADMITTED with no pool ceiling instead of "
         "being refused -- this is the fail-open gap R16's read-path guard "
         "(previously_pooled) exists to close"
+    )
+    assert refusal.detail["reason"] == "pool_period_row_missing", (
+        "refused, but not as the missing period row: the `reason` is the "
+        "identifier C14.13 fixes and the one an operator greps for"
+    )
+    assert refusal.status_code == 503, (
+        "the missing row is a routing input the gateway could not read, not an "
+        "exhausted figure -- 402 would tell the caller their budget ran out "
+        "when the pool may hold its entire limit (see this module's docstring)"
     )
 
 
