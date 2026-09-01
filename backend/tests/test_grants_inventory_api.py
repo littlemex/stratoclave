@@ -28,6 +28,34 @@ before. Neither `mvp.grants.router` nor `is_capacity_bearing` exist in this
 worktree (F2 has not landed here), so every test below still fails at the
 seeding import — the reason changed (a shared predicate is now missing, not
 just an endpoint), the "surface absent" shape of the failure did not.
+
+Union amendment corrections (integration review of all four test suites,
+`## Union amendments` in the F3 contract):
+
+  - **U1/U2 — no `GrantsRepository` in `mvp`.** This file used to import
+    `mvp.grants.GrantsRepository` to seed grant rows — a name touched by no
+    F2 test, refused outright, not merely renamed. Grant rows live in the
+    `quota-events` table, whose repository is `dynamo.quota_events.QuotaEventsRepository`
+    — already established, so a second repository in the `mvp` layer would
+    be a second data-access path to the same table (two writers of one
+    invariant). Seeding below now goes through `QuotaEventsRepository`
+    directly. F2's confirmed `mvp.grants` surface is exactly `router`,
+    `RaiseHint`, `effective_grant_cap_microusd`, `is_capacity_bearing`,
+    `latest_permissible_expiry_for_period` — this file only needs
+    `router` and `is_capacity_bearing` from it, both confirmed, unchanged.
+  - **U3 — the field is `approved_amount_microusd`.** This file's
+    reconciliation used to read `g["amount_microusd"]`; F2 stores and
+    exposes `approved_amount_microusd` (the grant row carries both the
+    asked and the approved figure, and a reader of the shorter name cannot
+    tell which one they hold — the same ambiguity R24 exists to remove).
+    Every seed and every read below uses the corrected name.
+
+`QuotaEventsRepository`'s own write method name is still this role's
+plausible guess (`.record(...)`, mirroring `UsageLogsRepository`'s
+append-only pattern, the closest analogue already in this codebase) — the
+class and table are confirmed, the method is not, so this may need one more
+retarget once F2's actual method name is visible. That risk is now confined
+to a single call site instead of an entire invented class.
 """
 from __future__ import annotations
 
@@ -72,20 +100,26 @@ def _seed_grants_across_two_periods(tenant_id: str = "acme-eng") -> None:
     """The B4 scenario: a live grant on the CURRENT period's row, plus a
     grant that still bears capacity on the PRIOR period's row — one because
     it is `REVOKE_BLOCKED` (subtraction not yet complete), simulating
-    rollover-plus-late-sweep landing on the same tenant at once."""
+    rollover-plus-late-sweep landing on the same tenant at once.
+
+    Seeded through `QuotaEventsRepository` (U2), not a second `mvp`-layer
+    repository — `dynamo.quota_events` does not exist in this worktree
+    either (F2 has not landed here), so this still fails at import; only the
+    module it fails to import FROM changed.
+    """
+    from dynamo.quota_events import QuotaEventsRepository
     from dynamo.tenant_budgets import current_period, previous_period
-    from mvp.grants import GrantsRepository
 
     current = current_period()
     prior = previous_period(current)
-    repo = GrantsRepository()
-    repo.create(
-        tenant_id=tenant_id, request_id="lr_9f2c", amount_microusd=50_000_000,
+    repo = QuotaEventsRepository()
+    repo.record(
+        tenant_id=tenant_id, request_id="lr_9f2c", approved_amount_microusd=50_000_000,
         approver_id="user-lead-1", expires_at="2026-08-31T23:59:59Z",
         status="active", target_pk=tenant_id, period=current,
     )
-    repo.create(
-        tenant_id=tenant_id, request_id="lr_7e21", amount_microusd=12_000_000,
+    repo.record(
+        tenant_id=tenant_id, request_id="lr_7e21", approved_amount_microusd=12_000_000,
         approver_id="user-lead-1", expires_at="2026-07-30T23:59:59Z",
         status="revoke_blocked", target_pk=tenant_id, period=prior,
         revoke_blocked_reason="an in-flight reservation is still holding against this grant",
@@ -120,7 +154,11 @@ class TestGrantsInventoryReconciliation:
 
         for period, row in rows_by_period.items():
             live_sum = sum(
-                g["amount_microusd"] for g in row["grants"]
+                # U3: the grant row carries both the asked and the approved
+                # figure — `approved_amount_microusd` is the one this
+                # reconciliation is actually about, never the shorter,
+                # ambiguous `amount_microusd`.
+                g["approved_amount_microusd"] for g in row["grants"]
                 if is_capacity_bearing(g, target_pk="acme-eng", period=period)
             )
             assert live_sum == row["pool_granted_microusd"], (

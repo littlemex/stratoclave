@@ -16,6 +16,11 @@
 // its own total, and a new test asserts no single combined total is
 // offered anywhere on the page.
 //
+// Union amendment U3 (integration review of all four test suites): the
+// grant amount field is `approved_amount_microusd`, not `amount_microusd` —
+// the row carries both the asked and the approved figure, and the shorter
+// name cannot say which one it is. The fixture below was fixed accordingly.
+//
 // This component does not exist in this worktree — every test fails at
 // module resolution. Bodies assert rendered text (each row's own visible
 // sum, the visible reason), not merely that the payload carries the fields.
@@ -70,7 +75,7 @@ const FIXTURE = {
         {
           grant_id: 'gr_1a',
           request_id: 'lr_9f2c',
-          amount_microusd: 50_000_000,
+          approved_amount_microusd: 50_000_000,
           approver_id: 'user-lead-1',
           expires_at: '2026-08-31T23:59:59Z',
           status: 'active',
@@ -84,7 +89,7 @@ const FIXTURE = {
         {
           grant_id: 'gr_0b',
           request_id: 'lr_7e21',
-          amount_microusd: 12_000_000,
+          approved_amount_microusd: 12_000_000,
           approver_id: 'user-lead-1',
           expires_at: '2026-08-30T23:59:59Z',
           status: 'revoke_blocked',

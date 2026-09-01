@@ -18,14 +18,28 @@ What remains F3's to verify here is the field-shape F3's frontend depends on
 would be exactly the "two independent statements of one shape drift" the
 seam amendments exist to close).
 
-Neither `mvp.grants`'s router nor its repository exist in this worktree (F2
-has not landed here), so every test below still fails at collection with
-`ModuleNotFoundError` — the same "surface absent" reason as before; only the
-module it is absent FROM changed.
+Union amendment corrections (integration review of all four test suites,
+`## Union amendments` in the F3 contract):
+
+  - **U1/U2 — no `LimitRaisesRepository` in `mvp`.** This file used to
+    import `mvp.grants.LimitRaisesRepository` to seed request rows — a name
+    touched by no F2 test, refused outright. Request rows, like grant rows,
+    live in the `quota-events` table; seeding now goes through
+    `dynamo.quota_events.QuotaEventsRepository`, the one already-established
+    repository for that table, rather than a second `mvp`-layer path to it.
+    `router` (from `mvp.grants`) is confirmed and unchanged.
+
+Neither `mvp.grants.router` nor `dynamo.quota_events.QuotaEventsRepository`
+exist in this worktree (F2 has not landed here), so every test below still
+fails at collection with `ModuleNotFoundError` — the same "surface absent"
+reason as before; only the module each import targets changed.
 
 Contract correction: the approver field is `approver_id` — a stable user id,
 resolved to a display name by the console on demand — never an email address
-carried on the wire.
+carried on the wire. (Unaffected by U3 — U3 corrects the GRANT row's amount
+field, `approved_amount_microusd` vs `amount_microusd`; this file's request
+row already used `requested_amount_microusd`/`approved_amount_microusd`
+correctly.)
 """
 from __future__ import annotations
 
@@ -61,11 +75,16 @@ def _client(monkeypatch) -> TestClient:
 
 def _seed_decided_request(*, requested_microusd: int, approved_microusd: int) -> str:
     """Seed one decided (approved) limit-raise request for the requester,
-    granted for LESS than she asked — the id's own motivating case."""
-    from mvp.grants import LimitRaisesRepository  # not yet written
+    granted for LESS than she asked — the id's own motivating case.
 
-    repo = LimitRaisesRepository()
-    return repo.create(
+    Seeded through `QuotaEventsRepository` (U2), not a second `mvp`-layer
+    repository. `dynamo.quota_events` does not exist in this worktree either
+    (F2 has not landed here) — this still fails at import.
+    """
+    from dynamo.quota_events import QuotaEventsRepository
+
+    repo = QuotaEventsRepository()
+    return repo.record(
         user_id="requester-1",
         tenant_id="acme-eng",
         reason="cascade_shortfall",
@@ -79,10 +98,10 @@ def _seed_decided_request(*, requested_microusd: int, approved_microusd: int) ->
 
 
 def _seed_pending_request(*, requested_microusd: int) -> str:
-    from mvp.grants import LimitRaisesRepository
+    from dynamo.quota_events import QuotaEventsRepository
 
-    repo = LimitRaisesRepository()
-    return repo.create(
+    repo = QuotaEventsRepository()
+    return repo.record(
         user_id="requester-1",
         tenant_id="acme-eng",
         reason="cascade_shortfall",
