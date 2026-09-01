@@ -52,7 +52,7 @@ from .dimensions import (
     select,
     unknown_profile_prefix,
 )
-from .snapshot import Snapshot, SnapshotStore, digest_of
+from .snapshot import Snapshot, SnapshotStore, digest_of, stale_after_seconds
 
 logger = get_logger(__name__)
 
@@ -118,6 +118,14 @@ class FetchReport:
     # the action it calls for (split the key) belongs to whoever reads the report.
     key_price_disagreement: dict[str, dict[str, list[int]]] = field(default_factory=dict)
     duration_seconds: float = 0.0
+    # The budget this pass ran with. Carried rather than looked up when logging: the
+    # request path and the ops refresh have different ceilings, and reporting the wrong
+    # one names a knob that had nothing to do with the truncation.
+    budget_seconds: float = 0.0
+    # How old the stored table was when this pass ran, in wall seconds. Reported on every
+    # pass that produced nothing, so a feed that has been dark for a week is a repeating
+    # signal rather than one info line at task start.
+    snapshot_age_seconds: Optional[float] = None
     # True when ANY feed stopped before it had asked about everything — a whole feed
     # skipped, models left unasked, a region's pages cut short. Named for the fact rather
     # than for one of its causes, because `--strict` and the operator both need "this
@@ -142,19 +150,31 @@ class LivePriceSource:
         registry: Optional[Sequence] = None,
         interval_seconds: Optional[float] = None,
         clock=time.time,
+        budget_clock=time.monotonic,
     ) -> None:
         self._feeds: Optional[Sequence[Feed]] = feeds
         self._store = store if store is not None else SnapshotStore()
         self._registry = registry
         self._interval = interval_seconds
+        # Two time sources, because two different questions are being asked. `clock` is
+        # WALL time: it answers "how long ago was this instant", which is only meaningful
+        # against the timestamps the store wrote. `budget_clock` is ELAPSED time, and the
+        # budget is arithmetic on it alone — including the deadline handed to the feeds,
+        # which compare against the very callable it came from. Sharing one clock is what
+        # let a deadline be computed on one scale and read on another.
         self._clock = clock
+        self._budget_clock = budget_clock
         self._lock = threading.Lock()
+        # Held for the whole of a pass, so two passes cannot run at once. Separate from
+        # `_lock`, which covers state swaps only and must never be held across I/O.
+        self._pass_lock = threading.Lock()
         self._table: dict[str, Rate] = {}
         self._provenance: dict[str, str] = {}
         self._snapshot: Optional[Snapshot] = None
         self._snapshot_loaded = False
-        self._last_fetch_at = 0.0
-        self._fetching = False
+        # `None` rather than 0.0: with an elapsed-time source, zero is a legal reading a
+        # few microseconds after start, so the sentinel has to be outside the value space.
+        self._last_fetch_at: Optional[float] = None
         self._live_classes: dict[str, frozenset[str]] = {}
         self._last_report: Optional[FetchReport] = None
 
@@ -164,7 +184,11 @@ class LivePriceSource:
         from .price_list import PriceListFeed
         from .selfhosted import SelfHostedFeed
 
-        return (AgreementFeed(), PriceListFeed(), SelfHostedFeed())
+        # The self-hosted feed answers from the registry THIS source was constructed with.
+        # Reading a global one made a source built with an injected registry answer from two
+        # different registries at once, and left a self-hosted entry that declares a billing
+        # id silently unpriced.
+        return (AgreementFeed(), PriceListFeed(), SelfHostedFeed(registry=self._entries()))
 
     def _entries(self) -> Sequence:
         if self._registry is not None:
@@ -195,23 +219,28 @@ class LivePriceSource:
         does propagate is a programming error, which should fail loudly in tests
         rather than be absorbed here.
         """
+        # The store read happens off `_lock`. Claiming the pass inside the lock and
+        # running it outside was already the rule for the feeds — `mvp.pricing` fetches
+        # its source off its own lock so a slow feed cannot stall every concurrent
+        # request — but the snapshot read and the persist were still inside it, which put
+        # the same stall back one layer down where it is harder to see. A blocked
+        # DynamoDB call must not stop a concurrent reader from being served the table
+        # already in memory.
+        self._ensure_snapshot()
         with self._lock:
-            self._ensure_snapshot()
-            claim = self._due() and not self._fetching
-            if claim:
-                # Claimed inside the lock, run outside it. `mvp.pricing` deliberately
-                # fetches its source off its own lock so a slow feed cannot stall every
-                # concurrent request; holding this one across two AWS APIs would put
-                # that stall back one layer down, where it is harder to see.
-                self._fetching = True
-                self._last_fetch_at = self._clock()
-        if claim:
+            due = self._due()
+        if due and self._pass_lock.acquire(blocking=False):
             try:
-                report = self._run_fetch()
-            finally:
                 with self._lock:
-                    self._fetching = False
-            self._apply(report)
+                    # The version this pass starts from. Captured before the fetch, so a
+                    # pass that finishes after someone else moved the pointer fences on
+                    # what it actually saw rather than on what it finds afterwards.
+                    started_from = self._snapshot.digest if self._snapshot else None
+                    self._last_fetch_at = self._budget_clock()
+                report = self._run_fetch()
+                self._apply(report, fenced_on=started_from)
+            finally:
+                self._pass_lock.release()
         with self._lock:
             return self._merged_locked()
 
@@ -221,19 +250,33 @@ class LivePriceSource:
         return merged
 
     def _due(self) -> bool:
-        if self._last_fetch_at == 0.0:
-            # Never fetched. Stated rather than left to the arithmetic: with a clock
-            # that does not start at the epoch (a test, or a monotonic source) the
-            # elapsed-time comparison would decide a cold process was up to date.
-            return True
-        return (self._clock() - self._last_fetch_at) >= self._interval_seconds()
+        if self._last_fetch_at is None:
+            # Nothing fetched in THIS process — which is not the same as nothing being
+            # known. A task that starts to a snapshot confirmed minutes ago has a table
+            # inside the interval already, and refetching it makes the first request pay
+            # for a pass the deploy step already ran. Compared against the interval and
+            # not the staleness window: the question here is "has an interval elapsed
+            # since this table was confirmed", and staleness is a separate label with its
+            # own knob. Wall time, because the comparison is against a stored instant.
+            snapshot = self._snapshot
+            confirmed = (snapshot.last_seen_at or snapshot.fetched_at) if snapshot else 0.0
+            if not confirmed:
+                return True
+            # Measured on THIS source's wall clock, not on `time.time()` directly. The two
+            # are the same in production and are not the same under an injected clock, and a
+            # dueness decision that ignores the clock it was given cannot be exercised.
+            return (self._clock() - confirmed) >= self._interval_seconds()
+        return (self._budget_clock() - self._last_fetch_at) >= self._interval_seconds()
 
     def _ensure_snapshot(self) -> None:
-        if self._snapshot_loaded:
-            return
-        self._snapshot_loaded = True
+        """Read the stored version once per process. Runs OUTSIDE `_lock` — see `load`."""
+        with self._lock:
+            if self._snapshot_loaded:
+                return
+            self._snapshot_loaded = True
         snapshot = self._store.load() if self._store else None
-        self._snapshot = snapshot
+        with self._lock:
+            self._snapshot = snapshot
         if snapshot is None:
             logger.info("price_feed_snapshot_absent")
             return
@@ -241,31 +284,49 @@ class LivePriceSource:
             "price_feed_snapshot_loaded",
             keys=len(snapshot.rates),
             digest=snapshot.digest,
+            digest_verified=snapshot.digest_verified,
             age_seconds=int(snapshot.age_seconds) if snapshot.fetched_at else None,
             stale=snapshot.is_stale(now=self._clock()),
         )
 
     # ----- fetching -----------------------------------------------------------
     def refresh(self, budget_seconds: Optional[float] = None) -> FetchReport:
-        """Force a fetch, with the whole-table budget. The ops CLI's entry point."""
-        with self._lock:
-            self._ensure_snapshot()
-            self._fetching = True
-            self._last_fetch_at = self._clock()
-        try:
-            report = self._run_fetch(budget_seconds or self._refresh_budget_seconds())
-        finally:
+        """Force a fetch, with the whole-table budget. The ops CLI's entry point.
+
+        Joins a pass already in flight rather than starting a second one. Two passes at
+        once in one process is how the fence gets lost locally: both start from the same
+        version, one persists, and the other then moves the pointer back to a table it
+        read first. The joined report may say `truncated` — it was run on the request
+        path's smaller budget — and that is reported rather than hidden, which is what
+        `--strict` exits on.
+        """
+        self._ensure_snapshot()
+        if not self._pass_lock.acquire(blocking=False):
+            with self._pass_lock:
+                pass
             with self._lock:
-                self._fetching = False
-        self._apply(report)
+                return self._last_report if self._last_report else FetchReport()
+        try:
+            with self._lock:
+                started_from = self._snapshot.digest if self._snapshot else None
+                self._last_fetch_at = self._budget_clock()
+            report = self._run_fetch(budget_seconds or self._refresh_budget_seconds())
+            self._apply(report, fenced_on=started_from)
+        finally:
+            self._pass_lock.release()
         return report
 
     def _run_fetch(self, budget_seconds: Optional[float] = None) -> FetchReport:
         """Talk to the feeds and fold their answers. Holds no lock, changes no state."""
-        started = self._clock()
-        deadline = started + (budget_seconds if budget_seconds is not None
-                              else self._budget_seconds())
+        started = self._budget_clock()
+        budget = (budget_seconds if budget_seconds is not None
+                  else self._budget_seconds())
+        deadline = started + budget
         report = FetchReport()
+        # What this pass actually ran with, not what the request path defaults to. A
+        # refresh that truncated on 300 seconds used to be logged as truncating on 15,
+        # which sends the reader to a knob that had nothing to do with it.
+        report.budget_seconds = budget
         try:
             entries = [e for e in self._entries() if not getattr(e, "virtual", False)]
             feeds = self._feeds if self._feeds is not None else self._default_feeds()
@@ -294,7 +355,7 @@ class LivePriceSource:
             results: list[tuple[str, FeedResult]] = []
             for feed in feeds:
                 name = getattr(feed, "name", feed.__class__.__name__)
-                if self._clock() >= deadline:
+                if self._budget_clock() >= deadline:
                     # Out of budget with feeds still unasked. Recorded, not hidden: the
                     # keys those feeds would have answered for keep the layer below,
                     # and a partial pass must not read as a complete one.
@@ -309,6 +370,10 @@ class LivePriceSource:
                             r for e in entries
                             for r in (regions_by_entry[id(e)] or ())),
                         deadline=deadline,
+                        # The very callable the deadline was computed from. A feed that
+                        # compared it against wall time would read an elapsed-time instant
+                        # as either long past or unreachable.
+                        clock=self._budget_clock,
                     ))))
                 except Exception as exc:  # noqa: BLE001 — a feed contract violation.
                     result = FeedResult()
@@ -318,11 +383,16 @@ class LivePriceSource:
         except Exception as exc:  # noqa: BLE001 — never take charging down.
             logger.warning("price_feed_fetch_failed", error=str(exc))
             report.feed_errors.setdefault("composite", []).append(str(exc)[:300])
-        report.duration_seconds = max(0.0, self._clock() - started)
+        report.duration_seconds = max(0.0, self._budget_clock() - started)
         return report
 
-    def _apply(self, report: FetchReport) -> None:
-        """Take what a pass produced into the served table, and persist it."""
+    def _apply(self, report: FetchReport, *, fenced_on: Optional[str]) -> None:
+        """Take what a pass produced into the served table, and persist it.
+
+        The store call happens outside `_lock`: the lock is for swapping state, and a
+        conditional put with a retrying client behind it is exactly the kind of wait that
+        must not be visible to a concurrent reader.
+        """
         with self._lock:
             self._last_report = report
             self._observe(report)
@@ -333,8 +403,17 @@ class LivePriceSource:
                 # the store is unwritable (a missing IAM permission, say).
                 self._table.update(report.rates)
                 self._provenance.update(report.provenance)
-                self._live_classes.update(report.live_classes)
-                self._maybe_persist(report)
+                # UNION per key, not replacement. `live_classes` answers "has this leg ever
+                # been sourced live", and that is what tells a leg the provider stopped
+                # publishing (keep the stored value, report the regression) from a leg no
+                # provider ever published (fall to the current floor). Replacing the set
+                # made one quiet pass erase the distinction, and the value then jumped to
+                # the floor for a leg that had a perfectly good stored number.
+                for key, classes in report.live_classes.items():
+                    self._live_classes[key] = self._live_classes.get(
+                        key, frozenset()) | classes
+        if report.rates:
+            self._maybe_persist(report, fenced_on=fenced_on)
 
     def _budget_seconds(self) -> float:
         return _positive_env(BUDGET_ENV, DEFAULT_BUDGET_SECONDS)
@@ -375,9 +454,35 @@ class LivePriceSource:
         # one of its members produced a selection from a feed that called its own answer
         # complete.
         complete: dict[str, bool] = {}
-        incomplete_models = {
-            model for _, result in results for model in result.incomplete_models
-        }
+
+        def _member_incomplete(model_id: str) -> bool:
+            """Whether any feed that still owes an answer for this model fell short.
+
+            A flat union across feeds was the whole of the bug: a feed lists every model it
+            was asked about when it runs out of budget — honestly, since a feed that stopped
+            early cannot know which of them it would have priced — so unioning froze keys
+            that a different feed had read completely, and a denied Price List became a
+            permanent over-charge on every Claude key.
+
+            Ownership decides it, and ownership is not a hardcoded table: it is the same
+            runtime split the rest of this module relies on. A model some feed produced a
+            complete card for is that feed's, and no other feed owes an answer for it. A
+            model a feed established as out of scope is not that feed's to answer. What is
+            left — nobody carded it completely, and a feed that never ruled itself out fell
+            short — is the case that must still freeze, because a truncated feed may be
+            exactly the one that owns the model and never reached it.
+            """
+            carded_completely = any(
+                model_id in result.cards and model_id not in result.incomplete_models
+                for _, result in results
+            )
+            if carded_completely:
+                return False
+            return any(
+                model_id in result.incomplete_models
+                and model_id not in result.out_of_scope
+                for _, result in results
+            )
         # pricing key -> per-field maximum over the models that share the key, plus
         # which token classes any feed actually published and which feeds answered.
         folded: dict[str, dict[str, int]] = {}
@@ -443,21 +548,37 @@ class LivePriceSource:
                         if token_class not in widened:
                             widened.append(token_class)
                 sources.setdefault(entry.pricing_key, set()).add(name)
+                # Every leg, from the one leg registry. Comparing input and output alone
+                # missed a key whose members diverge only on a cache rate — charged at the
+                # per-leg maximum in the meantime, with nothing telling the operator the
+                # tier had stopped being a tier.
                 disagreement.setdefault(entry.pricing_key, {})[entry.bedrock_model_id] = tuple(
                     _to_micro(selection.rates[c]) if c in selection.rates else None
-                    for c in ("input", "output")
+                    for c in _LEGS_IN_ORDER
                 )
-            if not member_selected or model_id in incomplete_models:
+            # A member every feed has positively established as outside its own scope is not
+            # a member this pass MISSED: nobody publishes a price for it, so the key's
+            # maximum over the members that have one is complete without it. Distinguishing
+            # the two is the whole reason `out_of_scope` is reported, and conflating them let
+            # one unpublishable sibling freeze a key its neighbour had priced completely.
+            everywhere_out_of_scope = bool(results) and all(
+                model_id in result.out_of_scope for _, result in results
+            )
+            if everywhere_out_of_scope:
+                complete.setdefault(entry.pricing_key, True)
+            elif not member_selected or _member_incomplete(model_id):
                 # This member did not contribute a rate, or the feed that answered for it
                 # said its own answer may be partial. Either way the key's maximum was
                 # computed over less than the models and regions it covers.
                 complete[entry.pricing_key] = False
             else:
                 complete.setdefault(entry.pricing_key, True)
-            if entry.pricing_key in folded:
-                # Priced by one feed and refused by another: the model is not unpriced,
-                # and leaving it on that list turns a report an operator acts on into
-                # noise.
+            if member_selected:
+                # Priced by one feed and refused by another: THIS model is not unpriced, and
+                # leaving it on that list turns a report an operator acts on into noise.
+                # Keyed on the model rather than on the key: a sibling sharing the key used
+                # to erase this model's own notice, so "the failover set is unreadable" —
+                # the one place that says so — disappeared whenever a tier had two members.
                 report.unpriced.pop(entry.bedrock_model_id, None)
             if not answered:
                 refused = report.unauthorized.get(entry.bedrock_model_id)
@@ -563,13 +684,42 @@ class LivePriceSource:
         snapshot = self._snapshot
         if snapshot is not None:
             stored = snapshot.rates.get(key)
+            # Only for a leg the stored version actually SOURCED. A leg no provider
+            # publishes was filled from the floor when that version was cut, and the value
+            # written is a copy of the floor as it stood that day — so serving it back
+            # ranks a stale floor above the current one, and a correction to an unpublished
+            # leg could never take effect. `leg_regressions` cannot notice either, because
+            # the leg was never live. `live_classes` is already stored and already read on
+            # load, so the fact needed to tell the two apart is to hand.
+            #
+            # But only where that fact EXISTS. A key the stored version records nothing
+            # about — a row written by a build before this was tracked, or one whose
+            # classes could not be read — is unknown, not floor-derived, and treating
+            # unknown as floor-derived would drop a whole stored table to the floor on the
+            # first deploy that reads it. Unknown keeps the stored value: the same rule as
+            # everywhere else here, that absence falls back rather than lowering.
             if stored is not None:
-                return int(getattr(stored, field_name))
+                known = snapshot.live_classes.get(key)
+                if known is None or _FIELD_BY_CLASS[field_name] in known:
+                    return int(getattr(stored, field_name))
         floor = _floor_rates()
         rate = floor.get(key) or floor.get("default")
         return int(getattr(rate, field_name)) if rate is not None else None
 
-    def _maybe_persist(self, report: FetchReport) -> None:
+    def _touch_due(self, previous: Snapshot) -> bool:
+        """Whether an unchanged table is old enough to be worth confirming.
+
+        Half the staleness window, matching the store's own throttle: the point of the
+        confirmation is that the age a task reports is the age of the last CHECK, not of
+        the last change.
+        """
+        window = stale_after_seconds() / 2.0
+        seen = previous.last_seen_at or previous.fetched_at
+        if not seen:
+            return True
+        return (self._clock() - seen) >= window
+
+    def _maybe_persist(self, report: FetchReport, *, fenced_on: Optional[str]) -> None:
         """Store the union of what was known and what was just read.
 
         The union, not the fetch: a fetch that lost coverage — a renamed dimension, a
@@ -578,18 +728,25 @@ class LivePriceSource:
         start would read the reduced table and fall to the floor for the rest. Newer
         values win per key; keys only the old snapshot had are carried forward.
         """
-        previous = self._snapshot
+        with self._lock:
+            previous = self._snapshot
         merged: dict[str, Rate] = dict(previous.rates) if previous else {}
         merged.update(report.rates)
         provenance: dict[str, str] = dict(previous.provenance) if previous else {}
         provenance.update(report.provenance)
         live_classes: dict[str, frozenset[str]] = (
             dict(previous.live_classes) if previous else {})
-        live_classes.update(report.live_classes)
+        # Union, for the reason given in `_apply`: this set is the memory of what was ever
+        # published, and a set that forgets turns a frozen leg into a floor-priced one.
+        for key, classes in report.live_classes.items():
+            live_classes[key] = live_classes.get(key, frozenset()) | classes
         digest = digest_of(merged)
-        if previous is not None and previous.digest == digest and not previous.is_stale(
-            now=self._clock()
-        ):
+        if (previous is not None and previous.digest == digest
+                and not self._touch_due(previous)):
+            # Nothing to write and nothing to confirm. Gated on the store's touch window
+            # rather than on full staleness: with the old gate, a table checked every hour
+            # was never handed to `save()` until it had ALREADY gone stale, so the store's
+            # half-window touch could not run and a healthy table reported a day's age.
             return
         if previous is not None and previous.digest != digest:
             logger.info(
@@ -598,15 +755,63 @@ class LivePriceSource:
                 digest_new=digest,
                 changed_keys=sorted(_changed_keys(previous.rates, merged))[:20],
             )
-        stored = (self._store.save(merged, provenance, live_classes)
+        # `now` from the same clock this source measures ages with. Without it the store
+        # timestamps with `time.time()` while the caller decides with an injected clock, so
+        # the two disagree about whether the touch window has passed — and the disagreement
+        # is invisible in production, where they happen to be the same function.
+        stored = (self._store.save(merged, provenance, live_classes,
+                                   now=self._clock(), fenced_on=fenced_on)
                   if self._store else None)
         if stored is not None:
-            self._snapshot = stored
+            with self._lock:
+                self._snapshot = stored
+            return
+        # Lost the fence, or could not write. Losing means another pass has already
+        # published a version this one did not see, so this pass's fold is a table nothing
+        # else can read — and serving it would be the pointer rewind the fence just
+        # prevented, moved into memory. Adopt the winner for what is served as well as
+        # what is merged from: `_merged_locked` unions `_table` OVER the snapshot, so
+        # replacing only the snapshot would leave this process on its own numbers. The
+        # adopted rate can be lower than this pass's, and that is not the never-lower rule
+        # being broken: that rule is about what one pass saw across regions and models,
+        # not about preferring the higher of two competing passes, and the stored version
+        # is the rung the ladder names.
+        winner = self._store.load() if self._store else None
+        if winner is None:
+            return
+        with self._lock:
+            self._snapshot = winner
+            for key in winner.rates:
+                self._table.pop(key, None)
+                self._provenance.pop(key, None)
+            self._snapshot_loaded = True
 
     def _observe(self, report: FetchReport) -> None:
-        previous = self._snapshot.rates if self._snapshot else {}
+        snapshot = self._snapshot
+        previous = snapshot.rates if snapshot else {}
+        confirmed = (snapshot.last_seen_at or snapshot.fetched_at) if snapshot else 0.0
+        report.snapshot_age_seconds = (
+            max(0.0, self._clock() - confirmed) if confirmed else None)
         regressed = sorted(set(previous) - set(report.rates)) if report.rates else []
         report.coverage_regressions = regressed
+        if not report.rates and previous:
+            # A pass that produced NOTHING against a table that has keys. Louder than the
+            # partial case it swallows, because the ordering used to be inverted: losing
+            # some keys warned, losing all of them was silent — `coverage_regressions` is
+            # computed only when the pass produced rates, so the total loss emptied the one
+            # list that would have said so. Charging carries on at the stored version,
+            # correctly, and nothing else in this module would ever mention it again.
+            # Emitted on EVERY such pass, not once per process: a feed dark for a week is
+            # a repeating signal or it is not a signal at all.
+            logger.warning(
+                "price_feed_fetch_empty",
+                stored_keys=len(previous),
+                snapshot_age_seconds=(int(report.snapshot_age_seconds)
+                                      if report.snapshot_age_seconds is not None else None),
+                feed_errors={k: v[:2] for k, v in report.feed_errors.items()},
+                note=("no feed produced a rate; charging continues at the stored version, "
+                      "which is not being refreshed"),
+            )
         if regressed:
             # The snapshot still answers for these keys (see `load`), so nothing is
             # mispriced — but a key that used to be readable and is not any more is
@@ -644,7 +849,7 @@ class LivePriceSource:
                 )
         if report.truncated:
             logger.warning("price_feed_table_partial",
-                           budget_seconds=self._budget_seconds(),
+                           budget_seconds=report.budget_seconds,
                            duration_seconds=round(report.duration_seconds, 3))
         if report.unparsed:
             logger.info("price_feed_unparsed_names", counts=report.unparsed,
@@ -687,6 +892,10 @@ assert set(_FIELD_BY_CLASS) == set(RATE_FIELDS), (
 assert set(_FIELD_BY_CLASS.values()) == set(TOKEN_CLASSES), (
     "the token classes moved; update _FIELD_BY_CLASS with them"
 )
+# The legs in one stable order, for the per-key comparison vectors. Derived from the map
+# above rather than written out again: a vector that quietly covers two of four legs is how
+# a tier can stop being a tier without anything saying so.
+_LEGS_IN_ORDER = tuple(_FIELD_BY_CLASS.values())
 
 
 def _to_micro(usd_per_mtok: Decimal) -> int:

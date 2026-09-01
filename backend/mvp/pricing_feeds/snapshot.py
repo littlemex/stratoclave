@@ -50,10 +50,6 @@ _POINTER_SK = "CURRENT"
 _VERSION_SK_PREFIX = "__ratefeed__"
 SCHEMA_VERSION = 1
 
-# Sentinel for "this caller never read the pointer, so do not fence on it". Distinct from
-# `None`, which is a real fence meaning "there was no version when I started".
-_UNFENCED = "\x00unfenced"
-
 # How stale the current version may be before it is REPORTED as stale. Not an expiry:
 # expiring a version would change the amount charged with nobody deciding to, which is
 # the one thing this subsystem must not do quietly. It also bounds how often the pointer
@@ -86,6 +82,12 @@ class Snapshot:
     live_classes: dict[str, frozenset[str]] = field(default_factory=dict)
     # When this version was last confirmed to still be what the provider publishes.
     last_seen_at: float = 0.0
+    # Whether `digest_of(rates)` matched the version id this row was read under. True for
+    # every snapshot this module builds itself (the digest and the rates come from the same
+    # write), so the only place this is ever `False` is a version read back with a corrupt
+    # row dropped — the table can then differ from the name it is stored under, and this is
+    # what lets a dispute tool refuse it while the charging path keeps serving the rest.
+    digest_verified: bool = True
 
     @property
     def age_seconds(self) -> float:
@@ -94,12 +96,12 @@ class Snapshot:
 
     def is_stale(self, *, now: Optional[float] = None) -> bool:
         confirmed = self.last_seen_at or self.fetched_at
-        limit = _stale_after_seconds()
+        limit = stale_after_seconds()
         age = max(0.0, (now or time.time()) - confirmed) if confirmed else float("inf")
         return age > limit
 
 
-def _stale_after_seconds() -> float:
+def stale_after_seconds() -> float:
     raw = os.getenv(STALE_AFTER_SECONDS_ENV)
     if not raw:
         return float(DEFAULT_STALE_AFTER_SECONDS)
@@ -190,43 +192,65 @@ class SnapshotStore:
 
         Short by construction: a version exists per price CHANGE, not per fetch, so this
         is the history of what moved rather than a log of every poll.
+
+        `Limit` is a DynamoDB page size, not a result count, and DynamoDB applies it in
+        sort-key order — the digest, which carries no relationship to time — before this
+        method ever sees the items. Passing `limit` straight through as `Limit` can hand
+        back an arbitrary old page and drop the version a dispute actually wants, so the
+        partition is paged in full first and `limit` is applied only after sorting by
+        `created_at`.
         """
         from boto3.dynamodb.conditions import Key
 
+        items: list[dict] = []
+        key_condition = Key("pk").eq(_PK) & Key("sk").begins_with(_VERSION_SK_PREFIX)
+        exclusive_start_key = None
         try:
-            response = self._get_table().query(
-                KeyConditionExpression=(Key("pk").eq(_PK)
-                                        & Key("sk").begins_with(_VERSION_SK_PREFIX)),
-                Limit=max(1, limit),
-            )
+            while True:
+                kwargs: dict = {"KeyConditionExpression": key_condition}
+                if exclusive_start_key is not None:
+                    kwargs["ExclusiveStartKey"] = exclusive_start_key
+                response = self._get_table().query(**kwargs)
+                items.extend(response.get("Items", ()))
+                exclusive_start_key = response.get("LastEvaluatedKey")
+                if not exclusive_start_key:
+                    break
         except Exception as exc:  # noqa: BLE001
             logger.warning("price_feed_versions_read_failed", error=str(exc))
             return []
         out = []
-        for item in response.get("Items", ()):
+        for item in items:
             sk = str(item.get("sk") or "")
             out.append({
                 "version": sk[len(_VERSION_SK_PREFIX):],
                 "created_at": int(item.get("created_at") or 0),
                 "keys": len(item.get("rates") or {}),
             })
-        return sorted(out, key=lambda row: row["created_at"], reverse=True)
+        out.sort(key=lambda row: row["created_at"], reverse=True)
+        return out[:max(1, limit)]
 
     # ----- write --------------------------------------------------------------
     def save(self, rates: Mapping[str, Rate], provenance: Mapping[str, str],
              live_classes: Optional[Mapping[str, frozenset[str]]] = None,
              *, now: Optional[float] = None,
-             fenced_on: Optional[str] = _UNFENCED) -> Optional[Snapshot]:
+             fenced_on: Optional[str]) -> Optional[Snapshot]:
         """Store `rates`, cutting a version only if these numbers are new.
 
-        `fenced_on` is the active version this pass STARTED from — its fence. The pointer
-        moves only if that is still the active version, which makes ordering a fact about the
-        data rather than about clocks: a pass that began before another finished finds the
-        pointer moved and steps aside. `None` means "there was no version when I started";
-        omitting it skips the fence, which only a caller that never read the pointer should do.
+        `fenced_on` is required and keyword-only: every caller states, at the call site,
+        what it read at the pointer before fetching. A digest is the active version this
+        pass STARTED from — its fence — and the pointer moves only if that is still the
+        active version, which makes ordering a fact about the data rather than about
+        clocks: a pass that began before another finished finds the pointer moved and
+        steps aside. `None` means the caller read the pointer and found no active version
+        yet — the fleet's first pass — and fences on exactly that: the write only lands if
+        the pointer still has none, so two tasks cold-starting together cannot both win the
+        first version. Making the parameter required rather than defaulted is the fix: a
+        default is how the fence went unused everywhere in production while every test of
+        it passed.
 
-        Returns the stored snapshot — newly cut or already there — or `None` on failure or on
-        a lost fence. Usually zero or one write, never more than three:
+        Returns the stored snapshot — newly cut or already there — or `None` on failure or
+        on a lost fence, and never raises: a missing table name, a missing region and a
+        `ClientError` all return `None`. Usually zero or one write, never more than three:
 
         1. the version row, `attribute_not_exists`-guarded, so an unchanged table costs
            nothing and two tasks racing in the same second cannot both create it;
@@ -250,7 +274,14 @@ class SnapshotStore:
             live_classes={k: frozenset(v) for k, v in (live_classes or {}).items()},
             last_seen_at=moment,
         )
-        table = self._get_table()
+        try:
+            table = self._get_table()
+        except Exception as exc:  # noqa: BLE001 — a store failure skips the rung, it does
+            # not raise through `load()` on the next read: `_get_table()` used to sit
+            # outside this try, so a mis-deployed task (no table name, no region) raised
+            # out of a successful fetch instead of just losing the write.
+            logger.warning("price_feed_snapshot_table_unavailable", error=str(exc))
+            return None
         created = self._put_version_if_new(table, snapshot, moment)
         if created is None:
             return None
@@ -292,7 +323,7 @@ class SnapshotStore:
 
     def _advance_pointer(self, table, snapshot: Snapshot, moment: float,
                          *, version_is_new: bool,
-                         fenced_on: Optional[str] = _UNFENCED) -> Optional[Snapshot]:
+                         fenced_on: Optional[str]) -> Optional[Snapshot]:
         current = None
         try:
             current = table.get_item(Key={"pk": _PK, "sk": _POINTER_SK},
@@ -304,7 +335,7 @@ class SnapshotStore:
             first_seen = _as_float((current or {}).get("first_seen_at"),
                                    snapshot.fetched_at)
             last_seen = _as_float((current or {}).get("last_seen_at"), 0.0)
-            if moment - last_seen > _stale_after_seconds() / 2:
+            if moment - last_seen > stale_after_seconds() / 2:
                 self._touch(table, moment)
                 last_seen = moment
             return Snapshot(rates=snapshot.rates, provenance=snapshot.provenance,
@@ -327,26 +358,25 @@ class SnapshotStore:
         # stale writer reads the winner's version and then satisfies its own condition.
         # Fencing on the pass's starting point closes it without asking a client clock to be
         # right — a future-dated write would otherwise lock the pointer until the world
-        # caught up.
-        expected = active if fenced_on is _UNFENCED else fenced_on
-        condition = "attribute_not_exists(sk)"
-        values: dict[str, object] = {}
-        if isinstance(expected, str) and expected:
-            condition = "active_version = :expected"
-            values = {":expected": expected}
+        # caught up. `fenced_on is None` is still a fence, not an escape from one: it is the
+        # caller that read the pointer and found no active version, so the write must land
+        # only if that is still true — an unconditional put here would let two tasks
+        # cold-starting together both win the very first version, reopening this same hole
+        # at the one moment there is no prior version to fence on.
         try:
-            if values:
-                table.put_item(Item=item, ConditionExpression=condition,
-                               ExpressionAttributeValues=values)
+            if fenced_on is None:
+                table.put_item(Item=item,
+                               ConditionExpression="attribute_not_exists(active_version)")
             else:
-                table.put_item(Item=item, ConditionExpression=condition)
+                table.put_item(Item=item, ConditionExpression="active_version = :expected",
+                               ExpressionAttributeValues={":expected": fenced_on})
         except Exception as exc:  # noqa: BLE001
             if _is_conditional_failure(exc):
                 # Another pass moved the pointer since this one started. Its version row is
                 # stored either way, so nothing is lost; the loser steps aside rather than
                 # overwrite a decision that may rest on a newer fetch than its own.
                 logger.info("price_feed_pointer_race_lost", version=snapshot.digest,
-                            fenced_on=expected, active_now=active)
+                            fenced_on=fenced_on, active_now=active)
                 return None
             # The version row is stored, so a task that restarts reads the OLD pointer: a
             # real table, not a wrong one.
@@ -442,5 +472,15 @@ def _parse_version(item: Mapping, *, version: str,
     created_at = _as_float(item.get("created_at"), 0.0)
     first_seen = _as_float((pointer or {}).get("first_seen_at"), created_at)
     last_seen = _as_float((pointer or {}).get("last_seen_at"), created_at)
+    # The version id IS the digest of the table it names (see `digest_of`), so recomputing
+    # it here is the check that the row read back is the row that was written — a dropped
+    # or altered field above already changed `rates` without anyone deciding to. A mismatch
+    # does not fail the read: charging may still serve the surviving keys, but a dispute
+    # tool answering from this table needs to be able to refuse it, which is what the flag
+    # is for.
+    verified = digest_of(rates) == version
+    if not verified:
+        logger.warning("price_feed_snapshot_digest_mismatched", version=version)
     return Snapshot(rates=rates, provenance=provenance, fetched_at=first_seen,
-                    digest=version, live_classes=live_classes, last_seen_at=last_seen)
+                    digest=version, live_classes=live_classes, last_seen_at=last_seen,
+                    digest_verified=verified)
