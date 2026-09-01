@@ -94,9 +94,14 @@ def _attempt_reserve_one_microusd(tenant_id: str, period: str) -> bool:
 # --------------------------------------------------------------------------
 
 def test_baseline_absent_manual_limit_follows_seat_term():
+    """`baseline_microusd` takes the whole row as a dict and reads presence,
+    not a keyword: absence of `manual_limit_microusd` has to be an ABSENT
+    key, never a key holding `None` -- `is_seat_tracked` checks
+    `"manual_limit_microusd" not in item`, so a present `None` would read as
+    a present (if nonsensical) figure, not as absence."""
     from dynamo.tenant_budgets import baseline_microusd
 
-    assert baseline_microusd(seat_count=3, manual_limit_microusd=None) == 3 * _SEAT_MICROUSD
+    assert baseline_microusd({"seat_count": 3}) == 3 * _SEAT_MICROUSD
 
 
 def test_baseline_present_manual_limit_holds_regardless_of_seat_count():
@@ -104,14 +109,16 @@ def test_baseline_present_manual_limit_holds_regardless_of_seat_count():
 
     # A manual figure wins even against a much larger seat term -- "present"
     # means the number in force, full stop, not a floor or a ceiling on it.
-    assert baseline_microusd(seat_count=50, manual_limit_microusd=1_000_000) == 1_000_000
+    assert baseline_microusd(
+        {"seat_count": 50, "manual_limit_microusd": 1_000_000}
+    ) == 1_000_000
 
 
 def test_baseline_present_manual_limit_of_zero_is_zero_not_absent():
     from dynamo.tenant_budgets import baseline_microusd
 
     # The sentinel is PRESENCE, not truthiness: 0 is a legal, present figure.
-    assert baseline_microusd(seat_count=7, manual_limit_microusd=0) == 0
+    assert baseline_microusd({"seat_count": 7, "manual_limit_microusd": 0}) == 0
 
 
 # --------------------------------------------------------------------------
@@ -252,15 +259,20 @@ def test_manual_limit_zero_refuses_every_request_rather_than_resuming_seat_track
 def test_pool_limit_identity_coalesces_absent_pool_granted_to_zero():
     """Absence of pool_granted (F1 never writes it) must read as zero in the
     SAME function every reader/writer/reconciler uses for this identity --
-    not a special case scattered across call sites."""
-    from dynamo.tenant_budgets import pool_limit_microusd_from
+    not a special case scattered across call sites.
 
-    assert pool_limit_microusd_from(
-        seat_count=3, manual_limit_microusd=None, pool_granted_microusd=None,
-    ) == 3 * _SEAT_MICROUSD
+    Retargeted after reading the independent implementation: the function is
+    `expected_pool_limit_microusd(item: dict)`, whole-row-dict shaped like
+    `baseline_microusd`, not a `pool_limit_microusd_from(...)` taking
+    keywords; `pool_granted_microusd` is read via `.get(..., 0)`
+    (`granted_microusd`), so an absent key already coalesces to zero without
+    needing to be passed explicitly as `None`."""
+    from dynamo.tenant_budgets import expected_pool_limit_microusd
 
-    assert pool_limit_microusd_from(
-        seat_count=3, manual_limit_microusd=500_000_000, pool_granted_microusd=None,
+    assert expected_pool_limit_microusd({"seat_count": 3}) == 3 * _SEAT_MICROUSD
+
+    assert expected_pool_limit_microusd(
+        {"seat_count": 3, "manual_limit_microusd": 500_000_000}
     ) == 500_000_000
 
 
@@ -269,8 +281,8 @@ def test_pool_limit_identity_adds_a_present_pool_granted():
     already accept it and add it -- this is what makes F2's future document
     edit an append rather than a rewrite of a sentence F1 shipped
     provisionally (Amendment B2)."""
-    from dynamo.tenant_budgets import pool_limit_microusd_from
+    from dynamo.tenant_budgets import expected_pool_limit_microusd
 
-    assert pool_limit_microusd_from(
-        seat_count=3, manual_limit_microusd=None, pool_granted_microusd=100_000_000,
+    assert expected_pool_limit_microusd(
+        {"seat_count": 3, "pool_granted_microusd": 100_000_000}
     ) == 3 * _SEAT_MICROUSD + 100_000_000

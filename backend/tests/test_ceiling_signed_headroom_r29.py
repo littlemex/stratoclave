@@ -102,7 +102,7 @@ def test_pool_response_over_ceiling_by_field_reports_the_deficit(dynamodb_mock, 
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["remaining_microusd"] == -50_000_000
-    assert body.get("over_ceiling_by_microusd") == 50_000_000, (
-        f"expected a positive over_ceiling_by_microusd of 50_000_000, got "
-        f"{body.get('over_ceiling_by_microusd')!r} (body: {body})"
+    assert body.get("over_ceiling_microusd") == 50_000_000, (
+        f"expected a positive over_ceiling_microusd of 50_000_000, got "
+        f"{body.get('over_ceiling_microusd')!r} (body: {body})"
     )

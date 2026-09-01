@@ -44,30 +44,55 @@ def _seed_row(tenant_id: str, period: str, *, seat_count: int) -> None:
     })
 
 
-def test_first_boot_seeds_the_stored_rate_from_the_configured_value(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import assert_seat_rate_in_force, stored_seat_rate_usd
+def test_a_never_migrated_process_has_no_stored_rate_and_the_check_is_a_permanent_no_op(
+    monkeypatch, dynamodb_mock,
+):
+    """A real caveat, found by running this file's first draft against the
+    independent implementation, not a test bug: `assert_seat_rate_in_force`
+    never seeds anything by itself. Only `phase_m1_add_attributes` (or
+    `TenantBudgetsRepository.record_rate_in_force` directly) records the rate
+    in force. So a fleet that has never run M1 has `rate_in_force_microusd()`
+    return `None` forever, and this check is a standing no-op regardless of
+    what the process is configured with -- "refuses to start" becomes true
+    only AFTER M1 has run once. This is correct given M1 is mandatory
+    infrastructure, and it is documented in the runbook rather than fixed
+    here; this test pins the no-op as the current, intended behaviour."""
+    from dynamo.tenant_budgets import TenantBudgetsRepository, assert_seat_rate_in_force
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
-    assert stored_seat_rate_usd() is None, "fixture sanity: nothing seeded yet"
+    assert TenantBudgetsRepository().rate_in_force_microusd() is None, (
+        "fixture sanity: nothing seeded yet"
+    )
 
-    assert_seat_rate_in_force()  # must not raise -- nothing to conflict with yet
+    assert assert_seat_rate_in_force() is None  # nothing recorded -- must not raise
 
-    assert stored_seat_rate_usd() == 200
+    # And it is STILL nothing, regardless of the configured value: no seeding
+    # happened, so a second boot at a totally different rate is equally a
+    # no-op, not a mismatch.
+    monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "9999")
+    assert assert_seat_rate_in_force() is None
+    assert TenantBudgetsRepository().rate_in_force_microusd() is None
 
 
 def test_a_second_boot_at_the_same_rate_is_a_silent_no_op(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import assert_seat_rate_in_force
+    from dynamo.tenant_budgets import TenantBudgetsRepository, assert_seat_rate_in_force
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
+    TenantBudgetsRepository().record_rate_in_force(rate_microusd=200_000_000)
     assert_seat_rate_in_force()
     assert_seat_rate_in_force()  # a second, ordinary boot -- must not raise
 
 
 def test_a_mismatched_rate_refuses_to_start_with_a_named_error(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import SeatRateMismatchError, assert_seat_rate_in_force
+    """Requires a REAL recorded rate to test the refusal against -- the check
+    itself never seeds one (see the permanent-no-op test above), so this
+    seeds it directly via the same repository method the migration uses."""
+    from dynamo.tenant_budgets import (
+        SeatRateMismatchError, TenantBudgetsRepository, assert_seat_rate_in_force,
+    )
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
-    assert_seat_rate_in_force()  # seed at 200
+    TenantBudgetsRepository().record_rate_in_force(rate_microusd=200_000_000)
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "250")  # a config drift
     monkeypatch.delenv("STRATOCLAVE_SEAT_RATE_MIGRATION", raising=False)
@@ -84,10 +109,10 @@ def test_a_mismatched_rate_refuses_to_start_with_a_named_error(monkeypatch, dyna
 
 
 def test_the_migration_flag_is_the_named_escape_hatch(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import assert_seat_rate_in_force
+    from dynamo.tenant_budgets import TenantBudgetsRepository, assert_seat_rate_in_force
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
-    assert_seat_rate_in_force()
+    TenantBudgetsRepository().record_rate_in_force(rate_microusd=200_000_000)
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "250")
     monkeypatch.setenv("STRATOCLAVE_SEAT_RATE_MIGRATION", "1")
@@ -127,11 +152,11 @@ def test_migration_recomputes_every_seat_tracked_row_and_leaves_a_manual_row_unt
     )
 
     assert summary["recomputed"] == 1
-    assert summary["skipped_manual"] == 1
+    assert summary["untouched_operator_figures"] == 1
 
-    from dynamo.tenant_budgets import stored_seat_rate_usd
-
-    assert stored_seat_rate_usd() == 250, "the stored rate must move only after every row does"
+    assert TenantBudgetsRepository().rate_in_force_microusd() == 250 * 1_000_000, (
+        "the stored rate must move only after every row does"
+    )
 
 
 # ---------------------------------------------------------------------------
