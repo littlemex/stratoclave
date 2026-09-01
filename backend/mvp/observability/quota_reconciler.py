@@ -412,6 +412,23 @@ def handler(event=None, context=None):  # noqa: ARG001 -- Lambda signature
     summary["PoolCeilingChecksMissing"] = len(summary["checks_missing"])
     summary["PoolCeilingNotices"] = summary["notices"]
     print(json.dumps(summary, default=str))
+
+    # One line per defect, each naming its tenant. The summary above is what the
+    # alarm counts; these are what the person the alarm woke up reads. The
+    # tenant_id is on the LINE and never a metric dimension, because a dimension
+    # per tenant on a filter over every log line is unbounded cardinality -- so
+    # the alarm says "somewhere" and one query over these says where.
+    for f in summary["defect_detail"]:
+        print(json.dumps({
+            "event": "pool_ceiling_defect",
+            "tenant_id": f["tenant_id"],
+            "period": f["period"],
+            "check": f["check"],
+            "detail": f["detail"],
+            "observed": f["observed"],
+            "expected": f["expected"],
+            "defects": 1,
+        }, default=str))
     return summary
 
 

@@ -783,8 +783,10 @@ class TenantBudgetsRepository:
     def pool_item_size_bytes(self, tenant_id: str, period: str) -> Optional[int]:
         """Estimated stored size of the pool item (or None if absent). The canary
         detector for the item-growth regression the separate-item marker fixed: a
-        healthy pool item is a handful of fixed counters (< ~200 B) and MUST NOT
-        grow with the number of holds. Emit as a gauge; alarm above a small ceiling.
+        healthy pool item holds exactly the attributes POOL_ROW_ATTRIBUTES declares
+        and MUST NOT grow with the number of holds. The bound to compare against is
+        `max_pool_row_bytes()`, derived from that declaration, so it moves with a
+        schema change instead of going stale; emit both as a gauge.
         Eventually-consistent read (Fable E-phase review Q2): a monitoring gauge does
         not need the current instant — an eventually-consistent GetItem halves RCU
         and loses nothing for this signal."""

@@ -1778,10 +1778,22 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
     # the deductive argument assumes away. Best-effort; never fails reconcile.
     pool_item_bytes = None
     try:
+        from dynamo.tenant_budgets import max_pool_row_bytes
+
         pool_item_bytes = budgets.pool_item_size_bytes(tenant_id, period)
         if pool_item_bytes is not None:
+            # The declared bound travels WITH the observation, so the alarm on it
+            # compares the row to its own declaration rather than to a threshold
+            # somebody typed once. A hand-picked figure is calibrated to the row
+            # shape that existed when it was typed, and the next schema change
+            # makes it fire on growth that change intended -- which is
+            # indistinguishable from a regression unless you remember which shape
+            # was measured.
+            declared = max_pool_row_bytes()
             logger.info("pool_item_size", tenant_id=tenant_id, period=period,
-                        size_bytes=pool_item_bytes)
+                        size_bytes=pool_item_bytes,
+                        declared_max_bytes=declared,
+                        over_declared_bytes=max(pool_item_bytes - declared, 0))
     except Exception:  # noqa: BLE001 — the gauge is observability, never money
         pass
     if recovered or stale_markers_settled:

@@ -308,8 +308,14 @@ export class EcsStack extends cdk.Stack {
       alarmDescription:
         'PENDING protocol: the hot pool item exceeded its expected small/flat size — a code regression may have reintroduced per-hold growth on it (the rejected marker-in-pool-item design). Investigate before growth degrades write latency.',
       metric: poolSizeMf.metric({ statistic: 'Maximum', period: cdk.Duration.minutes(5) }),
-      // A healthy pool item is a handful of fixed counters (<~200B). 2KB is a
-      // generous ceiling that still catches unbounded growth long before it bites.
+      // This one catches UNBOUNDED growth — the rejected map design, whose failure
+      // is orders of magnitude — so a generous absolute ceiling is the right shape
+      // for it and 2 KB still bites long before write latency does. It is NOT the
+      // detector for the row holding one attribute more than it should: that
+      // difference is tens of bytes, an absolute figure typed here would be
+      // calibrated to whichever row shape existed when it was typed, and the next
+      // schema change would make it fire on growth that change intended. The
+      // PoolRowBeyondDeclaration alarm below is the tight, derived one.
       threshold: 2048,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       // 1/1, NOT 3/3 (Fable E-phase review Bug-1): `pool_item_size` is emitted only
@@ -318,6 +324,44 @@ export class EcsStack extends cdk.Stack {
       // NOT_BREACHING would make the alarm structurally unable to reach ALARM.
       // Item-size growth is monotonic and does not flap, so a single over-threshold
       // datapoint IS the real regression: alarm immediately.
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // The tight bound, and it is DERIVED rather than configured. The backend emits
+    // `over_declared_bytes` alongside the gauge — the observed row size minus the
+    // width its own closed-world declaration allows — so this alarm's threshold is
+    // zero forever and the calibration lives with the schema. A schema change moves
+    // the bound with it; nothing here has to be remembered or re-measured.
+    //
+    // What it catches that the 2 KB alarm cannot: an attribute being written to the
+    // pool row that the declaration does not classify. That is tens of bytes, so it
+    // is invisible under a generous absolute ceiling, and it is precisely the case
+    // where the rollover does not know whether to carry the attribute, no
+    // reconciler check covers it, and the size accounting does not count it.
+    const poolOverDeclaredMf = logGroup.addMetricFilter('PoolRowOverDeclaredMF', {
+      filterName: `${prefix}-pool-row-over-declared`,
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.event', '=', 'pool_item_size'),
+        logs.FilterPattern.exists('$.over_declared_bytes'),
+      ),
+      metricNamespace: METRIC_NS,
+      metricName: 'PoolRowOverDeclaredBytes',
+      metricValue: '$.over_declared_bytes',
+      // No defaultValue, same reason as the gauge above.
+    });
+    new cloudwatch.Alarm(this, 'PoolRowBeyondDeclaration', {
+      alarmName: `${prefix}-PoolRowBeyondDeclaration`,
+      alarmDescription:
+        'A tenant pool row is stored wider than its own closed-world declaration allows. Either an attribute is being written that the declaration does not classify, or one holds a wider value than declared. Both mean the row has grown outside what the period rollover, the reconciler checks and the size accounting know about — so the next boundary may drop it, no check compares it to anything, and the measured worst case is not the row that ships.',
+      metric: poolOverDeclaredMf.metric({
+        statistic: 'Maximum', period: cdk.Duration.minutes(5),
+      }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      // Same 1/1 reasoning as the gauge: emitted once per reconcile, monotonic,
+      // does not flap.
       evaluationPeriods: 1,
       datapointsToAlarm: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

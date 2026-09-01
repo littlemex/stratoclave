@@ -23,6 +23,7 @@ import { CognitoStack } from '../lib/cognito-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
 import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
 import { CertificateSchedulerStack } from '../lib/certificate-scheduler-stack';
+import { QuotaReconcilerStack } from '../lib/quota-reconciler-stack';
 import { WafStack } from '../lib/waf-stack';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -682,6 +683,31 @@ if (app.node.tryGetContext('certificateScheduler') === true ||
     });
   certificateSchedulerStack.addDependency(ecrStack);
   certificateSchedulerStack.addDependency(dynamoDBStack);
+}
+
+// Daily tenant pool-ceiling reconciler. Its OWN stack, on the same convention as
+// the projector and the certificate scheduler above: every scheduled job in this
+// repository is its own stack, and putting this one on the service stack would
+// have made it the exception. Same posture too — gated behind the
+// `quotaReconciler` context flag, inert until the Lambda image exists.
+let quotaReconcilerStack: QuotaReconcilerStack | undefined;
+if (app.node.tryGetContext('quotaReconciler') === true ||
+    app.node.tryGetContext('quotaReconciler') === 'true') {
+  quotaReconcilerStack = new QuotaReconcilerStack(
+    app, stackName(prefix, 'quota-reconciler'), {
+      env,
+      prefix,
+      lambdaRepository: ecrStack.repository,
+      lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+      tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+      // The seat counts the pool rows are compared AGAINST. The reconciler exists
+      // because an equation over the pool row alone cannot see a membership delta
+      // applied twice, so the membership table is not optional here.
+      userTenantsTable: dynamoDBStack.userTenantsTable,
+      description: `[${prefix}] Daily tenant pool-ceiling reconciliation against sources`,
+    });
+  quotaReconcilerStack.addDependency(ecrStack);
+  quotaReconcilerStack.addDependency(dynamoDBStack);
 }
 
 // --- 8. Backend Config (static Parameter Store values) ---
