@@ -45,7 +45,7 @@ from typing import Optional
 
 from core.logging import get_logger
 
-from .base import Card, FeedRequest, FeedResult
+from .base import STRATOCLAVE_REGION_ENV, Card, FeedRequest, FeedResult
 from .dimensions import EXCLUDED, parse_agreement_dimension, per_mtok
 
 logger = get_logger(__name__)
@@ -55,7 +55,7 @@ NAME = "bedrock-agreement"
 # The API is region-independent (see the module docstring), so the client region is
 # an operational choice, not a pricing one: use the deployment's own region so the
 # call stays inside it.
-_REGION_ENV = "STRATOCLAVE_REGION"
+_REGION_ENV = STRATOCLAVE_REGION_ENV
 _DEFAULT_REGION = "us-east-1"
 
 # One call per model, and a registry of twenty models took ~40 s in sequence against
@@ -89,17 +89,34 @@ class AgreementFeed:
         self._client = client
         self._region = region or os.getenv(_REGION_ENV) or _DEFAULT_REGION
 
-    def _bedrock(self):
-        if self._client is None:
-            import boto3
+    def _bedrock(self, request: FeedRequest):
+        if self._client is not None:
+            # Injected (tests, an embedding caller): this feed does not own its
+            # timeouts and must not silently override what the caller built.
+            return self._client
+        import boto3
+        from botocore.config import Config
 
-            self._client = boto3.client("bedrock", region_name=self._region)
-        return self._client
+        # Built fresh per pass, sized to THIS pass's remaining budget, rather than
+        # cached: the composite calls `fetch()` with a different budget for a
+        # request-path refresh than for the ops CLI's `refresh()`, and a client
+        # cached from the first call would carry the wrong one for every pass after
+        # it. `standard` retry mode backs off on throttling without also retrying a
+        # call that is already the reason a pass is late; two attempts bounds the
+        # worst case to roughly twice the per-call timeout instead of botocore's
+        # default of many.
+        timeout = request.remaining_seconds()
+        # `total_max_attempts` (not `max_attempts`, which counts RETRIES after the
+        # initial call, so `max_attempts=2` would mean three attempts) is also what
+        # botocore prefers, since it is the same key `AWS_MAX_ATTEMPTS` sets.
+        config = Config(connect_timeout=timeout, read_timeout=timeout,
+                        retries={"total_max_attempts": 2, "mode": "standard"})
+        return boto3.client("bedrock", region_name=self._region, config=config)
 
     def fetch(self, request: FeedRequest) -> FeedResult:
         result = FeedResult()
         try:
-            client = self._bedrock()
+            client = self._bedrock(request)
         except Exception as exc:  # noqa: BLE001 — no client, no prices; not fatal.
             result.note_error(f"cannot construct bedrock client: {exc}")
             return result
@@ -125,6 +142,15 @@ class AgreementFeed:
                         result.not_authorized.add(model_id)
                     else:
                         result.note_model_error(model_id, message)
+                    if request.out_of_time():
+                        # The call started before the deadline (or it would have been
+                        # skipped above) but the deadline passed while it was in
+                        # flight — a stall the client's own `Config` timeout eventually
+                        # cut off. The pass ran longer than its budget even though
+                        # nothing here was skipped, and that must read the same as a
+                        # skip: `truncated` is about how long the pass took, not about
+                        # which calls it declined to make.
+                        result.truncated = True
                 return
             with lock:
                 card = _parse_offers(response, result)
@@ -136,6 +162,11 @@ class AgreementFeed:
                     # silent empty.
                     result.note_model_error(
                         model_id, "rate card produced no chargeable slot")
+                if request.out_of_time():
+                    # Same reasoning as the exception branch: a call that returns
+                    # (successfully, this time) after the deadline still means the pass
+                    # overran its budget.
+                    result.truncated = True
 
         workers = max(1, min(_worker_count(), len(wanted) or 1))
         if workers == 1:

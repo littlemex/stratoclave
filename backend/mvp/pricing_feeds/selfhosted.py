@@ -44,7 +44,7 @@ from typing import Optional
 from core.logging import get_logger
 
 from .base import Card, FeedRequest, FeedResult
-from .dimensions import SCOPES, RateDimension
+from .dimensions import SCOPES, RateDimension, base_model_id
 
 logger = get_logger(__name__)
 
@@ -63,14 +63,17 @@ class SelfHostedFeed:
 
     def __init__(self, path: Optional[str] = None, *, registry=None) -> None:
         self._path = path
-        self._registry = registry
+        # The registry the composite was constructed with. No fallback to the global
+        # registry here: `LivePriceSource._entries()` already owns resolving "the
+        # global registry, unless a caller supplied its own", and a second copy of
+        # that fallback in this feed is how the two disagree about which registry is
+        # in force. A composite that wants this feed to see the global registry
+        # passes it explicitly (`SelfHostedFeed(registry=self._entries())`); an empty
+        # registry here answers nothing rather than guessing.
+        self._registry = registry or ()
 
     def _entries(self):
-        if self._registry is not None:
-            return self._registry
-        from ..models import registry_entries
-
-        return registry_entries()
+        return self._registry
 
     def _document_path(self) -> Optional[str]:
         return self._path or os.getenv(PATH_ENV) or None
@@ -83,21 +86,31 @@ class SelfHostedFeed:
         # Which of the asked-about models are self-hosted at all. A Bedrock model is
         # not this feed's business, and saying so lets the composite tell "no feed
         # owns this model" from "this feed had nothing to say".
+        #
+        # `request.model_ids` is keyed on the id the PRICE APIs know a model by
+        # (`price_model_id` when the registry declares one, else `bedrock_model_id`
+        # with any inference-profile prefix stripped) — the same resolution the
+        # composite applies before building the request. Matching on the invoked
+        # `bedrock_model_id` instead would silently drop any self-hosted entry that
+        # declares a billing id, so the same resolution is repeated here rather than
+        # matching on the registry's own spelling.
         by_endpoint: dict[str, list[str]] = {}
         for entry in self._entries():
-            if entry.bedrock_model_id not in model_ids:
+            price_id = getattr(entry, "price_model_id", None) or base_model_id(
+                entry.bedrock_model_id)
+            if price_id not in model_ids:
                 continue
             if getattr(entry, "served_by", "bedrock") == "bedrock":
-                result.out_of_scope.add(entry.bedrock_model_id)
+                result.out_of_scope.add(price_id)
                 continue
             key = getattr(entry, "endpoint_key", None)
             if not key:
                 # A semantic-router pool entry has no endpoint of its own; it is
                 # priced at whatever the executed model costs, which is another
                 # feed's answer.
-                result.out_of_scope.add(entry.bedrock_model_id)
+                result.out_of_scope.add(price_id)
                 continue
-            by_endpoint.setdefault(key, []).append(entry.bedrock_model_id)
+            by_endpoint.setdefault(key, []).append(price_id)
         if not by_endpoint:
             return result
         path = self._document_path()
@@ -171,8 +184,10 @@ def _card_for(declared: dict[str, Decimal]) -> Card:
     Self-hosted capacity has no region-differentiated list price and no
     global-versus-geo distinction, so the same number answers whatever the selector
     asks for. Cache classes are published as an explicit zero rather than omitted:
-    omitting them would make `dimensions.select` refuse the model (its completeness rule),
-    and the zero here is a fact about vLLM, not an absence of data.
+    omitting them would make `dimensions.select` report them as absent, and the
+    caller would fall the leg through to the snapshot or the bundled floor instead —
+    a nonzero price for tokens vLLM does not split out at all. The zero here is a
+    fact about vLLM, not an absence of data.
     """
     card: Card = {}
     for scope in SCOPES:

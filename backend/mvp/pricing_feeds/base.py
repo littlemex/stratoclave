@@ -20,14 +20,34 @@ that can change shape without notice:
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Optional, Protocol, runtime_checkable
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 from .dimensions import RateDimension
 
 # model id -> {(region_code_or_None, RateDimension): USD per million tokens}
 Card = dict[tuple[Optional[str], RateDimension], Decimal]
+
+# The deployment's own region. Read by `agreement.py` (where the API is
+# region-independent, so this is purely an operational choice of which endpoint to
+# call) and by `price_list.py` (as the fallback when no candidate regions were
+# passed in). Named once, here, rather than as a string literal in each module, so
+# the two cannot drift into reading two different environment variables under a
+# comment that claims they read one.
+STRATOCLAVE_REGION_ENV = "STRATOCLAVE_REGION"
+
+# A client built with a zero or negative timeout either raises at construction
+# (botocore requires a positive `connect_timeout`) or gives up before the socket
+# opens. The between-call check (`out_of_time`) is what actually stops a spent pass
+# from starting a new call, so this floor only has to keep a client from being built
+# with a timeout botocore will refuse.
+MIN_CLIENT_TIMEOUT_SECONDS = 1.0
+# Used only when a feed is asked with no deadline at all — a fetch on the request
+# path always carries one; this is for a direct call (a script, a test) that does
+# not.
+DEFAULT_CLIENT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -42,18 +62,36 @@ class FeedRequest:
       registry (an inference-profile prefix stripped, or a declared billing id used).
     - `regions`: the regions this deployment can dispatch to, so a feed with a
       per-region catalogue does not download the world.
-    - `deadline`: a `time.time()`-comparable instant to stop at, or `None` for no bound.
-      An instant rather than a duration so it survives being passed down a chain.
+    - `deadline`: an instant to stop at, comparable against `clock()`, or `None` for no
+      bound. An instant rather than a duration so it survives being passed down a chain.
+    - `clock`: a zero-argument callable returning a float on the **same time source**
+      `deadline` was computed on, defaulting to `time.monotonic`. `deadline` and `clock`
+      must come from one source — comparing a monotonic deadline against `time.time()`
+      (or the reverse) does not raise, it just answers wrong, which is worse: a monotonic
+      deadline read against wall time can be arbitrarily far from now in either
+      direction, so `out_of_time()` can come back true on the first check of a fresh
+      pass, or never come back true at all.
     """
 
     model_ids: frozenset[str]
     regions: frozenset[str] = frozenset()
     deadline: Optional[float] = None
+    clock: Callable[[], float] = time.monotonic
 
     def out_of_time(self) -> bool:
-        import time
+        return self.deadline is not None and self.clock() >= self.deadline
 
-        return self.deadline is not None and time.time() >= self.deadline
+    def remaining_seconds(self) -> float:
+        """Seconds left in the budget, for sizing a client's own connect/read timeout.
+
+        Floored at `MIN_CLIENT_TIMEOUT_SECONDS` rather than left to reach zero or go
+        negative, and read on `clock` rather than `time.time()` for the same reason
+        `out_of_time()` is: the deadline is only meaningful against the source it was
+        computed on.
+        """
+        if self.deadline is None:
+            return DEFAULT_CLIENT_TIMEOUT_SECONDS
+        return max(self.deadline - self.clock(), MIN_CLIENT_TIMEOUT_SECONDS)
 
 
 @dataclass
@@ -63,9 +101,12 @@ class FeedResult:
     cards: dict[str, Card] = field(default_factory=dict)
     # Model ids this feed established are not its business (for the agreement feed:
     # the API answered "agreement not supported", which is how AWS says "this model
-    # is billed by AWS, not through Marketplace"). Distinct from a model the feed
-    # merely failed to read, because the composite uses it to decide whether another
-    # feed still owes an answer.
+    # is billed by AWS, not through Marketplace"; for the Price List feed: a full,
+    # untruncated scan that never turned up a row for the model). Distinct from a
+    # model the feed merely failed to read, because the composite uses it to decide
+    # whether a truncated feed still owes an answer for that model. Mutually
+    # exclusive with `incomplete_models` for the same reason: a model this feed has
+    # established as not its own is never also one it still owes an answer for.
     out_of_scope: set[str] = field(default_factory=set)
     # Names the feed recognised as prices but could not map to a RateDimension. Counted per
     # feed rather than logged per name: a renamed grammar produces thousands.

@@ -24,12 +24,11 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from typing import Iterable, Optional
 
 from core.logging import get_logger
 
-from .base import Card, FeedRequest, FeedResult
+from .base import STRATOCLAVE_REGION_ENV, Card, FeedRequest, FeedResult
 from .dimensions import EXCLUDED, parse_price_list_usagetype, per_mtok
 
 logger = get_logger(__name__)
@@ -40,8 +39,9 @@ NAME = "bedrock-price-list"
 # the endpoint is an availability choice and never affects the answer.
 ENDPOINT_REGION_ENV = "STRATOCLAVE_PRICE_LIST_REGION"
 _DEFAULT_ENDPOINT_REGION = "us-east-1"
-# The deployment's own region, named once. `agreement.py` reads the same variable.
-REGION_ENV = "STRATOCLAVE_REGION"
+# The deployment's own region, named once in `base.py`. `agreement.py` reads the
+# same constant.
+REGION_ENV = STRATOCLAVE_REGION_ENV
 # Bedrock prices are spread across several offer codes and a model can move between
 # them: `AmazonBedrockService` carries Sonnet 4 / 4.5 / Haiku 4.5 while `AmazonBedrock`
 # carries the mantle families. Reading more than one costs pages, not correctness — a row
@@ -71,12 +71,24 @@ class PriceListFeed:
         # download the whole world's prices on every refresh.
         self._regions = tuple(regions or ())
 
-    def _pricing(self):
-        if self._client is None:
-            import boto3
+    def _pricing(self, request: FeedRequest):
+        if self._client is not None:
+            # Injected (tests, an embedding caller): leave whatever timeout the
+            # caller built it with alone.
+            return self._client
+        import boto3
+        from botocore.config import Config
 
-            self._client = boto3.client("pricing", region_name=self._endpoint_region)
-        return self._client
+        # Same reasoning as `AgreementFeed._bedrock`: built fresh per pass, sized to
+        # this pass's remaining budget, rather than cached across passes that may
+        # carry a different budget.
+        timeout = request.remaining_seconds()
+        # Same key choice as `AgreementFeed._bedrock`: `total_max_attempts`, not
+        # `max_attempts`, which counts retries after the initial call rather than the
+        # total.
+        config = Config(connect_timeout=timeout, read_timeout=timeout,
+                        retries={"total_max_attempts": 2, "mode": "standard"})
+        return boto3.client("pricing", region_name=self._endpoint_region, config=config)
 
     def fetch(self, request: FeedRequest) -> FeedResult:
         model_ids = request.model_ids
@@ -84,7 +96,7 @@ class PriceListFeed:
         if not model_ids:
             return result
         try:
-            client = self._pricing()
+            client = self._pricing(request)
         except Exception as exc:  # noqa: BLE001
             result.note_error(f"cannot construct pricing client: {exc}")
             return result
@@ -103,24 +115,25 @@ class PriceListFeed:
                     result.note_error(
                         f"{region}: stopped at the fetch budget before offer {offer}")
                     break
-                self._fetch_region(client, offer, region, model_ids, result,
-                                  request.deadline)
+                self._fetch_region(client, offer, region, model_ids, result, request)
         for model_id in sorted(model_ids):
-            if model_id not in result.cards:
-                # Not an error: the Price List does not carry every model (the whole
-                # reason the agreement feed exists). The composite decides what to do
-                # with a model no feed could price.
-                result.out_of_scope.add(model_id)
+            if model_id in result.cards or model_id in result.incomplete_models:
+                # A card answers for it, or this pass already said it does not know
+                # whether the model is ours — either way "not our business" would be
+                # false. Only a model this scan actually got all the way through
+                # without ever finding a row for it is established as out of scope.
+                continue
+            result.out_of_scope.add(model_id)
         return result
 
     def _fetch_region(self, client, offer: str, region: str, model_ids: frozenset[str],
-                     result: FeedResult, deadline: Optional[float] = None) -> None:
+                     result: FeedResult, request: FeedRequest) -> None:
         token = None
         pages = 0
         max_pages = _max_pages()
         while pages < max_pages:
             pages += 1
-            if deadline is not None and time.time() >= deadline:
+            if request.out_of_time():
                 result.truncated = True
                 result.incomplete_models.update(model_ids)
                 result.note_error(f"{offer}/{region}: stopped at the fetch budget after "
@@ -143,6 +156,15 @@ class PriceListFeed:
                 result.incomplete_models.update(model_ids)
                 result.note_error(f"{offer}/{region}: get_products failed: {exc}")
                 return
+            if request.out_of_time():
+                # The call returned (successfully) after the deadline had already
+                # passed — a stall the client's own `Config` timeout eventually cut
+                # off. Nothing here was skipped, but the pass still ran longer than
+                # its budget, and that must read the same as a skip.
+                result.truncated = True
+                result.incomplete_models.update(model_ids)
+                result.note_error(
+                    f"{offer}/{region}: get_products returned after the fetch budget")
             for raw in response.get("PriceList", ()):
                 _absorb_product(raw, model_ids, result)
             token = response.get("NextToken")
