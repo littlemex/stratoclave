@@ -42,12 +42,17 @@ def test_the_declaration_exists_and_covers_every_attribute_f1_itself_writes():
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
     # The row shape this file (and R1/R2/R8/R16/R20's own tests) actually
-    # write, in FINAL (post-M4, no `sizing`) form.
+    # write, in FINAL (post-M4, no `sizing`) form. `seat_rate_microusd`, not
+    # `seat_monthly_usd` -- fixed after re-verifying against the
+    # implementation post-merge: the mapping conversion this test was
+    # waiting for landed, and it exposed that this file's OWN attribute name
+    # was stale (a second, independent bug the earlier tuple-shape failure
+    # had been masking).
     expected = {
         "tenant_id", "sk",
         "pool_limit_microusd", "pool_headroom_microusd",
         "pool_reserved_microusd", "pool_settled_microusd",
-        "seat_count", "manual_limit_microusd", "seat_monthly_usd",
+        "seat_count", "manual_limit_microusd", "seat_rate_microusd",
         "status", "version", "updated_at",
     }
     missing = expected - set(POOL_ROW_ATTRIBUTES)
@@ -56,21 +61,25 @@ def test_the_declaration_exists_and_covers_every_attribute_f1_itself_writes():
 
 def test_every_entry_is_well_formed():
     """Every entry states a rollover class, at least one writer, and either
-    a reconciler check or an explicit, reasoned exemption -- an entry with
+    a covering check or an explicit, reasoned exemption -- an entry with
     neither is the same gap this whole mechanism exists to close, one level
-    up."""
+    up.
+
+    Field names fixed after re-verifying against the implementation
+    post-merge: `PoolAttribute` has `check`/`exemption` (a single
+    `Optional[str]` field each, mutually exclusive by construction), not
+    `reconciler_check`/`exempt`/`exempt_reason` -- another bug the earlier
+    tuple-shape `AttributeError` had been masking."""
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
     bad = []
     for name, spec in POOL_ROW_ATTRIBUTES.items():
-        if spec.rollover not in ("carried", "reset"):
-            bad.append(f"{name}: rollover={spec.rollover!r} is not carried/reset")
+        if spec.rollover not in ("carried", "derived", "reset"):
+            bad.append(f"{name}: rollover={spec.rollover!r} is not carried/derived/reset")
         if not spec.writers:
             bad.append(f"{name}: no writers declared")
-        if spec.reconciler_check is None and not spec.exempt:
-            bad.append(f"{name}: no reconciler_check and not exempt")
-        if spec.exempt and not spec.exempt_reason:
-            bad.append(f"{name}: exempt with no reason given")
+        if bool(spec.check) == bool(spec.exemption):
+            bad.append(f"{name}: exactly one of check/exemption must be set")
     assert not bad, "malformed POOL_ROW_ATTRIBUTES entries:\n" + "\n".join(bad)
 
 
@@ -112,10 +121,20 @@ def test_assert_row_fully_classified_catches_an_unclassified_attribute():
 def test_pool_granted_itself_is_not_pre_registered_by_f1():
     """B1's declaration is closed-world over what F1 writes; it is not F1's
     job to pre-classify F2's own attribute on F2's behalf (that registration,
-    and the merge-time failure if it is skipped, belongs to F2's own PR)."""
+    and the merge-time failure if it is skipped, belongs to F2's own PR).
+
+    Fixed after re-verifying against the implementation post-merge: this
+    checked the bare string `"pool_granted"`, but the real attribute (once
+    F2 adds it) is `"pool_granted_microusd"` -- a THIRD bug the tuple-shape
+    failure had been masking. The bare-string check passed both before and
+    after the mapping conversion, but for the wrong reason each time: before,
+    because a string can never equal a `PoolAttribute`; after, because it was
+    checking a name nothing was ever going to use. Checking the real name is
+    what makes this test capable of failing when F2 actually adds the
+    attribute without registering it -- the one thing it claims to prove."""
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
-    assert "pool_granted" not in POOL_ROW_ATTRIBUTES, (
-        "F1 must not pre-register pool_granted -- classifying it is F2's "
-        "own merge-time obligation, which is the whole point of B1's design"
+    assert "pool_granted_microusd" not in POOL_ROW_ATTRIBUTES, (
+        "F1 must not pre-register pool_granted_microusd -- classifying it is "
+        "F2's own merge-time obligation, which is the whole point of B1's design"
     )

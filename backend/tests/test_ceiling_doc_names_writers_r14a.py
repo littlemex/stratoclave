@@ -118,14 +118,21 @@ def test_limits_doc_names_every_writer_the_declaration_lists():
     `apply`/`expiry_revoke`/`early_revoke`/`repair` writers for
     `pool_granted` without anyone updating this file, which is exactly the
     "green test over an incomplete document" B5 exists to prevent.
-    Sentinel writer markers (`__key__`, `__all_writers__`) are not real
-    function names and are excluded."""
+    Sentinel/placeholder writer markers are not real function names and are
+    excluded -- fixed after re-verifying against the implementation
+    post-merge: the real placeholders are parenthetical strings like
+    `"(F2: the grant apply and revoke writers)"` and
+    `"(every writer in this module stamps it)"`, not the `__key__`/
+    `__all_writers__` sentinels this test invented before the real module
+    existed to check against. Filtered the same way the module's own
+    `ceiling_writers()` does (`not w.startswith("(")`), so this test's
+    notion of "a real writer" matches the declaration's own."""
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
     all_writers: set[str] = set()
     for spec in POOL_ROW_ATTRIBUTES.values():
         all_writers.update(spec.writers)
-    all_writers -= {"__key__", "__all_writers__"}
+    all_writers = {w for w in all_writers if not w.startswith("(")}
     assert all_writers, "POOL_ROW_ATTRIBUTES declares no real writers at all"
 
     text = _limits_text()
