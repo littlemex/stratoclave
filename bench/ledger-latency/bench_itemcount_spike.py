@@ -202,6 +202,7 @@ def main(argv=None) -> int:
 
     from dynamo.credit_ledger import CreditLedgerRepository
     from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+    from pool_fixture import seed_verified_pool
 
     os.makedirs(args.out_dir, exist_ok=True)
     period = current_period()
@@ -217,8 +218,12 @@ def main(argv=None) -> int:
     for n_items in item_counts:
         # A fresh pool per item-count so a lowered headroom from a prior sweep
         # never starves the next. A huge pool: we measure the write, not a 402.
-        budgets.set_manual_limit(tenant_id=args.tenant, period=period,
-                               manual_limit_microusd=args.pool_microusd, status="active")
+        # Routed through the R39c fixture: this spike varies item COUNT, not
+        # item BYTES (docs/benchmarks/ledger-latency.md's annotation for this
+        # figure), and the fixture's identity check is what proves the seeded
+        # row is still a real pool row and not an artifact of the sweep.
+        seed_verified_pool(budgets, tenant_id=args.tenant, period=period,
+                          manual_limit_microusd=args.pool_microusd, status="active")
 
         floor_rows, floor_attr = _run_phase(
             client, mods, args.tenant, period, args.amount_microusd, n_items,
