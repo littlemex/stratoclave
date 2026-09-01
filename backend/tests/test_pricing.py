@@ -27,31 +27,38 @@ def _reset_pricing_cache():
 
 
 def test_estimate_prices_the_input_side_at_its_worst_rate(dynamodb_mock):
-    # opus default: input 5_000_000 /MTok, cache_write 6_250_000 /MTok (the worst
-    # input-side leg), output 25_000_000 /MTok. 1 MTok of input-side tokens is
-    # reserved at 6_250_000 because the provider may classify every one of them as
-    # a cache write. Plus 2 microUSD of slack: three input-side legs can each round
-    # up at settle where the group total rounds up once, and one output-side leg
-    # adds none.
+    # 1 MTok of input-side tokens is reserved at the CACHE-WRITE rate — the worst
+    # input-side leg — because the provider may classify every one of them as a cache
+    # write, plus 1 MTok at the output rate. Plus 2 microUSD of slack: three
+    # input-side legs can each round up at settle where the group total rounds up
+    # once, and one output-side leg adds none.
+    #
+    # Read from the floor rather than pinned as a literal: the floor holds measured
+    # list prices and moves when AWS moves them, while the SHAPE of this arithmetic
+    # is what the test is about. `test_pricing_floor.py` is where the numbers
+    # themselves are pinned.
+    opus = pricing.baseline_rates()["opus"]
     cost = pricing.estimate_cost_microusd(
         pricing_key="opus",
         input_tokens_est=1_000_000,
         max_output_tokens=1_000_000,
     )
-    assert cost == 6_250_000 + 25_000_000 + 2
+    assert cost == (opus.cache_write_per_mtok_microusd
+                    + opus.output_per_mtok_microusd + 2)
 
 
 def test_estimate_applies_effort_multiplier_to_output_only(dynamodb_mock):
     # 1 MTok output at 4x effort = 4 MTok priced at output rate; input 0.
+    sonnet = pricing.baseline_rates()["sonnet"]
     cost = pricing.estimate_cost_microusd(
-        pricing_key="sonnet",  # output 15_000_000 /MTok
+        pricing_key="sonnet",
         input_tokens_est=0,
         max_output_tokens=1_000_000,
         effort_multiplier=4,
     )
-    # 4 * 15_000_000, and no rounding slack: the output side has one leg, and the
+    # 4x the output rate, and no rounding slack: the output side has one leg, and the
     # input side has no tokens.
-    assert cost == 60_000_000
+    assert cost == 4 * sonnet.output_per_mtok_microusd
 
 
 def test_estimate_rounds_up_sub_mtok(dynamodb_mock):
@@ -71,7 +78,7 @@ def test_estimate_rounds_up_sub_mtok(dynamodb_mock):
 
 
 def test_actual_cost_prices_each_token_type(dynamodb_mock):
-    # haiku: in 1_000_000, out 5_000_000, cache_read 100_000, cache_write 1_250_000
+    haiku = pricing.baseline_rates()["haiku"]
     cost = pricing.actual_cost_microusd(
         pricing_key="haiku",
         input_tokens=1_000_000,
@@ -79,12 +86,16 @@ def test_actual_cost_prices_each_token_type(dynamodb_mock):
         cache_read_tokens=1_000_000,
         cache_write_tokens=1_000_000,
     )
-    assert cost == 1_000_000 + 5_000_000 + 100_000 + 1_250_000
+    # One MTok on each leg, so the charge is the four rates added up — each token
+    # type priced at its own rate rather than all of them at the input rate.
+    assert cost == (haiku.input_per_mtok_microusd + haiku.output_per_mtok_microusd
+                    + haiku.cache_read_per_mtok_microusd
+                    + haiku.cache_write_per_mtok_microusd)
 
 
 def test_unknown_pricing_key_falls_back_to_default(dynamodb_mock):
-    # An unknown key uses the "default" tier (Opus-priced), so it never
-    # under-charges a budget.
+    # An unknown key uses the "default" row, which is priced at the dearest rate any
+    # registry entry is billed at, so it never under-charges a budget.
     unknown = pricing.actual_cost_microusd(
         pricing_key="does-not-exist",
         input_tokens=1_000_000,
@@ -95,7 +106,7 @@ def test_unknown_pricing_key_falls_back_to_default(dynamodb_mock):
         input_tokens=1_000_000,
         output_tokens=0,
     )
-    assert unknown == default == 5_000_000
+    assert unknown == default == pricing.baseline_rates()["default"].input_per_mtok_microusd
 
 
 def test_pricing_config_override_is_hot_reloaded(dynamodb_mock):
@@ -134,7 +145,7 @@ def test_missing_pricing_table_keeps_defaults(dynamodb_mock):
         input_tokens_est=1_000_000,
         max_output_tokens=0,
     )
-    assert cost == 6_250_000 + 2
+    assert cost == pricing.baseline_rates()["opus"].cache_write_per_mtok_microusd + 2
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +158,9 @@ def test_snapshot_builtin_when_no_override(dynamodb_mock):
     pricing.reset_version_cache()
     snap = pricing.snapshot_rates("opus")
     assert snap.version == pricing.BUILTIN_VERSION
-    assert snap.input_per_mtok_microusd == 5_000_000
-    assert snap.output_per_mtok_microusd == 25_000_000
+    opus = pricing.baseline_rates()["opus"]
+    assert snap.input_per_mtok_microusd == opus.input_per_mtok_microusd
+    assert snap.output_per_mtok_microusd == opus.output_per_mtok_microusd
 
 
 def test_snapshot_freezes_active_version_value(dynamodb_mock):

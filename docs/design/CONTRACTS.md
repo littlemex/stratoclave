@@ -77,6 +77,28 @@ price the request was admitted under.
 | **C2.3** A published derived money figure is replayable from the artifact itself: the same facts, priced the way they were priced, give the same figure however long after issue. | E | `test_savings_certificate.py` (`test_a_replay_holds_its_number_across_a_rate_change`, mutation-checked): the report embeds the four rate legs per pricing key and the model resolutions it used, and a replay handed an incomplete basis raises rather than pricing the gap live. A version stamp alone would not carry this — the effective table is the bundled floor plus a live external source plus the version's override rows, and only the last is versioned. Detail rows past the stored cap are not retained, so a replay reproduces the figure and the class breakdown rather than every line |
 | **C2.4** The set of billable legs is declared in one place; adding a leg to the charge without adding it to the estimate is impossible to do silently. | E | `test_billable_legs_registry.py` |
 | **C2.5** A rate document is one complete validated value: every leg present, every rate a non-negative integer, a version read whole or refused, and a version's rows and row COUNT immutable once written. Validated at every boundary that consumes a row — including the point read that builds the frozen snapshot, not only the bulk load. An invalid document is not a transient, so it refuses admission instead of quietly leaving the previous rates in place. | E | `test_contract_price_identity.py` |
+| **C2.6** A rate is resolved through a fixed ladder — admin override, then a fresh fetch, then the current stored version, then the bundled floor — and a missing rate falls DOWN it. No layer's absence lowers a price: a feed that fails, a rate name in a grammar this build cannot read, a token class the provider does not publish, and a region set that cannot be read each keep the value from the layer below, per leg, and never become zero. A leg with no sourced number at all removes its key from the fetch rather than charging zero. | E | `test_pricing_feeds_composite.py`, `test_pricing_feeds_snapshot.py`. The ladder and the measured behaviour of each price API are documented in [`price-feeds.md`](price-feeds.md) |
+| **C2.9** A stored rate version is cut when prices CHANGE, not when they are checked: the version id is the digest of the table and each version is written once, so polling adds no rows and a superseded version stays readable. | E | `test_pricing_feeds_snapshot.py::test_an_unchanged_table_cuts_no_new_version`, `::test_a_changed_price_cuts_a_version_and_moves_the_pointer` |
+| **C2.10** A charge is recomputable from what was stored: every terminal money event carries, per leg, the token count and the rate applied, so a period can be repriced at any other table — including a superseded stored version — as arithmetic over recorded facts rather than a reconstruction. As-charged is the ledger's settled delta rather than the rating's self-report, every money event is counted whether or not it carries a rating, and the report states whether it covered the whole period. The recompute reads only: it neither edits the charge of record nor resolves the live price source, so running it cannot change what the gateway charges next. | E | `test_reprice.py`, and `dynamo/credit_ledger.py::rating_replay_mismatches` for the replay of each event against its own rate |
+| **C2.7** Where a rate could be one of several published numbers, the charged one is the dearest: across the regions a request can fail over to, across the models that share a pricing key, and when a model id does not say which scope it is billed at. Conversion to integer micro-USD rounds up. A fetch that did not see everything that maximum is taken over — a missing member of a shared key, an unread region, a leg priced out of scope — may raise a rate and never lower one. Completeness is judged per key from positive evidence per member, so trouble in a feed that prices none of a key's models does not freeze it. | E | `test_pricing_feeds_dimensions.py`, `test_pricing_feeds_composite.py` |
+| **C2.8** The bundled floor's provenance is recorded per leg, not as one blanket sentence: a provider-published leg is a measured list price, a leg no provider publishes is a stated conservative upper bound (named in the document's own `notes`), and `default` and `vllm` are neither a measured price nor an upper bound — a synthetic ceiling built to dominate every real row, and the operator's own cost-recovery figure. Not a placeholder, and a pricing key holds one price point: a key whose models are published at different prices is charged at the dearest and reported (`price_feed_key_spans_prices`) so it is split rather than left to over-charge the cheaper member. | E | `test_pricing_floor.py`, `test_pricing_feeds_composite.py::test_two_models_on_one_key_are_charged_at_the_dearer` |
+
+**Not guaranteed (N).** That a long-context request is charged at the long-context rate.
+Bedrock prices a request above a model's long-context threshold at a higher rate per leg
+(for Claude Sonnet 4.6, double the standard input rate), and the rate table holds ONE rate
+per leg, so such a request is charged at the standard rate — the only systematic
+UNDER-charge in this subsystem, and it is named here rather than hidden. The feed parses
+long-context rate names and excludes them deliberately (it does not mistake them for the
+standard rate, which would over-charge every ordinary request). Closing it needs a leg per
+context band in the rate type and in the estimator, which is a money-path change with its
+own proof obligations; it is on the open-items list.
+
+**Not guaranteed (N).** That a rate follows the market. No Bedrock API publishes when a
+promotional price ends — every offer's `effectiveDate` reads as the first of the current
+month — so a change is visible only as a difference between two fetches, and a model no
+feed covers (or whose offer this account may not read) keeps the floor until an operator
+edits it. That the published list price is what the account actually pays is also outside
+this contract: private pricing, credits and commitments are not in any price list.
 
 ## C3 — Termination and recovery
 
@@ -283,6 +305,14 @@ clause that has been closed leaves this list; a residual stated inside a clause'
 own cell is not an open item, because there is nothing outstanding to do about it
 without paying a cost the clause names.
 
+- **The long-context rate band, for C2.6 (see the N note there).** Bedrock charges a
+  request past a model's long-context threshold at a higher rate per leg; the rate type
+  holds one rate per leg, so those requests are charged at the standard rate. This is the
+  only systematic under-charge in the pricing subsystem. Closing it means a leg per context
+  band through `Rate`, `RateSnapshot`, the estimator and the settle path — a money-path
+  change that carries the same proof obligations as the rest of that path, which is why it
+  is here rather than done quietly.
+
 - **C3.2b and C3.2c, for the per-user token reservation and the per-model counter.**
   The admission transaction debits up to three counters; the hold row records only the
   pool amount, so a crash between
@@ -371,19 +401,27 @@ without paying a cost the clause names.
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper
   key or a provider token — is what would move it from B to E.
-- **C10's lint reaches six documents, not every document.** `README.md`,
+- **C10's lint reaches seven documents, not every document.** `README.md`,
   `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, `docs/ARCHITECTURE.md`,
-  `docs/ADMIN_GUIDE.md` and `docs/DEPLOYMENT.md` are read. The ones a reader also
-  consults and this lint does not are named here rather than counted, because a bare
-  number goes stale silently the day someone adds a document and forgets the list:
+  `docs/ADMIN_GUIDE.md`, `docs/DEPLOYMENT.md` and, since the price-feeds change,
+  `docs/design/price-feeds.md` are read. The ones a reader also consults and this
+  lint does not are named here rather than counted, because a bare number goes
+  stale silently the day someone adds a document and forgets the list:
   `docs/MEASUREMENTS.md`, `docs/MEASUREMENTS.ja.md`, `docs/CLI_GUIDE.md`,
   `docs/CODEX_GUIDE.md`, `docs/COWORK_INTEGRATION.md`, `docs/GETTING_STARTED.md`,
   `docs/LOCAL.md`, `docs/VSR_CONFIG_CONTRACT.md`, `docs/design/calibrated-mode.md`,
   `docs/design/charge-loss.md`, `docs/design/gateway-capacity.md`,
-  `docs/design/ledger-hot-path.md`, `docs/design/pending-protocol.md` and
-  `docs/design/vsr-savings-certificate.md`. The list lives in
-  `contracts/claims/config.json` under `uncovered_documents_named`, and the covered
-  set grows by a document's name entering `covered_documents` there — never by a
+  `docs/design/ledger-hot-path.md`, `docs/design/pending-protocol.md`,
+  `docs/design/vsr-savings-certificate.md`, `docs/EVIDENCE.md`,
+  `docs/benchmarks/ledger-latency.md`, `docs/demo/README.md`,
+  `docs/demo/savings-certificate-sample.md`, `docs/demo/savings-vs-litellm.md` and
+  this document itself, `docs/design/CONTRACTS.md` — the last six found only when
+  the price-feeds change made the coverage check bidirectional over the filesystem
+  instead of one-directional over the lists, which is the class Q11 closed; naming
+  them here is the honest half of that close, since sweeping six unrelated
+  documents is not. The list lives in `contracts/claims/config.json` under
+  `uncovered_documents_named`, and the covered set grows by a document's name
+  entering `covered_documents` there — never by a
   count going up on its own.
 
   The guarantee lexicon also deliberately leaves out two ordinary absolutes,

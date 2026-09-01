@@ -6,7 +6,8 @@
   "docs/design/hard-ceiling.md",
   "docs/ARCHITECTURE.md",
   "docs/ADMIN_GUIDE.md",
-  "docs/DEPLOYMENT.md"
+  "docs/DEPLOYMENT.md",
+  "docs/design/price-feeds.md"
  ],
  "min_sentence_length": 40,
  "guarantee_terms": [
@@ -135,7 +136,13 @@
   "docs/design/gateway-capacity.md",
   "docs/design/ledger-hot-path.md",
   "docs/design/pending-protocol.md",
-  "docs/design/vsr-savings-certificate.md"
+  "docs/design/vsr-savings-certificate.md",
+  "docs/EVIDENCE.md",
+  "docs/benchmarks/ledger-latency.md",
+  "docs/demo/README.md",
+  "docs/demo/savings-certificate-sample.md",
+  "docs/demo/savings-vs-litellm.md",
+  "docs/design/CONTRACTS.md"
  ],
  "guarantee_terms_note": "The first term is `every`/`all` restricted to quantification over BEHAVIOUR: the quantifier must sit within a short span of a verb that does something to a request, a charge or a principal. Unrestricted, it captured statements of fact about configuration ('every table is provisioned in PAY_PER_REQUEST mode'), which are not promises and have no honest anchor kind. See amendment 10 of the change contract. Each term carries its own word boundaries: a single wrapper around the whole alternation silently broke every prefix term, because no boundary can follow the 'c' of 'enforc' when the text says 'enforces'.",
  "third_party_subjects": [

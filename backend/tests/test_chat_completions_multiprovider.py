@@ -53,17 +53,25 @@ class TestRegistryWidening:
         Anthropic route — the registry entry is what makes both routes see it."""
         assert resolve_bedrock_model("claude-sonnet-5") == "us.anthropic.claude-sonnet-5"
 
-    def test_new_pricing_keys_exist_and_never_undercharge(self):
-        """Bedrock publishes no list price for either model, so both must default to
-        the Opus tier per this module's stated rule. A missing key would silently
-        fall back to `default` and quietly change the charge."""
+    def test_new_pricing_keys_exist_and_price_every_leg(self):
+        """Both keys must exist in the floor. A missing key falls back to `default`,
+        which silently changes the charge.
+
+        These two used to be pinned at the Opus tier under a "Bedrock publishes no
+        list price" rule. It does publish one — $0.15/$0.65 per MTok for Nemotron in
+        the Price List's AmazonBedrock offer — so the floor now carries the measured
+        rate and the assertion here is about completeness rather than about being
+        expensive: every leg is priced, and no leg is zero, because a zero leg is a
+        discount rather than a price. The exact numbers are pinned in
+        `tests/test_pricing_floor.py`."""
         from mvp.pricing import snapshot_rates
 
-        opus = snapshot_rates("opus")
         for key in ("nemotron", "qwen"):
             rate = snapshot_rates(key)
-            assert rate.input_per_mtok_microusd >= opus.input_per_mtok_microusd
-            assert rate.output_per_mtok_microusd >= opus.output_per_mtok_microusd
+            assert rate.input_per_mtok_microusd > 0, key
+            assert rate.output_per_mtok_microusd > 0, key
+            assert rate.cache_read_per_mtok_microusd > 0, key
+            assert rate.cache_write_per_mtok_microusd > 0, key
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +641,10 @@ class TestCostTierTracksPrice:
     def test_keys_priced_at_or_above_opus_are_not_mid_tier(self):
         from mvp.routing.chains import _tier_for
 
-        for key in ("fable", "gemma", "gpt-5", "gpt-5.6-sol", "nemotron", "qwen"):
+        # `opus-legacy` (Claude Opus 4 / 4.1 / 3 Opus at $15/$75) belongs here for the
+        # same reason `fable` does: it out-prices the current Opus tier, so a
+        # downgrade must never treat it as a cheaper fallback.
+        for key in ("fable", "gpt-5", "gpt-5.6-sol", "opus-legacy"):
             assert _tier_for(key) == 3, key
 
     def test_cheaper_keys_land_below_opus(self):
@@ -641,6 +652,17 @@ class TestCostTierTracksPrice:
 
         assert _tier_for("grok") == 2
         assert _tier_for("gpt-5.6-terra") == 2
+
+    def test_open_weight_keys_land_in_the_cheap_tier_once_priced(self):
+        """Gemma, Nemotron and Qwen sat in tier 3 while the floor defaulted them to
+        the Opus rate for want of a published price. The Price List does publish
+        one — $0.14 to $0.15 per MTok input — so they are now the cheapest models in
+        the catalogue, and the tier has to say so or a downgrade would skip the very
+        targets it exists to reach."""
+        from mvp.routing.chains import _tier_for
+
+        for key in ("gemma", "nemotron", "qwen", "haiku-3", "haiku-3-5"):
+            assert _tier_for(key) == 1, key
 
     def test_tier_never_contradicts_the_price_ordering(self):
         from mvp.pricing import _DEFAULT_RATES

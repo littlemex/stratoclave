@@ -1574,6 +1574,157 @@
    "id": "cl-3cd1b2ad25b5",
    "claim": "What changed in each release, and what the current major version promises: which guarantees may not weaken without a major bump, and which surfaces are deliberately not covered.",
    "anchor": "descriptive:describes what the changelog contains, not what the gateway does"
+  },
+  {
+   "id": "cl-484db8f0a20a",
+   "claim": "It never raises: a network error, a permission error, a renamed field and an unreadable price all come back as *absence*, because absence is what the layers below are there to cover.",
+   "anchor": "contract:C2.6"
+  },
+  {
+   "id": "cl-d637e3a96a45",
+   "claim": "Each rung exists for a failure the rung below has to absorb, and the direction is always downward.",
+   "anchor": "contract:C2.6"
+  },
+  {
+   "id": "cl-020d1e0dfe15",
+   "claim": "**Absence never lowers a price** — that is the single property the whole subsystem is built around, and `test_pricing_feeds_composite.py` is where each of those paths is exercised.",
+   "anchor": "contract:C2.6"
+  },
+  {
+   "id": "cl-da0a3c22ba54",
+   "claim": "Every input and output leg in [`defaults/pricing.json`](../../backend/mvp/defaults/pricing.json) is a measured in-region list price, pinned with its provenance in `test_pricing_floor.py`.",
+   "anchor": "contract:C2.8",
+   "note": "M9"
+  },
+  {
+   "id": "cl-0cfac489d20f",
+   "claim": "The exceptions are named in the document's own `notes` rather than left for a reader to discover: the cache legs of `haiku-3`, `grok`, `gemma`, `nemotron` and `qwen` are a stated conservative upper bound, because none of those providers publishes a cache rate at all (read priced at the input rate, write at 1.25x it — the same premium the Anthropic tiers that do publish one actually charge); `gpt-5` is priced at the dearest measured GPT-5.6 tier so a cheaper one is never under-charged; `default` is synthetic, built to dominate every other row rather than to describe a price anyone publishes; and `vllm` is the operator's own cost-recovery figure, not a list price at all.",
+   "anchor": "contract:C2.8",
+   "note": "M9"
+  },
+  {
+   "id": "cl-38c102423678",
+   "claim": "So a deployment that never enables a feed still charges real, measured prices for every provider-published leg, and a named conservative bound rather than an invented number for the rest.",
+   "anchor": "contract:C2.8",
+   "note": "M9"
+  },
+  {
+   "id": "cl-78a5c7cb76b7",
+   "claim": "This is where **every current Claude price** lives, and it is not where anyone looks first.",
+   "anchor": "descriptive:names what AWS's own API publishes and where, not a claim about this gateway's behaviour"
+  },
+  {
+   "id": "cl-5949dcfd7dc0",
+   "claim": "Region lives inside the dimension names, so one call prices every region.",
+   "anchor": "descriptive:a measured property of Bedrock's own API, not a guarantee this gateway makes"
+  },
+  {
+   "id": "cl-24f581bc5868",
+   "claim": "Reading prices must not become subscribing to a paid product, so the token is never stored, logged or returned, and the test fixtures have it stripped.",
+   "anchor": "contract:C12.5@60b55405",
+   "note": "the offer token is the credential-shaped artefact C12.5 already covers"
+  },
+  {
+   "id": "cl-c4b961dc1ce8",
+   "claim": "The feed keys on the usage type, which always embeds the id, and requires the registry's id as the anchor.",
+   "anchor": "descriptive:describes the Price List API's own naming shape, not a guarantee of this gateway"
+  },
+  {
+   "id": "cl-7a7fe126004a",
+   "claim": "A deployment that wants the change history keeps its own log of that event; the gateway does not model a price calendar it cannot see.",
+   "anchor": "boundary:states the gateway's own limit directly — it does not model a price calendar no API publishes"
+  },
+  {
+   "id": "cl-4cb0c0daaa21",
+   "claim": "Those legs come from the snapshot, then from the floor — never from zero, because a zero leg turns \"unpublished\" into \"free\".",
+   "anchor": "contract:C2.6"
+  },
+  {
+   "id": "cl-ec29ac45c721",
+   "claim": "**A class priced only outside the region or scope asked for is widened, not dropped.** Claude Opus 5 publishes its cache legs in-region only, so a deployment addressing it through a `global.` profile has no in-scope cache rate; refusing the model would send all four legs to the floor, which is the larger error.",
+   "anchor": "contract:C2.7"
+  },
+  {
+   "id": "cl-f98e609f8898",
+   "claim": "**A pass that saw less than the whole picture may raise a rate and never lower one.** The published number is a maximum — over the models sharing a key, over the regions a request can reach — so a pass that missed a member, could not read a region, or had to widen a leg computed that maximum over less than the truth, and is clamped to at least what the layer below holds.",
+   "anchor": "contract:C2.7"
+  },
+  {
+   "id": "cl-2c174711898e",
+   "claim": "**A pricing key is a price point, not a family.** A shared key can only be charged at its dearest member, so `opus` covering Claude Opus 4.1 ($15/MTok input) and Opus 5 ($5.50) would have charged every Opus 5 request at nearly three times its rate.",
+   "anchor": "contract:C2.8"
+  },
+  {
+   "id": "cl-4feb36ba1f0e",
+   "claim": "**A billed id that differs from the invoked one is declared, never guessed.** `qwen.qwen3-next-80b-a3b` is billed as `...-a3b-instruct`, and the registry says so in `price_model_id`.",
+   "anchor": "contract:C2.7"
+  },
+  {
+   "id": "cl-2b2fb9d64a50",
+   "claim": "The alternative — absorbing unexpected segments after a prefix match — cannot tell a variant of the same model from a dearer sibling, and would let `xai.grok-4` be charged at `xai.grok-4.6` rates.",
+   "anchor": "contract:C2.7"
+  },
+  {
+   "id": "cl-ae24f1f9ee70",
+   "claim": "**A leg with no number behind it drops the whole key, and never charges zero.** If a leg resolves neither from the feeds, nor the snapshot, nor the floor — reachable on a deploy where the bundled document cannot be read — the key is left to the layer below (`price_feed_key_dropped_unfundable_leg`).",
+   "anchor": "contract:C2.6"
+  },
+  {
+   "id": "cl-ad63e182250c",
+   "claim": "If the failover set cannot be read, the model keeps the layer below and is named in the report — the one place where \"we could not tell\" must not become \"here is a cheaper number\".",
+   "anchor": "contract:C2.7"
+  },
+  {
+   "id": "cl-1cb8e84d03a5",
+   "claim": "The pointer is written after the version row it names, so an eventually-consistent pair can show a reader a pointer at a version it cannot see yet — and this module's answer to a missing version is \"no stored version\", which drops the whole table to the floor.",
+   "anchor": "contract:C2.9"
+  },
+  {
+   "id": "cl-6a333fe7b589",
+   "claim": "Every terminal money event carries, per leg, the token count and the rate it was charged at, so a charge is arithmetic over recorded facts rather than an opaque number.",
+   "anchor": "contract:C2.10"
+  },
+  {
+   "id": "cl-cf7f9fbdf0b5",
+   "claim": "- `STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS` (default 24 h) — a label, never an expiry; expiring a snapshot would change the amount charged with nobody deciding to.",
+   "anchor": "contract:C2.6",
+   "note": "the value charged is unaffected by staleness bookkeeping — the same never-lowers-and-never-invents-a-number property"
+  },
+  {
+   "id": "cl-73907a659bb7",
+   "claim": "The Price List API is served from only a few regions and is a global catalogue, so this is an availability choice and never changes the answer.",
+   "anchor": "boundary:states its own limit — an availability choice, never a pricing one"
+  },
+  {
+   "id": "cl-392a90e703bc",
+   "claim": "The first four are a pass that found something a person has to act on; the last two are new: a whole feed the account could not read at all, and a model left unpriced that is not on the accepted allowlist — so `--strict` is a gate against a half-denied pass as well as a partially-stale one.",
+   "anchor": "contract:C2.7"
+  },
+  {
+   "id": "cl-bea96058e10b",
+   "claim": "- **Automatic following of market prices for every model.** A model no feed covers, or whose offer this account may not read, keeps the floor.",
+   "anchor": "boundary:states the limit directly under \"What this does not guarantee\""
+  },
+  {
+   "id": "cl-fa2f240c13d0",
+   "claim": "It is the only systematic UNDER-charge here, it is deliberate (folding the long-context number into the standard slot would over-charge every ordinary request instead), and it is on the open-items list in [`CONTRACTS.md`](CONTRACTS.md) with the change named: a leg per context band through the rate type, the estimator and the settle path.",
+   "anchor": "debt:C2.6",
+   "note": "the long-context rate band is the open item named under C2.6's N-note and in CONTRACTS.md's open-items list"
+  },
+  {
+   "id": "cl-8774b32e6d2a",
+   "claim": "- `STRATOCLAVE_PRICE_LIST_MAX_PAGES` (default 40 per region) — the pagination scan is bounded so a catalogue that grows by an order of magnitude cannot turn a price refresh into an unbounded scan.",
+   "anchor": "boundary:states the bound directly"
+  },
+  {
+   "id": "cl-b25161053705",
+   "claim": "The fetch never runs while the source's lock is held, so a slow feed cannot stall concurrent readers, who go on serving the table already in memory rather than waiting on it.",
+   "anchor": "boundary:states its own mechanism and limit directly — the lock never covers network I/O"
+  },
+  {
+   "id": "cl-d809c77c156d",
+   "claim": "Events worth alerting on: `price_feed_coverage_regression` (a key that used to be readable is not any more — the signature of a renamed API), `price_feed_unparsed_names` (a grammar this build cannot read), `price_feed_key_spans_prices` (split the key), `price_feed_leg_regression` (a leg that was live and stopped being published, so the stored value is now serving on trust rather than on a fresh answer), `price_feed_table_partial` (a pass that stopped before it had asked about everything, so the table it produced is partial and every key it did not reach is answered by the layer below — this is the one that fires when a fetch runs out of time, which is why it is the event an operator sees when a knob needs changing rather than a provider), `price_feed_fetch_empty` (a pass that read nothing against a snapshot that is not empty, naming the stored key count and the snapshot's age), and `price_table_changed` (a price moved).",
+   "anchor": "descriptive:names the telemetry events this module emits, not itself a pricing guarantee"
   }
  ]
 }

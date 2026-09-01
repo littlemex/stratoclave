@@ -5075,6 +5075,11 @@ def settle_reservation_and_log(
         model_id=model_id,
         input_tokens=actual_input_tokens,
         output_tokens=actual_output_tokens,
+        # Carried so the usage row can re-derive its own cost: the charge prices four
+        # legs, and a row holding two of them can only re-derive a request that used no
+        # prompt cache.
+        cache_read_tokens=actual_cache_read_tokens,
+        cache_write_tokens=actual_cache_write_tokens,
         cost_microusd=actual_cost_microusd,
         requested_model_id=requested_stored,
         request_id=settle_request_id,

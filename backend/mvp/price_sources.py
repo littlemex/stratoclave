@@ -244,9 +244,32 @@ def validate_configuration() -> str:
     transient but would mean a typo'd `STRATOCLAVE_PRICE_SOURCE` charges the bundled
     floor for as long as the task stays up. Failing the deployment instead means the
     misconfiguration never reaches live traffic.
+
+    Also refuses a document that does not price every `pricing_key` the model
+    registry uses. A pricing-key split (adding `opus-legacy`, `sonnet-5`, `sonnet-3`,
+    `haiku-3-5`, `haiku-3` alongside the families they came from) leaves a deployment
+    carrying its own older document with no rate row for the new keys, and
+    `mvp.pricing` falls back to `default` for anything absent — so the split silently
+    charges those families at whatever `default` happens to be, and an admin override
+    written against the old key set stops applying to the models it was written for.
+    Checked against THIS source's own returned table, not the layered effective table
+    `mvp.pricing` computes: this function takes no repository and makes no AWS call by
+    design, and an admin override is dynamic — it can be withdrawn at any moment, so a
+    document that is complete only while an override is applied is not complete. An
+    override supplying a missing key does not rescue startup.
     """
+    from .models import registry_entries  # deferred: models <-> price_sources import cycle
+
     source = active_source()
-    validate_rate_table(source.load(), origin=f"price source {source.name!r}")
+    table = validate_rate_table(source.load(), origin=f"price source {source.name!r}")
+    used_keys = {entry.pricing_key for entry in registry_entries()}
+    missing = sorted(used_keys - set(table))
+    if missing:
+        raise PriceSourceConfigError(
+            f"price source {source.name!r} has no rate row for pricing_key(s) "
+            f"{missing} that the model registry uses; mvp.pricing would fall back to "
+            "'default' for every model on one of these keys"
+        )
     return source.name
 
 

@@ -1,0 +1,3026 @@
+[
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Output tokens flex",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-output-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "2422CEQGH8Y2DDME"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "2422CEQGH8Y2DDME.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "2422CEQGH8Y2DDME.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000325 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "2422CEQGH8Y2DDME.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "2422CEQGH8Y2DDME",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Output tokens",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-output-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "25TQBHR3NG9CVNAU"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "25TQBHR3NG9CVNAU.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "25TQBHR3NG9CVNAU.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00065 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0006500000"
+       },
+       "rateCode": "25TQBHR3NG9CVNAU.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "25TQBHR3NG9CVNAU",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USE1-xai.grok-4.6-mantle-cache-read-tokens-global-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "287ZNXQ32XNMTM6V"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "287ZNXQ32XNMTM6V.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "287ZNXQ32XNMTM6V.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000875 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-global-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0008750000"
+       },
+       "rateCode": "287ZNXQ32XNMTM6V.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "287ZNXQ32XNMTM6V",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-input-tokens-global-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "2CA8NVKC4GJPUHWY"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "2CA8NVKC4GJPUHWY.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "2CA8NVKC4GJPUHWY.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0035 per 1K token for xai.grok-4.6-mantle-input-tokens-global-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0035000000"
+       },
+       "rateCode": "2CA8NVKC4GJPUHWY.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "2CA8NVKC4GJPUHWY",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USW2-xai.grok-4.6-mantle-cache-read-tokens-global-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "2JZCFK852ASZDHUR"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "2JZCFK852ASZDHUR.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "2JZCFK852ASZDHUR.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0005 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-global-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0005000000"
+       },
+       "rateCode": "2JZCFK852ASZDHUR.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "2JZCFK852ASZDHUR",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Input tokens priority",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-input-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "2WZFQUYAVQBKEPJG"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "2WZFQUYAVQBKEPJG.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "2WZFQUYAVQBKEPJG.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0002625 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002625000"
+       },
+       "rateCode": "2WZFQUYAVQBKEPJG.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "2WZFQUYAVQBKEPJG",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Input tokens",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-input-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "3589FV4TTHJXCUUJ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "3589FV4TTHJXCUUJ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "3589FV4TTHJXCUUJ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00015 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0001500000"
+       },
+       "rateCode": "3589FV4TTHJXCUUJ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "3589FV4TTHJXCUUJ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-input-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "365AYUPU4RMCFNBZ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "365AYUPU4RMCFNBZ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "365AYUPU4RMCFNBZ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0011 per 1K token for xai.grok-4.6-mantle-input-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0011000000"
+       },
+       "rateCode": "365AYUPU4RMCFNBZ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "365AYUPU4RMCFNBZ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Input tokens flex",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-input-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "3JMTSZGRJ2S63MZB"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "3JMTSZGRJ2S63MZB.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "3JMTSZGRJ2S63MZB.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000075 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-input-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "3JMTSZGRJ2S63MZB.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "3JMTSZGRJ2S63MZB",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "output tokens batch",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "batch",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-output-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "3RNZ47S9X7292GER"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "3RNZ47S9X7292GER.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "3RNZ47S9X7292GER.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000325 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-batch in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "3RNZ47S9X7292GER.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "3RNZ47S9X7292GER",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Output tokens",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-output-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "3XSW6VRFQCKQW6T9"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "3XSW6VRFQCKQW6T9.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "3XSW6VRFQCKQW6T9.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00065 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0006500000"
+       },
+       "rateCode": "3XSW6VRFQCKQW6T9.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "3XSW6VRFQCKQW6T9",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USE1-xai.grok-4.6-mantle-cache-read-tokens-global-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "4986KQYTC6VTE39F"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "4986KQYTC6VTE39F.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "4986KQYTC6VTE39F.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00025 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-global-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002500000"
+       },
+       "rateCode": "4986KQYTC6VTE39F.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "4986KQYTC6VTE39F",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "input tokens batch",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-input-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "4FKQT8RKHXTS3UHA"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "4FKQT8RKHXTS3UHA.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "4FKQT8RKHXTS3UHA.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000075 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-input-tokens-batch in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "4FKQT8RKHXTS3UHA.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "4FKQT8RKHXTS3UHA",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-output-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "4NPVARQ2PV52GKA5"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "4NPVARQ2PV52GKA5.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "4NPVARQ2PV52GKA5.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0066 per 1K token for xai.grok-4.6-mantle-output-tokens-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0066000000"
+       },
+       "rateCode": "4NPVARQ2PV52GKA5.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "4NPVARQ2PV52GKA5",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-input-tokens-global-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "52N8MSMVG6VCJNYC"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "52N8MSMVG6VCJNYC.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "52N8MSMVG6VCJNYC.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.002 per 1K token for xai.grok-4.6-mantle-input-tokens-global-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0020000000"
+       },
+       "rateCode": "52N8MSMVG6VCJNYC.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "52N8MSMVG6VCJNYC",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Input tokens",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-input-tokens"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "5VZ5KD9CSMJX2G44"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "5VZ5KD9CSMJX2G44.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "5VZ5KD9CSMJX2G44.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.00015 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-input-tokens in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0001500000"
+       },
+       "rateCode": "5VZ5KD9CSMJX2G44.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "5VZ5KD9CSMJX2G44",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-output-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "6SRHP65SEJQDE7FZ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "6SRHP65SEJQDE7FZ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "6SRHP65SEJQDE7FZ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0033 per 1K token for xai.grok-4.6-mantle-output-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0033000000"
+       },
+       "rateCode": "6SRHP65SEJQDE7FZ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "6SRHP65SEJQDE7FZ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USW2-xai.grok-4.6-mantle-cache-read-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "7J77Y75G4VAKYYS4"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "7J77Y75G4VAKYYS4.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "7J77Y75G4VAKYYS4.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000275 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002750000"
+       },
+       "rateCode": "7J77Y75G4VAKYYS4.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "7J77Y75G4VAKYYS4",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-output-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "7UPQCUUWGSG49JQS"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "7UPQCUUWGSG49JQS.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "7UPQCUUWGSG49JQS.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.01155 per 1K token for xai.grok-4.6-mantle-output-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0115500000"
+       },
+       "rateCode": "7UPQCUUWGSG49JQS.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "7UPQCUUWGSG49JQS",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Output tokens flex",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-output-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "7XB6K5K5NBGN2PDA"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "7XB6K5K5NBGN2PDA.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "7XB6K5K5NBGN2PDA.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000325 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-output-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "7XB6K5K5NBGN2PDA.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "7XB6K5K5NBGN2PDA",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Output tokens flex",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-output-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "8NWYUF7PY7AQY3QT"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "8NWYUF7PY7AQY3QT.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "8NWYUF7PY7AQY3QT.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000325 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-output-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "8NWYUF7PY7AQY3QT.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "8NWYUF7PY7AQY3QT",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "output tokens batch",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-output-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "8QT4C6358XKF6X9H"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "8QT4C6358XKF6X9H.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "8QT4C6358XKF6X9H.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000325 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-output-tokens-batch in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "8QT4C6358XKF6X9H.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "8QT4C6358XKF6X9H",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Input tokens flex",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-input-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "9AJMFSEWH7X6CUVY"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "9AJMFSEWH7X6CUVY.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "9AJMFSEWH7X6CUVY.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000075 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-input-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "9AJMFSEWH7X6CUVY.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "9AJMFSEWH7X6CUVY",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-input-tokens-global-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "9D83UVRDH532DGC7"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "9D83UVRDH532DGC7.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "9D83UVRDH532DGC7.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.002 per 1K token for xai.grok-4.6-mantle-input-tokens-global-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0020000000"
+       },
+       "rateCode": "9D83UVRDH532DGC7.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "9D83UVRDH532DGC7",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USE1-xai.grok-4.6-mantle-cache-read-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "A57M77FEVJDY98AW"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "A57M77FEVJDY98AW.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "A57M77FEVJDY98AW.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0009625 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0009625000"
+       },
+       "rateCode": "A57M77FEVJDY98AW.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "A57M77FEVJDY98AW",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Output tokens priority",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-output-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "AGDXTDDC32DN3NF5"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "AGDXTDDC32DN3NF5.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "AGDXTDDC32DN3NF5.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0011375 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0011375000"
+       },
+       "rateCode": "AGDXTDDC32DN3NF5.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "AGDXTDDC32DN3NF5",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-input-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "AJXSD4CTZBNGQ827"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "AJXSD4CTZBNGQ827.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "AJXSD4CTZBNGQ827.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00385 per 1K token for xai.grok-4.6-mantle-input-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0038500000"
+       },
+       "rateCode": "AJXSD4CTZBNGQ827.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "AJXSD4CTZBNGQ827",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-input-tokens-global-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "C9QG58QDBQTEUMWJ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "C9QG58QDBQTEUMWJ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "C9QG58QDBQTEUMWJ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0035 per 1K token for xai.grok-4.6-mantle-input-tokens-global-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0035000000"
+       },
+       "rateCode": "C9QG58QDBQTEUMWJ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "C9QG58QDBQTEUMWJ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USW2-xai.grok-4.6-mantle-cache-read-tokens-global-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "CNTWFPHMUS8WX7BX"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "CNTWFPHMUS8WX7BX.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "CNTWFPHMUS8WX7BX.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00025 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-global-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002500000"
+       },
+       "rateCode": "CNTWFPHMUS8WX7BX.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "CNTWFPHMUS8WX7BX",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Output tokens priority",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-output-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "DT5B4D8SJUGT3G8U"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "DT5B4D8SJUGT3G8U.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "DT5B4D8SJUGT3G8U.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.0011375 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-output-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0011375000"
+       },
+       "rateCode": "DT5B4D8SJUGT3G8U.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "DT5B4D8SJUGT3G8U",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USE1-xai.grok-4.6-mantle-cache-read-tokens-global-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "EGRFJP567AQ4V7QP"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "EGRFJP567AQ4V7QP.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "EGRFJP567AQ4V7QP.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0005 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-global-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0005000000"
+       },
+       "rateCode": "EGRFJP567AQ4V7QP.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "EGRFJP567AQ4V7QP",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Output tokens flex",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-output-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "ENS55847Z9AXKPBU"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "ENS55847Z9AXKPBU.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "ENS55847Z9AXKPBU.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000325 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "ENS55847Z9AXKPBU.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "ENS55847Z9AXKPBU",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "input tokens batch",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-input-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "EREK7BK5SURTCWE6"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "EREK7BK5SURTCWE6.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "EREK7BK5SURTCWE6.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000075 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-input-tokens-batch in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "EREK7BK5SURTCWE6.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "EREK7BK5SURTCWE6",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-output-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "EYB63VP6KKRNPB5A"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "EYB63VP6KKRNPB5A.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "EYB63VP6KKRNPB5A.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0033 per 1K token for xai.grok-4.6-mantle-output-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0033000000"
+       },
+       "rateCode": "EYB63VP6KKRNPB5A.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "EYB63VP6KKRNPB5A",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Input tokens priority",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-input-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "G9VQMWXDRCXFE2PM"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "G9VQMWXDRCXFE2PM.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "G9VQMWXDRCXFE2PM.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.0002625 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-input-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002625000"
+       },
+       "rateCode": "G9VQMWXDRCXFE2PM.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "G9VQMWXDRCXFE2PM",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-output-tokens-global-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "H3WF994UJC8V2FD2"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "H3WF994UJC8V2FD2.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "H3WF994UJC8V2FD2.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0105 per 1K token for xai.grok-4.6-mantle-output-tokens-global-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0105000000"
+       },
+       "rateCode": "H3WF994UJC8V2FD2.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "H3WF994UJC8V2FD2",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-output-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "H7HQV4NFHCAT3QY2"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "H7HQV4NFHCAT3QY2.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "H7HQV4NFHCAT3QY2.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0066 per 1K token for xai.grok-4.6-mantle-output-tokens-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0066000000"
+       },
+       "rateCode": "H7HQV4NFHCAT3QY2.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "H7HQV4NFHCAT3QY2",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-output-tokens-global-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "HM44F8NJCHXJHNB3"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "HM44F8NJCHXJHNB3.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "HM44F8NJCHXJHNB3.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0105 per 1K token for xai.grok-4.6-mantle-output-tokens-global-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0105000000"
+       },
+       "rateCode": "HM44F8NJCHXJHNB3.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "HM44F8NJCHXJHNB3",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USE1-xai.grok-4.6-mantle-cache-read-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "HPYRKXF8AJN8HEWT"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "HPYRKXF8AJN8HEWT.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "HPYRKXF8AJN8HEWT.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00055 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0005500000"
+       },
+       "rateCode": "HPYRKXF8AJN8HEWT.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "HPYRKXF8AJN8HEWT",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "input tokens batch",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "batch",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-input-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "JHT9QB33N85PEFYK"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "JHT9QB33N85PEFYK.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "JHT9QB33N85PEFYK.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000075 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-batch in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "JHT9QB33N85PEFYK.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "JHT9QB33N85PEFYK",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Output tokens priority",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-output-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "K8EVBZ8VT7C4VMFH"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "K8EVBZ8VT7C4VMFH.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "K8EVBZ8VT7C4VMFH.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0011375 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0011375000"
+       },
+       "rateCode": "K8EVBZ8VT7C4VMFH.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "K8EVBZ8VT7C4VMFH",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Output tokens",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-output-tokens"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "KVBSSSV5CDM5EPZZ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "KVBSSSV5CDM5EPZZ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "KVBSSSV5CDM5EPZZ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.00065 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-output-tokens in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0006500000"
+       },
+       "rateCode": "KVBSSSV5CDM5EPZZ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "KVBSSSV5CDM5EPZZ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Output tokens priority",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-output-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "MV77FXQHZ725SQAV"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "MV77FXQHZ725SQAV.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "MV77FXQHZ725SQAV.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.0011375 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-output-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0011375000"
+       },
+       "rateCode": "MV77FXQHZ725SQAV.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "MV77FXQHZ725SQAV",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USW2-xai.grok-4.6-mantle-cache-read-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "N2KJVRVBJV43QTCQ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "N2KJVRVBJV43QTCQ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "N2KJVRVBJV43QTCQ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00055 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0005500000"
+       },
+       "rateCode": "N2KJVRVBJV43QTCQ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "N2KJVRVBJV43QTCQ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USW2-xai.grok-4.6-mantle-cache-read-tokens-global-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "N2VGKR8HY3Y83XD4"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "N2VGKR8HY3Y83XD4.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "N2VGKR8HY3Y83XD4.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000875 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-global-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0008750000"
+       },
+       "rateCode": "N2VGKR8HY3Y83XD4.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "N2VGKR8HY3Y83XD4",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-output-tokens-global-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "N2ZZNSCZB8BFYFYU"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "N2ZZNSCZB8BFYFYU.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "N2ZZNSCZB8BFYFYU.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.006 per 1K token for xai.grok-4.6-mantle-output-tokens-global-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0060000000"
+       },
+       "rateCode": "N2ZZNSCZB8BFYFYU.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "N2ZZNSCZB8BFYFYU",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "input tokens batch",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "batch",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-input-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "PAYPN6NSFBQ74NP3"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "PAYPN6NSFBQ74NP3.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "PAYPN6NSFBQ74NP3.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000075 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-batch in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "PAYPN6NSFBQ74NP3.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "PAYPN6NSFBQ74NP3",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Input tokens flex",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-input-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "QJU32U2CHKBWDY95"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "QJU32U2CHKBWDY95.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "QJU32U2CHKBWDY95.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000075 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "QJU32U2CHKBWDY95.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "QJU32U2CHKBWDY95",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-input-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "QSA3QSGVYYU258F4"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "QSA3QSGVYYU258F4.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "QSA3QSGVYYU258F4.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0022 per 1K token for xai.grok-4.6-mantle-input-tokens-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0022000000"
+       },
+       "rateCode": "QSA3QSGVYYU258F4.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "QSA3QSGVYYU258F4",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Output tokens",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-output-tokens"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "R98CKDSNXJGUW56U"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "R98CKDSNXJGUW56U.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "R98CKDSNXJGUW56U.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.00065 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-output-tokens in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0006500000"
+       },
+       "rateCode": "R98CKDSNXJGUW56U.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "R98CKDSNXJGUW56U",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-output-tokens-global-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "RFP5H6UP4223NBNJ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "RFP5H6UP4223NBNJ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "RFP5H6UP4223NBNJ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.003 per 1K token for xai.grok-4.6-mantle-output-tokens-global-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0030000000"
+       },
+       "rateCode": "RFP5H6UP4223NBNJ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "RFP5H6UP4223NBNJ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-input-tokens-global-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "RXN7NGDQPSYGSDH9"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "RXN7NGDQPSYGSDH9.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "RXN7NGDQPSYGSDH9.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.001 per 1K token for xai.grok-4.6-mantle-input-tokens-global-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0010000000"
+       },
+       "rateCode": "RXN7NGDQPSYGSDH9.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "RXN7NGDQPSYGSDH9",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "output tokens batch",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-output-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "RYMZKBDCSM793J5C"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "RYMZKBDCSM793J5C.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "RYMZKBDCSM793J5C.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.000325 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-output-tokens-batch in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "RYMZKBDCSM793J5C.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "RYMZKBDCSM793J5C",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-input-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "SCUJQDNM8DJRUJFC"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "SCUJQDNM8DJRUJFC.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "SCUJQDNM8DJRUJFC.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0011 per 1K token for xai.grok-4.6-mantle-input-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0011000000"
+       },
+       "rateCode": "SCUJQDNM8DJRUJFC.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "SCUJQDNM8DJRUJFC",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-input-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "SD5HYBXPEJX8YRY4"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "SD5HYBXPEJX8YRY4.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "SD5HYBXPEJX8YRY4.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0022 per 1K token for xai.grok-4.6-mantle-input-tokens-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0022000000"
+       },
+       "rateCode": "SD5HYBXPEJX8YRY4.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "SD5HYBXPEJX8YRY4",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-output-tokens-global-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "TC5CN7R5FGUXXRE5"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "TC5CN7R5FGUXXRE5.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "TC5CN7R5FGUXXRE5.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.006 per 1K token for xai.grok-4.6-mantle-output-tokens-global-standard in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0060000000"
+       },
+       "rateCode": "TC5CN7R5FGUXXRE5.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "TC5CN7R5FGUXXRE5",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-output-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "TFYP7NNMB2ZWSYEW"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "TFYP7NNMB2ZWSYEW.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "TFYP7NNMB2ZWSYEW.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.01155 per 1K token for xai.grok-4.6-mantle-output-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0115500000"
+       },
+       "rateCode": "TFYP7NNMB2ZWSYEW.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "TFYP7NNMB2ZWSYEW",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-input-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "TR9HNAT6E9QY3Z2A"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "TR9HNAT6E9QY3Z2A.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "TR9HNAT6E9QY3Z2A.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00385 per 1K token for xai.grok-4.6-mantle-input-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0038500000"
+       },
+       "rateCode": "TR9HNAT6E9QY3Z2A.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "TR9HNAT6E9QY3Z2A",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Input tokens",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "standard",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-input-tokens-standard"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "TZNEW3YZV74RNFFD"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "TZNEW3YZV74RNFFD.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "TZNEW3YZV74RNFFD.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.00015 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-standard in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0001500000"
+       },
+       "rateCode": "TZNEW3YZV74RNFFD.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "TZNEW3YZV74RNFFD",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Input tokens priority",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-input-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "UBKV5PQMB82S3D5G"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "UBKV5PQMB82S3D5G.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "UBKV5PQMB82S3D5G.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0002625 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002625000"
+       },
+       "rateCode": "UBKV5PQMB82S3D5G.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "UBKV5PQMB82S3D5G",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Input tokens",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-input-tokens"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "UQC9NZ8AFRXUHRVH"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "UQC9NZ8AFRXUHRVH.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "UQC9NZ8AFRXUHRVH.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.00015 per 1K tokens for USW2-nvidia.nemotron-super-3-120b-input-tokens in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0001500000"
+       },
+       "rateCode": "UQC9NZ8AFRXUHRVH.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "UQC9NZ8AFRXUHRVH",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "global-flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "output_tokens_mantle",
+    "usagetype": "USW2-xai.grok-4.6-mantle-output-tokens-global-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "W6NQWQ8RC7VKHRTS"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "W6NQWQ8RC7VKHRTS.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "W6NQWQ8RC7VKHRTS.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.003 per 1K token for xai.grok-4.6-mantle-output-tokens-global-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0030000000"
+       },
+       "rateCode": "W6NQWQ8RC7VKHRTS.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "W6NQWQ8RC7VKHRTS",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "global-flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "input_tokens_mantle",
+    "usagetype": "USE1-xai.grok-4.6-mantle-input-tokens-global-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "WBVCCK9JR5GE3PDJ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "WBVCCK9JR5GE3PDJ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "WBVCCK9JR5GE3PDJ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.001 per 1K token for xai.grok-4.6-mantle-input-tokens-global-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0010000000"
+       },
+       "rateCode": "WBVCCK9JR5GE3PDJ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "WBVCCK9JR5GE3PDJ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-east-1",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USE1-xai.grok-4.6-mantle-cache-read-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "WTV9RAPGQM6P3NP7"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "WTV9RAPGQM6P3NP7.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "WTV9RAPGQM6P3NP7.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000275 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-flex in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002750000"
+       },
+       "rateCode": "WTV9RAPGQM6P3NP7.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "WTV9RAPGQM6P3NP7",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "Input tokens flex",
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-west-2",
+    "service_tier": "flex",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USW2-nvidia.nemotron-super-3-120b-mantle-input-tokens-flex"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "WUGCWF7ECHEDA9Q7"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "WUGCWF7ECHEDA9Q7.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "WUGCWF7ECHEDA9Q7.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000075 per 1K token for nvidia.nemotron-super-3-120b-mantle-input-tokens-flex in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0000750000"
+       },
+       "rateCode": "WUGCWF7ECHEDA9Q7.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "WUGCWF7ECHEDA9Q7",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "feature": "On-demand Inference",
+    "inferenceType": "Input tokens priority",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-input-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "XSMU92QGSU82CAQZ"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "XSMU92QGSU82CAQZ.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "XSMU92QGSU82CAQZ.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "USD 0.0002625 per 1K tokens for USE1-nvidia.nemotron-super-3-120b-input-tokens-priority in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0002625000"
+       },
+       "rateCode": "XSMU92QGSU82CAQZ.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "XSMU92QGSU82CAQZ",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "location": "US West (Oregon)",
+    "locationType": "AWS Region",
+    "model": "xai.grok-4.6",
+    "operation": "",
+    "regionCode": "us-west-2",
+    "service_tier": "priority",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "tokenType": "Cache Read Input Tokens",
+    "usagetype": "USW2-xai.grok-4.6-mantle-cache-read-tokens-priority"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "Y2PP34886ZVCNUSB"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "Y2PP34886ZVCNUSB.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "Y2PP34886ZVCNUSB.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.0009625 per 1K token for xai.grok-4.6-mantle-cache-read-tokens-priority in US West (Oregon)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0009625000"
+       },
+       "rateCode": "Y2PP34886ZVCNUSB.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "Y2PP34886ZVCNUSB",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ },
+ {
+  "product": {
+   "attributes": {
+    "inferenceType": "output tokens batch",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "model": "NVIDIA Nemotron 3 Super 120B A12B",
+    "operation": "",
+    "provider": "Nvidia",
+    "regionCode": "us-east-1",
+    "service_tier": "batch",
+    "servicecode": "AmazonBedrock",
+    "servicename": "Amazon Bedrock",
+    "usagetype": "USE1-nvidia.nemotron-super-3-120b-mantle-output-tokens-batch"
+   },
+   "productFamily": "Amazon Bedrock",
+   "sku": "YJZ9QQPGPKU666WN"
+  },
+  "publicationDate": "2026-08-31T09:21:34Z",
+  "serviceCode": "AmazonBedrock",
+  "terms": {
+   "OnDemand": {
+    "YJZ9QQPGPKU666WN.JRTCKXETXF": {
+     "effectiveDate": "2026-08-01T00:00:00Z",
+     "offerTermCode": "JRTCKXETXF",
+     "priceDimensions": {
+      "YJZ9QQPGPKU666WN.JRTCKXETXF.6YS6EN2CT7": {
+       "appliesTo": [],
+       "beginRange": "0",
+       "description": "$0.000325 per 1K token for nvidia.nemotron-super-3-120b-mantle-output-tokens-batch in US East (N. Virginia)",
+       "endRange": "Inf",
+       "pricePerUnit": {
+        "USD": "0.0003250000"
+       },
+       "rateCode": "YJZ9QQPGPKU666WN.JRTCKXETXF.6YS6EN2CT7",
+       "unit": "1K tokens"
+      }
+     },
+     "sku": "YJZ9QQPGPKU666WN",
+     "termAttributes": {}
+    }
+   }
+  },
+  "version": "20260831092134"
+ }
+]

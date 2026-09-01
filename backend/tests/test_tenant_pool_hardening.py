@@ -408,8 +408,8 @@ def test_cache_tokens_are_billed_on_settle(seed_tenant_with_pool):
     user = _user(seed)
     ctx = reserve_credit(user, 4000, pricing_key="opus", cost_microusd=2_000_000)
 
-    # opus cache_write is 6_250_000 micro-USD/MTok; 1_000_000 cache-write tokens
-    # => exactly $6.25. With input/output=0 the settled cost must reflect cache.
+    # 1_000_000 cache-write tokens is exactly one MTok, so the settled cost is the
+    # opus cache-write rate. With input/output=0 it must reflect cache alone.
     settle_reservation_and_log(
         user=user,
         tenants_repo=ctx,
@@ -421,8 +421,11 @@ def test_cache_tokens_are_billed_on_settle(seed_tenant_with_pool):
         actual_cache_read_tokens=0,
         actual_cache_write_tokens=1_000_000,
     )
-    # Settled spend is non-zero and equals the cache-write cost.
-    assert _pool(seed)["pool_settled_microusd"] == 6_250_000
+    # Settled spend is non-zero and equals the cache-write cost for one MTok.
+    from mvp.pricing import baseline_rates
+
+    assert (_pool(seed)["pool_settled_microusd"]
+            == baseline_rates()["opus"].cache_write_per_mtok_microusd)
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +697,8 @@ def test_pricing_reverts_to_defaults_when_current_pointer_removed(dynamodb_mock)
     pricing._cache._loaded_at = 0.0  # expire TTL
 
     # The cache must revert to built-in defaults, not keep the stale override.
-    assert pricing._cache.get("opus", repo).input_per_mtok_microusd == 5_000_000
+    assert (pricing._cache.get("opus", repo).input_per_mtok_microusd
+            == pricing.baseline_rates()["opus"].input_per_mtok_microusd)
     reset_cache()
 
 

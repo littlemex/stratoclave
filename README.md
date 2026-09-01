@@ -962,6 +962,7 @@ section. Changing the behaviour means changing the document first.
 | [`docs/design/calibrated-mode.md`](./docs/design/calibrated-mode.md) | Calibrated mode — a tighter bound that trades a stated margin for admission headroom — and how a shortage is told from a sizing problem. |
 | [`docs/design/charge-loss.md`](./docs/design/charge-loss.md) | Attempts, evidence and liability: what a provider call may have cost when the gateway did not observe its outcome. The measurements behind it are in [`docs/MEASUREMENTS.md`](./docs/MEASUREMENTS.md). |
 | [`docs/design/ledger-hot-path.md`](./docs/design/ledger-hot-path.md) | The ledger's place on the request path, and the latency it is allowed to add. |
+| [`docs/design/price-feeds.md`](./docs/design/price-feeds.md) | Where a rate comes from: the resolution ladder, what each Bedrock price API actually publishes (measured), how a self-hosted rate joins the same pipeline, and where each promise stops. |
 | [`docs/design/pending-protocol.md`](./docs/design/pending-protocol.md) | The PENDING-protocol migration for hold records, and the gate conditions for deleting the old shape. |
 | [`docs/design/gateway-capacity.md`](./docs/design/gateway-capacity.md) | How many requests the gateway holds at once, what limits it, and how to size it. |
 | [`docs/design/vsr-savings-certificate.md`](./docs/design/vsr-savings-certificate.md) | The counterfactual savings report: what is potential, what is realised, and why they are never added. |

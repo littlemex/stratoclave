@@ -13,9 +13,25 @@ from mvp.learning import savings as sv
 from mvp.vsr.client import DECISION_PREFER_APPLIED, DECISION_HARD_APPLIED
 from dynamo import UsageLogsRepository
 
-# real recompute of these models over 10k input / 2k output (see pricing table).
-_OPUS_10K2K = 100_000
-_HAIKU_10K2K = 20_000
+def _recompute(pricing_key: str, *, input_tokens: int = 10_000,
+              output_tokens: int = 2_000) -> int:
+    """What the ledger charges for this many tokens at the built-in floor.
+
+    Computed rather than pinned: the floor holds measured list prices, so a literal
+    here would have to be edited every time AWS moves a rate, and the certificate's
+    property under test is that the saving is `recompute(billed) - recompute(advised)`
+    over the SAME tokens — not any particular dollar amount.
+    """
+    from mvp import pricing
+
+    return pricing.actual_cost_microusd(
+        pricing_key=pricing_key, input_tokens=input_tokens, output_tokens=output_tokens,
+    )
+
+
+# real recompute of these models over 10k input / 2k output.
+_OPUS_10K2K = _recompute("opus")
+_HAIKU_10K2K = _recompute("haiku")
 
 
 def test_certificate_counts_counterfactual_saving(dynamodb_mock):

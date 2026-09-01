@@ -11,7 +11,10 @@
     "  bedrock_region    the region this model is invoked in",
     "  aliases           client-facing names that resolve to this entry; must be globally unique",
     "  wire_protocol     messages = Bedrock Converse, responses = bedrock-mantle OpenAI surface",
-    "  pricing_key       row in the pricing table; models sharing a price tier share a key",
+    "  pricing_key       row in the pricing table; a key is ONE price point, so models",
+    "                    at different published prices do not share one",
+    "  price_model_id    the id the price APIs know this model by, when the billed",
+    "                    spelling differs from bedrock_model_id (optional)",
     "  served_by         bedrock (default) | vllm | semantic-router",
     "  endpoint_key      required when served_by=vllm (an allowlist token, never a URL)",
     "  virtual           true marks a pool placeholder that must never be a billed model",
@@ -37,7 +40,7 @@
       ],
       "wire_protocol": "messages",
       "pricing_key": "opus",
-      "notes": "Lists at the same rate as the Opus 4.x tier (AWS model card, Jul 2026), so it shares pricing_key \"opus\" — confirmed, not assumed."
+      "notes": "Shares pricing_key \"opus\" with Opus 4.5 through 4.8, whose in-region rate is the same $5.50/$27.50 per MTok (measured 2026-08-31 against bedrock:ListFoundationModelAgreementOffers). Opus 4 and 4.1 are NOT in this tier — they list at $15/$75 — and carry \"opus-legacy\"."
     },
     {
       "provider": "anthropic",
@@ -48,7 +51,7 @@
       ],
       "wire_protocol": "messages",
       "pricing_key": "fable",
-      "notes": "Priced above the Opus tier ($10/$50 per MTok), so it carries its own pricing_key rather than sharing \"opus\". The Bedrock offering requires the account to opt into provider_data_share and has a higher refusal rate than prior Claude models."
+      "notes": "Priced above the Opus tier: $11/$55 per MTok in-region, $10/$50 global (measured 2026-08-31). It carries its own pricing_key rather than sharing \"opus\". The Bedrock offering requires the account to opt into provider_data_share and has a higher refusal rate than prior Claude models."
     },
     {
       "provider": "anthropic",
@@ -90,7 +93,8 @@
         "claude-opus-4-1-20250805"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "opus"
+      "pricing_key": "opus-legacy",
+      "notes": "Priced at $15/$75 per MTok, three times the Opus 4.5+ rate, so it cannot share \"opus\": a key is charged at its dearest member, and sharing would charge every Opus 5 request at this rate. Measured 2026-08-31 from the Price List's AmazonBedrockFoundationModels offer."
     },
     {
       "provider": "anthropic",
@@ -101,7 +105,7 @@
         "claude-opus-4-20250514"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "opus"
+      "pricing_key": "opus-legacy"
     },
     {
       "provider": "anthropic",
@@ -111,8 +115,8 @@
         "claude-sonnet-5"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "sonnet",
-      "notes": "Lists at the Sonnet tier, so it shares pricing_key \"sonnet\"."
+      "pricing_key": "sonnet-5",
+      "notes": "Lists BELOW the Sonnet 4.x tier — $2.20/$11.00 per MTok in-region against $3.30/$16.50 — so it carries its own key. It shared \"sonnet\" until the live feed's key-spread check measured the difference (2026-08-31)."
     },
     {
       "provider": "anthropic",
@@ -155,7 +159,8 @@
         "claude-3-7-sonnet-20250219"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "sonnet"
+      "pricing_key": "sonnet-3",
+      "notes": "Priced at $3/$15 per MTok — the Sonnet 4.x tier's in-region rate is $3.30/$16.50, so this shares a key with Claude 3 Sonnet instead of with the current tier."
     },
     {
       "provider": "anthropic",
@@ -166,7 +171,8 @@
         "claude-3-5-haiku-20241022"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "haiku"
+      "pricing_key": "haiku-3-5",
+      "notes": "Priced at $0.80/$4.00 per MTok against Haiku 4.5's $1.10/$5.50, so it carries its own key. The Latency Optimized variant is a different product at $1.00/$5.00 and is not served here."
     },
     {
       "provider": "anthropic",
@@ -176,7 +182,8 @@
         "claude-3-haiku"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "haiku"
+      "pricing_key": "haiku-3",
+      "notes": "Priced at $0.25/$1.25 per MTok. Bedrock publishes no prompt-cache rate for it because it does not support prompt caching; the key's cache legs are therefore an upper bound, not a published price."
     },
     {
       "provider": "anthropic",
@@ -186,7 +193,7 @@
         "claude-3-opus"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "opus"
+      "pricing_key": "opus-legacy"
     },
     {
       "provider": "anthropic",
@@ -196,7 +203,7 @@
         "claude-3-sonnet"
       ],
       "wire_protocol": "messages",
-      "pricing_key": "sonnet"
+      "pricing_key": "sonnet-3"
     },
     {
       "provider": "openai",
@@ -247,7 +254,7 @@
       ],
       "wire_protocol": "messages",
       "pricing_key": "nemotron",
-      "notes": "Served by Converse, so it rides the same transport as the Claude family. Not Claude, so resolve_bedrock_model() keeps it out of /v1/messages; reachable only via /v1/chat/completions. Bedrock publishes no list price, so pricing_key \"nemotron\" defaults to the Opus tier."
+      "notes": "Served by Converse, so it rides the same transport as the Claude family. Not Claude, so resolve_bedrock_model() keeps it out of /v1/messages; reachable only via /v1/chat/completions. Priced at $0.15/$0.65 per MTok in the Price List's AmazonBedrock offer (measured 2026-08-31); no prompt-cache rate is published, so the key's cache legs are an upper bound."
     },
     {
       "provider": "qwen",
@@ -259,6 +266,7 @@
       ],
       "wire_protocol": "messages",
       "pricing_key": "qwen",
+      "price_model_id": "qwen.qwen3-next-80b-a3b-instruct",
       "notes": "Chosen over qwen3-235b-a22b-2507 because Bedrock offers that one only in us-west-2, outside a us-east-1 residency policy. Converse transport; same /v1/messages exclusion and same unpriced-defaults-high rule as nemotron."
     }
   ]
