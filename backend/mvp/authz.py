@@ -179,7 +179,13 @@ ALL_SCOPES: tuple[str, ...] = (
     "billing:read", "billing:write",
     "messages:send", "responses:send",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
-    "tenants:update",
+    # `tenants:update-own` is a WRITE on a tenant the actor owns, deliberately
+    # separate from `tenants:update` (any tenant) and deliberately NOT a reuse of
+    # `tenants:read-own`: a write gated on a read permission is a lie the
+    # permission table tells every future reader of it. No implication edge —
+    # the ladder is read-breadth only, and `tenants:*` already covers this for
+    # an admin.
+    "tenants:update", "tenants:update-own",
     "usage:read-all", "usage:read-own-tenant", "usage:read-self",
     "users:assign-tenant", "users:create", "users:delete", "users:read",
     "users:update", "users:update-own-tenant",

@@ -29,7 +29,10 @@ CONCRETE = [
     "billing:read", "billing:write",
     "messages:send", "responses:send",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
-    "tenants:update",
+    # A write on an owned tenant. Reviewed as a new scope rather than a reuse of
+    # `tenants:read-own`, and given NO implication edge: the ladder is
+    # read-breadth only, and an admin reaches it through `tenants:*`.
+    "tenants:update", "tenants:update-own",
     "usage:read-all", "usage:read-own-tenant", "usage:read-self",
     "users:assign-tenant", "users:create", "users:delete", "users:read",
     "users:update", "users:update-own-tenant",

@@ -28,6 +28,10 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
   team_lead: [
     'tenants:create',
     'tenants:read-own',
+    // A write on an owned tenant (the pool budget). Separate from `tenants:update`
+    // (any tenant) and deliberately not a reuse of `tenants:read-own`: a write
+    // gated on a read permission is a lie the permission table tells its readers.
+    'tenants:update-own',
     'users:update-own-tenant',
     'usage:read-own-tenant',
     'usage:read-self',

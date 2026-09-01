@@ -26,15 +26,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo import (
+    TenantBudgetsRepository,
     TenantLimitExceededError,
     TenantNotFoundError,
     TenantsRepository,
     UsersRepository,
     UserTenantsRepository,
     UsageLogsRepository,
+    current_period,
 )
 from limits import MAX_TOKEN_CREDIT
+from dynamo.tenant_budgets import PoolLimitExceedsMaximumError, SIZING_FIXED, seat_pool_limit_microusd
 from dynamo.user_tenants import CreditExhaustedError, is_unlimited
+from .admin_tenants import (
+    PoolBudgetResponse,
+    SetPoolBudgetRequest,
+    _MICRO_USD_PER_CENT,
+    _pool_response,
+    _provision_seat_pool,
+)
 from .credit_ops import CreditAction
 
 from .authz import log_audit_event, require_permission
@@ -141,6 +151,18 @@ def create_tenant(
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
 ) -> TenantItem:
     """Create a Tenant owned by the calling Team Lead. team_lead_user_id is forced to user.user_id."""
+    # L8: validate seats (1, at creation) x SEAT_MONTHLY_USD against
+    # MAX_POOL_BUDGET_USD_CENTS BEFORE writing anything (same gate the admin
+    # route applies) — a misconfigured SEAT_MONTHLY_USD refuses loudly rather
+    # than creating a tenant with no pool (or a silently-clamped one).
+    try:
+        seat_pool_limit_microusd(1)
+    except PoolLimitExceedsMaximumError as e:
+        raise HTTPException(status_code=422, detail=f"seat_pool_limit_exceeds_maximum: {e}")
+    # Written at ZERO seats and grown by the same ±1-seat delta every membership
+    # change applies, so the ceiling equals the seat count at every moment. One
+    # seat here would count the owner twice.
+    pool_limit_microusd = seat_pool_limit_microusd(0)
     try:
         item = TenantsRepository().create(
             name=body.name,
@@ -160,6 +182,10 @@ def create_tenant(
         target_type="tenant",
         details={"name": body.name},
     )
+    # L3: the same default dollar pool the admin route provisions, shared via
+    # `admin_tenants._provision_seat_pool` so the pool a tenant gets does not
+    # depend on which route created it.
+    _provision_seat_pool(item["tenant_id"], pool_limit_microusd=pool_limit_microusd, actor=actor)
     return _to_tenant_item(item)
 
 
@@ -209,6 +235,61 @@ def update_own_tenant(
         after={"name": body.name, "default_credit": body.default_credit},
     )
     return _to_tenant_item(item)
+
+
+@router.put("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
+def set_own_pool_budget(
+    tenant_id: str,
+    body: SetPoolBudgetRequest,
+    actor: AuthenticatedUser = Depends(require_permission("tenants:update-own")),
+) -> PoolBudgetResponse:
+    """Set the caller's own tenant's dollar pool budget for a period (L5).
+
+    The admin-only ``PUT /admin/tenants/{id}/pool-budget`` mirror: same request
+    body, same semantics, same audit event (``tenant_pool_budget_set``) so a
+    pool ceiling looks identical in the log regardless of which route moved
+    it. Reuses `_require_owner` — the SAME ownership check every other
+    team-lead-scoped write in this router uses — so a team lead may set only
+    their OWN tenant's pool; another tenant's returns the same unified 404 as
+    every other endpoint here. Like the admin route, this always stops the
+    row's per-seat auto-adjust (``sizing -> "fixed"``, L4).
+    """
+    _require_owner(tenant_id, actor)
+
+    period = body.period or current_period()
+    limit_microusd = int(body.limit_usd_cents) * _MICRO_USD_PER_CENT
+
+    repo = TenantBudgetsRepository()
+    before = repo.pool_summary(tenant_id, period)
+    repo.set_pool_limit(
+        tenant_id=tenant_id,
+        period=period,
+        pool_limit_microusd=limit_microusd,
+        status=body.status,
+        sizing=SIZING_FIXED,
+    )
+    summary = repo.pool_summary(tenant_id, period)
+    assert summary is not None  # just written
+
+    log_audit_event(
+        event="tenant_pool_budget_set",
+        actor_id=actor.user_id,
+        actor_email=actor.email,
+        target_id=tenant_id,
+        target_type="tenant",
+        before={
+            "pool_limit_microusd": (before or {}).get("pool_limit_microusd"),
+            "status": (before or {}).get("status"),
+            "sizing": (before or {}).get("sizing"),
+        },
+        after={
+            "period": period,
+            "pool_limit_microusd": limit_microusd,
+            "status": body.status,
+            "sizing": SIZING_FIXED,
+        },
+    )
+    return _pool_response(tenant_id, period, summary)
 
 
 @router.get("/{tenant_id}/members", response_model=TenantMembersResponse)
