@@ -165,16 +165,25 @@ def counter_touching_qualnames(tree: ast.Module) -> dict:
 def check_nontransactional_counter_writes(sites, counter_funcs, module,
                                           preserving_put_allowlist,
                                           readonly_counter_update_allowlist=frozenset(),
-                                          pending_counter_write_allowlist=frozenset()):
+                                          pending_counter_write_allowlist=frozenset(),
+                                          create_only_put_allowlist=frozenset()):
     """HARD rule.  A non-transactional write that (a) mentions a counter attr
     in its own arguments, or (b) lives in a function that mentions one, is a
-    violation -- with three reviewed exceptions:
+    violation -- with four reviewed exceptions:
 
-      * a *preserving* put_item (set_pool_limit's create branch);
-      * a *counter-read-only* update_item (set_pool_limit's ceiling-CAS /
-        legacy-repair branches): the function READS pool_reserved/pool_settled
-        in Python to compute a value, but its DynamoDB UpdateExpression must not
-        ADD/SET/REMOVE either protected counter. A2 governs mutations, not reads.
+      * a *preserving* put_item: a read-then-rewrite that carries the counter
+        values it read back out again;
+      * a *create-only* put_item (create_only_put_allowlist): a put whose own
+        ConditionExpression is `attribute_not_exists(<partition key>)`, so it can
+        only ever bring a row into existence. Its counter literals are not a
+        rewrite of anybody's counters, because a row for them to belong to is
+        exactly what the condition forbids. This is a DIFFERENT claim from
+        preserving, and the stronger one: preserving says the write carries the
+        live values, create-only says the write cannot reach a live row at all.
+      * a *counter-read-only* update_item (e.g. reconcile_headroom): the function
+        READS pool_reserved/pool_settled in Python to compute a value, but its
+        DynamoDB UpdateExpression must not ADD/SET/REMOVE either protected
+        counter. A2 governs mutations, not reads.
       * a *PENDING-protocol* counter write (pending_counter_write_allowlist): a
         DELIBERATE non-transactional single-item conditional counter mutation
         whose safety is proven NOT by transactional A2 but by the PENDING protocol
@@ -195,6 +204,9 @@ def check_nontransactional_counter_writes(sites, counter_funcs, module,
             continue
         if s.api == "put_item" and s.qualname in preserving_put_allowlist:
             v.extend(check_preserving_put(s))
+            continue
+        if s.api == "put_item" and s.qualname in create_only_put_allowlist:
+            v.extend(check_create_only_put(s))
             continue
         if s.api == "update_item" and s.qualname in readonly_counter_update_allowlist:
             v.extend(check_non_mutating_counter_update(s))
@@ -251,8 +263,32 @@ def check_pending_counter_write(site: WriteSite):
     return []
 
 
+def check_create_only_put(site: WriteSite):
+    """A reviewed create-only put_item is allowed ONLY if its own
+    ConditionExpression forbids the row already existing. That condition is the
+    whole of the argument: a put that cannot land on an existing row cannot
+    overwrite a live pool_reserved/pool_settled, whatever it writes for them, so
+    A2's "mutations go through a transact" does not reach it.
+
+    Nothing weaker will do. Without the condition the same put is an
+    unconditional whole-row rewrite that silently zeroes a live reserve, which is
+    the exact defect A2 exists to refuse -- so the condition is checked here
+    rather than trusted to the reviewer who added the allowlist entry."""
+    kws = {kw.arg: kw.value for kw in getattr(site.call, "keywords", []) if kw.arg}
+    cond = kws.get("ConditionExpression")
+    texts = string_constants(cond) if cond is not None else []
+    if not any("attribute_not_exists" in t for t in texts):
+        return [
+            f"{site.module}:{site.lineno} {site.qualname}: allow-listed "
+            f"create-only put_item has no attribute_not_exists(...) "
+            f"ConditionExpression, so it can land on an EXISTING row and rewrite "
+            f"a live pool_reserved/pool_settled. Either restore the condition or "
+            f"make the write transactional (A2)."]
+    return []
+
+
 def check_preserving_put(site: WriteSite):
-    """set_pool_limit is allowed to put_item the pool row ONLY as a
+    """A preserving put_item is allowed to put_item the pool row ONLY as a
     read-then-rewrite that carries the previously read counter values.
     Regression checks: (1) the function must still read; (2) no dict literal
     or subscript-assign in the function may bind a counter attr to a
@@ -582,14 +618,15 @@ def check_required_conditions(tree, module, requirements):
 
 def analyze_module(source, module, *, allowed_sites, preserving_puts,
                    counter_registry, readonly_counter_updates=frozenset(),
-                   pending_counter_writes=frozenset()):
+                   pending_counter_writes=frozenset(),
+                   create_only_puts=frozenset()):
     tree = load(source)
     sites, hard = collect_write_sites(tree, module)
     counter_funcs = counter_touching_qualnames(tree)
     v = list(hard)
     v += check_nontransactional_counter_writes(
         sites, counter_funcs, module, preserving_puts,
-        readonly_counter_updates, pending_counter_writes)
+        readonly_counter_updates, pending_counter_writes, create_only_puts)
     v += check_write_inventory(sites, allowed_sites)
     v += check_counter_registry(counter_funcs, counter_registry, module)
     v += check_no_budget_row_deletion(tree, module, sites)

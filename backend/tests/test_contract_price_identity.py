@@ -70,8 +70,8 @@ def env(dynamodb_mock):
     UserTenantsRepository().ensure(
         user_id=USER, tenant_id=TENANT, role="user", total_credit=10**12,
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=TENANT, period=current_period(), pool_limit_microusd=10**11,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=TENANT, period=current_period(), manual_limit_microusd=10**11,
     )
     yield
     _routing_config.reset_cache()

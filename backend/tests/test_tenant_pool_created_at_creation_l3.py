@@ -70,12 +70,11 @@ def test_admin_create_tenant_writes_a_one_seat_pool(monkeypatch, dynamodb_mock):
 
     summary = TenantBudgetsRepository().pool_summary(tenant_id, current_period())
     assert summary is not None, "no BUDGET row was written at tenant creation"
-    # ZERO at creation, and `per_seat`, so the ceiling equals the seat count at
-    # every moment. Writing one seat here would count the owner twice: a fresh
+    # ZERO at creation, and seat-tracked, so the ceiling equals the seat count
+    # at every moment. Writing one seat here would count the owner twice: a fresh
     # tenant has no memberships yet, and the first `ensure` adds its own seat.
     assert summary["pool_limit_microusd"] == 0
     assert summary["remaining_microusd"] == 0
-    assert summary["sizing"] == "per_seat"
 
     # And the first membership is what brings it to exactly one seat.
     from dynamo.user_tenants import UserTenantsRepository
@@ -84,8 +83,6 @@ def test_admin_create_tenant_writes_a_one_seat_pool(monkeypatch, dynamodb_mock):
     grown = TenantBudgetsRepository().pool_summary(tenant_id, current_period())
     assert grown["pool_limit_microusd"] == 1 * 200 * _MICRO_USD_PER_USD
 
-    raw = TenantBudgetsRepository().get(tenant_id, current_period())
-    assert raw.get("sizing") == "per_seat"
 
 
 def test_team_lead_create_tenant_writes_a_one_seat_pool(monkeypatch, dynamodb_mock):
@@ -104,10 +101,6 @@ def test_team_lead_create_tenant_writes_a_one_seat_pool(monkeypatch, dynamodb_mo
     summary = TenantBudgetsRepository().pool_summary(tenant_id, current_period())
     assert summary is not None, "the team-lead create route wrote no BUDGET row"
     assert summary["pool_limit_microusd"] == 0
-    assert summary["sizing"] == "per_seat"
-
-    raw = TenantBudgetsRepository().get(tenant_id, current_period())
-    assert raw.get("sizing") == "per_seat"
 
 
 def test_seat_monthly_usd_env_var_scales_the_default_pool(monkeypatch, dynamodb_mock):

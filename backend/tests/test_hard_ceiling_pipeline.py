@@ -60,10 +60,10 @@ def _seed_tenant_with_pool(pool_limit_microusd: int, bound_mode: str = "strict")
         created_by="test",
     )
     TenantsRepository().update(tenant_id=TENANT_ID, bound_mode=bound_mode)
-    TenantBudgetsRepository().set_pool_limit(
+    TenantBudgetsRepository().set_manual_limit(
         tenant_id=TENANT_ID,
         period=_current_period(),
-        pool_limit_microusd=pool_limit_microusd,
+        manual_limit_microusd=pool_limit_microusd,
     )
 
 

@@ -109,8 +109,8 @@ def _seed(tenant, limit=10_000_000):
     period = current_period()
     UserTenantsRepository().ensure(user_id=f"u-{tenant}", tenant_id=tenant, role="user",
                                    total_credit=1_000_000_000)
-    TenantBudgetsRepository().set_pool_limit(tenant_id=tenant, period=period,
-                                             pool_limit_microusd=limit)
+    TenantBudgetsRepository().set_manual_limit(tenant_id=tenant, period=period,
+                                             manual_limit_microusd=limit)
     return tenant, period
 
 

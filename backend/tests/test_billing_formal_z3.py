@@ -361,7 +361,7 @@ def test_headroom_equals_limit_minus_reserved_settled():
     preserves("reap", -r, 0, r)
     preserves("settled_only_fallback", 0, act, -act)
 
-    # set_pool_limit ceiling change (Fable review finding 3): the limit moves by
+    # set_manual_limit ceiling change (Fable review finding 3): the limit moves by
     # `d` (new - old) and headroom moves by the SAME `d`, with reserved/settled
     # untouched. Modeled as a change to L (not R/S), so re-derive the invariant
     # with L -> L + d and dH = d. This is the ADD-delta CAS branch.
@@ -369,7 +369,7 @@ def test_headroom_equals_limit_minus_reserved_settled():
     s = _solver()
     s.add(inv)
     s.add(z3.Not(((H + d) == (L + d) - R - S)))
-    assert_proved(s, "set_pool_limit ceiling delta preserves headroom == L - R - S")
+    assert_proved(s, "set_manual_limit ceiling delta preserves headroom == L - R - S")
 
     # reconcile_headroom (Fable review finding 2): from ANY pre-state H_bad
     # (missing, drifted, or negative — e.g. a mixed-window settle created the

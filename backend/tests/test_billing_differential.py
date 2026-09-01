@@ -182,8 +182,8 @@ def _run_differential():
                 user_id=self.user.user_id, tenant_id=TENANT,
                 role="user", total_credit=10**12,
             )
-            # Reset the pool row to CLEAN counters for this example. set_pool_limit
-            # is a *preserving* put (keeps reserved/settled), so across examples
+            # Reset the pool row to CLEAN counters for this example.
+            # set_manual_limit keeps reserved/settled, so across examples
             # the shared sc-diff table would accumulate — put an explicit
             # zero-counter row instead so every example starts from R=S=0.
             budgets._table.put_item(Item={
@@ -314,8 +314,8 @@ def _run_differential():
 
         @rule(new_limit=LIMITS)
         def set_limit(self, new_limit):
-            budgets.set_pool_limit(tenant_id=TENANT, period=PERIOD,
-                                   pool_limit_microusd=new_limit)
+            budgets.set_manual_limit(tenant_id=TENANT, period=PERIOD,
+                                   manual_limit_microusd=new_limit)
             self.ledger.set_limit(new_limit)
             self.limit = new_limit
             self.max_limit_seen = max(self.max_limit_seen, new_limit)
@@ -341,8 +341,8 @@ def _run_differential():
         user = _User(user_id=f"u-reap-{uuid.uuid4()}", org_id=TENANT)
         UserTenantsRepository().ensure(user_id=user.user_id, tenant_id=TENANT,
                                        role="user", total_credit=10**12)
-        budgets.set_pool_limit(tenant_id=TENANT, period=PERIOD,
-                               pool_limit_microusd=5_000_000)
+        budgets.set_manual_limit(tenant_id=TENANT, period=PERIOD,
+                               manual_limit_microusd=5_000_000)
         cost, actual = 40_000, 30_000
         r0, s0 = real_pool()
         ctx = _pipeline.reserve_credit(user, cost, pricing_key="opus",
@@ -381,8 +381,8 @@ def _run_differential():
         )
 
         tenant = TENANT
-        budgets.set_pool_limit(tenant_id=tenant, period=PERIOD,
-                               pool_limit_microusd=5_000_000)
+        budgets.set_manual_limit(tenant_id=tenant, period=PERIOD,
+                               manual_limit_microusd=5_000_000)
         # clean counters for this check
         budgets._table.put_item(Item={
             "tenant_id": tenant, "sk": f"BUDGET#{PERIOD}",

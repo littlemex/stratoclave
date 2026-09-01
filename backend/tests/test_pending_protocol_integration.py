@@ -38,8 +38,8 @@ def _seed(tenant_id, limit=10_000_000_000):
         user_id=f"user-{tenant_id}", tenant_id=tenant_id, role="user",
         total_credit=1_000_000_000,
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=limit,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=limit,
     )
     return tenant_id, period
 
@@ -378,7 +378,7 @@ def test_audit_sweep_ignores_other_period_markers(dynamodb_mock, monkeypatch):
     # Also place the prev-period EXPIRED_UNCREDITED hold so prev's reconcile can
     # recover it (the debited headroom is still held out).
     from dynamo.tenant_budgets import hold_sk as _hsk2
-    b.set_pool_limit(tenant_id=tenant, period=prev, pool_limit_microusd=10_000_000_000)
+    b.set_manual_limit(tenant_id=tenant, period=prev, manual_limit_microusd=10_000_000_000)
     # reflect the debit that the prev-period marker represents on the prev pool.
     b._table.update_item(
         Key={"tenant_id": tenant, "sk": f"BUDGET#{prev}"},

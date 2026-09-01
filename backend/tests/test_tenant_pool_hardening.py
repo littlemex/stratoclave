@@ -191,10 +191,10 @@ def test_suspended_pool_rejects_immediately(seed_tenant_with_pool):
     """
     seed = seed_tenant_with_pool
     # Flip the pool to suspended.
-    TenantBudgetsRepository().set_pool_limit(
+    TenantBudgetsRepository().set_manual_limit(
         tenant_id=seed["tenant_id"],
         period=seed["period"],
-        pool_limit_microusd=seed["pool_limit_microusd"],
+        manual_limit_microusd=seed["pool_limit_microusd"],
         status="suspended",
     )
     user = _user(seed)
@@ -960,8 +960,8 @@ def test_sweep_reclaims_previous_period_orphan(seed_tenant_with_pool):
     seed = seed_tenant_with_pool
     prev = previous_period(seed["period"])
     # Seed a pool row + expired orphan under the PREVIOUS period.
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=seed["tenant_id"], period=prev, pool_limit_microusd=5_000_000
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=seed["tenant_id"], period=prev, manual_limit_microusd=5_000_000
     )
     _seed_expired_hold(seed, 1_200_000, period=prev, expires_at=5)
     assert _holds(seed, period=prev)
@@ -978,7 +978,7 @@ def test_sweep_reclaims_previous_period_orphan(seed_tenant_with_pool):
 # --- settle after the pool row vanished must not create a ghost row --------
 def test_settle_after_pool_row_deleted_is_noop(seed_tenant_with_pool):
     """If the pool row is deleted mid-flight, an in-flight settle must NOT
-    recreate it as a ghost row carrying negative reserved (a later set_pool_limit
+    recreate it as a ghost row carrying negative reserved (a later set_manual_limit
     would preserve that and inflate the next period's budget).
     """
     seed = seed_tenant_with_pool

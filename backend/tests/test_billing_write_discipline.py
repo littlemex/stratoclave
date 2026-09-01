@@ -34,6 +34,7 @@ SCANNED_FILES = {
     "backend/dynamo/tenant_budgets.py",
     "backend/dynamo/user_tenants.py",
     "backend/migrations/backfill_pool_headroom.py",
+    "backend/migrations/pool_ceiling_migration.py",
 }
 
 # Reviewed write sites. Seeded from the current design:
@@ -42,7 +43,7 @@ SCANNED_FILES = {
 #   - settle():   transact_write_items, caller-stable `token`,
 #                 attribute_exists(reservation_id)
 #   - settle_settled_only(): transact_write_items, token f"{token}-so"
-#   - set_pool_limit(): preserving put_item (reads row, writes back counters)
+#   - _seed_pool_row(): create-only put_item (attribute_not_exists(tenant_id))
 # Fingerprints are TUPLES (module, enclosing-qualname, api) — the engine's
 # WriteSite.fingerprint. Seeded from the REAL code after reviewing each site
 # against A2/A5 (see the review note beside each).
@@ -128,21 +129,34 @@ ALLOWED_SITES = {
         # which is the safe direction (a refusal, never an over-admission).
         # Reviewed OK.
         ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.adjust_pool_for_seat_delta", "update_item"),
-        # set_pool_limit CREATE branch: conditional put_item seeding a brand-new
-        # pool row (attribute_not_exists(tenant_id)). reserved=settled=0 literals
-        # are correct at creation (there is no prior row to preserve), verified by
-        # check_preserving_put's read + constant checks.
-        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.set_pool_limit", "put_item"),
-        # set_pool_limit UPDATE branches (Fable review finding 3): the ceiling-CAS
-        # (SET pool_limit ADD pool_headroom :delta, guarded pool_limit=:old) and
-        # the legacy-repair (SET pool_headroom = computed, guarded
-        # attribute_not_exists(pool_headroom)). Both READ reserved/settled in
-        # Python to compute a value but their DynamoDB expressions NEVER name the
-        # protected counters — verified structurally by
-        # check_non_mutating_counter_update. A2 governs mutations, not reads, so a
-        # non-transactional update that only moves pool_limit/pool_headroom is
-        # sound. Race-safe: the delta ADD composes with concurrent reserve ADDs.
-        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.set_pool_limit", "update_item"),
+        # _seed_pool_row: the ONE place a pool row comes into existence, and a
+        # CREATE-ONLY put_item — ConditionExpression attribute_not_exists(tenant_id),
+        # so it either writes a row that did not exist or writes nothing at all.
+        # The reserved=settled=0 literals are therefore not a rewrite of anybody's
+        # counters: there is no prior row for them to overwrite. A2 is about
+        # mutations of a live counter, and this write cannot reach one.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository._seed_pool_row", "put_item"),
+        # set_manual_limit: the operator's figure. SET manual_limit ADD pool_limit
+        # :delta, pool_headroom :delta, where delta is the BASELINE delta, under a
+        # CAS on the three values that delta was computed from (seat_count, the
+        # prior manual_limit including its absence, and pool_limit). Names neither
+        # protected counter in any of its expressions, so A2 is not engaged; it
+        # reads them not at all. Race-safe for the same reason the seat delta is:
+        # the money moves as an ADD, so a concurrent reserve's own headroom ADD
+        # composes with it instead of being clobbered.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.set_manual_limit", "update_item"),
+        # clear_manual_limit: the reversal, REMOVE manual_limit with the same ADD
+        # of the baseline delta under the same CAS. Same review as above, and the
+        # same reason A2 is not engaged. It is a separate method rather than a
+        # sentinel value because zero is a legal figure meaning "refuse every
+        # request", so there is no in-band value left to mean "follow the seats".
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.clear_manual_limit", "update_item"),
+        # record_rate_in_force: put_item of the singleton row recording the seat
+        # rate the stored ceilings were computed at. Not a pool row and not a pool
+        # counter — it is the fact the boot-time check compares the configured rate
+        # against, so that changing the rate cannot silently restate every
+        # seat-tracked ceiling. Money-neutral.
+        ("backend/dynamo/tenant_budgets.py", "TenantBudgetsRepository.record_rate_in_force", "put_item"),
         # reconcile_headroom (Fable review finding 2): value-repairs pool_headroom
         # to `limit - reserved - settled` under a CAS (attribute_not_exists OR
         # pool_headroom = :observed). Reads reserved/settled in Python only; its
@@ -196,7 +210,50 @@ ALLOWED_SITES = {
     },
     # backend/migrations/backfill_pool_headroom.py makes NO raw write of its own
     # (see COUNTER_FUNCTIONS note): it backfills by delegating to the reviewed
-    # set_pool_limit preserving put, so it has no write site to allow here.
+    # reconcile_headroom update, so it has no write site to allow here.
+    "backend/migrations/pool_ceiling_migration.py": {
+        # The five phases of the ceiling migration. Every one is a single-item
+        # CONDITIONAL UpdateItem over one BUDGET row, and NONE of them names
+        # pool_reserved_microusd or pool_settled_microusd anywhere in the module --
+        # so none is a counter mutation and A2 is not engaged by any of them. What
+        # each one is reviewed for instead is that it cannot restate a figure from
+        # a stale read: the migration runs against a live table, so every write is
+        # guarded on what it read.
+        #   * M1 seeds the stored seat rate, guarded
+        #     attribute_not_exists(seat_rate_microusd) -- a concurrent seed is never
+        #     doubled, and a row already carrying a DIFFERENT rate is left for the
+        #     reconciler to flag rather than overwritten.
+        ("backend/migrations/pool_ceiling_migration.py", "phase_m1_add_attributes", "update_item"),
+        #   * M2 backfills seat_count and, for a row holding an operator's figure,
+        #     manual_limit. Guarded on the values it classified from, so a
+        #     membership delta or an operator set that landed under it loses the CAS
+        #     and the row waits for the next pass instead of being written from a
+        #     stale read. Moves no money: it writes the row's COMPOSITION, and
+        #     pool_limit is untouched.
+        ("backend/migrations/pool_ceiling_migration.py", "phase_m2_backfill", "update_item"),
+        #   * M3 repairs a row M2 could not classify, guarded
+        #     attribute_not_exists(manual_limit_microusd) AND pool_limit = :observed
+        #     -- fail-stale, so a row a concurrent backfill has since fixed is not
+        #     overwritten with a figure derived from the total M3 read. Also moves
+        #     no money.
+        ("backend/migrations/pool_ceiling_migration.py", "phase_m3_cutover", "update_item"),
+        #   * M4 REMOVEs the dead `sizing` attribute. Money-neutral by construction
+        #     -- nothing reads it and nothing derives from it -- and gated behind a
+        #     clean reconciler pass because it is the point of no return for reading
+        #     the old shape.
+        ("backend/migrations/pool_ceiling_migration.py", "phase_m4_drop_sizing", "update_item"),
+        #   * The rate change is the only one that moves money, and the only place
+        #     the rate in force may move. It recomputes a seat-tracked row at the
+        #     new rate as `ADD pool_limit :d, pool_headroom :d` -- an ADD, so a live
+        #     reserve's own headroom ADD composes with it rather than being
+        #     clobbered -- under a CAS on the two figures the delta was computed
+        #     from (pool_limit and seat_count). It moves pool_limit and
+        #     pool_headroom by the SAME delta, which is the identity
+        #     headroom == limit - reserved - settled being preserved without either
+        #     protected counter being read or written. A row holding an operator's
+        #     figure is skipped outright.
+        ("backend/migrations/pool_ceiling_migration.py", "recompute_seat_tracked_rows", "update_item"),
+    },
     "backend/dynamo/user_tenants.py": {
         # These write the per-USER token-balance row (user_id/tenant_id), NOT
         # the pool BUDGET counters. Reviewed: none carry pool_*_microusd.
@@ -206,6 +263,11 @@ ALLOWED_SITES = {
         ("backend/dynamo/user_tenants.py", "UserTenantsRepository.refund", "update_item"),
         ("backend/dynamo/user_tenants.py", "UserTenantsRepository.overwrite_credit", "update_item"),
         ("backend/dynamo/user_tenants.py", "UserTenantsRepository.switch_tenant", "transact_write_items"),
+        # archive_membership: marks a membership row archived. Touches the per-USER
+        # membership row, never the pool BUDGET row, and carries no pool_*_microusd
+        # — the pool side of a membership change is adjust_pool_for_seat_delta,
+        # reviewed above. Reviewed: same class as the ensure/reserve/refund writes.
+        ("backend/dynamo/user_tenants.py", "UserTenantsRepository.archive_membership", "update_item"),
     },
 }
 
@@ -213,8 +275,29 @@ ALLOWED_SITES = {
 # they read-modify-write the whole row. The engine additionally rejects any
 # counter attribute in these Items whose value is a *constant* (a literal 0
 # in a preserving put means someone replaced the read-back value).
-PRESERVING_PUTS = {
-    "backend/dynamo/tenant_budgets.py": {"TenantBudgetsRepository.set_pool_limit"},
+#
+# Empty, and deliberately so: no write rewrites a live pool row wholesale any
+# more. The one that used to -- set_pool_limit's create branch -- is now
+# `_seed_pool_row`, which is CREATE-ONLY rather than preserving and belongs in
+# CREATE_ONLY_PUTS below. Putting it here instead would have passed, and passed
+# vacuously: the "reads the row first" check is satisfied by the `.get` on the
+# ClientError response rather than by any read of the row, and the "no constant
+# counter" check does not see `Decimal(0)` as a constant. Two checks that both
+# say nothing about the site they are guarding.
+PRESERVING_PUTS: dict = {}
+
+# put_item calls allowed to carry counter literals because their own
+# ConditionExpression forbids the row already existing, so they can only create.
+# The engine verifies the condition rather than taking the entry's word for it.
+CREATE_ONLY_PUTS = {
+    "backend/dynamo/tenant_budgets.py": {
+        # The ONE place a pool row comes into existence, under
+        # attribute_not_exists(tenant_id). reserved=settled=0 are the correct
+        # values for a row being created, and cannot overwrite anyone's live
+        # counters because the condition refuses an existing row outright. A2
+        # governs mutations of a live counter and this write cannot reach one.
+        "TenantBudgetsRepository._seed_pool_row",
+    },
 }
 
 # update_item calls in counter-referencing functions that are allowed BECAUSE
@@ -224,7 +307,9 @@ PRESERVING_PUTS = {
 # "no protected counter in the call's strings" invariant structurally.
 READONLY_COUNTER_UPDATES = {
     "backend/dynamo/tenant_budgets.py": {
-        "TenantBudgetsRepository.set_pool_limit",
+        # set_manual_limit / clear_manual_limit are NOT here and do not need to
+        # be: neither names a protected counter in any of its expressions, nor
+        # reads one, so the rule this exception softens never fires on them.
         "TenantBudgetsRepository.reconcile_headroom",
     },
 }
@@ -241,7 +326,7 @@ COUNTER_FUNCTIONS = {
         "TenantBudgetsRepository.settle_txn_item",
         "TenantBudgetsRepository.reclaim_hold_txn_item",
         "TenantBudgetsRepository.hold_put_txn_item",
-        "TenantBudgetsRepository.set_pool_limit",
+        "TenantBudgetsRepository._seed_pool_row",
         # reconcile_headroom reads the mirrors to recompute the invariant; its
         # write never names a protected counter (see READONLY_COUNTER_UPDATES).
         "TenantBudgetsRepository.reconcile_headroom",
@@ -256,6 +341,10 @@ COUNTER_FUNCTIONS = {
         "<module>",  # module docstring names the counters
     },
     "backend/dynamo/user_tenants.py": set(),
+    # The ceiling migration names NO protected counter anywhere -- it migrates the
+    # row's composition (seat rate, seat count, the operator's figure) and, in the
+    # rate change, its ceiling. Empty is the assertion.
+    "backend/migrations/pool_ceiling_migration.py": set(),
     "backend/migrations/backfill_pool_headroom.py": {
         # The migration reads limit/reserved/settled in _classify to report the
         # target headroom, and delegates the write to reconcile_headroom (a
@@ -380,7 +469,7 @@ BUDGET_TABLE_MARKERS = ("tenant_budgets", "TenantBudgets", "TENANT_BUDGETS_TABLE
 
 
 def _run(module, source=None, *, allowed=None, preserving=None, counters=None,
-         readonly_updates=None, pending_writes=None):
+         readonly_updates=None, pending_writes=None, create_only=None):
     billing_guards.REQUIRED_CONDITIONS = REQUIRED_CONDITIONS
     billing_guards.EXPECTED_TOKEN_KIND = EXPECTED_TOKEN_KIND
     src = source if source is not None else (REPO_ROOT / module).read_text()
@@ -395,6 +484,9 @@ def _run(module, source=None, *, allowed=None, preserving=None, counters=None,
         pending_counter_writes=(
             PENDING_COUNTER_WRITES.get(module, set())
             if pending_writes is None else pending_writes),
+        create_only_puts=(
+            CREATE_ONLY_PUTS.get(module, set())
+            if create_only is None else create_only),
     )
 
 
@@ -420,7 +512,7 @@ def test_no_unscanned_module_touches_budgets_table():
     SCANNED_FILES. A new module writing to the table can't bypass the guard.
 
     Modules that only CALL the repository (e.g. admin_tenants ->
-    TenantBudgetsRepository.set_pool_limit) are not raw writers: the write
+    TenantBudgetsRepository.set_manual_limit) are not raw writers: the write
     discipline is enforced at the repo layer, which IS scanned. Test modules
     are exempt. This is the fail-closed net for a NEW raw write path.
     """
@@ -487,7 +579,7 @@ def dispatch(table, method, **kw):
 
 PLANTED_CONST_IN_PRESERVING_PUT = '''
 class TenantBudgets:
-    def set_pool_limit(self, tenant_id, period, limit):
+    def set_ceiling(self, tenant_id, period, limit):
         existing = self.table.get_item(Key={"pk": tenant_id})  # reads the row
         self.table.put_item(Item={
             "pk": tenant_id,
@@ -532,19 +624,56 @@ def test_engine_flags_getattr_dispatch():
 
 def test_engine_flags_constant_counter_in_preserving_put():
     v = _run("<planted>", PLANTED_CONST_IN_PRESERVING_PUT,
-             allowed={"<planted>::TenantBudgets.set_pool_limit::put_item"},
-             preserving={"TenantBudgets.set_pool_limit"},
-             counters={"TenantBudgets.set_pool_limit"})
+             allowed={"<planted>::TenantBudgets.set_ceiling::put_item"},
+             preserving={"TenantBudgets.set_ceiling"},
+             counters={"TenantBudgets.set_ceiling"})
     _assert_flagged(v, "pool_reserved_microusd")
     assert any("constant" in x.lower() or "literal" in x.lower() for x in v), v
 
 
-# The readonly-counter-update exception (set_pool_limit / reconcile_headroom)
+# The create-only-put exception must NOT become a hole either: an allow-listed
+# put_item that carries counter literals but has LOST the condition forbidding an
+# existing row is an unconditional whole-row rewrite, and must still be rejected.
+PLANTED_CREATE_ONLY_PUT_WITHOUT_CONDITION = '''
+class TenantBudgets:
+    def _seed_pool_row(self, tenant_id, period, limit):
+        item = {
+            "tenant_id": tenant_id,
+            "pool_limit_microusd": limit,
+            "pool_reserved_microusd": 0,
+            "pool_settled_microusd": 0,
+        }
+        self._table.put_item(Item=item)
+'''
+
+
+def test_engine_flags_create_only_put_without_the_not_exists_condition():
+    v = _run("<planted>", PLANTED_CREATE_ONLY_PUT_WITHOUT_CONDITION,
+             allowed={("<planted>", "TenantBudgets._seed_pool_row", "put_item")},
+             preserving=set(), counters={"TenantBudgets._seed_pool_row"},
+             create_only={"TenantBudgets._seed_pool_row"})
+    _assert_flagged(v, "attribute_not_exists")
+
+
+def test_engine_accepts_a_create_only_put_that_keeps_its_condition():
+    """The mirror of the above: the SAME write, with the condition, is clean --
+    so the check above is refusing the missing condition rather than the shape."""
+    src = PLANTED_CREATE_ONLY_PUT_WITHOUT_CONDITION.replace(
+        "put_item(Item=item)",
+        'put_item(Item=item, ConditionExpression="attribute_not_exists(tenant_id)")')
+    v = _run("<planted>", src,
+             allowed={("<planted>", "TenantBudgets._seed_pool_row", "put_item")},
+             preserving=set(), counters={"TenantBudgets._seed_pool_row"},
+             create_only={"TenantBudgets._seed_pool_row"})
+    assert v == [], v
+
+
+# The readonly-counter-update exception (reconcile_headroom)
 # must NOT become a hole: an allow-listed update_item that actually MUTATES a
 # protected counter in its own DynamoDB expression must still be rejected.
 PLANTED_READONLY_UPDATE_THAT_MUTATES = '''
 class TenantBudgets:
-    def set_pool_limit(self, tenant_id, period, limit):
+    def set_ceiling(self, tenant_id, period, limit):
         row = self.get(tenant_id, period)  # reads reserved/settled
         self.table.update_item(
             Key={"pk": tenant_id},
@@ -556,10 +685,10 @@ class TenantBudgets:
 
 def test_engine_flags_readonly_update_that_actually_mutates_counter():
     v = _run("<planted>", PLANTED_READONLY_UPDATE_THAT_MUTATES,
-             allowed={("<planted>", "TenantBudgets.set_pool_limit", "update_item")},
+             allowed={("<planted>", "TenantBudgets.set_ceiling", "update_item")},
              preserving=set(),
-             counters={"TenantBudgets.set_pool_limit"},
-             readonly_updates={"TenantBudgets.set_pool_limit"})
+             counters={"TenantBudgets.set_ceiling"},
+             readonly_updates={"TenantBudgets.set_ceiling"})
     # even though it's allow-listed as read-only, naming a protected counter in
     # the UpdateExpression is an A2 regression the guard must catch.
     _assert_flagged(v, "pool_reserved_microusd")

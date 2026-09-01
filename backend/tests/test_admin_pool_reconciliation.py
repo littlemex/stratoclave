@@ -79,8 +79,8 @@ def _reserve_and_settle(tenant_id: str, period: str, cost: int, actual: int) -> 
         user_id=user.user_id, tenant_id=tenant_id, role="user",
         total_credit=1_000_000_000,
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=10_000_000_000,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=10_000_000_000,
     )
     ctx = reserve_credit(user, 4000, pricing_key="opus", cost_microusd=cost)
     settle_reservation_and_log(
@@ -153,8 +153,8 @@ def test_reconciliation_migrating_suppresses_reserved_drift(monkeypatch, dynamod
 
     tid = _seed_tenant()
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tid, period=period, pool_limit_microusd=10_000_000_000,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tid, period=period, manual_limit_microusd=10_000_000_000,
     )
     # Simulate a Phase-1 SETTLE terminal directly (native put, no RESERVE event):
     # reserved_delta=-R, settled_delta=actual, on the shared TERMINAL sk.
@@ -199,8 +199,8 @@ def test_reconciliation_detects_rating_replay_mismatch(monkeypatch, dynamodb_moc
 
     tid = _seed_tenant()
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tid, period=period, pool_limit_microusd=10_000_000_000,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tid, period=period, manual_limit_microusd=10_000_000_000,
     )
     # Write a SETTLE terminal whose rating.total disagrees with its components.
     bad_rating = {

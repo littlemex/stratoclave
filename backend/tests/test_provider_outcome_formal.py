@@ -256,7 +256,7 @@ def test_z3_a_reclaim_cannot_drive_the_reserved_counter_negative():
     """This is a property a move CAN violate, unlike invariant preservation.
 
     A negative `pool_reserved` is how a double-credit shows up in the row, and it is
-    what `set_pool_limit`'s repair would later bake into a wrong headroom. The proof
+    what `set_manual_limit`'s repair would later bake into a wrong headroom. The proof
     needs `amount <= reserved` — delete that constraint and Z3 finds the
     counterexample, which is what makes the constraint load-bearing rather than
     decorative.
@@ -484,8 +484,8 @@ def test_the_reaper_records_the_hold_before_deleting_it(dynamodb_mock, monkeypat
     period = current_period()
     UserTenantsRepository().ensure(user_id=_U.user_id, tenant_id=_U.org_id,
                                    role="user", total_credit=10**9)
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=_U.org_id, period=period, pool_limit_microusd=10**10)
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=_U.org_id, period=period, manual_limit_microusd=10**10)
     ctx = _pipeline.reserve_credit(_U, 4000, pricing_key="opus", cost_microusd=250_000)
     assert ctx.hold_id
 

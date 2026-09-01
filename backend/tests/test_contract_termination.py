@@ -44,8 +44,8 @@ class TestTheSettleSideReadsTheSameCellTheReaperDoes:
         decrements `pool_reserved` again returns it twice."""
         repo = TenantBudgetsRepository()
         period = current_period()
-        repo.set_pool_limit(
-            tenant_id=TENANT, period=period, pool_limit_microusd=1_000_000)
+        repo.set_manual_limit(
+            tenant_id=TENANT, period=period, manual_limit_microusd=1_000_000)
 
         sk = hold_sk(period, 1, "hold-retired")
         _low_level().put_item(
@@ -70,8 +70,8 @@ class TestTheSettleSideReadsTheSameCellTheReaperDoes:
         cancelling."""
         repo = TenantBudgetsRepository()
         period = current_period()
-        repo.set_pool_limit(
-            tenant_id=TENANT, period=period, pool_limit_microusd=1_000_000)
+        repo.set_manual_limit(
+            tenant_id=TENANT, period=period, manual_limit_microusd=1_000_000)
 
         sk = hold_sk(period, 1, "hold-plain")
         _low_level().put_item(
@@ -93,8 +93,8 @@ class TestTheSettleSideReadsTheSameCellTheReaperDoes:
     def test_an_active_hold_settles(self, dynamodb_mock):
         repo = TenantBudgetsRepository()
         period = current_period()
-        repo.set_pool_limit(
-            tenant_id=TENANT, period=period, pool_limit_microusd=1_000_000)
+        repo.set_manual_limit(
+            tenant_id=TENANT, period=period, manual_limit_microusd=1_000_000)
 
         sk = hold_sk(period, 1, "hold-active")
         _low_level().put_item(
