@@ -1114,6 +1114,74 @@ class TenantBudgetsRepository:
                 raise
         return False
 
+    # ----- period rollover -----
+    # R16's named owner. Nothing rolled a period over before this: a new month
+    # simply had no row, and a membership change against a missing row was a
+    # no-op, so a tenant's ceiling silently became "unlimited at the pool level"
+    # on the 1st. The rollover is what makes the new period's row exist, and the
+    # ONE thing it must not be is a hardcoded list of attributes to copy --
+    # because the next part to add an attribute would have to remember to edit it,
+    # and if it forgot, that attribute would evaporate every 1st with nothing
+    # saying so. So it reads the closed-world declaration instead.
+
+    def roll_period_forward(
+        self, *, tenant_id: str, from_period: str, to_period: str
+    ) -> Optional[dict[str, Any]]:
+        """Create `to_period`'s pool row from `from_period`'s, carrying exactly
+        the attributes the declaration classifies as carried and recomputing the
+        derived ones. Returns the new row, or None when there is nothing to roll.
+
+        Moves NO effective limit: a seat-tracked row arrives seat-tracked with the
+        same seats and the same rate, so its ceiling is the same number; a manual
+        row arrives with the same figure. What does NOT arrive is the spend, the
+        reservations, or the granted term -- a new period starts at zero committed
+        and, per the declaration, `pool_granted_microusd` is reset BY OMISSION so
+        the first grant of the new period creates it.
+
+        Idempotent, and it never overwrites: the seed is conditional on the new
+        row not existing, so a second call (or a concurrent one) is a no-op and a
+        row that has already taken traffic in the new period is never reset.
+        """
+        source = self.get(tenant_id, from_period, consistent_read=True)
+        if source is None:
+            return None
+        seed: dict[str, Any] = {}
+        for name in carried_attributes():
+            if name in source:
+                seed[name] = source[name]
+        manual = seed.get(MANUAL_LIMIT_ATTR)
+        self._seed_pool_row(
+            tenant_id=tenant_id,
+            period=to_period,
+            # Carried by ABSENCE as well as by value: a seat-tracked row must
+            # reach the new period still seat-tracked, and `None` here is what
+            # leaves the attribute off.
+            manual_limit_microusd=None if manual is None else int(manual),
+            status=str(seed.get("status", "active")),
+            seat_count=int(seed.get(SEAT_COUNT_ATTR, 0)),
+            seat_rate=int(seed[SEAT_RATE_ATTR]) if SEAT_RATE_ATTR in seed else None,
+        )
+        return self.get(tenant_id, to_period)
+
+    def ensure_current_period_row(
+        self, *, tenant_id: str, period: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """The rollover as the request path meets it: if `period` has no row and
+        the previous period does, roll it forward. Returns the row for `period`.
+
+        Lazy rather than scheduled, because a scheduled job that misses a tenant
+        leaves that tenant unlimited for a month and nothing about the request
+        that was admitted says why. Called from the seat-delta path so a
+        membership change on the 1st lands on a row rather than on nothing.
+        """
+        resolved = period or current_period()
+        row = self.get(tenant_id, resolved, consistent_read=True)
+        if row is not None:
+            return row
+        return self.roll_period_forward(
+            tenant_id=tenant_id, from_period=previous_period(resolved),
+            to_period=resolved)
+
     def reconcile_headroom(self, tenant_id: str, period: str) -> dict[str, Any]:
         """Repair `pool_headroom` to the invariant `limit - reserved - settled`,
         race-safely, whatever value it currently holds. This is the migration /

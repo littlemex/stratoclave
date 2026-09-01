@@ -239,24 +239,35 @@ class UserTenantsRepository:
         return default_tenant_credit(), "global_default"
 
     def _adjust_pool_seat_delta_best_effort(self, *, tenant_id: str, seat_delta: int) -> None:
-        """Apply a membership change to `tenant_id`'s CURRENT-period dollar pool
-        (L4), if that pool is `sizing="per_seat"`.
+        """Apply a membership change to `tenant_id`'s CURRENT-period dollar pool.
+
+        THE ONE SEAT-DELTA WRITER. Every membership transition — a hire, a
+        departure, a resurrection, a tenant switch, a user deletion — goes through
+        here, and a path that archives a membership without calling it leaves the
+        seat count stale by exactly that seat with nothing saying so.
 
         Best-effort and silent by design: a membership write (a user gaining or
         losing an active row) must never fail, or be forced to retry, because of
         the tenant pool's unrelated state.
-        `TenantBudgetsRepository.adjust_pool_for_seat_delta` already no-ops
-        safely when the pool is `sizing="fixed"`, has no `sizing` attribute, or
-        has no row for the period at all; any OTHER, unexpected error is
-        swallowed here rather than surfacing on a request whose own write (the
+        `TenantBudgetsRepository.adjust_pool_for_seat_delta` already no-ops safely
+        when the row carries an operator's figure (moving the seat count and not
+        the money) or has no row for the period at all; any OTHER, unexpected error
+        is swallowed here rather than surfacing on a request whose own write (the
         membership row itself) already committed successfully.
+
+        The period row is ensured first, so a membership change on the 1st lands on
+        a rolled-forward row instead of on nothing. Without it the delta silently
+        no-ops for the whole first membership change of every month.
         """
         try:
             from .tenant_budgets import TenantBudgetsRepository, current_period
 
-            TenantBudgetsRepository().adjust_pool_for_seat_delta(
+            repo = TenantBudgetsRepository()
+            period = current_period()
+            repo.ensure_current_period_row(tenant_id=tenant_id, period=period)
+            repo.adjust_pool_for_seat_delta(
                 tenant_id=tenant_id,
-                period=current_period(),
+                period=period,
                 seat_delta=seat_delta,
             )
         except Exception:  # noqa: BLE001 — never fail a membership write for this
