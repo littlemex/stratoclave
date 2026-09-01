@@ -1993,6 +1993,11 @@
    "id": "cl-5a0ea779006f",
    "claim": "Every lifecycle rule, the refusals, the sweep, the checks",
    "anchor": "descriptive:a cell in the ownership table at the end of the document -- it names a file, not a guarantee. It matches the lint because the row reads as 'every ... rule'"
+  },
+  {
+   "id": "cl-5fdc0e5c11e2",
+   "claim": "The orphan hunt starts from grants and would never see them, and the user-deletion path archives memberships without touching them — so a deleted user's old slots stay.",
+   "anchor": "descriptive:states what the orphan hunt and the deletion path do NOT reach, which is the declaration that slot rows are dead storage rather than a claim about what this gateway enforces; the hunt's own guarantee is C14.19 and is anchored on the sentence that makes it"
   }
  ]
 }

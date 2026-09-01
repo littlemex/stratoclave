@@ -448,6 +448,9 @@
   "cl-5f8c881307c4": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-5fdc0e5c11e2": {
+   "first_seen": "docs/design/quota-raises.md, added with the limit-raise mechanism (CONTRACT-F2-grant)"
+  },
   "cl-619c66256099": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },

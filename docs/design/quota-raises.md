@@ -154,6 +154,15 @@ request holding it and when the day resets, with the zone spelled out. A reset t
 read in the reader's own timezone is wrong for most of the world by up to a day, and
 for a once-a-day allowance that is the whole allowance.
 
+**Slot rows are declared harmless rather than swept, and this sentence is the
+declaration.** They are keyed by user with no expiry, they hold a token and a request
+id and nothing else, and nothing reads a slot for a day that has passed. The
+orphan hunt starts from grants and would never see them, and the user-deletion path
+archives memberships without touching them — so a deleted user's old slots stay. They
+are dead rows of fixed size, at most one per user per tenant per day they filed on,
+and the cost of leaving them is storage. If that ever stops being true, the fix is a
+sweep on the date component of the sort key, not a change to the mechanism above.
+
 **A decided request frees the day.** Withdrawn and rejected free it; so does an
 approval whose grant has stopped bearing capacity. `PENDING` does not, and
 `REVOKE_BLOCKED` does not — that grant is still holding its share of the ceiling, and
