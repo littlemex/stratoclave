@@ -118,7 +118,20 @@ def missing_declared_checks() -> tuple[str, ...]:
     The other half of the declaration. An attribute is allowed to have no source
     comparison, but it has to say so as an exemption; naming a check that does
     not exist is how a comparison stops happening without anybody noticing.
+
+    THE GRANT-AWARE CHECKS ARE IMPORTED HERE, and this is the one line of this
+    module a later part owns. Those checks live in `mvp/grants.py` and register on
+    import, which is right -- a check belongs with the code that makes it
+    meaningful -- but this module's Lambda entry point does not otherwise reach
+    that module, so the pass would report them missing and alarm on a healthy
+    fleet. The import is inside the function that ASKS the question rather than at
+    module scope, for two reasons: `mvp.grants` imports `register_check` from here,
+    so a module-level import would be a cycle; and putting it in the function whose
+    whole job is "is every declared check registered" means the answer is correct
+    wherever that question is asked rather than only on the scheduled path.
     """
+    import mvp.grants  # noqa: F401 -- imported for its check registrations
+
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
     declared = {a.check for a in POOL_ROW_ATTRIBUTES.values() if a.check}

@@ -55,15 +55,29 @@ class LimitKind:
     module_name: str
     builder_qualname: str
     builder: Callable[..., Any]
+    #: Can a refusal at this wall be answered by asking a person for more?
+    #:
+    #: Declared per kind rather than decided at the refusal, because "is this
+    #: grantable" is a property of the limit and not of the request that hit it --
+    #: and a refusal path that worked it out for itself would be a second place
+    #: the answer lives. Exactly one wall is grantable today, and the two that are
+    #: not include one denominated in money: being micro-USD does not make a limit
+    #: raisable, and that is precisely the mistake this field exists to stop
+    #: somebody making at the call site.
+    grantable: bool = False
 
 
-def _limit(name: str, config_source: str, module_name: str, builder_qualname: str) -> LimitKind:
+def _limit(
+    name: str, config_source: str, module_name: str, builder_qualname: str,
+    *, grantable: bool = False,
+) -> LimitKind:
     return LimitKind(
         name=name,
         config_source=config_source,
         module_name=module_name,
         builder_qualname=builder_qualname,
         builder=_resolve(module_name, builder_qualname),
+        grantable=grantable,
     )
 
 
@@ -82,6 +96,9 @@ RESERVE_LIMITS: tuple[LimitKind, ...] = (
         ),
         module_name="dynamo.tenant_budgets",
         builder_qualname="TenantBudgetsRepository.reserve_txn_item",
+        # The ONE raisable wall. A tenant refused here can ask an approver for a
+        # grant, which moves `pool_granted_microusd` for a bounded window.
+        grantable=True,
     ),
     _limit(
         name="user_token_quota",
@@ -122,3 +139,30 @@ KNOWN_LIMIT_MODULES: tuple[str, ...] = (
 
 def limit_kinds_in_module(module_name: str) -> tuple[LimitKind, ...]:
     return tuple(k for k in RESERVE_LIMITS if k.module_name == module_name)
+
+
+def limit_kind(name: str) -> LimitKind:
+    """The declared kind called `name`. Raises rather than returning None: every
+    caller here is asking about a wall a refusal just named, and a refusal naming
+    a wall this registry has never heard of is a bug in the refusal."""
+    for kind in RESERVE_LIMITS:
+        if kind.name == name:
+            return kind
+    raise KeyError(
+        f"{name!r} is not a declared admission limit. The declared ones are "
+        f"{sorted(k.name for k in RESERVE_LIMITS)}; a refusal that names another "
+        f"wall is describing a limit nothing enforces.")
+
+
+def is_grantable_wall(name: str) -> bool:
+    """Can a refusal at `name` be answered by asking for a raise?
+
+    Reads the declaration rather than testing the name against a literal, so the
+    refusal path and the raise path cannot disagree about which wall is which.
+    """
+    return limit_kind(name).grantable
+
+
+def wall_names() -> frozenset[str]:
+    """Every wall a refusal may name, derived from the declaration."""
+    return frozenset(k.name for k in RESERVE_LIMITS)
