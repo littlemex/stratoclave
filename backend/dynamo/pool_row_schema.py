@@ -344,11 +344,34 @@ def carried_attributes() -> tuple[str, ...]:
                  if a.rollover == ROLLOVER_CARRIED and a.name not in ("tenant_id",))
 
 
+def _assert_money_width_covers_the_maximum() -> None:
+    """The declared money width is a constant, so it is CHECKED against the ceiling
+    it has to cover rather than trusted.
+
+    `_MAX_POOL_MICROUSD_DIGITS` is written out because the size accounting wants a
+    number of bytes, not a value. A constant nobody checks is a constant that goes
+    stale the first time `MAX_POOL_BUDGET_USD_CENTS` moves, and the symptom would be
+    a size bound quietly too small — so the alarm derived from it would fire on a
+    legal row. The import is local because `dynamo/` deliberately does not depend on
+    the API-layer validation module (see `limits.py`'s own docstring).
+    """
+    from limits import MAX_POOL_BUDGET_USD_CENTS
+
+    needed = len(str(int(MAX_POOL_BUDGET_USD_CENTS) * 10_000))
+    if _MAX_POOL_MICROUSD_DIGITS < needed:
+        raise RuntimeError(
+            f"_MAX_POOL_MICROUSD_DIGITS is {_MAX_POOL_MICROUSD_DIGITS} but "
+            f"MAX_POOL_BUDGET_USD_CENTS={MAX_POOL_BUDGET_USD_CENTS} needs {needed} "
+            f"digits in micro-USD; the declared row width would under-count and the "
+            f"size alarm derived from it would fire on a legal row")
+
+
 def worst_case_pool_item_bytes() -> int:
     """The widest a pool row can get, from the declaration: every attribute's
     name plus its widest value. The item-size gauge's baseline and its alarm
     threshold are derived from this, so a schema change moves the alarm with it
     instead of failing it."""
+    _assert_money_width_covers_the_maximum()
     return sum(len(a.name) + a.max_value_bytes for a in POOL_ROW_ATTRIBUTES
                if a.name != "sizing")
 

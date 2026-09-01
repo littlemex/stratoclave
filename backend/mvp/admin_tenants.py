@@ -319,6 +319,19 @@ def _cents_toward_zero(microusd: int) -> int:
     return -((-m) // _MICRO_USD_PER_CENT) if m < 0 else m // _MICRO_USD_PER_CENT
 
 
+def _usd_from_microusd(microusd: int) -> str:
+    """`$1,234.56` from integer micro-USD, with NO float anywhere.
+
+    Formatting is where float money creeps back in: `cents / 100` inside an f-string
+    reads as harmless and is a float division on a money quantity. The dollars and the
+    cents are separate integers here, and the sign is carried once.
+    """
+    cents = _cents_toward_zero(microusd)
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    return f"{sign}${cents // 100:,}.{cents % 100:02d}"
+
+
 def _mode_sentence(summary: dict) -> str:
     """The pool's mode as a sentence an operator can act on.
 
@@ -329,25 +342,24 @@ def _mode_sentence(summary: dict) -> str:
     """
     seats = int(summary.get("seat_count", 0))
     entitlement = int(summary.get("seat_entitlement_microusd", 0))
-    ent_usd = _cents_toward_zero(entitlement) / 100
+    ent = _usd_from_microusd(entitlement)
     if summary.get("seat_tracked"):
         return (
             f"This pool follows the tenant's seat count: {seats} "
-            f"{'seat' if seats == 1 else 'seats'} entitle it to ${ent_usd:,.2f} a "
-            f"month, and it moves by one seat's worth whenever somebody joins or "
-            f"leaves. Setting a figure by hand stops that."
+            f"{'seat' if seats == 1 else 'seats'} entitle it to {ent} a month, and it "
+            f"moves by one seat's worth whenever somebody joins or leaves. Setting a "
+            f"figure by hand stops that."
         )
     figure = int(summary.get("manual_limit_microusd") or 0)
-    fig_usd = _cents_toward_zero(figure) / 100
     tail = (
-        f"The seats would entitle it to ${ent_usd:,.2f}, which is more than the "
-        f"figure, so the figure is now the smaller of the two."
+        f"The seats would entitle it to {ent}, which is more than the figure, so the "
+        f"figure is now the smaller of the two."
         if entitlement > figure else
-        f"The seats would entitle it to ${ent_usd:,.2f}."
+        f"The seats would entitle it to {ent}."
     )
     return (
-        f"This pool is held at ${fig_usd:,.2f}, a figure set by hand, and no "
-        f"longer follows the tenant's seat count. {tail} Sending "
+        f"This pool is held at {_usd_from_microusd(figure)}, a figure set by hand, and "
+        f"no longer follows the tenant's seat count. {tail} Sending "
         f"{{\"follow_seats\": true}} to this endpoint returns it to the seat count."
     )
 
