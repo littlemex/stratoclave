@@ -1017,6 +1017,12 @@
   },
   "cl-fa2f240c13d0": {
    "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-1e5cb796a022": {
+   "first_seen": "the rate-basis row in the README comparison table"
+  },
+  "cl-246a00ba5c5b": {
+   "first_seen": "the rate-basis row in the README comparison table"
   }
  },
  "retired": {
