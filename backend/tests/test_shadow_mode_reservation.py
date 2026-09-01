@@ -260,8 +260,8 @@ def test_shadow_admits_a_request_enforced_would_refuse_for_headroom(
     # than the bound — exactly the concurrency level "that used to be fine".
     tiny_limit = legacy + (legacy // 2)
     assert tiny_limit < bound  # sanity: the bound alone cannot fit this pool
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=current_period(), pool_limit_microusd=tiny_limit,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=current_period(), manual_limit_microusd=tiny_limit,
     )
 
     monkeypatch.setenv(HARD_CEILING_GATE_ENV, "1")

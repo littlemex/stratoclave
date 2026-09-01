@@ -290,8 +290,8 @@ def test_reserve_event_carries_frozen_snapshot(dynamodb_mock):
     UserTenantsRepository().ensure(
         user_id=_U.user_id, tenant_id=_U.org_id, role="user", total_credit=10**12
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=_U.org_id, period=period, pool_limit_microusd=10**12
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=_U.org_id, period=period, manual_limit_microusd=10**12
     )
     pricing.reset_cache()
     pricing.reset_version_cache()

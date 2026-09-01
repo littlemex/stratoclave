@@ -55,8 +55,8 @@ def _seed(*, pool_limit: int = 10**9) -> str:
         tenant_id=TENANT, name="Reaper Giveback", team_lead_user_id="admin-giveback",
         default_credit=10**12, created_by="test")
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=TENANT, period=period, pool_limit_microusd=pool_limit)
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=TENANT, period=period, manual_limit_microusd=pool_limit)
     return period
 
 

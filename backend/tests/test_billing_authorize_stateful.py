@@ -85,9 +85,9 @@ class ExternalAuthcapMachine(RuleBasedStateMachine):
         )
         # Generous pool so the machine exercises the money protocol, not the 402
         # ceiling (pool-full is covered by an example test). 10^10 ≫ 500k×steps.
-        TenantBudgetsRepository().set_pool_limit(
+        TenantBudgetsRepository().set_manual_limit(
             tenant_id=self.tenant_id, period=self.period,
-            pool_limit_microusd=10_000_000_000,
+            manual_limit_microusd=10_000_000_000,
         )
         # Independent reference model.
         self.ref_settled = 0                     # micro-USD we EXPECT settled

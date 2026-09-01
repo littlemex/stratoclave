@@ -79,8 +79,8 @@ def _seed_run_with_cost(tenant=TENANT, run_id=RUN_ID):
     UserTenantsRepository().ensure(
         user_id="worker", tenant_id=tenant, role="user", total_credit=10**12
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant, period=period, pool_limit_microusd=10**12
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant, period=period, manual_limit_microusd=10**12
     )
     ctx = reserve_credit(_U(), 4000, pricing_key="opus", cost_microusd=2_000_000)
     # settle with an explicit run_id so events_for_run(run_id) finds it.

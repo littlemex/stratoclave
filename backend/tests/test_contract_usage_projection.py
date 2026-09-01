@@ -47,8 +47,8 @@ def _seed() -> str:
         tenant_id=TENANT, name="Usage Projection", team_lead_user_id="admin-owned",
         default_credit=10_000_000, created_by="test")
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=TENANT, period=period, pool_limit_microusd=1_000_000_000)
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=TENANT, period=period, manual_limit_microusd=1_000_000_000)
     return period
 
 

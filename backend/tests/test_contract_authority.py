@@ -155,9 +155,9 @@ class TestAdmissionDoesNotGrantAuthority:
             org_id: str
             email: str = "u@example.com"
 
-        TenantBudgetsRepository().set_pool_limit(
+        TenantBudgetsRepository().set_manual_limit(
             tenant_id="org-unprovisioned", period=current_period(),
-            pool_limit_microusd=10**9,
+            manual_limit_microusd=10**9,
         )
         with pytest.raises(HTTPException) as e:
             _pipeline.reserve_credit(

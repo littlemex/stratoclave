@@ -22,7 +22,7 @@ whether L3 has landed.
 Today `UserTenantsRepository.ensure()` and `.switch_tenant()` have no
 knowledge of any pool at all — every assertion that a membership change moves
 a pool counter fails today because the counter does not move. Today
-`TenantBudgetsRepository.set_pool_limit()` writes no `sizing` attribute at
+`TenantBudgetsRepository.set_manual_limit()` writes no `sizing` attribute at
 all, so the "flips sizing to fixed" assertion also fails today.
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _seed_per_seat_pool(tenant_id: str, period: str, limit_microusd: int) -> Non
     standing in for what L3's creation path is expected to have written), so
     this file's evidence is about the membership-delta mechanism alone."""
     repo = TenantBudgetsRepository()
-    repo.set_pool_limit(tenant_id=tenant_id, period=period, pool_limit_microusd=limit_microusd)
+    repo.set_manual_limit(tenant_id=tenant_id, period=period, manual_limit_microusd=limit_microusd)
     repo._table.update_item(
         Key={"tenant_id": tenant_id, "sk": f"BUDGET#{period}"},
         UpdateExpression="SET sizing = :s",
@@ -130,7 +130,7 @@ def test_set_pool_limit_flips_sizing_to_fixed(dynamodb_mock):
     _seed_per_seat_pool(tenant_id, period, _SEAT_MICROUSD)
 
     # An admin sets an explicit figure.
-    repo.set_pool_limit(tenant_id=tenant_id, period=period, pool_limit_microusd=999_000_000)
+    repo.set_manual_limit(tenant_id=tenant_id, period=period, manual_limit_microusd=999_000_000)
 
     row = repo.get(tenant_id, period)
     assert row.get("sizing") == "fixed"
@@ -183,8 +183,8 @@ def test_a_pool_row_with_no_sizing_attribute_does_not_follow_seats(dynamodb_mock
     """
     tenant_id, period = "legacy-co", current_period()
     repo = TenantBudgetsRepository()
-    repo.set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=_SEAT_MICROUSD
+    repo.set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=_SEAT_MICROUSD
     )
     # Reproduce the legacy row shape: no `sizing` attribute at all.
     repo._table.update_item(
