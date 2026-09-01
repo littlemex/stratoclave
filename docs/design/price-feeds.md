@@ -40,11 +40,21 @@ model nobody publishes a price for keeps the floor. **Absence never lowers a
 price** — that is the single property the whole subsystem is built around, and
 `test_pricing_feeds_composite.py` is where each of those paths is exercised.
 
-The bundled floor is not a placeholder. Every row in
+The bundled floor is not a placeholder, and its provenance is recorded per leg rather
+than in one blanket sentence. Every input and output leg in
 [`defaults/pricing.json`](../../backend/mvp/defaults/pricing.json) is a measured
-in-region list price, pinned with its provenance in `test_pricing_floor.py`, so a
-deployment that never enables a feed still charges real prices rather than a
-plausible-looking guess.
+in-region list price, pinned with its provenance in `test_pricing_floor.py`. The
+exceptions are named in the document's own `notes` rather than left for a reader to
+discover: the cache legs of `haiku-3`, `grok`, `gemma`, `nemotron` and `qwen` are a
+stated conservative upper bound, because none of those providers publishes a cache
+rate at all (read priced at the input rate, write at 1.25x it — the same premium the
+Anthropic tiers that do publish one actually charge); `gpt-5` is priced at the
+dearest measured GPT-5.6 tier so a cheaper one is never under-charged; `default` is
+synthetic, built to dominate every other row rather than to describe a price anyone
+publishes; and `vllm` is the operator's own cost-recovery figure, not a list price at
+all. So a deployment that never enables a feed still charges real, measured prices
+for every provider-published leg, and a named conservative bound rather than an
+invented number for the rest.
 
 ## 2. What each API actually publishes
 
@@ -103,8 +113,10 @@ easy to get wrong: `AmazonBedrock` (legacy on-demand plus the mantle families),
 `AmazonBedrockFoundationModels` (the Marketplace-metered rows, where the model is
 identifiable only through a `servicename` display name), and `AmazonBedrockAgentCore`.
 Commercial-region GPT-5.x appears in none of them; only GovCloud rows exist. The feed
-reads `AmazonBedrock` and leaves the rest to the agreement API, which covers the same
-models with ids instead of display names.
+reads `AmazonBedrock` and `AmazonBedrockService` by default — two offers, not one,
+because `AmazonBedrock` alone misses Sonnet 4 / 4.5 / Haiku 4.5 — configurable through
+`STRATOCLAVE_PRICE_LIST_OFFERS`, and leaves the rest to the agreement API, which covers
+the same models with ids instead of display names.
 
 ### What no API publishes
 
@@ -279,39 +291,90 @@ measurement is yours.
 
 ## 5. Operating it
 
-```bash
-# Nothing is live by default. Register the source and select it:
-STRATOCLAVE_PRICE_SOURCE=bedrock-live
+Nothing is live by default; the source has to be registered and selected. The
+commands below run from the repository root. `cd backend` is the first of them
+because the pricing-feeds module is not importable from anywhere else — everything
+after it is a plain `python -m` invocation, not a path trick. They need AWS
+credentials carrying `bedrock:ListFoundationModelAgreementOffers` and
+`pricing:GetProducts`, plus read (and, for `--apply`, write) access to the
+pricing-config table named by `DYNAMODB_PRICING_CONFIG_TABLE` (falls back to
+`stratoclave-pricing-config`), and a region to call through: `AWS_REGION` for the AWS
+SDK generally and `STRATOCLAVE_REGION` for the feeds' own endpoint choice, both
+falling back to `us-east-1` if unset. In production the credential is the task role's,
+not an operator's, because `--apply` runs on whatever schedule the deployment gives it
+rather than at a terminal:
 
-# Fill the snapshot at deploy time so no task ever races the feeds:
-python -m mvp.pricing_feeds.fetch            # dry run: fetch, diff, store nothing
-python -m mvp.pricing_feeds.fetch --apply    # fetch and store the snapshot
+```bash
+cd backend
+export STRATOCLAVE_PRICE_SOURCE=bedrock-live
+python -m mvp.pricing_feeds.fetch
+python -m mvp.pricing_feeds.fetch --apply
 ```
 
-IAM for the task role: `bedrock:ListFoundationModelAgreementOffers` and
-`pricing:GetProducts`, plus read/write on the pricing-config table it already has.
-Both price APIs are read-only; `bedrock:CreateFoundationModelAgreement` is
-deliberately **not** granted, and must not be.
+The first invocation is a dry run: it fetches, diffs against the stored snapshot, and
+stores nothing. Fill the snapshot with `--apply` at deploy time so no task ever races
+the feeds on its first request. The task role's own IAM needs the same two price
+actions and read/write on the pricing-config table it already has. Both price APIs
+are read-only; `bedrock:CreateFoundationModelAgreement` is deliberately **not**
+granted, and must not be.
 
-Knobs: `STRATOCLAVE_PRICE_FEED_INTERVAL_SECONDS` (default 3600 — the pricing cache
-asks a source for a table every 60 s, and calling two AWS APIs per registered model on
-that cadence would be a self-inflicted throttle for data that moves monthly),
-`STRATOCLAVE_PRICE_FEED_BUDGET_SECONDS` (default 30 — the ceiling on one pass; the
-first fetch after a cold start with no snapshot is on the request path, so it stops at
-the budget with a partial table rather than making a caller wait, and says so), and
-`STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS` (default 24 h — a label, never an expiry;
-expiring a snapshot would change the amount charged with nobody deciding to).
+Knobs, all env-tunable and read from the deployment environment:
+
+- `STRATOCLAVE_PRICE_FEED_INTERVAL_SECONDS` (default 3600) — how often the pricing
+  cache asks a source for a fresh table. The cache itself polls a source every 60 s,
+  and calling two AWS APIs per registered model on that cadence would be a
+  self-inflicted throttle for data that moves monthly.
+- `STRATOCLAVE_PRICE_FEED_BUDGET_SECONDS` (default 15) — the ceiling on one
+  request-path pass. The first fetch after a cold start with no snapshot runs on the
+  request path, so it stops at the budget with a partial table rather than making a
+  caller wait, and says so.
+- `STRATOCLAVE_PRICE_FEED_REFRESH_BUDGET_SECONDS` (default 300) — the ceiling on a
+  background `refresh()`, off the request path, where a caller waiting is not the
+  constraint and a fuller table is worth the extra time. **This is the one the CLI below
+  obeys**, since the CLI is a refresh; the request-path budget above has no effect on it.
+- `STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS` (default 24 h) — a label, never an
+  expiry; expiring a snapshot would change the amount charged with nobody deciding to.
+- `STRATOCLAVE_PRICE_FEED_WORKERS` (default 8) — the agreement feed's thread pool.
+  One call per model, and a registry of twenty models took roughly 40 s run in
+  sequence — long enough to spend the request-path budget with most models unasked.
+- `STRATOCLAVE_REGION` — the deployment's own region, read by both price feeds:
+  the fallback catalogue region for the Price List feed when no candidate regions are
+  passed in, and the endpoint `agreement.py` calls (that API is region-independent, so
+  this is an operational choice, not a pricing one). Defaults to `us-east-1`.
+- `STRATOCLAVE_PRICE_LIST_REGION` (default `us-east-1`) — which regional endpoint the
+  Price List feed calls. The Price List API is served from only a few regions and is
+  a global catalogue, so this is an availability choice and never changes the answer.
+- `STRATOCLAVE_PRICE_LIST_OFFERS` (default `AmazonBedrock,AmazonBedrockService`) —
+  which offer codes the Price List feed reads.
+- `STRATOCLAVE_PRICE_LIST_MAX_PAGES` (default 40 per region) — the pagination scan is
+  bounded so a catalogue that grows by an order of magnitude cannot turn a price
+  refresh into an unbounded scan.
+- `STRATOCLAVE_PRICE_FEED_UNPRICED_ALLOWLIST` — a comma-separated list of model ids an
+  operator has accepted as unpriced. A model on it does not trip `--strict`; empty or
+  unset allows none.
 
 The fetch never runs while the source's lock is held, so a slow feed cannot stall
-concurrent readers: they keep serving the table already in memory. `--strict` on the CLI
-exits 2 when the pass found something a person has to act on (a key spanning two
-prices, a leg that stopped being published, a spent budget), which makes it usable as a
-deploy gate.
+concurrent readers, who go on serving the table already in memory rather than waiting
+on it. `--strict` on the
+CLI exits 2 on exactly these reasons, printed by name: `key_spans_prices`,
+`leg_regression`, `coverage_regression`, `budget_spent`, `feed_not_authorized` and
+`unpriced_not_allowlisted`. The first four are a pass that found something a person
+has to act on; the last two are new: a whole feed the account could not read at all,
+and a model left unpriced that is not on the accepted allowlist — so `--strict` is a
+gate against a half-denied pass as well as a partially-stale one.
 
 Events worth alerting on: `price_feed_coverage_regression` (a key that used to be
 readable is not any more — the signature of a renamed API), `price_feed_unparsed_names`
-(a grammar this build cannot read), `price_feed_key_spans_prices` (split the key), and
-`price_table_changed` (a price moved).
+(a grammar this build cannot read), `price_feed_key_spans_prices` (split the key),
+`price_feed_leg_regression` (a leg that was live and stopped being published, so the
+stored value is now serving on trust rather than on a fresh answer),
+`price_feed_table_partial` (a pass that stopped before it had asked about everything,
+so the table it produced is partial and every key it did not reach is answered by the
+layer below — this is the one that fires when a fetch runs out of time, which is why
+it is the event an operator sees when a knob needs changing rather than a provider),
+`price_feed_fetch_empty` (a pass that read nothing against a snapshot that is not
+empty, naming the stored key count and the snapshot's age), and `price_table_changed`
+(a price moved).
 
 ## 6. What this does not guarantee
 

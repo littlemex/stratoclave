@@ -263,3 +263,80 @@ def test_c10_1_states_the_lexicon_and_the_covered_file_list():
             f"{rel} is outside the covered set and must be named BY NAME in the open "
             "items — a bare count of unswept documents goes stale without saying "
             "what is missing")
+
+
+# --------------------------------------------------------- item 7: total coverage (Q11)
+
+
+def test_every_docs_markdown_file_is_covered_exactly_once():
+    """Q11, added by the price-feeds change contract. Item 3 above
+    (`test_all_six_documents_are_covered_and_the_architecture_security_sentences_anchor`)
+    proves the six NAMED documents are swept — it is one-directional, built by reading
+    the six names out of `lint.COVERED` one at a time. It cannot notice a document
+    that was never named on either side. `docs/design/price-feeds.md` is the
+    reproduction: twenty-five guarantee-shaped sentences about money, in a file that
+    is in neither `covered_documents` (so the claim lint never sweeps it) nor
+    `uncovered_documents_named` (so the coverage config never admits the gap either).
+    It escapes the lint and the ratchet that is supposed to catch escaping.
+
+    This makes the check bidirectional over the filesystem rather than over the
+    lists: every `docs/**/*.md` file has to appear in EXACTLY one of the two lists in
+    `contracts/claims/config.json`, so a document that sits outside both — whether
+    newly added or simply never swept up — fails here by name, and a stale entry
+    naming a file that no longer exists fails here too.
+
+    The `neither` half and the `stale` half read different domains on purpose: `docs/
+    **/*.md` is the SWEEP domain — the set this check requires to be named somewhere
+    — while a config entry is free to name any file that legitimately exists, which
+    includes `README.md` at the repository root, one of the original six covered
+    documents. An earlier version of this test built `stale` from `known - on_disk`
+    using the same `docs/**/*.md` glob as `on_disk` for BOTH halves, so `README.md`
+    could never be found in `on_disk` and always landed in `stale` — a false
+    positive the moment `README.md` was actually correct in `covered_documents`,
+    caught only once every entry the config names was legitimately on disk and this
+    became the one assertion still failing. `stale` is checked per entry against the
+    real filesystem instead, so a root document and a `docs/` document are both
+    correctly found, and a genuinely missing file is still caught (proved below by a
+    fabricated entry, so this half cannot pass merely because nothing today happens
+    to be missing)."""
+    cfg = _config()
+    covered = set(cfg["covered_documents"])
+    uncovered = set(cfg["uncovered_documents_named"])
+
+    both = sorted(covered & uncovered)
+    assert not both, (
+        f"listed in BOTH covered_documents and uncovered_documents_named: {both}")
+
+    known = covered | uncovered
+    docs_on_disk = {
+        str(path.relative_to(ROOT)) for path in (ROOT / "docs").rglob("*.md")
+    }
+
+    neither = sorted(docs_on_disk - known)
+    assert not neither, (
+        f"these docs/**/*.md files are in NEITHER covered_documents NOR "
+        f"uncovered_documents_named — the coverage check never swept them and the "
+        f"config never named the gap either: {neither}")
+
+    stale = sorted(rel for rel in known if not (ROOT / rel).is_file())
+    assert not stale, (
+        f"contracts/claims/config.json names a file that no longer exists on disk: "
+        f"{stale}")
+
+    # Falsifiability: the assertion above must be ABLE to fail, not merely happen
+    # to pass because every entry named today is real. A fabricated entry that
+    # provably does not exist has to be caught by itself, with nothing real
+    # flagged alongside it.
+    # Assembled rather than written out: `test_doc_references_resolve.py` scans the source
+    # for anything shaped like a docs path and requires it to exist, so a literal here
+    # would make this test's own fixture a broken citation.
+    fabricated = "/".join(("docs", "design", "absent-on-purpose")) + ".md"
+    assert not (ROOT / fabricated).exists(), (
+        f"fixture assumption broken: {fabricated} exists now")
+    assert fabricated not in known, (
+        f"fixture assumption broken: {fabricated} is already named in config.json")
+    stale_with_fabricated = sorted(
+        rel for rel in known | {fabricated} if not (ROOT / rel).is_file())
+    assert stale_with_fabricated == [fabricated], (
+        f"a config entry naming a file that does not exist on disk must be caught "
+        f"by itself, with nothing else flagged: got {stale_with_fabricated}")

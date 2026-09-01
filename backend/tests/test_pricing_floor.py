@@ -3,8 +3,15 @@
 Everywhere else in the suite the expected charge is derived from
 `pricing.baseline_rates()`, so that a price change does not fail thirty unrelated
 tests. That leaves exactly one thing unguarded — whether the floor itself is right —
-and this file is it. A price move should fail here, once, with the provenance of the
-new number in the diff.
+and this file is it. Q20: what follows this docstring, up to
+`test_no_floor_leg_undercuts_the_live_published_price`, is a DIFF gate between two
+copies living in this same file — `MEASURED` here and `defaults/pricing.json` — so a
+change to either one alone fails immediately, with the provenance of the new number
+expected in the diff. Neither copy moves when the provider's own price does, so that
+diff gate is not, by itself, a check against what AWS currently publishes.
+`test_no_floor_leg_undercuts_the_live_published_price`, gated behind
+`STRATOCLAVE_LIVE_PRICE_TESTS`, is the one test in this file that reads the provider
+directly and is the only thing here a real price move can fail.
 
 Every figure below was read from the provider's own APIs on 2026-08-31:
 
@@ -22,10 +29,15 @@ floor: the floor's job is to be safe when a feed is unavailable.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from mvp.models import registry_entries
 from mvp.pricing import baseline_rates
+from tests.live_aws import real_session
+
+_LIVE_FLAG = "STRATOCLAVE_LIVE_PRICE_TESTS"
 
 # pricing key -> (input, output, cache_read, cache_write) in micro-USD per MTok.
 MEASURED = {
@@ -147,3 +159,206 @@ def test_a_pricing_key_holds_one_price_point():
             f"pricing key {key!r} is used by {sorted(models)} but has no measured "
             f"price pinned here"
         )
+
+
+def test_assumed_cache_leg_set_is_derived_from_the_document_not_hardcoded_twice():
+    """M9. `price-feeds.md:43` and CONTRACTS.md's C2.8 say every floor row is a
+    measured in-region list price; the document's own `notes` say otherwise for
+    five of them (`haiku-3`, `grok`, `gemma`, `nemotron`, `qwen` all say their cache
+    legs are an UPPER BOUND, not a published number). `CACHE_LEGS_ASSUMED` above
+    already carries that distinction — `test_assumed_cache_legs_are_declared_in_the_
+    document` checks it forward, that every key IN the set says so in its notes — but
+    that check is one-directional: a sixth row could start saying 'upper bound' in its
+    notes without anyone adding it to `CACHE_LEGS_ASSUMED`, and nothing here would
+    notice. This derives the assumed set FROM the document's own notes independently
+    of the hand-maintained constant and requires the two to agree exactly, so a
+    document row that becomes an assumption without updating this file fails here
+    rather than only being true by one copy trusting the other."""
+    from mvp.price_sources import pricing_path
+    import json
+
+    doc = json.load(open(pricing_path(), encoding="utf-8"))
+    derived = {
+        key for key, row in doc["rates"].items()
+        if "upper bound" in (row.get("notes") or "").lower()
+    }
+    assert derived == CACHE_LEGS_ASSUMED, (
+        f"the document's own notes say the assumed-cache-leg set is "
+        f"{sorted(derived)}; CACHE_LEGS_ASSUMED here says {sorted(CACHE_LEGS_ASSUMED)}. "
+        f"A row whose cache legs are an assumption has to say 'upper bound' in its "
+        f"notes AND be listed in CACHE_LEGS_ASSUMED, or the claim price-feeds.md:43 "
+        f"and C2.8 make is not checkable from the data it describes."
+    )
+
+
+def _price_feeds_doc_path():
+    import pathlib
+
+    # backend/tests/test_pricing_floor.py -> parents[1] = backend, .parent = repo root.
+    root = pathlib.Path(__file__).resolve().parents[1].parent
+    return root / "docs" / "design" / "price-feeds.md"
+
+
+def _non_measured_floor_rows() -> set[str]:
+    """The keys `price-feeds.md:43` and C2.8's unqualified 'every row' /
+    'the bundled floor' claims are false about, derived from the bundled
+    document's own `notes` rather than hand-copied here a second time: the
+    cache-leg-assumed set (whatever currently says 'upper bound') plus the three
+    rows that are not measured at all, whatever their leg. A new assumed row, or
+    a new not-measured row, changes this set on its own -- which is the point:
+    the two sentences this feeds have to become STALE the moment the document's
+    own data disagrees with them, not stay green because nobody looked twice."""
+    from mvp.price_sources import pricing_path
+    import json
+
+    doc = json.load(open(pricing_path(), encoding="utf-8"))
+    assumed_cache = {
+        key for key, row in doc["rates"].items()
+        if "upper bound" in (row.get("notes") or "").lower()
+    }
+    return assumed_cache | {"gpt-5", "default", "vllm"}
+
+
+def test_price_feeds_doc_states_measured_per_leg_not_every_row():
+    """M9, half one. `docs/design/price-feeds.md:43` says: "Every row in
+    `defaults/pricing.json` is a measured in-region list price" -- unqualified
+    over every ROW. The document's own `notes` contradict it for the set derived
+    in `_non_measured_floor_rows` above: five rows whose cache legs are a stated
+    upper bound rather than a measurement, `gpt-5` (the dearest measured GPT-5.6
+    tier, not itself measured), `default` (synthetic) and `vllm` (an operator
+    figure). The repair the contract asks for is per-leg precision -- a
+    provider-published leg is measured, an unpublished leg is a stated
+    conservative upper bound, and `default`/`vllm` are neither -- not weakening
+    the sentence until it says nothing. This fails while the unqualified 'every
+    row ... is a measured ... list price' form is still in the document, and it
+    derives the exception set from the document's own data so a new assumed or
+    synthetic row makes this sentence stale on its own, rather than staying
+    green by nobody having looked."""
+    import re
+
+    from mvp.price_sources import pricing_path
+    import json
+
+    doc = json.load(open(pricing_path(), encoding="utf-8"))
+    non_measured = _non_measured_floor_rows()
+    assert non_measured <= set(doc["rates"]), (
+        f"fixture assumption broken: {sorted(non_measured - set(doc['rates']))} "
+        f"no longer exist in defaults/pricing.json"
+    )
+
+    doc_path = _price_feeds_doc_path()
+    text = doc_path.read_text(encoding="utf-8")
+    normalized = re.sub(r"\s+", " ", text)
+    unqualified = re.search(
+        r"[Ee]very row in .*? is a measured in-region list price", normalized
+    )
+    assert unqualified is None, (
+        f"docs/design/price-feeds.md still says {unqualified.group()!r} -- an "
+        f"unqualified claim over EVERY row, contradicted by the document's own "
+        f"notes for {sorted(non_measured)} (cache legs stated as an upper bound "
+        f"for the assumed set, or not measured at all for gpt-5/default/vllm). "
+        f"Restate per leg: a provider-published leg is measured, an unpublished "
+        f"leg is a stated conservative upper bound, default/vllm are neither."
+    )
+
+
+def test_contracts_c2_8_states_measured_per_leg_not_the_whole_floor():
+    """M9, half two. `docs/design/CONTRACTS.md`'s C2.8 says: "The bundled floor
+    is a measured list price with its provenance recorded, not a placeholder" --
+    the same unqualified claim as price-feeds.md:43, over the WHOLE floor this
+    time rather than 'every row', in the file a dispute is answered from. Same
+    exception set, same repair, same requirement that the exception set be
+    derived from the document's own notes rather than hand-copied a second time
+    in CONTRACTS.md's row."""
+    import re
+
+    non_measured = _non_measured_floor_rows()
+
+    contracts_path = _price_feeds_doc_path().parent / "CONTRACTS.md"
+    text = contracts_path.read_text(encoding="utf-8")
+    rows = [line for line in text.split("\n") if line.startswith("| **C2.8**")]
+    assert rows, "C2.8 not found in docs/design/CONTRACTS.md"
+    row = rows[0]
+
+    unqualified = re.search(r"bundled floor is a measured list price", row)
+    assert unqualified is None, (
+        f"CONTRACTS.md's C2.8 still says {unqualified.group()!r} "
+        f"-- unqualified over the WHOLE bundled floor, contradicted by "
+        f"defaults/pricing.json's own notes for {sorted(non_measured)}. Restate "
+        f"per leg, the same repair as price-feeds.md:43: a provider-published leg "
+        f"is measured, an unpublished leg is a stated conservative upper bound, "
+        f"and default/vllm are neither."
+    )
+
+
+@pytest.mark.live
+def test_no_floor_leg_undercuts_the_live_published_price():
+    """Q20. `test_floor_matches_the_measured_list_price` above compares
+    `baseline_rates()` (which reads `defaults/pricing.json`) against `MEASURED`, a
+    hand-written copy of the same numbers in this same file. That is a gate on the
+    two copies agreeing with EACH OTHER — it fails when someone edits one without the
+    other — and this module's docstring used to describe it as a gate on the
+    provider, which it is not: neither copy moves when AWS raises a price, so a real
+    price increase the floor has gone stale against would pass silently forever.
+
+    This is the test that reads the provider directly: `bedrock:
+    ListFoundationModelAgreementOffers` and `pricing:GetProducts`, for the same keys
+    the floor prices, and asserts no floor leg is CHEAPER than what is published
+    right now. A floor leg below the live number under-charges every request that
+    falls to it while a feed is unavailable — the exact failure the floor exists to
+    prevent.
+
+    Skipped by default and gated behind `STRATOCLAVE_LIVE_PRICE_TESTS` plus real
+    credentials, the same convention `tests/test_pricing_feeds_live_apis.py` and
+    `tests/test_pricing_feeds_prefixes.py` use — this is a phase 5 check, not a
+    per-commit one.
+    """
+    if not os.getenv(_LIVE_FLAG):
+        pytest.skip(f"set {_LIVE_FLAG}=1 (with AWS credentials) to check the floor "
+                    f"against the live price APIs")
+    boto3 = pytest.importorskip("boto3")
+    session = real_session(boto3)
+    if session is None:
+        pytest.skip("no real AWS credentials available")
+
+    from mvp.pricing_feeds.agreement import AgreementFeed
+    from mvp.pricing_feeds.composite import LivePriceSource
+    from mvp.pricing_feeds.price_list import PriceListFeed
+    from mvp.rates import RATE_FIELDS
+
+    class _NoStore:
+        """Reads and writes nothing: a live check must not touch the snapshot the
+        running deployment charges from."""
+
+        def load(self):
+            return None
+
+        def save(self, *args, **kwargs):
+            return None
+
+    region = os.getenv("STRATOCLAVE_REGION") or "us-east-1"
+    feeds = (
+        AgreementFeed(session.client("bedrock", region_name=region)),
+        PriceListFeed(session.client("pricing", region_name="us-east-1")),
+    )
+    source = LivePriceSource(feeds, store=_NoStore(), interval_seconds=0)
+    report = source.refresh()
+    if not report.rates and report.feed_errors:
+        pytest.skip(f"price APIs unreachable with these credentials: {report.feed_errors}")
+
+    floor = baseline_rates()
+    too_low = []
+    for key, live_rate in report.rates.items():
+        floor_rate = floor.get(key)
+        if floor_rate is None:
+            continue
+        for leg in RATE_FIELDS:
+            floor_value = getattr(floor_rate, leg)
+            live_value = getattr(live_rate, leg)
+            if floor_value < live_value:
+                too_low.append(f"{key}.{leg}: floor {floor_value} < live {live_value}")
+    assert not too_low, (
+        "the bundled floor is CHEAPER than what the provider currently publishes, "
+        "which under-charges every request that falls to it while a feed is down:\n"
+        + "\n".join(too_low)
+    )
