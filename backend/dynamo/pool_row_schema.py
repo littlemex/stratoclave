@@ -15,6 +15,17 @@ writers, either a covering reconciler check or an explicit exemption, and the
 widest value it can hold. An attribute found on a row and absent from here is a
 failure, which is what makes forgetting impossible rather than merely unlikely.
 
+WHY IT IS A MAPPING AND NOT A SEQUENCE. Two reasons, and the second is the one
+that matters. Every consumer either looks an attribute up by name or walks all of
+them, and the closed-world check's central operation is "is this key declared?" --
+which is a mapping's primitive and, for a sequence, an index it has to build first.
+And a mapping keyed by name makes TWO ENTRIES FOR ONE ATTRIBUTE unrepresentable. A
+sequence lets a careless append declare `seat_count` twice with different rollover
+classes, and then the rollover carries it while the size accounting counts it twice
+and neither reading is wrong on its own. The declaration's entire value is being the
+single source for this row, so a container that can hold a contradiction about it is
+the wrong container.
+
 WHY THIS IS ITS OWN MODULE, and it is load-bearing rather than tidiness. If the
 declaration lived inside `tenant_budgets.py` and the size guard read a second
 copy from somewhere else, the guard would be measuring a row shape the rollover
@@ -115,18 +126,24 @@ class PoolAttribute:
 _MAX_POOL_MICROUSD_DIGITS = 16   # 1_000_000_000 cents x 10_000 = 1e13, 14 digits; +2 margin
 _SIGNED = 1                      # headroom is the one signed money attribute
 
-#: The one declaration. F2 adds its grant cap here, in the same shape, or the
-#: closed-world test fails at F2's merge -- loudly, and at the moment the
-#: attribute appears, rather than silently on the 1st of the following month.
-POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
-    PoolAttribute(
+#: The one declaration, KEYED BY ATTRIBUTE NAME. F2 adds its grant cap here, in the
+#: same shape, or the closed-world test fails at F2's merge -- loudly, and at the
+#: moment the attribute appears, rather than silently on the 1st of the following
+#: month.
+#:
+#: A mapping rather than a sequence, for the reason in the module docstring: a
+#: sequence lets a careless append declare one attribute twice, in two different
+#: classes, and the declaration's entire value is being the single source. Here that
+#: is unrepresentable.
+POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
+    "tenant_id": PoolAttribute(
         name="tenant_id",
         rollover=ROLLOVER_CARRIED,
         writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
         max_value_bytes=128,
         exemption="the partition key; it identifies the row rather than describing it",
     ),
-    PoolAttribute(
+    "sk": PoolAttribute(
         name="sk",
         rollover=ROLLOVER_DERIVED,
         writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
@@ -134,7 +151,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         exemption="the sort key; the new period's row has the new period in it by "
                   "construction, so carrying it verbatim would be the bug",
     ),
-    PoolAttribute(
+    MANUAL_LIMIT_ATTR: PoolAttribute(
         name=MANUAL_LIMIT_ATTR,
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -149,7 +166,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
              "new period still seat-tracked, so the rollover writes this attribute "
              "only when the old row had it. Zero is a figure and is carried as one.",
     ),
-    PoolAttribute(
+    SEAT_COUNT_ATTR: PoolAttribute(
         name=SEAT_COUNT_ATTR,
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -161,7 +178,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         check="seat_count_matches_membership",
         note="the seats do not reset at a period boundary; the people are still there",
     ),
-    PoolAttribute(
+    SEAT_RATE_ATTR: PoolAttribute(
         name=SEAT_RATE_ATTR,
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -174,7 +191,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         note="carried so a ceiling is reproducible; changing it is a migration, not a "
              "deploy, which is what makes the boot-time refusal honest",
     ),
-    PoolAttribute(
+    POOL_GRANTED_ATTR: PoolAttribute(
         name=POOL_GRANTED_ATTR,
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_OMISSION,
@@ -188,7 +205,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
              "most the period end; without that pin this reset destroys live granted "
              "capacity every 1st.",
     ),
-    PoolAttribute(
+    "pool_limit_microusd": PoolAttribute(
         name="pool_limit_microusd",
         rollover=ROLLOVER_DERIVED,
         writers=(
@@ -202,7 +219,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         note="recomputed on the new row from the carried attributes; carrying last "
              "month's number would carry a granted term the new row does not have",
     ),
-    PoolAttribute(
+    "pool_headroom_microusd": PoolAttribute(
         name="pool_headroom_microusd",
         rollover=ROLLOVER_DERIVED,
         writers=(
@@ -222,7 +239,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
              "figure an operator needs, and clamping it at zero hides the amount by "
              "which admission has already been exceeded",
     ),
-    PoolAttribute(
+    "pool_reserved_microusd": PoolAttribute(
         name="pool_reserved_microusd",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_ZERO,
@@ -237,7 +254,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         exemption="reconciled against the credit ledger, not against a row-side "
                   "source: mvp.admin_tenants.get_pool_reconciliation owns that axis",
     ),
-    PoolAttribute(
+    "pool_settled_microusd": PoolAttribute(
         name="pool_settled_microusd",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_ZERO,
@@ -248,7 +265,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
         exemption="reconciled against the credit ledger; same owner as reserved",
     ),
-    PoolAttribute(
+    "pool_reclaimed_microusd": PoolAttribute(
         name="pool_reclaimed_microusd",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_ZERO,
@@ -256,7 +273,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
         exemption="reconciled against the credit ledger; same owner as reserved",
     ),
-    PoolAttribute(
+    "status": PoolAttribute(
         name="status",
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -267,21 +284,21 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
         exemption="not a quantity; a suspended pool stays suspended across a boundary "
                   "because suspension is an operator's decision, not a month's",
     ),
-    PoolAttribute(
+    "version": PoolAttribute(
         name="version",
         rollover=ROLLOVER_DERIVED,
         writers=("(every writer in this module stamps it)",),
         max_value_bytes=4,
         exemption="a schema marker; the new row is stamped at the current version",
     ),
-    PoolAttribute(
+    "updated_at": PoolAttribute(
         name="updated_at",
         rollover=ROLLOVER_DERIVED,
         writers=("(every writer in this module stamps it)",),
         max_value_bytes=40,
         exemption="a timestamp; carrying the old row's would misdate the new one",
     ),
-    PoolAttribute(
+    "sizing": PoolAttribute(
         name="sizing",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_OMISSION,
@@ -292,12 +309,19 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
                   "closed-world test must not fail on a row mid-migration. Nothing "
                   "reads it and the rollover never carries it forward.",
     ),
-)
+}
 
-_POOL_ATTRIBUTES_BY_NAME: dict[str, PoolAttribute] = {
-    a.name: a for a in POOL_ROW_ATTRIBUTES}
-if len(_POOL_ATTRIBUTES_BY_NAME) != len(POOL_ROW_ATTRIBUTES):
-    raise RuntimeError("POOL_ROW_ATTRIBUTES declares an attribute twice")
+# The key IS the attribute name, and the spec repeats it so a spec read on its own
+# can still say what it describes. Two places holding one string is two places to
+# disagree, so they are checked against each other at import: a copy-paste that
+# changes the key and not the name would otherwise declare a class for an attribute
+# nothing on the row is called, and leave the real one unclassified.
+for _key, _spec in POOL_ROW_ATTRIBUTES.items():
+    if _key != _spec.name:
+        raise RuntimeError(
+            f"POOL_ROW_ATTRIBUTES is keyed {_key!r} but its spec is named "
+            f"{_spec.name!r}; the key is the attribute name and nothing else")
+del _key, _spec
 
 #: The attributes that MOVE THE CEILING, derived from the declaration rather than
 #: restated. The ceiling-writer document test reads this, so a writer added to
@@ -311,17 +335,20 @@ CEILING_ATTRS: tuple[str, ...] = (
 
 def pool_attribute(name: str) -> Optional[PoolAttribute]:
     """The declaration for `name`, or None if it is in no class."""
-    return _POOL_ATTRIBUTES_BY_NAME.get(name)
+    return POOL_ROW_ATTRIBUTES.get(name)
 
 
 def unclassified_pool_attributes(item: dict[str, Any]) -> set[str]:
     """Every attribute on `item` that appears in no class of the declaration.
 
-    The closed-world assertion. A non-empty result is a failure and not a
-    warning: it means something writes the pool row that four other mechanisms
-    do not know exists.
+    The closed-world assertion, and it is a single mapping lookup per attribute --
+    "is this key declared?" is the declaration's primitive rather than a scan it has
+    to build an index for.
+
+    A non-empty result is a failure and not a warning: it means something writes the
+    pool row that four other mechanisms do not know exists.
     """
-    return {str(k) for k in (item or {}) if str(k) not in _POOL_ATTRIBUTES_BY_NAME}
+    return {str(k) for k in (item or {}) if str(k) not in POOL_ROW_ATTRIBUTES}
 
 
 def ceiling_writers() -> tuple[str, ...]:
@@ -329,8 +356,8 @@ def ceiling_writers() -> tuple[str, ...]:
     declaration. Derived, never listed: a literal list passes while naming a
     subset the moment a writer is added."""
     out: list[str] = []
-    for attr in POOL_ROW_ATTRIBUTES:
-        if attr.name not in CEILING_ATTRS:
+    for name, attr in POOL_ROW_ATTRIBUTES.items():
+        if name not in CEILING_ATTRS:
             continue
         for w in attr.writers:
             if not w.startswith("(") and w not in out:
@@ -340,8 +367,8 @@ def ceiling_writers() -> tuple[str, ...]:
 
 def carried_attributes() -> tuple[str, ...]:
     """The attributes the period rollover copies verbatim."""
-    return tuple(a.name for a in POOL_ROW_ATTRIBUTES
-                 if a.rollover == ROLLOVER_CARRIED and a.name not in ("tenant_id",))
+    return tuple(name for name, attr in POOL_ROW_ATTRIBUTES.items()
+                 if attr.rollover == ROLLOVER_CARRIED and name != "tenant_id")
 
 
 def _assert_money_width_covers_the_maximum() -> None:
@@ -372,8 +399,8 @@ def worst_case_pool_item_bytes() -> int:
     threshold are derived from this, so a schema change moves the alarm with it
     instead of failing it."""
     _assert_money_width_covers_the_maximum()
-    return sum(len(a.name) + a.max_value_bytes for a in POOL_ROW_ATTRIBUTES
-               if a.name != "sizing")
+    return sum(len(name) + attr.max_value_bytes
+               for name, attr in POOL_ROW_ATTRIBUTES.items() if name != "sizing")
 
 
 

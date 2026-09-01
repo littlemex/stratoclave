@@ -94,7 +94,7 @@ def missing_declared_checks() -> tuple[str, ...]:
     """
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
-    declared = {a.check for a in POOL_ROW_ATTRIBUTES if a.check}
+    declared = {a.check for a in POOL_ROW_ATTRIBUTES.values() if a.check}
     return tuple(sorted(declared - set(_REGISTRY)))
 
 
