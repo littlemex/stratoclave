@@ -20,9 +20,36 @@ comparisons in it. There are two reasons, and the second is the load-bearing one
     check it names must be registered, so an attribute whose covering check went
     missing is a failure here rather than a comparison quietly not happening.
 
-Read-only. Every finding is a signal to investigate, never a repair: a
-reconciler that fixes what it finds destroys the evidence of how the row got
-that way, and it can only guess which side of a disagreement is right.
+The reconciliation is read-only. Every finding is a signal to investigate, never a
+repair: a reconciler that fixes what it finds destroys the evidence of how the row
+got that way, and it can only guess which side of a disagreement is right.
+
+THE PERIOD ROLLOVER LIVES HERE TOO, and it does write. `roll_forward_all_tenants`
+creates each period's pool row for the tenants that had one in the period before,
+and it is in this module because it rides the same daily schedule and visits the
+same rows -- a second module and a second schedule would be two more things to keep
+in step.
+
+Sharing a module is not sharing a permission. The two are separate Lambda entry
+points (`handler` and `rollover_handler`) on separate functions with separate IAM
+roles, and only the rollover's role can write. That is what keeps "the reconciler
+reports and never repairs" a property of the deployment: the read-only grant is the
+enforcement, and it survives the colocation because grants attach to functions and
+not to files.
+
+WHY THE ROLLOVER IS NEEDED AT ALL. The pool row is keyed by calendar month, and the
+admission path reads a MISSING row as "this tenant is not pooled" -- correct,
+because pool budgeting is opt-in. Creating the row only when a membership changes
+therefore left a silent hole: a tenant whose membership was stable over the boundary
+had no row on the 1st, read as never-opted-in, and spent the whole month with no
+money ceiling at all. It failed OPEN, in the direction that admits spend, on the
+common case. Three things now close it, and each covers what the others cannot:
+this scheduled pass creates the row in the ordinary case;
+`TenantBudgetsRepository.ensure_current_period_row` still creates it lazily on the
+seat-delta path, so a hire at five past midnight does not wait; and the reserve path
+refuses rather than silently unpooling when a row is missing but the previous
+period's is not, which is what keeps a month where this job fails from returning the
+ceiling to fail-open.
 """
 from __future__ import annotations
 
@@ -433,6 +460,129 @@ def handler(event=None, context=None):  # noqa: ARG001 -- Lambda signature
         }, default=str))
     return summary
 
+
+
+# ---------------------------------------------------------------------------
+# The period rollover: the one writer in this module
+# ---------------------------------------------------------------------------
+def _iter_budget_rows_for_period(table, period: str) -> Iterator[dict[str, Any]]:
+    """Every pool row whose sort key is exactly this period's.
+
+    A scan filtered to the one sort key rather than a scan of every `BUDGET#` row:
+    the rollover only ever cares about one period, and reading twelve months of
+    history to find one of them is work that grows with the deployment's age.
+    """
+    from boto3.dynamodb.conditions import Attr
+
+    from dynamo.tenant_budgets import budget_sk
+
+    kwargs: dict[str, Any] = {"FilterExpression": Attr("sk").eq(budget_sk(period))}
+    while True:
+        resp = table.scan(**kwargs)
+        for item in resp.get("Items", []):
+            yield item
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            return
+        kwargs["ExclusiveStartKey"] = lek
+
+
+def roll_forward_all_tenants(*, period: Optional[str] = None) -> dict[str, Any]:
+    """Create `period`'s row for every tenant holding a row in the period before.
+
+    Returns a summary a caller can gate on. `failed` is reported per tenant and
+    never raised: one tenant whose row cannot be written must not stop the rest of
+    the fleet from getting theirs, and the reserve-path guard refuses that tenant's
+    spend in the meantime rather than admitting it.
+    """
+    from dynamo.tenant_budgets import (
+        TenantBudgetsRepository,
+        current_period,
+        previous_period,
+    )
+
+    repo = TenantBudgetsRepository()
+    to_period = period or current_period()
+    from_period = previous_period(to_period)
+
+    considered = created = already = 0
+    failed: list[dict[str, str]] = []
+    for row in _iter_budget_rows_for_period(repo._table, from_period):
+        tenant_id = str(row.get("tenant_id") or "")
+        if not tenant_id:
+            continue
+        considered += 1
+        try:
+            if repo.get(tenant_id, to_period, consistent_read=True) is not None:
+                # Already there -- the seat-delta path's lazy creation got here
+                # first, or a previous run did. Not an error and not a rewrite.
+                already += 1
+                continue
+            repo.roll_period_forward(
+                tenant_id=tenant_id, from_period=from_period, to_period=to_period)
+            if repo.get(tenant_id, to_period, consistent_read=True) is not None:
+                created += 1
+            else:
+                failed.append({"tenant_id": tenant_id,
+                               "error": "row absent after roll_period_forward"})
+        except Exception as exc:  # noqa: BLE001 -- one tenant must not stop the fleet
+            failed.append({"tenant_id": tenant_id, "error": str(exc)})
+
+    return {
+        "job": "tenant_pool_period_rollover",
+        "from_period": from_period,
+        "to_period": to_period,
+        "considered": considered,
+        "created": created,
+        "already_present": already,
+        "failed": len(failed),
+        "failed_detail": failed[:50],
+        # A tenant left without a row is a tenant the reserve path will refuse, so
+        # this is the figure that matters and it has to be zero.
+        "clean": not failed,
+    }
+
+
+def rollover_handler(event=None, context=None):  # noqa: ARG001 -- Lambda signature
+    """Scheduled entry point for the rollover. One structured line for the run, and one per tenant
+    that could not be rolled forward.
+
+    The per-tenant lines carry `tenant_id` on the LINE and never as a metric
+    dimension, for the same reason as everywhere else here: a per-tenant dimension
+    on a filter over every log line is unbounded cardinality. The alarm counts, the
+    line names who.
+    """
+    import time
+
+    summary = roll_forward_all_tenants()
+    summary["event"] = "pool_period_rollover"
+    summary["PoolPeriodRolloverFailures"] = summary["failed"]
+    summary["PoolPeriodRolloverCreated"] = summary["created"]
+    summary["_aws"] = {
+        "CloudWatchMetrics": [{
+            "Namespace": os.getenv("STRATOCLAVE_METRIC_NAMESPACE",
+                                   "Stratoclave/Ledger"),
+            "Dimensions": [[]],
+            "Metrics": [
+                {"Name": "PoolPeriodRolloverFailures"},
+                {"Name": "PoolPeriodRolloverCreated"},
+            ],
+        }],
+        # Always stamped: a scheduled EventBridge event carries no timestamp, and an
+        # EMF line without one is dropped -- which would leave the alarm with no data
+        # and this job's failures invisible.
+        "Timestamp": int(time.time() * 1000),
+    }
+    print(json.dumps(summary, default=str))
+    for f in summary["failed_detail"]:
+        print(json.dumps({
+            "event": "pool_period_rollover_failed",
+            "tenant_id": f["tenant_id"],
+            "to_period": summary["to_period"],
+            "error": f["error"],
+            "failures": 1,
+        }, default=str))
+    return summary
 
 if __name__ == "__main__":
     result = handler()

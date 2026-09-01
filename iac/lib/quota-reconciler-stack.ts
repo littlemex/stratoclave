@@ -25,9 +25,18 @@ import { TenantAlarm } from './tenant-alarm';
  * the same direction, so everything still balances while the tenant admits an
  * extra seat's worth of spend a month.
  *
- * Read-only. It holds no write grant at all, which is the enforcement of "reports
- * and never repairs": a reconciler that could fix what it finds would destroy the
- * evidence of how the row got that way.
+ * The reconciler is read-only. It holds no write grant at all, which is the
+ * enforcement of "reports and never repairs": a reconciler that could fix what it
+ * finds would destroy the evidence of how the row got that way.
+ *
+ * The PERIOD ROLLOVER rides the same schedule and is a SEPARATE FUNCTION with its own
+ * write grant, even though it lives in the same backend module. Sharing a module is not
+ * sharing a permission: grants attach to functions, not to files, so only the
+ * rollover's role can write and the reconciler's read-only posture survives the
+ * colocation. It has to stay separate precisely because of the sentence above —
+ * merging the two roles would hand the reconciler the ability to repair what it finds,
+ * and the absence of a write grant is the only thing making that structural rather
+ * than conventional. One schedule, two functions, two grants.
  */
 export interface QuotaReconcilerStackProps extends cdk.StackProps {
   prefix: string;
@@ -45,6 +54,7 @@ export interface QuotaReconcilerStackProps extends cdk.StackProps {
 
 export class QuotaReconcilerStack extends cdk.Stack {
   public readonly reconciler: lambda.Function;
+  public readonly periodRollover: lambda.Function;
 
   constructor(scope: Construct, id: string, props: QuotaReconcilerStackProps) {
     super(scope, id, props);
@@ -78,10 +88,43 @@ export class QuotaReconcilerStack extends cdk.Stack {
     tenantBudgetsTable.grantReadData(this.reconciler);
     userTenantsTable.grantReadData(this.reconciler);
 
+    // --- Period rollover: create each month's pool row for tenants that had one ---
+    // The pool row is keyed by calendar month and a MISSING row means "not pooled",
+    // because pool budgeting is opt-in. Creating the new month's row only when a
+    // membership changes therefore left every tenant with stable membership
+    // unpooled for the whole month — failing open, in the direction that admits
+    // spend, on the common case. This job is what makes the row exist.
+    this.periodRollover = new lambda.DockerImageFunction(this, 'PeriodRollover', {
+      functionName: `${prefix}-quota-period-rollover`,
+      code: lambda.DockerImageCode.fromEcr(lambdaRepository, {
+        tagOrDigest: lambdaImageTag,
+        cmd: ['mvp.observability.quota_reconciler.rollover_handler'],
+      }),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(10),
+      environment: {
+        DYNAMODB_TENANT_BUDGETS_TABLE: tenantBudgetsTable.tableName,
+        STRATOCLAVE_METRIC_NAMESPACE: metricNamespace,
+      },
+      description:
+        "Creates each period's pool row for tenants holding the prior period's row.",
+    });
+    // WRITE, and only on the budgets table. It never reads the membership table: its
+    // unit of work is "tenants with a prior-period row", which is the opt-in signal,
+    // and a tenant that never had a pool must not acquire one from a rollover — that
+    // would make the scheduler a writer of ceilings nobody set.
+    tenantBudgetsTable.grantReadWriteData(this.periodRollover);
+
+    // ONE rule, both functions. A second schedule would be a second thing to watch
+    // and could drift from this one; the rollover has to have run before the
+    // reconciler's findings about the current period mean anything.
     new events.Rule(this, 'ReconcilerSchedule', {
       ruleName: `${prefix}-quota-reconciler-schedule`,
       schedule: props.schedule ?? events.Schedule.rate(cdk.Duration.days(1)),
-      targets: [new targets.LambdaFunction(this.reconciler)],
+      targets: [
+        new targets.LambdaFunction(this.periodRollover),
+        new targets.LambdaFunction(this.reconciler),
+      ],
     });
 
     const logGroup = logs.LogGroup.fromLogGroupName(
@@ -134,6 +177,32 @@ export class QuotaReconcilerStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       alarmDescription:
         'Either the daily pool-ceiling reconciler stopped emitting, or the row declaration names a check that nothing registered. Both mean an attribute that looks covered is not being compared to anything. Do not treat a quiet metric here as a healthy one.',
+    });
+
+    const rolloverLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'PeriodRolloverLogGroup', `/aws/lambda/${prefix}-quota-period-rollover`);
+
+    // (3) A tenant the rollover could not carry forward. Per-tenant, so it goes
+    // through the shared construct. This is the alarm that matters most in this
+    // stack: a tenant left without a row for the period is a tenant whose requests
+    // the gateway now refuses, which is the safe direction and still an outage for
+    // them.
+    new TenantAlarm(this, 'PoolPeriodRolloverFailures', {
+      logGroup: rolloverLogGroup,
+      prefix,
+      scope: 'tenant',
+      metricNamespace,
+      metricName: 'PoolPeriodRolloverFailures',
+      event: 'pool_period_rollover_failed',
+      valueField: '$.failures',
+      threshold: 0,
+      period: cdk.Duration.minutes(5),
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      // A clean run emits no failure line, and that really is nothing to report.
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "A tenant's pool row could not be carried into the current period. Its ceiling does not exist for this period, so the gateway refuses that tenant's priced requests rather than admitting them unbounded — the safe direction, and still an outage for that tenant until the row exists. Find the tenant in the pool_period_rollover_failed log line and re-run the rollover.",
     });
 
     applyCommonTags(this, prefix, 'quota-reconciler');

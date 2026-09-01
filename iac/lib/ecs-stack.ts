@@ -9,6 +9,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
+import { TenantAlarm } from './tenant-alarm';
 import { applyCommonTags, putStringParameter } from './_common';
 
 export interface EcsStackProps extends cdk.StackProps {
@@ -365,6 +366,32 @@ export class EcsStack extends cdk.Stack {
       evaluationPeriods: 1,
       datapointsToAlarm: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // A PRICED REQUEST REFUSED BECAUSE THIS PERIOD'S POOL ROW DOES NOT EXIST. The
+    // tenant was pooled last period and has no row for this one, so the gateway
+    // refuses rather than reading the miss as "never pooled" and spending the month
+    // with no money ceiling. The refusal is the safe direction and it is still an
+    // outage for that tenant, so it pages: the scheduled rollover should have created
+    // the row, and a sustained signal here means it did not.
+    //
+    // Through the shared construct, because it is per-tenant and an alarm that cannot
+    // say which tenant sends the responder looking.
+    new TenantAlarm(this, 'PoolPeriodRowMissing', {
+      logGroup,
+      prefix,
+      scope: 'tenant',
+      metricNamespace: METRIC_NS,
+      metricName: 'PoolPeriodRowMissing',
+      event: 'pool_period_row_missing',
+      threshold: 0,
+      period: cdk.Duration.minutes(5),
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      // No line means no refusal, which really is nothing to report.
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "A tenant that was pooled last period has no pool row for this one, so its priced requests are being refused with pool_period_row_missing. This is the guard working — the alternative is spending the month with no money ceiling at all — but the row should exist: check the quota period-rollover job, then re-run it. Find the tenant in the pool_period_row_missing log line.",
     });
 
     // RETENTION EXPOSURE (C8.3's missing watcher). `STRATOCLAVE_UNOBSERVED_HOLDS`

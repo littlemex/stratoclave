@@ -19,6 +19,9 @@
   "cl-091436a9cb9f": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-0a1c9ba0c5bf": {
+   "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
+  },
   "cl-0a50052d1a77": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -493,6 +496,9 @@
   "cl-73adf5790f11": {
    "first_seen": "added when the blockquote splitter was fixed"
   },
+  "cl-73ffa150f659": {
+   "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
+  },
   "cl-745072b5abcb": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -828,6 +834,9 @@
   },
   "cl-ca57d6f86167": {
    "first_seen": "added when the money flags became the default"
+  },
+  "cl-cac5356f294b": {
+   "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
   },
   "cl-cafe46c6ef05": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -1322,7 +1331,8 @@
     "C14.9": "B",
     "C14.10": "B",
     "C14.11": "B",
-    "C14.12": "B"
+    "C14.12": "B",
+    "C14.13": "B"
    }
   },
   "retired": {},

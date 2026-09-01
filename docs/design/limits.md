@@ -119,10 +119,28 @@ perfectly plausible number and nothing afterwards can tell it from a correct one
 `migrations.pool_ceiling_migration --recompute-seat-rate`, which recomputes every seat-tracked row and
 leaves rows holding an operator's figure alone.
 
-**The period boundary has an owner.** A new calendar month's row is created from the previous month's,
-carrying the attributes the declaration classifies as carried and recomputing the rest, so a
-seat-tracked row arrives seat-tracked with the same seats and a row holding a figure arrives holding
-it. What does not arrive is the spend, the reservations, or the granted term.
+**The period boundary has an owner, and it has two.** A new calendar month's row is created from the
+previous month's, carrying the attributes the declaration classifies as carried and recomputing the
+rest, so a seat-tracked row arrives seat-tracked with the same seats and a row holding a figure
+arrives holding it. What does not arrive is the spend, the reservations, or the granted term.
+
+A **scheduled job** creates that row for every tenant holding the previous period's row, on the daily
+reconciler's schedule — on the 1st it does the rollovers and on other days it finds nothing to do. Its
+unit of work is deliberately "tenants with a prior-period row" rather than "all tenants": pool
+budgeting is opt-in, the prior row is the opt-in signal, and a job that created rows for everyone
+would be inventing ceilings for tenants who were deliberately left unpooled. A **membership change**
+also creates the row if it arrives first, because a hire at five past midnight on the 1st should not
+wait for a scheduled run.
+
+**And a missing row does not read as an unpooled tenant.** An absent row has always meant "not
+pooled", which is right, and once the row is per-period that reading acquires a second case it cannot
+tell apart: a tenant that *is* pooled whose row for this period has not been created. The previous
+period's row is what separates them. Present means the row is missing and a priced request is refused
+with `pool_period_row_missing`; absent means the tenant is genuinely unpooled and nothing changes for
+it. Both layers are needed, and neither is sufficient: the schedule alone would return the ceiling to
+fail-open in any month the job failed, and the guard alone would refuse every pooled tenant from
+midnight until the job ran. Together the row exists in the ordinary case, and when it does not the
+failure is loud and lands on the side that refuses spend rather than admitting it.
 
 **The migration to this rule is one-shot.** No phase of it may be re-run once grants exist. Its
 cut-over reads a row carrying neither new attribute as `manual_limit = pool_limit`, which is right

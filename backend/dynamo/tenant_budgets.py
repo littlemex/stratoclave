@@ -556,6 +556,28 @@ class TenantBudgetsRepository:
             "updated_at": _now_iso(),
         })
 
+    def previously_pooled(self, tenant_id: str, period: str) -> bool:
+        """Did this tenant hold a pool row BEFORE `period`?
+
+        The fact that separates the two meanings of a missing row, and it is a named
+        method rather than an inline read because those two meanings are not obviously
+        different at a call site. An absent row has always meant "this tenant is not
+        pooled", which is right -- pool budgeting is opt-in. Once the row is
+        per-period, that reading acquires a second case: a tenant that IS pooled whose
+        row for this period has not been created yet. Reading the second as opt-out
+        spends the month with no money ceiling at all.
+
+        True means the row is MISSING and the caller must refuse rather than admit.
+        False means the tenant is genuinely unpooled and nothing has changed for it.
+
+        Eventually consistent, and that is deliberate on both counts. It answers a
+        question about a CLOSED period, whose row is not being written any more, so
+        there is nothing for a strong read to be more current about; and it is reached
+        only on the miss path, which is already cold, so it must not cost the extra
+        latency of a consistent read on the way to a refusal.
+        """
+        return self.get(tenant_id, previous_period(period)) is not None
+
     def pool_summary(self, tenant_id: str, period: str) -> Optional[dict[str, Any]]:
         """The pool's ceiling, its composition and its live usage in micro-USD,
         or None when the tenant has no pool budget for the period.

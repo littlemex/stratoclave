@@ -1848,6 +1848,24 @@
    "claim": "The rule that makes the cut-over safe beforehand is exactly what makes a re-run unsafe afterwards, so every phase refuses outright on a table where any row carries a granted amount.",
    "anchor": "contract:C14.12@d1717e28",
    "note": "the clause states the same refusal as a precondition every phase checks, and names the read that makes a re-run unsafe"
+  },
+  {
+   "id": "cl-cac5356f294b",
+   "claim": "Its unit of work is deliberately \"tenants with a prior-period row\" rather than \"all tenants\": pool budgeting is opt-in, the prior row is the opt-in signal, and a job that created rows for everyone would be inventing ceilings for tenants who were deliberately left unpooled.",
+   "anchor": "contract:C14.13@13021301",
+   "note": "the clause states the unit of work and why a tenant that never had a pool must not acquire one"
+  },
+  {
+   "id": "cl-73ffa150f659",
+   "claim": "**And a missing row does not read as an unpooled tenant.** An absent row has always meant \"not pooled\", which is right, and once the row is per-period that reading acquires a second case it cannot tell apart: a tenant that *is* pooled whose row for this period has not been created.",
+   "anchor": "contract:C14.13@13021301",
+   "note": "the clause states the miss guard and the condition that separates the two meanings of an absent row"
+  },
+  {
+   "id": "cl-0a1c9ba0c5bf",
+   "claim": "Both layers are needed, and neither is sufficient: the schedule alone would return the ceiling to fail-open in any month the job failed, and the guard alone would refuse every pooled tenant from midnight until the job ran.",
+   "anchor": "contract:C14.13@13021301",
+   "note": "the clause states that both layers are load-bearing and what each one alone would fail to do"
   }
  ]
 }

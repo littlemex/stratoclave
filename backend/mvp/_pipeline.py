@@ -2800,6 +2800,48 @@ def reserve_credit(
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
+    # A MISS HAS TWO MEANINGS AND THEY ARE NOT THE SAME REQUEST.
+    #
+    # "No row" has always meant "this tenant is not pooled", because pool budgeting
+    # is opt-in per tenant. Once the row is per-period AND created by a rollover,
+    # that reading acquires a second case it cannot tell apart: a tenant that IS
+    # pooled and whose row for THIS period has not been created yet. Both look like
+    # an absent row, and treating the second as opt-out spends the month with no
+    # money ceiling at all — failing open, in the direction that admits spend,
+    # silently, on the tenant most likely to be affected (stable membership over a
+    # boundary is the common case, not the edge).
+    #
+    # The previous period's row is what distinguishes them. Present means the tenant
+    # was pooled and this period's row is MISSING; absent means the tenant is
+    # genuinely unpooled and the fast path below is correct.
+    #
+    # This is a READ on the miss path only, which is already the cold path — there
+    # is deliberately no conditional write here. Creating the row from the request
+    # path would put a write on the hot path that the whole PENDING-protocol design
+    # exists to keep off it. The scheduled rollover
+    # (`mvp.observability.period_rollover`) creates rows; this only refuses to
+    # pretend the ceiling was never there.
+    #
+    # There is deliberately NO configurable default for "no pool row" either. A
+    # default value would apply to both meanings of the miss and destroy exactly the
+    # distinction this guard depends on.
+    if pool is None and cost_microusd is not None:
+        if budgets.previously_pooled(user.org_id, period):
+            logger.warning(
+                "pool_period_row_missing",
+                tenant_id=user.org_id,
+                user_id=user.user_id,
+                period=period,
+                prior_period=_previous_period(period),
+                reason="pool_period_row_missing",
+            )
+            # 503 rather than 402: nothing is exhausted, and the request was not
+            # refused on its merits. The row is expected to appear — the scheduled
+            # rollover runs daily — so retrying is the right response, and it shares
+            # the `budget_unavailable` shape every other "could not establish the
+            # budget" refusal already uses.
+            raise _err_503("pool_period_row_missing")
+
     # No pool budget AND no per-model quota to enforce → original single-table
     # fast path (fully backward compat).
     if (pool is None or cost_microusd is None) and not quota_lines:
