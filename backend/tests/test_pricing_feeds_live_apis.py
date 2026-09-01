@@ -31,8 +31,8 @@ _NOT_FEED_PRICED = {"vllm", "semantic-router"}
 # Models known to have no readable price, with the reason. A ratchet in both
 # directions: a model outside this set that stops being priced fails the first test,
 # and a model inside it that starts being priced fails the second, so the list cannot
-# quietly grow into a blanket excuse. Measured 2026-08-31 on account 776010787911;
-# the authorization ones are account-scoped and may differ in yours.
+# quietly grow into a blanket excuse. Measured 2026-08-31 on one commercial-partition
+# account; the authorization ones are account-scoped and may differ in yours.
 EXPECTED_UNPRICED = {
     "anthropic.claude-3-opus-20240229-v1:0":
         "ListFoundationModelAgreementOffers rejects the id as invalid, and the Price "
