@@ -24,7 +24,9 @@ also a report that is safe to run against production.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional
 
@@ -32,7 +34,7 @@ from boto3.dynamodb.conditions import Key
 
 from core.logging import get_logger
 
-from .pricing import mtok_cost_for_rounding
+from .pricing import BILLABLE_LEGS, mtok_cost_for_rounding
 from .rates import RATE_FIELDS, Rate
 
 logger = get_logger(__name__)
@@ -50,6 +52,11 @@ assert set(_RATE_FIELD_BY_COMPONENT.values()) == set(RATE_FIELDS), (
     "the rate legs moved; update mvp.reprice's component map with them"
 )
 
+# The billable-leg names, read from the one registry `rate_usage` itself writes
+# from (`mvp.pricing.BILLABLE_LEGS`), not spelled out again here. A rating whose
+# component keys are not exactly this set did not come from that writer.
+_BILLABLE_LEG_NAMES = frozenset(leg.name for leg in BILLABLE_LEGS)
+
 
 @dataclass
 class RepriceReport:
@@ -61,6 +68,12 @@ class RepriceReport:
     target: str
     as_charged_microusd: int = 0
     as_repriced_microusd: int = 0
+    # as_charged_microusd summed over only the events that were actually repriced — the
+    # same population as as_repriced_microusd. as_charged_microusd itself stays a total
+    # over the WHOLE period (see events_seen below); subtracting it from as_repriced
+    # is what read an unrepriceable event as a refund, because the two totals covered
+    # different populations. The headline difference is computed against this one instead.
+    comparable_as_charged_microusd: int = 0
     # pricing key -> (as-charged, as-repriced, events) so a difference can be attributed
     # rather than merely stated.
     by_pricing_key: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -77,7 +90,14 @@ class RepriceReport:
 
     @property
     def difference_microusd(self) -> int:
-        return self.as_repriced_microusd - self.as_charged_microusd
+        """As-repriced minus as-charged, over the population that was actually repriced.
+
+        Not `as_charged_microusd`: that total covers the whole period (deliberately —
+        see `events_seen`), so subtracting it here would compare a repriced subset
+        against a charged superset, and one unrepriceable event would read as a refund
+        that never happened.
+        """
+        return self.as_repriced_microusd - self.comparable_as_charged_microusd
 
     @property
     def complete(self) -> bool:
@@ -95,6 +115,7 @@ class RepriceReport:
             "period": self.period,
             "target": self.target,
             "as_charged_microusd": self.as_charged_microusd,
+            "comparable_as_charged_microusd": self.comparable_as_charged_microusd,
             "as_repriced_microusd": self.as_repriced_microusd,
             "difference_microusd": self.difference_microusd,
             "by_pricing_key": self.by_pricing_key,
@@ -145,12 +166,21 @@ def reprice_period(
         try:
             rating = json.loads(raw_rating)
             components = rating["components"]
-            rounding = str(rating.get("rounding", "ceil"))
             pricing_key = str(rating.get("pricing_key") or "")
             rating_total = _nonneg_int(rating.get("total_cost_microusd"))
         except (ValueError, KeyError, TypeError):
             _count(report.not_repriced, "unparseable_rating")
             continue
+        if "rounding" not in rating:
+            # `rate_usage` (mvp/pricing.py) raises unless the snapshot's policy is
+            # `ceil`, so a rating with no `rounding` at all never came from that
+            # writer — it is legacy or corrupt. Defaulting it to `ceil` would replay
+            # the charge under a policy the original charge never froze, which is
+            # M6 and M10's defect one field lower: a guess standing in for a fact and
+            # not showing up as one. Refuse instead, so the count is visible.
+            _count(report.not_repriced, "rating_without_rounding")
+            continue
+        rounding = str(rating["rounding"])
         if rating_total is None or rating_total != charged:
             # The rating does not describe the money that moved, so its token counts are
             # not evidence of what this charge was for.
@@ -161,6 +191,14 @@ def reprice_period(
             continue
         if not isinstance(components, Mapping) or not components:
             _count(report.not_repriced, "rating_without_components")
+            continue
+        if set(components.keys()) != _BILLABLE_LEG_NAMES:
+            # `rate_usage` always writes all four `BILLABLE_LEGS`, so a rating short a
+            # leg — or carrying one this build does not bill — is not a smaller version
+            # of what the writer produces, it is a different shape. Repricing it anyway
+            # would silently price the missing leg at zero, the same defect M11 named in
+            # the fixture that once stood in for this rating.
+            _count(report.not_repriced, "rating_component_mismatch")
             continue
         target = target_rates.get(pricing_key)
         if target is None:
@@ -188,6 +226,7 @@ def reprice_period(
             continue
         report.events_priced += 1
         report.as_repriced_microusd += repriced
+        report.comparable_as_charged_microusd += charged
         bucket = report.by_pricing_key.setdefault(
             pricing_key, {"as_charged_microusd": 0, "as_repriced_microusd": 0, "events": 0})
         bucket["as_charged_microusd"] += charged
@@ -221,12 +260,21 @@ def _charge_event_types() -> frozenset[str]:
 
 
 def _charge_events(repo, pk: str) -> Iterable[Mapping[str, Any]]:
-    """Every event in the partition whose settled delta is part of the charge, rated or not.
+    """Every event in the partition whose type is a charge, rated or settled or not.
 
     Read strongly and paged. Strongly because a report that quietly omits a settle written
     a second ago reads as a complete period; rated-or-not because an event with no frozen
     rating still moved money, and leaving it out of the as-charged total would measure the
     difference against a period that is not the one asked about.
+
+    The type check decides whether an item belongs in this stream at all — a `RELEASE` or
+    `RECLAIM` is never part of the charge, whatever its delta says. It does NOT decide
+    whether a charge-type event is worth yielding: a `SETTLE` with no readable
+    `settled_delta_microusd` still has to reach `reprice_period`, which counts it in
+    `events_seen` and classifies it as `settled_delta_unreadable`. Filtering it out here
+    instead — checking the delta before the type, as this once did — hid the event from
+    both `events_seen` and `not_repriced`, so a period that lost an event could still
+    report `complete`.
     """
     charge_types = _charge_event_types()
     kwargs: dict[str, Any] = {
@@ -238,8 +286,6 @@ def _charge_events(repo, pk: str) -> Iterable[Mapping[str, Any]]:
     while True:
         response = repo._table.query(**kwargs)
         for item in response.get("Items", ()):
-            if item.get("settled_delta_microusd") is None:
-                continue
             if str(item.get("event_type") or "") not in charge_types:
                 continue
             yield item
@@ -312,6 +358,18 @@ def target_from_effective() -> tuple[dict[str, Rate], str]:
     return rates, "durable-effective(" + " + ".join(labels) + ")"
 
 
+class UnverifiedVersionError(ValueError):
+    """A stored version whose rows do not reconstruct the digest they are named under.
+
+    Distinct from "no such version" (plain `ValueError`, unchanged below): the row
+    exists, but a corrupt or dropped entry means the table `reprice` would read is not
+    the table `<digest>` names. The charging path degrades gracefully from this — it
+    keeps serving the surviving keys, because a smaller table beats none. A dispute
+    answer is the opposite case: repricing against the wrong table would be a wrong
+    answer with the right label on it, so this refuses instead of arithmetic-ing over it.
+    """
+
+
 def target_from_feed_version(version: str) -> tuple[dict[str, Rate], str]:
     """A stored price-feed version, by its digest.
 
@@ -324,6 +382,16 @@ def target_from_feed_version(version: str) -> tuple[dict[str, Rate], str]:
     snapshot = SnapshotStore().load_version(version)
     if snapshot is None:
         raise ValueError(f"no stored price-feed version {version!r}")
+    if not snapshot.digest_verified:
+        # The row's digest_verified is False, so the table does not reconstruct the
+        # digest it is stored under (a row was dropped or altered). Refuse before the
+        # arithmetic ever runs, rather than repricing a dispute against a table this
+        # version id does not actually name.
+        raise UnverifiedVersionError(
+            f"stored version {version!r} does not verify: its rows do not "
+            f"reconstruct this digest (a row was dropped or altered when it was "
+            f"read back), so this is not the table {version!r} names — refusing to "
+            f"reprice a dispute against it")
     return snapshot.rates, f"feed-version({version})"
 
 
@@ -349,17 +417,38 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover — ops e
     args = parser.parse_args(argv)
 
     if args.at_version:
-        rates, label = target_from_feed_version(args.at_version)
+        try:
+            rates, label = target_from_feed_version(args.at_version)
+        except UnverifiedVersionError as exc:
+            # A different failure from "no such version" (still an uncaught ValueError,
+            # unchanged below): the version exists but does not name the table it would
+            # answer the dispute with, so this refuses before any arithmetic runs.
+            print(f"refused: {exc}")
+            return 2
     elif args.at == "floor":
         rates, label = target_from_floor()
     else:
         rates, label = target_from_effective()
 
-    report = reprice_period(tenant_id=args.tenant, period=args.period,
-                            target_rates=rates, target_label=label)
+    if args.json:
+        # `reprice_period` logs `reprice_report` on stdout right before it returns, and a
+        # machine-readable mode that needs a human to strip a log line out of it is not
+        # machine-readable. The log still happens — on stderr. `fetch.py` solved exactly
+        # this by redirecting the stream itself, which catches a handler installed lazily
+        # on first use; the same fix applies here.
+        with contextlib.redirect_stdout(sys.stderr):
+            report = reprice_period(tenant_id=args.tenant, period=args.period,
+                                    target_rates=rates, target_label=label)
+    else:
+        report = reprice_period(tenant_id=args.tenant, period=args.period,
+                                target_rates=rates, target_label=label)
+    # A partial period is not a smaller version of a complete one: it is a different
+    # answer, and a caller that only checks the exit code must not be able to mistake it
+    # for success.
+    exit_code = 0 if report.complete else 2
     if args.json:
         print(json.dumps(report.to_dict(), indent=1, sort_keys=True))
-        return 0
+        return exit_code
     print(f"tenant {report.tenant_id} period {report.period} recomputed at {report.target}")
     print(f"  as charged : {_usd(report.as_charged_microusd)}")
     print(f"  as repriced: {_usd(report.as_repriced_microusd)}")
@@ -380,7 +469,7 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover — ops e
         print(f"  pricing keys absent from the target table: "
               f"{', '.join(report.keys_missing_from_target)}")
     print("\n(read-only: the ledger is unchanged, and the charge of record stands)")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":  # pragma: no cover
