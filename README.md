@@ -280,8 +280,10 @@ for where a broker is the better choice.
   spend are counted differently — all in integer micro-USD, never floating
   point. **A tenant gets a dollar pool at creation** — `seats x $200` a month by
   default (`STRATOCLAVE_SEAT_MONTHLY_USD`), following the seat count until an
-  operator sets a figure of their own — so the ceiling a fresh deployment
-  enforces is denominated in the unit the invoice arrives in. The per-user token
+  operator sets a figure of their own, and following it again when they ask it to
+  (`{"follow_seats": true}`) — so the ceiling a fresh deployment enforces is
+  denominated in the unit the invoice arrives in, and choosing a figure once is not
+  a decision a tenant is stuck with. The per-user token
   quota remains, at a deliberately loose ten million tokens
   (`DEFAULT_TENANT_CREDIT`), as a fairness device between a tenant's users
   rather than as a budget: a token count cannot state a cost, since one million

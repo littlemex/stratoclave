@@ -42,7 +42,7 @@ figure as dollars.
 
 A tenant created through the ordinary route, with nothing set by hand, gets:
 
-- a dollar pool for the current period marked `sizing = "per_seat"`, written at zero and
+- a dollar pool for the current period that follows the seat count, written at zero and
   maintained at `seats x $200` — zero is the honest ceiling for a tenant nobody is a member of
   yet, and the first membership brings it to one seat;
 - a per-user token quota of ten million tokens, stamped onto the tenant as `default_credit` and
@@ -54,20 +54,82 @@ per-user money ceilings a later change may add, because a per-seat pool equal to
 individual ceilings can never bind — the individuals would exhaust themselves first, and a ceiling
 that cannot bind is decoration.
 
-`seats` is the count of active memberships, and the pool equals it **at every moment** rather than
-at creation only: a membership added or removed moves the limit and the headroom by exactly one seat,
-as an atomic delta on the row, under the same guard the ceiling-set path uses. Nothing counts seats
-by querying them, which is why the figure cannot drift from the memberships that produced it.
+`seats` is the count of active memberships, and the pool tracks it as the memberships change rather
+than being sized once at creation: a membership added or removed moves the stored seat count, and on a
+seat-tracked row moves the limit and the headroom by exactly one seat, as an atomic delta on the row.
+The admission path never counts seats by querying them, so the ceiling costs no membership read.
 
-## 4. Where an operator's own figure takes over
+Drift between the stored count and the memberships is possible, and it is checked rather than assumed
+away. A delta applied twice moves the seat count and the ceiling together, in the same direction, so
+every equation over the row still balances while the tenant admits an extra seat's worth of spend a
+month. That is invisible to any intra-row check, so a daily reconciler counts the memberships and
+compares. It reports and never repairs, because a repair would destroy the evidence of how the row got
+that way and could only guess which side of the disagreement is right.
 
-The moment an operator sets a pool figure explicitly — through the admin route or, for their own
-tenant, through the team-lead route — the row is marked `sizing = "fixed"` and stops following seats.
-A figure a person chose is not overwritten by a later hire.
+## 4. The rule: what the ceiling is, and how it is reversed
 
-**A row with no `sizing` attribute is `fixed`.** Every pool row written before this document existed
-has none, and each one is a figure someone set by hand; reading absence as `per_seat` would make
-those ceilings start moving behind the operator's back.
+The ceiling is not a mode stored on the row. It is a rule over three attributes, and the mode falls
+out of it:
+
+```
+seat_term  = seat_count x seat_rate
+baseline   = manual_limit  if manual_limit is PRESENT  else seat_term
+pool_limit = baseline + coalesce(pool_granted, 0)
+```
+
+`pool_granted_microusd` is any granted amount, and it is zero until grants exist. The identity is
+written with the `coalesce` from the start so it is true of every row that exists today, rather than
+becoming true when granting ships.
+
+**Absence of `manual_limit_microusd` means "follow the seat count". Presence, INCLUDING zero, means
+"this figure".** The sentinel has to be absence rather than zero, and the reason is not aesthetic:
+`limit_usd_cents` accepts `0` today and it means every request refused, so reading `0` as "follow the
+seats" would silently reverse the meaning of a request every existing caller can already make. No
+existing caller can send absence, which is exactly what makes it a safe sentinel.
+
+The moment an operator sets a figure explicitly — through the admin route or, for their own tenant,
+through the team-lead route — the row holds that figure and stops following seats. A figure a person
+chose is not overwritten by a later hire.
+
+**The reversal is `{"follow_seats": true}`**, on the same endpoint, and it REMOVES the attribute
+rather than writing the seat term into it. Writing the term back would leave a figure behind, and the
+next hire would not move it. Before this existed, a figure set once stopped seat tracking permanently:
+there was no request that could undo it, so a tenant that grew from four people to forty kept the
+number somebody typed when it was four.
+
+`seat_count` moves on every membership change whether or not money moves with it. On a row holding a
+figure that means the row can still say its entitlement has outgrown the figure — which is the one
+thing an operator cannot work out by looking at the figure.
+
+**Every writer of this ceiling.** The list is derived from the row's own declaration
+(`dynamo.tenant_budgets.ceiling_writers()`, from `POOL_ROW_ATTRIBUTES`) rather than restated here,
+because a list written out in prose passes review while naming a subset the moment a writer is added:
+
+- `TenantBudgetsRepository.set_manual_limit` — an operator's figure (admin or team-lead route).
+- `TenantBudgetsRepository.clear_manual_limit` — the reversal.
+- `TenantBudgetsRepository.adjust_pool_for_seat_delta` — a membership change; the ONE seat-delta
+  writer, which every membership transition including a user deletion routes through.
+- `TenantBudgetsRepository._seed_pool_row` — creation, and the period rollover's new row.
+- `migrations.pool_ceiling_migration` — the backfill and the seat-rate recompute.
+
+**The rate is not a live knob.** Each row stores the per-seat rate its own ceiling was computed at, so
+that ceiling is reproducible; the deployment records the rate in force once. A process configured with
+a different figure **refuses to start**, because a ceiling recomputed at a rate nobody chose is a
+perfectly plausible number and nothing afterwards can tell it from a correct one. Changing the rate is
+`migrations.pool_ceiling_migration --recompute-seat-rate`, which recomputes every seat-tracked row and
+leaves rows holding an operator's figure alone.
+
+**The period boundary has an owner.** A new calendar month's row is created from the previous month's,
+carrying the attributes the declaration classifies as carried and recomputing the rest, so a
+seat-tracked row arrives seat-tracked with the same seats and a row holding a figure arrives holding
+it. What does not arrive is the spend, the reservations, or the granted term.
+
+**The migration to this rule is one-shot.** No phase of it may be re-run once grants exist. Its
+cut-over reads a row carrying neither new attribute as `manual_limit = pool_limit`, which is right
+while the total is only ever a baseline and destructive once the total can also contain granted money:
+the grant would be folded permanently into the operator's figure, on every such row at once. The rule
+that makes the cut-over safe beforehand is exactly what makes a re-run unsafe afterwards, so every
+phase refuses outright on a table where any row carries a granted amount.
 
 ## 5. What is bounded and what is not
 

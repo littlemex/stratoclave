@@ -1796,10 +1796,58 @@
    "note": "restates C1's own Not-guaranteed (N) boundary and points at it; the sentence is the boundary rather than a claim past it"
   },
   {
-   "id": "cl-373c5642b9cd",
-   "claim": "Nothing counts seats by querying them, which is why the figure cannot drift from the memberships that produced it.",
-   "anchor": "contract:C14.4",
-   "note": "the delta is the only writer of the seat-scaled figure, so there is no second derivation to disagree with it; C14.4 is what the delta's exactness is recorded as"
+   "id": "cl-484362f524f6",
+   "claim": "Presence, INCLUDING zero, means \"this figure\".** The sentinel has to be absence rather than zero, and the reason is not aesthetic: `limit_usd_cents` accepts `0` today and it means every request refused, so reading `0` as \"follow the seats\" would silently reverse the meaning of a request every existing caller can already make.",
+   "anchor": "contract:C14.7@6aa51a16",
+   "note": "the clause states the sentinel and why zero could not be it"
+  },
+  {
+   "id": "cl-30903ebd27e7",
+   "claim": "Before this existed, a figure set once stopped seat tracking permanently: there was no request that could undo it, so a tenant that grew from four people to forty kept the number somebody typed when it was four.",
+   "anchor": "contract:C14.8@cdf9c8f7",
+   "note": "the reversibility clause; the sentence describes the state before it and the clause is what makes it past tense"
+  },
+  {
+   "id": "cl-bab53fcd8c96",
+   "claim": "On a row holding a figure that means the row can still say its entitlement has outgrown the figure — which is the one thing an operator cannot work out by looking at the figure.",
+   "anchor": "contract:C14.4@f93cbaac",
+   "note": "the clause states that the seat count moves on a row holding a figure, which is what makes the report possible"
+  },
+  {
+   "id": "cl-e37a724bc95b",
+   "claim": "**The rate is not a live knob.** Each row stores the per-seat rate its own ceiling was computed at, so that ceiling is reproducible; the deployment records the rate in force once.",
+   "anchor": "contract:C14.11@544905bd",
+   "note": "the clause states the stored rate, the recorded rate in force, and the refusal to start"
+  },
+  {
+   "id": "cl-6bbd77c21c79",
+   "claim": "Changing the rate is `migrations.pool_ceiling_migration --recompute-seat-rate`, which recomputes every seat-tracked row and leaves rows holding an operator's figure alone.",
+   "anchor": "contract:C14.11@544905bd",
+   "note": "the same clause names the migration and that rows holding a figure are untouched"
+  },
+  {
+   "id": "cl-0fb328229b6f",
+   "claim": "The admission path never counts seats by querying them, so the ceiling costs no membership read.",
+   "anchor": "contract:C14.3@60cb7464",
+   "note": "'never counts seats by querying them' is scoped to the ADMISSION path in the sentence itself; C14.9's reconciler does query them, deliberately, and off the request path"
+  },
+  {
+   "id": "cl-395d172b9440",
+   "claim": "A delta applied twice moves the seat count and the ceiling together, in the same direction, so every equation over the row still balances while the tenant admits an extra seat's worth of spend a month.",
+   "anchor": "contract:C14.9@bccfbdd7",
+   "note": "the clause states exactly this failure and why an intra-row identity cannot see it"
+  },
+  {
+   "id": "cl-ac18c67a7a32",
+   "claim": "It reports and never repairs, because a repair would destroy the evidence of how the row got that way and could only guess which side of the disagreement is right.",
+   "anchor": "contract:C14.9@bccfbdd7",
+   "note": "'reports and never repairs' is the clause's own wording, and the read-only grant in the reconciler stack is what enforces it"
+  },
+  {
+   "id": "cl-7ed90cbbf499",
+   "claim": "The rule that makes the cut-over safe beforehand is exactly what makes a re-run unsafe afterwards, so every phase refuses outright on a table where any row carries a granted amount.",
+   "anchor": "contract:C14.12@b0cf8237",
+   "note": "the clause states the same refusal as a precondition every phase checks, and names the read that makes a re-run unsafe"
   }
  ]
 }

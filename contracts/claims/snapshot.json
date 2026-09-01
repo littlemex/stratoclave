@@ -4,6 +4,9 @@
   "cl-00a4fd0cc226": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-020d1e0dfe15": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-05db3a17573e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -34,6 +37,9 @@
   "cl-0cd7980c4e9a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-0cfac489d20f": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-0e217409923b": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -42,6 +48,9 @@
   },
   "cl-0ef0b4d30b07": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-0fb328229b6f": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
   },
   "cl-0ffa6f76fd6a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -69,6 +78,9 @@
   },
   "cl-1438d80bb82d": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-14c90d8583f8": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-151f28450237": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -112,11 +124,17 @@
   "cl-1c9336f659ff": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-1cb8e84d03a5": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-1d0fce10f192": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-1e4645a2920a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-1e5cb796a022": {
+   "first_seen": "the rate-basis row in the README comparison table"
   },
   "cl-1ed6a28203c7": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -151,14 +169,23 @@
   "cl-23e1ba1c8f45": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-246a00ba5c5b": {
+   "first_seen": "the rate-basis row in the README comparison table"
+  },
   "cl-24afdaf407a1": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-24bea37d2376": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-24f581bc5868": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-257f80bc423d": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-261415bbe25e": {
+   "first_seen": "added when the blockquote splitter was fixed"
   },
   "cl-2697088eaa5a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -181,8 +208,20 @@
   "cl-2ab16d248e89": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-2b2fb9d64a50": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-2c174711898e": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-2e376a8e476a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-2f9e315b4448": {
+   "first_seen": "added when the blockquote splitter was fixed"
+  },
+  "cl-30903ebd27e7": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
   },
   "cl-323ec00356a7": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -214,6 +253,15 @@
   "cl-38019d314b68": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-38c102423678": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-392a90e703bc": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-395d172b9440": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
+  },
   "cl-39c150194f02": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -225,6 +273,9 @@
   },
   "cl-3ca03cd79190": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-3cd1b2ad25b5": {
+   "first_seen": "added with CHANGELOG.md at v1.0.0"
   },
   "cl-3cd41cc27be6": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -259,6 +310,15 @@
   "cl-43831b7ca0f8": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-45cba8a73adb": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
+  "cl-484362f524f6": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
+  },
+  "cl-484db8f0a20a": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-489b7b86c750": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -280,6 +340,9 @@
   "cl-4bddc706fbd9": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-4cb0c0daaa21": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-4d34794abaf3": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -291,6 +354,12 @@
   },
   "cl-4e128200130f": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-4f0dad7b3f88": {
+   "first_seen": "added when the money flags became the default"
+  },
+  "cl-4feb36ba1f0e": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-52ae05b86355": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -319,6 +388,9 @@
   "cl-592905afcd5c": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-5949dcfd7dc0": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-59b075b1ab2c": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -339,6 +411,9 @@
   },
   "cl-5d4c77e2d2d6": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-5d5d5ab9f311": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-5f8c881307c4": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -367,8 +442,17 @@
   "cl-692085924daa": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-6a333fe7b589": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-6bbd77c21c79": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
+  },
   "cl-6d79e3ad9ae5": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-6d7e9e9d91ab": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-6d91f148a230": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -403,6 +487,12 @@
   "cl-72b71ad48346": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-73907a659bb7": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-73adf5790f11": {
+   "first_seen": "added when the blockquote splitter was fixed"
+  },
   "cl-745072b5abcb": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -424,8 +514,14 @@
   "cl-77556ccb4a6c": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-78a5c7cb76b7": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-7958023f966b": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-7a7fe126004a": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-7c0ed6a263fa": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -441,6 +537,9 @@
   },
   "cl-7eaba524c73a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-7ed90cbbf499": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
   },
   "cl-8036c0219ac0": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -472,6 +571,9 @@
   "cl-863d34271dfa": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-8774b32e6d2a": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-8a7eca468f0e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -486,6 +588,9 @@
   },
   "cl-8d9b42f9afcf": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-8e2e2bf04268": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-8fe0fe2a42fd": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -519,6 +624,12 @@
   },
   "cl-97adc1d3af72": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-98723c33000c": {
+   "first_seen": "added when the blockquote splitter was fixed"
+  },
+  "cl-990ca4b30a94": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-99cc36f57540": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -571,17 +682,29 @@
   "cl-aa1140cddac1": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-ac18c67a7a32": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
+  },
   "cl-ac86e4fc530a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-ac8707176500": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-aca38f5d7f56": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
   "cl-ad4fb83134ab": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-ad63e182250c": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-ada22f10e9ee": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-ae24f1f9ee70": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-ae7da09d31b0": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -594,6 +717,9 @@
   },
   "cl-b1ca382b1544": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-b25161053705": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-b4c9b93161d8": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -628,6 +754,9 @@
   "cl-ba2d629a19ba": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-bab53fcd8c96": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
+  },
   "cl-bbb411d2649c": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -645,6 +774,9 @@
   },
   "cl-bdd8b5e03923": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-bea96058e10b": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-bedc0822b3ab": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -676,6 +808,9 @@
   "cl-c3d40e1cfbd5": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-c4b961dc1ce8": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-c5f46776f54e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -691,6 +826,9 @@
   "cl-c8014693e4d9": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-ca57d6f86167": {
+   "first_seen": "added when the money flags became the default"
+  },
   "cl-cafe46c6ef05": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -699,6 +837,9 @@
   },
   "cl-cd99f98f645e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-cf7f9fbdf0b5": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-cfcb81cf5049": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -712,6 +853,9 @@
   "cl-d0eb970e217d": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-d2d92e0588ee": {
+   "first_seen": "added when the money flags became the default"
+  },
   "cl-d37b13839190": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -720,6 +864,9 @@
   },
   "cl-d60a15fce23f": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-d637e3a96a45": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-d63dc2ce720f": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -739,6 +886,9 @@
   "cl-d760ab6ed2ee": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-d809c77c156d": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-d87d72230755": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -748,8 +898,14 @@
   "cl-d96d2635a141": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-da0a3c22ba54": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
   "cl-db7266d1fc30": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-dbc638e1e95c": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-dddf8c03c811": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -783,6 +939,9 @@
   },
   "cl-e33dab58a2e9": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-e37a724bc95b": {
+   "first_seen": "added by the ceiling-rule change (F1): limits.md section 4 replaced the sizing-mode description with the rule, its reversal, the stored seat rate and the one-shot migration"
   },
   "cl-e3c118c0aa96": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -835,6 +994,12 @@
   "cl-ebb863b192bf": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-ec29ac45c721": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-eee5b421c76f": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
+  },
   "cl-ef22e1dbaee1": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -855,6 +1020,9 @@
   },
   "cl-f4b000ee6fdc": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-f539a741d035": {
+   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
   },
   "cl-f5dd20e3016f": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -879,6 +1047,12 @@
   },
   "cl-f85dec6606e9": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-f98e609f8898": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
+  },
+  "cl-fa2f240c13d0": {
+   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
   },
   "cl-faed8ef493dc": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -906,156 +1080,6 @@
   },
   "cl-ff2dcb6dd80a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
-  "cl-73adf5790f11": {
-   "first_seen": "added when the blockquote splitter was fixed"
-  },
-  "cl-2f9e315b4448": {
-   "first_seen": "added when the blockquote splitter was fixed"
-  },
-  "cl-98723c33000c": {
-   "first_seen": "added when the blockquote splitter was fixed"
-  },
-  "cl-261415bbe25e": {
-   "first_seen": "added when the blockquote splitter was fixed"
-  },
-  "cl-ca57d6f86167": {
-   "first_seen": "added when the money flags became the default"
-  },
-  "cl-d2d92e0588ee": {
-   "first_seen": "added when the money flags became the default"
-  },
-  "cl-4f0dad7b3f88": {
-   "first_seen": "added when the money flags became the default"
-  },
-  "cl-3cd1b2ad25b5": {
-   "first_seen": "added with CHANGELOG.md at v1.0.0"
-  },
-  "cl-020d1e0dfe15": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-0cfac489d20f": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-1cb8e84d03a5": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-24f581bc5868": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-2b2fb9d64a50": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-2c174711898e": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-38c102423678": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-392a90e703bc": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-484db8f0a20a": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-4cb0c0daaa21": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-4feb36ba1f0e": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-5949dcfd7dc0": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-6a333fe7b589": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-73907a659bb7": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-78a5c7cb76b7": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-7a7fe126004a": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-8774b32e6d2a": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-ad63e182250c": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-ae24f1f9ee70": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-b25161053705": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-bea96058e10b": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-c4b961dc1ce8": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-cf7f9fbdf0b5": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-d637e3a96a45": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-d809c77c156d": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-da0a3c22ba54": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-ec29ac45c721": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-f98e609f8898": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-fa2f240c13d0": {
-   "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-1e5cb796a022": {
-   "first_seen": "the rate-basis row in the README comparison table"
-  },
-  "cl-246a00ba5c5b": {
-   "first_seen": "the rate-basis row in the README comparison table"
-  },
-  "cl-45cba8a73adb": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-6d7e9e9d91ab": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-eee5b421c76f": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-990ca4b30a94": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-aca38f5d7f56": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-dbc638e1e95c": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-5d5d5ab9f311": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-f539a741d035": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-8e2e2bf04268": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-14c90d8583f8": {
-   "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-373c5642b9cd": {
-   "first_seen": "docs/design/limits.md (money-first defaults, C14)"
   }
  },
  "retired": {
@@ -1064,30 +1088,35 @@
    "target": "cl-261415bbe25e",
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
   },
-  "cl-9310dfb7d196": {
+  "cl-2881fa53d6ec": {
    "disposition": "reworded-to",
-   "target": "cl-2f9e315b4448",
+   "target": "cl-98723c33000c",
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
+  },
+  "cl-373c5642b9cd": {
+   "disposition": "moved-to-clause",
+   "target": "C14.9",
+   "why": "the sentence asserted that the seat figure CANNOT drift from the memberships that produced it, on the grounds that nothing counts seats by querying them. That was not a guarantee, it was an absence of checking: a best-effort delta can be lost or applied twice, and applied twice it moves the seat count and the ceiling together so no equation over the row disagrees. The obligation is now C14.9's daily comparison against the memberships themselves, which detects both directions a day late rather than claiming neither can happen."
   },
   "cl-4f6f74123973": {
    "disposition": "reworded-to",
    "target": "cl-2f9e315b4448",
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
   },
-  "cl-2881fa53d6ec": {
+  "cl-63f15d5323aa": {
    "disposition": "reworded-to",
-   "target": "cl-98723c33000c",
+   "target": "cl-4f0dad7b3f88",
+   "why": "the two money flags were flipped to default on and renamed into the STRATOCLAVE_ namespace, so the sentence stating the default changed"
+  },
+  "cl-9310dfb7d196": {
+   "disposition": "reworded-to",
+   "target": "cl-2f9e315b4448",
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
   },
   "cl-aa130aaffa48": {
    "disposition": "reworded-to",
    "target": "cl-73adf5790f11",
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
-  },
-  "cl-63f15d5323aa": {
-   "disposition": "reworded-to",
-   "target": "cl-4f0dad7b3f88",
-   "why": "the two money flags were flipped to default on and renamed into the STRATOCLAVE_ namespace, so the sentence stating the default changed"
   },
   "cl-cd0412ec7f22": {
    "disposition": "reworded-to",
