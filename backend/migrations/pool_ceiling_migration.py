@@ -110,33 +110,6 @@ def _period_of(sk: str) -> str:
     return sk.split("#", 1)[1] if "#" in sk else sk
 
 
-def active_membership_counts(user_tenants_table) -> dict[str, int]:
-    """Active membership count per tenant, from ONE strongly consistent pass.
-
-    A `Scan` with `ConsistentRead=True` rather than a per-tenant query on the
-    tenant GSI, for two reasons that point the same way: a GSI read cannot be
-    strongly consistent, and a seat count read eventually would let the backfill
-    write a figure that was already stale. One pass over the membership table
-    also costs less than one query per tenant.
-
-    A row with no `status` is active, matching every other reader of this table.
-    """
-    counts: dict[str, int] = {}
-    kwargs: dict[str, Any] = {"ConsistentRead": True}
-    while True:
-        resp = user_tenants_table.scan(**kwargs)
-        for it in resp.get("Items", []):
-            if str(it.get("status", "active")) != "active":
-                continue
-            tid = str(it.get("tenant_id") or "")
-            if tid:
-                counts[tid] = counts.get(tid, 0) + 1
-        lek = resp.get("LastEvaluatedKey")
-        if not lek:
-            return counts
-        kwargs["ExclusiveStartKey"] = lek
-
-
 # ---------------------------------------------------------------------------
 # The one-shot guard
 # ---------------------------------------------------------------------------
@@ -320,6 +293,7 @@ def phase_m2_backfill(*, apply: bool) -> dict[str, Any]:
     recording why.
     """
     from dynamo.tenant_budgets import TenantBudgetsRepository
+    from dynamo.user_tenants import UserTenantsRepository
 
     repo = TenantBudgetsRepository()
     table = repo._table
@@ -331,7 +305,7 @@ def phase_m2_backfill(*, apply: bool) -> dict[str, Any]:
             "rate M1 seeds. Taking the environment's value here instead would "
             "convert every seat-scaled row at whatever the rate happens to be now.")
 
-    counts = active_membership_counts(_user_tenants_table())
+    counts = UserTenantsRepository().active_membership_counts()
     scanned = seat_tracked = operator_figure = done = lost_cas = 0
     adjudication: list[dict[str, Any]] = []
     for item in _iter_budget_rows(table):
@@ -620,12 +594,6 @@ def _now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
-
-
-def _user_tenants_table():
-    from dynamo.user_tenants import UserTenantsRepository
-
-    return UserTenantsRepository()._table
 
 
 _PHASES = {

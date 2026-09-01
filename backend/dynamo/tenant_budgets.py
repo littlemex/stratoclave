@@ -228,7 +228,7 @@ POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
             "migrations.pool_ceiling_migration:phase_m2_backfill",
         ),
         max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        check="baseline_identity",
+        check="limit_identity",
         note="carried, and carried by ABSENCE too: a seat-tracked row must reach the "
              "new period still seat-tracked, so the rollover writes this attribute "
              "only when the old row had it. Zero is a figure and is carried as one.",

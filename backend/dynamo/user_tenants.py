@@ -273,6 +273,38 @@ class UserTenantsRepository:
         except Exception:  # noqa: BLE001 — never fail a membership write for this
             pass
 
+    def active_membership_counts(self) -> dict[str, int]:
+        """Active membership count per tenant, from ONE strongly consistent pass.
+
+        A `Scan` with `ConsistentRead=True` rather than a query per tenant on the
+        tenant GSI, for two reasons that point the same way: a GSI read cannot be
+        strongly consistent, and a seat count read eventually is a figure that was
+        already stale when whoever asked for it wrote it down. One pass over this
+        table also costs less than one query per tenant.
+
+        A row with no `status` counts as active, matching every other reader here.
+
+        This lives on the repository that OWNS memberships rather than beside
+        either of its callers, because the migration's backfill and the daily
+        reconciler must count seats the same way: two implementations of "how many
+        seats does this tenant have" would eventually be two numbers, and the
+        reconciler comparing against the other one would report the fleet broken.
+        """
+        counts: dict[str, int] = {}
+        kwargs: dict[str, Any] = {"ConsistentRead": True}
+        while True:
+            resp = self._table.scan(**kwargs)
+            for it in resp.get("Items", []):
+                if str(it.get("status", "active")) != "active":
+                    continue
+                tid = str(it.get("tenant_id") or "")
+                if tid:
+                    counts[tid] = counts.get(tid, 0) + 1
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                return counts
+            kwargs["ExclusiveStartKey"] = lek
+
     def archive_membership(self, *, user_id: str, tenant_id: str) -> bool:
         """Archive one membership row and account for the seat it gave up.
 
