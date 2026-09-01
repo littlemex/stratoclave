@@ -87,6 +87,18 @@ Decomposition at p50: of the 57 ms end-to-end, ~20 ms is the ledger round-trip
 and ~37 ms is ALB + app + network (of which the VPC-crossing hop is ~1 ms; the
 rest is app processing on 0.25 vCPU).
 
+> **R39d annotation.** Captured at commit `f0bab1c` (see [Environment](#environment)),
+> before the quota-raise-and-archive epic: the pool row carried the pre-epic
+> attribute set (`sizing`, no `seat_count`/`manual_limit_microusd`/
+> `seat_rate_microusd`/`pool_granted_microusd`/`grant_cap_microusd`). Not
+> re-measured for this epic and no re-measurement is claimed: the 58 ms
+> transaction tail is dominated by round trips and DynamoDB's own commit
+> latency at this item size, not by the pool item's byte count, and the epic's
+> attribute additions still leave the item inside its first write unit (see
+> [`../design/ledger-hot-path.md`](../design/ledger-hot-path.md)'s flatness
+> paragraph). A reader should not assume this number describes today's schema
+> from the fact that it is unchanged — it describes `f0bab1c`'s.
+
 ### Contention curve — single tenant pool row (worst case), 0.25 vCPU
 
 All load aimed at ONE pool row. This is the **worst case by construction**: a
@@ -106,6 +118,12 @@ barely moved (58 → 51 ms)**, yet the **end-to-end p99 exploded (225 → 1,953 
 The degradation is therefore NOT DynamoDB — it is the application's
 optimistic-CAS retry (snapshot re-read + full-jitter backoff) on the single hot
 pool row. A single pool row is a structural hot spot under concurrency.
+
+> **R39d annotation.** Pre-epic schema, commit `f0bab1c`, snapshot-all-equal
+> CAS — this is the design the headroom-ADD gate below **replaced**. Not
+> re-measured for this epic: re-measuring a design already abandoned adds
+> nothing, and this curve is not sensitive to the pool item's byte count (it is
+> measuring application-level CAS retry storms, not item size).
 
 ### After: headroom ADD gate (same worst case, re-measured)
 
@@ -142,6 +160,12 @@ What changed, stated plainly:
 (The after-run's c=1 step was a short 45 s sample and is not comparable to the
 long dedicated floor run above; the floor p99 = 58 ms is unchanged by this
 change, as the design predicted.) Raw CSVs: `bench/ledger-latency/results/headroom_c{1,2,8,16}.csv`.
+
+> **R39d annotation.** Pre-epic schema, commit `f0bab1c`. Not re-measured for
+> this epic, for the same reason as the floor above: this curve measures the
+> headroom-ADD gate's effect on transaction-conflict retries under contention,
+> which is orthogonal to the pool item's byte count. No re-measurement is
+> justified by the epic's attribute additions alone.
 
 ### CPU is not the limiter
 
@@ -225,6 +249,17 @@ p99 confidence interval comfortably spans a 10 ms gap.) A further signal: at c=1
 35–38 of 3,000 transactions still FAILED after 8 retries — under a burst past
 c=16 the current transactional design does not just get slow, it drops requests.
 
+> **R39d annotation.** Pre-epic schema, throwaway namespace, run from
+> `bench/ledger-latency/bench_itemcount_spike.py`. This spike varies item
+> **count** (4/3/2 items in the transaction), not item **bytes** — none of the
+> three variants carry `seat_count`/`manual_limit_microusd`/
+> `seat_rate_microusd`/`pool_granted_microusd`/`grant_cap_microusd`, and the
+> pool row's byte size in this spike is unrelated to the epic's attribute
+> additions. Not re-measured: the conclusion (item count is a dead end) does
+> not depend on the pool item's byte size at all, and this script now seeds
+> its pool row through `bench/ledger-latency/pool_fixture.py` (R39c) so a
+> future re-run is a real tenant-shaped row rather than a bare figure.
+
 **What this redirects the design to.** Because the killer is *the transaction
 itself* on a hot row, the next measured step is the **PENDING protocol** (design
 doc): Put HOLD `PENDING` → a SINGLE conditional `UpdateItem` on the pool row (no
@@ -238,6 +273,36 @@ only pool + HOLD, so moving RESERVE/IDEMP off the synchronous transaction is a
 precondition), and the deployed shadow projector + reconciler become the
 drift/orphan safety net that de-transactionalization requires. See
 [docs/design/ledger-hot-path.md](../design/ledger-hot-path.md).
+
+## Post-epic re-measurement (R39d, B5) — pending, named rather than fabricated
+
+None of the figures above needs re-running **because of** this epic: none were
+sensitive to the pool item's byte count in the first place (each measures
+transaction/round-trip latency or an application-level retry storm), and the
+item stays inside its first write unit either way (see
+[`../design/ledger-hot-path.md`](../design/ledger-hot-path.md)'s flatness
+paragraph, `599` bytes worst case as of this epic's F1+F2 schema). What they
+needed was the annotation above making that explicit, so a reader does not
+independently conclude "these numbers are stale."
+
+`SEAMS.md` B5 names the evidence R39d anchors to as one benchmark re-run
+through `bench/ledger-latency/pool_fixture.py`, after F1's and F2's attributes
+are both present on the same row simultaneously, with the figure difference
+attributed to the change or to the harness. That fixture and its identity
+check exist as of this contract's implementation (`bench/ledger-latency/`, all
+five scripts routed through `seed_verified_pool`) and have been exercised
+functionally under moto — see the fixture's own docstring for the identity it
+enforces. **The re-run itself, against real AWS and the deployed ALB/Fargate
+path this document's other figures were captured on, has not been executed**:
+it needs a deployed bench revision and live infrastructure this implementation
+pass does not have standing access to, and is recorded here as pending rather
+than fabricated. A single benchmark run captures ONE of the three reachable
+row shapes — never granted; granted, cap derived; granted, cap explicit (the
+cap sentinel is documented in `docs/design/quota-raises.md` and
+`docs/design/CONTRACTS.md` C14.17) — and whoever runs it must name which shape
+the run was in and list only that shape's attributes, per this row's R39d
+"Verified by" clause, rather than describing "the post-epic row" as if there
+were one.
 
 ## Not measured (the honest limits)
 
