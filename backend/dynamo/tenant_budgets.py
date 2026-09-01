@@ -228,7 +228,27 @@ def assert_seat_rate_in_force() -> Optional[int]:
     exactly where it mattered.
     """
     configured = seat_rate_microusd()
-    in_force = TenantBudgetsRepository().rate_in_force_microusd()
+    try:
+        in_force = TenantBudgetsRepository().rate_in_force_microusd()
+    except Exception as exc:  # noqa: BLE001
+        # A read that FAILED is not evidence of a disagreement, and refusing on it
+        # would turn a transient DynamoDB error -- or a process that legitimately has
+        # no table in front of it -- into a boot failure across the fleet. This check
+        # exists to catch a MISMATCH, so only a read that succeeds and disagrees
+        # refuses.
+        #
+        # The trade, stated because it is real: a task that boots without confirming
+        # the rate may write seat-scaled ceilings at a rate the fleet has moved off.
+        # The reconciler's `seat_rate_matches_rate_in_force` check finds those rows a
+        # day later, which is the same lateness the rest of that reconciler already
+        # accepts, and it is a far smaller failure than refusing every deploy whose
+        # first DynamoDB call happens to fail.
+        from core.logging import get_logger
+
+        get_logger(__name__).warning(
+            "seat_rate_in_force_unreadable", error=str(exc),
+            configured_microusd=configured)
+        return None
     if in_force is None or in_force == configured:
         return in_force
     if seat_rate_migration_allowed():
