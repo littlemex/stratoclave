@@ -214,7 +214,8 @@ export interface PoolBudget {
   // deficit, and its magnitude is what an operator acts on: floored at zero,
   // "nothing left" and "already $400 over" read identically.
   remaining_microusd: number
-  available_microusd: number
+  // A DIFFERENT fact, not a restatement: the magnitude of the overshoot, zero
+  // whenever there is none, so a surface need not inspect a sign.
   over_ceiling_microusd: number
   pool_limit_usd_cents: number
   remaining_usd_cents: number

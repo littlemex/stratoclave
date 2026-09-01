@@ -1094,9 +1094,9 @@
    "why": "the blockquote splitter joined hard-wrapped quote lines into whole sentences, so this claim's text changed shape; the obligation moved rather than ended"
   },
   "cl-373c5642b9cd": {
-   "disposition": "moved-to-clause",
-   "target": "C14.9",
-   "why": "the sentence asserted that the seat figure CANNOT drift from the memberships that produced it, on the grounds that nothing counts seats by querying them. That was not a guarantee, it was an absence of checking: a best-effort delta can be lost or applied twice, and applied twice it moves the seat count and the ceiling together so no equation over the row disagrees. The obligation is now C14.9's daily comparison against the memberships themselves, which detects both directions a day late rather than claiming neither can happen."
+   "disposition": "retracted-false",
+   "target": "C14.1 seat-count drift",
+   "why": "the sentence was 'Nothing counts seats by querying them, which is why the figure cannot drift from the memberships that produced it', and BOTH halves are false under the change that removed it. Something does now query: the daily reconciler compares the row's seat count against a live count of the tenant's memberships. And the figure can drift: the seat delta is applied after the membership write commits, best-effort, so a delta that is lost leaves the count one seat small and one applied twice leaves it one seat large. The sentence asserted an ABSENCE as a guarantee -- nothing counted, therefore nothing could disagree -- and this change deliberately introduces the thing whose absence was the guarantee. So it is retracted, not moved: C14.9 does not carry the obligation forward, it does the opposite, admitting the drift and detecting it a day late. Nothing anywhere guarantees what this sentence guaranteed. The open item it now points at states the trade and what closing it would cost."
   },
   "cl-4f6f74123973": {
    "disposition": "reworded-to",

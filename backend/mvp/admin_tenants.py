@@ -234,7 +234,6 @@ class PoolBudgetResponse(BaseModel):
     # it at zero reports "nothing left" for both "exactly nothing left" and
     # "already $400 over", which are different problems with different fixes.
     remaining_microusd: int
-    available_microusd: int
     over_ceiling_microusd: int
     # Convenience mirrors in USD cents for admin surfaces that prefer dollars.
     # Truncated toward ZERO, not floored, so a negative available reads as the
@@ -366,7 +365,7 @@ def _mode_sentence(summary: dict) -> str:
 
 def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetResponse":
     limit = int(summary["pool_limit_microusd"])
-    available = int(summary["available_microusd"])
+    remaining = int(summary["remaining_microusd"])
     manual = summary.get("manual_limit_microusd")
     entitlement = int(summary.get("seat_entitlement_microusd", 0))
     seat_tracked = bool(summary.get("seat_tracked"))
@@ -377,11 +376,10 @@ def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetRes
         pool_limit_microusd=limit,
         pool_reserved_microusd=int(summary["pool_reserved_microusd"]),
         pool_settled_microusd=int(summary["pool_settled_microusd"]),
-        remaining_microusd=available,
-        available_microusd=available,
+        remaining_microusd=remaining,
         over_ceiling_microusd=int(summary.get("over_ceiling_microusd", 0)),
         pool_limit_usd_cents=_cents_toward_zero(limit),
-        remaining_usd_cents=_cents_toward_zero(available),
+        remaining_usd_cents=_cents_toward_zero(remaining),
         mode_sentence=_mode_sentence(summary),
         seat_tracked=seat_tracked,
         seat_count=int(summary.get("seat_count", 0)),

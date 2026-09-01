@@ -567,12 +567,17 @@ class TenantBudgetsRepository:
         `pool_granted_microusd` is reported as a plain zero until grants exist,
         so the composition printed beside the limit always adds up to it.
 
-        `available_microusd` is SIGNED and never clamped. A row whose ceiling was
+        `remaining_microusd` is SIGNED and never clamped. A row whose ceiling was
         lowered below its committed spend has negative headroom, and that deficit
         is the figure an operator has to act on -- clamping it at zero reports
         "nothing left" for both "exactly nothing left" and "already $400 over",
-        which are different problems. `over_ceiling_microusd` is the same fact
-        stated positively for a surface that wants a magnitude.
+        which are different problems. There is deliberately no second name for it:
+        one source of a fact gets one name, and a synonym is a second place a
+        reader has to check for agreement.
+
+        `over_ceiling_microusd` is a DIFFERENT fact rather than a restatement -- the
+        magnitude of the overshoot, zero whenever there is none -- so a surface can
+        ask "is this row over, and by how much" without inspecting a sign.
         """
         item = self.get(tenant_id, period)
         if not item:
@@ -595,10 +600,9 @@ class TenantBudgetsRepository:
             "pool_reserved_microusd": reserved,
             "pool_settled_microusd": settled,
             "pool_headroom_microusd": headroom,
-            # The signed figure, and the one the surfaces render.
-            "available_microusd": headroom,
-            "over_ceiling_microusd": -headroom if headroom < 0 else 0,
+            # Signed, and the one the surfaces render. One name, not two.
             "remaining_microusd": headroom,
+            "over_ceiling_microusd": -headroom if headroom < 0 else 0,
             "status": item.get("status", "active"),
             # The composition. Absence of the operator's figure IS the mode, so
             # `manual_limit_microusd` is None exactly when the row follows seats.

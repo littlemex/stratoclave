@@ -120,9 +120,9 @@ export function PoolBudgetCard({
                   as the same one. */}
               <PoolStat
                 label={t('admin_tenant_detail.pool.available_label')}
-                value={fmtMicroUsd(pool.available_microusd)}
+                value={fmtMicroUsd(pool.remaining_microusd)}
                 emphasise
-                negative={pool.available_microusd < 0}
+                negative={pool.remaining_microusd < 0}
                 testId="pool-available"
               />
               <PoolStat

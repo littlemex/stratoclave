@@ -373,6 +373,19 @@ without paying a cost the clause names.
   same edit closes C3.2c for the per-model counter. It is the largest distance in
   these documents between how weak a sentence is and how little work would remove
   the weakness, which is why it is stated this precisely.
+- **C14.1 seat-count drift, and the retraction behind it.** The seat delta is applied
+  after the membership write commits, best-effort, so it is not atomic with it: a delta
+  that does not land leaves the stored `seat_count` and a seat-tracked ceiling one seat
+  SMALL, and one applied twice leaves them one seat LARGE — in both attributes, in the
+  same direction, so no equation over the row disagrees. C14.9's daily comparison against
+  the memberships is the detection, and it is a day late by construction. Closing it means
+  making the seat delta part of the membership transaction, which puts the pool row inside
+  every membership write and makes a membership write fail on the pool's unrelated state —
+  the property `_adjust_pool_seat_delta_best_effort` exists to guarantee. So it is a real
+  trade rather than an oversight, and it is named here because an earlier version of
+  `limits.md` asserted the opposite: that the figure *cannot* drift. That sentence was
+  retracted as false rather than moved, since nothing carries it forward.
+
 - **C3.3 reachability.** The reaper runs inside a pooled reserve and scans the
   current and previous period, so a hold orphaned in a quiet month is never
   reached. A scheduled reconciler already exists for other work; giving it the
