@@ -1884,6 +1884,115 @@
    "claim": "Either setting without an audit event naming the actor, the old value, the new value, and for the rate the period it takes effect in — the same discipline every other ceiling writer here already follows.",
    "anchor": "debt:C14.14@163ad404",
    "note": "a prohibition on work not yet done rather than a guarantee about shipped code. What would close it is C14.14's settings carrying the audit event this sentence requires of them"
+  },
+  {
+   "id": "cl-6d1601a8813f",
+   "claim": "It never touches the baseline, and that is the whole reason the two writes are safe to make without a compare-and-swap.",
+   "anchor": "contract:C14.7@c3909932,C14.3@5b055a37",
+   "note": "the identity puts the granted term outside the baseline (C14.7) and C14.3 is the clause about how this ceiling's writers are guarded; the sentence's claim is that the grant writes need no CAS, which follows from the granted term being additive"
+  },
+  {
+   "id": "cl-54e5e351dbe2",
+   "claim": "There is nothing for a CAS to protect, so an approval composes with a concurrent hire, a concurrent operator set and a concurrent reserve rather than racing all three.",
+   "anchor": "contract:C14.4@4c0ee8d8,C14.15@e00188ee",
+   "note": "composing with a membership delta is C14.4's per-seat write, and composing with a revocation is C14.15's; 'racing all three' is the property those two rows carry"
+  },
+  {
+   "id": "cl-17791be94565",
+   "claim": "A blocked grant is one whose subtraction could not be made to commit, so the capacity was never actually given back and the row is right to still be counting it.",
+   "anchor": "contract:C14.18@4740bad5"
+  },
+  {
+   "id": "cl-ac64c08e1b89",
+   "claim": "A reconciler that treated it as returned would report every row holding a blocked grant as broken, continuously, for exactly as long as the fault lasted — which is when an operator most needs it quiet about everything else.",
+   "anchor": "descriptive:states what a DIFFERENT design would do, not what this one guarantees; the guarantee itself is C14.18 and is anchored on the sentence that makes it"
+  },
+  {
+   "id": "cl-eb13b21399cb",
+   "claim": "So the index holds exactly the work outstanding, rather than every grant that ever existed behind a filter — and a filter is what `Limit` is applied before, which is how a bounded sweep ends up never reaching the work sitting behind a full page of finished rows.",
+   "anchor": "contract:C14.15@e00188ee",
+   "note": "index membership rather than a filter is the mechanism C14.15's third column names"
+  },
+  {
+   "id": "cl-f15be0cb638d",
+   "claim": "The heartbeat also fires on **empty** runs, because a signal that only appears when there was work cannot tell \"nothing expired\" from \"nobody is looking\".",
+   "anchor": "contract:C14.15@e00188ee",
+   "note": "the heartbeat on empty runs is what makes the absence alarm in iac/lib/quota-grants-stack.ts able to distinguish the two cases"
+  },
+  {
+   "id": "cl-71d9759173c9",
+   "claim": "**A grant that cannot be revoked becomes `REVOKE_BLOCKED` and is alarmed, not retried forever.** After a bounded number of attempts it is marked, leaves the index so one poison grant cannot consume every run from then on, and keeps counting its amount — honestly.",
+   "anchor": "contract:C14.18@4740bad5"
+  },
+  {
+   "id": "cl-529f475847b3",
+   "claim": "The pool is deliberately untouched: the capacity was never returned, and writing it back would be the system asserting something it does not know.",
+   "anchor": "contract:C14.18@4740bad5",
+   "note": "the pool keeping a blocked grant's amount is the same fact as the grant still bearing capacity"
+  },
+  {
+   "id": "cl-30052d53851a",
+   "claim": "The reset destroys the money instead of releasing it, on every granted row at once, on the 1st, silently.",
+   "anchor": "descriptive:describes what WOULD happen if the expiry pin were removed; the pin itself is C14.16 and is anchored on the sentence that states it"
+  },
+  {
+   "id": "cl-8f52c397373b",
+   "claim": "An approval also refuses an expiry less than five minutes out, and refuses **every** expiry when fewer than five minutes remain in the period — the window is then unsatisfiable, and saying so is better than accepting a grant that expires before it can admit a request while still consuming the tenant's cap headroom.",
+   "anchor": "contract:C14.16@55f42290"
+  },
+  {
+   "id": "cl-30a290afed87",
+   "claim": "**The cost, stated because it is real.** A DynamoDB condition on a *missing* attribute fails, so the apply guard cannot be a row-side condition on the cap.",
+   "anchor": "contract:C14.17@9580babc",
+   "note": "C14.17's own row carries this boundary in the form the lint wants -- the guard is caller-side and does not catch a concurrent baseline change -- so the sentence is anchored to the clause that states the limit rather than restating it"
+  },
+  {
+   "id": "cl-a2f965a4694e",
+   "claim": "`pool_granted_microusd` is absent on any row that has not been granted to yet, and a comparison against a missing attribute fails — so a guard written as `pool_granted_microusd <= :remaining` **alone** refuses the first grant of every period on every tenant, and reports it as the cap being exceeded when nothing has been granted at all.",
+   "anchor": "contract:C14.17@9580babc",
+   "note": "C14.17's third column names the condition that admits the attribute's absence, which is what this sentence is about"
+  },
+  {
+   "id": "cl-882d9d18823a",
+   "claim": "**The tenant it binds is the one read from the request or grant row**, never a value the caller supplied.",
+   "anchor": "contract:C14.20@41d7515a"
+  },
+  {
+   "id": "cl-afe5e69af205",
+   "claim": "It matters most for the tenant owner, who holds the approval authority for their own tenant and would otherwise be the one path in this feature that never expires.",
+   "anchor": "descriptive:explains WHY self-approval is refused; the refusal itself is C14.20"
+  },
+  {
+   "id": "cl-f1ebb023bd54",
+   "claim": "Every `402` names the wall that refused, whether that wall can be raised, and — for the one that can — what an approver still has room to grant.",
+   "anchor": "contract:C14.22@a5d718f0"
+  },
+  {
+   "id": "cl-361d1e4a4dbd",
+   "claim": "Grantability is read from the same declaration the admission path enforces, so the refusal path and the raise path cannot disagree about which wall is which.",
+   "anchor": "contract:C14.22@a5d718f0"
+  },
+  {
+   "id": "cl-0a6ea4301f18",
+   "claim": "Whether anybody set a cap, what number is in force, and which of those two you are looking at are different questions, and a console showing a single figure cannot tell an operator whether it will move when the tenant hires.",
+   "anchor": "descriptive:argues why the cap is reported as three fields rather than one; the composition the read carries is C14.23's surface and C14.17's cap"
+  },
+  {
+   "id": "cl-588e284b40bc",
+   "claim": "Archiving over one leaves a grant pinned to a pool row nobody will look at again: the sweep keeps trying to revoke it, the reconciler keeps counting it against a cap for a tenant that no longer exists, and its capacity can never be released because releasing means moving a retired tenant's ceiling.",
+   "anchor": "contract:C14.23@84c7737e",
+   "note": "the consequence the retirement refusal exists to prevent, which is the clause's own reason"
+  },
+  {
+   "id": "cl-6bf463db753c",
+   "claim": "- **Nothing sets the aggregate cap.** It is read wherever it matters and no request writes it, so today it is either absent — the derived default, which is the case every tenant is in — or set out of band.",
+   "anchor": "debt:C14.24@ca4ee538",
+   "note": "what would close it: a request that SETS grant_cap_microusd, with an audit event and a read surface -- the attribute is already carried across a period boundary and already read by the approval guard and the daily check, so the gap is a writer and a surface, not a mechanism. Named under Open items in CONTRACTS.md and in quota-raises.md section 11."
+  },
+  {
+   "id": "cl-5a0ea779006f",
+   "claim": "Every lifecycle rule, the refusals, the sweep, the checks",
+   "anchor": "descriptive:a cell in the ownership table at the end of the document -- it names a file, not a guarantee. It matches the lint because the row reads as 'every ... rule'"
   }
  ]
 }

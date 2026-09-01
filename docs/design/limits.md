@@ -142,6 +142,18 @@ fail-open in any month the job failed, and the guard alone would refuse every po
 midnight until the job ran. Together the row exists in the ordinary case, and when it does not the
 failure is loud and lands on the side that refuses spend rather than admitting it.
 
+**The granted term has an owner, and it is a whole mechanism.** `pool_granted` is the sum of the
+raises currently in force: an amount a person approved, with an expiry, applied to the row the
+approval read. It moves through exactly two writers, both pure additions on top of whichever
+baseline is in force, which is why they need no compare-and-swap while every writer listed above
+does. A raise is asked for, decided, and ends by itself — the scheduled sweep is what makes the
+"ends by itself" true, and its absence alarm is what makes the sweep trustworthy. The aggregate
+cap on what may be granted is absent by default, meaning derived from this row's baseline and
+evaluated now, for the same reason the ceiling's own sentinel is absence rather than zero: a
+materialised default freezes at the moment it is written. The full statement is
+[quota-raises.md](quota-raises.md), and section 4 of it is the one to read from here — a grant may
+not outlive its period, and the rollover's reset of this attribute is safe only because of that.
+
 **The migration to this rule is one-shot.** No phase of it may be re-run once grants exist. Its
 cut-over reads a row carrying neither new attribute as `manual_limit = pool_limit`, which is right
 while the total is only ever a baseline and destructive once the total can also contain granted money:
