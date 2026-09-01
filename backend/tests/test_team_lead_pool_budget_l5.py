@@ -79,10 +79,6 @@ def test_team_lead_can_set_own_tenants_pool_budget(monkeypatch, dynamodb_mock):
     body = resp.json()
     assert body["tenant_id"] == owned
     assert body["pool_limit_microusd"] == 400_000_000
-    # "Also sets sizing='fixed'; response gains sizing" — the admin route's own
-    # wording for the identical write; the team-lead route shares "same body
-    # and semantics".
-    assert body["sizing"] == "fixed"
 
 
 def test_team_lead_is_refused_on_another_tenants_pool_budget(monkeypatch, dynamodb_mock):

@@ -14,16 +14,14 @@ headroom move by exactly one seat and the identity holds. An explicit
 `set_pool_limit` flips `sizing` to `fixed` and a subsequent hire moves
 nothing."
 
-These tests seed the `sizing="per_seat"` precondition directly on the
-TenantBudgets row (rather than going through the L3 tenant-creation path),
-so a failure here is evidence about L4 specifically and does not depend on
-whether L3 has landed.
+These tests seed the seat-tracked precondition on the TenantBudgets row
+directly (rather than through the L3 tenant-creation route), so a failure here
+is evidence about L4 specifically and does not depend on whether L3 has landed.
 
-Today `UserTenantsRepository.ensure()` and `.switch_tenant()` have no
-knowledge of any pool at all — every assertion that a membership change moves
-a pool counter fails today because the counter does not move. Today
-`TenantBudgetsRepository.set_manual_limit()` writes no `sizing` attribute at
-all, so the "flips sizing to fixed" assertion also fails today.
+The `sizing` attribute the spec above names no longer exists. A row follows the
+seat count exactly when it carries NO operator figure, so the precondition these
+tests need is seeded by `create_seat_tracked_pool` rather than by writing a mode
+attribute, and there is no mode attribute left to assert.
 """
 from __future__ import annotations
 
@@ -57,22 +55,19 @@ def _create_users_table_and_row(user_id: str) -> None:
     )
 
 
-def _seed_per_seat_pool(tenant_id: str, period: str, limit_microusd: int) -> None:
-    """Seed a BUDGET row and mark it `sizing="per_seat"` directly (a raw write,
-    standing in for what L3's creation path is expected to have written), so
-    this file's evidence is about the membership-delta mechanism alone."""
-    repo = TenantBudgetsRepository()
-    repo.set_manual_limit(tenant_id=tenant_id, period=period, manual_limit_microusd=limit_microusd)
-    repo._table.update_item(
-        Key={"tenant_id": tenant_id, "sk": f"BUDGET#{period}"},
-        UpdateExpression="SET sizing = :s",
-        ExpressionAttributeValues={":s": "per_seat"},
+def _seed_seat_tracked_pool(tenant_id: str, period: str, seats: int) -> None:
+    """Seed a BUDGET row that follows the seat count, through the SAME creation
+    call L3's tenant-creation path uses, so this file's evidence is about the
+    membership-delta mechanism alone. `seats` seats at the stated default rate,
+    and no operator figure -- which is what being seat-tracked now consists of."""
+    TenantBudgetsRepository().create_seat_tracked_pool(
+        tenant_id=tenant_id, period=period, seat_count=seats
     )
 
 
 def test_adding_a_member_moves_limit_and_headroom_by_exactly_one_seat(dynamodb_mock):
     tenant_id, period = "acme-eng", current_period()
-    _seed_per_seat_pool(tenant_id, period, _SEAT_MICROUSD)  # 1-seat pool, $200
+    _seed_seat_tracked_pool(tenant_id, period, 1)  # 1-seat pool, $200
 
     UserTenantsRepository().ensure(user_id="user-new-hire", tenant_id=tenant_id, role="user")
 
@@ -94,8 +89,8 @@ def test_removing_a_member_via_switch_tenant_moves_both_pools_by_one_seat(dynamo
     land."""
     old_tenant, new_tenant, period = "acme-eng", "beta-co", current_period()
     _create_users_table_and_row("user-mobile")
-    _seed_per_seat_pool(old_tenant, period, 2 * _SEAT_MICROUSD)  # 2 seats
-    _seed_per_seat_pool(new_tenant, period, _SEAT_MICROUSD)      # 1 seat
+    _seed_seat_tracked_pool(old_tenant, period, 2)      # 2 seats
+    _seed_seat_tracked_pool(new_tenant, period, 1)      # 1 seat
 
     uts = UserTenantsRepository()
     # This `ensure` is itself a membership addition, so it applies +1 seat to the
@@ -124,31 +119,11 @@ def test_removing_a_member_via_switch_tenant_moves_both_pools_by_one_seat(dynamo
         )
 
 
-def test_set_pool_limit_flips_sizing_to_fixed(dynamodb_mock):
-    tenant_id, period = "acme-eng", current_period()
-    repo = TenantBudgetsRepository()
-    _seed_per_seat_pool(tenant_id, period, _SEAT_MICROUSD)
-
-    # An admin sets an explicit figure.
-    repo.set_manual_limit(tenant_id=tenant_id, period=period, manual_limit_microusd=999_000_000)
-
-    row = repo.get(tenant_id, period)
-    assert row.get("sizing") == "fixed"
-
-
-# NOTE (no test, deliberately): "an explicit set_pool_limit flips sizing to
-# fixed and a subsequent hire moves nothing" has a first half tested above
-# (test_set_pool_limit_flips_sizing_to_fixed) and a second half — "a
-# subsequent hire moves nothing" — that is NOT given its own test here. Today,
-# with no membership-delta mechanism wired at all, a hire on a `sizing=fixed`
-# pool trivially moves nothing, because a hire moves nothing on ANY pool
-# regardless of sizing. A test asserting only "fixed + hire => unchanged"
-# would pass today for that reason, not because fixed sizing was respected —
-# exactly the "passes for the wrong reason" case this assignment asks not to
-# present as evidence. It becomes meaningful only once
-# test_adding_a_member_moves_limit_and_headroom_by_exactly_one_seat above is
-# green (i.e. hires DO move a per_seat pool) and must stay green alongside it;
-# it is not separate evidence that L4 landed.
+# REMOVED: "an explicit set_pool_limit flips `sizing` to `fixed`". There is no
+# `sizing` attribute to flip. The requirement it stood for -- that an operator's
+# figure ends seat tracking -- is now carried by the presence of
+# `manual_limit_microusd`, and asserting that here instead would be a different
+# claim than the one this test made.
 
 
 # NOTE (ambiguity, not a test): a pool with NO `sizing` attribute at all — the
@@ -204,10 +179,3 @@ def test_a_pool_row_with_no_sizing_attribute_does_not_follow_seats(dynamodb_mock
         "be read as fixed, so an operator's hand-set figure is never auto-adjusted"
     )
     assert int(after["pool_headroom_microusd"]) == _SEAT_MICROUSD
-
-    # And it must REPORT itself as fixed, not merely behave that way: an operator
-    # shown `per_seat` for a row they set by hand would believe a ceiling follows
-    # hiring when it does not. The behaviour is enforced by the delta's
-    # ConditionExpression (an absent attribute fails it); this is the read side.
-    summary = repo.pool_summary(tenant_id, period)
-    assert summary.get("sizing") == "fixed"
