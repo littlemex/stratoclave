@@ -24,6 +24,7 @@ import { DynamoDBStack } from '../lib/dynamodb-stack';
 import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
 import { CertificateSchedulerStack } from '../lib/certificate-scheduler-stack';
 import { QuotaReconcilerStack } from '../lib/quota-reconciler-stack';
+import { QuotaGrantsStack } from '../lib/quota-grants-stack';
 import { WafStack } from '../lib/waf-stack';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -466,6 +467,9 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_UI_TICKETS_TABLE: dynamoDBStack.uiTicketsTable.tableName,
     // A-1/A-2: tenant dollar pool budgets + admin-editable model pricing.
     DYNAMODB_TENANT_BUDGETS_TABLE: dynamoDBStack.tenantBudgetsTable.tableName,
+    // Limit raises: the request, the grant, and the daily slot. Set on the SERVICE
+    // task because the raise endpoints live in the API, not only on the sweeper.
+    DYNAMODB_QUOTA_EVENTS_TABLE: dynamoDBStack.quotaEventsTable.tableName,
     DYNAMODB_PRICING_CONFIG_TABLE: dynamoDBStack.pricingConfigTable.tableName,
     // Per-IP rate-limit counters, shared across ECS tasks (multi-task/AZ safe).
     DYNAMODB_RATE_LIMITS_TABLE: dynamoDBStack.rateLimitsTable.tableName,
@@ -710,6 +714,33 @@ if (app.node.tryGetContext('quotaReconciler') === true ||
   quotaReconcilerStack.addDependency(dynamoDBStack);
 }
 
+// The sweep that ends granted capacity when its window closes. Its own stack, on
+// the same convention as the reconciler above, and gated behind the same kind of
+// context flag so a normal deploy is unaffected until the Lambda image exists.
+//
+// An APPEND rather than an edit anywhere above: this block adds a stack and touches
+// nothing that was already here, which is what keeps a shared file like this one
+// merging mechanically.
+let quotaGrantsStack: QuotaGrantsStack | undefined;
+if (app.node.tryGetContext('quotaGrants') === true ||
+    app.node.tryGetContext('quotaGrants') === 'true') {
+  quotaGrantsStack = new QuotaGrantsStack(
+    app, stackName(prefix, 'quota-grants'), {
+      env,
+      prefix,
+      lambdaRepository: ecrStack.repository,
+      lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+      quotaEventsTable: dynamoDBStack.quotaEventsTable,
+      // The rows a revocation moves. Not optional: a sweep that could read grants
+      // and not write pools would take grants terminal while leaving their capacity
+      // on the ceiling forever.
+      tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+      description: `[${prefix}] Revokes expired limit-raise grants and returns their capacity`,
+    });
+  quotaGrantsStack.addDependency(ecrStack);
+  quotaGrantsStack.addDependency(dynamoDBStack);
+}
+
 // --- 8. Backend Config (static Parameter Store values) ---
 class BackendConfigStack extends Stack {
   constructor(scope: Construct, id: string, stackProps: cdk.StackProps) {
@@ -892,6 +923,18 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   }
   if (certificateSchedulerStack) {
     NagSuppressions.addStackSuppressions(certificateSchedulerStack, appLevelSuppressions);
+  }
+  // The same app-level suppressions every other scheduled-Lambda stack here takes:
+  // the managed basic-execution policy, and the `/index/*` wildcard a table grant
+  // necessarily produces for a job that reads through a GSI.
+  //
+  // NOTE for whoever reads this next: `quotaReconcilerStack` is missing from this
+  // list and carries the identical findings. It is not added here because it is not
+  // this change's file to fix, and it went unnoticed because `cdk synth` is not part
+  // of the jest suite — so nag findings on a context-gated stack are invisible until
+  // somebody deploys it.
+  if (quotaGrantsStack) {
+    NagSuppressions.addStackSuppressions(quotaGrantsStack, appLevelSuppressions);
   }
 }
 
