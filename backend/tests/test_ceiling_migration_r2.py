@@ -33,7 +33,7 @@ a migration that reads the environment instead of the stored item would
 compute the WRONG seat_count and fail loudly rather than passing by
 coincidence.
 
-Today `backend.migrations.backfill_seat_and_manual_limit` does not exist at
+Today `backend.migrations.pool_ceiling_migration.phase_m2_backfill` does not exist at
 all, so every test below fails on `ModuleNotFoundError`.
 
 Design note: /Users/akazawt/tmp/stratoneed/change-pipeline/quota-raise-and-archive/design-F1.md
@@ -104,7 +104,7 @@ def test_per_seat_row_backfills_seat_count_and_reproduces_the_same_effective_lim
     dynamodb_mock, monkeypatch,
 ):
     from dynamo.tenant_budgets import baseline_microusd
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", str(_WRONG_LIVE_ENV_USD))
@@ -143,7 +143,7 @@ def test_fixed_row_backfills_manual_limit_from_pool_limit_and_seat_count_from_li
     dynamodb_mock,
 ):
     from dynamo.tenant_budgets import baseline_microusd
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)  # M2 checks the stored rate on every run,
     # even a fixed-only one (Amendment A5) -- seeded here so backfill() does not
@@ -174,7 +174,7 @@ def test_fixed_row_at_zero_migrates_manual_limit_of_zero_not_absent(dynamodb_moc
     "including 0" -- a fixed row an operator set to $0 must migrate to a
     PRESENT manual_limit_microusd=0, never to absence (absence would silently
     resume seat tracking on a row an operator zeroed out on purpose)."""
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)
 
@@ -195,7 +195,7 @@ def test_absent_sizing_row_migrates_the_same_way_as_fixed(dynamodb_mock):
     OPERATOR figure ... an unlabelled row predates PR 1 and its figure was
     chosen when seats did not exist.'"""
     from dynamo.tenant_budgets import baseline_microusd
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)
 
@@ -219,7 +219,7 @@ def test_per_seat_row_with_a_non_integer_quotient_is_adjudicated_not_migrated(dy
     drifted, or the STORED rate no longer matches the row's history) must go
     on the adjudication list and be left untouched -- migrating it would
     silently invent a seat count nobody counted."""
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)
 
@@ -248,7 +248,7 @@ def test_backfill_refuses_when_the_stored_rate_has_not_been_seeded_yet(dynamodb_
     dividing by whatever STRATOCLAVE_SEAT_MONTHLY_USD happens to say today --
     exactly the fallback that would reopen the ordering hole this amendment
     closes."""
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     tenant_id, period = "no-stored-rate-co", current_period()
     _seed_legacy_row(tenant_id, period, sizing="per_seat", pool_limit_microusd=3 * _SEAT_MICROUSD)
@@ -268,7 +268,7 @@ def test_backfill_refuses_when_the_stored_rate_has_not_been_seeded_yet(dynamodb_
 
 
 def test_dry_run_writes_nothing(dynamodb_mock):
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)
 
@@ -284,7 +284,7 @@ def test_dry_run_writes_nothing(dynamodb_mock):
 
 
 def test_backfill_is_idempotent(dynamodb_mock):
-    from migrations.backfill_seat_and_manual_limit import backfill
+    from migrations.pool_ceiling_migration import phase_m2_backfill as backfill
 
     _seed_stored_rate(_STORED_RATE_USD)
 

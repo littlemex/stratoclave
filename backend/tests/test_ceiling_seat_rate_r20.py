@@ -10,8 +10,8 @@ call with NO stored value anywhere to check it against -- an operator can
 change the env var on a rolling deploy and different processes in the same
 fleet will compute different pool limits for the same tenant with no error at
 all. `dynamo.tenant_budgets` has no `stored_seat_rate_usd`,
-`SeatRateMismatchError`, or `assert_seat_rate_or_seed`, and
-`backend.migrations.recompute_seat_rate` does not exist. Every test below
+`SeatRateMismatchError`, or `assert_seat_rate_in_force`, and
+`backend.migrations.pool_ceiling_migration.recompute_seat_tracked_rows` does not exist. Every test below
 fails on `AttributeError`/`ImportError`/`ModuleNotFoundError` for that reason.
 
 Design note (including the scope-boundary gap this file does NOT attempt to
@@ -45,35 +45,35 @@ def _seed_row(tenant_id: str, period: str, *, seat_count: int) -> None:
 
 
 def test_first_boot_seeds_the_stored_rate_from_the_configured_value(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import assert_seat_rate_or_seed, stored_seat_rate_usd
+    from dynamo.tenant_budgets import assert_seat_rate_in_force, stored_seat_rate_usd
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
     assert stored_seat_rate_usd() is None, "fixture sanity: nothing seeded yet"
 
-    assert_seat_rate_or_seed()  # must not raise -- nothing to conflict with yet
+    assert_seat_rate_in_force()  # must not raise -- nothing to conflict with yet
 
     assert stored_seat_rate_usd() == 200
 
 
 def test_a_second_boot_at_the_same_rate_is_a_silent_no_op(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import assert_seat_rate_or_seed
+    from dynamo.tenant_budgets import assert_seat_rate_in_force
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
-    assert_seat_rate_or_seed()
-    assert_seat_rate_or_seed()  # a second, ordinary boot -- must not raise
+    assert_seat_rate_in_force()
+    assert_seat_rate_in_force()  # a second, ordinary boot -- must not raise
 
 
 def test_a_mismatched_rate_refuses_to_start_with_a_named_error(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import SeatRateMismatchError, assert_seat_rate_or_seed
+    from dynamo.tenant_budgets import SeatRateMismatchError, assert_seat_rate_in_force
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
-    assert_seat_rate_or_seed()  # seed at 200
+    assert_seat_rate_in_force()  # seed at 200
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "250")  # a config drift
     monkeypatch.delenv("STRATOCLAVE_SEAT_RATE_MIGRATION", raising=False)
 
     try:
-        assert_seat_rate_or_seed()
+        assert_seat_rate_in_force()
     except SeatRateMismatchError:
         pass
     else:
@@ -84,21 +84,21 @@ def test_a_mismatched_rate_refuses_to_start_with_a_named_error(monkeypatch, dyna
 
 
 def test_the_migration_flag_is_the_named_escape_hatch(monkeypatch, dynamodb_mock):
-    from dynamo.tenant_budgets import assert_seat_rate_or_seed
+    from dynamo.tenant_budgets import assert_seat_rate_in_force
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
-    assert_seat_rate_or_seed()
+    assert_seat_rate_in_force()
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "250")
     monkeypatch.setenv("STRATOCLAVE_SEAT_RATE_MIGRATION", "1")
 
-    assert_seat_rate_or_seed()  # must not raise -- the flag authorizes the difference
+    assert_seat_rate_in_force()  # must not raise -- the flag authorizes the difference
 
 
 def test_migration_recomputes_every_seat_tracked_row_and_leaves_a_manual_row_untouched(
     monkeypatch, dynamodb_mock,
 ):
-    from migrations.recompute_seat_rate import recompute_seat_rate
+    from migrations.pool_ceiling_migration import recompute_seat_tracked_rows
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "200")
     tenant_a, tenant_b, period = "seat-tracked-co", "manual-co", current_period()
@@ -115,7 +115,7 @@ def test_migration_recomputes_every_seat_tracked_row_and_leaves_a_manual_row_unt
 
     monkeypatch.setenv("STRATOCLAVE_SEAT_MONTHLY_USD", "250")
     monkeypatch.setenv("STRATOCLAVE_SEAT_RATE_MIGRATION", "1")
-    summary = recompute_seat_rate(new_rate_usd=250)
+    summary = recompute_seat_tracked_rows(apply=True)
 
     row_a = TenantBudgetsRepository().get(tenant_a, period)
     assert int(row_a["pool_limit_microusd"]) == 5 * 250 * 1_000_000
@@ -145,7 +145,7 @@ def test_migration_recomputes_every_seat_tracked_row_and_leaves_a_manual_row_unt
 # the rate knob was inert in production despite being fully correct in the
 # repository module.
 #
-# Today `main.py`'s lifespan calls neither `assert_seat_rate_or_seed` nor any
+# Today `main.py`'s lifespan calls neither `assert_seat_rate_in_force` nor any
 # function like it, so both tests below fail: the first because the spy is
 # never invoked (the call site does not exist), the second because nothing
 # raises at all (there is nothing to propagate).
@@ -193,7 +193,7 @@ def test_main_lifespan_calls_the_seat_rate_check_at_boot(monkeypatch, dynamodb_m
     # point is to prove main.py's lifespan reaches for a name at this path,
     # which it cannot do today regardless.
     monkeypatch.setattr(
-        tenant_budgets, "assert_seat_rate_or_seed", lambda: calls.append(True),
+        tenant_budgets, "assert_seat_rate_in_force", lambda: calls.append(True),
         raising=False,
     )
 
@@ -222,7 +222,7 @@ def test_a_seat_rate_refusal_propagates_out_of_the_lifespan_and_blocks_boot(
         pass
 
     monkeypatch.setattr(
-        tenant_budgets, "assert_seat_rate_or_seed", lambda: (_ for _ in ()).throw(_Boom()),
+        tenant_budgets, "assert_seat_rate_in_force", lambda: (_ for _ in ()).throw(_Boom()),
         raising=False,
     )
 
