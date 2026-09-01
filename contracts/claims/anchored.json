@@ -1725,6 +1725,17 @@
    "id": "cl-d809c77c156d",
    "claim": "Events worth alerting on: `price_feed_coverage_regression` (a key that used to be readable is not any more — the signature of a renamed API), `price_feed_unparsed_names` (a grammar this build cannot read), `price_feed_key_spans_prices` (split the key), `price_feed_leg_regression` (a leg that was live and stopped being published, so the stored value is now serving on trust rather than on a fresh answer), `price_feed_table_partial` (a pass that stopped before it had asked about everything, so the table it produced is partial and every key it did not reach is answered by the layer below — this is the one that fires when a fetch runs out of time, which is why it is the event an operator sees when a knob needs changing rather than a provider), `price_feed_fetch_empty` (a pass that read nothing against a snapshot that is not empty, naming the stored key count and the snapshot's age), and `price_table_changed` (a price moved).",
    "anchor": "descriptive:names the telemetry events this module emits, not itself a pricing guarantee"
+  },
+  {
+   "id": "cl-1e5cb796a022",
+   "claim": "**Provider-read, downward-only**: a rate resolves `admin override` > a live fetch of AWS's own price APIs (`bedrock:ListFoundationModelAgreementOffers` + the Price List API, per region, four legs) > a digest-versioned snapshot in DynamoDB > the bundled **measured floor** (whose exceptions are declared in the document's own `notes`) — and **absence never lowers a price**: every feed failure, from a permission error to a renamed field, falls through to the rung below rather than charging less. `mvp.reprice` re-prices a past period against the frozen version a charge was rated under, but **reports the difference, it does not correct the ledger**. Feeds are **opt-in** (a floor-only deployment is valid), and a rate holds one price per leg, so a long-context band is not charged",
+   "anchor": "contract:C2.6,C2.8,C2.9,C2.10",
+   "note": "one clause per conjunct: C2.6 the ladder and that no layer's absence lowers a price; C2.8 the floor being measured per leg with its exceptions in the document's own notes; C2.9 a version cut on change, digest-identified; C2.10 the recompute reading only and reporting rather than correcting. The last conjunct states its own boundary in the sentence — feeds opt-in, one price per leg — which is C2's named Not-guaranteed (N) long-context under-charge, carried here rather than left for the reader"
+  },
+  {
+   "id": "cl-246a00ba5c5b",
+   "claim": "**The broker needs no request-time price at all**: its quota is a token count checked at the credential layer, from client-emitted telemetry rather than AWS-metered cost (per its guidance README), and the dollars arrive **post-facto from the bill** — per-IAM-principal via CUR 2.0 in Cost Explorer. Exact and AWS-authoritative, but never pre-flight",
+   "anchor": "descriptive:about the credential broker's own quota and cost attribution, as documented in its guidance README, and it names the broker rather than this gateway"
   }
  ]
 }
