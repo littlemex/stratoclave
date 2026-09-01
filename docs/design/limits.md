@@ -159,3 +159,43 @@ that boundary is stated in [CONTRACTS.md](CONTRACTS.md) under C1 and measured in
 The token quota bounds nothing in money, by construction of section 2. It is documented here so that
 nobody reads its number as a budget, and so that an operator who wants a money ceiling per user knows
 that today the answer is the per-model quota's user scope, one model at a time.
+
+## 6. Future work: operator-editable defaults
+
+Not built. Recorded here as a direction, because both figures are environment variables today and the
+reason each one is not a live setting is different — so a single "expose them in the console" change
+would get one of them wrong.
+
+**The two are not the same problem.** The seat rate is not a live knob on purpose: a ceiling
+recomputed at a rate nobody chose is a plausible number, and nothing afterwards distinguishes it from
+a correct one, which is why a differently-configured process refuses to start. `DEFAULT_TENANT_CREDIT`
+is read at call time and never touches an allowance that already exists, so changing it is already
+effectively live; its problem is that it is **invisible** — there is no way to see the value in force,
+or which users received which default, or that it changed at all. One needs a safe moment and the
+other needs a surface, and treating them alike is the trap.
+
+**The period boundary is the right seam for the rate**, for the reason the rollover in section 4 makes
+true: at a boundary the new row is being *written* from carried attributes, so a new rate applies to a
+row being created rather than to a row being mutated. The current period's stored rate never moves, so
+the boot-time refusal stays honest and no ceiling changes under a tenant mid-month. That makes it a
+**queued** change — the rate that takes effect at the next reset, withdrawable before the boundary
+leaves nothing behind — and not an immediate one.
+`--recompute-seat-rate` keeps its job as the deliberate restatement of the *current* period, which is a
+rarer intention than "from next month we charge differently"; a console offering only the immediate
+form would push operators into the destructive one for a routine task.
+
+**Four things must not be built.** A rate change that recomputes existing rows on save, which is the
+boot-time refusal re-introduced through a button — an operator who wants that wants the migration, and
+the surface should say so and link to it. A default-credit change that moves existing users'
+allowances, which is a different action with a different blast radius, and conflating them means
+adjusting a default silently re-limits everyone. Either setting without an audit event naming the
+actor, the old value, the new value, and for the rate the period it takes effect in — the same
+discipline every other ceiling writer here already follows. And a settings table holding "the current
+rate", which would be a second answer to a question the row already answers, and the two can disagree
+while both look authoritative. The setting holds the next period's rate only.
+
+**What it would take.** A setting for each, read and written under the permissions the admin and
+team-lead routes already use, with one audit event per write; the rollover reading the queued rate
+rather than the environment; and the boot-time check comparing against the period's stored rate rather
+than against the process's environment. That last part is what turns the environment variable into a
+bootstrap default rather than the source of truth, and it is the piece that makes the rest coherent.

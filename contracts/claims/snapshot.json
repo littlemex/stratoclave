@@ -664,6 +664,9 @@
   "cl-a12e772054af": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-a22adf28344e": {
+   "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
+  },
   "cl-a3b79bb83649": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -741,6 +744,9 @@
   },
   "cl-b6aae92284ce": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-b6c56af3d180": {
+   "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
   },
   "cl-b756f1d21d7e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -843,6 +849,9 @@
   },
   "cl-cb57bfd8b0ca": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-cd896fd12f7c": {
+   "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
   },
   "cl-cd99f98f645e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -1332,7 +1341,8 @@
     "C14.10": "B",
     "C14.11": "B",
     "C14.12": "B",
-    "C14.13": "B"
+    "C14.13": "B",
+    "C14.14": "N"
    }
   },
   "retired": {},

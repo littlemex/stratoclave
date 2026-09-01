@@ -1866,6 +1866,24 @@
    "claim": "Both layers are needed, and neither is sufficient: the schedule alone would return the ceiling to fail-open in any month the job failed, and the guard alone would refuse every pooled tenant from midnight until the job ran.",
    "anchor": "contract:C14.13@13021301",
    "note": "the clause states that both layers are load-bearing and what each one alone would fail to do"
+  },
+  {
+   "id": "cl-b6c56af3d180",
+   "claim": "`DEFAULT_TENANT_CREDIT` is read at call time and never touches an allowance that already exists, so changing it is already effectively live; its problem is that it is **invisible** — there is no way to see the value in force, or which users received which default, or that it changed at all.",
+   "anchor": "debt:C14.14@163ad404",
+   "note": "true as qualified: the default IS already safe to change and IS invisible. What would close it is the operator-facing setting and audit event C14.14 names, which is not built"
+  },
+  {
+   "id": "cl-a22adf28344e",
+   "claim": "The current period's stored rate never moves, so the boot-time refusal stays honest and no ceiling changes under a tenant mid-month.",
+   "anchor": "debt:C14.14@163ad404",
+   "note": "true of the design as it stands, and stated in a section about work not done. What would close it is the queued-rate mechanism C14.14 names; until then there is no way to change the rate at a boundary at all"
+  },
+  {
+   "id": "cl-cd896fd12f7c",
+   "claim": "Either setting without an audit event naming the actor, the old value, the new value, and for the rate the period it takes effect in — the same discipline every other ceiling writer here already follows.",
+   "anchor": "debt:C14.14@163ad404",
+   "note": "a prohibition on work not yet done rather than a guarantee about shipped code. What would close it is C14.14's settings carrying the audit event this sentence requires of them"
   }
  ]
 }
