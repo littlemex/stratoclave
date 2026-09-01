@@ -297,6 +297,35 @@ A parameter this gateway cannot honour is refused, not dropped.
 | **C13.2** The bytes on the wire match the API being emulated, so an SDK that validates its own contract sees a conforming response. | E | `test_anthropic_wire_bytes.py` |
 | **C13.3** A completeness claim the README makes about itself is checked against the table that carries the evidence. | E | `test_contract_layer_claim.py`: "ships all five layers" is true iff the five-layer table has five rows and each says shipped, so a layer demoted to a roadmap item fails rather than leaving the prose quietly false. It does not establish that a row marked shipped is shipped — the same residue every clause here carries, which is why the status is written where a reader can see it |
 
+## C14 — Tenant ceilings and defaults
+
+An unconfigured tenant — created through the ordinary route, with nothing set by
+hand — is bounded by a ceiling denominated in the unit the bill arrives in, and that
+ceiling is on by default. See [limits.md](limits.md) for the full statement of the
+three ceilings this section is about; this section is the claim that they hold, not
+the explanation of what each one is for.
+
+| Clause | Level | Enforced by |
+| --- | --- | --- |
+| **C14.1** A tenant created through the ordinary route (admin or team-lead) receives a `sizing="per_seat"` dollar pool for the current period, written at zero seats and maintained at `seats x SEAT_MONTHLY_USD` by the membership delta, with no operator action required. | B | `admin_tenants.create_tenant` / `team_lead.create_tenant` both call the shared `_provision_seat_pool` helper, which writes the BUDGET row before returning. Holds for the two ordinary creation routes; a tenant seeded directly via `TenantsRepository.seed_default` (the bootstrap default-org path) does not go through this and stays unlimited at the pool level until an operator sets one, exactly as an unpooled tenant always has |
+| **C14.2** The per-user token quota's default is loose (10,000,000), not the binding ceiling, and raising it changes no admission arithmetic: the item the reserve transaction builds for it is unchanged, only the number `dynamo.tenants._default_credit_fallback` returns. | B | `dynamo/tenants.py`; the reserve-side item this number feeds is `dynamo.user_tenants.UserTenantsRepository.reserve_txn_item`, untouched by this change |
+| **C14.3** `pool_limit_microusd` and `pool_headroom_microusd` are never rewritten from a read-then-write of `reserved`/`settled`; every write to them — the admin/team-lead explicit set, the seat-scaled creation write, and a membership delta — is a guarded conditional write against the row's OWN prior value or attribute state, composing with a concurrent reserve rather than racing it. No `pool_base` (or any second stored figure the ceiling could be recomputed from) exists. | B | `dynamo/tenant_budgets.py`: `set_pool_limit` (CAS on `pool_limit_microusd`), `adjust_pool_for_seat_delta` (pure `ADD`, guarded on `sizing`), `reserve_txn_item`/`settle_txn_item` (unmodified by this change) |
+| **C14.4** A membership change moves a `sizing="per_seat"` pool's limit and headroom by exactly `±SEAT_MONTHLY_USD`, and moves nothing on a `sizing="fixed"` pool or a row with no `sizing` attribute at all (absence reads as `"fixed"`, never as `"per_seat"`). An explicit pool-budget set (admin or team-lead) always sets `sizing="fixed"`, which is the one durable way this auto-adjust stops for a row. | E | `test_pool_membership_delta_l4.py` — a hire and a departure each move limit and headroom by exactly one seat, the identity holds after both, and a row carrying no `sizing` attribute moves by nothing |
+| **C14.5** A team lead may set only their OWN tenant's pool budget, gated by the same ownership check (`_require_owner`) every other team-lead-scoped write in that router uses, and audited by the same event name (`tenant_pool_budget_set`) the admin route uses. | E | `test_team_lead_pool_budget_l5.py` — a team lead sets their own tenant's pool and is refused on another's, and the refusal is the ownership check rather than a missing route (verified by mutation: removing `_require_owner` from this route fails the test) |
+| **C14.6** A tenant whose creation-time figure (`seats x SEAT_MONTHLY_USD`, seats=1) would exceed `MAX_POOL_BUDGET_USD_CENTS` is refused before either the Tenants row or the BUDGET row is written — never silently clamped to the maximum. | E | `test_pool_seat_cap_validation_l8.py` — an oversized per-seat figure refuses tenant creation rather than clamping it |
+
+Three of these hold at **B** rather than **E** for reasons stated in their own rows: a
+tenant seeded through the bootstrap default-org path does not pass through the
+creation routes (C14.1), "changes no admission arithmetic" is a property of a number
+rather than of a code path (C14.2), and "no second stored figure the ceiling could be
+recomputed from" is a shape a reading confirms rather than a value a test can read
+(C14.3). The other three are enforced by tests named in their rows.
+
+**Not guaranteed (N).** A per-user ceiling denominated in money. The per-user quota is
+tokens, so it bounds usage and not spend; the aggregate money ceiling is the pool.
+Closing this needs a per-user money counter, which needs a reserve, a settle and a
+release path of its own — it is on the open-items list rather than implied here.
+
 ## Open items, named rather than implied
 
 These are contract clauses the code does not satisfy yet. They are listed here
@@ -401,10 +430,11 @@ without paying a cost the clause names.
   by construction, and nothing stops a future call site from putting it in one. A
   static sweep — no repository or logger call takes a value derived from the wrapper
   key or a provider token — is what would move it from B to E.
-- **C10's lint reaches seven documents, not every document.** `README.md`,
+- **C10's lint reaches eight documents, not every document.** `README.md`,
   `docs/SCOPE.md`, `docs/design/hard-ceiling.md`, `docs/ARCHITECTURE.md`,
-  `docs/ADMIN_GUIDE.md`, `docs/DEPLOYMENT.md` and, since the price-feeds change,
-  `docs/design/price-feeds.md` are read. The ones a reader also consults and this
+  `docs/ADMIN_GUIDE.md`, `docs/DEPLOYMENT.md`, and, since the price-feeds change,
+  `docs/design/price-feeds.md`, and, since this change, `docs/design/limits.md`,
+  are read. The ones a reader also consults and this
   lint does not are named here rather than counted, because a bare number goes
   stale silently the day someone adds a document and forgets the list:
   `docs/MEASUREMENTS.md`, `docs/MEASUREMENTS.ja.md`, `docs/CLI_GUIDE.md`,

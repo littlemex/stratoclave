@@ -7,7 +7,8 @@
   "docs/ARCHITECTURE.md",
   "docs/ADMIN_GUIDE.md",
   "docs/DEPLOYMENT.md",
-  "docs/design/price-feeds.md"
+  "docs/design/price-feeds.md",
+  "docs/design/limits.md"
  ],
  "min_sentence_length": 40,
  "guarantee_terms": [

@@ -278,8 +278,16 @@ for where a broker is the better choice.
   [docs/design/hard-ceiling.md](docs/design/hard-ceiling.md). Cost is derived from
   an admin-editable per-model price table (`PricingConfig`), so Opus and Haiku
   spend are counted differently — all in integer micro-USD, never floating
-  point. A tenant with no pool row keeps the token-only behaviour unchanged
-  (pools are opt-in per tenant/period).
+  point. **A tenant gets a dollar pool at creation** — `seats x $200` a month by
+  default (`STRATOCLAVE_SEAT_MONTHLY_USD`), following the seat count until an
+  operator sets a figure of their own — so the ceiling a fresh deployment
+  enforces is denominated in the unit the invoice arrives in. The per-user token
+  quota remains, at a deliberately loose ten million tokens
+  (`DEFAULT_TENANT_CREDIT`), as a fairness device between a tenant's users
+  rather than as a budget: a token count cannot state a cost, since one million
+  tokens is $0.25 of Haiku input and $27.50 of Opus output at this repository's
+  own measured prices. Which ceiling protects what, and why the units differ, is
+  [docs/design/limits.md](docs/design/limits.md).
 - **Infrastructure resilience — retry, cross-region failover (streaming path).**
   Streaming requests flow through an **InfraRouter** that wraps the Bedrock
   call: a `ThrottlingException` (429), `ServiceUnavailableException`, timeout,
