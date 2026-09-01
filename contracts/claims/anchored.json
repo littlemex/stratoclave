@@ -1998,6 +1998,24 @@
    "id": "cl-5fdc0e5c11e2",
    "claim": "The orphan hunt starts from grants and would never see them, and the user-deletion path archives memberships without touching them — so a deleted user's old slots stay.",
    "anchor": "descriptive:states what the orphan hunt and the deletion path do NOT reach, which is the declaration that slot rows are dead storage rather than a claim about what this gateway enforces; the hunt's own guarantee is C14.19 and is anchored on the sentence that makes it"
+  },
+  {
+   "id": "cl-e39add9aac62",
+   "claim": "`STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's own admission ceiling are process-wide environment values, not per-tenant configuration — every tenant on a deployment is priced from the same seat figure and bounded by the same maximum, so two otherwise-unrelated tenants are coupled through this one setting rather than independently configurable ([docs/design/limits.md](docs/design/limits.md) §3).",
+   "anchor": "contract:C14.11@c4be8607,C14.6@2332dbb3",
+   "note": "one clause per conjunct (CONTRACT-F4-claims.md R41): C14.11 the seat rate is one deployment-wide figure enforced by a boot-time refusal; C14.6 the pool's admission ceiling is the same MAX_POOL_BUDGET_USD_CENTS constant for every tenant creation. 'Coupled' and 'not per-tenant configuration' are this sentence's own restatement of what the two clauses already establish, not a new guarantee"
+  },
+  {
+   "id": "cl-8140cdf19788",
+   "claim": "**`STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's own admission ceiling (`MAX_POOL_BUDGET_USD_CENTS`) are process-wide values, not per-tenant configuration.** Every tenant on a given deployment is priced from the same seat figure and bounded by the same maximum — there is no per-tenant override for either — so two otherwise-unrelated tenants on the same deployment are coupled through this one process-wide setting rather than independently configurable.",
+   "anchor": "contract:C14.11@c4be8607,C14.6@2332dbb3",
+   "note": "restates README.md's cl-e39add9aac62 in limits.md section 3, its other named home (CONTRACT-F4-claims.md R41); same two clauses, one per conjunct"
+  },
+  {
+   "id": "cl-d46f5f46ce06",
+   "claim": "So a report saying \"up to $G of this period's spend was covered by the grant\" is sound — the grant genuinely raised the ceiling by `G` and the tenant could not have spent past its baseline without it — but a report attributing a *specific* charge to the grant rather than to the baseline is stating something this row does not track and cannot answer.",
+   "anchor": "contract:C14.25@1c9f04b6",
+   "note": "grant-supported spend is an upper bound on what the grant covered, never an attribution of which dollar came from it, because C14.25 establishes the pool's headroom counter is one fungible number rather than tagged sub-balances (CONTRACT-F4-claims.md R41)"
   }
  ]
 }

@@ -22,6 +22,17 @@ A **grant** is an amount on `pool_granted_microusd` with an expiry. It raises
 lowers both by exactly that amount when it ends. It never touches the baseline, and
 that is the whole reason the two writes are safe to make without a compare-and-swap.
 
+**A figure describing spend as "grant-supported" is an upper bound on what the
+grant covered, not an attribution of which dollar came from it.** The pool's
+headroom counter is one fungible number, not a set of tagged sub-balances; a
+settle draws down `pool_headroom_microusd` regardless of whether the amount it
+consumes traces to the seat term, an operator's figure, or a live grant. So a
+report saying "up to $G of this period's spend was covered by the grant" is
+sound — the grant genuinely raised the ceiling by `G` and the tenant could not
+have spent past its baseline without it — but a report attributing a
+*specific* charge to the grant rather than to the baseline is stating something
+this row does not track and cannot answer.
+
 **Why the grant writes carry no CAS while every other writer of this ceiling does.**
 The other writers move the *baseline*, and they compute their delta from values that
 can move under them — a seat count, a prior figure — so each one has to check those

@@ -1161,6 +1161,15 @@
   },
   "cl-ff2dcb6dd80a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-e39add9aac62": {
+   "first_seen": "added by CONTRACT-F4-claims.md R41: README.md's boundary sentence that the seat rate and the pool's admission ceiling are process-wide, not per-tenant"
+  },
+  "cl-8140cdf19788": {
+   "first_seen": "added by CONTRACT-F4-claims.md R41: limits.md section 3's restatement of cl-e39add9aac62, its other named home"
+  },
+  "cl-d46f5f46ce06": {
+   "first_seen": "added by CONTRACT-F4-claims.md R41: quota-raises.md's boundary sentence that grant-supported spend is an upper bound, not an attribution"
   }
  },
  "retired": {
@@ -1406,7 +1415,18 @@
     "C14.11": "B",
     "C14.12": "B",
     "C14.13": "B",
-    "C14.14": "N"
+    "C14.14": "N",
+    "C14.15": "B",
+    "C14.16": "B",
+    "C14.17": "B",
+    "C14.18": "B",
+    "C14.19": "B",
+    "C14.20": "B",
+    "C14.21": "B",
+    "C14.22": "B",
+    "C14.23": "B",
+    "C14.24": "N",
+    "C14.25": "B"
    }
   },
   "retired": {},
