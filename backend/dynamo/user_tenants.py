@@ -273,6 +273,42 @@ class UserTenantsRepository:
         except Exception:  # noqa: BLE001 — never fail a membership write for this
             pass
 
+    def archive_membership(self, *, user_id: str, tenant_id: str) -> bool:
+        """Archive one membership row and account for the seat it gave up.
+
+        The seat-aware archive. A caller that sets `status = "archived"` with its
+        own `update_item` does the same thing to the row and NOT the same thing to
+        the tenant: the seat is gone and the ceiling still counts it, so a tenant
+        that deletes users keeps a ceiling scaled to people who are not there. The
+        error is upward — it admits spend rather than refusing it — which is why it
+        is not cosmetic drift.
+
+        Conditional on the row being ACTIVE, so the seat delta is applied at most
+        once per transition: a second archive of an already-archived row returns
+        False and moves nothing. That condition is what makes this safe to call on
+        a retry, and it is why the caller must not pre-filter on a read.
+        """
+        try:
+            self._table.update_item(
+                Key={"user_id": user_id, "tenant_id": tenant_id},
+                UpdateExpression="SET #s = :archived, updated_at = :now",
+                ConditionExpression=(
+                    "attribute_exists(user_id) AND "
+                    "(#s = :active OR attribute_not_exists(#s))"),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":archived": "archived",
+                    ":active": "active",
+                    ":now": _now_iso(),
+                },
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False  # already archived, or gone — no seat to give back
+            raise
+        self._adjust_pool_seat_delta_best_effort(tenant_id=tenant_id, seat_delta=-1)
+        return True
+
     # ----- credit operations -----
     def remaining_credit(self, user_id: str, tenant_id: str) -> int:
         item = self.get(user_id, tenant_id)
