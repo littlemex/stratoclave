@@ -49,7 +49,12 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+# `datetime` is imported as a NAME rather than through its package, and that is the
+# whole reason this module's clock is controllable: a test substitutes this one
+# symbol and every rule in here moves with it. Importing `datetime` the module and
+# calling `datetime.datetime.now()` would put the clock somewhere no test can reach
+# without patching the standard library.
+from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query

@@ -22,6 +22,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     'accounts:*',
     'apikeys:*',
     'billing:*',
+    // Money-ceiling raises: filing one, and deciding one for any tenant.
+    'limits:*',
     'messages:send',
     'responses:send',
   ],
@@ -40,12 +42,22 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     'apikeys:revoke-self',
     'billing:read',
     'billing:write',
+    // Filing a raise for one's own tenant, and deciding raises for a tenant one
+    // OWNS. The second is a different authority from deciding for any tenant, so it
+    // is a separate scope rather than a reuse: the routes it reaches bind the
+    // approval to tenant ownership inside the transaction, and the routes
+    // `limits:approve` reaches do not.
+    'limits:raise-self',
+    'limits:approve-own',
     'messages:send',
     'responses:send',
   ],
   user: [
     'messages:send',
     'responses:send',
+    // Every end user may ask for more of their own tenant's money ceiling; only an
+    // approver may decide it.
+    'limits:raise-self',
     'usage:read-self',
     'apikeys:read-self',
     'apikeys:create-self',
