@@ -201,6 +201,60 @@ def test_units_are_normalised_and_an_unknown_one_is_refused():
     assert per_mtok("-1", "1M tokens") is None
 
 
+def test_per_mtok_returns_none_for_non_finite_values():
+    """M5: `per_mtok`'s contract is "return `None` for anything it cannot read", but
+    today the negativity check sits OUTSIDE the `try` around `Decimal(str(price))`,
+    so `per_mtok("NaN", ...)` raises `decimal.InvalidOperation` (comparing a NaN with
+    `<` is itself an invalid operation) instead of returning `None`, and
+    `per_mtok("Infinity", ...)` sails straight through the `< 0` check and comes back
+    as `Decimal('Infinity')` rather than being refused. A published price is money per
+    token; neither a NaN nor an infinite rate is a number a request can ever be
+    charged at, and a single such row must not be able to raise out of a feed."""
+    assert per_mtok("NaN", "1M tokens") is None
+    assert per_mtok("Infinity", "1M tokens") is None
+    assert per_mtok("-Infinity", "1M tokens") is None
+    assert per_mtok("nan", "1K tokens") is None
+    assert per_mtok("inf", "Units") is None
+
+
+def test_a_feed_whose_rate_card_contains_a_non_finite_row_still_prices_every_other_model():
+    """M5: `per_mtok("NaN", ...)` raising `decimal.InvalidOperation` is not contained
+    to the one malformed row — nothing in `PriceListFeed.fetch()` catches it, so one
+    provider publishing a NaN row for ANY model takes the whole pass down and
+    discards every other model's price with it, hourly, with no signal but a generic
+    feed error. Once `per_mtok` returns `None` instead of raising, the malformed row
+    is simply unreadable and every model whose row IS readable must still get priced."""
+    from mvp.pricing_feeds.base import FeedRequest
+    from mvp.pricing_feeds.price_list import PriceListFeed
+
+    def _product(model_id: str, usd: str) -> dict:
+        return {
+            "product": {"attributes": {
+                "usagetype": f"USE1-{model_id}-mantle-input-tokens-standard",
+                "regionCode": "us-east-1"}},
+            "terms": {"OnDemand": {"t": {"priceDimensions": {"d": {
+                "unit": "1K tokens", "pricePerUnit": {"USD": usd}}}}}},
+        }
+
+    products = [
+        _product("vendor.broken-model", "NaN"),
+        _product("vendor.good-model", "0.0022"),
+    ]
+
+    class _Client:
+        def get_products(self, **kwargs):
+            return {"PriceList": [json.dumps(p) for p in products]}
+
+    feed = PriceListFeed(_Client())
+    result = feed.fetch(FeedRequest(
+        model_ids=frozenset({"vendor.broken-model", "vendor.good-model"}),
+        regions=frozenset({"us-east-1"})))
+    assert "vendor.good-model" in result.cards, (
+        f"a NaN row for a different model took the whole pass down with it: "
+        f"errors={result.errors}"
+    )
+
+
 # --- model id handling ------------------------------------------------------
 def test_profile_prefix_decides_scope_and_is_stripped_for_the_query():
     """Both price APIs key on the bare id — `list-foundation-model-agreement-offers`
