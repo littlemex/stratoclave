@@ -10,15 +10,42 @@ Layout:
                                   (mirror, for the read API + audit reconciliation)
         pool_settled_microusd   : sum of settled (actual) spend (mirror)
         status                  : "active" | "suspended"
-        sizing                  : "per_seat" | "fixed" (docs/design/limits.md, L3/L4).
-                                  "per_seat": written at tenant creation, and a
-                                  membership add/remove still moves this row's
-                                  limit/headroom by SEAT_MONTHLY_USD. "fixed":
-                                  an explicit set_pool_limit call has stopped
-                                  that. ABSENT (every row from before this
-                                  change) means "fixed" -- never inferred as
-                                  "per_seat".
+        manual_limit_microusd   : the operator's own figure, in micro-USD.
+                                  PRESENT (including `0`) means the ceiling is
+                                  that figure. ABSENT means "follow the seat
+                                  count". See "the ceiling rule" below.
+        seat_count              : the tenant's active membership count, moved by
+                                  the ONE seat-delta writer on every membership
+                                  change, whether or not money moves with it.
+        seat_rate_microusd      : the per-seat monthly rate IN FORCE for this
+                                  row, stored so the ceiling is reproducible
+                                  across a re-run and a rollback. A process
+                                  configured with a different rate refuses to
+                                  start (see `assert_seat_rate_in_force`).
+        pool_granted_microusd   : an approved raise, added on top of the
+                                  baseline. ABSENT until grants exist, and
+                                  absence reads as zero -- which is why the
+                                  identity below carries a coalesce from day one.
         version                 : schema/version marker
+
+THE CEILING RULE (docs/design/limits.md section 4):
+
+    seat_term  = seat_count x seat_rate
+    baseline   = manual_limit  if manual_limit is PRESENT  else seat_term
+    pool_limit = baseline + coalesce(pool_granted, 0)
+
+**Absence** of `manual_limit_microusd` means "follow the seat count"; **zero is a
+figure** and means zero budget. That asymmetry is load-bearing rather than
+stylistic: `limit_usd_cents` accepts `0` today, meaning every request refused, so
+reading `0` as "follow the seats" would silently reverse a legal input for every
+existing caller. The sentinel is absence, which no existing caller can send, and
+`{"follow_seats": true}` on the setter is how absence is asked for.
+
+`pool_granted_microusd` is the mirror image, deliberately: it is reset by
+OMISSION and never by writing an explicit zero, because for it absence and zero
+mean the same thing (`ADD` on a missing numeric attribute creates it). Getting
+those two backwards inverts the feature, so each one says which it is where it is
+declared, in POOL_ROW_ATTRIBUTES below.
 
 Invariant enforced at reserve time (inside a DynamoDB transaction):
 
@@ -58,6 +85,7 @@ All amounts are integer micro-USD; this module never introduces a float.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -67,25 +95,393 @@ from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource, tenant_budgets_table_name
 
-# Pool sizing modes (docs/design/limits.md, L3/L4). "per_seat" means the pool's
-# ceiling was written by the seat-scaled default at tenant creation and still
-# auto-follows membership changes; "fixed" means an explicit `set_pool_limit`
-# call (an admin's own figure) has stopped that. A row with NO `sizing`
-# attribute at all -- every row written before this change -- is treated as
-# "fixed": a pre-existing pool an operator set by hand must never start
-# following seats behind their back just because this code shipped.
-SIZING_PER_SEAT = "per_seat"
-SIZING_FIXED = "fixed"
+# The name of the operator's own figure. Its PRESENCE is the whole mode switch,
+# so it is referenced by name in four places (the two writers, the rollover and
+# the reconciler) and never spelled inline in any of them.
+MANUAL_LIMIT_ATTR = "manual_limit_microusd"
+SEAT_COUNT_ATTR = "seat_count"
+SEAT_RATE_ATTR = "seat_rate_microusd"
+POOL_GRANTED_ATTR = "pool_granted_microusd"
 
-# The tenant pool's per-seat monthly figure (L3/L4 Interface). Read fresh on
-# every call (not cached) -- an admin write and a membership delta are both
-# rare, so there is no hot-path cost to paying for a live env read, and a
-# changed env var takes effect immediately rather than only after a restart.
+# The tenant pool's per-seat monthly figure, as this PROCESS is configured. It is
+# NOT the rate a row's ceiling was computed from: that one is stored on the row
+# (`seat_rate_microusd`) so the ceiling is reproducible, and a process whose
+# configuration disagrees with the stored rate refuses to start rather than
+# recomputing ceilings at a figure nobody chose. `assert_seat_rate_in_force` is
+# the check; `main.py` is the boot path that calls it.
 _SEAT_MONTHLY_USD_DEFAULT = 200
 
 
 def seat_monthly_usd() -> int:
+    """The per-seat monthly rate in whole USD, as this process is configured."""
     return int(os.getenv("STRATOCLAVE_SEAT_MONTHLY_USD", str(_SEAT_MONTHLY_USD_DEFAULT)))
+
+
+def seat_rate_microusd() -> int:
+    """The same rate in integer micro-USD, which is the unit the row stores.
+
+    One unit on the pool row, not two: every other money attribute on it is
+    micro-USD, and a second unit on one item is a conversion waiting to be
+    forgotten at the one call site that omits it.
+    """
+    return seat_monthly_usd() * 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# The closed-world declaration of the pool row
+# ---------------------------------------------------------------------------
+# Four separate mechanisms need to know what is on this row: the period rollover
+# (what to carry), the ceiling-writer document test (who writes the ceiling), the
+# reconciler (what to check against its source), and the item-size gauge (how
+# wide the row can get). Each of those was a list, and a list is forgotten
+# silently -- an attribute added later evaporates at the next rollover, or is
+# checked by nobody, or is missing from the measured item, and nothing says so.
+#
+# So this is not an appendable list. It is a TOTAL CLASSIFICATION: every
+# attribute a pool row can carry appears here exactly once, with its rollover
+# class, its writers, either a covering reconciler check or an explicit
+# exemption, and the widest value it can hold. An attribute found on a row and
+# absent from here is a failure, which is what makes forgetting impossible
+# instead of merely unlikely.
+
+ROLLOVER_CARRIED = "carried"    # copied verbatim into the new period's row
+ROLLOVER_DERIVED = "derived"    # recomputed on the new row from carried attributes
+ROLLOVER_RESET = "reset"        # not carried; the new period starts without it
+
+# HOW a reset attribute is reset, which is a decision and not a detail.
+RESET_BY_OMISSION = "omission"  # left off the new row entirely; absence is its zero
+RESET_BY_ZERO = "zero"          # written as 0, because absence would mean something else
+
+
+@dataclass(frozen=True)
+class PoolAttribute:
+    """One attribute of the pool row, in every class that has to know about it."""
+
+    name: str
+    rollover: str
+    #: Every code site that writes this attribute, as `module:function`. The
+    #: ceiling-writer document test derives its list from the subset of these
+    #: whose attribute moves the ceiling, so the document cannot name a subset.
+    writers: tuple[str, ...]
+    #: Widest value this attribute can hold, in bytes as DynamoDB accounts for
+    #: it (a number is its digit count, plus one for a sign). The item-size
+    #: gauge and its alarm threshold are derived from the sum of these.
+    max_value_bytes: int
+    #: The reconciler check that compares this attribute to its SOURCE, or None
+    #: with `exemption` saying why no source comparison exists for it.
+    check: Optional[str] = None
+    exemption: Optional[str] = None
+    #: Only for `ROLLOVER_RESET`.
+    reset_by: Optional[str] = None
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.rollover not in (ROLLOVER_CARRIED, ROLLOVER_DERIVED, ROLLOVER_RESET):
+            raise ValueError(f"{self.name}: unknown rollover class {self.rollover!r}")
+        if self.rollover == ROLLOVER_RESET and self.reset_by not in (
+                RESET_BY_OMISSION, RESET_BY_ZERO):
+            raise ValueError(
+                f"{self.name}: a reset attribute must say HOW it is reset "
+                f"(omission or zero), got {self.reset_by!r}")
+        if self.rollover != ROLLOVER_RESET and self.reset_by is not None:
+            raise ValueError(f"{self.name}: reset_by is meaningless unless reset")
+        if bool(self.check) == bool(self.exemption):
+            raise ValueError(
+                f"{self.name}: exactly one of check / exemption, so an attribute "
+                f"nobody reconciles has to say so out loud")
+        if self.max_value_bytes <= 0:
+            raise ValueError(f"{self.name}: max_value_bytes must be positive")
+
+
+# The widest micro-USD figure any ceiling attribute can hold: L8's maximum pool,
+# in micro-USD. Written as a width rather than a value because the size gauge
+# wants bytes and the digits are what DynamoDB charges for.
+_MAX_POOL_MICROUSD_DIGITS = 16   # 1_000_000_000 cents x 10_000 = 1e13, 14 digits; +2 margin
+_SIGNED = 1                      # headroom is the one signed money attribute
+
+#: The one declaration. F2 adds its grant cap here, in the same shape, or the
+#: closed-world test fails at F2's merge -- loudly, and at the moment the
+#: attribute appears, rather than silently on the 1st of the following month.
+POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
+    PoolAttribute(
+        name="tenant_id",
+        rollover=ROLLOVER_CARRIED,
+        writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
+        max_value_bytes=128,
+        exemption="the partition key; it identifies the row rather than describing it",
+    ),
+    PoolAttribute(
+        name="sk",
+        rollover=ROLLOVER_DERIVED,
+        writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
+        max_value_bytes=32,
+        exemption="the sort key; the new period's row has the new period in it by "
+                  "construction, so carrying it verbatim would be the bug",
+    ),
+    PoolAttribute(
+        name=MANUAL_LIMIT_ATTR,
+        rollover=ROLLOVER_CARRIED,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.clear_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+            "migrations.pool_ceiling_migration:phase_m2_backfill",
+        ),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        check="baseline_identity",
+        note="carried, and carried by ABSENCE too: a seat-tracked row must reach the "
+             "new period still seat-tracked, so the rollover writes this attribute "
+             "only when the old row had it. Zero is a figure and is carried as one.",
+    ),
+    PoolAttribute(
+        name=SEAT_COUNT_ATTR,
+        rollover=ROLLOVER_CARRIED,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository.adjust_pool_for_seat_delta",
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+            "migrations.pool_ceiling_migration:phase_m2_backfill",
+        ),
+        max_value_bytes=8,
+        check="seat_count_matches_membership",
+        note="the seats do not reset at a period boundary; the people are still there",
+    ),
+    PoolAttribute(
+        name=SEAT_RATE_ATTR,
+        rollover=ROLLOVER_CARRIED,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+            "migrations.pool_ceiling_migration:phase_m1_add_attributes",
+            "migrations.pool_ceiling_migration:recompute_seat_tracked_rows",
+        ),
+        max_value_bytes=12,
+        check="seat_rate_matches_rate_in_force",
+        note="carried so a ceiling is reproducible; changing it is a migration, not a "
+             "deploy, which is what makes the boot-time refusal honest",
+    ),
+    PoolAttribute(
+        name=POOL_GRANTED_ATTR,
+        rollover=ROLLOVER_RESET,
+        reset_by=RESET_BY_OMISSION,
+        writers=("(F2: the grant apply and revoke writers)",),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        exemption="no writer exists until F2, which registers the grant-sum check "
+                  "against its own ACTIVE grants at that point",
+        note="RESET BY OMISSION, never by writing 0: absence and zero mean the same "
+             "thing here, which is exactly what is NOT true of manual_limit. Safe to "
+             "reset at the boundary ONLY because F2 pins a grant's expires_at to at "
+             "most the period end; without that pin this reset destroys live granted "
+             "capacity every 1st.",
+    ),
+    PoolAttribute(
+        name="pool_limit_microusd",
+        rollover=ROLLOVER_DERIVED,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.clear_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.adjust_pool_for_seat_delta",
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+        ),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        check="limit_identity",
+        note="recomputed on the new row from the carried attributes; carrying last "
+             "month's number would carry a granted term the new row does not have",
+    ),
+    PoolAttribute(
+        name="pool_headroom_microusd",
+        rollover=ROLLOVER_DERIVED,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.clear_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.adjust_pool_for_seat_delta",
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.reconcile_headroom",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_txn_item",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.settle_txn_item",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_commit_txn_items",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.pool_credit_back",
+        ),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS + _SIGNED,
+        check="headroom_identity",
+        note="the one signed money attribute: an over-ceiling row's deficit is a "
+             "figure an operator needs, and clamping it at zero hides the amount by "
+             "which admission has already been exceeded",
+    ),
+    PoolAttribute(
+        name="pool_reserved_microusd",
+        rollover=ROLLOVER_RESET,
+        reset_by=RESET_BY_ZERO,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_txn_item",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.settle_txn_item",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_commit_txn_items",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.pool_credit_back",
+        ),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS + _SIGNED,
+        exemption="reconciled against the credit ledger, not against a row-side "
+                  "source: mvp.admin_tenants.get_pool_reconciliation owns that axis",
+    ),
+    PoolAttribute(
+        name="pool_settled_microusd",
+        rollover=ROLLOVER_RESET,
+        reset_by=RESET_BY_ZERO,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+            "dynamo.tenant_budgets:TenantBudgetsRepository.settle_txn_item",
+        ),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        exemption="reconciled against the credit ledger; same owner as reserved",
+    ),
+    PoolAttribute(
+        name="pool_reclaimed_microusd",
+        rollover=ROLLOVER_RESET,
+        reset_by=RESET_BY_ZERO,
+        writers=("mvp._pipeline:_reclaim_expired_holds",),
+        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
+        exemption="reconciled against the credit ledger; same owner as reserved",
+    ),
+    PoolAttribute(
+        name="status",
+        rollover=ROLLOVER_CARRIED,
+        writers=(
+            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
+            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
+        ),
+        max_value_bytes=16,
+        exemption="not a quantity; a suspended pool stays suspended across a boundary "
+                  "because suspension is an operator's decision, not a month's",
+    ),
+    PoolAttribute(
+        name="version",
+        rollover=ROLLOVER_DERIVED,
+        writers=("(every writer in this module stamps it)",),
+        max_value_bytes=4,
+        exemption="a schema marker; the new row is stamped at the current version",
+    ),
+    PoolAttribute(
+        name="updated_at",
+        rollover=ROLLOVER_DERIVED,
+        writers=("(every writer in this module stamps it)",),
+        max_value_bytes=40,
+        exemption="a timestamp; carrying the old row's would misdate the new one",
+    ),
+    PoolAttribute(
+        name="sizing",
+        rollover=ROLLOVER_RESET,
+        reset_by=RESET_BY_OMISSION,
+        writers=("(none: no writer remains; M4 deletes the attribute)",),
+        max_value_bytes=8,
+        exemption="the mode this change replaced. Declared, not removed from the "
+                  "declaration, because rows still carry it until M4 runs and a "
+                  "closed-world test must not fail on a row mid-migration. Nothing "
+                  "reads it and the rollover never carries it forward.",
+    ),
+)
+
+_POOL_ATTRIBUTES_BY_NAME: dict[str, PoolAttribute] = {
+    a.name: a for a in POOL_ROW_ATTRIBUTES}
+if len(_POOL_ATTRIBUTES_BY_NAME) != len(POOL_ROW_ATTRIBUTES):
+    raise RuntimeError("POOL_ROW_ATTRIBUTES declares an attribute twice")
+
+#: The attributes that MOVE THE CEILING, derived from the declaration rather than
+#: restated. The ceiling-writer document test reads this, so a writer added to
+#: `pool_limit_microusd` above appears in the document's obligation immediately
+#: and a hardcoded list cannot go green while naming a subset.
+CEILING_ATTRS: tuple[str, ...] = (
+    "pool_limit_microusd", "pool_headroom_microusd", MANUAL_LIMIT_ATTR,
+    SEAT_COUNT_ATTR, SEAT_RATE_ATTR, POOL_GRANTED_ATTR,
+)
+
+
+def pool_attribute(name: str) -> Optional[PoolAttribute]:
+    """The declaration for `name`, or None if it is in no class."""
+    return _POOL_ATTRIBUTES_BY_NAME.get(name)
+
+
+def unclassified_pool_attributes(item: dict[str, Any]) -> set[str]:
+    """Every attribute on `item` that appears in no class of the declaration.
+
+    The closed-world assertion. A non-empty result is a failure and not a
+    warning: it means something writes the pool row that four other mechanisms
+    do not know exists.
+    """
+    return {str(k) for k in (item or {}) if str(k) not in _POOL_ATTRIBUTES_BY_NAME}
+
+
+def ceiling_writers() -> tuple[str, ...]:
+    """Every code site that writes a ceiling-bearing attribute, from the
+    declaration. Derived, never listed: a literal list passes while naming a
+    subset the moment a writer is added."""
+    out: list[str] = []
+    for attr in POOL_ROW_ATTRIBUTES:
+        if attr.name not in CEILING_ATTRS:
+            continue
+        for w in attr.writers:
+            if not w.startswith("(") and w not in out:
+                out.append(w)
+    return tuple(out)
+
+
+def carried_attributes() -> tuple[str, ...]:
+    """The attributes the period rollover copies verbatim."""
+    return tuple(a.name for a in POOL_ROW_ATTRIBUTES
+                 if a.rollover == ROLLOVER_CARRIED and a.name not in ("tenant_id",))
+
+
+def max_pool_row_bytes() -> int:
+    """The widest a pool row can get, from the declaration: every attribute's
+    name plus its widest value. The item-size gauge's baseline and its alarm
+    threshold are derived from this, so a schema change moves the alarm with it
+    instead of failing it."""
+    return sum(len(a.name) + a.max_value_bytes for a in POOL_ROW_ATTRIBUTES
+               if a.name != "sizing")
+
+
+# ---------------------------------------------------------------------------
+# The rule, as three pure functions over a row
+# ---------------------------------------------------------------------------
+def row_seat_rate_microusd(item: dict[str, Any]) -> int:
+    """The rate this row's seat term is computed at: the stored one when the row
+    carries it, else the rate this process is configured with.
+
+    The fallback is reachable only on a row M1 has not touched yet, and it is
+    safe there for the reason R20 exists: a process whose configured rate
+    disagrees with the rate in force refuses to boot, so on any running process
+    the two are the same number.
+    """
+    stored = (item or {}).get(SEAT_RATE_ATTR)
+    return int(stored) if stored is not None else seat_rate_microusd()
+
+
+def seat_term_microusd(item: dict[str, Any]) -> int:
+    """`seat_count x seat_rate`, in micro-USD."""
+    return int((item or {}).get(SEAT_COUNT_ATTR, 0)) * row_seat_rate_microusd(item)
+
+
+def is_seat_tracked(item: dict[str, Any]) -> bool:
+    """True iff this row follows the seat count -- i.e. the operator's figure is
+    ABSENT. A stored `0` is a figure ("refuse everything") and returns False."""
+    return MANUAL_LIMIT_ATTR not in (item or {})
+
+
+def baseline_microusd(item: dict[str, Any]) -> int:
+    """`manual_limit` when present (including zero), else the seat term."""
+    if is_seat_tracked(item):
+        return seat_term_microusd(item)
+    return int(item[MANUAL_LIMIT_ATTR])
+
+
+def granted_microusd(item: dict[str, Any]) -> int:
+    """The granted term, zero until grants exist. The coalesce lives here, once,
+    so the identity below is true from day one and F2 adds a writer rather than
+    editing an invariant."""
+    return int((item or {}).get(POOL_GRANTED_ATTR, 0))
+
+
+def expected_pool_limit_microusd(item: dict[str, Any]) -> int:
+    """`baseline + coalesce(granted, 0)` -- what `pool_limit_microusd` must equal.
+    The reconciler's identity check compares the stored figure to this."""
+    return baseline_microusd(item) + granted_microusd(item)
 
 
 class PoolLimitExceedsMaximumError(ValueError):
@@ -120,8 +516,8 @@ def seat_pool_limit_microusd(seats: int) -> int:
         )
     return limit_microusd
 
-# set_pool_limit is a conditional CAS on the pool ceiling (Fable review finding
-# 3). Concurrent admin writes to the SAME period's ceiling are rare, so a small
+# The operator set is a conditional CAS on the ceiling (Fable review finding 3).
+# Concurrent admin writes to the SAME period's ceiling are rare, so a small
 # bounded retry is plenty; exceeding it is a genuine anomaly worth surfacing.
 _SET_LIMIT_MAX_RETRIES = 8
 
@@ -344,9 +740,23 @@ class TenantBudgetsRepository:
         )
         return resp.get("Item")
 
-    def pool_summary(self, tenant_id: str, period: str) -> Optional[dict[str, int]]:
-        """Return the pool's limit/reserved/settled/remaining in micro-USD,
+    def pool_summary(self, tenant_id: str, period: str) -> Optional[dict[str, Any]]:
+        """The pool's ceiling, its composition and its live usage in micro-USD,
         or None when the tenant has no pool budget for the period.
+
+        Carries the whole ceiling composition rather than the one total, because
+        the total on its own cannot be checked: an admin looking at a figure has
+        no way to tell a seat-tracked row from an operator's own, and no way to
+        see that an entitlement has outgrown a figure someone set months ago.
+        `pool_granted_microusd` is reported as a plain zero until grants exist,
+        so the composition printed beside the limit always adds up to it.
+
+        `available_microusd` is SIGNED and never clamped. A row whose ceiling was
+        lowered below its committed spend has negative headroom, and that deficit
+        is the figure an operator has to act on -- clamping it at zero reports
+        "nothing left" for both "exactly nothing left" and "already $400 over",
+        which are different problems. `over_ceiling_microusd` is the same fact
+        stated positively for a surface that wants a magnitude.
         """
         item = self.get(tenant_id, period)
         if not item:
@@ -354,231 +764,355 @@ class TenantBudgetsRepository:
         limit = int(item.get("pool_limit_microusd", 0))
         reserved = int(item.get("pool_reserved_microusd", 0))
         settled = int(item.get("pool_settled_microusd", 0))
-        # `remaining` is reported from the authoritative headroom counter when it
-        # exists (a row written/backfilled under the new scheme), else derived
-        # from the mirrors (a legacy row not yet backfilled). They are equal by
-        # the maintained invariant; preferring headroom keeps the read consistent
-        # with the gate the reserve actually checks.
-        if "pool_headroom_microusd" in item:
-            remaining = max(int(item.get("pool_headroom_microusd", 0)), 0)
-        else:
-            remaining = max(limit - reserved - settled, 0)
+        # Reported from the authoritative headroom counter when it exists (a row
+        # written/backfilled under the new scheme), else derived from the mirrors
+        # (a legacy row not yet backfilled). They are equal by the maintained
+        # invariant; preferring headroom keeps the read consistent with the gate
+        # the reserve actually checks.
+        headroom = int(item["pool_headroom_microusd"]) \
+            if "pool_headroom_microusd" in item else limit - reserved - settled
+        seat_count = int(item.get(SEAT_COUNT_ATTR, 0))
+        rate = row_seat_rate_microusd(item)
+        manual = None if is_seat_tracked(item) else int(item[MANUAL_LIMIT_ATTR])
         return {
             "pool_limit_microusd": limit,
             "pool_reserved_microusd": reserved,
             "pool_settled_microusd": settled,
-            "pool_headroom_microusd": int(item.get("pool_headroom_microusd",
-                                                   limit - reserved - settled)),
-            "remaining_microusd": remaining,
+            "pool_headroom_microusd": headroom,
+            # The signed figure, and the one the surfaces render.
+            "available_microusd": headroom,
+            "over_ceiling_microusd": -headroom if headroom < 0 else 0,
+            "remaining_microusd": headroom,
             "status": item.get("status", "active"),
-            # A row with no `sizing` attribute predates this change (L4): treat
-            # it as "fixed" so a pre-existing, hand-set pool never starts
-            # auto-following seats just because this code shipped.
-            "sizing": item.get("sizing", SIZING_FIXED),
+            # The composition. Absence of the operator's figure IS the mode, so
+            # `manual_limit_microusd` is None exactly when the row follows seats.
+            "seat_count": seat_count,
+            "seat_rate_microusd": rate,
+            "seat_entitlement_microusd": seat_count * rate,
+            "manual_limit_microusd": manual,
+            "seat_tracked": manual is None,
+            "pool_granted_microusd": granted_microusd(item),
+            "baseline_microusd": baseline_microusd(item),
         }
 
-    # ----- write (admin) -----
-    def set_pool_limit(
+    # ----- write: the two ceiling writers -----
+    # Exactly two things move this row's ceiling, and each one is a single
+    # conditional write:
+    #
+    #   * a MEMBERSHIP change moves `seat_count` always, and the money only when
+    #     the row is seat-tracked. It is a delta, so it composes with a live
+    #     reserve instead of racing it.
+    #   * an OPERATOR SET writes the figure and shifts the money by the BASELINE
+    #     delta, under a CAS on the three values that delta was computed from.
+    #
+    # Every write moves `pool_headroom` by exactly the same amount it moves
+    # `pool_limit`, which is what keeps `headroom == limit - reserved - settled`
+    # true without ever recomputing headroom from the mirrors.
+
+    def _seed_pool_row(
         self,
         *,
         tenant_id: str,
         period: str,
-        pool_limit_microusd: int,
+        manual_limit_microusd: Optional[int],
         status: str = "active",
-        sizing: str = SIZING_FIXED,
-    ) -> dict[str, Any]:
-        """Create or update a tenant's pool limit for a period.
+        seat_count: int = 0,
+        seat_rate: Optional[int] = None,
+    ) -> bool:
+        """Create the period's pool row, iff nobody else just created it.
 
-        Preserves the running `pool_reserved`/`pool_settled` counters if the
-        row already exists (so changing the ceiling mid-period does not reset
-        spend); initialises them to 0 on first creation. `pool_headroom` is
-        shifted by the *ceiling delta* (`new_limit - old_limit`) so the invariant
-        `headroom == limit - reserved - settled` is preserved without ever
-        touching the reserved/settled mirrors; raising or lowering the limit
-        shifts headroom by the same delta (a lower limit can make headroom
-        negative, which correctly refuses all new admissions).
+        The ONE place a pool row comes into existence, so the row's shape is
+        stated once: the three counters at zero, the stored seat rate, the seat
+        count, and the operator's figure ONLY when there is one.
+        `manual_limit_microusd=None` seeds a seat-tracked row -- by leaving the
+        attribute OFF, which is the sentinel, rather than by writing a zero that
+        would mean "refuse every request".
 
-        `sizing` (L3/L4) is written on every branch alongside the limit itself:
-        the default is `"fixed"`, so every EXPLICIT caller of this method (the
-        admin and team-lead pool-budget endpoints) stops this row's membership
-        auto-adjust the moment a human sets a figure by hand, exactly once, on
-        the same write that sets the figure. The ONE caller that wants the
-        seat-scaled default instead (tenant creation) passes `sizing="per_seat"`
-        explicitly. This never introduces a second stored figure (no
-        `pool_base`, nothing derived from `reserved`/`settled`) — `sizing` is a
-        label on the existing limit/headroom pair, not a new counter.
-
-        RACE-SAFETY (Fable review, finding 3): this used to be a read-then-put
-        that rewrote headroom from the read-back mirrors, so a reserve/settle
-        landing between the read and the put silently lost its headroom move
-        (a real over-admission / under-admission window). It is now a single
-        CONDITIONAL UpdateItem: `SET pool_limit = :new ADD pool_headroom :delta`
-        guarded by `pool_limit = :old`, so a concurrent reserve's headroom ADD
-        composes with (never clobbers) this one — DynamoDB serializes them. A
-        `ConditionalCheckFailed` here means the limit moved under us (another
-        admin write); we re-read and retry a small number of times. Creation is
-        an `attribute_not_exists(tenant_id)` seed. This path is an admin write
-        (create pool / change ceiling), expected to be rare.
+        Returns True if this call created the row, False if it lost the race.
         """
-        new_limit = int(pool_limit_microusd)
+        rate = int(seat_rate) if seat_rate is not None else seat_rate_microusd()
+        baseline = (int(manual_limit_microusd) if manual_limit_microusd is not None
+                    else int(seat_count) * rate)
+        # `pool_granted` is absent on a fresh row and absence reads as zero, so
+        # the identity `limit = baseline + coalesce(granted, 0)` holds here with
+        # no granted term written.
+        item: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "sk": budget_sk(period),
+            "pool_limit_microusd": Decimal(baseline),
+            "pool_headroom_microusd": Decimal(baseline),
+            "pool_reserved_microusd": Decimal(0),
+            "pool_settled_microusd": Decimal(0),
+            SEAT_COUNT_ATTR: Decimal(int(seat_count)),
+            SEAT_RATE_ATTR: Decimal(rate),
+            "status": status,
+            "version": "3",
+            "updated_at": _now_iso(),
+        }
+        if manual_limit_microusd is not None:
+            item[MANUAL_LIMIT_ATTR] = Decimal(int(manual_limit_microusd))
+        try:
+            self._table.put_item(
+                Item=item, ConditionExpression="attribute_not_exists(tenant_id)")
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def create_seat_tracked_pool(
+        self, *, tenant_id: str, period: str, seat_count: int = 0,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        """Provision a tenant's pool for a period as SEAT-TRACKED.
+
+        Called at tenant creation. Writes no operator figure at all, so the row
+        follows the seat count from its first moment and reaches
+        `seats x rate` through the same delta every later membership change
+        applies -- rather than through a figure computed once at creation, which
+        is right only until the first hire.
+        """
+        self._seed_pool_row(
+            tenant_id=tenant_id, period=period, manual_limit_microusd=None,
+            status=status, seat_count=seat_count)
+        return self.get(tenant_id, period) or {}
+
+    def set_manual_limit(
+        self,
+        *,
+        tenant_id: str,
+        period: str,
+        manual_limit_microusd: int,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        """Set the operator's own ceiling figure for a period, latching the row
+        off seat tracking.
+
+        `manual_limit_microusd` is a figure, and `0` is a legal one meaning every
+        request refused. Asking for seat tracking back is `clear_manual_limit`,
+        which REMOVES the attribute -- there is no in-band value that means
+        "follow the seats", deliberately, because zero already means something
+        else to every existing caller.
+
+        RACE-SAFETY: `SET manual_limit = :asked ADD pool_limit :delta,
+        pool_headroom :delta` where `delta = new_baseline - old_baseline`, under a
+        CAS on all three values the delta was computed from (`seat_count`, the
+        prior `manual_limit` including its absence, and `pool_limit`). The money
+        moves as an ADD so a concurrent reserve's own `ADD pool_headroom :neg`
+        composes with it rather than being clobbered; the CAS is on the inputs so
+        a membership change that landed between the read and the write makes this
+        retry rather than apply a delta computed from a stale seat count. A
+        `ConditionalCheckFailed` means one of the three moved under us.
+
+        The granted term is deliberately NOT in the delta: an operator's figure
+        moves the baseline, and `pool_limit = baseline + granted` then moves by
+        the same amount with the granted term untouched.
+        """
+        asked = int(manual_limit_microusd)
         for _attempt in range(_SET_LIMIT_MAX_RETRIES):
-            existing = self.get(tenant_id, period)
+            existing = self.get(tenant_id, period, consistent_read=True)
             if existing is None:
-                # First creation: seed the row iff nobody else just created it.
-                headroom = new_limit  # reserved = settled = 0 at creation
-                try:
-                    self._table.put_item(
-                        Item={
-                            "tenant_id": tenant_id,
-                            "sk": budget_sk(period),
-                            "pool_limit_microusd": Decimal(new_limit),
-                            "pool_headroom_microusd": Decimal(headroom),
-                            "pool_reserved_microusd": Decimal(0),
-                            "pool_settled_microusd": Decimal(0),
-                            # NOTE: the PENDING-protocol per-hold marker is NO LONGER
-                            # a map on this pool item (docs/design/pending-protocol.md,
-                            # PR-1). The map design was rejected — it bloated the hot
-                            # pool item and its write cost rose super-linearly. Markers
-                            # now live in separate fixed-size items (SK=MARKER#<hold_id>,
-                            # see marker_sk / reserve_commit_txn_items). Nothing seeds a
-                            # map here anymore.
-                            "status": status,
-                            "sizing": sizing,
-                            "version": "2",
-                            "updated_at": _now_iso(),
-                        },
-                        ConditionExpression="attribute_not_exists(tenant_id)",
-                    )
-                except ClientError as e:
-                    if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                        continue  # someone created it first → fall through to update
-                    raise
-                return self.get(tenant_id, period) or {}
+                if self._seed_pool_row(
+                        tenant_id=tenant_id, period=period,
+                        manual_limit_microusd=asked, status=status):
+                    return self.get(tenant_id, period) or {}
+                continue  # someone created it first -> re-read and take the CAS
 
             if "pool_headroom_microusd" not in existing:
-                # LEGACY row (migration step 1 / repair): no headroom attribute
-                # yet. SET it to the invariant value from the row's OWN live
-                # mirrors, guarded by `attribute_not_exists(pool_headroom)` so a
-                # concurrent write that just created headroom is never clobbered.
-                # This is the only branch that SETs (rather than ADDs) headroom,
-                # and it only ever fires on a row that has none — so it cannot
-                # overwrite a live reserve's headroom move.
-                reserved = int(existing.get("pool_reserved_microusd", 0))
-                settled = int(existing.get("pool_settled_microusd", 0))
-                headroom = new_limit - reserved - settled
-                try:
-                    self._table.update_item(
-                        Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-                        UpdateExpression=(
-                            "SET pool_limit_microusd = :new, "
-                            "pool_headroom_microusd = :h, #st = :status, "
-                            "sizing = :sizing, version = :ver, updated_at = :now"
-                        ),
-                        ConditionExpression="attribute_not_exists(pool_headroom_microusd)",
-                        ExpressionAttributeNames={"#st": "status"},
-                        ExpressionAttributeValues={
-                            ":new": Decimal(new_limit),
-                            ":h": Decimal(headroom),
-                            ":status": status,
-                            ":sizing": sizing,
-                            ":ver": "2",
-                            ":now": _now_iso(),
-                        },
-                    )
-                except ClientError as e:
-                    if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                        continue  # headroom appeared under us → re-read, take ADD branch
-                    raise
-                return self.get(tenant_id, period) or {}
+                # A row from before the headroom counter existed. Repair it to the
+                # invariant first, race-safely, then take the ordinary path: this
+                # branch is a migration artifact and must not also carry the
+                # ceiling logic (it did once, and that duplication is where the
+                # two readings of "headroom" came from).
+                self.reconcile_headroom(tenant_id, period)
+                continue
 
+            old_baseline = baseline_microusd(existing)
+            delta = asked - old_baseline
             old_limit = int(existing.get("pool_limit_microusd", 0))
-            delta = new_limit - old_limit
+            old_seats = int(existing.get(SEAT_COUNT_ATTR, 0))
+            had_manual = not is_seat_tracked(existing)
+
+            cond = ["pool_limit_microusd = :old_limit"]
+            values: dict[str, Any] = {
+                ":asked": Decimal(asked),
+                ":delta": Decimal(delta),
+                ":old_limit": Decimal(old_limit),
+                ":status": status,
+                ":ver": "3",
+                ":now": _now_iso(),
+            }
+            if SEAT_COUNT_ATTR in existing:
+                cond.append("seat_count = :old_seats")
+                values[":old_seats"] = Decimal(old_seats)
+            else:
+                cond.append("attribute_not_exists(seat_count)")
+            if had_manual:
+                cond.append("manual_limit_microusd = :old_manual")
+                values[":old_manual"] = Decimal(int(existing[MANUAL_LIMIT_ATTR]))
+            else:
+                cond.append("attribute_not_exists(manual_limit_microusd)")
             try:
-                # Row already carries headroom. Shift it by the ceiling delta
-                # only. Never SET headroom or touch the reserved/settled mirrors,
-                # so a concurrent reserve's `ADD pool_headroom :neg` composes with
-                # this `ADD :delta` (DynamoDB serializes the two ADDs).
                 self._table.update_item(
                     Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                    # Literal attribute names, never assembled: the
+                    # write-discipline guard reads these expressions statically, and
+                    # a name it cannot resolve is a pool write it cannot track.
                     UpdateExpression=(
-                        "SET pool_limit_microusd = :new, #st = :status, "
-                        "sizing = :sizing, version = :ver, updated_at = :now "
-                        "ADD pool_headroom_microusd :delta"
+                        "SET manual_limit_microusd = :asked, #st = :status, "
+                        "version = :ver, updated_at = :now "
+                        "ADD pool_limit_microusd :delta, pool_headroom_microusd :delta"
                     ),
-                    ConditionExpression="pool_limit_microusd = :old",
+                    ConditionExpression=" AND ".join(cond),
                     ExpressionAttributeNames={"#st": "status"},
-                    ExpressionAttributeValues={
-                        ":new": Decimal(new_limit),
-                        ":old": Decimal(old_limit),
-                        ":delta": Decimal(delta),
-                        ":status": status,
-                        ":sizing": sizing,
-                        ":ver": "2",
-                        ":now": _now_iso(),
-                    },
+                    ExpressionAttributeValues=values,
                 )
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                    continue  # limit moved under us → re-read and retry
+                    continue  # an input moved under us -> re-read and recompute
                 raise
             return self.get(tenant_id, period) or {}
 
         raise RuntimeError(
-            f"set_pool_limit: lost the limit CAS {_SET_LIMIT_MAX_RETRIES}x for "
-            f"{tenant_id}/{period}; concurrent admin writes to the same pool ceiling"
-        )
+            f"set_manual_limit: lost the ceiling CAS {_SET_LIMIT_MAX_RETRIES}x for "
+            f"{tenant_id}/{period}; concurrent writes to the same pool ceiling")
+
+    def clear_manual_limit(self, *, tenant_id: str, period: str) -> dict[str, Any]:
+        """Return the row to seat tracking: REMOVE the operator's figure and move
+        the money to the seat term.
+
+        This is the reversal the one-way door lacked. It is not "set the figure to
+        the seat term" -- that would leave a figure behind, and the next hire
+        would not move it. Absence is the state, so absence is what is written.
+
+        Idempotent: a row that already follows seats has `delta = 0` and this is a
+        touch. Same CAS shape as `set_manual_limit`, for the same reason.
+        """
+        for _attempt in range(_SET_LIMIT_MAX_RETRIES):
+            existing = self.get(tenant_id, period, consistent_read=True)
+            if existing is None:
+                return {}
+            if "pool_headroom_microusd" not in existing:
+                self.reconcile_headroom(tenant_id, period)
+                continue
+            old_baseline = baseline_microusd(existing)
+            new_baseline = seat_term_microusd(existing)
+            delta = new_baseline - old_baseline
+            old_limit = int(existing.get("pool_limit_microusd", 0))
+            old_seats = int(existing.get(SEAT_COUNT_ATTR, 0))
+
+            cond = ["pool_limit_microusd = :old_limit"]
+            values: dict[str, Any] = {
+                ":delta": Decimal(delta),
+                ":old_limit": Decimal(old_limit),
+                ":ver": "3",
+                ":now": _now_iso(),
+            }
+            if SEAT_COUNT_ATTR in existing:
+                cond.append("seat_count = :old_seats")
+                values[":old_seats"] = Decimal(old_seats)
+            else:
+                cond.append("attribute_not_exists(seat_count)")
+            if is_seat_tracked(existing):
+                cond.append("attribute_not_exists(manual_limit_microusd)")
+            else:
+                cond.append("manual_limit_microusd = :old_manual")
+                values[":old_manual"] = Decimal(int(existing[MANUAL_LIMIT_ATTR]))
+            try:
+                self._table.update_item(
+                    Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                    UpdateExpression=(
+                        "REMOVE manual_limit_microusd "
+                        "SET version = :ver, updated_at = :now "
+                        "ADD pool_limit_microusd :delta, pool_headroom_microusd :delta"
+                    ),
+                    ConditionExpression=" AND ".join(cond),
+                    ExpressionAttributeValues=values,
+                )
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    continue
+                raise
+            return self.get(tenant_id, period) or {}
+
+        raise RuntimeError(
+            f"clear_manual_limit: lost the ceiling CAS {_SET_LIMIT_MAX_RETRIES}x for "
+            f"{tenant_id}/{period}; concurrent writes to the same pool ceiling")
 
     def adjust_pool_for_seat_delta(
         self, *, tenant_id: str, period: str, seat_delta: int
     ) -> bool:
-        """Apply a membership change to a `sizing="per_seat"` pool (L4):
-        `ADD pool_limit_microusd ±seat, pool_headroom_microusd ±seat`, both by
-        the SAME amount (`seat_delta x SEAT_MONTHLY_USD` micro-USD), in one
-        conditional UpdateItem guarded on `sizing = "per_seat"`.
+        """Apply a membership change to a tenant's pool row for `period`.
 
-        Deliberately a PURE ADD, not `set_pool_limit`'s CAS-on-old-value: a
-        delta needs no read-back snapshot to be safe -- ADD composes with any
-        concurrent ADD to the same attribute (a live reserve's
-        `pool_headroom -= amount`, or another membership delta), so there is no
-        read-then-write window in which a concurrent move is lost. This is
-        rule 3's "guarded delta" shape carried to its natural conclusion: no
-        `pool_base` is stored and headroom is never recomputed from
-        `reserved`/`settled` -- both counters simply move by the same amount.
+        `seat_count` moves on EVERY row, seat-tracked or not, and the money moves
+        only when the row is seat-tracked. That split is the point of the change:
+        the seat count is a fact about the tenant, so a manual row that stops
+        counting seats stops being able to say its entitlement has outgrown its
+        figure -- which is the one thing an operator needs in order to know the
+        figure is now the wrong one.
 
-        No-ops (returns False, never raises) when:
-          * the row has no `sizing` attribute at all -- a pool written before
-            this change, or by a caller that never set it. Absence means
-            "fixed" (L4), so it must never start auto-following seats.
-          * `sizing = "fixed"` -- an explicit `set_pool_limit` call has stopped
-            the auto-adjust for this row.
-          * no BUDGET row exists for `period` -- the tenant is unlimited at the
-            pool level for that period; there is nothing to adjust.
-        A membership write (add/remove a user) must never fail, or be forced
-        to retry, because of the pool's unrelated state -- this method is
-        built to be safe to call unconditionally after one.
+        The seat-tracked write is `ADD seat_count :ds, pool_limit :d,
+        pool_headroom :d` guarded by `attribute_not_exists(manual_limit)`. It is a
+        PURE ADD by design: a delta needs no snapshot to be safe, so it composes
+        with a live reserve's `ADD pool_headroom :neg` and with another membership
+        delta, and there is no read-then-write window in which a concurrent move
+        is lost. On a condition failure (the row carries an operator's figure) it
+        RETRIES with `seat_count` alone, so the seat count is recorded either way.
+
+        Returns True iff the money moved. Never raises for the row's state: a
+        membership write must never fail, or be forced to retry, because of the
+        pool's unrelated state, so a missing row is a no-op.
+
+        A missing row is a no-op and NOT a create: `ADD` on an absent item creates
+        it, and an item created by a membership delta would be a pool row with a
+        ceiling and no seat rate, no status and no counters -- exactly the partial
+        row a period boundary must not produce. Both writes are therefore
+        conditioned on `attribute_exists(tenant_id)` as well.
         """
         if seat_delta == 0:
             return False
-        delta_microusd = int(seat_delta) * seat_monthly_usd() * 1_000_000
+        # The rate the ROW's ceiling is denominated in, not the process's. They
+        # agree on any booted process (R20's refusal is what makes that true), and
+        # reading the row's own figure is what keeps a rate change a migration.
+        existing = self.get(tenant_id, period, consistent_read=True)
+        if existing is None:
+            return False
+        delta_microusd = int(seat_delta) * row_seat_rate_microusd(existing)
+        seats = Decimal(int(seat_delta))
         try:
             self._table.update_item(
                 Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
                 UpdateExpression=(
-                    "ADD pool_limit_microusd :d, pool_headroom_microusd :d "
-                    "SET updated_at = :now"
+                    "ADD seat_count :ds, pool_limit_microusd :d, "
+                    "pool_headroom_microusd :d SET updated_at = :now"
                 ),
-                ConditionExpression="sizing = :per_seat",
+                ConditionExpression=(
+                    "attribute_exists(tenant_id) AND "
+                    "attribute_not_exists(manual_limit_microusd)"
+                ),
                 ExpressionAttributeValues={
+                    ":ds": seats,
                     ":d": Decimal(delta_microusd),
-                    ":per_seat": SIZING_PER_SEAT,
                     ":now": _now_iso(),
                 },
             )
             return True
         except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                return False  # fixed / no sizing attribute / no row at all
-            raise
+            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+        # The row carries an operator's figure (or vanished). The money must not
+        # move, but the seat count still must: retry with the seat count alone.
+        try:
+            self._table.update_item(
+                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+                UpdateExpression="ADD seat_count :ds SET updated_at = :now",
+                ConditionExpression="attribute_exists(tenant_id)",
+                ExpressionAttributeValues={":ds": seats, ":now": _now_iso()},
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+        return False
 
     def reconcile_headroom(self, tenant_id: str, period: str) -> dict[str, Any]:
         """Repair `pool_headroom` to the invariant `limit - reserved - settled`,

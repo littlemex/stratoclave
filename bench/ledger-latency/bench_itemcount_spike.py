@@ -217,8 +217,8 @@ def main(argv=None) -> int:
     for n_items in item_counts:
         # A fresh pool per item-count so a lowered headroom from a prior sweep
         # never starves the next. A huge pool: we measure the write, not a 402.
-        budgets.set_pool_limit(tenant_id=args.tenant, period=period,
-                               pool_limit_microusd=args.pool_microusd, status="active")
+        budgets.set_manual_limit(tenant_id=args.tenant, period=period,
+                               manual_limit_microusd=args.pool_microusd, status="active")
 
         floor_rows, floor_attr = _run_phase(
             client, mods, args.tenant, period, args.amount_microusd, n_items,

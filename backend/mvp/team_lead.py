@@ -36,7 +36,7 @@ from dynamo import (
     current_period,
 )
 from limits import MAX_TOKEN_CREDIT
-from dynamo.tenant_budgets import PoolLimitExceedsMaximumError, SIZING_FIXED, seat_pool_limit_microusd
+from dynamo.tenant_budgets import PoolLimitExceedsMaximumError, seat_pool_limit_microusd
 from dynamo.user_tenants import CreditExhaustedError, is_unlimited
 from .admin_tenants import (
     PoolBudgetResponse,
@@ -44,6 +44,7 @@ from .admin_tenants import (
     _MICRO_USD_PER_CENT,
     _pool_response,
     _provision_seat_pool,
+    apply_pool_budget_request,
 )
 from .credit_ops import CreditAction
 
@@ -243,53 +244,52 @@ def set_own_pool_budget(
     body: SetPoolBudgetRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:update-own")),
 ) -> PoolBudgetResponse:
-    """Set the caller's own tenant's dollar pool budget for a period (L5).
+    """Set the caller's own tenant's dollar pool budget for a period (L5), or
+    return it to the seat count.
 
     The admin-only ``PUT /admin/tenants/{id}/pool-budget`` mirror: same request
-    body, same semantics, same audit event (``tenant_pool_budget_set``) so a
-    pool ceiling looks identical in the log regardless of which route moved
-    it. Reuses `_require_owner` — the SAME ownership check every other
-    team-lead-scoped write in this router uses — so a team lead may set only
-    their OWN tenant's pool; another tenant's returns the same unified 404 as
-    every other endpoint here. Like the admin route, this always stops the
-    row's per-seat auto-adjust (``sizing -> "fixed"``, L4).
+    body, same semantics, same audit events, through the same shared
+    `apply_pool_budget_request`, so a pool ceiling looks identical in the log
+    regardless of which route moved it. Reuses `_require_owner` — the SAME
+    ownership check every other team-lead-scoped write in this router uses — so a
+    team lead may set only their OWN tenant's pool; another tenant's returns the
+    same unified 404 as every other endpoint here.
+
+    A team lead is therefore a WRITER of the ceiling, and this is the write that
+    ends seat tracking. `{"follow_seats": true}` is the reversal, available to the
+    same role that can make it necessary.
     """
     _require_owner(tenant_id, actor)
+    return apply_pool_budget_request(tenant_id=tenant_id, body=body, actor=actor)
 
-    period = body.period or current_period()
-    limit_microusd = int(body.limit_usd_cents) * _MICRO_USD_PER_CENT
 
-    repo = TenantBudgetsRepository()
-    before = repo.pool_summary(tenant_id, period)
-    repo.set_pool_limit(
-        tenant_id=tenant_id,
-        period=period,
-        pool_limit_microusd=limit_microusd,
-        status=body.status,
-        sizing=SIZING_FIXED,
-    )
-    summary = repo.pool_summary(tenant_id, period)
-    assert summary is not None  # just written
+@router.get("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
+def get_own_pool_budget(
+    tenant_id: str,
+    period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    actor: AuthenticatedUser = Depends(require_permission("tenants:read-own")),
+) -> PoolBudgetResponse:
+    """The caller's own tenant's pool budget, its composition and its mode.
 
-    log_audit_event(
-        event="tenant_pool_budget_set",
-        actor_id=actor.user_id,
-        actor_email=actor.email,
-        target_id=tenant_id,
-        target_type="tenant",
-        before={
-            "pool_limit_microusd": (before or {}).get("pool_limit_microusd"),
-            "status": (before or {}).get("status"),
-            "sizing": (before or {}).get("sizing"),
-        },
-        after={
-            "period": period,
-            "pool_limit_microusd": limit_microusd,
-            "status": body.status,
-            "sizing": SIZING_FIXED,
-        },
-    )
-    return _pool_response(tenant_id, period, summary)
+    A team lead can already SET this ceiling, and setting it is what ends seat
+    tracking — so without a read, the one role that can silently leave seat
+    tracking is the one role that cannot see it happened. The read is the same
+    shape the admin route returns, mode sentence included, rather than a reduced
+    one: a writer needs to see what it writes, and a second projection of the same
+    row is a second thing that can disagree with it.
+
+    404 when the tenant has no pool budget for the period, which is what an absent
+    row means: unlimited at the pool level, with only per-user token budgets
+    applying.
+    """
+    _require_owner(tenant_id, actor)
+    resolved = period or current_period()
+    summary = TenantBudgetsRepository().pool_summary(tenant_id, resolved)
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pool budget set for tenant {tenant_id} period {resolved}")
+    return _pool_response(tenant_id, resolved, summary)
 
 
 @router.get("/{tenant_id}/members", response_model=TenantMembersResponse)

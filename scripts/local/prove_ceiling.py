@@ -544,7 +544,7 @@ def main() -> None:
     ap.add_argument("--repetitions", type=int, default=2)
     ap.add_argument("--probes", type=int, default=6)
     # Headroom, not the limit. Spend from earlier runs stays in `pool_settled`,
-    # and `set_pool_limit` deliberately preserves it, so asking for a LIMIT means
+    # and `set_manual_limit` deliberately preserves it, so asking for a LIMIT means
     # the second run of the day has less room than the first and eventually the
     # budget stops binding for a reason that has nothing to do with the system
     # under test. The first run of this harness failed exactly that way.
@@ -588,8 +588,8 @@ def main() -> None:
     existing = repo.get(tenant, period) or {}
     already_settled = int(existing.get("pool_settled_microusd", 0) or 0)
     limit = already_settled + args.headroom_microusd
-    repo.set_pool_limit(
-        tenant_id=tenant, period=period, pool_limit_microusd=limit, status="active",
+    repo.set_manual_limit(
+        tenant_id=tenant, period=period, manual_limit_microusd=limit, status="active",
     )
     print(f"[prove_ceiling] tenant={tenant} period={period}")
     print(f"[prove_ceiling] already settled this period: {already_settled} microUSD; "

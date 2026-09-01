@@ -76,7 +76,9 @@ RESERVE_LIMITS: tuple[LimitKind, ...] = (
         name="tenant_dollar_pool",
         config_source=(
             "dynamo.tenant_budgets: the BUDGET#<period> row's pool_limit_microusd, "
-            "set by TenantBudgetsRepository.set_pool_limit"
+            "which is baseline + coalesce(pool_granted, 0), moved by "
+            "TenantBudgetsRepository.set_manual_limit / clear_manual_limit / "
+            "adjust_pool_for_seat_delta"
         ),
         module_name="dynamo.tenant_budgets",
         builder_qualname="TenantBudgetsRepository.reserve_txn_item",

@@ -164,8 +164,8 @@ def main(argv=None) -> int:
         # applied map + a share of the pool. The single-row case (n=1) reuses the
         # real budget row.
         if n == 1:
-            budgets.set_pool_limit(tenant_id=args.tenant, period=period,
-                                   pool_limit_microusd=args.pool_microusd, status="active")
+            budgets.set_manual_limit(tenant_id=args.tenant, period=period,
+                                   manual_limit_microusd=args.pool_microusd, status="active")
             # ensure the applied map exists on the real row.
             budgets.ensure_applied_map(tenant_id=args.tenant, period=period)
             return [budget_sk(period)]

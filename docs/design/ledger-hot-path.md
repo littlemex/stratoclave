@@ -69,7 +69,7 @@ Counterpart operations:
   `headroom += (reserved_amount − actual)`.
 - `release` / `reclaim` (unconditional ADD): return the hold's full amount →
   `headroom += amount`.
-- `set_pool_limit` (raise/lower) is NOT an unconditional ADD (Fable review
+- `set_manual_limit` (raise/lower) is NOT an unconditional ADD (Fable review
   finding 3): it is a **conditional delta-CAS** — `SET pool_limit = :new
   ADD pool_headroom (:new − :old)` guarded by `pool_limit = :old`, with a small
   bounded retry on `ConditionalCheckFailed` (a competing admin write). This

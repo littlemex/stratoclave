@@ -225,8 +225,8 @@ def main(argv=None) -> int:
 
     def _reseed():
         # A huge pool so the money gate never rejects; we measure latency only.
-        budgets.set_pool_limit(tenant_id=args.tenant, period=period,
-                               pool_limit_microusd=args.pool_microusd, status="active")
+        budgets.set_manual_limit(tenant_id=args.tenant, period=period,
+                               manual_limit_microusd=args.pool_microusd, status="active")
 
     modes = {
         "single_update": lambda attrib: _one_single_update(

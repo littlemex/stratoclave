@@ -133,13 +133,13 @@ def main(argv=None) -> int:
 def _seed_pool(tenant_id: str, pool_microusd: int) -> None:
     """Ensure the bench tenant has a dollar pool with `pool_microusd` for the
     current period, via the same TenantBudgets repository the app uses. Re-runnable
-    (set_pool_limit preserves running counters). A big pool so the bench never
+    (set_manual_limit preserves running counters). A big pool so the bench never
     hits pool exhaustion and measures the ledger write, not a 402 path."""
     from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
     repo = TenantBudgetsRepository()
     period = current_period()
-    repo.set_pool_limit(tenant_id=tenant_id, period=period,
-                        pool_limit_microusd=pool_microusd, status="active")
+    repo.set_manual_limit(tenant_id=tenant_id, period=period,
+                        manual_limit_microusd=pool_microusd, status="active")
     print(f"[seed] pool for {tenant_id} period {period}: {pool_microusd} micro-USD")
 
 

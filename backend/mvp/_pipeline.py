@@ -435,7 +435,7 @@ def _pool_settle_items(
     `attribute_exists(tenant_id)` gates the update: if the pool row was legit-
     imately deleted mid-flight (the `pool_vanished` path), an in-flight settle
     or reclaim must NOT resurrect it as a ghost row carrying a negative
-    `pool_reserved` (which a later `set_pool_limit` would preserve, inflating the
+    `pool_reserved` (which a later `set_manual_limit` would preserve, inflating the
     next period's effective budget). A cancelled update is a no-op: no row means
     no reservation to reconcile.
 

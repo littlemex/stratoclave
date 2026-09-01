@@ -18,7 +18,7 @@ from typing import Any, Literal, Optional
 
 from boto3.dynamodb.conditions import Key as boto3_key
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dynamo import (
     ADMIN_OWNED,
@@ -32,8 +32,6 @@ from dynamo import (
     current_period,
 )
 from dynamo.tenant_budgets import (
-    SIZING_FIXED,
-    SIZING_PER_SEAT,
     PoolLimitExceedsMaximumError,
     seat_pool_limit_microusd,
 )
@@ -171,19 +169,34 @@ class ResolveRetainedResponse(BaseModel):
 
 
 class SetPoolBudgetRequest(BaseModel):
-    """Set a tenant's dollar pool budget for a period.
+    """Set a tenant's dollar pool budget for a period, or return it to the seats.
 
     The limit is given in whole USD cents for precision without floats; the
     repository stores it as integer micro-USD. `period` defaults to the
     current calendar month (UTC) when omitted.
+
+    `{"follow_seats": true}` is the REVERSAL, and it is a separate field rather
+    than a magic value because there is no number that could carry it: zero is a
+    legal ceiling meaning every request refused, and every existing caller may
+    already be sending it. Reading zero as "follow the seats" would have reversed
+    the meaning of a request those callers have been making all along. Exactly one
+    of `limit_usd_cents` and `follow_seats` may be given.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    limit_usd_cents: int = Field(
+    limit_usd_cents: Optional[int] = Field(
+        default=None,
         ge=0,
         le=MAX_POOL_BUDGET_USD_CENTS,
-        description="Pool ceiling for the period, in whole USD cents.",
+        description="Pool ceiling for the period, in whole USD cents. Zero is a "
+                    "figure and means every request is refused.",
+    )
+    follow_seats: Optional[bool] = Field(
+        default=None,
+        description="True clears the hand-set figure so the ceiling follows the "
+                    "tenant's seat count again. Mutually exclusive with "
+                    "limit_usd_cents.",
     )
     period: Optional[str] = Field(
         default=None,
@@ -191,6 +204,22 @@ class SetPoolBudgetRequest(BaseModel):
         description="Billing period YYYY-MM (UTC). Defaults to the current month.",
     )
     status: Literal["active", "suspended"] = "active"
+
+    @model_validator(mode="after")
+    def _exactly_one_intent(self) -> "SetPoolBudgetRequest":
+        if self.follow_seats is False:
+            # `false` would be a third meaning ("stay manual but change nothing"),
+            # and a request whose meaning is "do nothing" is a request the caller
+            # believes it made. Refuse rather than guess.
+            raise ValueError(
+                "follow_seats accepts only true; omit the field to set a figure")
+        asked_figure = self.limit_usd_cents is not None
+        asked_seats = self.follow_seats is True
+        if asked_figure == asked_seats:
+            raise ValueError(
+                "give exactly one of limit_usd_cents (a figure) or "
+                "follow_seats: true (return to the seat count)")
+        return self
 
 
 class PoolBudgetResponse(BaseModel):
@@ -200,16 +229,44 @@ class PoolBudgetResponse(BaseModel):
     pool_limit_microusd: int
     pool_reserved_microusd: int
     pool_settled_microusd: int
+    # SIGNED and never clamped. A ceiling lowered below committed spend leaves a
+    # deficit, and the amount of it is what an operator has to act on: clamping
+    # it at zero reports "nothing left" for both "exactly nothing left" and
+    # "already $400 over", which are different problems with different fixes.
     remaining_microusd: int
+    available_microusd: int
+    over_ceiling_microusd: int
     # Convenience mirrors in USD cents for admin surfaces that prefer dollars.
+    # Truncated toward ZERO, not floored, so a negative available reads as the
+    # same magnitude the micro-USD figure carries.
     pool_limit_usd_cents: int
     remaining_usd_cents: int
-    # "per_seat" | "fixed" (L3/L4): whether this row still auto-adjusts with
-    # membership, or an explicit set_pool_limit call has stopped that.
-    sizing: str
-    # The tenant's current active membership count. Only populated by the GET
-    # endpoint (a live membership count on a PUT write path would be an extra
-    # query with no reader for it); omitted (None) elsewhere.
+    # --- the ceiling's composition, so the total beside it can be checked ---
+    # The mode is a SENTENCE, not a field: `mode_sentence` is what a surface
+    # renders, and the parts are here so a surface can build its own. A field
+    # spelling "per_seat" told an operator the name of a state and nothing about
+    # what it meant for them, which is why the state that ended seat tracking
+    # could be entered without anyone noticing they had entered it.
+    mode_sentence: str
+    seat_tracked: bool
+    seat_count: int
+    seat_rate_microusd: int
+    seat_entitlement_microusd: int
+    # None exactly when the row follows seats: ABSENCE is the sentinel, and zero
+    # is a figure meaning every request refused.
+    manual_limit_microusd: Optional[int]
+    # Zero until grants exist. Rendered anyway, so the composition printed beside
+    # the limit always adds up to it and no interval shows an admin a total that
+    # does not equal its parts.
+    pool_granted_microusd: int
+    baseline_microusd: int
+    # True when a manual figure has been outgrown by what the seats now entitle
+    # the tenant to -- the state an operator wants to know about, since the
+    # figure they chose is now smaller than the default would have been.
+    entitlement_exceeds_figure: bool
+    # The action that undoes the latch, named on the read so a surface does not
+    # have to know the request shape to offer it.
+    resume_action: Optional[str]
 
 
 class PoolReconciliationResponse(BaseModel):
@@ -249,9 +306,58 @@ class PoolReconciliationResponse(BaseModel):
 _MICRO_USD_PER_CENT = 10_000  # 1 cent = 10_000 micro-USD
 
 
+def _cents_toward_zero(microusd: int) -> int:
+    """Micro-USD to whole cents, truncated toward ZERO on the magnitude.
+
+    Plain `//` floors, which on a NEGATIVE available balance reports a deficit one
+    cent LARGER than the micro-USD figure says. The cent mirror must never
+    disagree with the figure it mirrors, in either direction, so the truncation is
+    on the magnitude and the sign is reapplied. Integer-only; matches the
+    frontend's `fmtMicroUsd`.
+    """
+    m = int(microusd)
+    return -((-m) // _MICRO_USD_PER_CENT) if m < 0 else m // _MICRO_USD_PER_CENT
+
+
+def _mode_sentence(summary: dict) -> str:
+    """The pool's mode as a sentence an operator can act on.
+
+    A sentence rather than a field because the field was the defect: a row
+    labelled `fixed` said nothing about what the tenant was entitled to, nothing
+    about how the label got there, and nothing about how to undo it -- so the
+    write that ended seat tracking was invisible to the role that made it.
+    """
+    seats = int(summary.get("seat_count", 0))
+    entitlement = int(summary.get("seat_entitlement_microusd", 0))
+    ent_usd = _cents_toward_zero(entitlement) / 100
+    if summary.get("seat_tracked"):
+        return (
+            f"This pool follows the tenant's seat count: {seats} "
+            f"{'seat' if seats == 1 else 'seats'} entitle it to ${ent_usd:,.2f} a "
+            f"month, and it moves by one seat's worth whenever somebody joins or "
+            f"leaves. Setting a figure by hand stops that."
+        )
+    figure = int(summary.get("manual_limit_microusd") or 0)
+    fig_usd = _cents_toward_zero(figure) / 100
+    tail = (
+        f"The seats would entitle it to ${ent_usd:,.2f}, which is more than the "
+        f"figure, so the figure is now the smaller of the two."
+        if entitlement > figure else
+        f"The seats would entitle it to ${ent_usd:,.2f}."
+    )
+    return (
+        f"This pool is held at ${fig_usd:,.2f}, a figure set by hand, and no "
+        f"longer follows the tenant's seat count. {tail} Sending "
+        f"{{\"follow_seats\": true}} to this endpoint returns it to the seat count."
+    )
+
+
 def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetResponse":
     limit = int(summary["pool_limit_microusd"])
-    remaining = int(summary["remaining_microusd"])
+    available = int(summary["available_microusd"])
+    manual = summary.get("manual_limit_microusd")
+    entitlement = int(summary.get("seat_entitlement_microusd", 0))
+    seat_tracked = bool(summary.get("seat_tracked"))
     return PoolBudgetResponse(
         tenant_id=tenant_id,
         period=period,
@@ -259,10 +365,24 @@ def _pool_response(tenant_id: str, period: str, summary: dict) -> "PoolBudgetRes
         pool_limit_microusd=limit,
         pool_reserved_microusd=int(summary["pool_reserved_microusd"]),
         pool_settled_microusd=int(summary["pool_settled_microusd"]),
-        remaining_microusd=remaining,
-        pool_limit_usd_cents=limit // _MICRO_USD_PER_CENT,
-        remaining_usd_cents=remaining // _MICRO_USD_PER_CENT,
-        sizing=str(summary.get("sizing", SIZING_FIXED)),
+        remaining_microusd=available,
+        available_microusd=available,
+        over_ceiling_microusd=int(summary.get("over_ceiling_microusd", 0)),
+        pool_limit_usd_cents=_cents_toward_zero(limit),
+        remaining_usd_cents=_cents_toward_zero(available),
+        mode_sentence=_mode_sentence(summary),
+        seat_tracked=seat_tracked,
+        seat_count=int(summary.get("seat_count", 0)),
+        seat_rate_microusd=int(summary.get("seat_rate_microusd", 0)),
+        seat_entitlement_microusd=entitlement,
+        manual_limit_microusd=None if manual is None else int(manual),
+        pool_granted_microusd=int(summary.get("pool_granted_microusd", 0)),
+        baseline_microusd=int(summary.get("baseline_microusd", limit)),
+        entitlement_exceeds_figure=(
+            not seat_tracked and entitlement > int(manual or 0)),
+        # Named on the read rather than only documented, so a surface can offer
+        # the reversal without knowing the request shape.
+        resume_action=None if seat_tracked else "follow_seats",
     )
 
 
@@ -366,24 +486,27 @@ def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
 def _provision_seat_pool(
     tenant_id: str, *, pool_limit_microusd: int, actor: AuthenticatedUser
 ) -> None:
-    """Write the tenant's default dollar pool at creation (L3): a `sizing="per_seat"`
-    row for the current period, at ZERO seats. It reaches `seats x SEAT_MONTHLY_USD`
-    through the same ±1-seat delta every membership change applies, so the ceiling
-    equals the seat count at every moment rather than at creation only. Shared by
-    both create_tenant routes (admin and team-lead) so the pool a tenant gets does
-    not depend on which route created it.
+    """Write the tenant's default dollar pool at creation: a SEAT-TRACKED row for
+    the current period, at ZERO seats. It reaches `seats x rate` through the same
+    ±1-seat delta every membership change applies, so the ceiling equals the seat
+    count at every moment rather than at creation only. Shared by both
+    create_tenant routes (admin and team-lead) so the pool a tenant gets does not
+    depend on which route created it.
+
+    Seat-tracked means the row carries NO operator figure at all: absence is the
+    sentinel, so nothing has to be written to say "follow the seats".
 
     `pool_limit_microusd` is computed and L8-validated by the CALLER before the
-    Tenants row is written (see `create_tenant`), so a misconfigured
-    SEAT_MONTHLY_USD refuses loudly with no tenant created at all — this
-    function's own write is not where that check happens.
+    Tenants row is written (see `create_tenant`), so a misconfigured seat rate
+    refuses loudly with no tenant created at all — this function's own write is not
+    where that check happens. At zero seats it is zero, which is why the row is
+    seeded from the seat count rather than from that figure.
     """
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
+    TenantBudgetsRepository().create_seat_tracked_pool(
         tenant_id=tenant_id,
         period=period,
-        pool_limit_microusd=pool_limit_microusd,
-        sizing=SIZING_PER_SEAT,
+        seat_count=0,
     )
     log_audit_event(
         event="tenant_pool_provisioned",
@@ -394,7 +517,7 @@ def _provision_seat_pool(
         after={
             "period": period,
             "pool_limit_microusd": pool_limit_microusd,
-            "sizing": SIZING_PER_SEAT,
+            "seat_tracked": True,
             "seats": 0,
         },
     )
@@ -607,42 +730,48 @@ def get_tenant_usage(
     return bucket
 
 
-@router.put("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
-def set_pool_budget(
-    tenant_id: str,
-    body: SetPoolBudgetRequest,
-    actor: AuthenticatedUser = Depends(require_permission("tenants:update")),
-) -> PoolBudgetResponse:
-    """Set (create or update) the tenant's dollar pool budget for a period.
+def apply_pool_budget_request(
+    *, tenant_id: str, body: SetPoolBudgetRequest, actor: AuthenticatedUser
+) -> "PoolBudgetResponse":
+    """Apply a pool-budget PUT and audit it. Shared by the admin route and the
+    team-lead route so the two cannot drift: both are writers of the ceiling, both
+    latch the row off seat tracking, and the log must read the same either way.
 
-    The pool is enforced *before* every inference call in the credit pipeline:
-    when a tenant has a pool for the current period, each request reserves its
-    dollar cost from the pool atomically with the per-user token debit, so the
-    tenant cannot overspend its budget even under concurrency. This is a
-    control a credential broker cannot offer — there is no request-time choke
-    point outside a gateway.
+    Two audit events, not one. `tenant_pool_budget_set` records the figure, as it
+    always has. A `tenant_pool_mode_changed` event is emitted IN ADDITION whenever
+    the row crosses between following the seats and holding a figure, because a
+    figure change and a mode change are different facts and the second one is the
+    consequential one: it is the write that ends seat tracking, and before this it
+    was inferable only by comparing two figures in two log lines.
     """
-    tenant = TenantsRepository().get(tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
     period = body.period or current_period()
-    limit_microusd = int(body.limit_usd_cents) * _MICRO_USD_PER_CENT
-
     repo = TenantBudgetsRepository()
     before = repo.pool_summary(tenant_id, period)
-    repo.set_pool_limit(
-        tenant_id=tenant_id,
-        period=period,
-        pool_limit_microusd=limit_microusd,
-        status=body.status,
-        # An explicit admin PUT always stops the per-seat auto-adjust for this
-        # row (L4) — this is the ONE thing an admin figure and a team-lead
-        # figure (below) agree on.
-        sizing=SIZING_FIXED,
-    )
+    was_seat_tracked = bool((before or {}).get("seat_tracked", True))
+
+    if body.follow_seats:
+        if before is None:
+            # Nothing to clear, and creating a row here would invent a ceiling
+            # nobody asked for. The tenant is unlimited at the pool level for this
+            # period; that is what an absent row means and it is not this
+            # endpoint's business to change it.
+            raise HTTPException(
+                status_code=404,
+                detail=f"No pool budget set for tenant {tenant_id} period {period}")
+        repo.clear_manual_limit(tenant_id=tenant_id, period=period)
+        limit_microusd: Optional[int] = None
+    else:
+        limit_microusd = int(body.limit_usd_cents or 0) * _MICRO_USD_PER_CENT
+        repo.set_manual_limit(
+            tenant_id=tenant_id,
+            period=period,
+            manual_limit_microusd=limit_microusd,
+            status=body.status,
+        )
+
     summary = repo.pool_summary(tenant_id, period)
     assert summary is not None  # just written
+    now_seat_tracked = bool(summary.get("seat_tracked"))
 
     log_audit_event(
         event="tenant_pool_budget_set",
@@ -653,16 +782,61 @@ def set_pool_budget(
         before={
             "pool_limit_microusd": (before or {}).get("pool_limit_microusd"),
             "status": (before or {}).get("status"),
-            "sizing": (before or {}).get("sizing"),
+            "manual_limit_microusd": (before or {}).get("manual_limit_microusd"),
+            "seat_tracked": was_seat_tracked,
         },
         after={
             "period": period,
-            "pool_limit_microusd": limit_microusd,
-            "status": body.status,
-            "sizing": SIZING_FIXED,
+            "pool_limit_microusd": int(summary["pool_limit_microusd"]),
+            "manual_limit_microusd": summary.get("manual_limit_microusd"),
+            "status": str(summary.get("status", "active")),
+            "seat_tracked": now_seat_tracked,
         },
     )
+    if was_seat_tracked != now_seat_tracked:
+        log_audit_event(
+            event="tenant_pool_mode_changed",
+            actor_id=actor.user_id,
+            actor_email=actor.email,
+            target_id=tenant_id,
+            target_type="tenant",
+            before={"seat_tracked": was_seat_tracked},
+            after={
+                "period": period,
+                "seat_tracked": now_seat_tracked,
+                "seat_count": int(summary.get("seat_count", 0)),
+                "seat_entitlement_microusd": int(
+                    summary.get("seat_entitlement_microusd", 0)),
+                "manual_limit_microusd": summary.get("manual_limit_microusd"),
+            },
+        )
     return _pool_response(tenant_id, period, summary)
+
+
+@router.put("/{tenant_id}/pool-budget", response_model=PoolBudgetResponse)
+def set_pool_budget(
+    tenant_id: str,
+    body: SetPoolBudgetRequest,
+    actor: AuthenticatedUser = Depends(require_permission("tenants:update")),
+) -> PoolBudgetResponse:
+    """Set the tenant's dollar pool budget for a period, or return it to the seats.
+
+    The pool is enforced *before* every inference call in the credit pipeline:
+    when a tenant has a pool for the current period, each request reserves its
+    dollar cost from the pool atomically with the per-user token debit, so the
+    tenant cannot overspend its budget even under concurrency. This is a
+    control a credential broker cannot offer — there is no request-time choke
+    point outside a gateway.
+
+    Setting a figure stops the ceiling following the tenant's seat count, and
+    `{"follow_seats": true}` starts it again. The reversal is what this endpoint
+    lacked: a figure set once stopped seat tracking permanently, with no request
+    that could undo it.
+    """
+    tenant = TenantsRepository().get(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return apply_pool_budget_request(tenant_id=tenant_id, body=body, actor=actor)
 
 
 def _attempt_marker(tenant_id: str, hold_id: str) -> Optional[str]:

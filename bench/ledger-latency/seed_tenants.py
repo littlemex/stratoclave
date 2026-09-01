@@ -25,8 +25,8 @@ def seed(prefix: str, count: int, pool_microusd: int) -> None:
     repo = TenantBudgetsRepository()
     period = current_period()
     for tid in tenant_ids(prefix, count):
-        repo.set_pool_limit(tenant_id=tid, period=period,
-                            pool_limit_microusd=pool_microusd, status="active")
+        repo.set_manual_limit(tenant_id=tid, period=period,
+                            manual_limit_microusd=pool_microusd, status="active")
     print(f"[seed] {count} tenants ({prefix}00..{prefix}{count-1:02d}) "
           f"pool={pool_microusd} micro-USD for period {period}")
 
