@@ -90,6 +90,35 @@ export interface EcsStackProps extends cdk.StackProps {
   enableVsrConfigBucket?: boolean;
 
   /**
+   * Activates the live pricing subsystem (docs/design/price-feeds.md). Sets
+   * `STRATOCLAVE_PRICE_SOURCE` to this value (e.g. `"bedrock-live"`) on the task
+   * definition, AND is the switch that decides whether the read-only
+   * price-discovery IAM statement (`bedrock:ListFoundationModelAgreementOffers`,
+   * `pricing:GetProducts`) is attached to the task role at all — the two are
+   * gated on the same prop so a deployment cannot carry the permission with no
+   * variable naming a source to use it, or the variable with no permission to
+   * fetch. Absent/undefined => neither is present, and `active_source_name()`
+   * resolves to the bundled `json` source exactly as it does today (feature
+   * ships dark).
+   */
+  priceSource?: string;
+
+  /**
+   * Feed knobs, passed through only when `priceSource` is set (docs/design/price-feeds.md
+   * §5, "Operating it"). Every field is optional; an absent field leaves the
+   * backend's own built-in default in force, so this carries only the
+   * overrides an operator actually wants, not a mandatory full config.
+   */
+  priceFeed?: {
+    /** `STRATOCLAVE_PRICE_FEED_INTERVAL_SECONDS` */
+    intervalSeconds?: number;
+    /** `STRATOCLAVE_PRICE_FEED_BUDGET_SECONDS` */
+    budgetSeconds?: number;
+    /** `STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS` */
+    staleAfterSeconds?: number;
+  };
+
+  /**
    * P1-C (2026-04 security review).
    *
    * `enableExecuteCommand: true` means any principal with
@@ -744,17 +773,36 @@ export class EcsStack extends cdk.Stack {
     // actions here are reads; neither is resource-scopeable in a way that has been
     // tested, so they follow the `*` precedent above rather than a guess that fails
     // closed at refresh time.
-    this.taskDefinition.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        sid: 'AllowReadOnlyPriceDiscovery',
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'bedrock:ListFoundationModelAgreementOffers',
-          'pricing:GetProducts',
-        ],
-        resources: ['*'],
-      }),
-    );
+    //
+    // Gated on `props.priceSource`, same as the env vars built below: this statement
+    // and `STRATOCLAVE_PRICE_SOURCE` are the two halves of turning the subsystem on,
+    // and a deployment carrying one without the other is either paying for a
+    // permission it never uses or naming a source it cannot fetch. Ships dark —
+    // absent `priceSource`, neither is present, and this is a no-op.
+    const priceFeedEnv: { [key: string]: string } = {};
+    if (props.priceSource) {
+      this.taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'AllowReadOnlyPriceDiscovery',
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'bedrock:ListFoundationModelAgreementOffers',
+            'pricing:GetProducts',
+          ],
+          resources: ['*'],
+        }),
+      );
+      priceFeedEnv.STRATOCLAVE_PRICE_SOURCE = props.priceSource;
+      if (props.priceFeed?.intervalSeconds !== undefined) {
+        priceFeedEnv.STRATOCLAVE_PRICE_FEED_INTERVAL_SECONDS = String(props.priceFeed.intervalSeconds);
+      }
+      if (props.priceFeed?.budgetSeconds !== undefined) {
+        priceFeedEnv.STRATOCLAVE_PRICE_FEED_BUDGET_SECONDS = String(props.priceFeed.budgetSeconds);
+      }
+      if (props.priceFeed?.staleAfterSeconds !== undefined) {
+        priceFeedEnv.STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS = String(props.priceFeed.staleAfterSeconds);
+      }
+    }
 
     // SSM messages permissions required by ECS Exec
     // (`enableExecuteCommand: true`).
@@ -915,7 +963,7 @@ export class EcsStack extends cdk.Stack {
         mode: ecs.AwsLogDriverMode.NON_BLOCKING,
         maxBufferSize: cdk.Size.mebibytes(25),
       }),
-      environment: { ...(props.environment || {}), ...vsrEnv },
+      environment: { ...(props.environment || {}), ...vsrEnv, ...priceFeedEnv },
       secrets: props.secrets || {},
       portMappings: [{ containerPort: props.containerPort || 8000, protocol: ecs.Protocol.TCP }],
       healthCheck: {

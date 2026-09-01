@@ -338,6 +338,27 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   // 404s and no bucket/grant/env is created (feature ships dark). The bucket
   // name is injected as VSR_CONFIG_BUCKET into the container by EcsStack.
   enableVsrConfigBucket: (process.env.EXTERNAL_VSR_ENABLED || 'false') === 'true',
+  // Live pricing subsystem (docs/design/price-feeds.md). Unset/empty =>
+  // `undefined`, same treatment as the numeric knobs below, so `priceSource` is
+  // absent rather than `''` and EcsStack's `if (props.priceSource)` gate — which
+  // decides both the env var and the price-discovery IAM statement together —
+  // stays off exactly as it is today. An unknown name is not rejected here: the
+  // registry of valid names lives in the backend (`price_sources.register_price_source`,
+  // Python), not in this CDK app, and the existing guard pattern for a
+  // synth-time enum rejection (`assertRegion` in region-config.ts) is for values
+  // this app can validate against a fixed, language-independent rule (an AWS
+  // region id). There is no such rule for a plugin name registered at Python
+  // import time, so inventing one here would either hardcode the backend's
+  // registry into the CDK app or duplicate a validation the backend already
+  // does loudly: `active_source()` raises `PriceSourceConfigError` at process
+  // start on an unknown name, which is the point in the system that actually
+  // knows the registered set.
+  priceSource: process.env.STRATOCLAVE_PRICE_SOURCE || undefined,
+  priceFeed: {
+    intervalSeconds: optionalPositiveIntFromEnv('STRATOCLAVE_PRICE_FEED_INTERVAL_SECONDS'),
+    budgetSeconds: optionalPositiveIntFromEnv('STRATOCLAVE_PRICE_FEED_BUDGET_SECONDS'),
+    staleAfterSeconds: optionalPositiveIntFromEnv('STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS'),
+  },
   // Task size and the per-task concurrency ceilings are one decision: threads
   // that have no CPU behind them queue instead of serving. Both are overridable
   // so a deployment can be sized for its own concurrency target without a code
