@@ -15,16 +15,27 @@ writers, either a covering reconciler check or an explicit exemption, and the
 widest value it can hold. An attribute found on a row and absent from here is a
 failure, which is what makes forgetting impossible rather than merely unlikely.
 
-WHY IT IS A MAPPING AND NOT A SEQUENCE. Two reasons, and the second is the one
-that matters. Every consumer either looks an attribute up by name or walks all of
-them, and the closed-world check's central operation is "is this key declared?" --
-which is a mapping's primitive and, for a sequence, an index it has to build first.
-And a mapping keyed by name makes TWO ENTRIES FOR ONE ATTRIBUTE unrepresentable. A
-sequence lets a careless append declare `seat_count` twice with different rollover
-classes, and then the rollover carries it while the size accounting counts it twice
-and neither reading is wrong on its own. The declaration's entire value is being the
-single source for this row, so a container that can hold a contradiction about it is
-the wrong container.
+WHAT CONSUMERS READ IS A MAPPING, AND IT IS DERIVED. `POOL_ROW_ATTRIBUTES` is
+`{spec.name: spec}` built from `_DECLARATIONS`. The mapping is the right shape to
+read: every consumer either looks an attribute up by name or walks all of them, and
+the closed-world check's central operation is "is this key declared?" -- a mapping's
+primitive, and for a sequence an index it has to build before the question can be
+asked.
+
+Deriving it rather than writing it out is the part worth explaining. A hand-written
+mapping would put each attribute's name in two places, the key and the spec, and two
+places holding one string is a redundancy that has to be watched -- a copy-paste that
+changed one and not the other would declare a class for an attribute nothing on the
+row is called and leave the real one unclassified, which is the declaration's own
+failure mode arriving through the declaration. Deriving the mapping removes the
+second copy instead of guarding it, so there is nothing left to watch. `name` stays on
+the spec, because a spec is read alone in places the key is not there to help -- a
+reconciler finding, a debugger, a traceback -- and removing the field to kill the
+disagreement would buy that with a spec that cannot say what it describes.
+
+One check survives, and it is a check rather than a watcher: a literal can repeat a
+name, and the comprehension would silently keep whichever entry came last. There is
+no laxer way to answer that than to ask it.
 
 WHY THIS IS ITS OWN MODULE, and it is load-bearing rather than tidiness. If the
 declaration lived inside `tenant_budgets.py` and the size guard read a second
@@ -126,24 +137,24 @@ class PoolAttribute:
 _MAX_POOL_MICROUSD_DIGITS = 16   # 1_000_000_000 cents x 10_000 = 1e13, 14 digits; +2 margin
 _SIGNED = 1                      # headroom is the one signed money attribute
 
-#: The one declaration, KEYED BY ATTRIBUTE NAME. F2 adds its grant cap here, in the
-#: same shape, or the closed-world test fails at F2's merge -- loudly, and at the
-#: moment the attribute appears, rather than silently on the 1st of the following
-#: month.
+#: The specs, in declaration order. F2 adds its grant cap here, in the same shape,
+#: or the closed-world test fails at F2's merge -- loudly, and at the moment the
+#: attribute appears, rather than silently on the 1st of the following month.
 #:
-#: A mapping rather than a sequence, for the reason in the module docstring: a
-#: sequence lets a careless append declare one attribute twice, in two different
-#: classes, and the declaration's entire value is being the single source. Here that
-#: is unrepresentable.
-POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
-    "tenant_id": PoolAttribute(
+#: Consumers read `POOL_ROW_ATTRIBUTES` below, which is DERIVED from this. Writing
+#: the mapping out by hand would put each attribute's name in two places -- the key
+#: and the spec -- and two places holding one string is a redundancy that has to be
+#: watched. Deriving it means there is only ever one string, so there is nothing to
+#: watch: the key IS the name, by construction.
+_DECLARATIONS: tuple[PoolAttribute, ...] = (
+    PoolAttribute(
         name="tenant_id",
         rollover=ROLLOVER_CARRIED,
         writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
         max_value_bytes=128,
         exemption="the partition key; it identifies the row rather than describing it",
     ),
-    "sk": PoolAttribute(
+    PoolAttribute(
         name="sk",
         rollover=ROLLOVER_DERIVED,
         writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
@@ -151,7 +162,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         exemption="the sort key; the new period's row has the new period in it by "
                   "construction, so carrying it verbatim would be the bug",
     ),
-    MANUAL_LIMIT_ATTR: PoolAttribute(
+    PoolAttribute(
         name=MANUAL_LIMIT_ATTR,
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -166,7 +177,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
              "new period still seat-tracked, so the rollover writes this attribute "
              "only when the old row had it. Zero is a figure and is carried as one.",
     ),
-    SEAT_COUNT_ATTR: PoolAttribute(
+    PoolAttribute(
         name=SEAT_COUNT_ATTR,
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -178,7 +189,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         check="seat_count_matches_membership",
         note="the seats do not reset at a period boundary; the people are still there",
     ),
-    SEAT_RATE_ATTR: PoolAttribute(
+    PoolAttribute(
         name=SEAT_RATE_ATTR,
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -191,7 +202,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         note="carried so a ceiling is reproducible; changing it is a migration, not a "
              "deploy, which is what makes the boot-time refusal honest",
     ),
-    POOL_GRANTED_ATTR: PoolAttribute(
+    PoolAttribute(
         name=POOL_GRANTED_ATTR,
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_OMISSION,
@@ -205,7 +216,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
              "most the period end; without that pin this reset destroys live granted "
              "capacity every 1st.",
     ),
-    "pool_limit_microusd": PoolAttribute(
+    PoolAttribute(
         name="pool_limit_microusd",
         rollover=ROLLOVER_DERIVED,
         writers=(
@@ -219,7 +230,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         note="recomputed on the new row from the carried attributes; carrying last "
              "month's number would carry a granted term the new row does not have",
     ),
-    "pool_headroom_microusd": PoolAttribute(
+    PoolAttribute(
         name="pool_headroom_microusd",
         rollover=ROLLOVER_DERIVED,
         writers=(
@@ -239,7 +250,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
              "figure an operator needs, and clamping it at zero hides the amount by "
              "which admission has already been exceeded",
     ),
-    "pool_reserved_microusd": PoolAttribute(
+    PoolAttribute(
         name="pool_reserved_microusd",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_ZERO,
@@ -254,7 +265,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         exemption="reconciled against the credit ledger, not against a row-side "
                   "source: mvp.admin_tenants.get_pool_reconciliation owns that axis",
     ),
-    "pool_settled_microusd": PoolAttribute(
+    PoolAttribute(
         name="pool_settled_microusd",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_ZERO,
@@ -265,7 +276,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
         exemption="reconciled against the credit ledger; same owner as reserved",
     ),
-    "pool_reclaimed_microusd": PoolAttribute(
+    PoolAttribute(
         name="pool_reclaimed_microusd",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_ZERO,
@@ -273,7 +284,7 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
         exemption="reconciled against the credit ledger; same owner as reserved",
     ),
-    "status": PoolAttribute(
+    PoolAttribute(
         name="status",
         rollover=ROLLOVER_CARRIED,
         writers=(
@@ -284,21 +295,21 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
         exemption="not a quantity; a suspended pool stays suspended across a boundary "
                   "because suspension is an operator's decision, not a month's",
     ),
-    "version": PoolAttribute(
+    PoolAttribute(
         name="version",
         rollover=ROLLOVER_DERIVED,
         writers=("(every writer in this module stamps it)",),
         max_value_bytes=4,
         exemption="a schema marker; the new row is stamped at the current version",
     ),
-    "updated_at": PoolAttribute(
+    PoolAttribute(
         name="updated_at",
         rollover=ROLLOVER_DERIVED,
         writers=("(every writer in this module stamps it)",),
         max_value_bytes=40,
         exemption="a timestamp; carrying the old row's would misdate the new one",
     ),
-    "sizing": PoolAttribute(
+    PoolAttribute(
         name="sizing",
         rollover=ROLLOVER_RESET,
         reset_by=RESET_BY_OMISSION,
@@ -309,19 +320,30 @@ POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {
                   "closed-world test must not fail on a row mid-migration. Nothing "
                   "reads it and the rollover never carries it forward.",
     ),
-}
+)
 
-# The key IS the attribute name, and the spec repeats it so a spec read on its own
-# can still say what it describes. Two places holding one string is two places to
-# disagree, so they are checked against each other at import: a copy-paste that
-# changes the key and not the name would otherwise declare a class for an attribute
-# nothing on the row is called, and leave the real one unclassified.
-for _key, _spec in POOL_ROW_ATTRIBUTES.items():
-    if _key != _spec.name:
-        raise RuntimeError(
-            f"POOL_ROW_ATTRIBUTES is keyed {_key!r} but its spec is named "
-            f"{_spec.name!r}; the key is the attribute name and nothing else")
-del _key, _spec
+#: The one declaration, as every consumer reads it: attribute name -> spec.
+#:
+#: DERIVED from `_DECLARATIONS`, so the key cannot disagree with the spec's own
+#: `name`: there is one string, not two, and therefore no check to keep. `name` stays
+#: on the spec because a spec is read alone in places the key is not there to help --
+#: a reconciler finding, a debugger, a traceback -- and dropping the field to remove
+#: the disagreement would pay for it with a spec that is anonymous exactly where it
+#: is read by itself.
+POOL_ROW_ATTRIBUTES: dict[str, PoolAttribute] = {a.name: a for a in _DECLARATIONS}
+
+# A literal can still repeat a name, and the comprehension above would silently keep
+# whichever entry came last -- so `seat_count` could be declared twice, in two
+# different rollover classes, and the surviving one would be an accident of order.
+# There is no laxer way to answer that question than to ask it, which is what makes
+# this a real guard rather than a watcher over a redundancy that should not exist.
+if len(POOL_ROW_ATTRIBUTES) != len(_DECLARATIONS):
+    _seen: set[str] = set()
+    _dupes = sorted({a.name for a in _DECLARATIONS
+                     if a.name in _seen or _seen.add(a.name)})
+    raise RuntimeError(
+        f"_DECLARATIONS declares {_dupes} more than once; one attribute has one "
+        f"classification, and the mapping would have silently kept the last")
 
 #: The attributes that MOVE THE CEILING, derived from the declaration rather than
 #: restated. The ceiling-writer document test reads this, so a writer added to
