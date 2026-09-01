@@ -1810,23 +1810,100 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
             "reason": "recovered" if recovered else "clean"}
 
 
-def _err_402(reason: str) -> HTTPException:
+def _refusal_body(
+    reason: str, message: str, *, wall: str,
+    pool_row: Optional[dict] = None, quota_scope: Optional[str] = None,
+) -> dict:
+    """The shared shape of every 402 body: which wall refused, whether that wall
+    can be raised, and — only when it can — how to ask.
+
+    `wall` is REQUIRED at every call site and is a `RESERVE_LIMITS` key, so a
+    refusal cannot describe a limit nothing enforces. `blocker` is its public name,
+    derived through one total projection rather than spelled at the call site: the
+    per-model wall is a single registry entry and two public blockers, because the
+    quota that refused can be the user's or the tenant's and a reader cannot act on
+    a hint that will not say which.
+
+    A-08-credit still holds: no balance and no limit reaches the caller. What is
+    added is the wall's identity, its grantability, and for the grantable wall the
+    REMAINING CAP — which is a bound on what an approver may give rather than a
+    figure about this tenant's spend, and is the difference between a surface that
+    pre-fills a workable amount and one that pre-fills an amount guaranteed to be
+    refused a day later.
+
+    A GRANTABLE WALL WITH NO ROW IN HAND OMITS THE HINT rather than raising. The
+    two figures come from the pool row the refusal already read; at the few sites
+    that do not have one, an absent hint is a client that falls back to asking a
+    person, while a raised exception here would turn a money refusal into a 500 on
+    the path least able to afford one.
+    """
+    from mvp import grants as _grants
+    from mvp.reserve_limits import is_grantable_wall
+
+    grantable = is_grantable_wall(wall)
+    body: dict = {
+        "type": "credit_exhausted",
+        "reason": reason,
+        "message": message,
+        "wall": wall,
+        "blocker": _grants.blocker_for_wall(wall, quota_scope=quota_scope),
+        "grantable": grantable,
+    }
+    if grantable:
+        if pool_row is None:
+            logger.warning(
+                "raise_hint_unavailable", reason=reason, wall=wall,
+                detail="the refusal had no pool row in hand, so the remaining "
+                       "grant cap could not be reported")
+        else:
+            body["raise_hint"] = _grants.raise_hint_for_pool_row(
+                pool_row).model_dump()
+    return body
+
+
+def _quota_scope_of_line(
+    line: Optional[dict], *, tenant_id: str, user_id: str, model: str, period: str,
+) -> Optional[str]:
+    """Which per-model counter a quota transaction line reserves against.
+
+    Read off the line's own key through `quota.reserved_scopes`, the function the
+    reclaim path already uses for the same question, rather than derived from the
+    line's position: the builder emits the tenant line, the user line, or both
+    depending on what is configured, so position is only a scope by coincidence.
+    None when it cannot be established, which the caller reports as an
+    unattributed scope rather than guessing one.
+    """
+    from .routing import quota as _quota
+
+    if not line:
+        return None
+    scopes = _quota.reserved_scopes(tenant_id, user_id, model, period, [line])
+    if scopes.get("tenant"):
+        return "tenant_quota"
+    if scopes.get("user"):
+        return "user_quota"
+    return None
+
+
+def _err_402(
+    reason: str, *, wall: str, pool_row: Optional[dict] = None,
+    quota_scope: Optional[str] = None,
+) -> HTTPException:
     # A-08-credit: never leak precise balances/limits to the caller; surface
     # only the machine-readable reason and a generic message. The exhaustion
     # is recorded server-side for operators.
     return HTTPException(
         status_code=402,
-        detail={
-            "type": "credit_exhausted",
-            "reason": reason,
-            "message": (
-                "Insufficient budget for this request. Contact your admin."
-            ),
-        },
+        detail=_refusal_body(
+            reason,
+            "Insufficient budget for this request. Contact your admin.",
+            wall=wall, pool_row=pool_row, quota_scope=quota_scope),
     )
 
 
-def _err_402_does_not_fit(reason: str) -> HTTPException:
+def _err_402_does_not_fit(
+    reason: str, *, wall: str, pool_row: Optional[dict] = None,
+) -> HTTPException:
     """402 for a request whose reservation bound EXCEEDS THE WHOLE `pool_limit`
     (docs/design/hard-ceiling.md item 2b, "cannot fit at all") — exact, no
     configured fraction involved: no amount of waiting or draining the pool
@@ -1843,16 +1920,13 @@ def _err_402_does_not_fit(reason: str) -> HTTPException:
     """
     return HTTPException(
         status_code=402,
-        detail={
-            "type": "credit_exhausted",
-            "reason": reason,
-            "message": (
-                "This request's reservation exceeds the tenant's entire "
-                "budget for the period; no amount of available headroom "
-                "would admit it. Reduce the request size or ask your admin "
-                "to raise the budget."
-            ),
-        },
+        detail=_refusal_body(
+            reason,
+            "This request's reservation exceeds the tenant's entire "
+            "budget for the period; no amount of available headroom "
+            "would admit it. Reduce the request size or ask your admin "
+            "to raise the budget.",
+            wall=wall, pool_row=pool_row),
     )
 
 
@@ -1896,11 +1970,20 @@ class QuotaExhausted(Exception):
     was exhausted so the caller can advance the chain. NOT an HTTP error: it is
     caught by `reserve_with_model_cascade` and only surfaces as 402 if EVERY
     candidate is exhausted.
+
+    `scope` says WHICH of the two per-model counters refused — the tenant's or
+    the user's. It was previously derivable and discarded: the failing quota
+    line's index in the cancellation reasons identifies it exactly, and nothing
+    read it. That mattered once a refusal had to describe itself to a client,
+    because the per-model wall is one limit kind and two things a reader can act
+    on, and "your quota is exhausted" without saying whose sends them to the
+    wrong row. None when the transaction could not attribute it.
     """
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, scope: Optional[str] = None):
         super().__init__(f"quota exhausted for model {model}")
         self.model = model
+        self.scope = scope
 
 
 class ExternalHoldReclaimed(Exception):
@@ -2406,6 +2489,9 @@ def _reserve_over_candidates(
     # LATER, inside the best-effort fence.
     priced_tried: list = []  # (model, pricing_key, est_cost) for tried candidates
     exhausted: set[str] = set()
+    # The scopes the refusals came from, so the terminal 402 can name one when they
+    # agree and decline to name one when they do not.
+    exhausted_scopes: set[Optional[str]] = set()
     for idx, model in enumerate(candidates):
         pk, cost, snap, bound = price(model)
         priced_tried.append((model, pk, cost))
@@ -2468,11 +2554,22 @@ def _reserve_over_candidates(
             return ctx
         except QuotaExhausted as e:
             logger.info("quota_cascade_advance", tenant_id=user.org_id,
-                        exhausted_model=e.model, period=period)
+                        exhausted_model=e.model, period=period,
+                        quota_scope=e.scope)
             exhausted.add(model)
+            exhausted_scopes.add(e.scope)
             continue
-    logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period)
-    raise _err_402("model_quota_exhausted")
+    # WHICH per-model counter to name, when several candidates were refused. If
+    # every refusal came from the same scope there is one true answer; if they
+    # disagree there is not, and the refusal says so rather than picking the last
+    # one. Naming the wrong scope sends a reader to the wrong quota row, and
+    # collapsing two distinct answers into one would hide that the gateway had
+    # more than one.
+    _scope = exhausted_scopes.pop() if len(exhausted_scopes) == 1 else None
+    logger.info("model_quota_all_exhausted", tenant_id=user.org_id, period=period,
+                quota_scope=_scope)
+    raise _err_402("model_quota_exhausted", wall="per_model_quota",
+                   quota_scope=_scope)
 
 
 def _build_decision_facts(priced_tried, untried_models, price, exhausted) -> dict:
@@ -2861,7 +2958,7 @@ def reserve_credit(
                 reservation_required=reservation_tokens,
                 reason="personal_budget_exhausted",
             )
-            raise _err_402("personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted", wall="user_token_quota")
         return ReservationContext(
             tenants_repo=repo,
             reservation_tokens=reservation_tokens,
@@ -2934,7 +3031,7 @@ def reserve_credit(
         # exactly where the fail-open used to bite.
         item = repo.get(user.user_id, user.org_id, consistent_read=True)
         if not item:
-            raise _err_402("personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted", wall="user_token_quota")
         total = int(item.get("total_credit", 0))
         used = int(item.get("credit_used", 0))
         if used + reservation_tokens > total:
@@ -2944,7 +3041,7 @@ def reserve_credit(
                 tenant_id=user.org_id,
                 reason="personal_budget_exhausted",
             )
-            raise _err_402("personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted", wall="user_token_quota")
 
         pool_row = budgets.get(user.org_id, period, consistent_read=True)
         if pool_row is None:
@@ -2981,7 +3078,7 @@ def reserve_credit(
                 pool_settled_microusd=p_settled,
                 pool_limit_microusd=p_limit,
             )
-            raise _err_402("tenant_pool_exhausted")
+            raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row)
 
         # docs/design/hard-ceiling.md item 2b: two DISTINCT conditions, reported
         # differently. An earlier version of this check tested the bound
@@ -3020,7 +3117,7 @@ def reserve_credit(
                 pool_reserved_microusd=p_reserved,
                 pool_settled_microusd=p_settled,
             )
-            raise _err_402_does_not_fit("request_does_not_fit_pool_limit")
+            raise _err_402_does_not_fit("request_does_not_fit_pool_limit", wall="tenant_dollar_pool", pool_row=pool_row)
         if p_limit > 0 and cost > p_limit * _MAX_RESERVATION_FRACTION_OF_POOL:
             logger.warning(
                 "reservation_will_monopolise_pool",
@@ -3043,7 +3140,7 @@ def reserve_credit(
                 pool_limit_microusd=p_limit,
                 reservation_microusd=cost,
             )
-            raise _err_402("tenant_pool_exhausted")
+            raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row)
 
         user_txn = repo.reserve_txn_item(
             user_id=user.user_id,
@@ -3166,13 +3263,26 @@ def reserve_credit(
             # separately below.) The quota scan is bounded to EXACTLY the quota
             # slice so the appended ledger item's index is never misread as quota.
             if quota_model is not None and _quota_count:
-                for r in reasons[_quota_start:_quota_start + _quota_count]:
+                for _offset, r in enumerate(
+                        reasons[_quota_start:_quota_start + _quota_count]):
                     if r.get("Code", "") == "ConditionalCheckFailed":
+                        # WHICH counter refused, from the failing line's own key.
+                        # The index alone is not enough -- `build_reserve_txn_items`
+                        # emits the tenant line, the user line, or both depending on
+                        # what is configured -- so the scope is read back off the
+                        # item rather than inferred from its position, the same way
+                        # a reclaim reads it. Without this the refusal knows the
+                        # answer and throws it away, and the client is told "your
+                        # quota is exhausted" with no way to learn whose.
+                        _scope = _quota_scope_of_line(
+                            quota_lines[_offset], tenant_id=user.org_id,
+                            user_id=user.user_id, model=quota_model, period=period)
                         logger.info(
                             "model_quota_exhausted",
                             tenant_id=user.org_id, model=quota_model, period=period,
+                            quota_scope=_scope,
                         )
-                        raise QuotaExhausted(quota_model)
+                        raise QuotaExhausted(quota_model, _scope)
             if codes & {
                 "ThrottlingError",
                 "ProvisionedThroughputExceeded",
@@ -3221,7 +3331,7 @@ def reserve_credit(
                 tokens=reservation_tokens,
             )
         except CreditExhaustedError:
-            raise _err_402("personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted", wall="user_token_quota")
         return ReservationContext(
             tenants_repo=repo,
             reservation_tokens=reservation_tokens,
@@ -3260,7 +3370,17 @@ def reserve_credit(
                 ),
             },
         )
-    raise _err_402("tenant_pool_exhausted")
+    # Re-read the row for the hint. This is the one refusal path that has
+    # exhausted its retries, so it is already cold, and a refusal that cannot
+    # say what an approver may grant sends the requester to ask for a figure
+    # nobody can approve. Best-effort: a read that fails leaves the body
+    # without a hint rather than turning a 402 into a 500.
+    try:
+        _hint_row = budgets.get(user.org_id, period)
+    except Exception:  # noqa: BLE001 -- the hint is never worth the refusal
+        _hint_row = None
+    raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool",
+                   pool_row=_hint_row)
 
 
 def reserve_external_authorization(
@@ -3367,12 +3487,12 @@ def reserve_external_authorization(
             # reason the endpoint maps to 404 (no pool configured).
             raise ExternalAuthorizeNoPool(tenant_id, period)
         if str(pool_row.get("status", "active")) != "active":
-            raise _err_402("tenant_pool_exhausted")
+            raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row)
         p_limit = int(pool_row.get("pool_limit_microusd", 0))
         p_reserved = int(pool_row.get("pool_reserved_microusd", 0))
         p_settled = int(pool_row.get("pool_settled_microusd", 0))
         if p_reserved + p_settled + amount > p_limit:
-            raise _err_402("tenant_pool_exhausted")
+            raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row)
 
         pool_txn = budgets.reserve_txn_item(
             tenant_id=tenant_id,
@@ -3521,7 +3641,12 @@ def reserve_external_authorization(
                 "message": "Budget reservation is temporarily unavailable. Retry shortly.",
             },
         )
-    raise _err_402("tenant_pool_exhausted")
+    try:
+        _hint_row = budgets.get(tenant_id, period)
+    except Exception:  # noqa: BLE001 -- see reserve_credit
+        _hint_row = None
+    raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool",
+                   pool_row=_hint_row)
 
 
 def _pending_hold_id(tenant_id: str, period: str, idempotency_key: str) -> str:
@@ -3754,7 +3879,12 @@ def _reserve_external_pending(
         # status field it used to carry was written by an UpdateItem the deployed
         # IAM policy denies and no reader consulted.
         budgets.mark_pending_failed_best_effort(tenant_id=tenant_id, sk=hold_sk)
-        raise _err_402("tenant_pool_exhausted")
+        try:
+            _hint_row = budgets.get(tenant_id, period)
+        except Exception:  # noqa: BLE001 -- the hint is never worth the refusal
+            _hint_row = None
+        raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool",
+                       pool_row=_hint_row)
     # RESERVE_APPLIED or RESERVE_ALREADY: the debit is a fact. Continue.
     try:
         logger.info("ledger_transact_latency", op="external_authorize_reserve_pending",
@@ -3919,7 +4049,12 @@ def _replay_committed_or_refuse(
     hold = budgets.get_hold(tenant_id=tenant_id, sk=hold_sk) if hold_sk else None
     status = str((hold or {}).get("status", "")) if hold else ""
     if status == "FAILED":
-        raise _err_402("tenant_pool_exhausted")
+        try:
+            _hint_row = budgets.get(tenant_id, period)
+        except Exception:  # noqa: BLE001 -- the hint is never worth the refusal
+            _hint_row = None
+        raise _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool",
+                       pool_row=_hint_row)
     if status == "PENDING":
         raise HTTPException(status_code=503, detail={
             "type": "budget_unavailable", "reason": "pool_reservation_in_flight",
@@ -4280,13 +4415,13 @@ def _reserve_quota_without_pool(
             time.sleep(_contention_backoff(_attempt))
         item = repo.get(user.user_id, user.org_id, consistent_read=True)
         if not item:
-            raise _err_402("personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted", wall="user_token_quota")
         total = int(item.get("total_credit", 0))
         used = int(item.get("credit_used", 0))
         if used + reservation_tokens > total:
             logger.info("credit_exhausted_402", user_id=user.user_id,
                         tenant_id=user.org_id, reason="personal_budget_exhausted")
-            raise _err_402("personal_budget_exhausted")
+            raise _err_402("personal_budget_exhausted", wall="user_token_quota")
 
         user_txn = repo.reserve_txn_item(
             user_id=user.user_id, tenant_id=user.org_id,
@@ -4305,11 +4440,15 @@ def _reserve_quota_without_pool(
             # Quota lines start at index 1 here (index 0 is the user row). A
             # ConditionalCheckFailed on any quota line = quota exhausted.
             if quota_model is not None and len(reasons) > 1:
-                for r in reasons[1:]:
+                for _offset, r in enumerate(reasons[1:]):
                     if r.get("Code", "") == "ConditionalCheckFailed":
+                        _scope = _quota_scope_of_line(
+                            quota_lines[_offset], tenant_id=user.org_id,
+                            user_id=user.user_id, model=quota_model, period=period)
                         logger.info("model_quota_exhausted", tenant_id=user.org_id,
-                                    model=quota_model, period=period)
-                        raise QuotaExhausted(quota_model)
+                                    model=quota_model, period=period,
+                                    quota_scope=_scope)
+                        raise QuotaExhausted(quota_model, _scope)
             codes = {r.get("Code", "") for r in reasons}
             if codes & {"ThrottlingError", "ProvisionedThroughputExceeded",
                         "TransactionConflict", "RequestLimitExceeded"}:
@@ -4341,7 +4480,7 @@ def _reserve_quota_without_pool(
             "type": "budget_unavailable", "reason": "quota_reservation_contended",
             "message": "Quota reservation is temporarily unavailable. Retry shortly."})
     # Lost every snapshot race for the user row — treat as personal budget.
-    raise _err_402("personal_budget_exhausted")
+    raise _err_402("personal_budget_exhausted", wall="user_token_quota")
 
 
 def release_pool(context) -> None:
