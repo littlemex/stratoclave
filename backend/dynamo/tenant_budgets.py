@@ -45,7 +45,9 @@ existing caller. The sentinel is absence, which no existing caller can send, and
 OMISSION and never by writing an explicit zero, because for it absence and zero
 mean the same thing (`ADD` on a missing numeric attribute creates it). Getting
 those two backwards inverts the feature, so each one says which it is where it is
-declared, in POOL_ROW_ATTRIBUTES below.
+declared, in `dynamo.pool_row_schema.POOL_ROW_ATTRIBUTES` -- the ONE authority for
+this row's shape, deliberately in its own module so the size guard cannot end up
+measuring a shape the rollover and the reconciler do not use.
 
 Invariant enforced at reserve time (inside a DynamoDB transaction):
 
@@ -85,7 +87,6 @@ All amounts are integer micro-USD; this module never introduces a float.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -94,14 +95,18 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource, tenant_budgets_table_name
-
-# The name of the operator's own figure. Its PRESENCE is the whole mode switch,
-# so it is referenced by name in four places (the two writers, the rollover and
-# the reconciler) and never spelled inline in any of them.
-MANUAL_LIMIT_ATTR = "manual_limit_microusd"
-SEAT_COUNT_ATTR = "seat_count"
-SEAT_RATE_ATTR = "seat_rate_microusd"
-POOL_GRANTED_ATTR = "pool_granted_microusd"
+# The attribute NAMES, which are used in expressions and conditions throughout this
+# module. The declaration's helpers are reached through the module (`pool_row_schema.
+# carried_attributes()`) and deliberately NOT rebound here: a name bound in two
+# modules is two places to read the row's shape from, which is the second authority
+# this split exists to collapse.
+from . import pool_row_schema
+from .pool_row_schema import (
+    MANUAL_LIMIT_ATTR,
+    POOL_GRANTED_ATTR,
+    SEAT_COUNT_ATTR,
+    SEAT_RATE_ATTR,
+)
 
 # The tenant pool's per-seat monthly figure, as this PROCESS is configured. It is
 # NOT the rate a row's ceiling was computed from: that one is stored on the row
@@ -125,316 +130,6 @@ def seat_rate_microusd() -> int:
     forgotten at the one call site that omits it.
     """
     return seat_monthly_usd() * 1_000_000
-
-
-# ---------------------------------------------------------------------------
-# The closed-world declaration of the pool row
-# ---------------------------------------------------------------------------
-# Four separate mechanisms need to know what is on this row: the period rollover
-# (what to carry), the ceiling-writer document test (who writes the ceiling), the
-# reconciler (what to check against its source), and the item-size gauge (how
-# wide the row can get). Each of those was a list, and a list is forgotten
-# silently -- an attribute added later evaporates at the next rollover, or is
-# checked by nobody, or is missing from the measured item, and nothing says so.
-#
-# So this is not an appendable list. It is a TOTAL CLASSIFICATION: every
-# attribute a pool row can carry appears here exactly once, with its rollover
-# class, its writers, either a covering reconciler check or an explicit
-# exemption, and the widest value it can hold. An attribute found on a row and
-# absent from here is a failure, which is what makes forgetting impossible
-# instead of merely unlikely.
-
-ROLLOVER_CARRIED = "carried"    # copied verbatim into the new period's row
-ROLLOVER_DERIVED = "derived"    # recomputed on the new row from carried attributes
-ROLLOVER_RESET = "reset"        # not carried; the new period starts without it
-
-# HOW a reset attribute is reset, which is a decision and not a detail.
-RESET_BY_OMISSION = "omission"  # left off the new row entirely; absence is its zero
-RESET_BY_ZERO = "zero"          # written as 0, because absence would mean something else
-
-
-@dataclass(frozen=True)
-class PoolAttribute:
-    """One attribute of the pool row, in every class that has to know about it."""
-
-    name: str
-    rollover: str
-    #: Every code site that writes this attribute, as `module:function`. The
-    #: ceiling-writer document test derives its list from the subset of these
-    #: whose attribute moves the ceiling, so the document cannot name a subset.
-    writers: tuple[str, ...]
-    #: Widest value this attribute can hold, in bytes as DynamoDB accounts for
-    #: it (a number is its digit count, plus one for a sign). The item-size
-    #: gauge and its alarm threshold are derived from the sum of these.
-    max_value_bytes: int
-    #: The reconciler check that compares this attribute to its SOURCE, or None
-    #: with `exemption` saying why no source comparison exists for it.
-    check: Optional[str] = None
-    exemption: Optional[str] = None
-    #: Only for `ROLLOVER_RESET`.
-    reset_by: Optional[str] = None
-    note: str = ""
-
-    def __post_init__(self) -> None:
-        if self.rollover not in (ROLLOVER_CARRIED, ROLLOVER_DERIVED, ROLLOVER_RESET):
-            raise ValueError(f"{self.name}: unknown rollover class {self.rollover!r}")
-        if self.rollover == ROLLOVER_RESET and self.reset_by not in (
-                RESET_BY_OMISSION, RESET_BY_ZERO):
-            raise ValueError(
-                f"{self.name}: a reset attribute must say HOW it is reset "
-                f"(omission or zero), got {self.reset_by!r}")
-        if self.rollover != ROLLOVER_RESET and self.reset_by is not None:
-            raise ValueError(f"{self.name}: reset_by is meaningless unless reset")
-        if bool(self.check) == bool(self.exemption):
-            raise ValueError(
-                f"{self.name}: exactly one of check / exemption, so an attribute "
-                f"nobody reconciles has to say so out loud")
-        if self.max_value_bytes <= 0:
-            raise ValueError(f"{self.name}: max_value_bytes must be positive")
-
-
-# The widest micro-USD figure any ceiling attribute can hold: L8's maximum pool,
-# in micro-USD. Written as a width rather than a value because the size gauge
-# wants bytes and the digits are what DynamoDB charges for.
-_MAX_POOL_MICROUSD_DIGITS = 16   # 1_000_000_000 cents x 10_000 = 1e13, 14 digits; +2 margin
-_SIGNED = 1                      # headroom is the one signed money attribute
-
-#: The one declaration. F2 adds its grant cap here, in the same shape, or the
-#: closed-world test fails at F2's merge -- loudly, and at the moment the
-#: attribute appears, rather than silently on the 1st of the following month.
-POOL_ROW_ATTRIBUTES: tuple[PoolAttribute, ...] = (
-    PoolAttribute(
-        name="tenant_id",
-        rollover=ROLLOVER_CARRIED,
-        writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
-        max_value_bytes=128,
-        exemption="the partition key; it identifies the row rather than describing it",
-    ),
-    PoolAttribute(
-        name="sk",
-        rollover=ROLLOVER_DERIVED,
-        writers=("dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",),
-        max_value_bytes=32,
-        exemption="the sort key; the new period's row has the new period in it by "
-                  "construction, so carrying it verbatim would be the bug",
-    ),
-    PoolAttribute(
-        name=MANUAL_LIMIT_ATTR,
-        rollover=ROLLOVER_CARRIED,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.clear_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-            "migrations.pool_ceiling_migration:phase_m2_backfill",
-        ),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        check="limit_identity",
-        note="carried, and carried by ABSENCE too: a seat-tracked row must reach the "
-             "new period still seat-tracked, so the rollover writes this attribute "
-             "only when the old row had it. Zero is a figure and is carried as one.",
-    ),
-    PoolAttribute(
-        name=SEAT_COUNT_ATTR,
-        rollover=ROLLOVER_CARRIED,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository.adjust_pool_for_seat_delta",
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-            "migrations.pool_ceiling_migration:phase_m2_backfill",
-        ),
-        max_value_bytes=8,
-        check="seat_count_matches_membership",
-        note="the seats do not reset at a period boundary; the people are still there",
-    ),
-    PoolAttribute(
-        name=SEAT_RATE_ATTR,
-        rollover=ROLLOVER_CARRIED,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-            "migrations.pool_ceiling_migration:phase_m1_add_attributes",
-            "migrations.pool_ceiling_migration:recompute_seat_tracked_rows",
-        ),
-        max_value_bytes=12,
-        check="seat_rate_matches_rate_in_force",
-        note="carried so a ceiling is reproducible; changing it is a migration, not a "
-             "deploy, which is what makes the boot-time refusal honest",
-    ),
-    PoolAttribute(
-        name=POOL_GRANTED_ATTR,
-        rollover=ROLLOVER_RESET,
-        reset_by=RESET_BY_OMISSION,
-        writers=("(F2: the grant apply and revoke writers)",),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        exemption="no writer exists until F2, which registers the grant-sum check "
-                  "against its own ACTIVE grants at that point",
-        note="RESET BY OMISSION, never by writing 0: absence and zero mean the same "
-             "thing here, which is exactly what is NOT true of manual_limit. Safe to "
-             "reset at the boundary ONLY because F2 pins a grant's expires_at to at "
-             "most the period end; without that pin this reset destroys live granted "
-             "capacity every 1st.",
-    ),
-    PoolAttribute(
-        name="pool_limit_microusd",
-        rollover=ROLLOVER_DERIVED,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.clear_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.adjust_pool_for_seat_delta",
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-        ),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        check="limit_identity",
-        note="recomputed on the new row from the carried attributes; carrying last "
-             "month's number would carry a granted term the new row does not have",
-    ),
-    PoolAttribute(
-        name="pool_headroom_microusd",
-        rollover=ROLLOVER_DERIVED,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.clear_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.adjust_pool_for_seat_delta",
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.reconcile_headroom",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_txn_item",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.settle_txn_item",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_commit_txn_items",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.pool_credit_back",
-        ),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS + _SIGNED,
-        check="headroom_identity",
-        note="the one signed money attribute: an over-ceiling row's deficit is a "
-             "figure an operator needs, and clamping it at zero hides the amount by "
-             "which admission has already been exceeded",
-    ),
-    PoolAttribute(
-        name="pool_reserved_microusd",
-        rollover=ROLLOVER_RESET,
-        reset_by=RESET_BY_ZERO,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_txn_item",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.settle_txn_item",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.reserve_commit_txn_items",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.pool_credit_back",
-        ),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS + _SIGNED,
-        exemption="reconciled against the credit ledger, not against a row-side "
-                  "source: mvp.admin_tenants.get_pool_reconciliation owns that axis",
-    ),
-    PoolAttribute(
-        name="pool_settled_microusd",
-        rollover=ROLLOVER_RESET,
-        reset_by=RESET_BY_ZERO,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-            "dynamo.tenant_budgets:TenantBudgetsRepository.settle_txn_item",
-        ),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        exemption="reconciled against the credit ledger; same owner as reserved",
-    ),
-    PoolAttribute(
-        name="pool_reclaimed_microusd",
-        rollover=ROLLOVER_RESET,
-        reset_by=RESET_BY_ZERO,
-        writers=("mvp._pipeline:_reclaim_expired_holds",),
-        max_value_bytes=_MAX_POOL_MICROUSD_DIGITS,
-        exemption="reconciled against the credit ledger; same owner as reserved",
-    ),
-    PoolAttribute(
-        name="status",
-        rollover=ROLLOVER_CARRIED,
-        writers=(
-            "dynamo.tenant_budgets:TenantBudgetsRepository.set_manual_limit",
-            "dynamo.tenant_budgets:TenantBudgetsRepository._seed_pool_row",
-        ),
-        max_value_bytes=16,
-        exemption="not a quantity; a suspended pool stays suspended across a boundary "
-                  "because suspension is an operator's decision, not a month's",
-    ),
-    PoolAttribute(
-        name="version",
-        rollover=ROLLOVER_DERIVED,
-        writers=("(every writer in this module stamps it)",),
-        max_value_bytes=4,
-        exemption="a schema marker; the new row is stamped at the current version",
-    ),
-    PoolAttribute(
-        name="updated_at",
-        rollover=ROLLOVER_DERIVED,
-        writers=("(every writer in this module stamps it)",),
-        max_value_bytes=40,
-        exemption="a timestamp; carrying the old row's would misdate the new one",
-    ),
-    PoolAttribute(
-        name="sizing",
-        rollover=ROLLOVER_RESET,
-        reset_by=RESET_BY_OMISSION,
-        writers=("(none: no writer remains; M4 deletes the attribute)",),
-        max_value_bytes=8,
-        exemption="the mode this change replaced. Declared, not removed from the "
-                  "declaration, because rows still carry it until M4 runs and a "
-                  "closed-world test must not fail on a row mid-migration. Nothing "
-                  "reads it and the rollover never carries it forward.",
-    ),
-)
-
-_POOL_ATTRIBUTES_BY_NAME: dict[str, PoolAttribute] = {
-    a.name: a for a in POOL_ROW_ATTRIBUTES}
-if len(_POOL_ATTRIBUTES_BY_NAME) != len(POOL_ROW_ATTRIBUTES):
-    raise RuntimeError("POOL_ROW_ATTRIBUTES declares an attribute twice")
-
-#: The attributes that MOVE THE CEILING, derived from the declaration rather than
-#: restated. The ceiling-writer document test reads this, so a writer added to
-#: `pool_limit_microusd` above appears in the document's obligation immediately
-#: and a hardcoded list cannot go green while naming a subset.
-CEILING_ATTRS: tuple[str, ...] = (
-    "pool_limit_microusd", "pool_headroom_microusd", MANUAL_LIMIT_ATTR,
-    SEAT_COUNT_ATTR, SEAT_RATE_ATTR, POOL_GRANTED_ATTR,
-)
-
-
-def pool_attribute(name: str) -> Optional[PoolAttribute]:
-    """The declaration for `name`, or None if it is in no class."""
-    return _POOL_ATTRIBUTES_BY_NAME.get(name)
-
-
-def unclassified_pool_attributes(item: dict[str, Any]) -> set[str]:
-    """Every attribute on `item` that appears in no class of the declaration.
-
-    The closed-world assertion. A non-empty result is a failure and not a
-    warning: it means something writes the pool row that four other mechanisms
-    do not know exists.
-    """
-    return {str(k) for k in (item or {}) if str(k) not in _POOL_ATTRIBUTES_BY_NAME}
-
-
-def ceiling_writers() -> tuple[str, ...]:
-    """Every code site that writes a ceiling-bearing attribute, from the
-    declaration. Derived, never listed: a literal list passes while naming a
-    subset the moment a writer is added."""
-    out: list[str] = []
-    for attr in POOL_ROW_ATTRIBUTES:
-        if attr.name not in CEILING_ATTRS:
-            continue
-        for w in attr.writers:
-            if not w.startswith("(") and w not in out:
-                out.append(w)
-    return tuple(out)
-
-
-def carried_attributes() -> tuple[str, ...]:
-    """The attributes the period rollover copies verbatim."""
-    return tuple(a.name for a in POOL_ROW_ATTRIBUTES
-                 if a.rollover == ROLLOVER_CARRIED and a.name not in ("tenant_id",))
-
-
-def max_pool_row_bytes() -> int:
-    """The widest a pool row can get, from the declaration: every attribute's
-    name plus its widest value. The item-size gauge's baseline and its alarm
-    threshold are derived from this, so a schema change moves the alarm with it
-    instead of failing it."""
-    return sum(len(a.name) + a.max_value_bytes for a in POOL_ROW_ATTRIBUTES
-               if a.name != "sizing")
 
 
 # ---------------------------------------------------------------------------
@@ -783,10 +478,10 @@ class TenantBudgetsRepository:
     def pool_item_size_bytes(self, tenant_id: str, period: str) -> Optional[int]:
         """Estimated stored size of the pool item (or None if absent). The canary
         detector for the item-growth regression the separate-item marker fixed: a
-        healthy pool item holds exactly the attributes POOL_ROW_ATTRIBUTES declares
-        and MUST NOT grow with the number of holds. The bound to compare against is
-        `max_pool_row_bytes()`, derived from that declaration, so it moves with a
-        schema change instead of going stale; emit both as a gauge.
+        healthy pool item holds exactly the attributes `pool_row_schema` declares and
+        MUST NOT grow with the number of holds. The bound to compare against is
+        `pool_row_schema.worst_case_pool_item_bytes()`, derived from that declaration,
+        so it moves with a schema change instead of going stale; emit both as a gauge.
         Eventually-consistent read (Fable E-phase review Q2): a monitoring gauge does
         not need the current instant — an eventually-consistent GetItem halves RCU
         and loses nothing for this signal."""
@@ -1247,7 +942,7 @@ class TenantBudgetsRepository:
         if source is None:
             return None
         seed: dict[str, Any] = {}
-        for name in carried_attributes():
+        for name in pool_row_schema.carried_attributes():
             if name in source:
                 seed[name] = source[name]
         manual = seed.get(MANUAL_LIMIT_ATTR)

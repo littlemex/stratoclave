@@ -122,7 +122,7 @@ def assert_no_grants_present(table) -> None:
     once it also contains granted money: the grant would be folded into the
     operator's figure permanently, on every such row at once.
     """
-    from dynamo.tenant_budgets import POOL_GRANTED_ATTR
+    from dynamo.pool_row_schema import POOL_GRANTED_ATTR
 
     for item in _iter_budget_rows(table):
         if POOL_GRANTED_ATTR in item:
@@ -161,7 +161,7 @@ def verify(table) -> dict[str, Any]:
     Also reports any attribute the closed-world declaration does not classify,
     because a migration is exactly when an undeclared attribute appears.
     """
-    from dynamo.tenant_budgets import unclassified_pool_attributes
+    from dynamo.pool_row_schema import unclassified_pool_attributes
 
     rows = 0
     moved: list[dict[str, Any]] = []
@@ -208,11 +208,8 @@ def phase_m1_add_attributes(*, apply: bool) -> dict[str, Any]:
     Changes no effective limit: it writes one attribute that nothing reads until
     M2, and the rate it writes is the rate the ceilings were already computed at.
     """
-    from dynamo.tenant_budgets import (
-        SEAT_RATE_ATTR,
-        TenantBudgetsRepository,
-        seat_rate_microusd,
-    )
+    from dynamo.pool_row_schema import SEAT_RATE_ATTR
+    from dynamo.tenant_budgets import TenantBudgetsRepository, seat_rate_microusd
 
     repo = TenantBudgetsRepository()
     table = repo._table
@@ -259,7 +256,7 @@ def classify_for_backfill(item: dict[str, Any], *, rate: int) -> dict[str, Any]:
     Returns a dict with `action` in {`seat_tracked`, `operator_figure`,
     `adjudicate`, `done`} and the values it would write.
     """
-    from dynamo.tenant_budgets import MANUAL_LIMIT_ATTR, SEAT_COUNT_ATTR
+    from dynamo.pool_row_schema import MANUAL_LIMIT_ATTR, SEAT_COUNT_ATTR
 
     limit = int(item.get("pool_limit_microusd", 0))
     sizing = item.get("sizing")
@@ -384,11 +381,8 @@ def phase_m2b_report() -> dict[str, Any]:
     every row carries at least one of the new attributes, and the adjudication
     list is empty. Writes nothing -- the compatibility itself is a property of the
     deployed code, and this is the evidence that the data caught up with it."""
-    from dynamo.tenant_budgets import (
-        MANUAL_LIMIT_ATTR,
-        SEAT_COUNT_ATTR,
-        TenantBudgetsRepository,
-    )
+    from dynamo.pool_row_schema import MANUAL_LIMIT_ATTR, SEAT_COUNT_ATTR
+    from dynamo.tenant_budgets import TenantBudgetsRepository
 
     repo = TenantBudgetsRepository()
     rate = repo.rate_in_force_microusd() or 0
@@ -433,11 +427,8 @@ def phase_m3_cutover(*, apply: bool) -> dict[str, Any]:
     the grant permanent; `assert_no_grants_present` is why that cannot happen by
     accident.
     """
-    from dynamo.tenant_budgets import (
-        MANUAL_LIMIT_ATTR,
-        SEAT_COUNT_ATTR,
-        TenantBudgetsRepository,
-    )
+    from dynamo.pool_row_schema import MANUAL_LIMIT_ATTR, SEAT_COUNT_ATTR
+    from dynamo.tenant_budgets import TenantBudgetsRepository
 
     repo = TenantBudgetsRepository()
     table = repo._table
@@ -533,9 +524,8 @@ def recompute_seat_tracked_rows(*, apply: bool) -> dict[str, Any]:
     Requires `STRATOCLAVE_SEAT_RATE_MIGRATION`, because the process running this
     is the one process that is allowed to disagree with the stored rate.
     """
+    from dynamo.pool_row_schema import MANUAL_LIMIT_ATTR, SEAT_RATE_ATTR
     from dynamo.tenant_budgets import (
-        MANUAL_LIMIT_ATTR,
-        SEAT_RATE_ATTR,
         SEAT_RATE_MIGRATION_ENV,
         TenantBudgetsRepository,
         seat_rate_microusd,

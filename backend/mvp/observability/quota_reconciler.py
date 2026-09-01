@@ -92,7 +92,7 @@ def missing_declared_checks() -> tuple[str, ...]:
     comparison, but it has to say so as an exemption; naming a check that does
     not exist is how a comparison stops happening without anybody noticing.
     """
-    from dynamo.tenant_budgets import POOL_ROW_ATTRIBUTES
+    from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
 
     declared = {a.check for a in POOL_ROW_ATTRIBUTES if a.check}
     return tuple(sorted(declared - set(_REGISTRY)))
@@ -115,7 +115,8 @@ def _seat_count_matches_membership(
     now, and a closed period's seat count is a fact about then. Comparing them
     would report every past month as broken.
     """
-    from dynamo.tenant_budgets import SEAT_COUNT_ATTR, current_period
+    from dynamo.pool_row_schema import SEAT_COUNT_ATTR
+    from dynamo.tenant_budgets import current_period
 
     tenant_id = str(row.get("tenant_id") or "")
     period = _period_of(row)
@@ -208,7 +209,8 @@ def _seat_rate_matches_rate_in_force(
     number drift, and this is the check that says when they have -- which is what
     lets the per-row copy exist at all.
     """
-    from dynamo.tenant_budgets import SEAT_RATE_ATTR, is_seat_tracked
+    from dynamo.pool_row_schema import SEAT_RATE_ATTR
+    from dynamo.tenant_budgets import is_seat_tracked
 
     if ctx.rate_in_force_microusd is None:
         return   # nothing declared yet: a deployment the migration has not reached
@@ -245,8 +247,8 @@ def _entitlement_outgrew_figure(
     grown past the point where the default would have been more generous, and the
     figure is now doing the opposite of what it was probably set to do.
     """
+    from dynamo.pool_row_schema import MANUAL_LIMIT_ATTR
     from dynamo.tenant_budgets import (
-        MANUAL_LIMIT_ATTR,
         current_period,
         is_seat_tracked,
         seat_term_microusd,
@@ -278,7 +280,7 @@ def _row_is_fully_declared(
     writes; this is the same assertion against the shapes that actually exist,
     which is where an attribute written by something nobody remembered shows up.
     """
-    from dynamo.tenant_budgets import unclassified_pool_attributes
+    from dynamo.pool_row_schema import unclassified_pool_attributes
 
     extra = unclassified_pool_attributes(row)
     if extra:

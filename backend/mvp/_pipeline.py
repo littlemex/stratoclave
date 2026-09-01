@@ -1778,7 +1778,7 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
     # the deductive argument assumes away. Best-effort; never fails reconcile.
     pool_item_bytes = None
     try:
-        from dynamo.tenant_budgets import max_pool_row_bytes
+        from dynamo.pool_row_schema import worst_case_pool_item_bytes
 
         pool_item_bytes = budgets.pool_item_size_bytes(tenant_id, period)
         if pool_item_bytes is not None:
@@ -1789,7 +1789,7 @@ def reconcile_pool(budgets, tenant_id: str, period: str) -> dict:
             # makes it fire on growth that change intended -- which is
             # indistinguishable from a regression unless you remember which shape
             # was measured.
-            declared = max_pool_row_bytes()
+            declared = worst_case_pool_item_bytes()
             logger.info("pool_item_size", tenant_id=tenant_id, period=period,
                         size_bytes=pool_item_bytes,
                         declared_max_bytes=declared,

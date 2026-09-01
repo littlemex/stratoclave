@@ -109,7 +109,7 @@ their own `PK=hold_id` table would gain only ~2× and not touch the real ceiling
 That bound is still the pool item, and its magnitude has moved: the ceiling rule
 adds the operator's figure, the seat count and the stored seat rate to the row, so
 the bound is now the width the row's own declaration allows
-(`dynamo.tenant_budgets.max_pool_row_bytes()`) rather than the handful of counters
+(`dynamo.pool_row_schema.worst_case_pool_item_bytes()`) rather than the handful of counters
 it was when this was written. The row is still O(1) in the number of holds, which
 is the property this paragraph is about.
 Cost ~2 WCU/item + the transaction tax (warm p50 ≈ 10–20 ms — within the p50
@@ -197,7 +197,7 @@ it via `EcsStackProps.reserveProtocolCanaryTenants` (dark by default — no env 
 until set). Graduation ladder:
   1. **Shadow/Canary**: add ONE low-traffic internal tenant to the allowlist. Watch
      `PoolItemSizeBytes` (must stay flat at whatever the row's own declaration
-     allows — `max_pool_row_bytes()`, derived, not a figure typed here, so a
+     allows — `pool_row_schema.worst_case_pool_item_bytes()`, derived, not a figure typed here, so a
      schema change moves the bound with it; the live proof the item-growth bug is
      gone, replacing the redundant 2×-provisioned c=1×3000 re-benchmark),
      the ledger drift alarms (must stay zero), and

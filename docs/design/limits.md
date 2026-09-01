@@ -102,7 +102,7 @@ figure that means the row can still say its entitlement has outgrown the figure 
 thing an operator cannot work out by looking at the figure.
 
 **Every writer of this ceiling.** The list is derived from the row's own declaration
-(`dynamo.tenant_budgets.ceiling_writers()`, from `POOL_ROW_ATTRIBUTES`) rather than restated here,
+(`dynamo.pool_row_schema.ceiling_writers()`, from `POOL_ROW_ATTRIBUTES` in that module) rather than restated here,
 because a list written out in prose passes review while naming a subset the moment a writer is added:
 
 - `TenantBudgetsRepository.set_manual_limit` — an operator's figure (admin or team-lead route).

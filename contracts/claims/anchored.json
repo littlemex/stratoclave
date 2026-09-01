@@ -1828,7 +1828,7 @@
   {
    "id": "cl-0fb328229b6f",
    "claim": "The admission path never counts seats by querying them, so the ceiling costs no membership read.",
-   "anchor": "contract:C14.3@60cb7464",
+   "anchor": "contract:C14.3@5b055a37",
    "note": "'never counts seats by querying them' is scoped to the ADMISSION path in the sentence itself; C14.9's reconciler does query them, deliberately, and off the request path"
   },
   {
