@@ -212,6 +212,7 @@ def main(argv=None) -> int:
         TenantBudgetsRepository, budget_sk, current_period,
     )
     from dynamo.tenant_budgets import hold_sk as _hold_sk
+    from pool_fixture import seed_verified_pool
 
     os.makedirs(args.out_dir, exist_ok=True)
     period = current_period()
@@ -225,8 +226,12 @@ def main(argv=None) -> int:
 
     def _reseed():
         # A huge pool so the money gate never rejects; we measure latency only.
-        budgets.set_manual_limit(tenant_id=args.tenant, period=period,
-                               manual_limit_microusd=args.pool_microusd, status="active")
+        # R39c: routed through the verified fixture, not a bare set_manual_limit
+        # call -- the PENDING write path below (`_one_pending_e2e`) bypasses the
+        # repository on purpose to benchmark the raw operation, but the SEED
+        # still has to leave a row a real pool row's identity holds on.
+        seed_verified_pool(budgets, tenant_id=args.tenant, period=period,
+                          manual_limit_microusd=args.pool_microusd, status="active")
 
     modes = {
         "single_update": lambda attrib: _one_single_update(

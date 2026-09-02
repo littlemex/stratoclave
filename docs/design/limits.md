@@ -49,6 +49,15 @@ A tenant created through the ordinary route, with nothing set by hand, gets:
   resolved onto each membership as `total_credit`;
 - no per-model quota.
 
+**`STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's own admission ceiling
+(`MAX_POOL_BUDGET_USD_CENTS`) are process-wide values, not per-tenant
+configuration.** Every tenant on a given deployment is priced from the same
+seat figure and bounded by the same maximum — there is no per-tenant override
+for either — so two otherwise-unrelated tenants on the same deployment are
+coupled through this one process-wide setting rather than independently
+configurable. Raising or lowering either moves every tenant's ceiling in the
+same direction at once.
+
 The pool is the ceiling that binds first, and that is deliberate. It is set **below** the sum of any
 per-user money ceilings a later change may add, because a per-seat pool equal to the sum of the
 individual ceilings can never bind — the individuals would exhaust themselves first, and a ceiling
