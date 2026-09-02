@@ -182,11 +182,17 @@ def _codex_enabled() -> bool:
     unauthenticated bootstrap route). `STRATOCLAVE_CODEX_ENABLED` is the
     current name; the bare `CODEX_ENABLED` is a deprecated alias honoured
     only when the new name is unset, with no separate deprecation warning
-    here — the route handler's own check already logs it once per process."""
+    here — the route handler's own check already logs it once per process.
+    Default TRUE (matches the route handler and `iac/lib/region-config.ts`):
+    codex does not itself gate money or safety, every request through it
+    still runs the same reservation/settlement pipeline as the Anthropic
+    route, so defaulting it off only hid the route behind an undiscoverable
+    env var. `value if value is not None else "true"`, not `value or
+    "true"`: an explicit empty string must still mean disabled."""
     value = os.getenv("STRATOCLAVE_CODEX_ENABLED")
     if value is None:
         value = os.getenv("CODEX_ENABLED")
-    return (value or "false").lower() == "true"
+    return (value if value is not None else "true").lower() == "true"
 
 
 def _resolve_codex_hints() -> Optional[CodexHints]:

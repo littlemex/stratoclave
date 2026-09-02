@@ -147,10 +147,26 @@ export function resolveRegionConfig(env: Env): RegionConfig {
   // deployment to enabled on the next synth — silently re-enabling codex
   // (and, off us-east-1, leaking prompts to the US registry regions).
   //
-  // Default is FALSE (Fable final review B-1 flagged the old 'true' default
-  // as the odd one out among the flags that gate money/route exposure — every
-  // other one of them ships conservative). A route that exposes a provider
-  // surface must be opted into.
+  // Default is TRUE. An earlier revision of this comment defaulted it to
+  // FALSE on the theory that every flag gating money/route exposure should
+  // ship conservative (STRATOCLAVE_HARD_CEILING_GATE, STRATOCLAVE_UNOBSERVED_HOLDS,
+  // STRATOCLAVE_RESIDENCY, STRATOCLAVE_RESERVE_PROTOCOL do). Codex is not one
+  // of those: it does not, by itself, spend a tenant's money or relax a
+  // safety check — every request through it still goes through the SAME
+  // reservation/settlement pipeline as the Anthropic route, gated by the
+  // SAME pool/quota walls. What a default-off codex actually gates is
+  // whether `stratoclave codex` *works at all* for an operator who deployed
+  // this gateway and never separately discovered and set an extra env var —
+  // and since the route's own refusal for that case is a bare HTTP 503 with
+  // no operator-facing signal at deploy time, the failure mode is silent
+  // until someone tries it — an operator who follows the docs and deploys
+  // gets a working `stratoclave claude` and a `stratoclave codex` that 503s
+  // for a reason nothing in the deploy output mentioned. Codex is one of
+  // this gateway's two supported CLIs, not an optional add-on, so it now
+  // ships the way the Anthropic route always has: on by default,
+  // with STRATOCLAVE_CODEX_ENABLED=false as the explicit opt-out for an
+  // operator who wants the surface gone (e.g. residency: the codex path is
+  // registry-pinned to us-east-2/us-west-2 and cannot be relocated).
   //
   // `CODEX_ENABLED` (bare, unnamespaced) is the deprecated predecessor name,
   // honoured as a fallback only when `STRATOCLAVE_CODEX_ENABLED` is unset, so
@@ -171,7 +187,7 @@ export function resolveRegionConfig(env: Env): RegionConfig {
         'will be removed in a future release.',
     );
   } else {
-    codexEnabledRaw = 'false';
+    codexEnabledRaw = 'true';
   }
   const codexEnabled = codexEnabledRaw.toLowerCase() === 'true';
 

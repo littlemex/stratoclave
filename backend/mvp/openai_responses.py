@@ -94,11 +94,21 @@ def _open_hold(**kwargs) -> _money.Hold:
 # re-importing the module. Matches the `ENABLE_WAF` / `ENABLE_ECS_EXEC`
 # pattern in `iac/bin/iac.ts`.
 #
-# Default is FALSE: this flag gates route exposure (an OpenAI-compatible
-# surface), so it follows the same conservative, opt-in posture as the
-# money flags (STRATOCLAVE_HARD_CEILING_GATE, STRATOCLAVE_UNOBSERVED_HOLDS,
-# STRATOCLAVE_RESIDENCY, STRATOCLAVE_RESERVE_PROTOCOL) rather than defaulting
-# to on.
+# Default is TRUE. This flag exposes an OpenAI-compatible route surface, but
+# it does not itself gate money or safety the way STRATOCLAVE_HARD_CEILING_GATE,
+# STRATOCLAVE_UNOBSERVED_HOLDS, STRATOCLAVE_RESIDENCY, and
+# STRATOCLAVE_RESERVE_PROTOCOL do: every request through this route still runs
+# through the same reservation/settlement pipeline and the same pool/quota
+# walls as the Anthropic route (`mvp/anthropic.py`). Defaulting this flag off
+# does not make anything safer; it only makes `stratoclave codex` return a
+# bare 503 for an operator who deployed this gateway and never separately
+# discovered and set an extra env var, with nothing at deploy time saying so.
+# Codex is one of this gateway's two supported CLIs, not an optional add-on,
+# so it now ships the way the Anthropic route always has: on by default. The
+# explicit opt-out remains STRATOCLAVE_CODEX_ENABLED=false (e.g. for an
+# operator under strict residency, since this route's model registry pins the
+# call to us-east-2/us-west-2 regardless of the deploy region — see
+# `iac/lib/region-config.ts`'s residency analysis).
 #
 # `CODEX_ENABLED` (bare, unnamespaced) is the deprecated predecessor name.
 # It is honoured as a fallback so an existing deployment does not silently
@@ -132,7 +142,13 @@ def _codex_enabled() -> bool:
                     old_name="CODEX_ENABLED",
                     new_name="STRATOCLAVE_CODEX_ENABLED",
                 )
-    return (value or "false").lower() == "true"
+    # `value if value is not None else "true"`, NOT `value or "true"`: an
+    # explicit empty string on either env var name must still evaluate to
+    # disabled (region-config.ts's iac-side resolver treats `''` the same
+    # way — "set, evaluates to disabled" — and the two must agree on every
+    # explicit value). `or` would treat `''` as falsy and silently re-enable
+    # codex for an operator who explicitly set the var to nothing.
+    return (value if value is not None else "true").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
