@@ -44,8 +44,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[2]
 
 #: F2's future design doc. Built from a joined basename rather than the literal
@@ -134,24 +132,33 @@ def test_audit_log_is_excluded_from_the_archive_guarantee():
     F3's `audit_log` feature to satisfy this test — the exact thing the
     coordinator and the design note both refuse to do, and the same failure
     mode this whole part exists to prevent (a hand-reconstructed fact
-    standing in for a real one). This test starts enforcing the moment F3's
-    archive guarantee actually lands with an `audit_log` mention anywhere in
-    the four documents; until then it names the gap rather than papering
-    over it, the same way `test_a_post_epic_figure_names_its_shape_and_only_
-    that_shapes_attributes` (l39d) skips rather than fabricates a figure."""
+    standing in for a real one).
+
+    A bare `pytest.skip` here would be invisible except to someone running
+    this suite with `-rs`, so it can never expire: the day F3 lands its
+    feature without ALSO writing the boundary sentence, this test would keep
+    skipping forever and nobody would be told. Instead of skipping, the
+    absent-dependency branch asserts that the gap is recorded as a debt
+    under `docs/design/CONTRACTS.md`'s Open items — a place every reader of
+    the contract already looks — and fails if that bullet is missing. The
+    day a document names `audit_log`, this test switches to the real
+    boundary-sentence assertion below, the one it always meant to make."""
     paragraphs = _paragraphs()
     if not any("audit_log" in p for p in paragraphs):
-        pytest.skip(
-            "F3's archive feature has not merged into this integration "
-            "branch yet -- 'audit_log' appears nowhere in README.md, "
-            "limits.md, CONTRACTS.md or the (not-yet-created) quota-raises "
-            "doc, so there is no archive-guarantee sentence for this "
-            "boundary to attach to. Writing the boundary sentence now would "
-            "require guessing F3's audit_log schema, which the F4 design "
-            "note (section 10, boundary 3) explicitly defers to F3/"
-            "integration. This test starts enforcing the moment a paragraph "
-            "in one of these documents mentions audit_log."
+        contracts_text = DOCS["contracts"].read_text()
+        open_items = contracts_text.split(
+            "## Open items, named rather than implied", 1)[-1]
+        assert "audit_log` schema it would qualify has not landed" in open_items, (
+            "no document names audit_log yet, so the boundary sentence "
+            "cannot honestly be written -- but the gap has to be tracked as "
+            "a debt under CONTRACTS.md's Open items rather than left to a "
+            "skip reason nobody but a test run ever reads. That bullet is "
+            "missing. Either restore it, or, if audit_log has genuinely "
+            "landed somewhere this search misses, name it in one of "
+            "README.md / limits.md / quota-raises.md / CONTRACTS.md so this "
+            "test switches to checking the real boundary sentence instead."
         )
+        return
     boundary_word = re.compile(
         r"(not covered|does not (extend|cover)|excludes?|outside)", re.IGNORECASE)
     matches = [

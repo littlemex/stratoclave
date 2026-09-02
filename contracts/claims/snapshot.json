@@ -412,6 +412,12 @@
   "cl-588e284b40bc": {
    "first_seen": "docs/design/quota-raises.md, added with the limit-raise mechanism (CONTRACT-F2-grant)"
   },
+  "cl-0c3d504337a2": {
+   "first_seen": "docs/design/quota-raises.md section 9, added when the section's arithmetic was corrected to match C14.23 and mvp/admin_tenants.py's actual set_manual_limit behaviour -- the prior wording claimed the ceiling lands BELOW the typed figure at expiry, which set_manual_limit's ADD-against-the-old-baseline delta does not produce"
+  },
+  "cl-16fbfad398c6": {
+   "first_seen": "docs/design/quota-raises.md section 9, added alongside cl-0c3d504337a2 in the same correction: states why the refusal still holds once the arithmetic is corrected (the two readings of the typed figure settle identically at expiry and are indistinguishable from the figure alone while the grant is live)"
+  },
   "cl-592905afcd5c": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },

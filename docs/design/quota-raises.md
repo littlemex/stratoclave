@@ -270,11 +270,18 @@ or a fresh read that degrades to `remaining_cap_microusd: 0` rather than a 500.
 ## 9. Setting a figure while a grant is live
 
 An operator setting a figure that **equals the ceiling currently in force**, while
-part of that ceiling is granted, is refused. They almost certainly mean "make the
-baseline this"; the setter would read it as "make the baseline this, and the grant
-still sits on top" — so the ceiling jumps by the granted amount, and at expiry drops
-by it twice over, landing below the number that was typed. Both readings are
-plausible, which is why it is a refusal naming the composition rather than a silent
+part of that ceiling is granted, is refused. The setter treats the figure as the new
+baseline and moves the ceiling by the delta against the OLD baseline only, leaving
+the granted term untouched — so a figure copied straight off the screen (baseline
+plus a still-live grant) becomes the new baseline, and the same grant is added on top
+of it again: the ceiling sits at the typed figure **plus** the grant for as long as
+the grant stays open, one grant's worth above what was on the screen. That excess is
+temporary, not permanent — the sweep subtracts the grant once at expiry and the
+ceiling lands exactly on the figure the operator typed, never below it. But a window
+of extra capacity nobody asked for is indistinguishable, from the figure alone, from
+an operator who genuinely wants that number as the new baseline, for whom the same
+jump-then-settle is correct — the number alone cannot tell the two readings apart,
+which is why it is a refusal naming the composition rather than a silent
 reinterpretation.
 
 The read surface carries the composition for the same reason: the granted term, the

@@ -201,37 +201,52 @@ def test_a_post_epic_figure_names_its_shape_and_only_that_shapes_attributes():
     checked against the shape-aware requirement rather than a flat attribute
     list an earlier draft of this test accepted.
 
-    Skip condition fixed after re-running against the shipped document: the
-    original heuristic ("post-epic" absent AND no attribute name present)
-    does not fire once F4 ships its own honestly-worded pending section,
-    because that section's heading contains "Post-epic" and its guidance
-    paragraph — written for WHOEVER RUNS the re-run later — necessarily
-    names all three reachable shapes and the fixture, to tell that future
-    person what to record. That is not a captured figure claiming a shape;
-    it is B4's/B5's sanctioned disposition when live infrastructure access
-    is not available ("recorded here as pending rather than fabricated"),
-    and running this test's shape-exclusivity assertion against it fails
-    for the wrong reason (matching three shapes in one guidance paragraph)
-    rather than for the real one (no figure exists). The two are
-    distinguished by the document's own words: a real figure would replace
-    "pending" and "has not been executed" with an actual number and
-    timestamp, which the skip condition now checks for directly."""
+    Skip condition REPLACED after re-running against the shipped document.
+    The original heuristic ("post-epic" absent AND no attribute name
+    present) does not fire once F4 ships its own honestly-worded pending
+    section, because that section's heading contains "Post-epic" and its
+    guidance paragraph — written for WHOEVER RUNS the re-run later —
+    necessarily names all three reachable shapes and the fixture, to tell
+    that future person what to record. That is not a captured figure
+    claiming a shape; it is B4's/B5's sanctioned disposition when live
+    infrastructure access is not available ("recorded here as pending
+    rather than fabricated"), and running this test's shape-exclusivity
+    assertion against it fails for the wrong reason (matching three shapes
+    in one guidance paragraph) rather than for the real one (no figure
+    exists). The two are distinguished by the document's own words: a real
+    figure would replace "pending" and "has not been executed" with an
+    actual number and timestamp.
+
+    A bare `pytest.skip` on that pending marker would never expire on its
+    own: the marker can sit in the document forever, this test stays green
+    every run, and nobody re-running the re-measurement is ever required —
+    exactly the defect a skip-forever hides. So the pending branch below
+    does not skip; it asserts that the gap is tracked as a debt under
+    `docs/design/CONTRACTS.md`'s Open items instead, which fails the day
+    that bullet is removed without the re-run actually landing. The day the
+    pending marker is replaced by a real figure, this test falls through to
+    the shape-aware assertions below, which is what it always meant to
+    check."""
     text = DOC.read_text()
     pending_disposition = re.compile(
         r"pending.{0,80}rather than fabricated|has not been executed",
         re.IGNORECASE | re.DOTALL,
     )
     if pending_disposition.search(text):
-        pytest.skip(
-            "the post-epic re-run is explicitly recorded as PENDING (B4/B5's "
-            "sanctioned disposition when this pass has no standing access to "
-            "live infrastructure) rather than fabricated -- there is no "
-            "measured figure yet for this test to check the shape of. The "
-            "three-shapes explanation in that section is guidance for "
-            "whoever eventually runs it, not a claim that one was measured; "
-            "this test starts enforcing once a real figure replaces the "
-            "pending marker."
+        contracts_text = (ROOT / "docs" / "design" / "CONTRACTS.md").read_text()
+        open_items = contracts_text.split(
+            "## Open items, named rather than implied", 1)[-1]
+        assert "R39d post-epic benchmark re-run is pending" in open_items, (
+            "the post-epic re-run is still recorded as PENDING in "
+            "docs/benchmarks/ledger-latency.md, but the debt bullet "
+            "tracking it under CONTRACTS.md's Open items is missing -- a "
+            "skip with no external trace is exactly the defect this "
+            "assertion replaces. Either restore that bullet, or, if the "
+            "re-run has genuinely been executed, replace the pending "
+            "marker in ledger-latency.md with the real figure so this test "
+            "falls through to the shape-aware assertions instead."
         )
+        return
     if "post-epic" not in text.lower() and "seat_count" not in text and (
             "pool_granted" not in text and "manual_limit" not in text):
         pytest.skip(
