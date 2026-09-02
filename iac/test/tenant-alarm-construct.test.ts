@@ -12,7 +12,7 @@ import { TenantAlarm } from '../lib/tenant-alarm';
  * identified alarm is hand-rolled outside it.
  *
  * ADJUDICATED NAME (this file was previously importing a name the construct
- * never shipped under). The contract's own design note (`design-F1.md`
+ * never shipped under). The ceiling part's design note (its
  * section on B6/B9) named the construct `TenantIdentifiedAlarm`; the shipped
  * implementation (`iac/lib/tenant-alarm.ts`, landed in commit `3366956`) ships
  * `TenantAlarm` instead, with a REQUIRED `scope: 'tenant' | 'deployment'`

@@ -30,7 +30,7 @@ import { QuotaReconcilerStack } from '../lib/quota-reconciler-stack';
  *   - "a seat-count drift alarm exists" / "a coalesced-identity alarm
  *     exists" guessed CloudWatch alarm names (`SeatCountDrift`,
  *     `CoalescedIdentity`, `PoolLimitIdentity`) that appear NOWHERE in
- *     CONTRACT-F1-ceiling.md or design-F1.md -- R8's own "Verified by"
+ *     the change's contract or its design note -- R8's own "Verified by"
  *     column asks for a UNIT test over the registered check functions
  *     (`seat_count_matches_membership`, `limit_identity`), not a specific
  *     CDK alarm name or one alarm per check. The shipped design merges

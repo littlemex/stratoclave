@@ -75,7 +75,7 @@ import { EcsStack } from '../lib/ecs-stack';
  * number being `> 0` (`PoolRowBeyondDeclaration`, threshold pinned at zero
  * forever). This satisfies R39b's stated goal ("an intended growth is not
  * an alarm and an unintended one still is") through the same reassignment
- * CONTRACT-F4-claims.md's amendment B1/B3 makes: the schema and its
+ * this part's contract makes in its B1/B3 amendment: the schema and its
  * derivation are F1's backend module to own, not iac's to re-derive.
  * R39b's OWN acceptance criterion ("a test adds an attribute and shows the
  * threshold must move with it") is verified where the schema actually
