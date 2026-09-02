@@ -199,9 +199,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
-    use std::sync::Mutex;
 
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     struct HomeGuard {
         _tmp: tempfile::TempDir,
@@ -238,7 +236,7 @@ mod tests {
     }
 
     fn setup_home(toml: &str) -> (HomeGuard, std::sync::MutexGuard<'static, ()>) {
-        let guard = ENV_GUARD.lock().unwrap();
+        let guard = crate::test_env::env_lock();
         let tmp = tempfile::TempDir::new().expect("mktemp");
         let dir = tmp.path().join(".stratoclave");
         fs::create_dir_all(&dir).unwrap();

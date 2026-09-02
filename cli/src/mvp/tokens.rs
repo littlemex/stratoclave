@@ -68,10 +68,8 @@ mod tests {
     //! Tests for the MVP token persistence layer. These mutate $HOME and
     //! therefore run sequentially under a shared mutex.
     use super::*;
+    use crate::test_env::env_lock;
     use std::env;
-    use std::sync::Mutex;
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     struct HomeGuard {
         _tmp: tempfile::TempDir,
@@ -88,7 +86,7 @@ mod tests {
     }
 
     fn with_temp_home() -> (HomeGuard, std::sync::MutexGuard<'static, ()>) {
-        let lock = HOME_LOCK.lock().unwrap();
+        let lock = env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let guard = HomeGuard {
             orig_home: env::var_os("HOME"),
