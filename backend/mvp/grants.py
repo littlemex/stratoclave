@@ -1562,23 +1562,72 @@ def reconcile_tenant_grants(
     grants = repo.list_grants_for_tenant(tenant_id=tenant_id)
     by_target: dict[tuple[str, str], dict[str, Any]] = {}
     orphans: list[dict[str, Any]] = []
+
+    def _new_entry(key: tuple[str, str], period_str: str) -> dict[str, Any]:
+        return {
+            "target_pk": key[0], "target_sk": key[1],
+            "period": period_str,
+            "active_only_sum_microusd": 0,
+            "capacity_bearing_sum_microusd": 0,
+            "blocked_grant_ids": [],
+            # R34: "a grant whose pool row is missing is reported" is a
+            # grant-level promise, not merely a row-level one -- every
+            # capacity-bearing grant id pinned here (a superset of
+            # `blocked_grant_ids`), so an orphaned entry below names WHICH
+            # grant(s) are stranded rather than only the amount and the
+            # dead target row.
+            "grant_ids": [],
+        }
+
+    # A SPECIFIC period is always given a row, even with zero grants pinned
+    # to it: an operator asking "what is this tenant's cap for period P"
+    # must get an answer whether or not a grant has ever touched P's row --
+    # a grant-driven-only entry would silently omit both the cap and a
+    # stray `pool_granted_microusd` on a row nothing backs, the exact drift
+    # this reconciler exists to catch. `period=None` (the two production
+    # call sites' own usage) stays purely grant-driven, sweeping every
+    # target row the tenant's grants have ever touched.
+    if period:
+        by_target[(tenant_id, budget_sk(period))] = _new_entry(
+            (tenant_id, budget_sk(period)), period)
+
+    # The orphan hunt is UNCONDITIONAL -- built from every grant this tenant
+    # holds, never narrowed by `period`. R34's own wording is "the reconciler
+    # finds orphans starting from grants," with no period qualifier: an
+    # orphan sitting on a target row for a DIFFERENT period than the one an
+    # operator happens to be asking about must still surface, or checking
+    # one period at a time would never discover a grant stranded on another.
+    by_target_orphans: dict[tuple[str, str], dict[str, Any]] = {}
+    for grant in grants:
+        status = str(grant.get("status") or "")
+        if not is_capacity_bearing(status):
+            continue
+        key = (str(grant.get("target_pk") or ""), str(grant.get("target_sk") or ""))
+        if budgets.get_by_key(*key) is not None:
+            continue
+        entry = by_target_orphans.setdefault(key, _new_entry(key, str(grant.get("period") or "")))
+        amount = int(grant.get("approved_amount_microusd", 0))
+        entry["capacity_bearing_sum_microusd"] += amount
+        entry["grant_ids"].append(str(grant.get("grant_id") or ""))
+        if status == GRANT_ACTIVE:
+            entry["active_only_sum_microusd"] += amount
+        if status == GRANT_REVOKE_BLOCKED:
+            entry["blocked_grant_ids"].append(str(grant.get("grant_id") or ""))
+    for key, entry in sorted(by_target_orphans.items()):
+        orphans.append({**entry, "reason": "target pool row is missing"})
+
     for grant in grants:
         if period and str(grant.get("period") or "") != period:
             continue
         status = str(grant.get("status") or "")
         key = (str(grant.get("target_pk") or ""), str(grant.get("target_sk") or ""))
         amount = int(grant.get("approved_amount_microusd", 0))
-        entry = by_target.setdefault(key, {
-            "target_pk": key[0], "target_sk": key[1],
-            "period": str(grant.get("period") or ""),
-            "active_only_sum_microusd": 0,
-            "capacity_bearing_sum_microusd": 0,
-            "blocked_grant_ids": [],
-        })
+        entry = by_target.setdefault(key, _new_entry(key, str(grant.get("period") or "")))
         if status == GRANT_ACTIVE:
             entry["active_only_sum_microusd"] += amount
         if is_capacity_bearing(status):
             entry["capacity_bearing_sum_microusd"] += amount
+            entry["grant_ids"].append(str(grant.get("grant_id") or ""))
         if status == GRANT_REVOKE_BLOCKED:
             entry["blocked_grant_ids"].append(str(grant.get("grant_id") or ""))
 
@@ -1586,7 +1635,7 @@ def reconcile_tenant_grants(
     for key, entry in sorted(by_target.items()):
         row = budgets.get_by_key(*key)
         if row is None:
-            orphans.append({**entry, "reason": "target pool row is missing"})
+            # Already captured, tenant-wide and unconditionally, above.
             continue
         stored = granted_microusd(row)
         cap = effective_grant_cap_for_row(row)
