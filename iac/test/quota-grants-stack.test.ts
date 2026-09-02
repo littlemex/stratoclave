@@ -5,14 +5,14 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import { QuotaGrantsStack } from '../lib/quota-grants-stack';
 
 /**
- * F2 (CONTRACT-F2-grant.md) — R40: human-facing alarms carry a tenant
+ * F2 (docs/design/quota-raises.md) — R40: human-facing alarms carry a tenant
  * dimension.
  *
  * `QuotaGrantsStack` does not exist at all yet (`iac/lib/quota-grants-stack.ts`
  * is new, per the contract's own file list), so this whole suite fails today
  * at compile/import — `Cannot find module '../lib/quota-grants-stack'`.
  *
- * CORRECTED READING (superseding design-F2.md's original Ambiguity #3): a
+ * CORRECTED READING (superseding docs/design/quota-raises.md's original Ambiguity #3): a
  * per-tenant CloudWatch *metric* dimension was found to violate an existing,
  * explicit convention in this codebase (`iac/lib/vsr-service.ts`'s
  * `VSR_METRIC_ALLOWLIST` comment: metrics billed per name, high-cardinality
@@ -83,16 +83,29 @@ test('revoke_blocked_grants metric filter is undimensioned; its log line carries
   const found = metricTransformation('RevokeBlockedGrants');
   expect(found).toBeDefined();
   expect(found!.metricTransformation.Dimensions).toBeUndefined();
-  expect(found!.metricTransformation.MetricNamespace).toBe('Stratoclave/Grants');
+  expect(found!.metricTransformation.MetricNamespace).toBe('stratoclave/Grants');
   expect(found!.filterPattern).toMatch(/tenant_id/);
 });
 
-test('grant_revocation_late_seconds metric filter is undimensioned; its log line carries tenant_id (R40)', () => {
+test('grant_revocation_late_seconds metric filter is undimensioned AND its FilterPattern does not require tenant_id (a deployment-wide max, not a per-tenant one)', () => {
+  // Corrected reading: `grant_revocation_late_seconds` is `max(late_seconds)`
+  // OVER THE WHOLE SWEEP PASS (`mvp/grants.py::sweep_expired_grants`'s
+  // `summary` dict, printed as part of the SAME `sweeper_ran` line, not a
+  // second, per-grant log line) — it names no single tenant, the same shape
+  // as `sweeper_ran` itself, not the per-grant `revoke_blocked_grants` line.
+  // Tagging it with an arbitrary tenant_id (whichever grant happened to be
+  // the pass's slowest) would misattribute a fleet-wide statistic to one
+  // tenant, exactly the failure `TenantAlarm`'s own `AlarmScope` doc
+  // comment names ("a signal about the deployment as a whole has no tenant
+  // to name"). `quota-grants-stack.ts` wires this metric's `TenantAlarm`
+  // with `scope: 'deployment'` and `event: 'sweeper_ran'` accordingly —
+  // docs/design/quota-raises.md's Ambiguity #3 assumed a per-tenant log line that this
+  // metric's own arithmetic does not produce.
   const found = metricTransformation('GrantRevocationLateSeconds');
   expect(found).toBeDefined();
   expect(found!.metricTransformation.Dimensions).toBeUndefined();
-  expect(found!.metricTransformation.MetricNamespace).toBe('Stratoclave/Grants');
-  expect(found!.filterPattern).toMatch(/tenant_id/);
+  expect(found!.metricTransformation.MetricNamespace).toBe('stratoclave/Grants');
+  expect(found!.filterPattern).not.toMatch(/tenant_id/);
 });
 
 test('sweeper_ran heartbeat is undimensioned AND its FilterPattern does not require tenant_id (a global fact, not a per-tenant one)', () => {
@@ -113,7 +126,7 @@ test('every AWS::Logs::MetricFilter in this stack is undimensioned (no per-tenan
 
 test('an alarm exists on the blocked-grants metric, undimensioned, with missing data treated as breaching', () => {
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    Namespace: 'Stratoclave/Grants',
+    Namespace: 'stratoclave/Grants',
     MetricName: 'RevokeBlockedGrants',
     ComparisonOperator: 'GreaterThanThreshold',
     Threshold: 0,

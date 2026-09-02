@@ -3,11 +3,11 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
 
 /**
- * F2 (CONTRACT-F2-grant.md) — the quota-events table itself: PAY_PER_REQUEST,
+ * F2 (docs/design/quota-raises.md) — the quota-events table itself: PAY_PER_REQUEST,
  * NO stream, no TTL, and BOTH GSIs the sweeper and the approver's list
  * depend on.
  *
- * Seam amendment B9 (SEAMS.md S8): the stream was originally specified ON
+ * Seam amendment B9 (SEAMS S8): the stream was originally specified ON
  * ("NEW_AND_OLD_IMAGES ... so PR 3 needs no table change"), but F3 has no
  * event-source mapping, consumer, permissions or DLQ in scope and built
  * expiry attribution from durable grant records instead. The stream is
@@ -17,7 +17,7 @@ import { DynamoDBStack } from '../lib/dynamodb-stack';
  * table at all yet, so there is also no stream) and will keep failing for
  * the right reason if a future edit adds the table WITH a stream.
  *
- * design-F2.md's load-bearing property for R4: `grant-expiry-index` must be
+ * docs/design/quota-raises.md's load-bearing property for R4: `grant-expiry-index` must be
  * SPARSE by construction — its PK attribute (`grant_status`) is written only
  * while a grant is ACTIVE. CloudFormation/CDK cannot express "sparse" as a
  * table property (sparseness is a write-time behaviour, not a schema flag),
