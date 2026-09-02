@@ -209,20 +209,25 @@ def test_scheduled_pass_carries_whatever_the_declaration_marks_carried_not_a_har
     rollover code -- the same shape as F2 later adding
     `grant_cap_microusd` with `rollover="carried"` and it Just Working.
 
-    NOTE: this currently ALSO fails on the container shape
-    (`dynamo.pool_row_schema.POOL_ROW_ATTRIBUTES` is a tuple of
-    `PoolAttribute`, not a mapping) -- a known implementation defect the
-    other declaration tests (`test_ceiling_attribute_declaration_b1.py`,
-    `test_ceiling_doc_names_writers_r14a.py`) already caught; no edit needed
-    here for that part, it is expected to start failing on content instead
-    once the container becomes a mapping."""
+    Class name and constructor fixed after re-verifying against the
+    implementation post-merge: the shipped declaration's dataclass is
+    `PoolAttribute` (`name`, `rollover`, `writers`, `max_value_bytes`, and
+    exactly one of `check`/`exemption`), not this file's original
+    `AttributeSpec(rollover=..., writers=..., reconciler_check=...,
+    exempt=..., exempt_reason=...)` sketch -- the same rename the sibling
+    declaration test files (`test_ceiling_attribute_declaration_b1.py`,
+    `test_ceiling_doc_names_writers_r14a.py`) already absorbed. The
+    container is also the mapping form (`dict[str, PoolAttribute]`) rather
+    than the tuple this file's first draft guessed, so the fake entry is
+    keyed by its own name like every other entry."""
     import dynamo.pool_row_schema as pool_row_schema
     from mvp.observability.quota_reconciler import roll_forward_all_tenants
 
     fake_attrs = dict(pool_row_schema.POOL_ROW_ATTRIBUTES)
-    fake_attrs["a_future_f2_attribute"] = pool_row_schema.AttributeSpec(
-        rollover="carried", writers=("some_f2_writer",),
-        reconciler_check=None, exempt=True, exempt_reason="test double",
+    fake_attrs["a_future_f2_attribute"] = pool_row_schema.PoolAttribute(
+        name="a_future_f2_attribute", rollover=pool_row_schema.ROLLOVER_CARRIED,
+        writers=("some_f2_writer",), max_value_bytes=8,
+        exemption="test double",
     )
     monkeypatch.setattr(pool_row_schema, "POOL_ROW_ATTRIBUTES", fake_attrs)
 
