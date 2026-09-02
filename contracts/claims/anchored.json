@@ -1980,7 +1980,7 @@
   {
    "id": "cl-588e284b40bc",
    "claim": "Archiving over one leaves a grant pinned to a pool row nobody will look at again: the sweep keeps trying to revoke it, the reconciler keeps counting it against a cap for a tenant that no longer exists, and its capacity can never be released because releasing means moving a retired tenant's ceiling.",
-   "anchor": "contract:C14.23@84c7737e",
+   "anchor": "contract:C14.23@bd572700",
    "note": "the consequence the retirement refusal exists to prevent, which is the clause's own reason"
   },
   {
@@ -2044,19 +2044,19 @@
   {
    "id": "cl-1e921a990ab9",
    "claim": "**The refusal.** A pool refusal's candidate carries `grant_expired: true` when a grant against the same wall has `expires_at` within `[expires_at, expires_at + 15 minutes]` of now — three five-minute sweep intervals, so a late sweep still gets to name the cause — computed by the pure function `fallback_reason_for_expired_grant(grant_expires_at, now_epoch, grant_wall, blocked_wall)`, which also requires the grant's wall and the refusing wall to be the *same* one: a grant against the pool cannot explain a per-model refusal just because it expired recently.",
-   "anchor": "contract:C14.27@3bd773e5",
+   "anchor": "contract:C14.27@db24af4c",
    "note": "the refusal half of C14.27"
   },
   {
    "id": "cl-38a1beee5611",
    "claim": "**The usage row.** `usage_logs.record()` takes one additive attribute, `fallback_reason`, set at settle time — never derived after the fact, because the cause is a fact about the router's decision, not something the two model ids can reconstruct.",
-   "anchor": "contract:C14.27@3bd773e5",
+   "anchor": "contract:C14.27@db24af4c",
    "note": "the usage-row half of C14.27"
   },
   {
    "id": "cl-5d19d01ffa94",
    "claim": "Today it can only ever be `\"quota_exhausted\"`: the cascade advances past a candidate on `QuotaExhausted` alone, and a pool-wall refusal aborts the whole request rather than being caught and advanced past (section 8's own \"leaves on a pool refusal\"), so a *successfully served* fallback can never have been caused by a grant expiring at the pool wall — only a refusal can, which is what the candidate flag above is for.",
-   "anchor": "contract:C14.27@3bd773e5",
+   "anchor": "contract:C14.27@db24af4c",
    "note": "states C14.27's own boundary in the same breath as its guarantee -- the reachable cause set is closed, not open-ended"
   },
   {

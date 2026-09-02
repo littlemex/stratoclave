@@ -823,17 +823,25 @@ def apply_pool_budget_request(
     was_seat_tracked = bool((before or {}).get("seat_tracked", True))
 
     # A figure that EQUALS the ceiling currently in force, while part of that
-    # ceiling is granted, is almost certainly a figure copied off a screen. The
-    # operator means "make the baseline this"; the setter would read it as "make
-    # the baseline this, on top of which the grant still sits" -- so the grant is
-    # silently re-based on itself and the ceiling jumps by the granted amount. Then
-    # at expiry it drops by that amount again and lands below the figure the
-    # operator typed, which is the shape of the case this guard exists for: a $950
-    # figure set while $450 was granted became $1,400, then $950 minus the grant.
+    # ceiling is granted, is almost certainly a figure copied off the screen.
+    # `set_manual_limit` treats it as the new BASELINE and moves `pool_limit`
+    # by the delta against the OLD baseline only -- the granted term is never
+    # touched -- so a figure that already includes the grant makes the grant
+    # get added on top of itself again: the ceiling holds at the typed figure
+    # PLUS the grant for as long as the grant stays open, one grant's worth
+    # above what was on the screen. That excess is temporary, not permanent --
+    # the sweep subtracts the grant once at expiry and the ceiling lands
+    # exactly on the number the operator typed, never below it -- but it is a
+    # window of extra capacity nobody asked for, and it is indistinguishable,
+    # from the figure alone, from an operator who genuinely wants that number
+    # as the new baseline (for whom the same jump-then-settle is correct): a
+    # $950 figure set while $450 was granted holds the ceiling at $1,400 until
+    # the grant expires, then $950 -- never below $950.
     #
-    # Refused rather than reinterpreted, because both readings are plausible and
-    # picking one silently is how an operator's number becomes a number nobody
-    # chose. The refusal names the composition so the next request can be exact.
+    # Refused rather than reinterpreted, because both readings are plausible
+    # and picking one silently would either erase money that should still be
+    # there or open a free window that should not exist. The refusal names
+    # the composition so the next request can be exact.
     granted_now = int((before or {}).get("pool_granted_microusd", 0))
     if (not body.follow_seats) and granted_now > 0:
         asked_microusd = int(body.limit_usd_cents or 0) * _MICRO_USD_PER_CENT
@@ -844,10 +852,11 @@ def apply_pool_budget_request(
                     "type": "figure_includes_active_grant",
                     "message": (
                         "That figure is the ceiling currently in force, and part of "
-                        "it is granted rather than baseline. Setting it would add "
-                        "the granted amount on top of itself, and the tenant would "
-                        "lose it twice when the grant expires. Send the baseline you "
-                        "want instead."),
+                        "it is granted rather than baseline. Setting it would fold "
+                        "the grant into the new baseline and then add the same "
+                        "grant on top again, holding the ceiling at this figure "
+                        "plus the grant until the grant expires. Send the baseline "
+                        "you want instead."),
                     "figure_microusd": asked_microusd,
                     "pool_limit_microusd": int(
                         (before or {}).get("pool_limit_microusd", 0)),
