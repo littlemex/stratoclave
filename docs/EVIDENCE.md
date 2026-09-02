@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-08-30. Every figure carries the commit that produced it. -->
+<!-- Last updated: 2026-09-02. Every figure carries the commit that produced it. -->
 
 # Evidence map — what is claimed, and how far it is verified
 
@@ -117,6 +117,70 @@ its overlap witness read the pool once after the probes finished, which assumed 
 occupier was still in flight — true for a reasoning model on a long prompt, false on a
 trivial one, and it reported genuine overlap as inconclusive until the witness became a
 peak sampled across the probe window.
+
+### The limit-raise mechanism (F1+F2), on a from-scratch deployed stack (2026-09-02)
+
+A dedicated deployment (`scquota`, us-east-1, `impl/quota-f2` at `22b5eb9`), built
+from scratch for this verification and left standing rather than torn down. New
+harness `scripts/local/prove_raise.py --deployment scquota`, following
+`prove_ceiling.py`'s conventions: it refuses the production prefix by name, seeds a
+dedicated tenant plus two DIFFERENT identities (a requester holding only
+`limits:raise-self` and an approver holding `limits:approve`), and reads every
+figure back from the deployment's own `TenantBudgetsRepository.pool_summary` and
+`QuotaEventsRepository.get_grant` rather than recomputing it locally.
+
+| Claim | Evidence | Tier | Not covered |
+|---|---|---|---|
+| **A tenant at its ceiling is refused, and the refusal names the raise path** | `402 request_does_not_fit_pool_limit`, `grantable: true`, `raise_hint.candidates` naming `wall=tenant_dollar_pool` / `blocker=tenant_pool` | **deployed-live** | only the "does not fit at all" refusal shape was forced (headroom-exhausted-but-nonzero was exercised only in the `prove_ceiling.py` regression run below) |
+| **A raise approved for LESS than asked reaches the requester's own view as the approved figure, not the asked one** | approver granted 10,000 of 20,000 microUSD asked; `GET /me/limit-raises` for the requester returns `approved_amount_microusd: 10000` beside `asked_amount_microusd: 20000` | **deployed-live** | — |
+| **Work refused before the grant is admitted after it** | the same oversized probe's cost class, admitted `200` once the grant raised the ceiling from 20,000 to 30,000 microUSD | **deployed-live** | — |
+| **An operator setting a figure while a grant is live lands where they meant** | `PUT .../pool-budget` while the grant was ACTIVE returned `baseline_microusd: 520000`, `pool_granted_microusd: 10000`, `pool_limit_microusd: 530000` — the new baseline, not the baseline plus the grant swallowed into it | **deployed-live** | — |
+| **Resending the figure already in force (baseline + a live grant) is refused, not silently doubled** | `409 figure_includes_active_grant`, carrying `figure_microusd`, `pool_limit_microusd`, `pool_granted_microusd`, `baseline_microusd` | **deployed-live** | — |
+| **Negative headroom is reported signed and unclamped, to both sides** | baseline forced to 0 against 50,043 microUSD of injected committed spend: `remaining_microusd: -40043`, `over_ceiling_microusd: 40043` (exact negation, both fields present in one response) | **deployed-live** | the committed spend was injected directly on `pool_headroom_microusd`/`pool_settled_microusd` as a test fixture (a short model reply settles for far less than a `max_tokens` bound, so relying on real generation to reach a large settle was not viable in the time available) rather than reached by driving enough real traffic through the gateway |
+| **The grant expires with nobody acting, and the ceiling returns to EXACTLY the pre-grant figure** | forced the grant's `expires_at` five seconds into the past; CloudWatch Logs (`/aws/lambda/scquota-quota-grant-sweeper`) show the real EventBridge schedule (`rate(5 minutes)`) firing autonomously at `2026-09-02T00:56:00.410Z` with `grants_revoked: 1`, `grant_revocation_late_seconds: 197` — **3.5 seconds before** this run's own manual-invoke fallback, which found nothing left to do (`grants_revoked: 0`). Post-sweep `pool_limit_microusd` was exactly 20,000, the recorded baseline before the grant | **deployed-live** | the harness's own schedule-detection code had a bug on this run (it gave up after one premature CloudWatch Logs read, so it self-reported "not witnessed" and ran the fallback anyway) — fixed in the script; the finding above is from a retrospective `filter-log-events` query, not from the script's own field |
+| **The next admission after expiry is refused again, in terms of the expiry rather than repeating the first refusal verbatim** | **not met**: the post-expiry refusal is byte-identical to the pre-grant refusal (`reason`, `message`, `raise_hint` all equal) | **deployed-live** | this is the shipped behaviour, not a bug this run found by accident — `mvp._pipeline._err_402`'s docstring cites A-08-credit ("never leak precise balances/limits to the caller... a generic message") as the reason the body is deliberately generic, and F2's "Not in this part" explicitly excludes a `/me` grant join a client could use to tell the two refusals apart. The plan this run followed expected a distinguishing message; the shipped contract does not promise one |
+| **The dollar-ceiling-under-concurrency claim still holds after this change rewrites how the ceiling is computed** | `prove_ceiling.py --deployment scquota`: 1 of 2 repetitions witnessed an overlapping reservation window, 6 contended attempts, 11 admits / 3 pool-headroom refusals, no ledger-reconstructed state showed settled plus reserved above the limit, the headroom identity held | **deployed-live** | 6 contended attempts is a small number for the reason stated in the 2026-08-29 section above; the first attempt (default `--headroom-microusd`) produced zero refusals because the occupier route (`openai.gpt-5.6-sol`, gated by `STRATOCLAVE_CODEX_ENABLED`) was not enabled on the first ECS deploy and had to be redeployed with it on — see the deploy-defects note below |
+| **The four DynamoDB facts R15 rests on (ADD creates a missing attribute; a condition on a missing attribute fails; a negative ADD is not floored; cross-table `TransactWriteItems` is atomic)** | re-measured against two throwaway tables created in the real account and deleted immediately after: all four matched moto exactly (`ADD` → 5, `ConditionalCheckFailedException`, `-95`, `TransactionCanceledException` with no partial write) | **deployed-live** (real DynamoDB, not moto) | single trial per fact; no divergence from moto was found, which is itself the result — F4's moto-based facts were not hiding a difference |
+| **Ledger latency floor (server-side `TransactWriteItems` span), re-measured** | `n=40`, `POST /api/mvp/billing/authorize`, current commit, on the `scquota` ECS task (**1024 CPU / 2048 MiB — 4× the 256/512 task the 2026-07-19 benchmark in [`ledger-latency.md`](benchmarks/ledger-latency.md) used**): `p50=25.0 ms, p90=30.0 ms, p99=45.6 ms, max=45.6 ms`, read from the `ledger_transact_latency` structured log line the app itself emits | **deployed-live** | comparable in *shape* to the documented floor (p50 20 ms / p99 58 ms, n=3,734) despite 4× the CPU — consistent with that document's own finding that CPU is not the limiter — but n=40 vs n=3,734 is not the same statistical weight, and the task-size difference means this is not a controlled re-run of that number. **The end-to-end "A-layer" figure and the full concurrency sweep (c=2/8/16) were NOT re-measured**: the documented methodology requires a same-region, no-WAN load generator, which this pass did not provision — a client on this laptop measures WAN latency, not the ledger, and would misrepresent the number if reported as a re-run |
+
+**Deploy-time defects found only by attempting this deploy, not by reading the code**:
+
+1. `scquota-quota-reconciler`'s CDK-Nag findings are unsuppressed — `bin/iac.ts` already
+   says so in a comment ("NOTE for whoever reads this next: `quotaReconcilerStack` is
+   missing from this list... nag findings on a context-gated stack are invisible until
+   somebody deploys it") — and the documented `npx cdk deploy ... quotaReconciler=true`
+   path fails outright with three `AwsSolutions-IAM4`/`IAM5` errors before it deploys
+   anything. Worked around with the existing `CDK_NAG=off` escape hatch.
+2. `QuotaGrantsStack` and `QuotaReconcilerStack` both import their Lambda's CloudWatch Logs
+   log group with `logs.LogGroup.fromLogGroupName` (an import of something assumed to
+   already exist) rather than creating it, but a Lambda's log group is created lazily on
+   its first invocation — which has not happened on a fresh deploy. Both stacks'
+   `AWS::Logs::MetricFilter` resources therefore `CREATE_FAILED` with "The specified log
+   group does not exist" on the very first deploy of a fresh account, and the whole stack
+   rolls back. `certificate-scheduler-stack.ts`, the sibling stack the same convention
+   note points to, gets this right (`new logs.LogGroup(...)`). Worked around by
+   pre-creating the three log groups (`aws logs create-log-group`) before deploying.
+3. The three new scheduled Lambdas (`quota-grant-sweeper`, `quota-reconciler`,
+   `quota-period-rollover`) are wired to `DockerImageCode.fromEcr(lambdaRepository, {tagOrDigest: lambdaImageTag})`
+   pointing at the **same** ECR repository and, by default, the **same** `:latest` tag
+   the ECS backend uses — but they need an image built from `backend/Dockerfile.lambda`
+   (a different base image, `public.ecr.aws/lambda/python:3.11`, with the Lambda Runtime
+   Interface Client), not the `backend/Dockerfile` image the ECS service runs. Nothing in
+   the repository builds or pushes that image, and nothing sets `LAMBDA_IMAGE_TAG`; a
+   deploy that follows only the documented path would either fail to find a Lambda-shaped
+   image or — worse, if an operator ever pushes one to `:latest` — silently break the ECS
+   service, since both point at the same tag. Worked around by building
+   `backend/Dockerfile.lambda` under a separate tag and passing `LAMBDA_IMAGE_TAG` at
+   deploy time; confirmed working by invoking all three Lambdas directly.
+4. Unrelated to F1/F2 but hit while reaching them: `iac/scripts/build-and-push.sh` never
+   passes `--platform` to the container build. On an arm64 build host this silently
+   produces an arm64 image that Fargate (x86_64 by default) cannot run — surfacing only
+   as `exec /app/entrypoint.sh: exec format error` in the task's CloudWatch logs, exactly
+   as `05-verify/PLAN-real-machine.md` warned. Compounding it: the ECR repository is
+   `imageTagMutability: IMMUTABLE`, so once a wrong-architecture image is pushed as
+   `:latest`, pushing a corrected image under the same tag is rejected outright
+   (`400 Bad Request`) until the old tag is explicitly deleted first — the documented
+   "just rebuild and push" recovery path does not work as written.
 
 ### Local mode, against DynamoDB Local and real Bedrock (2026-08-28)
 
