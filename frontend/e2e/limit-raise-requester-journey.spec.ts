@@ -33,7 +33,9 @@
 //     (never `requested_amount_microusd`), and `reason_code` must be one of
 //     the four real `RAISE_REASON_CODES` (`onboarding`, `usage_spike`,
 //     `migration`, `incident_response`, `other`) -- `deadline` is not one.
-//   - The wire `status` is lowercase (`"approved"`/`"pending"`), and
+//   - The wire `status` carries the spelling it is STORED in (`"APPROVED"`,
+//     `"PENDING"`), so a value read from the API compares against the stored
+//     one with no translation step, and
 //     `expires_at` is an epoch-SECONDS integer, never an ISO string
 //     (`mvp/grants.py::_request_public`).
 //   - The approver identity field is `approver_id`.
@@ -105,7 +107,7 @@ function decidedRequest() {
     request_id: 'req-1',
     tenant_id: 'acme-eng',
     limit_kind: 'tenant_dollar_pool',
-    status: 'approved',
+    status: 'APPROVED',
     reason_code: 'migration',
     asked_amount_microusd: 200_000_000,
     // The facts that live on the grant row and reach her nowhere else.
@@ -220,7 +222,7 @@ test.describe('the refused engineer reading her own request', () => {
             request_id: 'req-2',
             tenant_id: 'acme-eng',
             limit_kind: 'tenant_dollar_pool',
-            status: 'pending',
+            status: 'PENDING',
             reason_code: capturedPostBody?.reason_code ?? 'migration',
             asked_amount_microusd: capturedPostBody?.asked_amount_microusd ?? 0,
             approved_amount_microusd: null,
@@ -245,7 +247,7 @@ test.describe('the refused engineer reading her own request', () => {
                   request_id: 'req-2',
                   tenant_id: 'acme-eng',
                   limit_kind: 'tenant_dollar_pool',
-                  status: 'pending',
+                  status: 'PENDING',
                   reason_code: capturedPostBody?.reason_code ?? 'migration',
                   asked_amount_microusd: capturedPostBody?.asked_amount_microusd ?? 0,
                   approved_amount_microusd: null,

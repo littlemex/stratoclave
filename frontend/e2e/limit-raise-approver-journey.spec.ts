@@ -87,7 +87,7 @@ function pendingRequest(overrides: Record<string, unknown> = {}) {
     limit_kind: 'tenant_dollar_pool',
     // Wire status is lowercase (`mvp.grants._request_public` lowercases the
     // stored `STATUS_PENDING`).
-    status: 'pending',
+    status: 'PENDING',
     reason_code: 'migration',
     comment: 'shipping the migration on Friday',
     asked_amount_microusd: 200_000_000,
@@ -111,7 +111,7 @@ function tenantPoolNow(overrides: Record<string, unknown> = {}) {
   return {
     tenant_id: TENANT_ID,
     period: PERIOD,
-    status: 'active',
+    status: 'ACTIVE',
     pool_limit_microusd: 2_050_000_000,
     pool_reserved_microusd: 300_000_000,
     pool_settled_microusd: 1_700_000_000,
