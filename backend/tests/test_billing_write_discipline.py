@@ -35,6 +35,7 @@ SCANNED_FILES = {
     "backend/dynamo/user_tenants.py",
     "backend/migrations/backfill_pool_headroom.py",
     "backend/migrations/pool_ceiling_migration.py",
+    "backend/dynamo/quota_events.py",
 }
 
 # Reviewed write sites. Seeded from the current design:
@@ -269,6 +270,55 @@ ALLOWED_SITES = {
         # reviewed above. Reviewed: same class as the ensure/reserve/refund writes.
         ("backend/dynamo/user_tenants.py", "UserTenantsRepository.archive_membership", "update_item"),
     },
+    # F2 (raise/grant mechanism). Every raw write here is on the quota-events
+    # table's OWN rows (slot/request/grant) or a bookkeeping counter on a
+    # grant -- it names no pool_*_microusd attribute anywhere in this module
+    # (that ADD lives on TenantBudgetsRepository.grant_apply_txn_item /
+    # grant_revoke_txn_item, dynamo/tenant_budgets.py, reviewed there), so A2
+    # is not engaged by any site below.
+    "backend/dynamo/quota_events.py": {
+        # The daily slot: a create-only Put (attribute_not_exists(pk)) that IS
+        # the idempotency anchor for R7 -- the first call today wins and
+        # stores the client_token + request_id a retry reads back. No money.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.put_slot_if_absent", "put_item"),
+        # Reclaiming a stale/decided slot: unconditional Delete of the SAME
+        # row the caller just read as free to reclaim (R22's lazy free). Best-
+        # effort by design -- a slot is declared harmless dead weight if
+        # nothing ever reclaims it (B11) -- and carries no money.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.delete_slot", "delete_item"),
+        # Creating a PENDING request row: a fresh request_id (uuid4) per call,
+        # so there is no concurrent-create to guard against, and the row
+        # carries no pool counter. No money moves at request time; a grant
+        # only moves money at approval, on the transactional path below.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.put_request", "put_item"),
+        # Revoke-attempt bookkeeping (R9): `ADD revoke_attempts :one`, guarded
+        # `status = ACTIVE`. A counter, but not a MONEY counter -- it never
+        # names pool_granted/pool_limit/pool_headroom -- and the guard is what
+        # keeps a grant already revoked (by a winning overlapping sweep) from
+        # having its attempt count bumped after the fact.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.bump_revoke_attempts", "update_item"),
+        # Taking a grant out of the expiry index after bounded failed
+        # attempts (R9): `SET status=REVOKE_BLOCKED ... REMOVE grant_status`,
+        # guarded `status = ACTIVE AND revoke_attempts >= :max`. Deliberately
+        # does NOT touch the pool -- the capacity was never given back, so
+        # pool_granted_microusd staying as it is is the honest state (the
+        # method's own docstring). Money-neutral by construction.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.mark_revoke_blocked", "update_item"),
+        # The repair path's counterpart: clears the block so the ordinary
+        # revoke path can retry. A single-item conditional SET/REMOVE on the
+        # grant row's own status fields, same class as mark_revoke_blocked,
+        # touches no pool counter.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.clear_revoke_block", "update_item"),
+        # The transactional path every grant lifecycle write (approve/reject/
+        # revoke/sweep) sends its pre-built items through. Reviewed under A5
+        # via EXPECTED_TOKEN_KIND["backend/dynamo/quota_events.py"]
+        # ["QuotaEventsRepository.transact_write"] = "none" below -- every
+        # item this method ever carries is itself a CAS (grant status, pool
+        # counter floor/ceiling guards), so a lost-ack retry of the identical
+        # transaction fails its own condition rather than double-applying;
+        # there is no money ADD here for a token to dedupe.
+        ("backend/dynamo/quota_events.py", "QuotaEventsRepository.transact_write", "transact_write_items"),
+    },
 }
 
 # put_item calls that are *allowed* to touch counter attributes, because
@@ -448,6 +498,17 @@ EXPECTED_TOKEN_KIND = {
         # money ADD; a lost-ack retry is harmless, so no ClientRequestToken is
         # required. Outside the billing settle path / proof scope. Reviewed.
         "UserTenantsRepository.switch_tenant": "none",
+    },
+    "backend/dynamo/quota_events.py": {
+        # Every item `transact_write` ever carries (authority ConditionCheck,
+        # grant Put/Update, pool Update) is itself a CAS -- status=ACTIVE,
+        # revision match, the cap/floor guards on the pool row -- so a
+        # lost-ack retry of the IDENTICAL transaction fails its own condition
+        # rather than double-applying. No money ADD here needs a token to
+        # dedupe against a retry the way settle's does; reviewed against A5
+        # as the "idempotent CAS, not a money ADD" shape the other "none"
+        # entries in this registry already cover.
+        "QuotaEventsRepository.transact_write": "none",
     },
 }
 
