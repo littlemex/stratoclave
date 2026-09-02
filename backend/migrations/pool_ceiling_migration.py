@@ -521,9 +521,26 @@ def recompute_seat_tracked_rows(*, apply: bool) -> dict[str, Any]:
     reproducible. A row holding an operator's figure is NOT touched: the figure is
     a number a person chose and the rate has nothing to say about it.
 
+    THE WRITE'S CAS INCLUDES `attribute_not_exists(manual_limit_microusd)`, and
+    that is load-bearing rather than redundant with the `MANUAL_LIMIT_ATTR in
+    item` check just above it. That check reads the SCANNED snapshot; the row is
+    read once per pass and written up to one page later, so an operator who calls
+    `set_manual_limit` for THIS row in that window is invisible to the snapshot
+    check and would otherwise pass straight through it. `set_manual_limit`'s own
+    delta can be zero (an operator setting the manual figure to exactly the
+    row's current baseline moves no money), so `pool_limit_microusd` and
+    `seat_count` alone are not enough to catch the interleaving: they can be
+    exactly what this pass already observed even though the row has since become
+    manual. Losing this CAS is reported, not raised through -- a row that turned
+    manual mid-pass is the row this migration was never going to touch, and the
+    next pass (or the reconciler) is where it is noticed again if it still needs
+    attention.
+
     Requires `STRATOCLAVE_SEAT_RATE_MIGRATION`, because the process running this
     is the one process that is allowed to disagree with the stored rate.
     """
+    from botocore.exceptions import ClientError
+
     from dynamo.pool_row_schema import MANUAL_LIMIT_ATTR, SEAT_RATE_ATTR
     from dynamo.tenant_budgets import (
         SEAT_RATE_MIGRATION_ENV,
@@ -543,8 +560,9 @@ def recompute_seat_tracked_rows(*, apply: bool) -> dict[str, Any]:
     new_rate = seat_rate_microusd()
     old_rate = repo.rate_in_force_microusd()
 
-    scanned = recomputed = untouched_manual = 0
+    scanned = recomputed = untouched_manual = lost_cas = 0
     moved: list[dict[str, Any]] = []
+    lost: list[dict[str, str]] = []
     for item in _iter_budget_rows(table):
         scanned += 1
         if MANUAL_LIMIT_ATTR in item:
@@ -557,21 +575,38 @@ def recompute_seat_tracked_rows(*, apply: bool) -> dict[str, Any]:
         if delta == 0 and int(item.get(SEAT_RATE_ATTR, 0)) == new_rate:
             continue
         if apply:
-            table.update_item(
-                Key={"tenant_id": item["tenant_id"], "sk": item["sk"]},
-                UpdateExpression=(
-                    "SET seat_rate_microusd = :r, updated_at = :now "
-                    "ADD pool_limit_microusd :d, pool_headroom_microusd :d"),
-                # The ceiling moves as an ADD so a live reserve's own headroom ADD
-                # composes with it, and the CAS is on the two figures the delta was
-                # computed from.
-                ConditionExpression=(
-                    "pool_limit_microusd = :obs_limit AND seat_count = :obs_seats"),
-                ExpressionAttributeValues={
-                    ":r": Decimal(new_rate), ":d": Decimal(delta),
-                    ":obs_limit": Decimal(old_limit),
-                    ":obs_seats": Decimal(seats), ":now": _now()},
-            )
+            try:
+                table.update_item(
+                    Key={"tenant_id": item["tenant_id"], "sk": item["sk"]},
+                    UpdateExpression=(
+                        "SET seat_rate_microusd = :r, updated_at = :now "
+                        "ADD pool_limit_microusd :d, pool_headroom_microusd :d"),
+                    # The ceiling moves as an ADD so a live reserve's own
+                    # headroom ADD composes with it, and the CAS is on the two
+                    # figures the delta was computed from PLUS the operator
+                    # figure's absence, which is the one input a zero delta
+                    # cannot make this condition see on its own (see docstring).
+                    ConditionExpression=(
+                        "pool_limit_microusd = :obs_limit AND "
+                        "seat_count = :obs_seats AND "
+                        "attribute_not_exists(manual_limit_microusd)"),
+                    ExpressionAttributeValues={
+                        ":r": Decimal(new_rate), ":d": Decimal(delta),
+                        ":obs_limit": Decimal(old_limit),
+                        ":obs_seats": Decimal(seats), ":now": _now()},
+                )
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") \
+                        != "ConditionalCheckFailedException":
+                    raise
+                # A membership delta, an operator's `set_manual_limit`, or
+                # another pass moved one of the three inputs under us. Leave the
+                # row for the next pass rather than writing a rate mismatch onto
+                # a row this snapshot no longer describes.
+                lost_cas += 1
+                lost.append({"tenant_id": str(item.get("tenant_id")),
+                            "sk": str(item.get("sk"))})
+                continue
         recomputed += 1
         moved.append({"tenant_id": str(item.get("tenant_id")),
                       "sk": str(item.get("sk")), "seats": seats,
@@ -580,7 +615,9 @@ def recompute_seat_tracked_rows(*, apply: bool) -> dict[str, Any]:
         repo.record_rate_in_force(rate_microusd=new_rate)
     summary = {"phase": "recompute-seat-rate", "scanned": scanned,
                "recomputed": recomputed, "untouched_operator_figures":
-               untouched_manual, "old_rate_microusd": old_rate,
+               untouched_manual, "lost_cas_retry_next_pass": lost_cas,
+               "lost_cas_detail": lost[:50],
+               "old_rate_microusd": old_rate,
                "new_rate_microusd": new_rate, "moved_detail": moved[:50],
                "applied": apply}
     print(f"[recompute] {summary}")

@@ -958,67 +958,105 @@ class TenantBudgetsRepository:
         figure is now the wrong one.
 
         The seat-tracked write is `ADD seat_count :ds, pool_limit :d,
-        pool_headroom :d` guarded by `attribute_not_exists(manual_limit)`. It is a
-        PURE ADD by design: a delta needs no snapshot to be safe, so it composes
-        with a live reserve's `ADD pool_headroom :neg` and with another membership
-        delta, and there is no read-then-write window in which a concurrent move
-        is lost. On a condition failure (the row carries an operator's figure) it
-        RETRIES with `seat_count` alone, so the seat count is recorded either way.
+        pool_headroom :d` guarded by `attribute_not_exists(manual_limit)` AND
+        `seat_rate_microusd = :rate` (a CAS, no longer the pure, snapshot-free
+        ADD this method used to be). `:d` is `seat_delta x rate`, and once `rate`
+        is a value migrated once and read off the row (`row_seat_rate_microusd`)
+        rather than a fixed deployment-wide constant, the ADD's own COEFFICIENT
+        depends on a read -- so, unlike the ceiling-neutral counters it composes
+        with (a reserve's headroom ADD, another membership delta), a rate change
+        landing between this read and this write would leave `:d` computed at a
+        rate the row no longer stores. The rate condition is what turns that from
+        a silent wrong number into a retry: on a mismatch the loop below re-reads
+        the row, gets the CURRENT rate, and tries again.
 
-        Returns True iff the money moved. Never raises for the row's state: a
-        membership write must never fail, or be forced to retry, because of the
-        pool's unrelated state, so a missing row is a no-op.
+        On a condition failure this RE-READS rather than assuming the cause: the
+        row may have gained an operator's figure since the read (money must not
+        move, ever, from here) or may simply have moved to a new rate (money
+        must move, at the NEW rate). Only a fresh read can tell the two apart, so
+        there is no more a fixed "retry with seat_count alone" fallback -- that
+        fallback used to fire on ANY condition failure, including a rate race,
+        which recorded the seat and silently dropped its money contribution at
+        either rate.
+
+        Returns True iff the money moved. Still never raises for the row's own
+        state: a missing row is a no-op, and a row that has gone manual ends the
+        loop through the seat-count-only write below, not an exception. It DOES
+        raise after `_SET_LIMIT_MAX_RETRIES` lost races on one row, matching
+        every other CAS-guarded writer in this file (`set_manual_limit`,
+        `clear_manual_limit`, `reconcile_headroom`) -- losing this many races on
+        one row is sustained contention worth surfacing, not a fact about one
+        membership change.
 
         A missing row is a no-op and NOT a create: `ADD` on an absent item creates
         it, and an item created by a membership delta would be a pool row with a
         ceiling and no seat rate, no status and no counters -- exactly the partial
-        row a period boundary must not produce. Both writes are therefore
+        row a period boundary must not produce. Every write below is therefore
         conditioned on `attribute_exists(tenant_id)` as well.
         """
         if seat_delta == 0:
             return False
-        # The rate the ROW's ceiling is denominated in, not the process's. They
-        # agree on any booted process (R20's refusal is what makes that true), and
-        # reading the row's own figure is what keeps a rate change a migration.
-        existing = self.get(tenant_id, period, consistent_read=True)
-        if existing is None:
-            return False
-        delta_microusd = int(seat_delta) * row_seat_rate_microusd(existing)
         seats = Decimal(int(seat_delta))
-        try:
-            self._table.update_item(
-                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-                UpdateExpression=(
-                    "ADD seat_count :ds, pool_limit_microusd :d, "
-                    "pool_headroom_microusd :d SET updated_at = :now"
-                ),
-                ConditionExpression=(
-                    "attribute_exists(tenant_id) AND "
-                    "attribute_not_exists(manual_limit_microusd)"
-                ),
-                ExpressionAttributeValues={
-                    ":ds": seats,
-                    ":d": Decimal(delta_microusd),
-                    ":now": _now_iso(),
-                },
-            )
-            return True
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                raise
-        # The row carries an operator's figure (or vanished). The money must not
-        # move, but the seat count still must: retry with the seat count alone.
-        try:
-            self._table.update_item(
-                Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
-                UpdateExpression="ADD seat_count :ds SET updated_at = :now",
-                ConditionExpression="attribute_exists(tenant_id)",
-                ExpressionAttributeValues={":ds": seats, ":now": _now_iso()},
-            )
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                raise
-        return False
+        key = {"tenant_id": tenant_id, "sk": budget_sk(period)}
+        for _attempt in range(_SET_LIMIT_MAX_RETRIES):
+            existing = self.get(tenant_id, period, consistent_read=True)
+            if existing is None:
+                return False
+            if not is_seat_tracked(existing):
+                # The row carries an operator's figure. The money must not
+                # move, but the seat count still must: it is a fact about the
+                # tenant an operator's figure has no bearing on.
+                try:
+                    self._table.update_item(
+                        Key=key,
+                        UpdateExpression="ADD seat_count :ds SET updated_at = :now",
+                        ConditionExpression="attribute_exists(tenant_id)",
+                        ExpressionAttributeValues={":ds": seats, ":now": _now_iso()},
+                    )
+                except ClientError as e:
+                    if e.response.get("Error", {}).get("Code") \
+                            != "ConditionalCheckFailedException":
+                        raise
+                return False
+            # The rate the ROW's ceiling is denominated in, not the process's.
+            # `:rate`/its absence is exactly what was just READ, so a rate the
+            # migration moves between this read and this write is caught rather
+            # than baked into `:d` at a coefficient the row no longer stores.
+            rate = row_seat_rate_microusd(existing)
+            delta_microusd = int(seat_delta) * rate
+            cond = [
+                "attribute_exists(tenant_id)",
+                "attribute_not_exists(manual_limit_microusd)",
+            ]
+            values: dict[str, Any] = {
+                ":ds": seats, ":d": Decimal(delta_microusd), ":now": _now_iso(),
+            }
+            if SEAT_RATE_ATTR in existing:
+                cond.append("seat_rate_microusd = :rate")
+                values[":rate"] = Decimal(rate)
+            else:
+                cond.append("attribute_not_exists(seat_rate_microusd)")
+            try:
+                self._table.update_item(
+                    Key=key,
+                    UpdateExpression=(
+                        "ADD seat_count :ds, pool_limit_microusd :d, "
+                        "pool_headroom_microusd :d SET updated_at = :now"
+                    ),
+                    ConditionExpression=" AND ".join(cond),
+                    ExpressionAttributeValues=values,
+                )
+                return True
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") \
+                        != "ConditionalCheckFailedException":
+                    raise
+                continue  # the row went manual, or its rate moved -> re-read
+
+        raise RuntimeError(
+            f"adjust_pool_for_seat_delta: lost the seat-rate CAS "
+            f"{_SET_LIMIT_MAX_RETRIES}x for {tenant_id}/{period}; concurrent "
+            f"writes to the same pool ceiling")
 
     # ----- write: the grant writers -----
     # A grant moves the ceiling WITHOUT touching the baseline, and that is why
