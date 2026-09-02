@@ -1984,6 +1984,18 @@
    "note": "the consequence the retirement refusal exists to prevent, which is the clause's own reason"
   },
   {
+   "id": "cl-0c3d504337a2",
+   "claim": "That excess is temporary, not permanent — the sweep subtracts the grant once at expiry and the ceiling lands exactly on the figure the operator typed, never below it.",
+   "anchor": "contract:C14.23@bd572700",
+   "note": "quota-raises.md section 9's restatement of the same mechanism C14.23's cell states: set_manual_limit ADDs the delta against the OLD baseline and never touches the granted term, so the figure typed while a grant is live is exactly what remains once that grant expires"
+  },
+  {
+   "id": "cl-16fbfad398c6",
+   "claim": "But a window of extra capacity nobody asked for is indistinguishable, from the figure alone, from an operator who genuinely wants that number as the new baseline, for whom the same jump-then-settle is correct — the number alone cannot tell the two readings apart, which is why it is a refusal naming the composition rather than a silent reinterpretation.",
+   "anchor": "contract:C14.23@bd572700",
+   "note": "states the boundary the refusal exists to cross: the two plausible readings of the typed figure produce the identical resting ceiling once the grant expires and differ only during the grant's remaining life, so no downstream check on the number alone can distinguish them"
+  },
+  {
    "id": "cl-6bf463db753c",
    "claim": "- **Nothing sets the aggregate cap.** It is read wherever it matters and no request writes it, so today it is either absent — the derived default, which is the case every tenant is in — or set out of band.",
    "anchor": "debt:C14.24@ca4ee538",
