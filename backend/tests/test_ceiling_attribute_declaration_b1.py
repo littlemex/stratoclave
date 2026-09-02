@@ -118,23 +118,51 @@ def test_assert_row_fully_classified_catches_an_unclassified_attribute():
     )
 
 
-def test_pool_granted_itself_is_not_pre_registered_by_f1():
-    """B1's declaration is closed-world over what F1 writes; it is not F1's
-    job to pre-classify F2's own attribute on F2's behalf (that registration,
-    and the merge-time failure if it is skipped, belongs to F2's own PR).
+def test_pool_granted_is_registered_with_real_content_not_a_placeholder():
+    """Re-adjudicated on the integration branch, where F2 has already merged.
 
-    Fixed after re-verifying against the implementation post-merge: this
-    checked the bare string `"pool_granted"`, but the real attribute (once
-    F2 adds it) is `"pool_granted_microusd"` -- a THIRD bug the tuple-shape
-    failure had been masking. The bare-string check passed both before and
-    after the mapping conversion, but for the wrong reason each time: before,
-    because a string can never equal a `PoolAttribute`; after, because it was
-    checking a name nothing was ever going to use. Checking the real name is
-    what makes this test capable of failing when F2 actually adds the
-    attribute without registering it -- the one thing it claims to prove."""
+    The original form of this test asserted bare absence:
+    `"pool_granted_microusd" not in POOL_ROW_ATTRIBUTES`, on the reasoning
+    that classifying F2's attribute is "F2's own merge-time obligation" and
+    F1 must not do it on F2's behalf. That is true of an F1-only branch,
+    where the real writers (`grant_apply_txn_item`, `grant_revoke_txn_item`)
+    and the real reconciler check (`pool_granted_matches_active_grants`,
+    registered in `mvp/grants.py`) do not exist yet -- there, an entry would
+    necessarily be a placeholder standing in for work not yet done, which is
+    exactly the anti-pattern B1's own module docstring warns against
+    ("AN ENTRY ADDED TO EXPLAIN A FUTURE OBLIGATION DISCHARGES IT").
+
+    On THIS branch, F2's writers and check already exist and are registered
+    (verified below), so an absent entry would itself be the silent gap B1
+    exists to catch, not the property this test is supposed to police. The
+    teeth this test guards are therefore narrower than bare absence: the
+    entry must never be a placeholder -- a bracketed non-site standing in for
+    `writers`, or an `exemption` standing in for a check that was never
+    written. `test_assert_row_fully_classified_catches_an_unclassified_attribute`
+    above already proves the generic closed-world mechanism catches a
+    wholly-missing entry; this test proves the specific entry that exists is
+    the real thing, not a discharged obligation."""
     from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
+    from mvp.observability.quota_reconciler import missing_declared_checks
 
-    assert "pool_granted_microusd" not in POOL_ROW_ATTRIBUTES, (
-        "F1 must not pre-register pool_granted_microusd -- classifying it is "
-        "F2's own merge-time obligation, which is the whole point of B1's design"
+    spec = POOL_ROW_ATTRIBUTES.get("pool_granted_microusd")
+    assert spec is not None, (
+        "pool_granted_microusd is unclassified even though F2's grant apply/"
+        "revoke writers and its reconciler check already exist in this "
+        "integration branch -- that is the silent gap B1 exists to catch, "
+        "not a pass condition"
+    )
+    assert spec.writers and not any(w.startswith("(") for w in spec.writers), (
+        f"pool_granted_microusd is classified with a placeholder writer "
+        f"{spec.writers!r} instead of the real grant apply/revoke sites -- "
+        f"this is the exact anti-pattern B1's docstring warns against"
+    )
+    assert spec.check and not spec.exemption, (
+        "pool_granted_microusd must carry a real reconciler check, not an "
+        "exemption standing in for one that was never written"
+    )
+    assert spec.check not in missing_declared_checks(), (
+        f"pool_granted_microusd names check {spec.check!r} but nothing "
+        f"registered a check under that name -- the check field is quoting "
+        f"a name rather than pointing at real code"
     )
