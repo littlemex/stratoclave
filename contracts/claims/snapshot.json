@@ -1161,6 +1161,36 @@
   },
   "cl-ff2dcb6dd80a": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
+  },
+  "cl-d0f9eb77116d": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-1fe8f75b885d": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-000bab100009": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-e3e426b3b043": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-1e921a990ab9": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, describing R38's expired-grant classification"
+  },
+  "cl-38a1beee5611": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, describing R38's fallback_reason attribute"
+  },
+  "cl-5d19d01ffa94": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, stating R38's own boundary"
+  },
+  "cl-1f2abdff0c77": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, naming C14.30's cascade defect"
+  },
+  "cl-e78d97513fdc": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 13, describing the self-service request view"
+  },
+  "cl-42cfc43250d2": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 13, describing the grant inventory view"
   }
  },
  "retired": {
@@ -1406,7 +1436,23 @@
     "C14.11": "B",
     "C14.12": "B",
     "C14.13": "B",
-    "C14.14": "N"
+    "C14.14": "N",
+    "C14.15": "B",
+    "C14.16": "B",
+    "C14.17": "B",
+    "C14.18": "B",
+    "C14.19": "B",
+    "C14.20": "B",
+    "C14.21": "B",
+    "C14.22": "B",
+    "C14.23": "B",
+    "C14.24": "N",
+    "C14.25": "B",
+    "C14.26": "B",
+    "C14.27": "B",
+    "C14.28": "B",
+    "C14.29": "B",
+    "C14.30": "N"
    }
   },
   "retired": {},

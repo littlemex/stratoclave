@@ -1998,6 +1998,65 @@
    "id": "cl-5fdc0e5c11e2",
    "claim": "The orphan hunt starts from grants and would never see them, and the user-deletion path archives memberships without touching them — so a deleted user's old slots stay.",
    "anchor": "descriptive:states what the orphan hunt and the deletion path do NOT reach, which is the declaration that slot rows are dead storage rather than a claim about what this gateway enforces; the hunt's own guarantee is C14.19 and is anchored on the sentence that makes it"
+  },
+  {
+   "id": "cl-d0f9eb77116d",
+   "claim": "The shape was shipped final, with degenerate (one-candidate) content, so a client written against the early shape renders a fuller one unchanged — filling it later is an append, never a second wire change.",
+   "anchor": "contract:C14.25@ea148473",
+   "note": "F3's own restatement of the premise C14.25 fills: the hint's shape does not change shape when it gains content, only grows it"
+  },
+  {
+   "id": "cl-1fe8f75b885d",
+   "claim": "A *quota* cascade is the opposite case: `QuotaExhausted` is caught and the cascade genuinely tries every candidate up to the one that finally 402s, so that hint's `candidates` holds one entry per candidate actually priced, none of them grantable (only the pool wall is), and `unattempted_model_ids` is empty because nothing here was skipped.",
+   "anchor": "contract:C14.25@ea148473",
+   "note": "the quota-cascade half of C14.25's fill"
+  },
+  {
+   "id": "cl-000bab100009",
+   "claim": "Both cases add `minimum_raise_microusd` (the smallest raise that clears the cheapest **grantable** priced candidate, zero when none was), `requested_model_id` and `target_shortfall_microusd` (the candidate the caller actually wanted, and its own shortfall — \"her own number\", never a cheaper candidate's), `router_mode` (`cascade`/`pin`/`fallback_disabled`), `pricing_version` and `priced_at`.",
+   "anchor": "contract:C14.25@ea148473",
+   "note": "the added-fields half of C14.25's fill"
+  },
+  {
+   "id": "cl-e3e426b3b043",
+   "claim": "**Where the fill lands.** `mvp/_pipeline.py`'s `_reserve_over_candidates` builds the multi-candidate hint from `priced_tried` at the single `_err_402` that ends the cascade; its per-candidate `reserve_credit` calls (the pool-wall path) build the one-candidate hint and, on a pool refusal, the caller augments it with the tail it never got to try.",
+   "anchor": "contract:C14.25@ea148473",
+   "note": "names the mechanism C14.25's Verified-by column already cites"
+  },
+  {
+   "id": "cl-1e921a990ab9",
+   "claim": "**The refusal.** A pool refusal's candidate carries `grant_expired: true` when a grant against the same wall has `expires_at` within `[expires_at, expires_at + 15 minutes]` of now — three five-minute sweep intervals, so a late sweep still gets to name the cause — computed by the pure function `fallback_reason_for_expired_grant(grant_expires_at, now_epoch, grant_wall, blocked_wall)`, which also requires the grant's wall and the refusing wall to be the *same* one: a grant against the pool cannot explain a per-model refusal just because it expired recently.",
+   "anchor": "contract:C14.26@13bcac70",
+   "note": "the refusal half of C14.26"
+  },
+  {
+   "id": "cl-38a1beee5611",
+   "claim": "**The usage row.** `usage_logs.record()` takes one additive attribute, `fallback_reason`, set at settle time — never derived after the fact, because the cause is a fact about the router's decision, not something the two model ids can reconstruct.",
+   "anchor": "contract:C14.26@13bcac70",
+   "note": "the usage-row half of C14.26"
+  },
+  {
+   "id": "cl-5d19d01ffa94",
+   "claim": "Today it can only ever be `\"quota_exhausted\"`: the cascade advances past a candidate on `QuotaExhausted` alone, and a pool-wall refusal aborts the whole request rather than being caught and advanced past (section 8's own \"leaves on a pool refusal\"), so a *successfully served* fallback can never have been caused by a grant expiring at the pool wall — only a refusal can, which is what the candidate flag above is for.",
+   "anchor": "contract:C14.26@13bcac70",
+   "note": "states C14.26's own boundary in the same breath as its guarantee -- the reachable cause set is closed, not open-ended"
+  },
+  {
+   "id": "cl-1f2abdff0c77",
+   "claim": "A cheaper candidate that would fit is genuinely never tried once a pricier one hits the pool wall; that is a defect in the cascade itself, not a gap in this attribute, and it belongs to whichever change eventually lets the loop advance past a pool refusal rather than abandoning the request.",
+   "anchor": "debt:C14.30",
+   "note": "the same defect C14.30 names as an open item, restated where a reader of the fallback-cause mechanism would otherwise assume the gap is in that attribute rather than in the cascade underneath it"
+  },
+  {
+   "id": "cl-e78d97513fdc",
+   "claim": "The **self-service request view** (`frontend/src/pages/MeLimitRaises.tsx`, route `/me/limit-raises`) shows the walls that apply to the caller before any refusal — a new endpoint, `GET /me/limit-raises/wall-status`, reduced to exactly enough for a requester to see whether asking makes sense (no `manual_limit`, no seat internals: those are an approver's business) — and the caller's own requests, joined to their decision (R24: a decided request states its approved amount and expiry, never the bare status word).",
+   "anchor": "contract:C14.27@9184b3de,C14.29@411baff6",
+   "note": "C14.27 covers the request-decision join; C14.29 covers the wall-status endpoint"
+  },
+  {
+   "id": "cl-42cfc43250d2",
+   "claim": "The **grant inventory** (`frontend/src/pages/GrantsInventory.tsx`, standalone routes `/{admin,team-lead}/tenants/:tenantId/limit-grants`) renders one total per target row, never a tenant-wide sum, and a `REVOKE_BLOCKED` grant's reason next to its row.",
+   "anchor": "contract:C14.28@6db0416c"
   }
  ]
 }
