@@ -199,10 +199,29 @@ pub async fn run(
         // arrives, immediately follow it with the same body rendered as prose
         // (wall / reason / whether it can be raised), so a reader does not have
         // to parse raw JSON out of a log line to learn this was not a network
-        // problem. See `extract_terminal_4xx_body` / `format_gateway_rejection`.
-        .on_stderr_line(|line| {
-            let (status, body) = extract_terminal_4xx_body(line)?;
-            Some(format_gateway_rejection(status, &body))
+        // problem.
+        //
+        // codex has been observed (live, against a real gateway 402 with a
+        // long `raise_hint` body) to split this one logical line across more
+        // than one real stderr line, with the break landing mid-JSON —
+        // sometimes mid-string-value, with no closing brace on the first
+        // line. `on_stderr_line` is called once per real line, so a matcher
+        // that only ever looks at a single line never sees the marker AND a
+        // balanced `{...}` together and never fires — silently, which is
+        // worse than the misleading "Reconnecting" lines it exists to
+        // clarify. `handle_stderr_line` carries an accumulator across calls
+        // (`pending`) so the JSON is read from the concatenation of every
+        // line since the marker, not from one line in isolation, and gives
+        // up (prints a status-only rejection rather than staying silent)
+        // once it has collected more than `MAX_PENDING_LINES` lines. See
+        // `handle_stderr_line` / `extract_terminal_4xx_body` /
+        // `format_gateway_rejection`.
+        .on_stderr_line({
+            let pending = std::cell::RefCell::new(None);
+            move |line: &str| {
+                let mut guard = pending.borrow_mut();
+                handle_stderr_line(line, &mut guard)
+            }
         });
     if let Some(ws) = &escape_workspace {
         launcher = launcher.cwd(ws.path());
@@ -343,7 +362,28 @@ fn is_terminal_4xx(status: u16) -> bool {
 /// and the embedded JSON body when the line matches AND the status is a
 /// terminal 4xx; `None` for anything else, including codex's "Reconnecting...
 /// N/5" lines (which carry no status at all) and retryable / success statuses.
+///
+/// This is the single-line fast path: it never sees a marker split across
+/// more than one real stderr line (see `handle_stderr_line`, which is what
+/// the running wrapper actually calls). Kept as its own function because it
+/// is independently useful — and independently tested — as "does this ONE
+/// line, on its own, carry a complete terminal 4xx body".
 fn extract_terminal_4xx_body(line: &str) -> Option<(u16, String)> {
+    let (status, after_marker) = find_terminal_4xx_marker(line)?;
+    let brace_start = after_marker.find('{')?;
+    let json = extract_balanced_json(&after_marker[brace_start..])?;
+    Some((status, json))
+}
+
+/// Find the `unexpected status <code> ...` marker in `line` and return the
+/// status plus the remainder of the line after the status token (where a
+/// JSON body, if this line carries any of it, begins). `None` for anything
+/// that is not this exact marker, or whose status is not terminal (see
+/// `is_terminal_4xx`) — including 429 and codex's own "Reconnecting... N/5"
+/// lines, which carry no status at all. Shared by `extract_terminal_4xx_body`
+/// (single-line) and `handle_stderr_line` (multi-line) so the marker/status
+/// grammar is defined in exactly one place.
+fn find_terminal_4xx_marker(line: &str) -> Option<(u16, &str)> {
     const MARKER: &str = "unexpected status ";
     let after_marker = &line[line.find(MARKER)? + MARKER.len()..];
     let status_str: String = after_marker
@@ -357,9 +397,107 @@ fn extract_terminal_4xx_body(line: &str) -> Option<(u16, String)> {
     if !is_terminal_4xx(status) {
         return None;
     }
+    Some((status, after_marker))
+}
+
+/// How many additional stderr lines `handle_stderr_line` will buffer, past
+/// the marker line, waiting for a terminal 4xx JSON body's braces to
+/// balance. The longest real refusal body observed in the wild (a
+/// `tenant_dollar_pool` 402 with a populated `raise_hint.candidates` and
+/// `reason_codes`) is well under 2 KiB on one line; this is generous
+/// headroom for a body split across many short lines without buffering
+/// forever if a future codex version's log shape never closes at all.
+const MAX_PENDING_LINES: usize = 50;
+/// Byte-size twin of `MAX_PENDING_LINES` — whichever bound is hit first ends
+/// the wait. Bounds the case a single continuation line is itself huge
+/// (one very long line, not many short ones).
+const MAX_PENDING_BYTES: usize = 16 * 1024;
+
+/// In-progress accumulation of a terminal 4xx body across more than one
+/// stderr line: `handle_stderr_line` saw the `unexpected status <code>`
+/// marker, but the JSON after it did not close its braces on that line
+/// alone, so subsequent lines are appended to `buf` until they do (or the
+/// `MAX_PENDING_*` bound gives up).
+struct PendingRefusal {
+    status: u16,
+    buf: String,
+    lines: usize,
+}
+
+/// Stateful sibling of `extract_terminal_4xx_body` that copes with codex
+/// splitting the `unexpected status <code> ...: {json}` line across more
+/// than one real line of stderr — observed live against a gateway 402 whose
+/// `raise_hint` body is long enough that the break can land mid-JSON, with
+/// no closing brace on the line the marker itself is on. `pending` carries
+/// an in-progress body across calls (`None` in / out means "not currently
+/// waiting on one"); each call either:
+///
+///   - sees no marker and no pending body: `None`, unchanged.
+///   - sees the marker and the JSON closes on this line alone: the usual
+///     `format_gateway_rejection` prose, immediately (the pre-existing,
+///     single-line-only behavior — unaffected by this function existing).
+///   - sees the marker but the JSON does NOT close on this line: starts
+///     accumulating, returns `None` (nothing to print yet — the body isn't
+///     fully known).
+///   - is already accumulating: appends this line, and either the JSON now
+///     closes (return the prose, done) or it still doesn't and the
+///     `MAX_PENDING_*` bound is not yet hit (return `None`, keep waiting) or
+///     the bound IS hit (return a status-only "could not be parsed" line —
+///     see `format_unparseable_rejection` — rather than staying silent,
+///     which was the original defect: a reader who never sees
+///     `[STRATOCLAVE]` falls back to reading "Reconnecting... 5/5" as a
+///     dropped connection).
+///
+/// Concatenation across lines uses no separator: the split is a raw
+/// mid-stream `\n` codex inserted into what was one logical write, not a
+/// reformatting, so gluing the fragments back together byte-for-byte (no
+/// character added or removed) reconstructs the original content exactly —
+/// including inside a string value, where inserting or dropping a character
+/// would change the JSON.
+fn handle_stderr_line(line: &str, pending: &mut Option<PendingRefusal>) -> Option<String> {
+    if let Some(mut p) = pending.take() {
+        p.buf.push_str(line);
+        p.lines += 1;
+        if let Some(json) = extract_balanced_json(&p.buf) {
+            return Some(format_gateway_rejection(p.status, &json));
+        }
+        if p.lines >= MAX_PENDING_LINES || p.buf.len() >= MAX_PENDING_BYTES {
+            return Some(format_unparseable_rejection(p.status, p.lines));
+        }
+        *pending = Some(p);
+        return None;
+    }
+
+    // Fast path: this one line, on its own, already carries a complete body
+    // (the common case — see `extract_terminal_4xx_body`'s own doc).
+    if let Some((status, json)) = extract_terminal_4xx_body(line) {
+        return Some(format_gateway_rejection(status, &json));
+    }
+
+    // Slow path: the marker is here but the JSON did not close on this line
+    // alone. Start accumulating from wherever the body began.
+    let (status, after_marker) = find_terminal_4xx_marker(line)?;
     let brace_start = after_marker.find('{')?;
-    let json = extract_balanced_json(&after_marker[brace_start..])?;
-    Some((status, json))
+    *pending = Some(PendingRefusal {
+        status,
+        buf: after_marker[brace_start..].to_string(),
+        lines: 1,
+    });
+    None
+}
+
+/// What `handle_stderr_line` prints when a terminal 4xx's JSON body never
+/// closed its braces within the `MAX_PENDING_*` bound. Says less than
+/// `format_gateway_rejection` — no wall/blocker/grantable, because the body
+/// never parsed and nothing here is invented — but still says the one thing
+/// that must never go unsaid: this status is a policy refusal, not the
+/// network problem "Reconnecting..." above it looks like.
+fn format_unparseable_rejection(status: u16, lines_collected: usize) -> String {
+    format!(
+        "[STRATOCLAVE] HTTP {status} from the gateway is a policy refusal, not a \
+         network error — the retries above will not fix it. The response body could \
+         not be parsed (collected {lines_collected} line(s) without the JSON closing)."
+    )
 }
 
 /// Return the substring of `s` (which must start with `{`) up to and
@@ -817,6 +955,132 @@ mod tests {
         assert!(rendered.contains("$0.45 short of this tenant's pool"));
         // grantable=true -> tells the reader HOW to raise it.
         assert!(rendered.contains("limit-raise request"));
+    }
+
+    /// The SAME real, live-captured body as `REAL_402_LINE` (byte-for-byte —
+    /// asserted below), split into three fragments the way codex-cli was
+    /// observed to split it live against a gateway 402 with this same long
+    /// `raise_hint` shape: mid-string, inside the `requested_model_id`
+    /// value, with no closing brace anywhere on the first fragment, and the
+    /// rest of the body (including the trailing `, url: ...`) arriving only
+    /// after two more real lines. This is what `extract_terminal_4xx_body`
+    /// (single-line only) is defenseless against, and what `handle_stderr_line`
+    /// exists to fix.
+    const REAL_402_SPLIT: [&str; 3] = [
+        r#"ERROR: unexpected status 402 Payment Required: {"detail":{"type":"credit_exhausted","reason":"request_does_not_fit_pool_limit","message":"This request's reservation exceeds the tenant's entire budget for the period; no amount of available headroom would admit it. Reduce the request size or ask your admin to raise the budget. This request is $0.45 short of this tenant's pool.","wall":"tenant_dollar_pool","blocker":"tenant_pool","grantable":true,"raise_hint":{"candidates":[{"blocker":"tenant_pool","wall":"tenant_dollar_pool","model_id":"openai.gpt-5.6-sol","estimated_cost_microusd":469701,"shortfall_microusd":459701,"grantable":true,"grant_expired":false}],"remaining_cap_microusd":10000,"reason_codes":["onboarding","usage_spike","migration","incident_response","other"],"minimum_raise_microusd":459701,"unattempted_model_ids":[],"tenant_id":"default-org","requested_model_id":"openai.gpt-5.6"#,
+        r#"-sol","target_shortfall_microusd":459701,"router_mode":"fallback_disabled","#,
+        r#""pricing_version":"builtin","priced_at":"2026-09-02T17:22:04+00:00"}}}, url: https://d1234.cloudfront.net/openai/v1/responses"#,
+    ];
+
+    #[test]
+    fn real_402_split_reconstructs_the_pinned_single_line_byte_for_byte() {
+        // Guards the fixture above against a transcription slip: if the three
+        // fragments do not concatenate back to exactly `REAL_402_LINE`, this
+        // test is checking a different body than the one that is actually
+        // pinned as real, and every test built on it would be meaningless.
+        assert_eq!(REAL_402_SPLIT.concat(), REAL_402_LINE);
+    }
+
+    #[test]
+    fn single_line_extractor_is_defenseless_against_the_real_split() {
+        // Documents the defect this module exists to fix: fed only the FIRST
+        // fragment (which is all `extract_terminal_4xx_body` — and the
+        // pre-fix `on_stderr_line` hook — ever saw per call), the single-line
+        // extractor finds the marker and a `{` but the JSON never closes, so
+        // it returns None. Silently. That silence is the "[STRATOCLAVE] line
+        // never printed" defect.
+        assert!(extract_terminal_4xx_body(REAL_402_SPLIT[0]).is_none());
+    }
+
+    #[test]
+    fn handle_stderr_line_reassembles_the_real_split_body() {
+        let mut pending = None;
+        // First fragment: marker + opening brace, JSON unbalanced. Nothing to
+        // print yet — but (unlike the old behavior) nothing is discarded either.
+        assert_eq!(handle_stderr_line(REAL_402_SPLIT[0], &mut pending), None);
+        assert!(pending.is_some(), "must start accumulating after fragment 1");
+        // Second fragment: still doesn't close (ends mid-object, before the
+        // pricing_version/priced_at/closing-braces tail).
+        assert_eq!(handle_stderr_line(REAL_402_SPLIT[1], &mut pending), None);
+        assert!(pending.is_some(), "must keep accumulating after fragment 2");
+        // Third fragment closes it: the accumulated buffer parses, and the
+        // pending state is cleared (ready for a fresh, unrelated marker later).
+        let rendered = handle_stderr_line(REAL_402_SPLIT[2], &mut pending)
+            .expect("the reassembled body must close and render");
+        assert!(pending.is_none(), "pending must clear once resolved");
+        assert!(rendered.contains("HTTP 402"));
+        assert!(rendered.contains("wall=tenant_dollar_pool"));
+        assert!(rendered.contains("blocker=tenant_pool"));
+        assert!(rendered.contains("grantable=true"));
+        assert!(rendered.contains("$0.45 short of this tenant's pool"));
+        assert!(rendered.contains("limit-raise request"));
+    }
+
+    #[test]
+    fn handle_stderr_line_single_line_body_still_fires_on_the_first_call() {
+        // The common case (this module's ORIGINAL behavior, before the
+        // multi-line accumulator existed) must be unaffected: a body that
+        // closes on the very line the marker is on renders immediately, with
+        // no accumulation and no second call needed.
+        let mut pending = None;
+        let rendered = handle_stderr_line(REAL_402_LINE, &mut pending)
+            .expect("a single-line body must still fire on the first call");
+        assert!(pending.is_none());
+        assert!(rendered.contains("HTTP 402"));
+        assert!(rendered.contains("wall=tenant_dollar_pool"));
+    }
+
+    #[test]
+    fn handle_stderr_line_429_is_never_accumulated_even_mid_split() {
+        // Requirement: 429 stays exempt from the whole mechanism, including
+        // the multi-line path — a retryable status must never start (or be
+        // mistaken for) an accumulation, on any fragment.
+        let line = r#"ERROR: unexpected status 429 Too Many Requests: {"detail":{"message":"slow down"#;
+        let mut pending = None;
+        assert_eq!(handle_stderr_line(line, &mut pending), None);
+        assert!(pending.is_none(), "429 must never start an accumulation");
+    }
+
+    #[test]
+    fn handle_stderr_line_gives_up_and_speaks_rather_than_staying_silent() {
+        // Requirement: if the body never closes, don't stay silent forever —
+        // say status + "could not be parsed" once the bound is hit, and
+        // clear the accumulator so it does not run forever.
+        let marker = r#"ERROR: unexpected status 402 Payment Required: {"detail":{"type":"credit_exhausted","reason":"garbage_that_never_closes"#;
+        let mut pending = None;
+        assert_eq!(handle_stderr_line(marker, &mut pending), None);
+        assert!(pending.is_some());
+
+        let mut rendered = None;
+        for i in 0..MAX_PENDING_LINES {
+            rendered = handle_stderr_line(&format!("more garbage line {i}"), &mut pending);
+            if rendered.is_some() {
+                break;
+            }
+        }
+        let rendered = rendered.expect("must eventually give up rather than buffer forever");
+        assert!(rendered.contains("HTTP 402"));
+        assert!(rendered.contains("not a network error"));
+        assert!(rendered.contains("could not be parsed"));
+        assert!(
+            pending.is_none(),
+            "giving up must clear the accumulator, not leave it stuck"
+        );
+    }
+
+    #[test]
+    fn handle_stderr_line_gives_up_on_byte_bound_even_with_few_lines() {
+        // The byte bound is a SEPARATE trigger from the line-count bound: one
+        // huge continuation line must give up too, not just many short ones.
+        let marker = r#"ERROR: unexpected status 402 Payment Required: {"detail":{"type":"credit_exhausted","reason":"garbage_that_never_closes"#;
+        let mut pending = None;
+        assert_eq!(handle_stderr_line(marker, &mut pending), None);
+
+        let huge_line = "x".repeat(MAX_PENDING_BYTES + 1);
+        let rendered = handle_stderr_line(&huge_line, &mut pending)
+            .expect("a single huge continuation line must also trip the give-up path");
+        assert!(rendered.contains("could not be parsed"));
+        assert!(pending.is_none());
     }
 
     #[test]
