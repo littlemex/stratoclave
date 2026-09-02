@@ -337,7 +337,7 @@ export interface UsageLogsResponse {
 export interface RaiseHintCandidate {
   blocker: string
   wall: string
-  model: string | null
+  model_id: string | null
   estimated_cost_microusd: number | null
   shortfall_microusd: number | null
   grantable: boolean
@@ -391,11 +391,27 @@ export interface LimitRaiseRequest {
   asked_amount_microusd: number
   created_at: string
   decided_at?: string
-  decided_by?: string
   grant_id?: string
   decision_comment?: string
-  approved_amount_microusd?: number
-  expires_at?: number
+  // The requester's OWN free-text justification, R12's "the comment" on the
+  // approver's queue -- distinct from `decision_comment` (the approver's
+  // reply, addressed back to the requester). Optional: not yet returned by
+  // `admin_list_limit_raises` (backend gap, out of this fork's scope --
+  // reported upstream); rendered when present so this component is correct
+  // the day the field ships.
+  comment?: string
+  // R30's "at request time" half: not yet captured by `submit_limit_raise`
+  // (backend gap, out of this fork's scope -- reported upstream). Optional
+  // so the UI degrades honestly ("not recorded") until it exists.
+  observed_limit_microusd?: number | null
+  observed_remaining_microusd?: number | null
+  observed_at?: string | null
+  // R24: always present -- null for a pending request, populated for a
+  // decided one. `approver_id` is a stable user id (never an address); the
+  // console resolves it to a display name on demand.
+  approved_amount_microusd: number | null
+  expires_at: number | null
+  approver_id: string | null
 }
 
 export interface LimitRaisesResponse {

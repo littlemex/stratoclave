@@ -25,48 +25,77 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ---- Module mocks (hoisted) ----
+// The real `api` object (`frontend/src/lib/api.ts`) is FLAT --
+// `api.listMyLimitRaises` / `api.submitLimitRaise` / `api.myWallStatus` --
+// not a nested `api.limitRaises.{mine,submit,reasons}` namespace this test
+// used to guess. There is also no separate "reasons" endpoint: the real
+// component reads `reason_codes` off the `listMyLimitRaises` response
+// itself (or the hint), never a dedicated fetch. `myWallStatus` is added
+// because the component calls it unconditionally on mount (R12: "the walls
+// that apply to the caller").
 vi.mock('@/lib/api', () => ({
   api: {
-    limitRaises: {
-      mine: (...args: unknown[]) => (globalThis as any).__lrMine(...args),
-      submit: (...args: unknown[]) => (globalThis as any).__lrSubmit(...args),
-      reasons: (...args: unknown[]) => (globalThis as any).__lrReasons(...args),
-    },
+    listMyLimitRaises: (...args: unknown[]) => (globalThis as any).__lrMine(...args),
+    submitLimitRaise: (...args: unknown[]) => (globalThis as any).__lrSubmit(...args),
+    myWallStatus: (...args: unknown[]) => (globalThis as any).__lrWallStatus(...args),
   },
 }))
 
 const mockMine = vi.fn()
 const mockSubmit = vi.fn()
-const mockReasons = vi.fn()
+const mockWallStatus = vi.fn()
 ;(globalThis as any).__lrMine = (...a: unknown[]) => mockMine(...a)
 ;(globalThis as any).__lrSubmit = (...a: unknown[]) => mockSubmit(...a)
-;(globalThis as any).__lrReasons = (...a: unknown[]) => mockReasons(...a)
+;(globalThis as any).__lrWallStatus = (...a: unknown[]) => mockWallStatus(...a)
 
 // Imported after the mocks so React sees the stubbed module. This import is
 // what fails today: `./MeLimitRaises` does not exist.
 import MeLimitRaises from './MeLimitRaises'
 
-function withClient(children: ReactNode, initialPath = '/me/limit-raises') {
+// R24 join fields, plus the hint prop, travel through a `MemoryRouter`
+// rather than through component props: `MeLimitRaises` reads the hint from
+// `useLocation().state.raiseHint` (contract journey amendment U4 --
+// "the hint reaches the request screen through navigation state, and a
+// deep link pre-fills nothing"), never from a prop. A component-level prop
+// would be a second way to supply the same fact, which this epic's own
+// pattern (one source per fact, one name) rules out everywhere else.
+function withClient(
+  children: ReactNode,
+  opts: { pathname?: string; raiseHint?: unknown } = {},
+) {
+  const { pathname = '/me/limit-raises', raiseHint } = opts
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
   })
+  const entry = raiseHint !== undefined ? { pathname, state: { raiseHint } } : pathname
   return (
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[initialPath]}>{children}</MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>{children}</MemoryRouter>
     </QueryClientProvider>
   )
 }
 
+// `expires_at` is the wire's epoch-SECONDS int (`backend/mvp/grants.py`'s
+// `_request_public`: `int(item["expires_at"])`, the same convention every
+// other `expires_at` in this codebase uses) -- not an ISO string. Computed
+// rather than hand-typed so the literal date stays legible.
+const AUG_31_2026_EOD_EPOCH = Math.floor(Date.UTC(2026, 7, 31, 23, 59, 59) / 1000)
+
 const DECIDED_ROW = {
   request_id: 'lr_9f2c',
   tenant_id: 'acme-eng',
-  reason: 'cascade_shortfall',
-  comment: 'need opus for the eval batch',
-  requested_amount_microusd: 200_000_000, // she asked for $200
+  reason_code: 'cascade_shortfall',
+  decision_comment: 'need opus for the eval batch',
+  // U7 (change-pipeline/quota-raise-and-archive/CONTRACT-F2-grant.md): the
+  // pinned wire name is `asked_amount_microusd`,
+  // not `requested_amount_microusd` -- this test used to guess the latter.
+  asked_amount_microusd: 200_000_000, // she asked for $200
   status: 'approved',
   decided_at: '2026-08-30T09:02:00Z',
   approved_amount_microusd: 50_000_000, // she got $50
-  expires_at: '2026-08-31T23:59:59Z',
+  expires_at: AUG_31_2026_EOD_EPOCH,
+  created_at: '2026-08-29T00:00:00Z',
+  limit_kind: 'tenant_pool',
   // Corrected per contract: a stable id, resolved to a display name by the
   // console — never an address on the wire. (This test used to assert
   // `approver_email`; missed in an earlier reconciliation pass, fixed here.)
@@ -76,21 +105,26 @@ const DECIDED_ROW = {
 const PENDING_ROW = {
   request_id: 'lr_a013',
   tenant_id: 'acme-eng',
-  reason: 'cascade_shortfall',
-  comment: '',
-  requested_amount_microusd: 12_000_000,
+  reason_code: 'cascade_shortfall',
+  asked_amount_microusd: 12_000_000,
   status: 'pending',
   decided_at: null,
   approved_amount_microusd: null,
   expires_at: null,
+  created_at: '2026-08-29T00:00:00Z',
+  limit_kind: 'tenant_pool',
   approver_id: null,
 }
 
 beforeEach(() => {
   mockMine.mockReset()
   mockSubmit.mockReset()
-  mockReasons.mockReset()
-  mockReasons.mockResolvedValue(['cascade_shortfall', 'seasonal_spike'])
+  mockWallStatus.mockReset()
+  mockWallStatus.mockResolvedValue({
+    tenant_id: 'acme-eng',
+    period: '2026-09',
+    pool: null,
+  })
 })
 afterEach(() => {
   vi.clearAllMocks()
@@ -103,11 +137,17 @@ describe('MeLimitRaises — R24: decided vs pending join', () => {
 
     // The defect this id exists to prevent: seeing only "APPROVED" lets a
     // requester plan against the $200 she asked for, not the $50 she got.
-    await waitFor(() => expect(screen.getByText('$50.00')).toBeInTheDocument())
+    // Both figures render inside one prose sentence per the contract's own
+    // quoted wording ("Approved $50.00, expires ...") rather than as bare,
+    // isolated text nodes, so the figures are matched by regex (a partial
+    // match against each element's full text) rather than exact string
+    // equality -- the same pattern this test already uses for the expiry
+    // one line below.
+    await waitFor(() => expect(screen.getByText(/\$50\.00/)).toBeInTheDocument())
     // The amount she originally asked for must ALSO still be visible
     // (for contrast), but never presented as what she was granted.
-    expect(screen.queryByText('$200.00')).not.toBeNull()
-    expect(screen.getByText('$200.00')).not.toBe(screen.getByText('$50.00'))
+    expect(screen.queryByText(/\$200\.00/)).not.toBeNull()
+    expect(screen.getByText(/\$200\.00/)).not.toBe(screen.getByText(/\$50\.00/))
     // The expiry must be visible, not just the amount.
     expect(screen.getByText(/2026-08-31|Aug 31/)).toBeInTheDocument()
     // The approver must be visibly identified somehow — the wire field is
@@ -121,10 +161,22 @@ describe('MeLimitRaises — R24: decided vs pending join', () => {
     mockMine.mockResolvedValue({ requests: [PENDING_ROW] })
     render(withClient(<MeLimitRaises />))
 
-    await waitFor(() => expect(screen.getByText(/pending/i)).toBeInTheDocument())
-    // No approved amount, no expiry, no approver anywhere on the pending row.
+    // Gate on the row itself loading -- not on the literal word "pending",
+    // which the row's own copy deliberately never uses (see the assertion
+    // below): the row's `data-testid` is the loading signal instead.
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-status-pending')).toBeInTheDocument(),
+    )
+    // No approved amount, no expiry, no approver IDENTIFIER on the pending
+    // row. Not a bare "no text containing /approver/i anywhere": the
+    // mandated pending copy itself says "your tenant's approver to
+    // review" (change-pipeline/quota-raise-and-archive/design-F3.md's own
+    // quoted wording, bullet 3) -- so the
+    // check is for the dedicated approver-name block this component
+    // renders only on a decided row, not for the word's mere presence.
     expect(screen.queryByText('$0.00')).toBeNull()
-    expect(screen.queryByText(/approved by|approver/i)).toBeNull()
+    expect(screen.queryByTestId('lr-status-approver')).toBeNull()
+    expect(screen.queryByText('user-lead-1')).toBeNull()
     // "PENDING must not read as 'my work is queued'" — the bare word
     // "Pending" or "Queued" alone fails this; the copy must say the
     // operation was NOT admitted yet.
@@ -154,8 +206,8 @@ describe('MeLimitRaises — interface note: tenant is carried from the hint, nev
       withClient(
         // An "ambient" tenant is simulated via a query param an evil/careless
         // implementation might read instead of the hint — this must be IGNORED.
-        <MeLimitRaises raiseHint={hint} />,
-        '/me/limit-raises?tenant_id=ambient-context-org',
+        <MeLimitRaises />,
+        { pathname: '/me/limit-raises?tenant_id=ambient-context-org', raiseHint: hint },
       ),
     )
 
@@ -179,7 +231,7 @@ describe('MeLimitRaises — interface note: tenant is carried from the hint, nev
       candidates: [],
       unattempted_model_ids: [],
     }
-    render(withClient(<MeLimitRaises raiseHint={hint} />))
+    render(withClient(<MeLimitRaises />, { raiseHint: hint }))
     await waitFor(() => expect(screen.getByDisplayValue('0.40')).toBeInTheDocument())
   })
 
@@ -207,7 +259,7 @@ describe('MeLimitRaises — interface note: tenant is carried from the hint, nev
       // (B5) — these two were configured but never priced.
       unattempted_model_ids: ['claude-sonnet-4-6', 'claude-haiku-4-5'],
     }
-    render(withClient(<MeLimitRaises raiseHint={hint} />))
+    render(withClient(<MeLimitRaises />, { raiseHint: hint }))
     await waitFor(() =>
       expect(screen.getByText(/claude-sonnet-4-6/)).toBeInTheDocument(),
     )
@@ -241,7 +293,7 @@ describe('MeLimitRaises — B6: the hint must not recommend a raise no approver 
       ],
       unattempted_model_ids: [],
     }
-    render(withClient(<MeLimitRaises raiseHint={hint} />))
+    render(withClient(<MeLimitRaises />, { raiseHint: hint }))
 
     // The conflict must be rendered — a day of latency on a dead end is
     // exactly what this id exists to prevent.
@@ -270,7 +322,7 @@ describe('MeLimitRaises — B6: the hint must not recommend a raise no approver 
       candidates: [],
       unattempted_model_ids: [],
     }
-    render(withClient(<MeLimitRaises raiseHint={hint} />))
+    render(withClient(<MeLimitRaises />, { raiseHint: hint }))
     await waitFor(() => expect(screen.getByDisplayValue('0.40')).toBeInTheDocument())
     expect(screen.queryByText(/no approver|could not (be )?grant/i)).toBeNull()
   })

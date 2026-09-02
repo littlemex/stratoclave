@@ -366,7 +366,8 @@
     "count_more": " / 次ページあり",
     "fallback_badge": "フォールバック",
     "fallback_from": "要求モデル {{requested}} からフォールバック",
-    "fallback_from_quota_exhausted": "要求モデル {{requested}} からフォールバック(クォータ枯渇)"
+    "fallback_from_quota_exhausted": "要求モデル {{requested}} からフォールバック(クォータ枯渇)",
+    "fallback_from_grant_expired": "要求モデル {{requested}} からフォールバック(グラントの期限切れ)"
   },
   "admin_tenants": {
     "title": "テナント管理",
@@ -528,6 +529,7 @@
     "no_pool": "このテナントには今期のドルプール設定がありません。",
     "remaining_label": "残り",
     "remaining_grant_cap_label": "追加付与の残り上限",
+    "tenant_label": "テナント",
     "hint_title": "このページに来た理由",
     "hint_desc": "{{model}} へのリクエストが {{wall}} の壁で拒否されました。",
     "hint_shortfall": "このリクエストは {{amount}} 不足しています。",
@@ -550,6 +552,7 @@
     "col_asked": "要求額",
     "col_status": "状態",
     "status_approved": "{{amount}} を承認、{{expires}} に失効",
+    "approved_by_label": "承認者:",
     "status_rejected": "却下",
     "status_pending": "テナントの承認者による確認待ちです — まだ使える金額は変わっていません。"
   },
@@ -564,6 +567,7 @@
     "asked_by": "申請者: {{user}}",
     "reason_is": "理由: {{reason}}",
     "observed_not_recorded": "この申請には、申請時点でのテナントの状況のスナップショットが記録されていません(申請経路が未対応)。上記の現在の状況のみ参照できます。",
+    "observed_snapshot": "申請時点({{when}}): 上限 {{limit}}、残り {{remaining}}。",
     "approve_amount_label": "承認額 (USD)",
     "expiry_label": "失効日時",
     "decision_comment_label": "判断コメント",
@@ -583,6 +587,7 @@
     "row_total": "この行の付与合計は {{total}}、上限は {{cap}} です。",
     "cap_exceeded": "上限を超過",
     "drift": "差分: {{amount}}",
+    "col_request": "リクエスト",
     "col_approved": "承認額",
     "col_approver": "承認者",
     "col_expires": "失効日時",
@@ -620,6 +625,7 @@
     "fallback_badge": "フォールバック",
     "fallback_from": "要求モデル {{requested}} からフォールバック",
     "fallback_from_quota_exhausted": "要求モデル {{requested}} からフォールバック(クォータ枯渇)",
+    "fallback_from_grant_expired": "要求モデル {{requested}} からフォールバック(グラントの期限切れ)",
     "fallback_count": "フォールバックで別モデルが使われたリクエスト: {{count}} 件"
   },
   "me_api_keys": {

@@ -65,7 +65,7 @@ export default function MeLimitRaises() {
     hint != null && hint.minimum_raise_microusd > hint.remaining_cap_microusd
   const prefillUsd =
     hint != null && !conflict && hint.minimum_raise_microusd > 0
-      ? (hint.minimum_raise_microusd / 1_000_000).toString()
+      ? (hint.minimum_raise_microusd / 1_000_000).toFixed(2)
       : ''
 
   const [reasonCode, setReasonCode] = useState('')
@@ -169,6 +169,23 @@ export default function MeLimitRaises() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
+            {/* Interface note: the tenant this request will be filed
+                against is carried from the hint alone, never from ambient
+                client context (a query param, a stale session tenant, ...).
+                Read-only display -- `submit_limit_raise` does not accept a
+                `tenant_id` at all (it derives the caller's tenant from their
+                session); this is provenance shown to the requester, not a
+                field that travels on the submit call. */}
+            <div className="space-y-1.5">
+              <Label htmlFor="lr-tenant">{t('me_limit_raises.tenant_label')}</Label>
+              <Input
+                id="lr-tenant"
+                value={hint.tenant_id ?? ''}
+                readOnly
+                disabled
+                data-testid="lr-tenant-input"
+              />
+            </div>
             {hint.target_shortfall_microusd != null ? (
               <p data-testid="hint-target-shortfall">
                 {t('me_limit_raises.hint_shortfall', {
@@ -344,8 +361,21 @@ function RequestStatus({ row }: { row: LimitRaiseRequest }) {
       <span data-testid="lr-status-approved">
         {t('me_limit_raises.status_approved', {
           amount: fmtMicroUsd(row.approved_amount_microusd),
-          expires: row.expires_at ? formatDate(new Date(row.expires_at * 1000).toISOString()) : '?',
+          expires: row.expires_at != null ? formatExpiryUtc(row.expires_at) : '?',
         })}
+        {/* R24: the approver must be visibly identified -- `approver_id` is
+            a stable id (never an address); resolving it to a display name
+            is a console-side lookup this row does not perform itself. The
+            id is its own element (not folded into one interpolated
+            sentence) so it renders as an identifiable, independently
+            selectable piece of text. */}
+        {row.approver_id ? (
+          <div className="text-muted-foreground" data-testid="lr-status-approver">
+            {t('me_limit_raises.approved_by_label')}
+            {' '}
+            <span>{row.approver_id}</span>
+          </div>
+        ) : null}
       </span>
     )
   }
@@ -388,4 +418,22 @@ function formatDate(iso: string): string {
   } catch {
     return iso
   }
+}
+
+/**
+ * The expiry's own wording
+ * (change-pipeline/quota-raise-and-archive/design-F3.md's quoted example: "Approved
+ * $50.00, expires Aug 31, 2026 23:59 UTC") -- always UTC and always with
+ * the month spelled out, unlike `formatDate`'s locale/timezone-dependent
+ * `toLocaleString()`. `expires_at` is the epoch-SECONDS int every surface
+ * in this codebase uses for it.
+ */
+function formatExpiryUtc(epochSeconds: number): string {
+  const d = new Date(epochSeconds * 1000)
+  const month = d.toLocaleString(undefined, { month: 'short', timeZone: 'UTC' })
+  const day = d.getUTCDate()
+  const year = d.getUTCFullYear()
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mm = String(d.getUTCMinutes()).padStart(2, '0')
+  return `${month} ${day}, ${year} ${hh}:${mm} UTC`
 }

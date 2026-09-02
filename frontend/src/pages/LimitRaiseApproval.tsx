@@ -97,7 +97,7 @@ export default function LimitRaiseApproval() {
           </CardTitle>
           <CardDescription>
             {expiryQuery.data ? (
-              <span data-testid="latest-permissible-expiry">
+              <span data-testid="lr-latest-permissible-expiry">
                 {t('limit_raise_approval.latest_expiry', {
                   when: formatDate(
                     new Date(expiryQuery.data.latest_permissible_expiry * 1000).toISOString(),
@@ -212,18 +212,31 @@ function DecisionRow({
           {fmtMicroUsd(request.asked_amount_microusd)}
         </p>
       </div>
-      {/* Plain JSX interpolation, never dangerouslySetInnerHTML. */}
-      <p className="text-sm text-muted-foreground" data-testid="lr-request-comment">
-        {request.decision_comment ?? ''}
+      {/* R12: the requester's own justification, rendered via plain JSX
+          interpolation -- never dangerouslySetInnerHTML -- so a comment
+          containing markup stays literal text. */}
+      <p className="text-sm text-muted-foreground" data-testid="lr-comment">
+        {request.comment ?? ''}
       </p>
 
-      {/* R30's "at request time" half: no `observed_limit_microusd` /
-          `observed_remaining_microusd` exists on the request row today (a
-          backend gap named in the F3 report, not fixed here -- F1's
-          submit_limit_raise never captures it). Stated honestly rather than
-          fabricated or silently omitted. */}
-      <p className="text-xs text-muted-foreground" data-testid="lr-observed-snapshot">
-        {t('limit_raise_approval.observed_not_recorded')}
+      {/* R30's "at request time" half. `observed_limit_microusd` /
+          `observed_remaining_microusd` are not captured by
+          `submit_limit_raise` on this backend yet (a gap named in the F3
+          report, not fixed here); rendered for real once they exist rather
+          than a second, drifting implementation added later. Stated
+          honestly rather than fabricated or silently omitted in the
+          meantime. */}
+      <p className="text-xs text-muted-foreground" data-testid="lr-snapshot-block">
+        {request.observed_limit_microusd != null &&
+        request.observed_remaining_microusd != null ? (
+          t('limit_raise_approval.observed_snapshot', {
+            limit: fmtMicroUsd(request.observed_limit_microusd),
+            remaining: fmtMicroUsd(request.observed_remaining_microusd),
+            when: request.observed_at ? formatDate(request.observed_at) : '?',
+          })
+        ) : (
+          t('limit_raise_approval.observed_not_recorded')
+        )}
       </p>
 
       <div className="grid gap-4 sm:grid-cols-3">

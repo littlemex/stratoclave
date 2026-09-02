@@ -253,6 +253,10 @@ export default function MeUsage() {
                               ? t('me_usage.fallback_from_quota_exhausted', {
                                   requested: row.requested_model_id ?? '?',
                                 })
+                              : row.fallback_reason === 'grant_expired'
+                              ? t('me_usage.fallback_from_grant_expired', {
+                                  requested: row.requested_model_id ?? '?',
+                                })
                               : t('me_usage.fallback_from', {
                                   requested: row.requested_model_id ?? '?',
                                 })

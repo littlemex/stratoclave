@@ -213,7 +213,15 @@ describe('MeUsage', () => {
     // The current fixed copy ("Fell back from requested claude-opus-4-7")
     // never mentions expiry for ANY cause — this must fail today, and must
     // start passing once the badge's title branches on fallback_reason.
-    const badge = screen.getAllByText(/fallback/i)[0]
+    //
+    // `/fallback/i` also matches the KPI summary line above the table
+    // ("1 request(s) served by a fallback model", `me_usage.fallback_count`)
+    // which renders EARLIER in the DOM and carries no `title` — a bare
+    // `getAllByText(...)[0]` grabs that one, not the badge, and asserts
+    // against its (always-empty) `closest('[title]')`. The badge's own text
+    // is the exact string "fallback" (`me_usage.fallback_badge`, no other
+    // words in that span), so an exact match isolates it from the KPI line.
+    const badge = screen.getAllByText('fallback', { exact: true })[0]
     const title = badge.closest('[title]')?.getAttribute('title') ?? ''
     expect(title).toMatch(/expir/i)
   })

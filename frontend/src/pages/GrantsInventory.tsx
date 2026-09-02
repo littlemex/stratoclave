@@ -131,6 +131,7 @@ export default function GrantsInventory() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead>{t('grants_inventory.col_request')}</TableHead>
                       <TableHead>{t('grants_inventory.col_approved')}</TableHead>
                       <TableHead>{t('grants_inventory.col_approver')}</TableHead>
                       <TableHead>{t('grants_inventory.col_expires')}</TableHead>
@@ -188,6 +189,9 @@ function GrantLine({
 
   return (
     <TableRow>
+      <TableCell className="font-mono text-xs text-muted-foreground">
+        {grant.request_id}
+      </TableCell>
       <TableCell className="font-mono text-xs">
         {fmtMicroUsd(grant.approved_amount_microusd)}
       </TableCell>

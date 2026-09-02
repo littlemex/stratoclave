@@ -366,7 +366,8 @@
     "count_more": " / more pages",
     "fallback_badge": "fallback",
     "fallback_from": "Fell back from requested {{requested}}",
-    "fallback_from_quota_exhausted": "Fell back from requested {{requested}} — its quota was exhausted"
+    "fallback_from_quota_exhausted": "Fell back from requested {{requested}} — its quota was exhausted",
+    "fallback_from_grant_expired": "Fell back from requested {{requested}} — your grant for that model expired"
   },
   "admin_tenants": {
     "title": "Tenant administration",
@@ -528,6 +529,7 @@
     "no_pool": "This tenant has no dollar pool configured for this period.",
     "remaining_label": "Remaining",
     "remaining_grant_cap_label": "Remaining grant cap",
+    "tenant_label": "Tenant",
     "hint_title": "Why you're here",
     "hint_desc": "Your request for {{model}} was refused at the {{wall}} wall.",
     "hint_shortfall": "This request is {{amount}} short.",
@@ -550,6 +552,7 @@
     "col_asked": "Asked",
     "col_status": "Status",
     "status_approved": "Approved {{amount}}, expires {{expires}}",
+    "approved_by_label": "Approved by",
     "status_rejected": "Rejected",
     "status_pending": "Waiting for your tenant's approver to review — this did not change what you can spend yet."
   },
@@ -564,6 +567,7 @@
     "asked_by": "Asked by {{user}}",
     "reason_is": "Reason: {{reason}}",
     "observed_not_recorded": "This request does not carry a snapshot of the tenant's position at the time it was filed (not recorded by the request path yet) — only the current position above is available.",
+    "observed_snapshot": "At request time ({{when}}): limit {{limit}}, remaining {{remaining}}.",
     "approve_amount_label": "Approve (USD)",
     "expiry_label": "Expires",
     "decision_comment_label": "Decision comment",
@@ -583,6 +587,7 @@
     "row_total": "This row's grants total {{total}} against a cap of {{cap}}.",
     "cap_exceeded": "Cap exceeded",
     "drift": "Drift: {{amount}}",
+    "col_request": "Request",
     "col_approved": "Approved",
     "col_approver": "Approver",
     "col_expires": "Expires",
@@ -620,6 +625,7 @@
     "fallback_badge": "fallback",
     "fallback_from": "Fell back from requested {{requested}}",
     "fallback_from_quota_exhausted": "Fell back from requested {{requested}} — its quota was exhausted",
+    "fallback_from_grant_expired": "Fell back from requested {{requested}} — your grant for that model expired",
     "fallback_count": "{{count}} request(s) served by a fallback model"
   },
   "me_api_keys": {
