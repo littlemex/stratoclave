@@ -232,12 +232,40 @@ refusal says so rather than naming the last one it saw.
 
 The hint carries the **remaining cap**. Without it a surface can pre-fill an amount no
 approver is permitted to grant, and the requester discovers that a day later from a
-`grant_cap_exceeded`. Its candidate list holds exactly one element today — the wall
-that actually refused — because at the moment of a pool refusal exactly one candidate
-has been priced: the routing cascade leaves on a pool refusal, and the untried tail is
-priced only after a hold commits. A hint carrying four shortfalls would describe
-measurements nobody took. The shape is the final one, so filling it later is an append
-rather than a second wire change.
+`grant_cap_exceeded`. The shape was shipped final, with degenerate (one-candidate)
+content, so a client written against the early shape renders a fuller one unchanged —
+filling it later is an append, never a second wire change.
+
+**What "filled" turned out to mean, exactly (F3).** At the moment of a *pool* refusal
+exactly one candidate has been priced — the routing cascade leaves on a pool refusal
+before trying the rest of the chain — so that hint's `candidates` still holds one
+element, and the rest of the chain is named in a new field, `unattempted_model_ids`, by
+id only, with no cost data: stating that cheaper candidates were not attempted is not
+the same as knowing what they would have cost. A *quota* cascade is the opposite case:
+`QuotaExhausted` is caught and the cascade genuinely tries every candidate up to the
+one that finally 402s, so that hint's `candidates` holds one entry per candidate
+actually priced, none of them grantable (only the pool wall is), and
+`unattempted_model_ids` is empty because nothing here was skipped. Both cases add
+`minimum_raise_microusd` (the smallest raise that clears the cheapest **grantable**
+priced candidate, zero when none was), `requested_model_id` and
+`target_shortfall_microusd` (the candidate the caller actually wanted, and its own
+shortfall — "her own number", never a cheaper candidate's), `router_mode`
+(`cascade`/`pin`/`fallback_disabled`), `pricing_version` and `priced_at`. A refusal
+caused by a grant expiring within three sweep intervals of `expires_at` sets
+`grant_expired` on the candidate it explains — a boolean beside `blocker` rather than
+a fifth value inside it, because `blocker` is a closed four-value enum. The 402 body's
+`message` states the target's own shortfall in dollars and names any unattempted
+candidates in prose, so a client that ignores `raise_hint` entirely is still told a
+number: "must state, not just carry" applies to the string a human reads, not only the
+object a script reads.
+
+**Where the fill lands.** `mvp/_pipeline.py`'s `_reserve_over_candidates` builds the
+multi-candidate hint from `priced_tried` at the single `_err_402` that ends the cascade;
+its per-candidate `reserve_credit` calls (the pool-wall path) build the one-candidate
+hint and, on a pool refusal, the caller augments it with the tail it never got to try.
+Neither path adds a DynamoDB call to price anything that was not already being priced —
+the remaining cap is read once, best-effort, from a row the refusal already has in hand
+or a fresh read that degrades to `remaining_cap_microusd: 0` rather than a 500.
 
 ## 9. Setting a figure while a grant is live
 
@@ -294,7 +322,71 @@ patched over because the answer to each is a decision and not a surface.
   be noticed from. Pointing the per-tenant reconciliation at it finds them; the fleet
   pass does not.
 
-## 12. Where each rule lives
+## 12. A fallback caused by an expiring grant is visible as such (F3)
+
+Naming a wall is not the same as naming a *cause*, and today only one cause is
+reachable from either surface this section describes.
+
+**The refusal.** A pool refusal's candidate carries `grant_expired: true` when a grant
+against the same wall has `expires_at` within `[expires_at, expires_at + 15 minutes]` of
+now — three five-minute sweep intervals, so a late sweep still gets to name the cause —
+computed by the pure function `fallback_reason_for_expired_grant(grant_expires_at,
+now_epoch, grant_wall, blocked_wall)`, which also requires the grant's wall and the
+refusing wall to be the *same* one: a grant against the pool cannot explain a per-model
+refusal just because it expired recently. The refusal's `message` names it in prose too.
+
+**The usage row.** `usage_logs.record()` takes one additive attribute,
+`fallback_reason`, set at settle time — never derived after the fact, because the cause
+is a fact about the router's decision, not something the two model ids can reconstruct.
+Today it can only ever be `"quota_exhausted"`: the cascade advances past a candidate on
+`QuotaExhausted` alone, and a pool-wall refusal aborts the whole request rather than
+being caught and advanced past (section 8's own "leaves on a pool refusal"), so a
+*successfully served* fallback can never have been caused by a grant expiring at the
+pool wall — only a refusal can, which is what the candidate flag above is for. A cheaper
+candidate that would fit is genuinely never tried once a pricier one hits the pool wall;
+that is a defect in the cascade itself, not a gap in this attribute, and it belongs to
+whichever change eventually lets the loop advance past a pool refusal rather than
+abandoning the request.
+
+## 13. Surfaces: the console and the CLI (F3)
+
+Two console views. The **self-service request view**
+(`frontend/src/pages/MeLimitRaises.tsx`, route `/me/limit-raises`) shows the walls that
+apply to the caller before any refusal — a new endpoint,
+`GET /me/limit-raises/wall-status`, reduced to exactly enough for a requester to see
+whether asking makes sense (no `manual_limit`, no seat internals: those are an
+approver's business) — and the caller's own requests, joined to their decision (R24: a
+decided request states its approved amount and expiry, never the bare status word). A
+submission pre-fills from the `raise_hint` of the 402 that sent the caller there,
+carried in the browser's own navigation state rather than reconstructed: a screen
+opened without that state (a deep link, a reload, a bookmark) shows no pre-filled
+amount and names no wall, because a reconstructed answer to "what refused you" is a
+second answer computed at a different moment, and the two can disagree while both look
+authoritative. When the hint's `minimum_raise_microusd` exceeds its
+`remaining_cap_microusd`, the view renders that conflict instead of a pre-filled figure
+that approval would refuse a day later with `422 grant_cap_exceeded`.
+
+The **tenant approval view** (`frontend/src/pages/LimitRaiseApproval.tsx`, routes
+`/{admin,team-lead}/tenants/:tenantId/limit-raises`) renders the queue, the tenant's
+live position and its ceiling composition through the same `PoolBudgetCard` the tenant
+detail pages already use — one renderer, not two that could disagree — and a new
+endpoint, `GET .../limit-raises/latest-permissible-expiry`, so the bound on an
+approval's `expires_at` is shown before it is typed rather than discovered from a
+refusal. It states plainly, rather than inventing, that the request's own position
+*at the time it was filed* has no data to render: nothing in the raise mechanism
+captures that snapshot today, which is a gap in the mechanism this view sits over, not
+a computation this view was ever positioned to perform.
+
+The **grant inventory** (`frontend/src/pages/GrantsInventory.tsx`, standalone routes
+`/{admin,team-lead}/tenants/:tenantId/limit-grants`) renders one total per target row,
+never a tenant-wide sum, and a `REVOKE_BLOCKED` grant's reason next to its row.
+
+The **CLI** (`cli/src/client.rs`) renders the same hint in a 402's error message: each
+priced candidate with its dollar shortfall, the unattempted tail by name, and — when a
+priced candidate is grantable and affordable — the exact `stratoclave limit-raise
+request` invocation to run next, or B6's conflict sentence in its place.
+
+## 14. Where each rule lives
 
 | Rule | Owner |
 | --- | --- |
@@ -303,6 +395,10 @@ patched over because the answer to each is a decision and not a surface.
 | Request, grant and slot storage; both indexes | `dynamo/quota_events.py` |
 | Every lifecycle rule, the refusals, the sweep, the checks | `mvp/grants.py` |
 | Which walls exist and which are grantable | `mvp/reserve_limits.py` |
-| The refusal body and its hint | `mvp/_pipeline.py` |
+| The refusal body, its hint, and the expired-grant classification | `mvp/_pipeline.py` |
 | The setter guard, the composition read, the retirement drain | `mvp/admin_tenants.py` |
+| The fallback cause, additive on the usage row | `dynamo/usage_logs.py` |
+| The self-service and approval console views | `frontend/src/pages/MeLimitRaises.tsx`, `frontend/src/pages/LimitRaiseApproval.tsx` |
+| The grant inventory console view | `frontend/src/pages/GrantsInventory.tsx` |
+| The CLI's rendering of a refusal's hint | `cli/src/client.rs` |
 | The sweep's schedule and its three alarms | `iac/lib/quota-grants-stack.ts` |

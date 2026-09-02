@@ -21,6 +21,9 @@ import Dashboard from '@/pages/Dashboard'
 import MeUsage from '@/pages/MeUsage'
 import MeBilling from '@/pages/MeBilling'
 import MeApiKeys from '@/pages/MeApiKeys'
+import MeLimitRaises from '@/pages/MeLimitRaises'
+import LimitRaiseApproval from '@/pages/LimitRaiseApproval'
+import GrantsInventory from '@/pages/GrantsInventory'
 import AdminUsers from '@/pages/admin/AdminUsers'
 import AdminUserNew from '@/pages/admin/AdminUserNew'
 import AdminUserDetail from '@/pages/admin/AdminUserDetail'
@@ -73,12 +76,21 @@ export default function App() {
               <Route path="/me/usage" element={<MeUsage />} />
               <Route path="/me/billing" element={<MeBilling />} />
               <Route path="/me/api-keys" element={<MeApiKeys />} />
+              <Route path="/me/limit-raises" element={<MeLimitRaises />} />
               <Route element={<ProtectedRoute requiredRoles={['admin']} />}>
                 <Route path="/admin/users" element={<AdminUsers />} />
                 <Route path="/admin/users/new" element={<AdminUserNew />} />
                 <Route path="/admin/users/:userId" element={<AdminUserDetail />} />
                 <Route path="/admin/tenants" element={<AdminTenants />} />
                 <Route path="/admin/tenants/:tenantId" element={<AdminTenantDetail />} />
+                <Route
+                  path="/admin/tenants/:tenantId/limit-raises"
+                  element={<LimitRaiseApproval />}
+                />
+                <Route
+                  path="/admin/tenants/:tenantId/limit-grants"
+                  element={<GrantsInventory />}
+                />
                 <Route path="/admin/usage" element={<AdminUsageLogs />} />
                 <Route path="/admin/pricing" element={<AdminPricing />} />
                 <Route path="/admin/trusted-accounts" element={<AdminTrustedAccounts />} />
@@ -93,6 +105,14 @@ export default function App() {
                 <Route
                   path="/team-lead/tenants/:tenantId"
                   element={<TeamLeadTenantDetail />}
+                />
+                <Route
+                  path="/team-lead/tenants/:tenantId/limit-raises"
+                  element={<LimitRaiseApproval />}
+                />
+                <Route
+                  path="/team-lead/tenants/:tenantId/limit-grants"
+                  element={<GrantsInventory />}
                 />
               </Route>
               <Route path="*" element={<Navigate to="/" replace />} />

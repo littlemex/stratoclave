@@ -1170,6 +1170,36 @@
   },
   "cl-d46f5f46ce06": {
    "first_seen": "added by CONTRACT-F4-claims.md R41: quota-raises.md's boundary sentence that grant-supported spend is an upper bound, not an attribution"
+  },
+  "cl-d0f9eb77116d": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-1fe8f75b885d": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-000bab100009": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-e3e426b3b043": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 8, describing R36's filled RaiseHint"
+  },
+  "cl-1e921a990ab9": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, describing R38's expired-grant classification"
+  },
+  "cl-38a1beee5611": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, describing R38's fallback_reason attribute"
+  },
+  "cl-5d19d01ffa94": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, stating R38's own boundary"
+  },
+  "cl-1f2abdff0c77": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 12, naming C14.31's cascade defect"
+  },
+  "cl-e78d97513fdc": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 13, describing the self-service request view"
+  },
+  "cl-42cfc43250d2": {
+   "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 13, describing the grant inventory view"
   }
  },
  "retired": {
@@ -1426,7 +1456,14 @@
     "C14.22": "B",
     "C14.23": "B",
     "C14.24": "N",
-    "C14.25": "B"
+    "C14.25": "B",
+    "C14.26": "B",
+    "C14.27": "B",
+    "C14.28": "B",
+    "C14.29": "B",
+    "C14.30": "B",
+    "C14.31": "N",
+    "C14.32": "N"
    }
   },
   "retired": {},

@@ -208,9 +208,16 @@ export default function AdminUsageLogs() {
                     {log.fallback_occurred === true && (
                       <span
                         className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800"
-                        title={t('admin_usage_logs.fallback_from', {
-                          requested: log.requested_model_id ?? '?',
-                        })}
+                        title={
+                          // R38 (F3): see mvp/MeUsage.tsx's identical branch.
+                          log.fallback_reason === 'quota_exhausted'
+                            ? t('admin_usage_logs.fallback_from_quota_exhausted', {
+                                requested: log.requested_model_id ?? '?',
+                              })
+                            : t('admin_usage_logs.fallback_from', {
+                                requested: log.requested_model_id ?? '?',
+                              })
+                        }
                       >
                         {t('admin_usage_logs.fallback_badge')}
                       </span>

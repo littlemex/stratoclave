@@ -195,6 +195,23 @@ export default function AdminTenantDetail() {
         }
       />
 
+      {/* R12: entry points for the two new console surfaces, kept OFF this
+          page rather than embedded in it -- R25's own resolution confirmed
+          the inventory is standalone, and the approval queue is a decision
+          workflow, not another read-only summary block among these cards. */}
+      <div className="flex gap-2">
+        <Link to={`/admin/tenants/${tenant.tenant_id}/limit-raises`}>
+          <Button variant="outline" size="sm">
+            {t('admin_tenant_detail.limit_raises_link')}
+          </Button>
+        </Link>
+        <Link to={`/admin/tenants/${tenant.tenant_id}/limit-grants`}>
+          <Button variant="outline" size="sm">
+            {t('admin_tenant_detail.limit_grants_link')}
+          </Button>
+        </Link>
+      </div>
+
       <RoutingConfigCard
         tenantId={tenant.tenant_id}
         config={routingQuery.data ?? null}

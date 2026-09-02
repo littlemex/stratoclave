@@ -191,7 +191,10 @@ test.describe('tenant pool budget admin UI', () => {
     // The card now shows the ceiling; the summary replaces the empty state.
     await expect(page.getByTestId('pool-budget-summary')).toBeVisible()
     await expect(page.getByTestId('pool-limit')).toHaveText('$500.00')
-    await expect(page.getByTestId('pool-remaining')).toHaveText('$500.00')
+    // `pool-remaining` was renamed to `pool-available` in a prior F3 commit
+    // (`ac3c738`, adding the mode sentence/composition); this spec predates
+    // that rename and was never updated.
+    await expect(page.getByTestId('pool-available')).toHaveText('$500.00')
 
     // The PUT sent integer cents, not a float — 500 USD == 50000 cents.
     expect(capturedPutBody).not.toBeNull()

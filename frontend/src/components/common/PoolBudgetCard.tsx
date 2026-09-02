@@ -128,10 +128,12 @@ export function PoolBudgetCard({
               <PoolStat
                 label={t('admin_tenant_detail.pool.reserved_label')}
                 value={fmtMicroUsd(pool.pool_reserved_microusd)}
+                testId="pool-reserved"
               />
               <PoolStat
                 label={t('admin_tenant_detail.pool.settled_label')}
                 value={fmtMicroUsd(pool.pool_settled_microusd)}
+                testId="pool-settled"
               />
               {/* The composition, so the total above can be checked against
                   something. The granted line is simply zero until grants exist,
@@ -148,6 +150,21 @@ export function PoolBudgetCard({
                 label={t('admin_tenant_detail.pool.granted_label')}
                 value={fmtMicroUsd(pool.pool_granted_microusd)}
                 testId="pool-granted"
+              />
+              {/* R21b/B6 (F3): what an approver still has room to grant, right
+                  now -- rendered here rather than only on the approval
+                  screen, because it is a fact about THIS row, identical to
+                  every other line in this composition. The provenance
+                  (`grant_cap_is_derived`) is what tells a reader whether a
+                  hire moves this number before their next look. */}
+              <PoolStat
+                label={t('admin_tenant_detail.pool.remaining_grant_cap_label')}
+                value={`${fmtMicroUsd(pool.remaining_grant_cap_microusd)} (${
+                  pool.grant_cap_is_derived
+                    ? t('admin_tenant_detail.pool.grant_cap_derived')
+                    : t('admin_tenant_detail.pool.grant_cap_fixed')
+                })`}
+                testId="pool-remaining-grant-cap"
               />
             </dl>
             {pool.over_ceiling_microusd > 0 ? (

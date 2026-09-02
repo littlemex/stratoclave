@@ -65,6 +65,7 @@ class UsageLogsRepository:
         cost_microusd: Optional[int] = None,
         requested_model_id: Optional[str] = None,
         measured_bound_microusd: Optional[int] = None,
+        fallback_reason: Optional[str] = None,
     ) -> dict[str, Any]:
         """Insert a UsageLog record.
 
@@ -91,9 +92,19 @@ class UsageLogsRepository:
         P0-11 cascade). `requested_model_id` (P0-11 visibility) is the
         client-requested model, canonicalized by the caller; absent on legacy
         rows, so readers MUST treat a missing value as "unknown", never as
-        "no fallback". The fallback bool is derived at read from the two ids —
+        "no fallback". The fallback BOOL is derived at read from the two ids —
         it is deliberately not persisted (no second source of truth to backfill
         or let go stale vs the ids).
+
+        `fallback_reason` (F3, contract R38) is a DIFFERENT fact from the
+        derived bool: not "did it fall back" but "why". That WHY is not
+        derivable from the two ids after the fact -- it is a fact about the
+        router's decision at reserve time -- so it is captured here, at
+        write time, one additive attribute on this per-request, append-only
+        row (the same argument `measured_bound_microusd` already rests on:
+        this write touches nothing another concurrent request also writes).
+        Absent on every row this deployment has produced before this field
+        existed, and on any row where no fallback occurred.
         """
         now = _now_iso()
         log_id = request_id or str(uuid4())
@@ -129,5 +140,7 @@ class UsageLogsRepository:
             item["requested_model_id"] = requested_model_id
         if measured_bound_microusd is not None:
             item["measured_bound_microusd"] = Decimal(int(measured_bound_microusd))
+        if fallback_reason is not None:
+            item["fallback_reason"] = fallback_reason
         self._table.put_item(Item=item)
         return item

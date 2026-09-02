@@ -142,6 +142,84 @@ impl ApiClient {
         None
     }
 
+    /// R36 (F3): render the `raise_hint` a 402 carries, or an empty string
+    /// when it carries none (a wall this deployment has not made grantable,
+    /// or the row was not in hand). The verification plan's own item 2: "a
+    /// refusal after a cascade over three candidates ... the CLI renders a
+    /// choice rather than a blank amount."
+    ///
+    /// Deliberately tolerant of a field this build has never seen (the
+    /// Interface section's "both clients render an unknown code rather than
+    /// failing closed"): every lookup here is `Option`-returning and a
+    /// missing/renamed field degrades to omitting that one line, never to a
+    /// parse failure that would hide the rest of the hint.
+    fn render_raise_hint(body: &str) -> String {
+        let v: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => return String::new(),
+        };
+        let detail = v.get("detail").unwrap_or(&v);
+        let hint = match detail.get("raise_hint") {
+            Some(h) => h,
+            None => return String::new(),
+        };
+        let mut out = String::new();
+        let candidates = hint.get("candidates").and_then(|c| c.as_array());
+        if let Some(cs) = candidates {
+            for c in cs {
+                let model = c.get("model_id").and_then(|m| m.as_str()).unwrap_or("?");
+                let blocker = c.get("blocker").and_then(|b| b.as_str()).unwrap_or("?");
+                let grantable = c.get("grantable").and_then(|g| g.as_bool()).unwrap_or(false);
+                let shortfall = c.get("shortfall_microusd").and_then(|s| s.as_i64());
+                out.push_str(&format!("\n  - {model}: blocked by {blocker}"));
+                if let Some(s) = shortfall {
+                    out.push_str(&format!(", short {}", crate::mvp::limits::usd(s)));
+                }
+                if grantable {
+                    out.push_str(" (raisable)");
+                }
+                if c.get("grant_expired").and_then(|g| g.as_bool()).unwrap_or(false) {
+                    out.push_str(" — a covering grant recently expired");
+                }
+            }
+        }
+        // B5: the tail the cascade never priced, named without cost data —
+        // stating it is not the same as knowing it, and this line exists so
+        // a reader does not mistake silence for "there were no cheaper
+        // options."
+        if let Some(unattempted) = hint.get("unattempted_model_ids").and_then(|u| u.as_array()) {
+            let names: Vec<&str> = unattempted.iter().filter_map(|m| m.as_str()).collect();
+            if !names.is_empty() {
+                out.push_str(&format!(
+                    "\n  (not attempted for this request: {})",
+                    names.join(", ")
+                ));
+            }
+        }
+        if let Some(min) = hint.get("minimum_raise_microusd").and_then(|m| m.as_i64()) {
+            if min > 0 {
+                let remaining = hint
+                    .get("remaining_cap_microusd")
+                    .and_then(|r| r.as_i64())
+                    .unwrap_or(i64::MAX);
+                if min > remaining {
+                    // B6: never suggest a raise no approver could grant.
+                    out.push_str(&format!(
+                        "\n  the smallest raise that would help ({}) exceeds this tenant's remaining grant cap ({}) — an approver could not grant it; ask about the cap instead",
+                        crate::mvp::limits::usd(min),
+                        crate::mvp::limits::usd(remaining),
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "\n  run: stratoclave limit-raise request --limit-usd {} --reason <reason>",
+                        crate::mvp::limits::usd(min).trim_start_matches('$'),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// Map an initial HTTP response status to a CliError.
     fn map_status_error(status: reqwest::StatusCode, body: &str) -> CliError {
         let code = Self::error_code(body);
@@ -154,11 +232,18 @@ impl ApiClient {
                 body
             )),
             // 402: budget / pool / per-model quota exhausted (Fable audit B3) —
-            // a distinct, actionable class, not a random failure.
+            // a distinct, actionable class, not a random failure. F3 (R36):
+            // a client that ignores `raise_hint` must still be told a
+            // number (the "must state, not just carry" rule) -- the fixed
+            // "ask your tenant owner" sentence stays as the fallback for a
+            // wall with no hint attached (a token quota, or a pool refusal
+            // with no row in hand), and `render_raise_hint` appends the
+            // rest whenever the body carries one.
             402 => CliError::BudgetExceeded(format!(
                 "Budget exhausted (HTTP 402{}). Check `stratoclave usage` or ask your \
-                 tenant owner to raise the limit.",
-                code.as_deref().map(|c| format!(", {c}")).unwrap_or_default()
+                 tenant owner to raise the limit.{}",
+                code.as_deref().map(|c| format!(", {c}")).unwrap_or_default(),
+                Self::render_raise_hint(body),
             )),
             // 403: distinguish a VSR model-pin rejection from a real
             // access-denied (Fable audit B4) — the user's access is fine, their

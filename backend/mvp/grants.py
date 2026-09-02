@@ -391,29 +391,85 @@ def unmapped_walls() -> tuple[str, ...]:
 class RaiseHintCandidate(BaseModel):
     """One wall a raise could address.
 
-    Under this change the list holds exactly ONE element -- the wall that
-    actually refused -- and `shortfall_microusd` is left unset. That is not a
-    stub: at the instant of a pool refusal exactly one candidate has been priced,
-    because the routing cascade leaves on a pool refusal and the untried tail is
-    priced only after a hold commits. A hint carrying four shortfalls would
-    describe measurements nobody took.
+    F2 shipped this with exactly ONE element per hint and `shortfall_microusd`
+    left unset -- degenerate content, not a stub for F3 to rename or remove
+    (contract amendment B2). F3 (this change) FILLS the shape instead: a
+    quota cascade that genuinely tried several candidates reports one entry
+    per candidate `_pipeline.py`'s `priced_tried` actually contains, and a
+    pool refusal now carries the cost and shortfall the refusal already
+    computed rather than leaving them unset.
+
+    `grantable` is derived from `blocker` at construction time by
+    `_hint_candidate()` below rather than accepted as caller-supplied input:
+    "only the tenant pool wall is raisable" is a fact about the wall, and a
+    second place that could set this field to something else is a second
+    place it could disagree with `reserve_limits.is_grantable_wall`.
+
+    `estimated_cost_microusd`/`shortfall_microusd` stay `Optional` on
+    purpose (contract amendment, this change): a per-model quota condition
+    failure tells the gateway THAT the ADD was refused, never the counter's
+    remaining headroom (no `ReturnValuesOnConditionCheckFailure` is
+    requested, and adding a read to learn it would be the same defect B5
+    already named for the untried tail -- a hint describing a measurement
+    the refusal path did not take). So `shortfall_microusd` is populated for
+    a tenant-pool candidate (the refusal already reads the row) and left
+    `None` for a per-model quota candidate (the refusal never reads the
+    counter back).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     blocker: str
     wall: str
-    model: Optional[str] = None
+    #: The contract's own wire name
+    #: (change-pipeline/quota-raise-and-archive/CONTRACT-F3-surfaces.md R36:
+    #: "the hint carries per-candidate `model_id`";
+    #: change-pipeline/quota-raise-and-archive/design-F3.md's field table
+    #: and JSON examples both use `model_id` throughout) -- not `model`,
+    #: which this field was originally shipped as before this fix.
+    model_id: Optional[str] = None
+    estimated_cost_microusd: Optional[int] = None
     shortfall_microusd: Optional[int] = None
+    grantable: bool = False
+    #: R38, contract correction: was this SPECIFIC candidate's refusal caused
+    #: by a grant against the SAME wall expiring within the naming window
+    #: (`_pipeline.fallback_reason_for_expired_grant`)? A separate boolean
+    #: rather than a fifth `blocker` value: the F3 contract's own "Contract
+    #: corrections" section closed `blocker` to exactly four values
+    #: (`tenant_pool | user_token_quota | per_model_tenant | per_model_user`)
+    #: on the same date this field's requirement was written, so a fifth
+    #: value would contradict a dated, explicit correction rather than fill a
+    #: gap it left open. This is one of the two-ways-to-read points the F3
+    #: report names.
+    grant_expired: bool = False
+
+
+def _hint_candidate(
+    *, blocker: str, wall: str, model: Optional[str] = None,
+    estimated_cost_microusd: Optional[int] = None,
+    shortfall_microusd: Optional[int] = None,
+    grant_expired: bool = False,
+) -> RaiseHintCandidate:
+    """The one constructor for a hint candidate, so `grantable` can never be
+    set to a value `blocker` disagrees with."""
+    return RaiseHintCandidate(
+        blocker=blocker, wall=wall, model_id=model,
+        estimated_cost_microusd=estimated_cost_microusd,
+        shortfall_microusd=shortfall_microusd,
+        grantable=(blocker == blocker_for_wall(POOL_WALL)),
+        grant_expired=grant_expired,
+    )
 
 
 class RaiseHint(BaseModel):
     """What a 402 tells a client about asking for more.
 
-    Shipped in its FINAL shape now, with one candidate, so that filling it later
-    -- more candidates, populated pricing -- is an append rather than a second
-    wire change. Two changes to one field across two releases, with clients in
-    between, is not a thing this deployment does.
+    Shipped in its FINAL shape by F2, with one candidate, so that filling it
+    later -- more candidates, populated pricing -- is an append rather than a
+    second wire change. Two changes to one field across two releases, with
+    clients in between, is not a thing this deployment does. The fields below
+    the `reason_codes` line are F3's additions (contract amendment B2/B5/B6):
+    all new, none renamed, none removed.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -426,6 +482,41 @@ class RaiseHint(BaseModel):
     #: The reasons the submit endpoint accepts, so a surface offering a raise
     #: does not have to carry its own copy of the enum.
     reason_codes: list[str] = Field(default_factory=lambda: list(RAISE_REASON_CODES))
+    #: The smallest raise that clears the cheapest GRANTABLE priced candidate,
+    #: `0` when no priced candidate is grantable. Never the target's own
+    #: shortfall when a cheaper grantable candidate was actually priced, and
+    #: never derived from a candidate in `unattempted_model_ids` (B6).
+    minimum_raise_microusd: int = 0
+    #: The servable chain tail the refusal never priced -- names only, no cost
+    #: data, because the code never gathered it for this refusal (B5).
+    unattempted_model_ids: list[str] = Field(default_factory=list)
+    #: The tenant the refusal happened under. Carried so a client can pre-fill
+    #: a submission WITHOUT reading it from ambient session context (the
+    #: contract's own Interface note): a hint is a fact about a specific
+    #: refusal, and the refusal's own tenant is safer than "whichever tenant
+    #: the client happens to be showing right now".
+    tenant_id: Optional[str] = None
+    #: The candidate the caller actually wanted -- the head of the chain, or
+    #: the pin. Distinct from `candidates[0].model_id` in general; the two
+    #: coincide for every refusal this deployment can currently produce (a
+    #: pool refusal always happens on the first candidate tried, and a quota
+    #: cascade tries every candidate starting from the head), which is
+    #: recorded here rather than assumed by a client.
+    requested_model_id: Optional[str] = None
+    #: `requested_model_id`'s own shortfall against the wall that refused it
+    #: -- "her own number" (R24's motivating grievance), not any other
+    #: candidate's. `None` when it was never measured (a quota candidate).
+    target_shortfall_microusd: Optional[int] = None
+    #: Mirrors the `fallback_default`/`vsr_hard_model` distinction
+    #: `_pipeline.py` already enforces. One of `cascade`, `pin`,
+    #: `fallback_disabled`.
+    router_mode: Optional[str] = None
+    #: `rate_snapshot.version` at price time, the same value the decision log
+    #: stamps -- so a hint and a decision record for the same refusal name the
+    #: same rate table.
+    pricing_version: Optional[str] = None
+    #: Wall-clock at hint construction. No existing field carried this.
+    priced_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +540,17 @@ def effective_grant_cap_microusd(tenant_id: str, period: str) -> int:
     return effective_grant_cap_for_row(row)
 
 
-def raise_hint_for_pool_row(row: Optional[dict[str, Any]]) -> RaiseHint:
+def raise_hint_for_pool_row(
+    row: Optional[dict[str, Any]],
+    *,
+    model: Optional[str] = None,
+    estimated_cost_microusd: Optional[int] = None,
+    shortfall_microusd: Optional[int] = None,
+    unattempted_model_ids: Optional[list[str]] = None,
+    router_mode: Optional[str] = None,
+    pricing_version: Optional[str] = None,
+    grant_expired: bool = False,
+) -> RaiseHint:
     """Build the hint for a pool refusal from the row the refusal already read.
 
     Takes the ROW rather than a tenant and a period, so the refusal path adds no
@@ -457,13 +558,75 @@ def raise_hint_for_pool_row(row: Optional[dict[str, Any]]) -> RaiseHint:
     condition against it. `remaining_cap_microusd` is floored at zero, so a cap
     lowered below what is already granted reports no room rather than a negative
     figure a surface would render as an amount to ask for.
+
+    Every keyword beyond `row` is OPTIONAL and defaults to the same degenerate
+    content F2 shipped (contract amendment B2): a caller with nothing more than
+    the row still gets a valid, single-candidate hint. A caller that also knows
+    which model it was pricing and what that priced at (every in-scope call
+    site in `_pipeline.py` now does) fills the candidate instead of leaving it
+    a bare wall name.
     """
     granted = granted_microusd(row or {})
     cap = effective_grant_cap_for_row(row or {})
+    candidate = _hint_candidate(
+        blocker=blocker_for_wall(POOL_WALL), wall=POOL_WALL, model=model,
+        estimated_cost_microusd=estimated_cost_microusd,
+        shortfall_microusd=shortfall_microusd, grant_expired=grant_expired)
     return RaiseHint(
-        candidates=[RaiseHintCandidate(
-            blocker=blocker_for_wall(POOL_WALL), wall=POOL_WALL)],
+        candidates=[candidate],
         remaining_cap_microusd=max(0, cap - granted),
+        minimum_raise_microusd=max(0, shortfall_microusd or 0),
+        unattempted_model_ids=list(unattempted_model_ids or []),
+        tenant_id=str((row or {}).get("tenant_id") or "") or None,
+        requested_model_id=model,
+        target_shortfall_microusd=shortfall_microusd,
+        router_mode=router_mode,
+        pricing_version=pricing_version,
+        priced_at=_now_iso(),
+    )
+
+
+def raise_hint_for_priced_candidates(
+    row: Optional[dict[str, Any]],
+    candidates: list[RaiseHintCandidate],
+    *,
+    requested_model_id: Optional[str] = None,
+    unattempted_model_ids: Optional[list[str]] = None,
+    router_mode: Optional[str] = None,
+    pricing_version: Optional[str] = None,
+) -> RaiseHint:
+    """Fill the hint from every candidate a cascade actually priced.
+
+    `candidates` must come from `priced_tried` (R36's own Verified-by: "four
+    internal reserve refusals produce one hint") -- one `RaiseHintCandidate`
+    per tried candidate, in the order they were tried, built by the caller
+    through `_hint_candidate()` since only the caller (`_pipeline.py`) knows
+    which wall blocked which one. This function does the two facts that need
+    a tenant's row rather than a candidate: the remaining cap, and the
+    minimum raise that would clear the cheapest GRANTABLE priced candidate
+    (`0` when none of the priced candidates were grantable -- a quota
+    cascade, every time, since the pool wall and the per-model wall are never
+    both blocking in the same cascade run).
+    """
+    granted = granted_microusd(row or {})
+    cap = effective_grant_cap_for_row(row or {})
+    minimum = min(
+        (c.shortfall_microusd for c in candidates
+         if c.grantable and c.shortfall_microusd is not None),
+        default=0,
+    )
+    target = candidates[0] if candidates else None
+    return RaiseHint(
+        candidates=list(candidates),
+        remaining_cap_microusd=max(0, cap - granted),
+        minimum_raise_microusd=max(0, minimum),
+        unattempted_model_ids=list(unattempted_model_ids or []),
+        tenant_id=str((row or {}).get("tenant_id") or "") or None,
+        requested_model_id=requested_model_id or (target.model_id if target else None),
+        target_shortfall_microusd=target.shortfall_microusd if target else None,
+        router_mode=router_mode,
+        pricing_version=pricing_version,
+        priced_at=_now_iso(),
     )
 
 
@@ -537,35 +700,92 @@ def _ccf_at(codes: list[str], index: int) -> bool:
 def _request_public(item: dict[str, Any]) -> dict[str, Any]:
     """A request row as a caller sees it.
 
-    `comment` and the client token are DELIBERATELY ABSENT. The comment is the
-    requester's own prose about their tenant's spending and the token is a
-    caller-supplied key; neither belongs in a body a surface may log, and R13's
-    rule is easier to keep by never putting them in the projection than by
-    remembering to strip them at each sink.
+    The client token is DELIBERATELY ABSENT -- a caller-supplied secret with
+    no reader who needs it back. The requester's own `comment`, though, IS
+    returned (contract correction): R12's Interface section requires the
+    tenant approval view to render "the ask, the reason, THE COMMENT, the
+    requester" -- an approver cannot judge a request without seeing why it
+    was filed. R13's rule ("the free text ... never reaches a log, a metric,
+    an object key or an error body") is about those FOUR sinks, not about
+    withholding it from the one legitimate reader (the requester herself, or
+    an approver authorised for her tenant) this projection is built for --
+    every caller of `_request_public` is one of those two. R12's own hygiene
+    note (item 6) still governs how a client renders it: as text, never as
+    markup.
+
+    R24 (contract correction) pins the approver as `approver_id` -- a stable
+    user id, resolved to a display name by the console on demand, never an
+    address -- and requires all THREE decision facts (`approved_amount_microusd`,
+    `expires_at`, `approver_id`) to be present on every row: `null` for a
+    pending request, populated for a decided one. That is the whole point of
+    the join this id exists to build: a client must never have to tell "not
+    decided yet" apart from "decided, field omitted" by checking for a
+    missing key.
     """
     out: dict[str, Any] = {
         "request_id": str(item.get("request_id") or ""),
         "tenant_id": str(item.get("tenant_id") or ""),
         "user_id": str(item.get("user_id") or ""),
-        "status": str(item.get("status") or ""),
+        # Stored as `STATUS_PENDING`/`STATUS_APPROVED`/`STATUS_REJECTED`/
+        # `STATUS_WITHDRAWN` (uppercase, `dynamo/quota_events.py`) -- the
+        # wire convention every consumer of this row actually uses is
+        # lowercase (change-pipeline/quota-raise-and-archive/design-F3.md's
+        # own examples: `"pending"`/`"approved"`;
+        # the real, shipped `frontend/src/pages/MeLimitRaises.tsx` checks
+        # `row.status === 'approved'`), so this projection lowercases it
+        # once here rather than leaving every reader to remember to.
+        "status": str(item.get("status") or "").lower(),
         "limit_kind": str(item.get("limit_kind") or ""),
         "reason_code": str(item.get("reason_code") or ""),
         "asked_amount_microusd": int(item.get("asked_amount_microusd", 0)),
         "created_at": str(item.get("created_at") or ""),
+        "approved_amount_microusd": (
+            int(item["approved_amount_microusd"])
+            if item.get("approved_amount_microusd") is not None else None
+        ),
+        "expires_at": (
+            int(item["expires_at"]) if item.get("expires_at") is not None else None
+        ),
+        # `decided_by` is the row's own storage attribute name (unaffected by
+        # this fix -- an internal detail); the WIRE field the contract pins
+        # is `approver_id`.
+        "approver_id": (
+            str(item["decided_by"]) if item.get("decided_by") is not None else None
+        ),
+        # R12: the requester's OWN comment, why she filed -- see this
+        # function's own docstring for why this is returned rather than
+        # withheld.
+        "comment": str(item["comment"]) if item.get("comment") is not None else None,
+        # R30: the tenant's pool position AS SHE SAW IT when she filed
+        # (`submit_limit_raise`'s best-effort read), never the current
+        # value -- that is a DIFFERENT fact the approval view reads fresh
+        # (R30's "current" block, F2's own live read). `None` for all three
+        # together when the submission had no pool row to observe, or (for
+        # any request filed before this fix landed) simply never captured
+        # one -- a request with a real observation always carries all
+        # three, never a subset.
+        "observed_limit_microusd": (
+            int(item["observed_limit_microusd"])
+            if item.get("observed_limit_microusd") is not None else None
+        ),
+        "observed_remaining_microusd": (
+            # SIGNED, never clamped -- a deficit already live when she
+            # filed is not a fact this projection may round up to zero.
+            int(item["observed_remaining_microusd"])
+            if item.get("observed_remaining_microusd") is not None else None
+        ),
+        "observed_at": (
+            str(item["observed_at"]) if item.get("observed_at") is not None else None
+        ),
     }
-    for name in ("decided_at", "decided_by", "grant_id"):
+    for name in ("decided_at", "grant_id"):
         if item.get(name) is not None:
             out[name] = str(item[name])
-    # The DECISION's comment is returned, and the requester's is not. They are
-    # different facts: a decision's reason is addressed TO the requester and is
-    # the whole point of R26, while the request's own justification is hers
-    # already and only adds a place for it to leak.
+    # The DECISION's comment (R26's own field, addressed TO the requester)
+    # is a different fact from the requester's own `comment` above, so it
+    # gets its own name rather than overwriting or being folded into it.
     if item.get("decision_comment") is not None:
         out["decision_comment"] = str(item["decision_comment"])
-    if item.get("approved_amount_microusd") is not None:
-        out["approved_amount_microusd"] = int(item["approved_amount_microusd"])
-    if item.get("expires_at") is not None:
-        out["expires_at"] = int(item["expires_at"])
     return out
 
 
@@ -582,7 +802,12 @@ def _grant_public(item: dict[str, Any]) -> dict[str, Any]:
         "grant_id": str(item.get("grant_id") or ""),
         "tenant_id": str(item.get("tenant_id") or ""),
         "request_id": str(item.get("request_id") or ""),
-        "status": str(item.get("status") or ""),
+        # Same lowercasing as `_request_public` -- stored uppercase
+        # (`GRANT_ACTIVE`/`GRANT_REVOKE_BLOCKED`/... in
+        # `dynamo/quota_events.py`), wire convention lowercase
+        # (change-pipeline/quota-raise-and-archive/design-F3.md's examples,
+        # and the real `frontend/src/pages/GrantsInventory.tsx`).
+        "status": str(item.get("status") or "").lower(),
         "approved_amount_microusd": int(item.get("approved_amount_microusd", 0)),
         "expires_at": int(item.get("expires_at", 0)),
         "period": str(item.get("period") or ""),
@@ -695,6 +920,26 @@ def submit_limit_raise(
     now = _now_epoch()
     date_str = slot_date_str(now)
 
+    # R30's snapshot half: what SHE saw when she filed, so an approver
+    # deciding hours later can be shown "at request time" beside "right
+    # now" rather than one number pretending to be both. Read once, before
+    # the slot-contention loop -- a best-effort observation, never a gate:
+    # a failure here degrades to filing with no snapshot, never to a 500 on
+    # the one path a person is actively waiting on.
+    observed_limit_microusd: Optional[int] = None
+    observed_remaining_microusd: Optional[int] = None
+    try:
+        _pool_now = TenantBudgetsRepository().pool_summary(tenant_id, current_period())
+        if _pool_now is not None:
+            observed_limit_microusd = int(_pool_now["pool_limit_microusd"])
+            # SIGNED, never clamped (the deficit rendering rule this whole
+            # change enforces everywhere else): a tenant already over its
+            # ceiling when she files is exactly the case a raise exists for.
+            observed_remaining_microusd = int(_pool_now["remaining_microusd"])
+    except Exception:  # noqa: BLE001 -- the snapshot is never worth the refusal
+        pass
+    observed_at = _now_iso()
+
     for _attempt in range(2):
         slot = repo.get_slot(
             user_id=actor.user_id, tenant_id=tenant_id, date_str=date_str)
@@ -737,7 +982,10 @@ def submit_limit_raise(
         item = repo.put_request(
             request_id=request_id, tenant_id=tenant_id, user_id=actor.user_id,
             asked_amount_microusd=asked, reason_code=str(reason_code),
-            comment=comment, limit_kind=wall, created_at=_now_iso())
+            comment=comment, limit_kind=wall, created_at=_now_iso(),
+            observed_limit_microusd=observed_limit_microusd,
+            observed_remaining_microusd=observed_remaining_microusd,
+            observed_at=observed_at)
         log_audit_event(
             event="limit_raise_requested", actor_id=actor.user_id,
             actor_email=actor.email, target_id=request_id,
@@ -1723,6 +1971,48 @@ def _guard(fn, *args, **kwargs):
 
 
 # --- the requester -------------------------------------------------------
+@router.get("/me/limit-raises/wall-status")
+def own_tenant_wall_status(
+    actor: AuthenticatedUser = Depends(require_permission("limits:raise-self")),
+) -> dict[str, Any]:
+    """R12: "the walls that apply to the caller and their remaining
+    capacity" -- reachable BEFORE any refusal, not only from a 402's hint.
+
+    The contract's own Interface section asks the self-service request view
+    to show this, and named no existing self-service surface that carries
+    it: `GET /me/usage-summary` is the caller's own TOKEN balance, a
+    different wall, and every tenant-pool read in this codebase up to this
+    change is gated on `tenants:update`/`tenants:update-own` -- an ordinary
+    user has neither. This is the minimal, reduced read: no `manual_limit`,
+    no seat internals, nothing an approver-only surface shows -- just enough
+    for a requester to see whether asking makes sense before she asks.
+
+    `None` (not a 404) when the tenant has no pool row for the period: a
+    tenant that has not opted into pool budgeting has no wall to report on,
+    which is a fact this endpoint states rather than an error a client has
+    to special-case.
+    """
+    period = current_period()
+    row = TenantBudgetsRepository().get(actor.org_id, period, consistent_read=True)
+    if row is None:
+        return {"tenant_id": actor.org_id, "period": period, "pool": None}
+    limit = int(row.get("pool_limit_microusd", 0))
+    reserved = int(row.get("pool_reserved_microusd", 0))
+    settled = int(row.get("pool_settled_microusd", 0))
+    cap = effective_grant_cap_for_row(row)
+    granted = granted_microusd(row)
+    return {
+        "tenant_id": actor.org_id,
+        "period": period,
+        "pool": {
+            "status": str(row.get("status", "active")),
+            "pool_limit_microusd": limit,
+            "remaining_microusd": limit - reserved - settled,
+            "remaining_grant_cap_microusd": max(0, cap - granted),
+        },
+    }
+
+
 @router.post("/me/limit-raises", status_code=201)
 def submit_own_limit_raise(
     body: SubmitLimitRaiseRequest,
@@ -1790,7 +2080,14 @@ def admin_list_limit_raises(
         "tenant_id": tenant_id,
         "requests": [
             _request_public(r) for r in repo.list_requests_for_tenant(
-                tenant_id=tenant_id, status=status, limit=limit)],
+                # The row's own status is stored uppercase (`STATUS_PENDING`
+                # etc.) and this projection's OUTPUT is lowercased for the
+                # wire (`_request_public`); a caller filtering with that
+                # same lowercase convention must still match the stored key
+                # range.
+                tenant_id=tenant_id,
+                status=status.upper() if status else status,
+                limit=limit)],
         "reason_codes": list(RAISE_REASON_CODES),
     }
 
@@ -1817,6 +2114,41 @@ def admin_reject_limit_raise(
     return _guard(
         reject_limit_raise, actor=actor, request_id=request_id,
         decision_comment=body.decision_comment, as_owner=False)
+
+
+@router.get("/admin/limit-raises/latest-permissible-expiry")
+def admin_latest_permissible_expiry(
+    period: Optional[str] = Query(default=None, min_length=1),
+    _actor: AuthenticatedUser = Depends(require_permission("limits:approve")),
+) -> dict[str, Any]:
+    """R28: the bound an approval's `expires_at` must satisfy, shown before
+    it is typed rather than discovered from a refusal.
+
+    Pure calendar arithmetic (`latest_permissible_expiry_for_period`), owned
+    by F3 per the contract's own ownership table ("survives B1 unchanged")
+    -- it has zero dependency on a grant, a request or a tenant's pool row,
+    which is exactly why this endpoint needs no tenant id: the bound is a
+    fact about the PERIOD, identical for every tenant inside it. Gated on
+    the same permission as the approval routes because the only reader who
+    needs it is an approver about to type an expiry, not because the value
+    itself is sensitive.
+    """
+    p = period or current_period()
+    now = _now_epoch()
+    return {"period": p, "latest_permissible_expiry": latest_permissible_expiry_for_period(now, p)}
+
+
+@router.get("/team-lead/limit-raises/latest-permissible-expiry")
+def team_lead_latest_permissible_expiry(
+    period: Optional[str] = Query(default=None, min_length=1),
+    _actor: AuthenticatedUser = Depends(require_permission("limits:approve-own")),
+) -> dict[str, Any]:
+    """Same bound, same reasoning, for the team-lead-scoped approver -- the
+    value does not vary by tenant, so this mirror exists only because the
+    route namespace does."""
+    p = period or current_period()
+    now = _now_epoch()
+    return {"period": p, "latest_permissible_expiry": latest_permissible_expiry_for_period(now, p)}
 
 
 @router.get("/admin/limit-grants")
@@ -1882,7 +2214,14 @@ def team_lead_list_limit_raises(
         "tenant_id": tenant_id,
         "requests": [
             _request_public(r) for r in repo.list_requests_for_tenant(
-                tenant_id=tenant_id, status=status, limit=limit)],
+                # The row's own status is stored uppercase (`STATUS_PENDING`
+                # etc.) and this projection's OUTPUT is lowercased for the
+                # wire (`_request_public`); a caller filtering with that
+                # same lowercase convention must still match the stored key
+                # range.
+                tenant_id=tenant_id,
+                status=status.upper() if status else status,
+                limit=limit)],
         "reason_codes": list(RAISE_REASON_CODES),
     }
 

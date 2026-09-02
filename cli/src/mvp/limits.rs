@@ -48,7 +48,11 @@ fn micro_usd(limit_usd: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("{limit_usd} is too large to express in micro-USD"))
 }
 
-fn usd(micro: i64) -> String {
+/// `pub(crate)` (F3): the 402 handler in `client.rs` renders a `raise_hint`'s
+/// dollar figures with this SAME formatter, so a request-does-not-fit
+/// message and a `stratoclave limits raise` receipt never disagree about
+/// how a micro-USD figure becomes a string.
+pub(crate) fn usd(micro: i64) -> String {
     let sign = if micro < 0 { "-" } else { "" };
     let m = micro.unsigned_abs();
     format!("{sign}${}.{:02}", m / 1_000_000, (m % 1_000_000) / 10_000)
