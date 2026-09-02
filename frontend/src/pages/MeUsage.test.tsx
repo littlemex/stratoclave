@@ -171,4 +171,50 @@ describe('MeUsage', () => {
     // Legacy row: badge text must NOT appear.
     expect(screen.queryByText(/^fallback$/i)).toBeNull()
   })
+
+  // F3 / R38 — "A user cannot distinguish 'my grant expired' from 'the
+  // router changed its mind', and a usage view spanning an expiry shows a
+  // model change with no cause."
+  //
+  // `fallback_reason` is not yet a field on `UsageHistoryEntry` (see this
+  // role's design note, section R38 — it requires a new backend field
+  // threaded through `usage_logs.py::record()`, `me.py`'s response model,
+  // and this type). The cast below simulates the API already carrying it so this test
+  // exercises ONLY the rendering gap: today `MeUsage.tsx`'s fallback badge
+  // title is the fixed string `me_usage.fallback_from` ("Fell back from
+  // requested {{requested}}") regardless of cause — there is no branch for
+  // "this fallback happened because a grant expired" at all.
+  it('names the grant expiry as the fallback cause, not the fixed fallback copy (R38)', async () => {
+    mockUsageSummary.mockResolvedValue({ ...FIXTURE_SUMMARY, fallback_count: 1 })
+    mockUsageHistory.mockResolvedValue({
+      history: [
+        {
+          tenant_id: 'default-org',
+          tenant_name: 'Default Organization',
+          model_id: 'us.anthropic.claude-haiku-4-5',
+          input_tokens: 10,
+          output_tokens: 5,
+          total_tokens: 15,
+          recorded_at: '2026-04-20T12:00:00Z',
+          requested_model_id: 'claude-opus-4-7',
+          fallback_occurred: true,
+          // Not yet a real field on UsageHistoryEntry — see comment above.
+          fallback_reason: 'grant_expired',
+        } as UsageHistoryResponse['history'][number] & { fallback_reason: string },
+      ],
+      next_cursor: null,
+    })
+
+    render(withClient(<MeUsage />))
+
+    await waitFor(() =>
+      expect(screen.getAllByText(/fallback/i).length).toBeGreaterThan(0),
+    )
+    // The current fixed copy ("Fell back from requested claude-opus-4-7")
+    // never mentions expiry for ANY cause — this must fail today, and must
+    // start passing once the badge's title branches on fallback_reason.
+    const badge = screen.getAllByText(/fallback/i)[0]
+    const title = badge.closest('[title]')?.getAttribute('title') ?? ''
+    expect(title).toMatch(/expir/i)
+  })
 })
