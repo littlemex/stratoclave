@@ -710,6 +710,19 @@ export const api = {
       { method: 'POST' },
     ),
 
+  // R12: the walls that apply to the caller, reachable before any refusal.
+  myWallStatus: () =>
+    jsonRequest<{
+      tenant_id: string
+      period: string
+      pool: {
+        status: string
+        pool_limit_microusd: number
+        remaining_microusd: number
+        remaining_grant_cap_microusd: number
+      } | null
+    }>('/api/mvp/me/limit-raises/wall-status'),
+
   // L5-d: the caller's own per-run charge breakdown (redacted — no cost/margin).
   // The runtime `assertNoCostLeak` backstop turns a redaction regression into a
   // loud client error instead of a silent leak into the DOM.

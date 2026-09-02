@@ -1831,6 +1831,48 @@ def _guard(fn, *args, **kwargs):
 
 
 # --- the requester -------------------------------------------------------
+@router.get("/me/limit-raises/wall-status")
+def own_tenant_wall_status(
+    actor: AuthenticatedUser = Depends(require_permission("limits:raise-self")),
+) -> dict[str, Any]:
+    """R12: "the walls that apply to the caller and their remaining
+    capacity" -- reachable BEFORE any refusal, not only from a 402's hint.
+
+    The contract's own Interface section asks the self-service request view
+    to show this, and named no existing self-service surface that carries
+    it: `GET /me/usage-summary` is the caller's own TOKEN balance, a
+    different wall, and every tenant-pool read in this codebase up to this
+    change is gated on `tenants:update`/`tenants:update-own` -- an ordinary
+    user has neither. This is the minimal, reduced read: no `manual_limit`,
+    no seat internals, nothing an approver-only surface shows -- just enough
+    for a requester to see whether asking makes sense before she asks.
+
+    `None` (not a 404) when the tenant has no pool row for the period: a
+    tenant that has not opted into pool budgeting has no wall to report on,
+    which is a fact this endpoint states rather than an error a client has
+    to special-case.
+    """
+    period = current_period()
+    row = TenantBudgetsRepository().get(actor.org_id, period, consistent_read=True)
+    if row is None:
+        return {"tenant_id": actor.org_id, "period": period, "pool": None}
+    limit = int(row.get("pool_limit_microusd", 0))
+    reserved = int(row.get("pool_reserved_microusd", 0))
+    settled = int(row.get("pool_settled_microusd", 0))
+    cap = effective_grant_cap_for_row(row)
+    granted = granted_microusd(row)
+    return {
+        "tenant_id": actor.org_id,
+        "period": period,
+        "pool": {
+            "status": str(row.get("status", "active")),
+            "pool_limit_microusd": limit,
+            "remaining_microusd": limit - reserved - settled,
+            "remaining_grant_cap_microusd": max(0, cap - granted),
+        },
+    }
+
+
 @router.post("/me/limit-raises", status_code=201)
 def submit_own_limit_raise(
     body: SubmitLimitRaiseRequest,
