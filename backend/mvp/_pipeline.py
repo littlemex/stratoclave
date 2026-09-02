@@ -2916,8 +2916,8 @@ def reserve_credit(
     # is deliberately no conditional write here. Creating the row from the request
     # path would put a write on the hot path that the whole PENDING-protocol design
     # exists to keep off it. The scheduled rollover
-    # (`mvp.observability.period_rollover`) creates rows; this only refuses to
-    # pretend the ceiling was never there.
+    # (`mvp/observability/quota_reconciler.py:roll_forward_all_tenants`) creates
+    # rows; this only refuses to pretend the ceiling was never there.
     #
     # There is deliberately NO configurable default for "no pool row" either. A
     # default value would apply to both meanings of the miss and destroy exactly the
