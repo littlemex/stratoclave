@@ -1858,15 +1858,17 @@ def _expired_grant_reason_for_pool_wall(
         from dynamo.quota_events import GRANT_EXPIRED, QuotaEventsRepository
         from mvp.grants import POOL_WALL
 
-        grants = QuotaEventsRepository().list_grants_for_tenant(
-            tenant_id=tenant_id)
+        # Narrowed to EXPIRED grants for THIS period: this runs once per
+        # refusal, on a wall that may have a long grant history behind it, and
+        # it only ever needs the most recent expiry against this one period --
+        # not the tenant's whole lifetime of grants. `list_grants_for_tenant`
+        # itself never caps a correctness read; this is a cold-path caller
+        # choosing to filter what it asks for, not a correctness path relying
+        # on a limit to stay cheap.
+        period_grants = QuotaEventsRepository().list_grants_for_tenant(
+            tenant_id=tenant_id, status=GRANT_EXPIRED, period=period)
     except Exception:  # noqa: BLE001 — never fail a refusal over this
         return None
-    period_grants = [
-        g for g in grants
-        if str(g.get("status") or "") == GRANT_EXPIRED
-        and str(g.get("period") or "") == period
-    ]
     if not period_grants:
         return None
     latest = max(period_grants, key=lambda g: int(g.get("expires_at", 0)))

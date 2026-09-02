@@ -2169,9 +2169,18 @@ def admin_list_limit_grants(
     let them read a list that does not.
     """
     repo = QuotaEventsRepository()
-    grants = [_grant_public(g)
-              for g in repo.list_grants_for_tenant(tenant_id=tenant_id)]
-    return {"tenant_id": tenant_id, "grants": grants,
+    page, truncated = repo.list_grants_for_tenant_page(tenant_id=tenant_id)
+    return {"tenant_id": tenant_id, "grants": [_grant_public(g) for g in page],
+            # R25/C14.29's reconciliation is computed from the UNTRUNCATED
+            # history (`reconcile_tenant_grants` -> `list_grants_for_tenant`,
+            # never the page above), so its sums stay correct for a tenant with
+            # more than one page of grants even while the human-facing list
+            # below it shows only the first page. `grants_truncated` is the
+            # signal that the list and the reconciliation may now disagree in
+            # COUNT (never in the reconciliation's own sums) -- a reader must
+            # not mistake "the page in front of me" for "this tenant's whole
+            # grant history".
+            "grants_truncated": truncated,
             "reconciliation": reconcile_tenant_grants(tenant_id=tenant_id)}
 
 
@@ -2272,9 +2281,13 @@ def team_lead_list_limit_grants(
 ) -> dict[str, Any]:
     _require_owned(tenant_id, actor)
     repo = QuotaEventsRepository()
+    page, truncated = repo.list_grants_for_tenant_page(tenant_id=tenant_id)
+    # See `admin_list_limit_grants`'s own comment: the page is bounded and
+    # says so; the reconciliation beside it is computed from the untruncated
+    # history either way.
     return {"tenant_id": tenant_id,
-            "grants": [_grant_public(g)
-                       for g in repo.list_grants_for_tenant(tenant_id=tenant_id)],
+            "grants": [_grant_public(g) for g in page],
+            "grants_truncated": truncated,
             "reconciliation": reconcile_tenant_grants(tenant_id=tenant_id)}
 
 

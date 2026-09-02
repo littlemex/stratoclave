@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from .client import get_dynamodb_resource, quota_events_table_name
@@ -591,15 +591,45 @@ class QuotaEventsRepository:
         return resp.get("Items", []), resp.get("LastEvaluatedKey")
 
     def list_grants_for_tenant(
-        self, *, tenant_id: str, limit: int = 500
+        self, *, tenant_id: str,
+        status: Optional[str] = None, period: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Every grant this tenant has ever held, of any status.
+        """Every grant this tenant has ever held that matches the given
+        filters, read to EXHAUSTION -- never truncated.
 
         The orphan hunt and the retirement drain both start HERE, from grants,
         rather than from pool rows. A sweep that starts from pool rows cannot see
         a grant whose target row is missing -- there is no row to start at -- so
         the one defect it most needs to find is the one it is structurally unable
         to.
+
+        NO CAP. `revoke_all_active_grants` (R34's drain), `reconcile_tenant_grants`
+        (the orphan hunt and the drift sum) and `_tenant_grants` (the reconciler's
+        per-row check) all need EVERY grant a tenant has ever held: a grant this
+        call dropped is a grant those three cannot revoke, reconcile or find --
+        silently, because a paginated Query that stops early looks identical to a
+        tenant that genuinely has fewer grants. The predecessor of this method
+        capped itself at 500 for exactly this reason and broke exactly this
+        guarantee once a tenant's lifetime grant count passed it: `sk` sorts by
+        `grant_id`, not by time, so the grants left off the end were not
+        reliably the oldest ones. A tenant with a long grant history costs
+        proportionally more to read here, which is the honest price of the
+        guarantee rather than a defect -- the alternative was a guarantee that
+        silently stopped holding past 500 grants.
+
+        `status`/`period`, when given, are a `FilterExpression` -- a narrowing of
+        what is TRANSFERRED off this one partition, not of what is READ from it
+        (DynamoDB applies a filter after paying for every item in the page). They
+        exist for a caller that already knows it wants a small slice of a
+        tenant's history: `_pipeline._expired_grant_reason_for_pool_wall` (a
+        refusal-path lookup, cold but per-request) passes `status=GRANT_EXPIRED,
+        period=<the refusing period>` so it is not carrying a tenant's entire
+        grant history over the wire to answer a question about its most recent
+        expiry. A tenant whose grants all fail the filter costs exactly what
+        reading them costs either way.
+
+        For a HUMAN reading a list on a screen, see `list_grants_for_tenant_page`
+        below, which bounds itself and SAYS so rather than cutting silently.
         """
         out: list[dict[str, Any]] = []
         kwargs: dict[str, Any] = {
@@ -608,14 +638,56 @@ class QuotaEventsRepository:
             ),
             "ConsistentRead": True,
         }
-        while len(out) < limit:
+        filters = []
+        if status is not None:
+            filters.append(Attr("status").eq(status))
+        if period is not None:
+            filters.append(Attr("period").eq(period))
+        if filters:
+            expr = filters[0]
+            for f in filters[1:]:
+                expr = expr & f
+            kwargs["FilterExpression"] = expr
+        while True:
             resp = self._table.query(**kwargs)
             out.extend(resp.get("Items", []))
             lek = resp.get("LastEvaluatedKey")
             if not lek:
                 break
             kwargs["ExclusiveStartKey"] = lek
-        return out[:limit]
+        return out
+
+    def list_grants_for_tenant_page(
+        self, *, tenant_id: str, limit: int = 500,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """A bounded PAGE of this tenant's grants, for a human reading a list on
+        a screen -- never for a correctness path (see `list_grants_for_tenant`'s
+        own docstring for why those must read to exhaustion instead).
+
+        Returns `(items, truncated)`. `truncated` is True when this tenant holds
+        more grants than `limit` names, so the caller's obligation is to SAY so
+        (a `grants_truncated` field alongside the list) rather than let a reader
+        believe the returned page is the tenant's whole history -- the silent cut
+        `list_grants_for_tenant(limit=500)` used to make, with no signal anywhere
+        in the response that one had happened.
+        """
+        out: list[dict[str, Any]] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("pk").eq(f"TENANT#{tenant_id}") & Key("sk").begins_with("GRANT#")
+            ),
+            "ConsistentRead": True,
+        }
+        lek: Optional[dict[str, Any]] = None
+        while True:
+            resp = self._table.query(**kwargs)
+            out.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if len(out) >= limit or not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+        truncated = len(out) > limit or bool(lek)
+        return out[:limit], truncated
 
     def iter_all_grants(self, *, page_limit: int = 200):
         """Every grant row in the table, paginated.
@@ -625,8 +697,6 @@ class QuotaEventsRepository:
         once per pass rather than once per row, which is what stops a reconciler
         from costing more the more carefully it looks.
         """
-        from boto3.dynamodb.conditions import Attr
-
         kwargs: dict[str, Any] = {
             "FilterExpression": Attr("sk").begins_with("GRANT#"),
             "Limit": int(page_limit),
