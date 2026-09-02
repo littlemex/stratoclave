@@ -391,12 +391,30 @@ def unmapped_walls() -> tuple[str, ...]:
 class RaiseHintCandidate(BaseModel):
     """One wall a raise could address.
 
-    Under this change the list holds exactly ONE element -- the wall that
-    actually refused -- and `shortfall_microusd` is left unset. That is not a
-    stub: at the instant of a pool refusal exactly one candidate has been priced,
-    because the routing cascade leaves on a pool refusal and the untried tail is
-    priced only after a hold commits. A hint carrying four shortfalls would
-    describe measurements nobody took.
+    F2 shipped this with exactly ONE element per hint and `shortfall_microusd`
+    left unset -- degenerate content, not a stub for F3 to rename or remove
+    (contract amendment B2). F3 (this change) FILLS the shape instead: a
+    quota cascade that genuinely tried several candidates reports one entry
+    per candidate `_pipeline.py`'s `priced_tried` actually contains, and a
+    pool refusal now carries the cost and shortfall the refusal already
+    computed rather than leaving them unset.
+
+    `grantable` is derived from `blocker` at construction time by
+    `_hint_candidate()` below rather than accepted as caller-supplied input:
+    "only the tenant pool wall is raisable" is a fact about the wall, and a
+    second place that could set this field to something else is a second
+    place it could disagree with `reserve_limits.is_grantable_wall`.
+
+    `estimated_cost_microusd`/`shortfall_microusd` stay `Optional` on
+    purpose (contract amendment, this change): a per-model quota condition
+    failure tells the gateway THAT the ADD was refused, never the counter's
+    remaining headroom (no `ReturnValuesOnConditionCheckFailure` is
+    requested, and adding a read to learn it would be the same defect B5
+    already named for the untried tail -- a hint describing a measurement
+    the refusal path did not take). So `shortfall_microusd` is populated for
+    a tenant-pool candidate (the refusal already reads the row) and left
+    `None` for a per-model quota candidate (the refusal never reads the
+    counter back).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -404,16 +422,48 @@ class RaiseHintCandidate(BaseModel):
     blocker: str
     wall: str
     model: Optional[str] = None
+    estimated_cost_microusd: Optional[int] = None
     shortfall_microusd: Optional[int] = None
+    grantable: bool = False
+    #: R38, contract correction: was this SPECIFIC candidate's refusal caused
+    #: by a grant against the SAME wall expiring within the naming window
+    #: (`_pipeline.fallback_reason_for_expired_grant`)? A separate boolean
+    #: rather than a fifth `blocker` value: the F3 contract's own "Contract
+    #: corrections" section closed `blocker` to exactly four values
+    #: (`tenant_pool | user_token_quota | per_model_tenant | per_model_user`)
+    #: on the same date this field's requirement was written, so a fifth
+    #: value would contradict a dated, explicit correction rather than fill a
+    #: gap it left open. This is one of the two-ways-to-read points the F3
+    #: report names.
+    grant_expired: bool = False
+
+
+def _hint_candidate(
+    *, blocker: str, wall: str, model: Optional[str] = None,
+    estimated_cost_microusd: Optional[int] = None,
+    shortfall_microusd: Optional[int] = None,
+    grant_expired: bool = False,
+) -> RaiseHintCandidate:
+    """The one constructor for a hint candidate, so `grantable` can never be
+    set to a value `blocker` disagrees with."""
+    return RaiseHintCandidate(
+        blocker=blocker, wall=wall, model=model,
+        estimated_cost_microusd=estimated_cost_microusd,
+        shortfall_microusd=shortfall_microusd,
+        grantable=(blocker == blocker_for_wall(POOL_WALL)),
+        grant_expired=grant_expired,
+    )
 
 
 class RaiseHint(BaseModel):
     """What a 402 tells a client about asking for more.
 
-    Shipped in its FINAL shape now, with one candidate, so that filling it later
-    -- more candidates, populated pricing -- is an append rather than a second
-    wire change. Two changes to one field across two releases, with clients in
-    between, is not a thing this deployment does.
+    Shipped in its FINAL shape by F2, with one candidate, so that filling it
+    later -- more candidates, populated pricing -- is an append rather than a
+    second wire change. Two changes to one field across two releases, with
+    clients in between, is not a thing this deployment does. The fields below
+    the `reason_codes` line are F3's additions (contract amendment B2/B5/B6):
+    all new, none renamed, none removed.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -426,6 +476,41 @@ class RaiseHint(BaseModel):
     #: The reasons the submit endpoint accepts, so a surface offering a raise
     #: does not have to carry its own copy of the enum.
     reason_codes: list[str] = Field(default_factory=lambda: list(RAISE_REASON_CODES))
+    #: The smallest raise that clears the cheapest GRANTABLE priced candidate,
+    #: `0` when no priced candidate is grantable. Never the target's own
+    #: shortfall when a cheaper grantable candidate was actually priced, and
+    #: never derived from a candidate in `unattempted_model_ids` (B6).
+    minimum_raise_microusd: int = 0
+    #: The servable chain tail the refusal never priced -- names only, no cost
+    #: data, because the code never gathered it for this refusal (B5).
+    unattempted_model_ids: list[str] = Field(default_factory=list)
+    #: The tenant the refusal happened under. Carried so a client can pre-fill
+    #: a submission WITHOUT reading it from ambient session context (the
+    #: contract's own Interface note): a hint is a fact about a specific
+    #: refusal, and the refusal's own tenant is safer than "whichever tenant
+    #: the client happens to be showing right now".
+    tenant_id: Optional[str] = None
+    #: The candidate the caller actually wanted -- the head of the chain, or
+    #: the pin. Distinct from `candidates[0].model` in general; the two
+    #: coincide for every refusal this deployment can currently produce (a
+    #: pool refusal always happens on the first candidate tried, and a quota
+    #: cascade tries every candidate starting from the head), which is
+    #: recorded here rather than assumed by a client.
+    requested_model_id: Optional[str] = None
+    #: `requested_model_id`'s own shortfall against the wall that refused it
+    #: -- "her own number" (R24's motivating grievance), not any other
+    #: candidate's. `None` when it was never measured (a quota candidate).
+    target_shortfall_microusd: Optional[int] = None
+    #: Mirrors the `fallback_default`/`vsr_hard_model` distinction
+    #: `_pipeline.py` already enforces. One of `cascade`, `pin`,
+    #: `fallback_disabled`.
+    router_mode: Optional[str] = None
+    #: `rate_snapshot.version` at price time, the same value the decision log
+    #: stamps -- so a hint and a decision record for the same refusal name the
+    #: same rate table.
+    pricing_version: Optional[str] = None
+    #: Wall-clock at hint construction. No existing field carried this.
+    priced_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +534,17 @@ def effective_grant_cap_microusd(tenant_id: str, period: str) -> int:
     return effective_grant_cap_for_row(row)
 
 
-def raise_hint_for_pool_row(row: Optional[dict[str, Any]]) -> RaiseHint:
+def raise_hint_for_pool_row(
+    row: Optional[dict[str, Any]],
+    *,
+    model: Optional[str] = None,
+    estimated_cost_microusd: Optional[int] = None,
+    shortfall_microusd: Optional[int] = None,
+    unattempted_model_ids: Optional[list[str]] = None,
+    router_mode: Optional[str] = None,
+    pricing_version: Optional[str] = None,
+    grant_expired: bool = False,
+) -> RaiseHint:
     """Build the hint for a pool refusal from the row the refusal already read.
 
     Takes the ROW rather than a tenant and a period, so the refusal path adds no
@@ -457,13 +552,75 @@ def raise_hint_for_pool_row(row: Optional[dict[str, Any]]) -> RaiseHint:
     condition against it. `remaining_cap_microusd` is floored at zero, so a cap
     lowered below what is already granted reports no room rather than a negative
     figure a surface would render as an amount to ask for.
+
+    Every keyword beyond `row` is OPTIONAL and defaults to the same degenerate
+    content F2 shipped (contract amendment B2): a caller with nothing more than
+    the row still gets a valid, single-candidate hint. A caller that also knows
+    which model it was pricing and what that priced at (every in-scope call
+    site in `_pipeline.py` now does) fills the candidate instead of leaving it
+    a bare wall name.
     """
     granted = granted_microusd(row or {})
     cap = effective_grant_cap_for_row(row or {})
+    candidate = _hint_candidate(
+        blocker=blocker_for_wall(POOL_WALL), wall=POOL_WALL, model=model,
+        estimated_cost_microusd=estimated_cost_microusd,
+        shortfall_microusd=shortfall_microusd, grant_expired=grant_expired)
     return RaiseHint(
-        candidates=[RaiseHintCandidate(
-            blocker=blocker_for_wall(POOL_WALL), wall=POOL_WALL)],
+        candidates=[candidate],
         remaining_cap_microusd=max(0, cap - granted),
+        minimum_raise_microusd=max(0, shortfall_microusd or 0),
+        unattempted_model_ids=list(unattempted_model_ids or []),
+        tenant_id=str((row or {}).get("tenant_id") or "") or None,
+        requested_model_id=model,
+        target_shortfall_microusd=shortfall_microusd,
+        router_mode=router_mode,
+        pricing_version=pricing_version,
+        priced_at=_now_iso(),
+    )
+
+
+def raise_hint_for_priced_candidates(
+    row: Optional[dict[str, Any]],
+    candidates: list[RaiseHintCandidate],
+    *,
+    requested_model_id: Optional[str] = None,
+    unattempted_model_ids: Optional[list[str]] = None,
+    router_mode: Optional[str] = None,
+    pricing_version: Optional[str] = None,
+) -> RaiseHint:
+    """Fill the hint from every candidate a cascade actually priced.
+
+    `candidates` must come from `priced_tried` (R36's own Verified-by: "four
+    internal reserve refusals produce one hint") -- one `RaiseHintCandidate`
+    per tried candidate, in the order they were tried, built by the caller
+    through `_hint_candidate()` since only the caller (`_pipeline.py`) knows
+    which wall blocked which one. This function does the two facts that need
+    a tenant's row rather than a candidate: the remaining cap, and the
+    minimum raise that would clear the cheapest GRANTABLE priced candidate
+    (`0` when none of the priced candidates were grantable -- a quota
+    cascade, every time, since the pool wall and the per-model wall are never
+    both blocking in the same cascade run).
+    """
+    granted = granted_microusd(row or {})
+    cap = effective_grant_cap_for_row(row or {})
+    minimum = min(
+        (c.shortfall_microusd for c in candidates
+         if c.grantable and c.shortfall_microusd is not None),
+        default=0,
+    )
+    target = candidates[0] if candidates else None
+    return RaiseHint(
+        candidates=list(candidates),
+        remaining_cap_microusd=max(0, cap - granted),
+        minimum_raise_microusd=max(0, minimum),
+        unattempted_model_ids=list(unattempted_model_ids or []),
+        tenant_id=str((row or {}).get("tenant_id") or "") or None,
+        requested_model_id=requested_model_id or (target.model if target else None),
+        target_shortfall_microusd=target.shortfall_microusd if target else None,
+        router_mode=router_mode,
+        pricing_version=pricing_version,
+        priced_at=_now_iso(),
     )
 
 
