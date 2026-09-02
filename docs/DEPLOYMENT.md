@@ -16,13 +16,14 @@ If you only want to use an existing Stratoclave deployment, you do not need this
 3. [Quick deploy](#quick-deploy)
 4. [Post-deploy: first admin](#post-deploy-first-admin)
 5. [Post-deploy: container image](#post-deploy-container-image)
-6. [Regional constraints](#regional-constraints)
-7. [Cost estimate](#cost-estimate)
-8. [Updates and re-deploys](#updates-and-re-deploys)
-9. [Local development](#local-development)
-10. [Backend environment variables](#backend-environment-variables)
-11. [Teardown](#teardown)
-12. [Troubleshooting](#troubleshooting)
+6. [Post-deploy: quota gated stacks](#post-deploy-quota-gated-stacks)
+7. [Regional constraints](#regional-constraints)
+8. [Cost estimate](#cost-estimate)
+9. [Updates and re-deploys](#updates-and-re-deploys)
+10. [Local development](#local-development)
+11. [Backend environment variables](#backend-environment-variables)
+12. [Teardown](#teardown)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -250,6 +251,46 @@ aws ecs update-service \
   --service <PREFIX>-backend \
   --force-new-deployment
 ```
+
+---
+
+## Post-deploy: quota gated stacks
+
+Two more stacks stay off until a second, explicit `cdk deploy` names them: `<Prefix>QuotaReconcilerStack` and `<Prefix>QuotaGrantsStack`. This is a required second pass after the container image step above, not an optional extra for later — skip it and the deployment is missing the two jobs that keep a tenant's spending pool honest over time. What that looks like in practice is below.
+
+Both stacks run scheduled Lambda functions built from `backend/Dockerfile.lambda`, a different image from the one ECS runs (it bundles the AWS Lambda Runtime Interface Client). `iac/scripts/build-and-push.sh` builds and pushes this image right after the backend image and prints the tag to export:
+
+```bash
+cd iac
+./scripts/build-and-push.sh
+# prints: export LAMBDA_IMAGE_TAG=lambda-YYYYMMDD-HHMMSS
+
+export LAMBDA_IMAGE_TAG=lambda-YYYYMMDD-HHMMSS   # the tag it just printed
+npx cdk deploy "${STRATOCLAVE_PREFIX:-stratoclave}-quota-reconciler" \
+               "${STRATOCLAVE_PREFIX:-stratoclave}-quota-grants" \
+  -c quotaReconciler=true -c quotaGrants=true \
+  --require-approval never
+```
+
+`LAMBDA_IMAGE_TAG` has to differ from the backend's own `IMAGE_TAG` (default `latest`); `cdk synth` refuses to proceed otherwise, because the two images share one ECR repository and a shared tag would let a push meant for one silently retag the other.
+
+### What skipping this pass looks like
+
+Not deploying `<Prefix>QuotaGrantsStack` leaves the sweeper that revokes a time-bounded limit raise absent. An admin who raises a tenant's ceiling for a day gets exactly that: the pool row keeps the raised figure past the day's end with nothing walking it back down, so a raise an admin thought was temporary reads as a permanent increase on the tenant's pool until somebody notices.
+
+Not deploying `<Prefix>QuotaReconcilerStack` leaves the monthly period rollover absent. A tenant's pool row is keyed to the calendar month; on the 1st, a tenant whose membership did not change that month gets no new row for the new period, so its pool disappears for the whole month until an operator notices and reruns the rollover by hand.
+
+### Confirming the Lambdas ran
+
+Each function logs to its own CloudWatch Logs group, created by the stack rather than left to appear on first invocation:
+
+```bash
+aws logs tail "/lambda/${STRATOCLAVE_PREFIX:-stratoclave}-quota-grant-sweeper" --since 1h
+aws logs tail "/lambda/${STRATOCLAVE_PREFIX:-stratoclave}-quota-reconciler" --since 1h
+aws logs tail "/lambda/${STRATOCLAVE_PREFIX:-stratoclave}-quota-period-rollover" --since 1h
+```
+
+A clean run of the sweeper logs a `sweeper_ran` line on its five-minute schedule; the reconciler and the period rollover log once a day. If a group is empty after the schedule's own interval has passed, the function has not fired yet — re-check the `-c quotaReconciler=true -c quotaGrants=true` deploy above actually completed (`aws cloudformation describe-stacks --stack-name <Prefix>-quota-grants`) and that `LAMBDA_IMAGE_TAG` pointed at a real image (`aws ecr describe-images --repository-name <Prefix>-backend --image-ids imageTag=<tag>`).
 
 ---
 
