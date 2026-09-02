@@ -151,7 +151,7 @@ class TestDecidedRequestJoin:
         resp = client.get("/api/mvp/me/limit-raises")
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        decided = next(r for r in body["requests"] if r["status"] == "approved")
+        decided = next(r for r in body["requests"] if r["status"] == "APPROVED")
         # This is the exact defect: granted LESS than asked must be visible
         # as its OWN number, not as the requested amount and not as a bare
         # status string.
@@ -172,7 +172,7 @@ class TestDecidedRequestJoin:
         resp = client.get("/api/mvp/me/limit-raises")
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        pending = next(r for r in body["requests"] if r["status"] == "pending")
+        pending = next(r for r in body["requests"] if r["status"] == "PENDING")
         assert pending["approved_amount_microusd"] is None
         assert pending["expires_at"] is None
         assert pending["approver_id"] is None

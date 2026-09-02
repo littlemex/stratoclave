@@ -1,22 +1,16 @@
-// MeLimitRaises — the self-service limit-raise request view (F3 / R12, R24,
-// and the interface note on tenant provenance).
+// MeLimitRaises — the self-service limit-raise request view.
 //
-// Contract: change-pipeline/quota-raise-and-archive/CONTRACT-F3-surfaces.md
-//   R12: "Console — the self-service request view (any authenticated user):
-//   the walls that apply to the caller and their remaining capacity; a
-//   submission carrying the reason enum, a comment and an amount, pre-filled
-//   from the raise_hint of the refusal that sent them there — including the
-//   tenant, which is carried from the hint and never taken from ambient
-//   client context; and the caller's own requests with, for a decided one,
-//   the approved amount, the expiry and the approver."
-//   R24: "a decided request carries [approved amount, expiry, approver], a
-//   pending one carries none."
+// It must show: the walls that apply to the caller and their remaining
+// capacity; a submission carrying the reason enum, a comment and an amount,
+// pre-filled from the raise_hint of the refusal that sent them there --
+// including the tenant, which is carried from the hint and never taken from
+// ambient client context; and the caller's own requests with, for a decided
+// one, the approved amount, the expiry and the approver. A decided request
+// carries all three of those; a pending one carries none.
 //
-// This component does not exist anywhere in this worktree (F1's raise
-// mechanism has not landed here either) — every test below fails at module
-// resolution. The test bodies are the executable spec: what a person must
-// see, not merely what field the API response carries (per this role's
-// brief: "Assert what a person sees, not that a field exists").
+// The test bodies are the executable spec: what a person must see, not
+// merely what field the API response carries -- assert what a person sees,
+// not that a field exists.
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -86,11 +80,10 @@ const DECIDED_ROW = {
   tenant_id: 'acme-eng',
   reason_code: 'cascade_shortfall',
   decision_comment: 'need opus for the eval batch',
-  // U7 (change-pipeline/quota-raise-and-archive/CONTRACT-F2-grant.md): the
-  // pinned wire name is `asked_amount_microusd`,
-  // not `requested_amount_microusd` -- this test used to guess the latter.
+  // The pinned wire name is `asked_amount_microusd`, not
+  // `requested_amount_microusd` -- this test used to guess the latter.
   asked_amount_microusd: 200_000_000, // she asked for $200
-  status: 'approved',
+  status: 'APPROVED',
   decided_at: '2026-08-30T09:02:00Z',
   approved_amount_microusd: 50_000_000, // she got $50
   expires_at: AUG_31_2026_EOD_EPOCH,
@@ -107,7 +100,7 @@ const PENDING_ROW = {
   tenant_id: 'acme-eng',
   reason_code: 'cascade_shortfall',
   asked_amount_microusd: 12_000_000,
-  status: 'pending',
+  status: 'PENDING',
   decided_at: null,
   approved_amount_microusd: null,
   expires_at: null,

@@ -123,7 +123,13 @@ def test_b4_tenant_pool_exhausted_carries_the_final_envelope_with_one_degenerate
     `granted_microusd`/`effective_grant_cap_for_row`, so a call site that
     already has the row open (every real one does — see
     `mvp/_pipeline.py::_refusal_body`'s own docstring) passes it once rather
-    than computing two figures from it itself."""
+    than computing two figures from it itself.
+
+    The candidate carries F3's later additions too (contract R36: `model_id`
+    rather than `model`, `estimated_cost_microusd`, `grantable`, and
+    `grant_expired`) — this refusal is exactly the one case
+    `RaiseHintCandidate`'s own docstring names as `grantable=True`, since
+    `tenant_pool` is `blocker_for_wall(POOL_WALL)`."""
     from mvp._pipeline import _err_402
 
     pool_row = {"pool_granted_microusd": 3_000_000, "grant_cap_microusd": 10_000_000}
@@ -135,7 +141,9 @@ def test_b4_tenant_pool_exhausted_carries_the_final_envelope_with_one_degenerate
     hint = exc.detail["raise_hint"]
     assert hint["candidates"] == [
         {"blocker": "tenant_pool", "wall": "tenant_dollar_pool",
-         "model": None, "shortfall_microusd": None}
+         "model_id": None, "estimated_cost_microusd": None,
+         "shortfall_microusd": None, "grantable": True,
+         "grant_expired": False}
     ]
     assert hint["remaining_cap_microusd"] == 7_000_000
 
@@ -222,38 +230,71 @@ def test_u1_raise_hint_is_importable_and_shaped_per_b4():
     `reason_codes` (defaulted from `RAISE_REASON_CODES`), so a console
     rendering the hint does not need a second request to learn what reasons
     a raise accepts. Both are additive — dumped alongside, not replacing,
-    the fields docs/design/quota-raises.md pinned."""
-    from mvp.grants import RAISE_REASON_CODES, RaiseHint, RaiseHintCandidate
+    the fields docs/design/quota-raises.md pinned.
+
+    The candidate is built through `_hint_candidate()`, the one constructor,
+    rather than `RaiseHintCandidate(...)` directly: a direct construction
+    leaves `grantable` at its class default (`False`) regardless of
+    `blocker`, which would let this test assert a value the shipped code
+    path can never actually produce for `blocker="tenant_pool"`. Going
+    through the constructor ties this test to the same invariant the
+    production call sites rely on."""
+    from mvp.grants import (
+        RAISE_REASON_CODES, RaiseHint, _hint_candidate,
+    )
 
     hint = RaiseHint(
-        candidates=[RaiseHintCandidate(blocker="tenant_pool", wall="tenant_dollar_pool")],
+        candidates=[_hint_candidate(blocker="tenant_pool", wall="tenant_dollar_pool")],
         remaining_cap_microusd=7_000_000,
     )
     dumped = hint.model_dump()
     assert dumped == {
         "candidates": [{"blocker": "tenant_pool", "wall": "tenant_dollar_pool",
-                         "model": None, "shortfall_microusd": None}],
+                         "model_id": None, "estimated_cost_microusd": None,
+                         "shortfall_microusd": None, "grantable": True,
+                         "grant_expired": False}],
         "remaining_cap_microusd": 7_000_000,
         "reason_codes": list(RAISE_REASON_CODES),
+        "minimum_raise_microusd": 0,
+        "unattempted_model_ids": [],
+        "tenant_id": None,
+        "requested_model_id": None,
+        "target_shortfall_microusd": None,
+        "router_mode": None,
+        "pricing_version": None,
+        "priced_at": None,
     }
 
 
 def test_u1_err_402_raise_hint_body_is_exactly_a_raisehint_dump():
     """The dict `_err_402` puts under `raise_hint` must be byte-identical to
     what constructing a `RaiseHint` and dumping it produces — the model is
-    the shape, not a second, parallel one `_err_402` maintains by hand."""
+    the shape, not a second, parallel one `_err_402` maintains by hand.
+
+    `priced_at` is wall-clock at construction (`_now_iso()`), so it is
+    compared as "a non-empty timestamp string" rather than pinned to a
+    literal; every other field must match exactly, including `grantable`
+    — which is why the expected candidate is built through
+    `_hint_candidate()` rather than `RaiseHintCandidate(...)` directly (see
+    `test_u1_raise_hint_is_importable_and_shaped_per_b4` for why a direct
+    construction cannot be trusted to agree with the shipped value)."""
     from mvp._pipeline import _err_402
-    from mvp.grants import RaiseHint, RaiseHintCandidate
+    from mvp.grants import RaiseHint, _hint_candidate
 
     pool_row = {"pool_granted_microusd": 3_000_000, "grant_cap_microusd": 10_000_000}
     exc = _err_402(
         "tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row,
     )
     expected = RaiseHint(
-        candidates=[RaiseHintCandidate(blocker="tenant_pool", wall="tenant_dollar_pool")],
+        candidates=[_hint_candidate(blocker="tenant_pool", wall="tenant_dollar_pool")],
         remaining_cap_microusd=7_000_000,
     ).model_dump()
-    assert exc.detail["raise_hint"] == expected
+
+    actual = dict(exc.detail["raise_hint"])
+    actual_priced_at = actual.pop("priced_at")
+    expected.pop("priced_at")
+    assert isinstance(actual_priced_at, str) and actual_priced_at
+    assert actual == expected
 
 
 def test_u1_is_capacity_bearing_is_defined_in_mvp_grants_and_nowhere_else():

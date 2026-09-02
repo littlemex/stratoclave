@@ -209,7 +209,11 @@ function GrantLine({
         {error ? <p className="mt-0.5 text-destructive">{error}</p> : null}
       </TableCell>
       <TableCell className="text-right">
-        {grant.status === 'active' || grant.status === 'revoke_blocked' ? (
+        {/* The wire value is the row's stored spelling verbatim (uppercase --
+            `GRANT_ACTIVE`/`GRANT_REVOKE_BLOCKED` in
+            `backend/dynamo/quota_events.py`), so this comparison matches
+            that spelling rather than a lowercase copy of it. */}
+        {grant.status === 'ACTIVE' || grant.status === 'REVOKE_BLOCKED' ? (
           <Button
             size="sm"
             variant="outline"

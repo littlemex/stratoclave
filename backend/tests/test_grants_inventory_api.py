@@ -286,7 +286,7 @@ class TestGrantsInventoryReconciliation:
         resp = client.get("/api/mvp/admin/limit-grants", params={"tenant_id": "acme-eng"})
         assert resp.status_code == 200, resp.text
         blocked = next(
-            g for g in resp.json()["grants"] if g["status"] == "revoke_blocked"
+            g for g in resp.json()["grants"] if g["status"] == "REVOKE_BLOCKED"
         )
         # Not merely PRESENT in the payload — carrying a reason nobody shows
         # is the same defect this deliverable's brief calls out for other

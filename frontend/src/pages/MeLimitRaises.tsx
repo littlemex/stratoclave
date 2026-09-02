@@ -356,7 +356,11 @@ export default function MeLimitRaises() {
  */
 function RequestStatus({ row }: { row: LimitRaiseRequest }) {
   const { t } = useTranslation()
-  if (row.status === 'approved' && row.approved_amount_microusd != null) {
+  // The wire value is the row's stored spelling verbatim (uppercase --
+  // `STATUS_APPROVED`/`STATUS_REJECTED`/`STATUS_PENDING` in
+  // `backend/dynamo/quota_events.py`), so this comparison matches that
+  // spelling rather than a lowercase copy of it.
+  if (row.status === 'APPROVED' && row.approved_amount_microusd != null) {
     return (
       <span data-testid="lr-status-approved">
         {t('me_limit_raises.status_approved', {
@@ -379,7 +383,7 @@ function RequestStatus({ row }: { row: LimitRaiseRequest }) {
       </span>
     )
   }
-  if (row.status === 'rejected') {
+  if (row.status === 'REJECTED') {
     return (
       <span data-testid="lr-status-rejected">
         {t('me_limit_raises.status_rejected')}
@@ -387,7 +391,7 @@ function RequestStatus({ row }: { row: LimitRaiseRequest }) {
       </span>
     )
   }
-  if (row.status === 'pending') {
+  if (row.status === 'PENDING') {
     return (
       <span data-testid="lr-status-pending">{t('me_limit_raises.status_pending')}</span>
     )
@@ -421,11 +425,11 @@ function formatDate(iso: string): string {
 }
 
 /**
- * The expiry's own wording
- * (change-pipeline/quota-raise-and-archive/design-F3.md's quoted example: "Approved
- * $50.00, expires Aug 31, 2026 23:59 UTC") -- always UTC and always with
- * the month spelled out, unlike `formatDate`'s locale/timezone-dependent
- * `toLocaleString()`. `expires_at` is the epoch-SECONDS int every surface
+ * The expiry's own wording -- e.g. "Approved $50.00, expires Aug 31, 2026
+ * 23:59 UTC" -- always UTC and always with the month spelled out, unlike
+ * `formatDate`'s locale/timezone-dependent `toLocaleString()`: an approval's
+ * deadline must read the same for every viewer regardless of their own
+ * locale or timezone. `expires_at` is the epoch-SECONDS int every surface
  * in this codebase uses for it.
  */
 function formatExpiryUtc(epochSeconds: number): string {

@@ -1,21 +1,17 @@
-// GrantsInventory — the grant inventory console view (F3 / R25).
+// GrantsInventory — the grant inventory console view.
 //
-// Contract: change-pipeline/quota-raise-and-archive/CONTRACT-F3-surfaces.md
-//   R25: "A grant inventory view: live grants with amount, approver, expiry,
-//   status and the request that produced each, and the sum equals
-//   `pool_granted`. Unit: the sum reconciles; a `REVOKE_BLOCKED` grant is
-//   visible with its reason."
+// It must show: live grants with amount, approver, expiry, status and the
+// request that produced each, and the sum equals `pool_granted`. The sum
+// reconciles per target row (period), not as a single combined total across
+// periods — a grant is pinned to a target row, and a late-swept
+// `REVOKE_BLOCKED` grant can still bear capacity on the PRIOR period's row
+// after rollover, so reconciling across periods would hide exactly the case
+// this view exists to surface. A `REVOKE_BLOCKED` grant is visible with its
+// reason.
 //
-// Seam amendment B4 (the integration owner's seam notes, §S6, outside this repository) rewrote what "the sum equals
-// pool_granted" means: grants are pinned to a target row (period), and a
-// late-swept REVOKE_BLOCKED grant can still bear capacity on the PRIOR
-// period's row after rollover. A single combined total across periods is
-// exactly the defect this amendment closes — reconciliation is per row.
-//
-// Union amendment U3 (integration review of all four test suites): the
-// grant amount field is `approved_amount_microusd`, not `amount_microusd` —
-// the row carries both the asked and the approved figure, and the shorter
-// name cannot say which one it is.
+// The grant amount field is `approved_amount_microusd`, not
+// `amount_microusd` — the row carries both the asked and the approved
+// figure, and the shorter name cannot say which one it is.
 //
 // Corrections made converging this file against the REAL, already-shipped
 // component and backend (this role, working blind, had neither):
@@ -120,7 +116,7 @@ const FIXTURE = {
       grant_id: 'gr_1a',
       tenant_id: 'acme-eng',
       request_id: 'lr_9f2c',
-      status: 'active',
+      status: 'ACTIVE',
       approved_amount_microusd: 50_000_000,
       expires_at: 1_788_303_599,
       period: '2026-09',
@@ -135,7 +131,7 @@ const FIXTURE = {
       grant_id: 'gr_0b',
       tenant_id: 'acme-eng',
       request_id: 'lr_7e21',
-      status: 'revoke_blocked',
+      status: 'REVOKE_BLOCKED',
       approved_amount_microusd: 12_000_000,
       expires_at: 1_785_628_799,
       period: '2026-08',

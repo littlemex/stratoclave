@@ -458,12 +458,10 @@ def test_journey_the_amount_she_was_granted_reaches_her(monkeypatch,
     assert pending.status_code == 200, pending.text
     row = _find(pending.json(), request_id)
     # Stored uppercase (`STATUS_PENDING`, `dynamo/quota_events.py`); the wire
-    # projection (`_request_public`, `mvp/grants.py`) lowercases it to match
-    # the codebase's own wire convention (the pool row's own `status` is
-    # lowercase from the start) and the real, shipped console
-    # (`frontend/src/pages/MeLimitRaises.tsx` checks `row.status ===
-    # 'approved'`).
-    assert row["status"] == "pending"
+    # projection (`_request_public`, `mvp/grants.py`) carries that spelling
+    # verbatim -- the same value `capacity_bearing` is computed from
+    # elsewhere on this same row, so the two must never disagree.
+    assert row["status"] == "PENDING"
     assert not row.get("approved_amount_microusd"), (
         "a pending request must carry no approved amount"
     )
@@ -478,7 +476,7 @@ def test_journey_the_amount_she_was_granted_reaches_her(monkeypatch,
     assert decided.status_code == 200, decided.text
     row = _find(decided.json(), request_id)
 
-    assert row["status"] == "approved"
+    assert row["status"] == "APPROVED"
     # The figure she must plan against, under the one name that says which of
     # the two amounts on the row it is.
     assert row.get("approved_amount_microusd") == 50_000_000, (

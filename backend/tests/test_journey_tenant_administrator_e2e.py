@@ -198,10 +198,10 @@ def _live_grant_id(client: TestClient, tenant_id: str) -> str:
     assert listed.status_code == 200, listed.text
     payload = listed.json()
     grants = payload["grants"] if isinstance(payload, dict) else payload
-    # `_grant_public` (`mvp/grants.py`) lowercases the wire `status` (the
-    # codebase's own convention -- the pool row's own `status` is lowercase
-    # from the start); the stored, internal value is uppercase `ACTIVE`.
-    live = [g for g in grants if g.get("status") == "active"]
+    # `_grant_public` (`mvp/grants.py`) carries the wire `status` verbatim
+    # from storage -- uppercase `ACTIVE`, the same spelling `GRANT_ACTIVE`
+    # names in `dynamo/quota_events.py`.
+    live = [g for g in grants if g.get("status") == "ACTIVE"]
     assert live, f"an approved grant that is in no inventory: {payload}"
     return live[0]["grant_id"]
 

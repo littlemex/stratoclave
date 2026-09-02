@@ -421,12 +421,11 @@ class RaiseHintCandidate(BaseModel):
 
     blocker: str
     wall: str
-    #: The contract's own wire name
-    #: (change-pipeline/quota-raise-and-archive/CONTRACT-F3-surfaces.md R36:
-    #: "the hint carries per-candidate `model_id`";
-    #: change-pipeline/quota-raise-and-archive/design-F3.md's field table
-    #: and JSON examples both use `model_id` throughout) -- not `model`,
-    #: which this field was originally shipped as before this fix.
+    #: The contract's own wire name for this field is `model_id`, not
+    #: `model` -- which this field was originally shipped as before this
+    #: fix. Every reader of a hint (a per-candidate model identifier, not
+    #: the tenant's aggregate `model` concept elsewhere) must see the same
+    #: name a per-candidate identifier gets everywhere else on this wire.
     model_id: Optional[str] = None
     estimated_cost_microusd: Optional[int] = None
     shortfall_microusd: Optional[int] = None
@@ -727,14 +726,16 @@ def _request_public(item: dict[str, Any]) -> dict[str, Any]:
         "tenant_id": str(item.get("tenant_id") or ""),
         "user_id": str(item.get("user_id") or ""),
         # Stored as `STATUS_PENDING`/`STATUS_APPROVED`/`STATUS_REJECTED`/
-        # `STATUS_WITHDRAWN` (uppercase, `dynamo/quota_events.py`) -- the
-        # wire convention every consumer of this row actually uses is
-        # lowercase (change-pipeline/quota-raise-and-archive/design-F3.md's
-        # own examples: `"pending"`/`"approved"`;
-        # the real, shipped `frontend/src/pages/MeLimitRaises.tsx` checks
-        # `row.status === 'approved'`), so this projection lowercases it
-        # once here rather than leaving every reader to remember to.
-        "status": str(item.get("status") or "").lower(),
+        # `STATUS_WITHDRAWN` (uppercase, `dynamo/quota_events.py`), and C14.21
+        # names `PENDING` and `REVOKE_BLOCKED` in that same case. The wire
+        # value MUST be the stored value verbatim: a projection that
+        # re-cases a status gives the one fact two spellings and two
+        # authorities, and a client that compares against the stored
+        # constant (as `is_capacity_bearing` does two lines below, on the
+        # SAME item) would silently stop matching this field. A display
+        # layer that wants lowercase is free to lowercase its own copy for
+        # rendering; it must not change what this projection asserts.
+        "status": str(item.get("status") or ""),
         "limit_kind": str(item.get("limit_kind") or ""),
         "reason_code": str(item.get("reason_code") or ""),
         "asked_amount_microusd": int(item.get("asked_amount_microusd", 0)),
@@ -802,12 +803,14 @@ def _grant_public(item: dict[str, Any]) -> dict[str, Any]:
         "grant_id": str(item.get("grant_id") or ""),
         "tenant_id": str(item.get("tenant_id") or ""),
         "request_id": str(item.get("request_id") or ""),
-        # Same lowercasing as `_request_public` -- stored uppercase
+        # Same rule as `_request_public`: stored uppercase
         # (`GRANT_ACTIVE`/`GRANT_REVOKE_BLOCKED`/... in
-        # `dynamo/quota_events.py`), wire convention lowercase
-        # (change-pipeline/quota-raise-and-archive/design-F3.md's examples,
-        # and the real `frontend/src/pages/GrantsInventory.tsx`).
-        "status": str(item.get("status") or "").lower(),
+        # `dynamo/quota_events.py`) MUST be the wire value verbatim, because
+        # `capacity_bearing` below is computed from this same raw status
+        # against those same uppercase constants -- a lowercased `status`
+        # next to an uppercase-derived `capacity_bearing` would be one row
+        # disagreeing with itself about the one fact it holds.
+        "status": str(item.get("status") or ""),
         "approved_amount_microusd": int(item.get("approved_amount_microusd", 0)),
         "expires_at": int(item.get("expires_at", 0)),
         "period": str(item.get("period") or ""),
@@ -2081,10 +2084,12 @@ def admin_list_limit_raises(
         "requests": [
             _request_public(r) for r in repo.list_requests_for_tenant(
                 # The row's own status is stored uppercase (`STATUS_PENDING`
-                # etc.) and this projection's OUTPUT is lowercased for the
-                # wire (`_request_public`); a caller filtering with that
-                # same lowercase convention must still match the stored key
-                # range.
+                # etc.) and `_request_public`'s OUTPUT carries that same
+                # uppercase spelling verbatim; a caller may still pass this
+                # query param in any case (a console's own convention for a
+                # dropdown, say), so it is upper-cased once here to match the
+                # stored key range rather than requiring every caller to
+                # remember the storage convention exactly.
                 tenant_id=tenant_id,
                 status=status.upper() if status else status,
                 limit=limit)],
@@ -2215,10 +2220,12 @@ def team_lead_list_limit_raises(
         "requests": [
             _request_public(r) for r in repo.list_requests_for_tenant(
                 # The row's own status is stored uppercase (`STATUS_PENDING`
-                # etc.) and this projection's OUTPUT is lowercased for the
-                # wire (`_request_public`); a caller filtering with that
-                # same lowercase convention must still match the stored key
-                # range.
+                # etc.) and `_request_public`'s OUTPUT carries that same
+                # uppercase spelling verbatim; a caller may still pass this
+                # query param in any case (a console's own convention for a
+                # dropdown, say), so it is upper-cased once here to match the
+                # stored key range rather than requiring every caller to
+                # remember the storage convention exactly.
                 tenant_id=tenant_id,
                 status=status.upper() if status else status,
                 limit=limit)],

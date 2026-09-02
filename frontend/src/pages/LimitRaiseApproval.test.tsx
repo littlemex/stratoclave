@@ -1,19 +1,18 @@
-// LimitRaiseApproval — the tenant approval view (F3 / R12 approval half, R30,
-// R28, R21b).
+// LimitRaiseApproval — the tenant approval view.
 //
-// Contract (as corrected): change-pipeline/quota-raise-and-archive/CONTRACT-F3-surfaces.md
-//   R12: "Console — the tenant approval view (`limit-raises:approve` on that
-//   tenant): the ask, the reason, the comment, the requester, the ceiling's
-//   composition ..., the tenant's current reserved and settled, the
-//   remaining grant cap, and the latest permissible expiry. Approve with an
-//   amount and an expiry, or reject with a reason." Plus: "the comment is
-//   rendered as text, never as HTML."
-//   R30: "observed_limit/observed_remaining were taken when the request was
-//   filed, possibly hours earlier. Unit: current reserved, settled and
-//   headroom appear alongside, each labelled."
-//   R28: "the latest permissible expiry is shown before it is typed."
-//   R21b: "The console's tenant view carries F1's mode sentence, the seat
-//   entitlement and the resume action."
+// It must show, for an approver holding `limit-raises:approve` on a tenant:
+// the ask, the reason, the comment, the requester, the ceiling's
+// composition, the tenant's current reserved and settled, the remaining
+// grant cap, and the latest permissible expiry -- shown before it is typed.
+// It must let the approver approve with an amount and an expiry, or reject
+// with a reason. The comment renders as text, never as HTML.
+//
+// The observed values on a request (`observed_limit`/`observed_remaining`)
+// were taken when the request was filed, possibly hours earlier; this view
+// shows the tenant's CURRENT reserved, settled and headroom alongside them,
+// each labelled, so a reader cannot mistake the stale snapshot for the live
+// figure. The tenant view also carries F1's mode sentence, the seat
+// entitlement and the resume action.
 //
 // CONVERGENCE NOTE (F3 test/impl triage). This file originally assumed a
 // single, invented `api.limitRaises.approvalDetail(requestId)` endpoint
@@ -159,7 +158,7 @@ const PENDING_REQUEST = {
   request_id: 'lr_9f2c',
   tenant_id: 'acme-eng',
   user_id: 'requester-1',
-  status: 'pending',
+  status: 'PENDING',
   limit_kind: 'pool',
   reason_code: 'cascade_shortfall',
   asked_amount_microusd: 200_000_000,
