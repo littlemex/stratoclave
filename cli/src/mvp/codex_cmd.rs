@@ -559,6 +559,8 @@ pub(crate) fn codex_context_window_for(model: &str) -> u64 {
     match model {
         "openai.gpt-5.4" | "gpt-5.4" => 400_000,
         "openai.gpt-5.5" | "gpt-5.5" => 400_000,
+        "openai.gpt-5.6-sol" | "gpt-5.6-sol" => 400_000,
+        "openai.gpt-5.6-terra" | "gpt-5.6-terra" => 400_000,
         _ => 200_000,
     }
 }
@@ -609,6 +611,49 @@ mod tests {
             (self.next_u64() % n as u64) as usize
         }
     }
+
+    /// The gateway's own registry decides which OpenAI ids it will serve, and
+    /// this table decides what window codex is told about them. Two files, one
+    /// fact, and nothing compared them: the table still named `gpt-5.4` and
+    /// `gpt-5.5` after the registry had moved to the 5.6 family, so every real
+    /// call fell through to the 200k default and codex budgeted prompts against
+    /// half the window it had. Read the registry and require an entry, rather
+    /// than trusting that whoever adds the next model remembers this file.
+    ///
+    /// The window VALUES cannot be derived — the registry does not record them —
+    /// so this checks coverage, not correctness of the number. A new id with the
+    /// wrong window is a different mistake, and one a reader can at least see.
+    #[test]
+    fn every_served_openai_model_has_an_explicit_context_window() {
+        let registry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../backend/mvp/defaults/models.json");
+        let text = std::fs::read_to_string(&registry)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", registry.display()));
+        let ids: Vec<String> = text
+            .split('"')
+            .filter(|t| t.starts_with("openai."))
+            .map(|t| t.to_string())
+            .collect();
+        assert!(
+            !ids.is_empty(),
+            "found no openai.* ids in {} — this check would pass vacuously",
+            registry.display()
+        );
+        for id in ids {
+            let short = id.trim_start_matches("openai.");
+            assert_eq!(
+                codex_context_window_for(&id),
+                400_000,
+                "{id} is served by the gateway but falls back to the 200k default"
+            );
+            assert_eq!(
+                codex_context_window_for(short),
+                400_000,
+                "{short} (the short alias codex may be given) falls back to the 200k default"
+            );
+        }
+    }
+
 
     #[test]
     fn temp_config_disables_project_root_markers() {
