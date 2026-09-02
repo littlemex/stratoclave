@@ -8,7 +8,8 @@
 //   ... the surfaces show ceiling, settled, reserved, signed available and
 //   an 'over ceiling by' line."
 //
-// **Convergence correction.** This file's own design note (`design-F1.md`)
+// **Convergence correction.** This file's own design note
+// (`change-pipeline/quota-raise-and-archive/design-F1.md`)
 // is an explicitly non-authoritative "test/design author" hypothesis
 // ("this note is the interface every failing test in this drop targets; it
 // is not itself an implementation"), and this file's original header claimed
