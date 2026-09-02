@@ -215,6 +215,19 @@ export default function TeamLeadTenantDetail() {
         }
       />
 
+      <div className="flex gap-2">
+        <Link to={`/team-lead/tenants/${tenant.tenant_id}/limit-raises`}>
+          <Button variant="outline" size="sm">
+            {t('team_lead_tenant_detail.limit_raises_link')}
+          </Button>
+        </Link>
+        <Link to={`/team-lead/tenants/${tenant.tenant_id}/limit-grants`}>
+          <Button variant="outline" size="sm">
+            {t('team_lead_tenant_detail.limit_grants_link')}
+          </Button>
+        </Link>
+      </div>
+
       <Card>
         <CardHeader className="flex flex-row items-start justify-between space-y-0">
           <div>
