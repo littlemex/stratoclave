@@ -119,7 +119,26 @@ because a list written out in prose passes review while naming a subset the mome
 - `TenantBudgetsRepository.adjust_pool_for_seat_delta` — a membership change; the ONE seat-delta
   writer, which every membership transition including a user deletion routes through.
 - `TenantBudgetsRepository._seed_pool_row` — creation, and the period rollover's new row.
-- `migrations.pool_ceiling_migration` — the backfill and the seat-rate recompute.
+- `migrations.pool_ceiling_migration.phase_m1_add_attributes` — seeds `seat_count` and
+  `manual_limit` without moving any effective limit.
+- `migrations.pool_ceiling_migration.phase_m2_backfill` — the CAS backfill onto the observed row.
+- `migrations.pool_ceiling_migration.recompute_seat_tracked_rows` — the seat-rate recompute.
+- `TenantBudgetsRepository.reconcile_headroom` — self-heals `pool_headroom` from the reserved and
+  settled mirrors it is defined against.
+- `TenantBudgetsRepository.reserve_txn_item` and `TenantBudgetsRepository.settle_txn_item` — a
+  request holding money against the ceiling and then spending it move headroom by construction.
+- `TenantBudgetsRepository.reserve_commit_txn_items` — the same movement for a batch of holds
+  committed in one transaction.
+- `TenantBudgetsRepository.pool_credit_back` — a released hold returns its headroom.
+- `TenantBudgetsRepository.grant_apply_txn_item` and `TenantBudgetsRepository.grant_revoke_txn_item`
+  — F2's grant apply and revoke, the two writers of `pool_granted_microusd`; both also move
+  `pool_limit_microusd` and `pool_headroom_microusd` by the same amount, which is why they are
+  ceiling writers and not merely a ledger entry beside one.
+
+`pool_headroom_microusd` is on this list for the same reason `pool_limit_microusd` is: the ceiling
+is not just the limit, it is the limit less what has already been spent against it, and R29 asks
+this row to be able to say a signed "over ceiling by" figure. A writer that moves headroom without
+moving the limit is still a writer of the ceiling in the sense this section means.
 
 **The rate is not a live knob.** Each row stores the per-seat rate its own ceiling was computed at, so
 that ceiling is reproducible; the deployment records the rate in force once. A process configured with

@@ -118,28 +118,54 @@ def test_limits_doc_names_every_writer_the_declaration_lists():
     `apply`/`expiry_revoke`/`early_revoke`/`repair` writers for
     `pool_granted` without anyone updating this file, which is exactly the
     "green test over an incomplete document" B5 exists to prevent.
+
+    Narrowed from a raw union over every declared attribute to
+    `dynamo.pool_row_schema.ceiling_writers()` after checking the document
+    itself: `limits.md`'s own "Every writer of this ceiling" section names
+    its derivation source explicitly --
+    "`dynamo.pool_row_schema.ceiling_writers()`, from `POOL_ROW_ATTRIBUTES`
+    in that module" -- not a raw union over every attribute on the row. A
+    raw union pulls in `pool_reclaimed_microusd`'s writer
+    (`mvp._pipeline:_reclaim_expired_holds`), which moves spend bookkeeping,
+    not the ceiling; `ceiling_writers()` is the function B1 shipped
+    specifically to exclude exactly that (it filters to `CEILING_ATTRS`),
+    and it is the one the document already cites. Checking against a
+    different, broader set than the one the document says it is deriving
+    from would make this test wrong about what "the ceiling" means, not the
+    document.
+
+    Matched against the writer's `Class.method` (or bare function) form,
+    stripping the `module.path:` prefix -- fixed after checking what the
+    document actually cites: `limits.md` already names four of these
+    writers as `` `TenantBudgetsRepository.set_manual_limit` ``, never as
+    the fully qualified `dynamo.tenant_budgets:TenantBudgetsRepository.
+    set_manual_limit` the declaration uses internally for programmatic
+    lookup. The qualified form with its module path and colon is this
+    module's own bookkeeping key, not a citation convention any prose would
+    use, so demanding it appear verbatim would fail the document over a
+    formatting choice the declaration never asked it to match.
+
     Sentinel/placeholder writer markers are not real function names and are
     excluded -- fixed after re-verifying against the implementation
     post-merge: the real placeholders are parenthetical strings like
     `"(F2: the grant apply and revoke writers)"` and
     `"(every writer in this module stamps it)"`, not the `__key__`/
     `__all_writers__` sentinels this test invented before the real module
-    existed to check against. Filtered the same way the module's own
-    `ceiling_writers()` does (`not w.startswith("(")`), so this test's
-    notion of "a real writer" matches the declaration's own."""
-    from dynamo.pool_row_schema import POOL_ROW_ATTRIBUTES
+    existed to check against. `ceiling_writers()` already filters these out
+    (`not w.startswith("(")`), so this test's notion of "a real writer"
+    matches the declaration's own."""
+    from dynamo.pool_row_schema import ceiling_writers
 
-    all_writers: set[str] = set()
-    for spec in POOL_ROW_ATTRIBUTES.values():
-        all_writers.update(spec.writers)
-    all_writers = {w for w in all_writers if not w.startswith("(")}
-    assert all_writers, "POOL_ROW_ATTRIBUTES declares no real writers at all"
+    writers = ceiling_writers()
+    assert writers, "ceiling_writers() reports no real writers at all"
 
     text = _limits_text()
-    missing = sorted(w for w in all_writers if w not in text)
+    missing = sorted(
+        w for w in writers if w.rsplit(":", 1)[-1] not in text
+    )
     assert not missing, (
         f"docs/design/limits.md does not name these writers from "
-        f"POOL_ROW_ATTRIBUTES: {missing}"
+        f"ceiling_writers(): {missing}"
     )
 
 
@@ -214,8 +240,15 @@ def test_pending_protocol_wcu_bound_sentence_names_the_new_magnitude():
     # sentence must name the actual new attributes, not merely sit near any
     # digit.
     window = text[idx: idx + 120].lower()
+    # `seat_monthly_usd` fixed to `seat_rate_microusd`: the former is
+    # `dynamo.tenant_budgets.seat_monthly_usd()`, the LIVE function that reads
+    # the deployment's configured rate; the row attribute F1 actually stores
+    # (`dynamo.pool_row_schema.SEAT_RATE_ATTR`) is `seat_rate_microusd`. The
+    # function computes a number; the attribute is what widens the row, which
+    # is what this sentence is about -- checking for the function's name here
+    # would never find it in a row-width sentence for the right reason.
     names_the_new_attributes = any(
-        token in window for token in ("seat_count", "manual_limit_microusd", "seat_monthly_usd")
+        token in window for token in ("seat_count", "manual_limit_microusd", "seat_rate_microusd")
     )
     assert names_the_new_attributes, (
         "the WCU-ceiling sentence in docs/design/pending-protocol.md still "

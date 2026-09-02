@@ -103,7 +103,8 @@ symptom of the design flaw, not a number to tune against.
 preserved; the marker item is FIXED-SIZE (no map growth) and O(1) per operation
 regardless of table size — the structural fix for the item-growth blowup. It stays
 on the tenant partition (SK-scoped), which is what kills the growth; the
-single-partition WCU ceiling remains bounded by the pool item itself and is a
+single-partition WCU ceiling remains bounded by the pool item itself, now widened by
+`seat_count`, `manual_limit_microusd` and `seat_rate_microusd`, and is a
 SEPARATE concern deferred to a future sharded-pool PR (Fable Q1: moving markers to
 their own `PK=hold_id` table would gain only ~2× and not touch the real ceiling).
 That bound is still the pool item, and its magnitude has moved: the ceiling rule
