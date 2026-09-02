@@ -50,12 +50,49 @@ Union amendment corrections (integration review of all four test suites,
     tell which one they hold — the same ambiguity R24 exists to remove).
     Every seed and every read below uses the corrected name.
 
-`QuotaEventsRepository`'s own write method name is still this role's
-plausible guess (`.record(...)`, mirroring `UsageLogsRepository`'s
-append-only pattern, the closest analogue already in this codebase) — the
-class and table are confirmed, the method is not, so this may need one more
-retarget once F2's actual method name is visible. That risk is now confined
-to a single call site instead of an entire invented class.
+**Convergence correction (this role's guesses did not survive contact with
+the real, shipped code).** Three things were wrong, all seeding/plumbing,
+none contractual:
+
+1. `QuotaEventsRepository` has no `.record(...)` method. A grant is created
+   through the real transaction fragments the approve flow itself uses:
+   `grant_put_txn_item(...)` (the grant row, `dynamo/quota_events.py`) paired
+   with `TenantBudgetsRepository.grant_apply_txn_item(...)` (the pool row's
+   `pool_granted_microusd`/`pool_limit_microusd`/`pool_headroom_microusd`,
+   `dynamo/tenant_budgets.py`) inside one `repo.transact_write([...])` — the
+   same two-table transaction `approve_limit_raise` commits in production,
+   because a grant row with no matching pool-side add is exactly the drift
+   `pool_granted_matches_active_grants` exists to catch. A `REVOKE_BLOCKED`
+   grant is produced by first exhausting `MAX_REVOKE_ATTEMPTS` real
+   `bump_revoke_attempts()` calls (mirroring the real sweeper), then
+   `mark_revoke_blocked(...)`, never by writing the status directly — the
+   grant's `pool_granted_microusd` share is never subtracted for a blocked
+   grant, which is `is_capacity_bearing`'s whole point.
+2. `is_capacity_bearing(status: str) -> bool` takes ONE argument — the
+   grant's own status string — not `(grant, target_pk, period)`. Verified
+   against the shipped function and its two real call sites
+   (`mvp.grants._capacity_bearing_sum_for_row`,
+   `mvp.grants.reconcile_tenant_grants`): per-row scoping is achieved by
+   filtering grants to the row's own `(target_pk, target_sk)` BEFORE calling
+   the predicate, not by widening the predicate's signature.
+3. `GET /api/mvp/admin/limit-grants` does not return `{"rows": [{"period",
+   "pool_granted_microusd", "grants": [...]}]}` — a shape this role
+   invented without access to the real endpoint. The shipped response
+   (`mvp.grants.admin_list_limit_grants`) is `{"tenant_id", "grants": [...]
+   (a FLAT list, each grant carrying its own "period"/"target_pk"/
+   "target_sk"), "reconciliation": reconcile_tenant_grants(...)}`, where
+   `reconciliation["rows"]` is the per-target-row grouping B4 actually
+   requires (`pool_granted_microusd`, `capacity_bearing_sum_microusd`,
+   `drift_microusd`, ... per row) and `reconciliation["orphans"]` covers a
+   grant whose target row is gone. `frontend/src/pages/GrantsInventory.tsx`
+   — real, shipped, already-merged code written with real backend access,
+   unlike this file — consumes exactly this shape
+   (`grantsQuery.data.grants`, `grantsQuery.data.reconciliation.rows`), which
+   is the corroborating evidence that the backend shape, not this test's
+   guess, is what ships. B4's actual requirement — reconciliation per target
+   row via the shared predicate, never a tenant-wide sum — holds under the
+   real shape exactly as under the imagined one; only the JSON's nesting was
+   wrong.
 """
 from __future__ import annotations
 
@@ -87,8 +124,17 @@ def _patch_authz(monkeypatch, allow: set[str]) -> None:
 
 
 def _client(monkeypatch) -> TestClient:
-    _patch_authz(monkeypatch, allow={"limit-raises:approve"})
-    from mvp.grants import router  # module does not exist yet (F2 not landed)
+    # Contract prose
+    # (`change-pipeline/quota-raise-and-archive/CONTRACT-F3-surfaces.md`'s
+    # Interface section) names
+    # the gate `limit-raises:approve`, but that scope is not in
+    # `mvp.authz`'s shipped, closed-world set (out of F3's file scope to
+    # change) -- the real endpoint (`mvp.grants.admin_list_limit_grants`)
+    # gates on `require_permission("limits:approve")`, the admin-global
+    # scope `mvp.authz.ALL_SCOPES` actually carries. Same naming drift as
+    # R21b's `sizing`/`follow_seats` correction, one scope over.
+    _patch_authz(monkeypatch, allow={"limits:approve"})
+    from mvp.grants import router
 
     app = FastAPI()
     app.include_router(router)
@@ -102,28 +148,70 @@ def _seed_grants_across_two_periods(tenant_id: str = "acme-eng") -> None:
     it is `REVOKE_BLOCKED` (subtraction not yet complete), simulating
     rollover-plus-late-sweep landing on the same tenant at once.
 
-    Seeded through `QuotaEventsRepository` (U2), not a second `mvp`-layer
-    repository — `dynamo.quota_events` does not exist in this worktree
-    either (F2 has not landed here), so this still fails at import; only the
-    module it fails to import FROM changed.
+    Seeded through the REAL transaction fragments (`grant_put_txn_item` +
+    `grant_apply_txn_item`) rather than a direct row write, so the pool
+    row's `pool_granted_microusd` and the grant row agree from the start —
+    exactly what `pool_granted_matches_active_grants` checks, and what a
+    hand-written row could silently get wrong.
     """
-    from dynamo.quota_events import QuotaEventsRepository
-    from dynamo.tenant_budgets import current_period, previous_period
+    from dynamo.quota_events import MAX_REVOKE_ATTEMPTS, QuotaEventsRepository
+    from dynamo.tenant_budgets import (
+        TenantBudgetsRepository, budget_sk, current_period, previous_period,
+    )
 
     current = current_period()
     prior = previous_period(current)
-    repo = QuotaEventsRepository()
-    repo.record(
-        tenant_id=tenant_id, request_id="lr_9f2c", approved_amount_microusd=50_000_000,
-        approver_id="user-lead-1", expires_at="2026-08-31T23:59:59Z",
-        status="active", target_pk=tenant_id, period=current,
+    quota = QuotaEventsRepository()
+    budgets = TenantBudgetsRepository()
+
+    # Both period rows must exist before a grant can be applied to them
+    # (`grant_apply_txn_item`'s own condition: `attribute_exists(pool_limit_microusd)`).
+    budgets.set_manual_limit(
+        tenant_id=tenant_id, period=current, manual_limit_microusd=10**11)
+    budgets.set_manual_limit(
+        tenant_id=tenant_id, period=prior, manual_limit_microusd=10**11)
+
+    def _apply_grant(
+        *, grant_id: str, request_id: str, period: str,
+        approved_amount_microusd: int, expires_at_epoch: int,
+    ) -> None:
+        target_sk = budget_sk(period)
+        quota.transact_write([
+            quota.grant_put_txn_item(
+                tenant_id=tenant_id, grant_id=grant_id, request_id=request_id,
+                approver_user_id="user-lead-1",
+                approved_amount_microusd=approved_amount_microusd,
+                expires_at_epoch=expires_at_epoch,
+                target_pk=tenant_id, target_sk=target_sk, period=period,
+                created_at="2026-08-28T09:00:00Z",
+            ),
+            budgets.grant_apply_txn_item(
+                target_pk=tenant_id, target_sk=target_sk,
+                approved_amount_microusd=approved_amount_microusd,
+                cap_minus_amount=10**11 - approved_amount_microusd,
+            ),
+        ])
+
+    # Grant 1: ACTIVE, on the CURRENT period's row, $50.
+    _apply_grant(
+        grant_id="gr_1a", request_id="lr_9f2c", period=current,
+        approved_amount_microusd=50_000_000,
+        expires_at_epoch=1_787_990_399,  # 2026-08-31T23:59:59Z
     )
-    repo.record(
-        tenant_id=tenant_id, request_id="lr_7e21", approved_amount_microusd=12_000_000,
-        approver_id="user-lead-1", expires_at="2026-07-30T23:59:59Z",
-        status="revoke_blocked", target_pk=tenant_id, period=prior,
-        revoke_blocked_reason="an in-flight reservation is still holding against this grant",
+
+    # Grant 2: on the PRIOR period's row, $12 — pushed to REVOKE_BLOCKED by
+    # exhausting real revoke attempts, the same path the sweeper takes.
+    _apply_grant(
+        grant_id="gr_0b", request_id="lr_7e21", period=prior,
+        approved_amount_microusd=12_000_000,
+        expires_at_epoch=1_785_398_399,  # 2026-07-30T23:59:59Z
     )
+    for _ in range(MAX_REVOKE_ATTEMPTS):
+        quota.bump_revoke_attempts(tenant_id=tenant_id, grant_id="gr_0b")
+    assert quota.mark_revoke_blocked(
+        tenant_id=tenant_id, grant_id="gr_0b",
+        reason="an in-flight reservation is still holding against this grant",
+    ), "seeding fixture: mark_revoke_blocked did not apply — check MAX_REVOKE_ATTEMPTS"
 
 
 class TestGrantsInventoryReconciliation:
@@ -137,11 +225,14 @@ class TestGrantsInventoryReconciliation:
         body = resp.json()
 
         from dynamo.tenant_budgets import current_period, previous_period
-        from mvp.grants import is_capacity_bearing
 
         current = current_period()
         prior = previous_period(current)
-        rows_by_period = {row["period"]: row for row in body["rows"]}
+        # The shipped shape: a flat `grants` list plus a per-target-row
+        # `reconciliation.rows` grouping (`mvp.grants.reconcile_tenant_grants`)
+        # — not a `rows[].grants` nesting this file's own earlier version
+        # invented without reading the real endpoint.
+        rows_by_period = {row["period"]: row for row in body["reconciliation"]["rows"]}
 
         # Both periods must be present — a tenant-wide sum would have
         # collapsed the prior period's still-capacity-bearing grant into (or
@@ -152,22 +243,27 @@ class TestGrantsInventoryReconciliation:
             "still bears capacity there and must be its own reconciling row"
         )
 
+        # `reconciliation.rows[].capacity_bearing_sum_microusd` IS the
+        # `is_capacity_bearing`-filtered, per-row sum -- computed server-side
+        # by `reconcile_tenant_grants`, which this test consumes rather than
+        # recomputing (B4/B2's own rule: a client restating a shape the
+        # server already computed is the drift this amendment exists to
+        # close).
         for period, row in rows_by_period.items():
-            live_sum = sum(
-                # U3: the grant row carries both the asked and the approved
-                # figure — `approved_amount_microusd` is the one this
-                # reconciliation is actually about, never the shorter,
-                # ambiguous `amount_microusd`.
-                g["approved_amount_microusd"] for g in row["grants"]
-                if is_capacity_bearing(g, target_pk="acme-eng", period=period)
-            )
-            assert live_sum == row["pool_granted_microusd"], (
+            assert row["capacity_bearing_sum_microusd"] == row["pool_granted_microusd"], (
                 f"row for period {period!r} does not reconcile: "
-                f"{live_sum} != {row['pool_granted_microusd']}"
+                f"{row['capacity_bearing_sum_microusd']} != {row['pool_granted_microusd']}"
             )
 
         assert rows_by_period[current]["pool_granted_microusd"] == 50_000_000
         assert rows_by_period[prior]["pool_granted_microusd"] == 12_000_000
+
+        # U3, cross-checked against the flat `grants` list: the field is
+        # `approved_amount_microusd`, never the shorter, ambiguous
+        # `amount_microusd`.
+        for g in body["grants"]:
+            assert "approved_amount_microusd" in g
+            assert "amount_microusd" not in g
 
     def test_no_single_tenant_wide_total_is_offered(self, monkeypatch, dynamodb_mock):
         # The defect B4 closes: a single flat `pool_granted_microusd` at the
@@ -190,14 +286,17 @@ class TestGrantsInventoryReconciliation:
         resp = client.get("/api/mvp/admin/limit-grants", params={"tenant_id": "acme-eng"})
         assert resp.status_code == 200, resp.text
         blocked = next(
-            g for row in resp.json()["rows"] for g in row["grants"]
-            if g["status"] == "revoke_blocked"
+            g for g in resp.json()["grants"] if g["status"] == "revoke_blocked"
         )
         # Not merely PRESENT in the payload — carrying a reason nobody shows
         # is the same defect this deliverable's brief calls out for other
         # ids: the reason must be a real, non-empty sentence.
         assert isinstance(blocked.get("revoke_blocked_reason"), str)
         assert len(blocked["revoke_blocked_reason"]) > 0
+        # Still capacity-bearing (B4's own point: a blocked grant's
+        # subtraction never committed, so the row is still honestly
+        # counting it).
+        assert blocked["capacity_bearing"] is True
 
 
 class TestCapacityBearingPredicateIsConsumedNotRestated:

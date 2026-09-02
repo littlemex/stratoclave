@@ -112,8 +112,8 @@ def env(dynamodb_mock):
     UserTenantsRepository().ensure(
         user_id=USER, tenant_id=TENANT, role="user", total_credit=10**12,
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=TENANT, period=current_period(), pool_limit_microusd=10**11,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=TENANT, period=current_period(), manual_limit_microusd=10**11,
     )
     yield
     _cfg_cache.clear()
@@ -189,8 +189,30 @@ class TestRaiseHintPresence:
             ):
                 assert field in c, f"candidate {c} missing required field {field!r}"
             assert isinstance(c["estimated_cost_microusd"], int)
-            assert isinstance(c["shortfall_microusd"], int)
-            assert c["shortfall_microusd"] >= 0
+            # `shortfall_microusd` is a MEASURED figure, not a derived one
+            # (B5's own principle, applied one wall over from the case it
+            # names): a per-model quota's ConditionalCheckFailed tells the
+            # gateway only THAT the ADD was refused, never the counter's
+            # remaining headroom (verified against real code --
+            # `QuotaExhausted` at `_pipeline.py:2124` carries only `model`
+            # and `scope`, no headroom fact -- and no
+            # `ReturnValuesOnConditionCheckFailure` is requested on that
+            # transaction). Every candidate in THIS scenario is blocked by
+            # `per_model_tenant`, so `shortfall_microusd` is `None` here by
+            # construction; asserting an `int` unconditionally would demand
+            # a measurement the refusal path never took, which is exactly
+            # the defect class B5 exists to prevent. The tenant-pool case
+            # (where the refusal DOES already hold the row, so the shortfall
+            # IS measured) is pinned separately in
+            # `TestTenantPoolBlockerIsGrantable`.
+            if c["blocker"] == "tenant_pool":
+                assert isinstance(c["shortfall_microusd"], int)
+                assert c["shortfall_microusd"] >= 0
+            else:
+                assert c["shortfall_microusd"] is None or (
+                    isinstance(c["shortfall_microusd"], int)
+                    and c["shortfall_microusd"] >= 0
+                )
             assert isinstance(c["grantable"], bool)
             assert c["blocker"] in self.VALID_BLOCKERS, (
                 f"blocker {c['blocker']!r} is not one of the four contract-pinned "
@@ -308,8 +330,8 @@ def pool_env(dynamodb_mock):
         user_id=POOL_USER, tenant_id=POOL_TENANT, role="user", total_credit=10**12,
     )
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=POOL_TENANT, period=period, pool_limit_microusd=10**11,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=POOL_TENANT, period=period, manual_limit_microusd=10**11,
     )
     # Probe reservation: generous pool, so this succeeds and reveals the
     # real priced cost for POOL_MODEL under this request shape.
@@ -319,8 +341,8 @@ def pool_env(dynamodb_mock):
     # Re-size the pool to 1.5x one reservation's cost: the probe's own
     # `reserved` (already on the pool row) plus a second, IDENTICALLY priced
     # attempt exceeds it, while the second attempt's cost alone does not.
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=POOL_TENANT, period=period, pool_limit_microusd=int(cost * 1.5),
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=POOL_TENANT, period=period, manual_limit_microusd=int(cost * 1.5),
     )
     yield
     _cfg_cache.clear()
@@ -397,8 +419,8 @@ def pool_cascade_env(dynamodb_mock):
         total_credit=10**12,
     )
     period = current_period()
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=POOL_CASCADE_TENANT, period=period, pool_limit_microusd=10**11,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=POOL_CASCADE_TENANT, period=period, manual_limit_microusd=10**11,
     )
     tbl = boto3.resource("dynamodb", region_name="us-east-1").Table(
         "stratoclave-user-tenants")
@@ -410,8 +432,8 @@ def pool_cascade_env(dynamodb_mock):
     probe_ctx = _reserve_cascade_probe()
     cost = probe_ctx.pool_reserved_microusd
     assert cost > 0, "probe reservation priced at 0 — cannot build a pool-exhaustion case"
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=POOL_CASCADE_TENANT, period=period, pool_limit_microusd=int(cost * 1.5),
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=POOL_CASCADE_TENANT, period=period, manual_limit_microusd=int(cost * 1.5),
     )
     yield
     _cfg_cache.clear()

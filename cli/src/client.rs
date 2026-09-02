@@ -167,7 +167,7 @@ impl ApiClient {
         let candidates = hint.get("candidates").and_then(|c| c.as_array());
         if let Some(cs) = candidates {
             for c in cs {
-                let model = c.get("model").and_then(|m| m.as_str()).unwrap_or("?");
+                let model = c.get("model_id").and_then(|m| m.as_str()).unwrap_or("?");
                 let blocker = c.get("blocker").and_then(|b| b.as_str()).unwrap_or("?");
                 let grantable = c.get("grantable").and_then(|g| g.as_bool()).unwrap_or(false);
                 let shortfall = c.get("shortfall_microusd").and_then(|s| s.as_i64());

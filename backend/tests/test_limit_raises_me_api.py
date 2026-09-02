@@ -37,9 +37,17 @@ reason as before; only the module each import targets changed.
 Contract correction: the approver field is `approver_id` — a stable user id,
 resolved to a display name by the console on demand — never an email address
 carried on the wire. (Unaffected by U3 — U3 corrects the GRANT row's amount
-field, `approved_amount_microusd` vs `amount_microusd`; this file's request
-row already used `requested_amount_microusd`/`approved_amount_microusd`
-correctly.)
+field, `approved_amount_microusd` vs `amount_microusd`.)
+
+**Further correction (convergence).** This file's own claim above --
+"this file's request row already used `requested_amount_microusd` ...
+correctly" -- was itself wrong, unverified against real code. F2's own
+contract amendment U7 pins the REQUEST row's asked-amount field as
+`asked_amount_microusd` ("the request body's field names are pinned here
+because the journey layer had to guess them and guessed from the
+`_microusd` convention ... if your implementation chose differently, these
+win"), and the shipped `mvp.grants._request_public` emits exactly that
+name. Fixed below.
 """
 from __future__ import annotations
 
@@ -62,10 +70,24 @@ def _requester() -> AuthenticatedUser:
 
 
 def _client(monkeypatch) -> TestClient:
-    # from mvp.grants import router  -- module does not exist yet (F2 has
-    # not landed in this worktree). This import is what actually fails;
-    # everything below documents the shape that must exist once it does.
-    from mvp.grants import router  # noqa: F401  (expected ImportError)
+    # `require_permission("limits:raise-self")` reads the REAL permissions
+    # table (`dynamo.permissions.PermissionsRepository`, seeded in
+    # production from `backend/permissions.json` at app startup) -- the
+    # shared `dynamodb_mock` fixture (`backend/tests/conftest.py`) does not
+    # create that table at all, so an un-patched real check 500s with
+    # `ResourceNotFoundException` on every request here, unrelated to
+    # anything this file is actually testing. Patched the same way
+    # `test_grants_inventory_api.py` and `test_admin_pool_budget.py`
+    # already do, rather than adding a table + seed step this file has no
+    # need to own.
+    from mvp import authz
+
+    def _fake_user_has_permission(user, scope: str) -> bool:
+        return scope == "limits:raise-self"
+
+    monkeypatch.setattr(authz, "user_has_permission", _fake_user_has_permission)
+
+    from mvp.grants import router
 
     app = FastAPI()
     app.include_router(router)
@@ -77,38 +99,45 @@ def _seed_decided_request(*, requested_microusd: int, approved_microusd: int) ->
     """Seed one decided (approved) limit-raise request for the requester,
     granted for LESS than she asked — the id's own motivating case.
 
-    Seeded through `QuotaEventsRepository` (U2), not a second `mvp`-layer
-    repository. `dynamo.quota_events` does not exist in this worktree either
-    (F2 has not landed here) — this still fails at import.
+    **Convergence correction.** `QuotaEventsRepository` has no `.record(...)`
+    method (this role's own guess, flagged as such, did not survive contact
+    with the real code). A request is created through the real primitives
+    the submit/approve flow itself uses: `put_request(...)` (PENDING,
+    `dynamo/quota_events.py`) then `decide_request_txn_item(...)` inside a
+    `transact_write` to move it to `STATUS_APPROVED` — the same pair
+    `mvp.grants.approve_limit_raise` commits in production.
     """
-    from dynamo.quota_events import QuotaEventsRepository
+    from dynamo.quota_events import STATUS_APPROVED, QuotaEventsRepository
 
     repo = QuotaEventsRepository()
-    return repo.record(
-        user_id="requester-1",
-        tenant_id="acme-eng",
-        reason="cascade_shortfall",
-        comment="need opus for the eval batch",
-        requested_amount_microusd=requested_microusd,
-        status="approved",
-        approved_amount_microusd=approved_microusd,
-        expires_at="2026-08-31T23:59:59Z",
-        approver_id="lead-1",
+    request_id = "lr_9f2c"
+    repo.put_request(
+        request_id=request_id, tenant_id="acme-eng", user_id="requester-1",
+        asked_amount_microusd=requested_microusd, reason_code="cascade_shortfall",
+        comment="need opus for the eval batch", limit_kind="tenant_dollar_pool",
     )
+    repo.transact_write([
+        repo.decide_request_txn_item(
+            request_id=request_id, to_status=STATUS_APPROVED,
+            decided_by="lead-1", decided_at="2026-08-30T09:02:00Z",
+            read_revision=1, approved_amount_microusd=approved_microusd,
+            grant_id="gr_9f2c", expires_at_epoch=1_787_990_399,  # 2026-08-31T23:59:59Z
+        ),
+    ])
+    return request_id
 
 
 def _seed_pending_request(*, requested_microusd: int) -> str:
     from dynamo.quota_events import QuotaEventsRepository
 
     repo = QuotaEventsRepository()
-    return repo.record(
-        user_id="requester-1",
-        tenant_id="acme-eng",
-        reason="cascade_shortfall",
-        comment="",
-        requested_amount_microusd=requested_microusd,
-        status="pending",
+    request_id = "lr_a013"
+    repo.put_request(
+        request_id=request_id, tenant_id="acme-eng", user_id="requester-1",
+        asked_amount_microusd=requested_microusd, reason_code="cascade_shortfall",
+        comment=None, limit_kind="tenant_dollar_pool",
     )
+    return request_id
 
 
 class TestDecidedRequestJoin:
@@ -127,7 +156,7 @@ class TestDecidedRequestJoin:
         # as its OWN number, not as the requested amount and not as a bare
         # status string.
         assert decided["approved_amount_microusd"] == 50_000_000
-        assert decided["approved_amount_microusd"] != decided["requested_amount_microusd"]
+        assert decided["approved_amount_microusd"] != decided["asked_amount_microusd"]
         assert decided["expires_at"] is not None
         # Contract correction: a stable id, never an address — the console
         # resolves it to a display name on demand, but the wire field is

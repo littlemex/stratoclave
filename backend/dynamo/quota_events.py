@@ -200,6 +200,9 @@ class QuotaEventsRepository:
         self, *, request_id: str, tenant_id: str, user_id: str,
         asked_amount_microusd: int, reason_code: str, comment: Optional[str],
         limit_kind: str, created_at: Optional[str] = None,
+        observed_limit_microusd: Optional[int] = None,
+        observed_remaining_microusd: Optional[int] = None,
+        observed_at: Optional[str] = None,
     ) -> dict[str, Any]:
         """Write a PENDING request and return it.
 
@@ -207,6 +210,20 @@ class QuotaEventsRepository:
         the one row whose job is to answer "was this token already admitted"; a
         second copy would be a second place a caller-supplied secret is stored
         and a second thing to keep out of every sink R13 names.
+
+        `observed_limit_microusd`/`observed_remaining_microusd`/`observed_at`
+        (R30) are the tenant's pool position AS READ AT FILING TIME -- the
+        one fact only the requester's own submission can capture, because an
+        approver reading the request hours later sees the tenant's position
+        NOW, not what she saw when she asked. `observed_remaining_microusd`
+        is the SIGNED, non-clamped figure
+        (`dynamo.tenant_budgets.pool_summary`'s own `remaining_microusd`):
+        a deficit at filing time is exactly the fact a raise is filed to
+        fix, and clamping it to zero here would be the same defect this
+        whole change treats as a bug everywhere else it appears. All three
+        are optional and omitted together (never partially) when the
+        submission has no pool row to observe -- `comment`'s own pattern,
+        extended to a triple.
         """
         now = created_at or _now_iso()
         item: dict[str, Any] = {
@@ -227,6 +244,12 @@ class QuotaEventsRepository:
         }
         if comment:
             item["comment"] = str(comment)
+        if observed_limit_microusd is not None and observed_remaining_microusd is not None:
+            item["observed_limit_microusd"] = Decimal(int(observed_limit_microusd))
+            # SIGNED: a negative deficit is a real, intended value, never
+            # coerced towards zero here or anywhere it is later read.
+            item["observed_remaining_microusd"] = Decimal(int(observed_remaining_microusd))
+            item["observed_at"] = str(observed_at or now)
         self._table.put_item(
             Item=item, ConditionExpression="attribute_not_exists(pk)")
         return item

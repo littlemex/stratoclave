@@ -35,7 +35,7 @@ of this file's first test.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from dynamo.usage_logs import UsageLogsRepository
 
@@ -103,21 +103,28 @@ class TestGrantExpiryWindow:
     the corrected contract, so both are pinned exactly rather than left as a
     named-but-unsized parameter.
 
-    Targets a hypothesized `mvp._pipeline.fallback_reason_for_expired_grant`
-    (design note, R38) — `mvp._pipeline` itself exists and imports cleanly,
-    so these fail at `AttributeError` on the missing function, not at
-    `ModuleNotFoundError` — the precise "this classification does not exist
-    yet" reason, on top of real, already-merged code.
+    Targets `mvp._pipeline.fallback_reason_for_expired_grant`, which this
+    role's own design note hypothesized as `(grant_expires_at, now,
+    grant_wall, blocked_wall)` without access to the real code. The shipped
+    function is `(grant_expires_at: int, now_epoch: int, grant_wall: str,
+    blocked_wall: str)` — epoch ints, matching every other `expires_at` in
+    this codebase (`mvp.grants` stores and compares `expires_at` as `int`
+    throughout, never as a `datetime`), and it calls `int(grant_expires_at)`
+    internally, which raises on an actual `datetime`. The design note's
+    guessed parameter name (`now`) and type (`datetime`) do not survive
+    contact with the shipped, already-merged function; the test is
+    corrected to the real signature and real convention rather than the
+    other way around.
     """
 
     def test_within_the_15_minute_window_and_matching_wall_names_the_cause(self):
         from mvp import _pipeline
 
-        expires_at = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
-        now = expires_at + timedelta(minutes=10)  # inside the 15-minute window
+        expires_at = int(datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        now_epoch = expires_at + 10 * 60  # inside the 15-minute window
         assert _pipeline.fallback_reason_for_expired_grant(
             grant_expires_at=expires_at,
-            now=now,
+            now_epoch=now_epoch,
             grant_wall="tenant_pool",
             blocked_wall="tenant_pool",
         ) == "grant_expired"
@@ -125,11 +132,11 @@ class TestGrantExpiryWindow:
     def test_exactly_15_minutes_still_names_the_cause_inclusive_bound(self):
         from mvp import _pipeline
 
-        expires_at = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
-        now = expires_at + timedelta(minutes=15)  # the boundary itself
+        expires_at = int(datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        now_epoch = expires_at + 15 * 60  # the boundary itself
         assert _pipeline.fallback_reason_for_expired_grant(
             grant_expires_at=expires_at,
-            now=now,
+            now_epoch=now_epoch,
             grant_wall="tenant_pool",
             blocked_wall="tenant_pool",
         ) == "grant_expired"
@@ -137,11 +144,11 @@ class TestGrantExpiryWindow:
     def test_past_the_15_minute_window_does_not_name_the_cause(self):
         from mvp import _pipeline
 
-        expires_at = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
-        now = expires_at + timedelta(minutes=16)  # one minute past three sweeps
+        expires_at = int(datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        now_epoch = expires_at + 16 * 60  # one minute past three sweeps
         assert _pipeline.fallback_reason_for_expired_grant(
             grant_expires_at=expires_at,
-            now=now,
+            now_epoch=now_epoch,
             grant_wall="tenant_pool",
             blocked_wall="tenant_pool",
         ) is None
@@ -153,11 +160,11 @@ class TestGrantExpiryWindow:
         # actually refused was a per-model USER quota — a different wall, so
         # the expired grant is not the proximate cause even though it is
         # within the window.
-        expires_at = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
-        now = expires_at + timedelta(minutes=5)
+        expires_at = int(datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        now_epoch = expires_at + 5 * 60
         assert _pipeline.fallback_reason_for_expired_grant(
             grant_expires_at=expires_at,
-            now=now,
+            now_epoch=now_epoch,
             grant_wall="tenant_pool",
             blocked_wall="per_model_user",
         ) is None
