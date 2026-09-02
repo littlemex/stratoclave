@@ -31,14 +31,23 @@ configurations that need to survive across runs (CI, remote workers).
 ## Prerequisites
 
 - A working Stratoclave deployment where `STRATOCLAVE_CODEX_ENABLED=true` is set on
-  the ECS task (the default in `iac/bin/iac.ts`).
+  the ECS task. **This is not the default**: with neither `STRATOCLAVE_CODEX_ENABLED`
+  nor the deprecated `CODEX_ENABLED` present in the deploy environment, the stack
+  synthesises `false` and every codex request answers `503`. Set it at deploy time.
 - `codex` CLI installed locally and able to reach the deployment's
   CloudFront URL over HTTPS. Test with
   `codex --version` (≥ 0.136.0 recommended).
 - The Bedrock account behind your deployment must have model access
-  enabled for the OpenAI families you intend to call:
-    - `openai.gpt-5.4` — us-west-2 only
-    - `openai.gpt-5.5` — us-east-2 only
+  enabled for the OpenAI families you intend to call, and **the deployment's own
+  allowlist is the authority on which names it accepts** — ask it rather than
+  trusting a list in a document, because these names turn over every few months:
+
+  ```
+  curl -sS -H "Authorization: Bearer $TOKEN" "$STRATOCLAVE_URL/openai/v1/models"
+  ```
+
+  A name outside that list is refused with `invalid_model`, and the refusal names the
+  accepted alternatives.
 - Your stratoclave user role must carry the `responses:send` scope.
   All three default roles (`admin`, `team_lead`, `user`) carry it
   out-of-the-box; check `backend/permissions.json` for the live
@@ -63,10 +72,15 @@ stratoclave auth login --email you@example.com           # password
 stratoclave auth sso --profile your-aws-sso-profile      # SSO / saml2aws / IAM user
 
 # Run codex through Stratoclave. Trailing args are passed through.
-stratoclave codex -- exec --skip-git-repo-check "Explain this repo"
-stratoclave codex -- "Open codex TUI through Stratoclave"
-stratoclave codex --model openai.gpt-5.5 -- "Use 5.5 for this run"
+stratoclave codex --model "$CODEX_MODEL" -- exec --skip-git-repo-check "Explain this repo"
+stratoclave codex --model "$CODEX_MODEL" -- "Open codex TUI through Stratoclave"
 ```
+
+**Pass `--model` explicitly.** Omitting it does not fall back to something the
+deployment accepts: `codex` supplies its own built-in default, which is a name this
+gateway's allowlist has no reason to contain, so the run dies with `invalid_model`
+before any work happens. Set `CODEX_MODEL` to a name the models endpoint above
+returned.
 
 What `stratoclave codex` does under the hood:
 

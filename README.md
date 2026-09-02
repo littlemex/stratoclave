@@ -595,7 +595,7 @@ stratoclave claude -- "Summarize this repository in one sentence"
 
 # Run OpenAI codex through Stratoclave (codex must be installed separately).
 # Mints a short-lived responses:send-only key; ~/.codex/config.toml is untouched.
-stratoclave codex -- "Summarize this repository in one sentence"
+stratoclave codex --model "$CODEX_MODEL" -- "Summarize this repository in one sentence"
 
 # Open the web console in a pre-authenticated tab
 stratoclave ui open
