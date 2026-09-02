@@ -125,7 +125,7 @@ def test_bench_marker_shard_spike_n1_branch_uses_the_fixture():
     )
 
 
-def test_the_fixture_enforces_both_identities_before_returning():
+def test_the_fixture_enforces_both_identities_before_returning(dynamodb_mock, monkeypatch):
     """Behavioural check of the fixture itself, once it exists: seeding with
     source attributes that do NOT explain the limit must raise loudly, not
     write successfully and let the caller's benchmark run against a bad row.
@@ -133,8 +133,33 @@ def test_the_fixture_enforces_both_identities_before_returning():
     This needs `bench/` on sys.path (bench is not a package the backend test
     suite otherwise imports from) and moto for the DynamoDB call — both are
     already dependencies of this repository's bench harness and dev test
-    suite respectively.
-    """
+    suite respectively. Fixed after re-running against the implementation:
+    this test's own first draft called `TenantBudgetsRepository()` and
+    `seed_verified_pool(...)` without requesting the `dynamodb_mock` fixture
+    at all, so no table existed — harmless only because the case it chose
+    (below) never reached a DynamoDB call in the first place.
+
+    That original case — `seat_count=3` alongside `manual_limit_microusd=1`
+    — does not exercise the identity check this test is named for. The
+    fixture's own docstring is explicit that a pool row is seat-tracked XOR
+    carries an operator's figure, never both, and it refuses the ambiguous
+    call BEFORE writing anything: `ValueError`, not `AssertionError`, and it
+    fires first regardless of which combination of values is inconsistent.
+    That is a real, correct guard (verified below), just not the one this
+    test's name is about.
+
+    The identity check itself sits AFTER a write, comparing the row read
+    back against what its own source attributes say it must be. Because
+    F1's real writers (`create_seat_tracked_pool`, `set_manual_limit`)
+    maintain `pool_limit_microusd == baseline + coalesce(pool_granted, 0)`
+    by construction, there is no legal combination of this fixture's own
+    arguments that can violate it — the only way to see the check's teeth
+    without weakening it is a writer that does NOT maintain the identity,
+    which is exactly the class of bug R39c protects a benchmark from timing
+    silently. Simulated below by monkeypatching `set_manual_limit` to leave
+    the row's limit at the figure asked for `set_manual_limit` to write
+    correctly, then corrupt it afterward — standing in for a latent bug in
+    that writer, not a caller error."""
     if not FIXTURE_MODULE.exists():
         pytest.skip(f"{FIXTURE_MODULE} does not exist yet — see the module-"
                     f"existence test above, which is the one that must fail "
@@ -143,18 +168,47 @@ def test_the_fixture_enforces_both_identities_before_returning():
         sys.path.insert(0, str(BENCH_DIR))
     import pool_fixture  # type: ignore  # noqa: E402
 
-    from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+    from dynamo.tenant_budgets import TenantBudgetsRepository, budget_sk, current_period
 
     repo = TenantBudgetsRepository()
     period = current_period()
 
-    # A row whose limit does NOT equal baseline(seat_count) + pool_granted must
-    # be refused loudly rather than silently written. `manual_limit_microusd=1`
-    # alongside `seat_count=3` is a deliberately inconsistent pair: no plausible
-    # per-seat price makes $0.000001 the correct limit for a 3-seat pool, so the
-    # fixture's identity assertion must reject it rather than write it.
-    with pytest.raises(AssertionError):
+    # The input guard: a pool row is seat-tracked XOR carries an operator's
+    # figure (`dynamo.tenant_budgets.is_seat_tracked`), so giving both is
+    # deciding that ambiguity silently rather than the caller deciding it.
+    # This refuses before any write, which is why it raises ValueError, not
+    # the AssertionError the post-write identity check raises.
+    with pytest.raises(ValueError):
         pool_fixture.seed_verified_pool(
             repo, tenant_id="l39c-bad-tenant", period=period,
             seat_count=3, manual_limit_microusd=1, pool_granted_microusd=0,
+        )
+
+    # The identity check: force the ONE writer this call goes through to
+    # leave a row its own source attributes do not explain, standing in for
+    # a latent bug in `set_manual_limit` rather than a caller error.
+    from decimal import Decimal
+
+    real_set_manual_limit = TenantBudgetsRepository.set_manual_limit
+
+    def _writes_then_corrupts_the_limit(self, *, tenant_id, period, manual_limit_microusd, status="active"):
+        result = real_set_manual_limit(
+            self, tenant_id=tenant_id, period=period,
+            manual_limit_microusd=manual_limit_microusd, status=status)
+        # No plausible bug in the caller's own arguments produces this; it
+        # stands for a writer that wrote the wrong figure.
+        self._table.update_item(
+            Key={"tenant_id": tenant_id, "sk": budget_sk(period)},
+            UpdateExpression="SET pool_limit_microusd = :bad",
+            ExpressionAttributeValues={":bad": Decimal(1)},
+        )
+        return result
+
+    monkeypatch.setattr(
+        TenantBudgetsRepository, "set_manual_limit", _writes_then_corrupts_the_limit)
+
+    with pytest.raises(AssertionError):
+        pool_fixture.seed_verified_pool(
+            repo, tenant_id="l39c-bad-tenant", period=period,
+            manual_limit_microusd=500_000_000, pool_granted_microusd=0,
         )
