@@ -123,6 +123,8 @@ export default function LimitRaiseApproval() {
                 request={req}
                 isAdmin={isAdmin}
                 latestPermissibleExpiry={expiryQuery.data?.latest_permissible_expiry ?? null}
+                remainingGrantCapMicrousd={poolQuery.data?.remaining_grant_cap_microusd ?? null}
+                grantCapIsDerived={poolQuery.data?.grant_cap_is_derived ?? false}
                 onDecided={() =>
                   void qc.invalidateQueries({ queryKey: ['limit-raises', 'queue', tenantId] })
                 }
@@ -139,11 +141,15 @@ function DecisionRow({
   request,
   isAdmin,
   latestPermissibleExpiry,
+  remainingGrantCapMicrousd,
+  grantCapIsDerived,
   onDecided,
 }: {
   request: LimitRaiseRequest
   isAdmin: boolean
   latestPermissibleExpiry: number | null
+  remainingGrantCapMicrousd: number | null
+  grantCapIsDerived: boolean
   onDecided: () => void
 }) {
   const { t } = useTranslation()
@@ -163,6 +169,18 @@ function DecisionRow({
   const cents = parseUsdToCents(amountUsd)
   const approvedMicro = cents !== null ? cents * 10_000 : null
   const givingLess = approvedMicro !== null && approvedMicro < request.asked_amount_microusd
+
+  // R36/B6: the same bound the expiry field carries as its `max`, but for
+  // the amount field -- which cannot express a bound as an attribute
+  // (`inputMode="decimal"` free text, not a numeric input with `max`). Read
+  // from the SAME pool call `PoolBudgetCard` already uses above; this is a
+  // second line of defence in front of the transaction's own condition
+  // check, not a replacement for it, so it can go stale behind a concurrent
+  // approval without being wrong to show now.
+  const overCap =
+    remainingGrantCapMicrousd != null &&
+    approvedMicro !== null &&
+    approvedMicro > remainingGrantCapMicrousd
 
   const approve = useMutation({
     mutationFn: () => {
@@ -251,6 +269,33 @@ function DecisionRow({
             onChange={(e) => setAmountUsd(e.target.value)}
             data-testid="lr-approve-amount"
           />
+          {/* Shown BEFORE the field is typed into -- driven by the pool
+              read alone, never by what has been entered -- and states
+              whether the figure is a stored one or derived from the
+              baseline, because "the cap is $0.00" with no explanation
+              reads as a bug. */}
+          {remainingGrantCapMicrousd != null ? (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="lr-remaining-grant-cap"
+            >
+              {t('limit_raise_approval.remaining_grant_cap', {
+                remaining: fmtMicroUsd(remainingGrantCapMicrousd),
+                derived: t(
+                  grantCapIsDerived
+                    ? 'limit_raise_approval.grant_cap_derived'
+                    : 'limit_raise_approval.grant_cap_fixed',
+                ),
+              })}
+            </p>
+          ) : null}
+          {overCap ? (
+            <p className="text-xs text-destructive" data-testid="lr-amount-over-cap">
+              {t('limit_raise_approval.amount_over_cap', {
+                remaining: fmtMicroUsd(remainingGrantCapMicrousd ?? 0),
+              })}
+            </p>
+          ) : null}
         </div>
         <div className="space-y-1.5">
           <Label htmlFor={`exp-${request.request_id}`}>
@@ -291,6 +336,7 @@ function DecisionRow({
             approvedMicro === null ||
             !expiryLocal ||
             (givingLess && decisionComment.trim() === '') ||
+            overCap ||
             approve.isPending
           }
           onClick={() => {
