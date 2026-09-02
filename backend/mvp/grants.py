@@ -1927,6 +1927,41 @@ def admin_reject_limit_raise(
         decision_comment=body.decision_comment, as_owner=False)
 
 
+@router.get("/admin/limit-raises/latest-permissible-expiry")
+def admin_latest_permissible_expiry(
+    period: Optional[str] = Query(default=None, min_length=1),
+    _actor: AuthenticatedUser = Depends(require_permission("limits:approve")),
+) -> dict[str, Any]:
+    """R28: the bound an approval's `expires_at` must satisfy, shown before
+    it is typed rather than discovered from a refusal.
+
+    Pure calendar arithmetic (`latest_permissible_expiry_for_period`), owned
+    by F3 per the contract's own ownership table ("survives B1 unchanged")
+    -- it has zero dependency on a grant, a request or a tenant's pool row,
+    which is exactly why this endpoint needs no tenant id: the bound is a
+    fact about the PERIOD, identical for every tenant inside it. Gated on
+    the same permission as the approval routes because the only reader who
+    needs it is an approver about to type an expiry, not because the value
+    itself is sensitive.
+    """
+    p = period or current_period()
+    now = _now_epoch()
+    return {"period": p, "latest_permissible_expiry": latest_permissible_expiry_for_period(now, p)}
+
+
+@router.get("/team-lead/limit-raises/latest-permissible-expiry")
+def team_lead_latest_permissible_expiry(
+    period: Optional[str] = Query(default=None, min_length=1),
+    _actor: AuthenticatedUser = Depends(require_permission("limits:approve-own")),
+) -> dict[str, Any]:
+    """Same bound, same reasoning, for the team-lead-scoped approver -- the
+    value does not vary by tenant, so this mirror exists only because the
+    route namespace does."""
+    p = period or current_period()
+    now = _now_epoch()
+    return {"period": p, "latest_permissible_expiry": latest_permissible_expiry_for_period(now, p)}
+
+
 @router.get("/admin/limit-grants")
 def admin_list_limit_grants(
     tenant_id: str = Query(..., min_length=1),

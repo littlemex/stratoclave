@@ -359,7 +359,8 @@
     "count_showing": "{{shown}} results",
     "count_more": " / more pages",
     "fallback_badge": "fallback",
-    "fallback_from": "Fell back from requested {{requested}}"
+    "fallback_from": "Fell back from requested {{requested}}",
+    "fallback_from_quota_exhausted": "Fell back from requested {{requested}} — its quota was exhausted"
   },
   "admin_tenants": {
     "title": "Tenant administration",
@@ -541,6 +542,7 @@
     "col_total": "Total",
     "fallback_badge": "fallback",
     "fallback_from": "Fell back from requested {{requested}}",
+    "fallback_from_quota_exhausted": "Fell back from requested {{requested}} — its quota was exhausted",
     "fallback_count": "{{count}} request(s) served by a fallback model"
   },
   "me_api_keys": {

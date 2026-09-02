@@ -241,9 +241,22 @@ export default function MeUsage() {
                       {row.fallback_occurred === true && (
                         <span
                           className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800"
-                          title={t('me_usage.fallback_from', {
-                            requested: row.requested_model_id ?? '?',
-                          })}
+                          title={
+                            // R38 (F3): the fixed string was byte-identical
+                            // for every cause -- exactly the defect this id
+                            // exists to fix ("a user cannot distinguish 'my
+                            // grant expired' from 'the router changed its
+                            // mind'"). A row with a recorded reason says
+                            // which; a legacy row with none keeps the
+                            // original, honestly-unspecific wording.
+                            row.fallback_reason === 'quota_exhausted'
+                              ? t('me_usage.fallback_from_quota_exhausted', {
+                                  requested: row.requested_model_id ?? '?',
+                                })
+                              : t('me_usage.fallback_from', {
+                                  requested: row.requested_model_id ?? '?',
+                                })
+                          }
                         >
                           {t('me_usage.fallback_badge')}
                         </span>
