@@ -17,6 +17,7 @@
 
 use anyhow::{anyhow, Result};
 use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -112,6 +113,10 @@ struct ScrubFlags {
     aws_identity: bool,
 }
 
+/// Boxed per-line stderr hook (see the `stderr_line_hook` field doc). Named so
+/// clippy's `type_complexity` lint has a single spot to point at.
+type StderrLineHook = Box<dyn Fn(&str) -> Option<String> + Send>;
+
 /// Builder for spawning a wrapper child process under stratoclave.
 pub struct ChildLauncher {
     binary: String,
@@ -130,6 +135,19 @@ pub struct ChildLauncher {
     /// the "here is where to look in *your* agent" part to the caller — a codex
     /// user must not be handed Claude Code troubleshooting.
     bypass_hint: Option<String>,
+    /// Optional per-line hook on the child's stderr. When set, stderr is piped
+    /// (not inherited): every line the child writes is still relayed to the
+    /// real stderr verbatim, in order, as it arrives — the child's own output
+    /// is unchanged — but `hook` also sees each line and may return an extra
+    /// line to print immediately after it. stdin/stdout stay `Stdio::inherit()`
+    /// regardless, so a full-screen TUI child (raw mode, alt-screen — codex's
+    /// interactive UI renders there) is unaffected; only line-oriented stderr
+    /// diagnostics are observable this way. See `codex_cmd::run` for the one
+    /// caller today: turning codex's own "unexpected status 402 ...: {json}"
+    /// line — which arrives only after codex's *own* retry loop has already
+    /// spent its attempts logging misleading "Reconnecting..." lines — into a
+    /// clarified, human-readable rejection reason.
+    stderr_line_hook: Option<StderrLineHook>,
 }
 
 impl ChildLauncher {
@@ -141,6 +159,7 @@ impl ChildLauncher {
             scrub: ScrubFlags::default(),
             cwd: None,
             bypass_hint: None,
+            stderr_line_hook: None,
         }
     }
 
@@ -148,6 +167,13 @@ impl ChildLauncher {
     /// this run's key (see `run_with_revoke`).
     pub fn bypass_hint(mut self, hint: &str) -> Self {
         self.bypass_hint = Some(hint.to_string());
+        self
+    }
+
+    /// Install a per-line stderr hook (see the `stderr_line_hook` field doc).
+    /// Switches stderr from `Stdio::inherit()` to a relayed pipe for this run.
+    pub fn on_stderr_line(mut self, hook: impl Fn(&str) -> Option<String> + Send + 'static) -> Self {
+        self.stderr_line_hook = Some(Box::new(hook));
         self
     }
 
@@ -248,10 +274,46 @@ impl ChildLauncher {
 
         cmd.stdin(Stdio::inherit());
         cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
+        // stdin/stdout are ALWAYS inherited, hook or not — a full-screen TUI
+        // child needs a real tty on both. Only stderr is ever piped, and only
+        // when a hook is installed (see `on_stderr_line`); everything else
+        // behaves exactly as `cmd.status()` did before this method existed.
+        let hook = self.stderr_line_hook;
+        if hook.is_some() {
+            cmd.stderr(Stdio::piped());
+        } else {
+            cmd.stderr(Stdio::inherit());
+        }
 
         let started = std::time::Instant::now();
-        let spawn_result = cmd.status();
+        let spawn_result: std::io::Result<std::process::ExitStatus> = (|| {
+            let mut child = cmd.spawn()?;
+            let relay = hook.map(|hook| {
+                // `expect`: stderr is `Stdio::piped()` in exactly this branch
+                // (set two lines above), so `Child::stderr` is always `Some`.
+                let stderr = child.stderr.take().expect("piped stderr");
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        // Relay first: the child's own output must reach the
+                        // terminal in the same order it would have with
+                        // Stdio::inherit(), whether or not the hook fires.
+                        eprintln!("{line}");
+                        if let Some(extra) = hook(&line) {
+                            eprintln!("{extra}");
+                        }
+                    }
+                })
+            });
+            let status = child.wait();
+            // Join AFTER wait(): the pipe's write end closes when the child
+            // exits, which is what lets the reader loop above terminate.
+            // Joining before wait() would deadlock on a child still writing.
+            if let Some(t) = relay {
+                let _ = t.join();
+            }
+            status
+        })();
         let child_ran_for = started.elapsed();
 
         // Did the child actually go through the gateway? Asked BEFORE the revoke,

@@ -188,7 +188,22 @@ pub async fn run(
             "Check that codex is still resolving the `stratoclave` model provider: \
              a `-c model_provider=...` override, a profile, or an OPENAI_* key in \
              the environment will send the run straight to the provider.",
-        );
+        )
+        // codex's own retry loop treats every non-2xx from the provider as a
+        // transient disconnect: on a real 402 (tenant out of budget) it prints
+        // "ERROR: Reconnecting... 1/5" .. "5/5" BEFORE it ever shows the actual
+        // refusal, which reads exactly like a broken network. The raw refusal
+        // does eventually print (codex logs "unexpected status <code> ...:
+        // <json>" once retries are exhausted), so nothing is lost — but it is
+        // easy to miss under five misleading retry lines. Once that line
+        // arrives, immediately follow it with the same body rendered as prose
+        // (wall / reason / whether it can be raised), so a reader does not have
+        // to parse raw JSON out of a log line to learn this was not a network
+        // problem. See `extract_terminal_4xx_body` / `format_gateway_rejection`.
+        .on_stderr_line(|line| {
+            let (status, body) = extract_terminal_4xx_body(line)?;
+            Some(format_gateway_rejection(status, &body))
+        });
     if let Some(ws) = &escape_workspace {
         launcher = launcher.cwd(ws.path());
     }
@@ -309,6 +324,127 @@ fn preflight_codex_supports_http_headers() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Any 4xx codex will not talk itself out of by retrying, EXCEPT 429: rate
+/// limiting is the one 4xx that genuinely can go away with a delay, so it is
+/// left to codex's own retry loop rather than flagged as a policy refusal.
+fn is_terminal_4xx(status: u16) -> bool {
+    (400..500).contains(&status) && status != 429
+}
+
+/// codex-cli 0.141.0 logs a failed provider call on ONE line of the shape:
+///
+///   ERROR: unexpected status <code> <reason phrase>: <json>, url: <url>
+///
+/// (verified 2026-09-02 against a live gateway 402 — see the codex_cmd.rs
+/// module report; codex does not distinguish this from a network error in
+/// its own retry loop, hence "Reconnecting..." above it). Returns the status
+/// and the embedded JSON body when the line matches AND the status is a
+/// terminal 4xx; `None` for anything else, including codex's "Reconnecting...
+/// N/5" lines (which carry no status at all) and retryable / success statuses.
+fn extract_terminal_4xx_body(line: &str) -> Option<(u16, String)> {
+    const MARKER: &str = "unexpected status ";
+    let after_marker = &line[line.find(MARKER)? + MARKER.len()..];
+    let status_str: String = after_marker
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if status_str.len() != 3 {
+        return None;
+    }
+    let status: u16 = status_str.parse().ok()?;
+    if !is_terminal_4xx(status) {
+        return None;
+    }
+    let brace_start = after_marker.find('{')?;
+    let json = extract_balanced_json(&after_marker[brace_start..])?;
+    Some((status, json))
+}
+
+/// Return the substring of `s` (which must start with `{`) up to and
+/// including the matching closing brace, honouring JSON string/escape syntax
+/// so a `{`/`}` inside a quoted message — or in the `, url: ...` text codex
+/// appends after the JSON on the same line — cannot mis-close it early.
+fn extract_balanced_json(s: &str) -> Option<String> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(s[..i + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Render the gateway's `credit_exhausted` 402 (or any other terminal 4xx)
+/// body as prose, distinguishing "the gateway refused this on purpose" from
+/// "the network broke". Every figure/name it prints is read verbatim out of
+/// the body the gateway actually sent (`mvp/_pipeline.py::_refusal_body` on
+/// the backend) — never invented — so it is silent about a field rather than
+/// guessing when that field is genuinely absent (e.g. a 404 has no `wall`).
+fn format_gateway_rejection(status: u16, body_json: &str) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body_json).ok();
+    let detail = parsed.as_ref().and_then(|v| v.get("detail")).or(parsed.as_ref());
+    let get_str = |key: &str| detail.and_then(|d| d.get(key)).and_then(|v| v.as_str());
+    let message = get_str("message");
+    let wall = get_str("wall");
+    let blocker = get_str("blocker");
+    let grantable = detail
+        .and_then(|d| d.get("grantable"))
+        .and_then(|v| v.as_bool());
+
+    let mut out = format!(
+        "[STRATOCLAVE] HTTP {status} from the gateway is a policy refusal, not a \
+         network error — the retries above will not fix it."
+    );
+    if let Some(m) = message {
+        out.push_str(&format!("\n[STRATOCLAVE]   {m}"));
+    }
+    if wall.is_some() || blocker.is_some() || grantable.is_some() {
+        let mut fields = String::new();
+        if let Some(w) = wall {
+            fields.push_str(&format!(" wall={w}"));
+        }
+        if let Some(b) = blocker {
+            fields.push_str(&format!(" blocker={b}"));
+        }
+        if let Some(g) = grantable {
+            fields.push_str(&format!(" grantable={g}"));
+        }
+        out.push_str(&format!("\n[STRATOCLAVE]  {fields}"));
+    }
+    match grantable {
+        Some(true) => out.push_str(
+            "\n[STRATOCLAVE]   Ask an admin to raise it: `stratoclave limit-raise request \
+             --limit-usd <amount> --reason <reason>`.",
+        ),
+        Some(false) => out.push_str(
+            "\n[STRATOCLAVE]   This wall cannot be raised by request; wait for the period \
+             to roll over, or ask an admin to change the policy directly.",
+        ),
+        None => {}
+    }
+    out
 }
 
 /// Return `true` when the current process cwd resolves to `$HOME`. We
@@ -604,5 +740,96 @@ mod tests {
         // Unknown model falls back to a non-zero default so codex
         // still has a finite budget to plan against.
         assert_eq!(codex_context_window_for("future-model"), 200_000);
+    }
+
+    /// The exact line codex-cli 0.141.0 printed against a live gateway 402
+    /// (scquota, 2026-09-02, pool budget forced to $0.01 to reproduce). Pinned
+    /// verbatim so a change in either codex's log format or our parser is
+    /// caught by a real-world shape, not a hand-simplified stand-in.
+    const REAL_402_LINE: &str = r#"ERROR: unexpected status 402 Payment Required: {"detail":{"type":"credit_exhausted","reason":"request_does_not_fit_pool_limit","message":"This request's reservation exceeds the tenant's entire budget for the period; no amount of available headroom would admit it. Reduce the request size or ask your admin to raise the budget. This request is $0.45 short of this tenant's pool.","wall":"tenant_dollar_pool","blocker":"tenant_pool","grantable":true,"raise_hint":{"candidates":[{"blocker":"tenant_pool","wall":"tenant_dollar_pool","model_id":"openai.gpt-5.6-sol","estimated_cost_microusd":469701,"shortfall_microusd":459701,"grantable":true,"grant_expired":false}],"remaining_cap_microusd":10000,"reason_codes":["onboarding","usage_spike","migration","incident_response","other"],"minimum_raise_microusd":459701,"unattempted_model_ids":[],"tenant_id":"default-org","requested_model_id":"openai.gpt-5.6-sol","target_shortfall_microusd":459701,"router_mode":"fallback_disabled","pricing_version":"builtin","priced_at":"2026-09-02T17:22:04+00:00"}}}, url: https://d17emgaxe9o29k.cloudfront.net/openai/v1/responses"#;
+
+    #[test]
+    fn extracts_real_402_line_from_live_gateway() {
+        let (status, body) = extract_terminal_4xx_body(REAL_402_LINE)
+            .expect("must extract the pinned real 402 line");
+        assert_eq!(status, 402);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(parsed["detail"]["wall"], "tenant_dollar_pool");
+        assert_eq!(parsed["detail"]["blocker"], "tenant_pool");
+        assert_eq!(parsed["detail"]["grantable"], true);
+    }
+
+    #[test]
+    fn formats_real_402_as_prose_naming_wall_and_grantability() {
+        let (status, body) = extract_terminal_4xx_body(REAL_402_LINE).unwrap();
+        let rendered = format_gateway_rejection(status, &body);
+        assert!(rendered.contains("HTTP 402"));
+        assert!(rendered.contains("not a network error"));
+        assert!(rendered.contains("wall=tenant_dollar_pool"));
+        assert!(rendered.contains("blocker=tenant_pool"));
+        assert!(rendered.contains("grantable=true"));
+        // The message field is carried verbatim, not summarized away.
+        assert!(rendered.contains("$0.45 short of this tenant's pool"));
+        // grantable=true -> tells the reader HOW to raise it.
+        assert!(rendered.contains("limit-raise request"));
+    }
+
+    #[test]
+    fn reconnecting_lines_never_match() {
+        for n in 1..=5 {
+            assert!(extract_terminal_4xx_body(&format!("ERROR: Reconnecting... {n}/5")).is_none());
+        }
+    }
+
+    #[test]
+    fn retryable_statuses_are_not_flagged_as_terminal() {
+        // 429 (rate limit) and every 5xx genuinely can go away with a retry;
+        // only 400-499 minus 429 is a policy refusal codex should stop
+        // hammering on its own.
+        assert!(!is_terminal_4xx(429));
+        assert!(!is_terminal_4xx(500));
+        assert!(!is_terminal_4xx(503));
+        assert!(!is_terminal_4xx(200));
+        for status in [400, 401, 402, 403, 404, 409, 413, 422] {
+            assert!(is_terminal_4xx(status), "{status} should be terminal");
+        }
+    }
+
+    #[test]
+    fn extract_terminal_4xx_body_ignores_retryable_status_even_with_json() {
+        let line = r#"ERROR: unexpected status 429 Too Many Requests: {"detail":{"message":"slow down"}}, url: https://example.test/"#;
+        assert!(extract_terminal_4xx_body(line).is_none());
+    }
+
+    #[test]
+    fn extract_balanced_json_stops_at_matching_brace_not_first_close() {
+        // A `}` inside a quoted string, and trailing text with its own
+        // (unbalanced-looking) punctuation, must not truncate the JSON early.
+        let s = r#"{"message":"a } b","n":1}, url: https://x/{not-json}"#;
+        let json = extract_balanced_json(s).expect("balanced JSON");
+        assert_eq!(json, r#"{"message":"a } b","n":1}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["message"], "a } b");
+    }
+
+    #[test]
+    fn format_gateway_rejection_never_invents_fields_it_does_not_have() {
+        // A minimal body with no `wall`/`blocker`/`grantable` at all (e.g. a
+        // bare 404) must not fabricate them.
+        let rendered = format_gateway_rejection(404, r#"{"detail":{"message":"not found"}}"#);
+        assert!(rendered.contains("HTTP 404"));
+        assert!(rendered.contains("not found"));
+        assert!(!rendered.contains("wall="));
+        assert!(!rendered.contains("grantable="));
+    }
+
+    #[test]
+    fn format_gateway_rejection_survives_unparseable_body() {
+        // Even if the body is not JSON at all, the function must not panic
+        // and must still say SOMETHING distinguishing this from a network
+        // error (the status line alone).
+        let rendered = format_gateway_rejection(402, "not json");
+        assert!(rendered.contains("HTTP 402"));
+        assert!(rendered.contains("not a network error"));
     }
 }
