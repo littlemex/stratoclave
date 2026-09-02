@@ -364,7 +364,7 @@
   {
    "id": "cl-99cc36f57540",
    "claim": "- Bedrock bearer tokens minted with a 15-minute TTL (capped in `openai_responses.py`); the token lives only in the ECS task heap for the duration of one request and is never persisted to DynamoDB or logs,",
-   "anchor": "contract:C12.5@60b55405"
+   "anchor": "contract:C12.5@ccf8dfb3"
   },
   {
    "id": "cl-1763ff51d73a",
@@ -1037,7 +1037,7 @@
   {
    "id": "cl-98723c33000c",
    "claim": "The backend sets it to `null` so that creator logs, screenshots, and shell history never contain a reusable credential.",
-   "anchor": "contract:C12.2@c35704a2,C12.5@60b55405"
+   "anchor": "contract:C12.2@c35704a2,C12.5@ccf8dfb3"
   },
   {
    "id": "cl-f772f79858dc",
@@ -1388,7 +1388,7 @@
   {
    "id": "cl-6e3690082e1f",
    "claim": "The plaintext of an API key is returned **once**, in the response to `POST /api/mvp/me/api-keys`, and is never stored on the server.",
-   "anchor": "contract:C12.5@60b55405"
+   "anchor": "contract:C12.5@ccf8dfb3"
   },
   {
    "id": "cl-3702dca544a0",
@@ -1448,7 +1448,7 @@
   {
    "id": "cl-192b660ec030",
    "claim": "Long-lived API keys; plaintext never stored",
-   "anchor": "contract:C12.5@60b55405"
+   "anchor": "contract:C12.5@ccf8dfb3"
   },
   {
    "id": "cl-1438d80bb82d",
@@ -1621,7 +1621,7 @@
   {
    "id": "cl-24f581bc5868",
    "claim": "Reading prices must not become subscribing to a paid product, so the token is never stored, logged or returned, and the test fixtures have it stripped.",
-   "anchor": "contract:C12.5@60b55405",
+   "anchor": "contract:C12.5@ccf8dfb3",
    "note": "the offer token is the credential-shaped artefact C12.5 already covers"
   },
   {
@@ -2087,6 +2087,18 @@
    "id": "cl-42cfc43250d2",
    "claim": "The **grant inventory** (`frontend/src/pages/GrantsInventory.tsx`, standalone routes `/{admin,team-lead}/tenants/:tenantId/limit-grants`) renders one total per target row, never a tenant-wide sum, and a `REVOKE_BLOCKED` grant's reason next to its row.",
    "anchor": "contract:C14.29@9786dc41"
+  },
+  {
+   "id": "cl-c327e5f405bb",
+   "claim": "The password is **never** written to stdout/stderr (and therefore never reaches CloudWatch Logs); it is stashed once in AWS Secrets Manager:",
+   "anchor": "contract:C12.5@ccf8dfb3",
+   "note": "the one instance of C12.5 that is checked rather than argued -- the bootstrap password reaches Secrets Manager and neither the logger nor stderr"
+  },
+  {
+   "id": "cl-dbf40fe924a5",
+   "claim": "Verified against a real deployment on 2026-09-02: the documented `ALLOW_ADMIN_CREATION` + `bootstrap-admin.sh` path 401s as described above; `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` is the path that actually works.",
+   "anchor": "evidence:A human can actually get through the console",
+   "note": "the documented first-admin path was tried on a real deployment and returned 401; the sentence reports that run"
   }
  ]
 }

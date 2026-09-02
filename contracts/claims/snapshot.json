@@ -1206,6 +1206,12 @@
   },
   "cl-42cfc43250d2": {
    "first_seen": "F3 (quota-raises): docs/design/quota-raises.md section 13, describing the grant inventory view"
+  },
+  "cl-c327e5f405bb": {
+   "first_seen": "the deployment guide's bootstrap-password sentence, anchored to C12.5's one checked instance"
+  },
+  "cl-dbf40fe924a5": {
+   "first_seen": "the deployment guide records that the documented first-admin path was tried on a real deployment and 401'd"
   }
  },
  "retired": {
