@@ -60,7 +60,24 @@ async function jsonRequest<T>(
     } catch {
       // ignore
     }
-    const err = new Error(detail ?? `${res.status} ${res.statusText}`) as ApiError
+    // Every structured refusal this backend throws (`credit_exhausted`,
+    // `grant_cap_exceeded`, `figure_includes_active_grant`, ...) sends
+    // `detail` as an OBJECT with its own `.message`, not a string -- so
+    // `detail` above stays undefined for every one of them, and a caller
+    // that only checked `e.detail ?? e.message` used to see the opaque
+    // "422 Unprocessable Entity" / "402 Payment Required" instead of the
+    // message the backend wrote for exactly this case. `err.detail` keeps
+    // its existing string-or-undefined contract for callers that already
+    // narrow `detailBody` themselves; only the Error's own `.message` (the
+    // fallback every such caller already reads) gains the richer text.
+    const structuredMessage =
+      typeof detailBody === 'object' && detailBody !== null &&
+      typeof (detailBody as { message?: unknown }).message === 'string'
+        ? (detailBody as { message: string }).message
+        : undefined
+    const err = new Error(
+      detail ?? structuredMessage ?? `${res.status} ${res.statusText}`,
+    ) as ApiError
     err.status = res.status
     err.detail = detail
     err.detailBody = detailBody

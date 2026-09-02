@@ -163,64 +163,54 @@ When the script finishes it prints:
 `deploy-all.sh` does **not** create any users. To mint the first administrator:
 
 ```bash
-# The backend must be reachable and ALLOW_ADMIN_CREATION must be true for this
-# one-shot. The CDK default is 'false'; set it in your environment for the
-# initial deploy, then flip it back (see "Locking down" below).
-export ALLOW_ADMIN_CREATION=true
-./iac/scripts/deploy-all.sh        # redeploy so the env var reaches ECS
-
-./scripts/bootstrap-admin.sh --email admin@example.com
+# STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL is read once at backend STARTUP, not at
+# request time, and only when no admin-role user exists yet -- so this is a
+# one-shot: after the first admin is created, leave the variable set (it is a
+# no-op from then on) or unset it, either is safe.
+export STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+cd iac && npx cdk deploy "${STRATOCLAVE_PREFIX:-stratoclave}-ecs" --require-approval never
 ```
 
-The script performs three idempotent steps:
+On the next container start, `backend/bootstrap/seed.py::seed_bootstrap_admin` runs three idempotent steps against the real Cognito user pool and DynamoDB tables:
 
-1. Create (or reuse) a Cognito user with `email_verified=true`.
-2. Set a permanent password (generated, or passed via `--password`).
-3. `POST /api/mvp/admin/users` so the backend writes the `admin` row into DynamoDB.
+1. `AdminCreateUser` for the email (or adopt the existing Cognito user on `UsernameExistsException`).
+2. `AdminSetUserPassword` with a random 20+ character permanent password.
+3. Write the `Users` + `UserTenants` rows with `roles=["admin", "user"]`.
+
+The password is **never** written to stdout/stderr (and therefore never reaches CloudWatch Logs); it is stashed once in AWS Secrets Manager:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id "${STRATOCLAVE_PREFIX:-stratoclave}/bootstrap-admin-temp-password" \
+  --query SecretString --output text
+# {"email": "admin@example.com", "password": "<generated-once, 20+ chars>"}
+```
+
+Retrieve it once, log in, then delete the secret (or let its 7-day recovery window expire):
+
+```bash
+aws secretsmanager delete-secret \
+  --secret-id "${STRATOCLAVE_PREFIX:-stratoclave}/bootstrap-admin-temp-password" \
+  --force-delete-without-recovery
+```
 
 The default `default-org` tenant and the `admin` / `team_lead` / `user` permission rows are seeded automatically on backend startup (see `backend/bootstrap/seed.py`). You do **not** need to pre-populate DynamoDB.
 
-Sample output:
+> **`ALLOW_ADMIN_CREATION` and `scripts/bootstrap-admin.sh` are stale.** They
+> describe an older contract in which `POST /api/mvp/admin/users` had an
+> unauthenticated bootstrap path. It no longer does: the endpoint is gated by
+> `require_permission("users:create")` unconditionally (`backend/mvp/admin_users.py`),
+> so `bootstrap-admin.sh`'s un-authenticated step 3 now fails outright with
+> `401 {"detail":"Missing bearer token"}` on a real deployment, before the
+> `ALLOW_ADMIN_CREATION` gate is ever reached. `ALLOW_ADMIN_CREATION` /
+> `ALLOW_ADMIN_CREATION_UNTIL` remain real and load-bearing for a DIFFERENT
+> case -- an already-authenticated admin promoting a second user to `admin`
+> through the same endpoint -- just not for minting the first one. Verified
+> against a real deployment on 2026-09-02: the documented `ALLOW_ADMIN_CREATION`
+> + `bootstrap-admin.sh` path 401s as described above; `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`
+> is the path that actually works.
 
-```
-[INFO] Resolving deployment outputs in region us-east-1...
-[INFO] User Pool : us-east-1_EXAMPLE
-[INFO] API       : https://<your-deployment>.cloudfront.net
-[INFO] Email     : admin@example.com
-[STEP 1/3] Ensuring Cognito user exists
-[OK]   Created Cognito user.
-[STEP 2/3] Setting permanent password
-[OK]   Password set (permanent).
-[STEP 3/3] Granting admin role via backend
-[OK]   Admin role granted.
-============================================
- Bootstrap complete
-============================================
-  Email:     admin@example.com
-  Password:  <generated-once, 20+ chars>
-  Login URL: https://<your-deployment>.cloudfront.net
-```
-
-### Locking down after bootstrap
-
-Once the admin can log in, **turn the bootstrap endpoint off**:
-
-1. In the environment you use to run CDK, unset `ALLOW_ADMIN_CREATION` (or set it to `false`).
-2. Redeploy:
-
-   ```bash
-   cd iac && npx cdk deploy <Prefix>EcsStack
-   ```
-
-3. Verify the task picked it up:
-
-   ```bash
-   aws ecs describe-task-definition \
-     --task-definition <PREFIX>-backend \
-     --query 'taskDefinition.containerDefinitions[0].environment[?name==`ALLOW_ADMIN_CREATION`]'
-   ```
-
-All subsequent admin promotions must go through the authenticated API.
+All subsequent admin promotions go through the authenticated `POST /api/mvp/admin/users` (an existing admin, with `ALLOW_ADMIN_CREATION=true` and, in production, `ALLOW_ADMIN_CREATION_UNTIL` set to a future epoch).
 
 ---
 

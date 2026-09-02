@@ -425,7 +425,14 @@ def main() -> None:
 
     sweep_fn = f"{args.deployment}-quota-grant-sweeper" if args.deployment else None
     logs_client = boto3.client("logs", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-    log_group = f"/aws/lambda/{sweep_fn}" if sweep_fn else None
+    # NOT the Lambda-default "/aws/lambda/<fn>": QuotaGrantsStack creates this
+    # log group itself, under "/lambda/<fn>" (iac/lib/quota-grants-stack.ts),
+    # for the same reason DEPLOYMENT.md documents that path -- a Lambda's
+    # default log group is created lazily on first invocation, which breaks
+    # the stack's own MetricFilter on a fresh deploy. Querying the default
+    # prefix here found nothing (ResourceNotFoundException) and silently fell
+    # through to "not witnessed" on a run where the schedule DID fire.
+    log_group = f"/lambda/{sweep_fn}" if sweep_fn else None
 
     scheduled_witnessed = False
     scheduled_detail = ""

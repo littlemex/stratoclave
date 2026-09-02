@@ -260,7 +260,7 @@ else
   "cognito": {
     "user_pool_id": "$COGNITO_USER_POOL_ID",
     "client_id": "$COGNITO_CLIENT_ID",
-    "domain": "https://$COGNITO_DOMAIN",
+    "domain": "$COGNITO_DOMAIN",
     "region": "$REGION"
   },
   "api": {
@@ -308,8 +308,11 @@ echo "     1st for any tenant whose membership did not change that month):"
 echo "     cd $IAC_DIR && LAMBDA_IMAGE_TAG=<tag from step 1> npx cdk deploy \\"
 echo "       ${PREFIX}-quota-reconciler ${PREFIX}-quota-grants \\"
 echo "       -c quotaReconciler=true -c quotaGrants=true --require-approval never"
-echo "  3. Create the first admin user:"
-echo "     $PROJECT_ROOT/scripts/bootstrap-admin.sh --email admin@example.com"
+echo "  3. Create the first admin user (bootstrap-admin.sh is stale — see"
+echo "     docs/DEPLOYMENT.md 'Post-deploy: first admin'):"
+echo "     export STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL=admin@example.com"
+echo "     cd $IAC_DIR && npx cdk deploy ${PREFIX}-ecs --require-approval never"
+echo "     aws secretsmanager get-secret-value --secret-id ${PREFIX}/bootstrap-admin-temp-password --query SecretString --output text"
 echo "  4. Share the CloudFront URL with CLI users:"
 echo "     stratoclave setup https://$CLOUDFRONT_DOMAIN"
 echo ""

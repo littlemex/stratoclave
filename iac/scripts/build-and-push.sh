@@ -71,10 +71,15 @@ log_info "ECR URI: $ECR_URI"
 log_info "Logging in to ECR..."
 aws ecr get-login-password --region $AWS_REGION | "$CONTAINER_CLI" login --username AWS --password-stdin $ECR_URI
 
-# Build Docker image
-log_info "Building image with $CONTAINER_CLI..."
+# Build Docker image. Fargate is x86_64 by default; a build host running
+# arm64 (Apple Silicon) silently produces an arm64 image otherwise, which
+# only surfaces later as "exec /app/entrypoint.sh: exec format error" in the
+# ECS task's CloudWatch logs. PLATFORM defaults to the same linux/amd64 the
+# Lambda image build below already uses, so one variable controls both.
+PLATFORM="${PLATFORM:-linux/amd64}"
+log_info "Building image with $CONTAINER_CLI for $PLATFORM..."
 cd "$(dirname "$0")/../../backend"
-"$CONTAINER_CLI" build -t stratoclave-backend:latest .
+"$CONTAINER_CLI" build --platform "$PLATFORM" -t stratoclave-backend:latest .
 
 # One timestamp for both the tag and the push: evaluating `date` twice can
 # straddle a second boundary and push a tag that was never created.
@@ -84,6 +89,14 @@ BUILD_TAG="$(date +%Y%m%d-%H%M%S)"
 log_info "Tagging image..."
 "$CONTAINER_CLI" tag stratoclave-backend:latest $ECR_URI:latest
 "$CONTAINER_CLI" tag stratoclave-backend:latest $ECR_URI:$BUILD_TAG
+
+# The repository's imageTagMutability is IMMUTABLE, so re-pushing ":latest"
+# after it already exists is rejected outright ("400 Bad Request") rather
+# than overwriting it — the one AWS-documented way past that on an immutable
+# repository is to delete the existing tag first. Best-effort: a first-ever
+# push has no ":latest" to delete, so a failure here is not fatal.
+aws ecr batch-delete-image --repository-name "$ECR_REPO_NAME" \
+    --image-ids imageTag=latest --region "$AWS_REGION" >/dev/null 2>&1 || true
 
 # Push image to ECR
 log_info "Pushing image to ECR..."
