@@ -1,4 +1,4 @@
-"""F2 (CONTRACT-F2-grant.md): R8b + R34, and seam amendment B8 (SEAMS.md S6).
+"""F2 (docs/design/quota-raises.md): R8b + R34, and seam amendment B8 (SEAMS S6).
 
 R8b — lateness is measured over grants READ AND STILL ACTIVE; a
       REVOKE_BLOCKED grant stays in its OWN denominator for THAT purpose
@@ -24,7 +24,7 @@ B8 — "capacity-bearing" is ONE shared predicate (owned here, consumed by
       Reconciliation is **per target row** (`target_pk`/`target_sk`), not per
       tenant: a late sweep can leave an expired-but-unrevoked grant still
       pinned to the PRIOR period's row after rollover, so a tenant-wide sum
-      against only the CURRENT period's row would miss it (SEAMS.md S6).
+      against only the CURRENT period's row would miss it (SEAMS S6).
 
 R34 — tenant retirement revokes ACTIVE grants first; deletion is refused
       while any remain; the reconciler finds orphans STARTING FROM GRANTS
@@ -108,7 +108,13 @@ def test_r8b_active_only_sum_excludes_revoke_blocked_its_own_denominator(
         period=PERIOD, status="REVOKE_BLOCKED",
     )
     report = grants.reconcile_tenant_grants(tenant_id=TENANT, period=PERIOD)
-    assert report["active_only_sum_microusd"] == 700, (
+    # The report is `{"rows": [...], "orphans": [...], "clean": bool, ...}`,
+    # one entry per TARGET ROW (B8) — not a flat single-row dict, since the
+    # function generalises to `period=None` sweeping every row a tenant's
+    # grants have ever touched. Exactly one row for this tenant+period.
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["active_only_sum_microusd"] == 700, (
         "the blocked grant's 250 must not be counted in the ACTIVE-only "
         "figure — it is 300+400, not 950"
     )
@@ -147,9 +153,11 @@ def test_b8_capacity_bearing_sum_includes_revoke_blocked_so_drift_is_zero(
         period=PERIOD, status="REVOKE_BLOCKED",
     )
     report = grants.reconcile_tenant_grants(tenant_id=TENANT, period=PERIOD)
-    assert report["capacity_bearing_sum_microusd"] == 950
-    assert report["pool_granted_microusd"] == 950
-    assert report["drift_microusd"] == 0
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["capacity_bearing_sum_microusd"] == 950
+    assert row["pool_granted_microusd"] == 950
+    assert row["drift_microusd"] == 0
 
 
 def test_b8_is_capacity_bearing_is_one_shared_predicate(dynamodb_mock, quota_events_table):
@@ -171,7 +179,7 @@ def test_b8_is_capacity_bearing_is_one_shared_predicate(dynamodb_mock, quota_eve
 def test_b8_reconciliation_is_per_target_row_a_late_swept_grant_is_seen_on_the_prior_period(
     dynamodb_mock, quota_events_table,
 ):
-    """SEAMS.md S6's exact scenario: rollover has happened (a "2026-10" row
+    """SEAMS S6's exact scenario: rollover has happened (a "2026-10" row
     now exists), but a grant pinned to "2026-09" is still ACTIVE (the sweep
     has not yet caught its expiry). Reconciling "2026-09" specifically must
     still see it — the whole point of per-TARGET-ROW reconciliation rather
@@ -193,12 +201,18 @@ def test_b8_reconciliation_is_per_target_row_a_late_swept_grant_is_seen_on_the_p
         period="2026-09", status="ACTIVE",
     )
     report_sep = grants.reconcile_tenant_grants(tenant_id=TENANT, period="2026-09")
-    assert report_sep["capacity_bearing_sum_microusd"] == 500
-    assert report_sep["drift_microusd"] == 0
+    assert len(report_sep["rows"]) == 1
+    assert report_sep["rows"][0]["capacity_bearing_sum_microusd"] == 500
+    assert report_sep["rows"][0]["drift_microusd"] == 0
 
     report_oct = grants.reconcile_tenant_grants(tenant_id=TENANT, period="2026-10")
-    assert report_oct["capacity_bearing_sum_microusd"] == 0
-    assert report_oct["drift_microusd"] == 0
+    # Nothing is pinned to October's row at all — one row, reported clean
+    # at zero, because a SPECIFIC period always gets a row (even with zero
+    # grants) so a stray `pool_granted_microusd` with no grant behind it
+    # would still be caught as drift.
+    assert len(report_oct["rows"]) == 1
+    assert report_oct["rows"][0]["capacity_bearing_sum_microusd"] == 0
+    assert report_oct["rows"][0]["drift_microusd"] == 0
 
 
 def test_r8b_reconciler_reports_grant_cap(dynamodb_mock, quota_events_table):
@@ -209,8 +223,10 @@ def test_r8b_reconciler_reports_grant_cap(dynamodb_mock, quota_events_table):
         pool_granted_microusd=0, grant_cap_microusd=555,
     )
     report = grants.reconcile_tenant_grants(tenant_id=TENANT, period=PERIOD)
-    assert report["grant_cap_microusd"] == 555
-    assert report["effective_cap_microusd"] == 555
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["grant_cap_microusd"] == 555
+    assert row["effective_grant_cap_microusd"] == 555
 
 
 def test_b1_reconciler_reports_effective_cap_derived_from_baseline_when_absent(
@@ -226,8 +242,10 @@ def test_b1_reconciler_reports_effective_cap_derived_from_baseline_when_absent(
         TENANT, PERIOD, pool_limit_microusd=10**9, pool_granted_microusd=100,
     )
     report = grants.reconcile_tenant_grants(tenant_id=TENANT, period=PERIOD)
-    assert report["grant_cap_microusd"] is None
-    assert report["effective_cap_microusd"] == 10**9 - 100
+    assert len(report["rows"]) == 1
+    row = report["rows"][0]
+    assert row["grant_cap_microusd"] is None
+    assert row["effective_grant_cap_microusd"] == 10**9 - 100
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +271,13 @@ def test_r34_reconciler_reports_a_grant_whose_pool_row_is_missing(dynamodb_mock,
         period="2099-01", status="ACTIVE",
     )
     report = grants.reconcile_tenant_grants(tenant_id=TENANT, period=PERIOD)
-    assert "g-orphan" in report["orphan_grant_ids"]
+    # The orphan hunt is UNCONDITIONAL (never narrowed by the `period=`
+    # argument): "g-orphan" is pinned to "2099-01", a period this call never
+    # asked about, and it must still surface — an orphan visible only when
+    # somebody happens to query its own period is not found "starting from
+    # grants" at all.
+    orphan_grant_ids = [gid for o in report["orphans"] for gid in o["grant_ids"]]
+    assert "g-orphan" in orphan_grant_ids
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +299,18 @@ def test_r34_archive_tenant_refused_while_active_grants_remain(
     dynamodb_mock, quota_events_table, monkeypatch,
 ):
     """`DELETE /admin/tenants/{id}` (mvp.admin_tenants.archive_tenant)
-    ALREADY EXISTS and today calls `repo.archive(tenant_id)` unconditionally
-    — no grant check at all. Seeding one ACTIVE grant and expecting the
-    existing route to refuse with 409 is directly falsifiable against
-    current code (it returns 204 today)."""
+    ALREADY calls `revoke_all_active_grants` and refuses when it reports any
+    `remaining`. An ordinary ACTIVE grant is NOT the right seed to prove
+    this refusal exists, because `revoke_all_active_grants` has no
+    per-grant authority check of its own (the caller is already authorised
+    by `tenants:delete`) and simply revokes it -- so the very case this
+    test needs to distinguish "old, ungated code" from "new, gated code"
+    produces 204 either way, proving nothing. `REVOKE_BLOCKED` is the
+    capacity-bearing status that genuinely CANNOT be drained by the
+    ordinary path (its own `status = ACTIVE` condition never matches), so
+    it is the one seed that actually exercises the refusal (see
+    `test_r34_archive_tenant_succeeds_once_grants_are_revocable_and_drained`
+    just below for the positive control with an ordinary revocable grant)."""
     TenantsRepository().create(
         tenant_id=TENANT, name="Reconcile Co", team_lead_user_id="tl-1", created_by="tl-1",
     )
@@ -290,7 +322,7 @@ def test_r34_archive_tenant_refused_while_active_grants_remain(
         _table(), grant_id="g-still-live", tenant_id=TENANT, request_id="r1",
         approver_user_id="admin-1", approved_amount_microusd=200,
         expires_at_epoch=9_999_999_999, target_pk=TENANT, target_sk=budget_sk(PERIOD),
-        period=PERIOD, status="ACTIVE",
+        period=PERIOD, status="REVOKE_BLOCKED",
     )
     client = _delete_client(monkeypatch)
     resp = client.delete(f"/api/mvp/admin/tenants/{TENANT}")
@@ -344,4 +376,4 @@ def test_r34_revoke_all_active_grants_directly(dynamodb_mock, quota_events_table
         period=PERIOD, status="ACTIVE",
     )
     result = grants.revoke_all_active_grants(tenant_id=TENANT, actor=_admin_actor())
-    assert result["remaining_active"] == 0
+    assert result["remaining_count"] == 0

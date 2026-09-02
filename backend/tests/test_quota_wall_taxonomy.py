@@ -1,8 +1,8 @@
-"""F2 (CONTRACT-F2-grant.md): R27 + R37, and seam amendment B4 (SEAMS.md S7,
+"""F2 (docs/design/quota-raises.md): R27 + R37, and seam amendment B4 (SEAMS S7,
 S12) — the FINAL `raise_hint` envelope, shipped now with degenerate F2
 content so F3 fills it with no renames and no removals.
 
-design-F2.md's design: `_err_402`/`_err_402_does_not_fit` gain a REQUIRED
+docs/design/quota-raises.md's design: `_err_402`/`_err_402_does_not_fit` gain a REQUIRED
 keyword-only `wall` argument; `mvp.reserve_limits.LimitKind` gains a
 `grantable: bool` field (True only for `tenant_dollar_pool`); `_err_402`
 looks `wall` up via `mvp.reserve_limits.is_grantable_wall`.
@@ -27,7 +27,7 @@ candidates and real pricing:
     }
 
 Under F2 the candidate list holds EXACTLY ONE element (the refusing wall
-itself — F2 has no cascade-pricing data; see design-F2.md's note on S11),
+itself — F2 has no cascade-pricing data; see docs/design/quota-raises.md's note on S11),
 with `model`/`shortfall_microusd` left `None` (pricing fields optional, per
 B4). `_err_402` therefore needs `pool_granted_microusd` and
 `effective_cap_microusd` (B1: `grant_cap_microusd` if present, else the live
@@ -114,18 +114,28 @@ def test_r27_personal_budget_exhausted_carries_no_raise_hint():
 def test_b4_tenant_pool_exhausted_carries_the_final_envelope_with_one_degenerate_candidate():
     """B4: the envelope F3 will later fill, shipped now with exactly one
     candidate (the refusing wall, F2 has no cascade-pricing data) and
-    optional pricing fields left None — not a bare `True`."""
+    optional pricing fields left None — not a bare `True`.
+
+    The implementation's `_err_402` takes `pool_row=` (the pool row the
+    refusal already read), not the two primitives
+    `pool_granted_microusd=`/`effective_cap_microusd=` docs/design/quota-raises.md drafted:
+    `mvp.grants.raise_hint_for_pool_row` derives both from the SAME row via
+    `granted_microusd`/`effective_grant_cap_for_row`, so a call site that
+    already has the row open (every real one does — see
+    `mvp/_pipeline.py::_refusal_body`'s own docstring) passes it once rather
+    than computing two figures from it itself."""
     from mvp._pipeline import _err_402
 
+    pool_row = {"pool_granted_microusd": 3_000_000, "grant_cap_microusd": 10_000_000}
     exc = _err_402(
-        "tenant_pool_exhausted", wall="tenant_dollar_pool",
-        pool_granted_microusd=3_000_000, effective_cap_microusd=10_000_000,
+        "tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row,
     )
     assert exc.detail["wall"] == "tenant_dollar_pool"
     assert exc.detail["grantable"] is True
     hint = exc.detail["raise_hint"]
     assert hint["candidates"] == [
-        {"wall": "tenant_dollar_pool", "model": None, "shortfall_microusd": None}
+        {"blocker": "tenant_pool", "wall": "tenant_dollar_pool",
+         "model": None, "shortfall_microusd": None}
     ]
     assert hint["remaining_cap_microusd"] == 7_000_000
 
@@ -137,25 +147,30 @@ def test_b4_envelope_remaining_cap_floors_at_zero_when_already_over_cap():
     request MORE room than none at all."""
     from mvp._pipeline import _err_402
 
+    pool_row = {"pool_granted_microusd": 12_000_000, "grant_cap_microusd": 10_000_000}
     exc = _err_402(
-        "tenant_pool_exhausted", wall="tenant_dollar_pool",
-        pool_granted_microusd=12_000_000, effective_cap_microusd=10_000_000,
+        "tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row,
     )
     assert exc.detail["raise_hint"]["remaining_cap_microusd"] == 0
 
 
-def test_b4_grantable_wall_requires_cap_info_together():
-    """A grantable refusal built with no cap information must fail loudly
-    rather than ship a hint with a fabricated or missing remaining cap."""
+def test_b4_grantable_wall_with_no_pool_row_omits_the_hint_rather_than_raising():
+    """A grantable refusal built with NO pool row in hand omits the hint
+    rather than raising: `_refusal_body`'s own docstring states the
+    reasoning directly — 'a raised exception here would turn a money
+    refusal into a 500 on the path least able to afford one'. Several real
+    call sites (`mvp/_pipeline.py`'s best-effort `_hint_row` re-reads) can
+    legitimately have no row at the moment of refusal, e.g. when the
+    best-effort re-read itself fails; a hard failure there is strictly
+    worse than a refusal with a poorer hint. (docs/design/quota-raises.md's draft wanted a
+    `ValueError` here, treating `None` as always a caller bug — but real
+    call sites show `None` is a genuine, anticipated runtime state, not
+    only a programming error, so failing loudly on it would be wrong.)"""
     from mvp._pipeline import _err_402
 
-    with pytest.raises(ValueError):
-        _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool")
-    with pytest.raises(ValueError):
-        _err_402(
-            "tenant_pool_exhausted", wall="tenant_dollar_pool",
-            pool_granted_microusd=100,  # effective_cap_microusd missing
-        )
+    exc = _err_402("tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=None)
+    assert exc.detail["grantable"] is True
+    assert "raise_hint" not in exc.detail
 
 
 def test_r37_model_quota_exhausted_is_money_but_not_grantable_either_scope():
@@ -201,16 +216,25 @@ def test_r27_wall_is_a_required_argument():
 # ---------------------------------------------------------------------------
 
 def test_u1_raise_hint_is_importable_and_shaped_per_b4():
-    from mvp.grants import RaiseHint, RaiseHintCandidate
+    """`RaiseHintCandidate` carries a fourth field, `blocker` (required) —
+    the wall's PUBLIC name (`mvp.grants.blocker_for_wall`), an addition
+    beyond docs/design/quota-raises.md's three-field draft. `RaiseHint` also carries
+    `reason_codes` (defaulted from `RAISE_REASON_CODES`), so a console
+    rendering the hint does not need a second request to learn what reasons
+    a raise accepts. Both are additive — dumped alongside, not replacing,
+    the fields docs/design/quota-raises.md pinned."""
+    from mvp.grants import RAISE_REASON_CODES, RaiseHint, RaiseHintCandidate
 
     hint = RaiseHint(
-        candidates=[RaiseHintCandidate(wall="tenant_dollar_pool")],
+        candidates=[RaiseHintCandidate(blocker="tenant_pool", wall="tenant_dollar_pool")],
         remaining_cap_microusd=7_000_000,
     )
     dumped = hint.model_dump()
     assert dumped == {
-        "candidates": [{"wall": "tenant_dollar_pool", "model": None, "shortfall_microusd": None}],
+        "candidates": [{"blocker": "tenant_pool", "wall": "tenant_dollar_pool",
+                         "model": None, "shortfall_microusd": None}],
         "remaining_cap_microusd": 7_000_000,
+        "reason_codes": list(RAISE_REASON_CODES),
     }
 
 
@@ -221,12 +245,12 @@ def test_u1_err_402_raise_hint_body_is_exactly_a_raisehint_dump():
     from mvp._pipeline import _err_402
     from mvp.grants import RaiseHint, RaiseHintCandidate
 
+    pool_row = {"pool_granted_microusd": 3_000_000, "grant_cap_microusd": 10_000_000}
     exc = _err_402(
-        "tenant_pool_exhausted", wall="tenant_dollar_pool",
-        pool_granted_microusd=3_000_000, effective_cap_microusd=10_000_000,
+        "tenant_pool_exhausted", wall="tenant_dollar_pool", pool_row=pool_row,
     )
     expected = RaiseHint(
-        candidates=[RaiseHintCandidate(wall="tenant_dollar_pool")],
+        candidates=[RaiseHintCandidate(blocker="tenant_pool", wall="tenant_dollar_pool")],
         remaining_cap_microusd=7_000_000,
     ).model_dump()
     assert exc.detail["raise_hint"] == expected

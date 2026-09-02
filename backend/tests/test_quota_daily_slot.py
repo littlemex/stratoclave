@@ -1,4 +1,4 @@
-"""F2 (CONTRACT-F2-grant.md): R7, R22, R33 — the daily slot and the client
+"""F2 (docs/design/quota-raises.md): R7, R22, R33 — the daily slot and the client
 token are one mechanism.
 
 R7  — the slot row stores the token AND the request_id it admitted; the
@@ -14,13 +14,17 @@ R22 — a DECIDED request frees the day's slot (lazily, on the next attempt):
       do not. The 409 for a still-occupied slot names the holder
       (request_id) and `reset_at` with an explicit zone.
 
-`mvp.grants` does not exist yet, so every test below fails today at import.
+Field names on `submit_limit_raise` (`asked_amount_microusd`, `reason_code`,
+`comment`, `client_token`, `limit_kind`) and the absence of a `tenant_id`
+argument (the tenant is the caller's own, read from `actor.org_id`) follow
+U7's pin. Time is controlled through `freeze_grants_clock`, per U5.
 """
 from __future__ import annotations
 
 import boto3
 
 from tests.quota_events_fixtures import (
+    freeze_grants_clock,
     quota_events_table,
     seed_grant,
     seed_pool_with_grant_fields,
@@ -34,6 +38,7 @@ TENANT_A = "slot-org-a"
 TENANT_B = "slot-org-b"
 USER = "user-slot-1"
 DAY = "2026-09-02"
+T0 = 1_788_307_200  # 2026-09-02T00:00:00Z
 
 
 def _table():
@@ -41,11 +46,11 @@ def _table():
         "stratoclave-quota-events")
 
 
-def _actor():
+def _actor(tenant_id: str = TENANT_A):
     from mvp.deps import AuthenticatedUser
 
     return AuthenticatedUser(
-        user_id=USER, email="u@example.com", org_id=TENANT_A,
+        user_id=USER, email="u@example.com", org_id=tenant_id,
         roles=["user"], raw_claims={}, auth_kind="cognito",
     )
 
@@ -61,45 +66,50 @@ def _seed_pool(tenant: str) -> None:
 # R7 — same token twice returns the same request; a different token refuses
 # ---------------------------------------------------------------------------
 
-def test_r7_same_client_token_twice_returns_the_first_request(dynamodb_mock, quota_events_table):
+def test_r7_same_client_token_twice_returns_the_first_request(
+    dynamodb_mock, quota_events_table, monkeypatch,
+):
     from mvp import grants
 
     _seed_pool(TENANT_A)
+    freeze_grants_clock(monkeypatch, T0)
     first = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=5_000,
-        requested_expires_at=9_999_999_999, client_token="tok-abc",
-        justification="need more headroom", now_epoch=1_788_307_200,  # 2026-09-02T00:00:00Z
+        actor=_actor(), asked_amount_microusd=5_000, reason_code="usage_spike",
+        client_token="tok-abc", comment="need more headroom",
     )
+    freeze_grants_clock(monkeypatch, T0 + 60)
     second = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=5_000,
-        requested_expires_at=9_999_999_999, client_token="tok-abc",
-        justification="need more headroom", now_epoch=1_788_307_260,
+        actor=_actor(), asked_amount_microusd=5_000, reason_code="usage_spike",
+        client_token="tok-abc", comment="need more headroom",
     )
     assert second["request_id"] == first["request_id"]
-    # Only ONE Request row was ever created.
+    # Only ONE Request row was ever created, and idempotent replay did not
+    # mutate the amount it was first admitted for.
     resp = _table().get_item(Key={"pk": f"REQUEST#{first['request_id']}", "sk": "REQUEST"})
-    assert resp["Item"]["client_token"] == "tok-abc"
+    assert int(resp["Item"]["asked_amount_microusd"]) == 5_000
 
 
-def test_r7_different_client_token_same_day_refused_with_daily_code(dynamodb_mock, quota_events_table):
+def test_r7_different_client_token_same_day_refused_with_daily_code(
+    dynamodb_mock, quota_events_table, monkeypatch,
+):
     from mvp import grants
 
     _seed_pool(TENANT_A)
+    freeze_grants_clock(monkeypatch, T0)
     grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=5_000,
-        requested_expires_at=9_999_999_999, client_token="tok-first",
-        justification="j1", now_epoch=1_788_307_200,
+        actor=_actor(), asked_amount_microusd=5_000, reason_code="usage_spike",
+        client_token="tok-first", comment="j1",
     )
+    freeze_grants_clock(monkeypatch, T0 + 60)
     try:
         grants.submit_limit_raise(
-            actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=7_000,
-            requested_expires_at=9_999_999_999, client_token="tok-second",
-            justification="j2", now_epoch=1_788_307_260,
+            actor=_actor(), asked_amount_microusd=7_000, reason_code="usage_spike",
+            client_token="tok-second", comment="j2",
         )
         raise AssertionError("a second, differently-tokened submission the same day must refuse")
     except grants.DailySlotOccupied as exc:
-        assert exc.holder_request_id
-        assert exc.reset_at.endswith("Z") or "+00:00" in exc.reset_at, (
+        assert exc.extra["holder_request_id"]
+        assert exc.extra["reset_at"].endswith("Z") or "+00:00" in exc.extra["reset_at"], (
             "R22: the 409 must name the reset time WITH an explicit zone"
         )
 
@@ -109,29 +119,29 @@ def test_r7_different_client_token_same_day_refused_with_daily_code(dynamodb_moc
 # ---------------------------------------------------------------------------
 
 def test_r33_same_token_same_user_two_tenants_yields_two_independent_requests(
-    dynamodb_mock, quota_events_table,
+    dynamodb_mock, quota_events_table, monkeypatch,
 ):
     from mvp import grants
 
     _seed_pool(TENANT_A)
     _seed_pool(TENANT_B)
+    freeze_grants_clock(monkeypatch, T0)
     a = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=1_000,
-        requested_expires_at=9_999_999_999, client_token="shared-token",
-        justification="a", now_epoch=1_788_307_200,
+        actor=_actor(TENANT_A), asked_amount_microusd=1_000, reason_code="usage_spike",
+        client_token="shared-token", comment="a",
     )
+    freeze_grants_clock(monkeypatch, T0 + 60)
     b = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_B, requested_amount_microusd=2_000,
-        requested_expires_at=9_999_999_999, client_token="shared-token",
-        justification="b", now_epoch=1_788_307_260,
+        actor=_actor(TENANT_B), asked_amount_microusd=2_000, reason_code="usage_spike",
+        client_token="shared-token", comment="b",
     )
     assert a["request_id"] != b["request_id"]
     resp_a = _table().get_item(Key={"pk": f"REQUEST#{a['request_id']}", "sk": "REQUEST"})
     resp_b = _table().get_item(Key={"pk": f"REQUEST#{b['request_id']}", "sk": "REQUEST"})
     assert resp_a["Item"]["tenant_id"] == TENANT_A
     assert resp_b["Item"]["tenant_id"] == TENANT_B
-    assert int(resp_a["Item"]["requested_amount_microusd"]) == 1_000
-    assert int(resp_b["Item"]["requested_amount_microusd"]) == 2_000
+    assert int(resp_a["Item"]["asked_amount_microusd"]) == 1_000
+    assert int(resp_b["Item"]["asked_amount_microusd"]) == 2_000
 
 
 def test_r33_slot_key_shape_embeds_tenant_in_the_sort_key(dynamodb_mock, quota_events_table):
@@ -152,57 +162,58 @@ def test_r33_slot_key_shape_embeds_tenant_in_the_sort_key(dynamodb_mock, quota_e
 # R22 — decided requests free the slot; PENDING/ACTIVE-grant does not
 # ---------------------------------------------------------------------------
 
-def test_r22_withdrawn_request_frees_the_slot(dynamodb_mock, quota_events_table):
+def test_r22_withdrawn_request_frees_the_slot(dynamodb_mock, quota_events_table, monkeypatch):
     from mvp import grants
 
     _seed_pool(TENANT_A)
     seed_request(
         _table(), request_id="req-w", tenant_id=TENANT_A, user_id=USER,
-        requested_amount_microusd=1_000, requested_expires_at=9_999_999_999,
+        asked_amount_microusd=1_000,
         status="WITHDRAWN", client_token="tok-w",
     )
     seed_slot(
         _table(), user_id=USER, tenant_id=TENANT_A, date_str=DAY,
         client_token="tok-w", request_id="req-w",
     )
+    freeze_grants_clock(monkeypatch, T0)
     new = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=2_000,
-        requested_expires_at=9_999_999_999, client_token="tok-new",
-        justification="try again", now_epoch=1_788_307_200,
+        actor=_actor(), asked_amount_microusd=2_000, reason_code="usage_spike",
+        client_token="tok-new", comment="try again",
     )
     assert new["request_id"] != "req-w"
 
 
-def test_r22_rejected_request_frees_the_slot(dynamodb_mock, quota_events_table):
+def test_r22_rejected_request_frees_the_slot(dynamodb_mock, quota_events_table, monkeypatch):
     from mvp import grants
 
     _seed_pool(TENANT_A)
     seed_request(
         _table(), request_id="req-rej", tenant_id=TENANT_A, user_id=USER,
-        requested_amount_microusd=1_000, requested_expires_at=9_999_999_999,
+        asked_amount_microusd=1_000,
         status="REJECTED", client_token="tok-rej",
     )
     seed_slot(
         _table(), user_id=USER, tenant_id=TENANT_A, date_str=DAY,
         client_token="tok-rej", request_id="req-rej",
     )
+    freeze_grants_clock(monkeypatch, T0)
     new = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=2_000,
-        requested_expires_at=9_999_999_999, client_token="tok-new2",
-        justification="try again", now_epoch=1_788_307_200,
+        actor=_actor(), asked_amount_microusd=2_000, reason_code="usage_spike",
+        client_token="tok-new2", comment="try again",
     )
     assert new["request_id"] != "req-rej"
 
 
-def test_r22_expired_grant_frees_the_slot(dynamodb_mock, quota_events_table):
+def test_r22_expired_grant_frees_the_slot(dynamodb_mock, quota_events_table, monkeypatch):
     from mvp import grants
     from dynamo.tenant_budgets import budget_sk
 
     _seed_pool(TENANT_A)
     seed_request(
         _table(), request_id="req-exp", tenant_id=TENANT_A, user_id=USER,
-        requested_amount_microusd=1_000, requested_expires_at=9_999_999_999,
+        asked_amount_microusd=1_000,
         status="APPROVED", client_token="tok-exp",
+        extra={"grant_id": "g-exp"},
     )
     seed_grant(
         _table(), grant_id="g-exp", tenant_id=TENANT_A, request_id="req-exp",
@@ -214,40 +225,40 @@ def test_r22_expired_grant_frees_the_slot(dynamodb_mock, quota_events_table):
         _table(), user_id=USER, tenant_id=TENANT_A, date_str=DAY,
         client_token="tok-exp", request_id="req-exp",
     )
+    freeze_grants_clock(monkeypatch, T0)
     new = grants.submit_limit_raise(
-        actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=2_000,
-        requested_expires_at=9_999_999_999, client_token="tok-new3",
-        justification="try again", now_epoch=1_788_307_200,
+        actor=_actor(), asked_amount_microusd=2_000, reason_code="usage_spike",
+        client_token="tok-new3", comment="try again",
     )
     assert new["request_id"] != "req-exp"
 
 
-def test_r22_pending_request_does_not_free_the_slot(dynamodb_mock, quota_events_table):
+def test_r22_pending_request_does_not_free_the_slot(dynamodb_mock, quota_events_table, monkeypatch):
     from mvp import grants
 
     _seed_pool(TENANT_A)
     seed_request(
         _table(), request_id="req-pending", tenant_id=TENANT_A, user_id=USER,
-        requested_amount_microusd=1_000, requested_expires_at=9_999_999_999,
+        asked_amount_microusd=1_000,
         status="PENDING", client_token="tok-pending",
     )
     seed_slot(
         _table(), user_id=USER, tenant_id=TENANT_A, date_str=DAY,
         client_token="tok-pending", request_id="req-pending",
     )
+    freeze_grants_clock(monkeypatch, T0)
     try:
         grants.submit_limit_raise(
-            actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=2_000,
-            requested_expires_at=9_999_999_999, client_token="tok-different",
-            justification="try again", now_epoch=1_788_307_200,
+            actor=_actor(), asked_amount_microusd=2_000, reason_code="usage_spike",
+            client_token="tok-different", comment="try again",
         )
         raise AssertionError("a PENDING request must NOT free the day's slot")
     except grants.DailySlotOccupied as exc:
-        assert exc.holder_request_id == "req-pending"
+        assert exc.extra["holder_request_id"] == "req-pending"
 
 
 def test_r22_approved_request_with_still_active_grant_does_not_free_the_slot(
-    dynamodb_mock, quota_events_table,
+    dynamodb_mock, quota_events_table, monkeypatch,
 ):
     from mvp import grants
     from dynamo.tenant_budgets import budget_sk
@@ -255,8 +266,9 @@ def test_r22_approved_request_with_still_active_grant_does_not_free_the_slot(
     _seed_pool(TENANT_A)
     seed_request(
         _table(), request_id="req-active-grant", tenant_id=TENANT_A, user_id=USER,
-        requested_amount_microusd=1_000, requested_expires_at=9_999_999_999,
+        asked_amount_microusd=1_000,
         status="APPROVED", client_token="tok-active",
+        extra={"grant_id": "g-still-active"},
     )
     seed_grant(
         _table(), grant_id="g-still-active", tenant_id=TENANT_A, request_id="req-active-grant",
@@ -268,11 +280,11 @@ def test_r22_approved_request_with_still_active_grant_does_not_free_the_slot(
         _table(), user_id=USER, tenant_id=TENANT_A, date_str=DAY,
         client_token="tok-active", request_id="req-active-grant",
     )
+    freeze_grants_clock(monkeypatch, T0)
     try:
         grants.submit_limit_raise(
-            actor=_actor(), tenant_id=TENANT_A, requested_amount_microusd=2_000,
-            requested_expires_at=9_999_999_999, client_token="tok-different2",
-            justification="try again", now_epoch=1_788_307_200,
+            actor=_actor(), asked_amount_microusd=2_000, reason_code="usage_spike",
+            client_token="tok-different2", comment="try again",
         )
         raise AssertionError("a live ACTIVE grant must keep the day's slot occupied")
     except grants.DailySlotOccupied:

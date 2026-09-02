@@ -1,11 +1,11 @@
-"""F2 (CONTRACT-F2-grant.md): R17b, and seam amendment B5 (SEAMS.md S5) — the
+"""F2 (docs/design/quota-raises.md): R17b, and seam amendment B5 (SEAMS S5) — the
 "$950" regression test, moved here from F4.
 
 R17b — a set whose figure equals the CURRENT `pool_limit_microusd` while
 `pool_granted_microusd > 0` is refused with `409 figure_includes_active_grant`
 — the caller's new figure almost certainly means "the baseline I want," and
 accepting it verbatim would silently re-base the grant on top of itself
-(design-F2.md's R17b row).
+(docs/design/quota-raises.md's R17b row).
 
 B5 — F2 is where the setter ACQUIRES grant-aware semantics in the first
 place, so F2 is where the regression guard must live; arriving in F4 (as
@@ -40,7 +40,11 @@ import pytest
 
 from dynamo.tenants import TenantsRepository
 from mvp.deps import AuthenticatedUser, get_current_user
-from tests.quota_events_fixtures import quota_events_table, seed_pool_with_grant_fields
+from tests.quota_events_fixtures import (
+    freeze_grants_clock,
+    quota_events_table,
+    seed_pool_with_grant_fields,
+)
 
 assert quota_events_table  # imported for its pytest-fixture side effect (used by name in B6)
 
@@ -200,15 +204,35 @@ def test_b5_950_regression_setting_a_new_baseline_survives_the_grants_later_expi
 
     # The grant now expires and is revoked (the sweeper's own mechanism,
     # exercised directly here since this file is about the setter, not the
-    # sweeper).
+    # sweeper). The real flow is two fragments from two repositories, not
+    # one `revoke_grant_txn_items` builder — see
+    # `test_quota_grant_pinning_and_revoke.py`'s header for why.
     from dynamo.quota_events import QuotaEventsRepository
 
-    repo = QuotaEventsRepository()
-    txn_items = repo.revoke_grant_txn_items(
-        tenant_id=TENANT, grant_id="g-950", approved_amount_microusd=50_000_000,
-        target_pk=TENANT, target_sk=budget_sk(PERIOD), to_status="EXPIRED",
-        revoked_by="sweeper", revoked_at="2026-09-02T00:00:00+00:00",
+    # `_seed_tenant_with_grant`/`seed_pool_with_grant_fields` never wrote a
+    # real Grant row for "g-950" (only the pool row's counters) — put one so
+    # `grant_terminal_txn_item`'s own condition
+    # (`approved_amount_microusd = :read`) has something to read.
+    from tests.quota_events_fixtures import seed_grant
+
+    seed_grant(
+        boto3_table(), grant_id="g-950", tenant_id=TENANT, request_id="r-950",
+        approver_user_id="admin-1", approved_amount_microusd=50_000_000,
+        expires_at_epoch=1_000, target_pk=TENANT, target_sk=budget_sk(PERIOD),
+        period=PERIOD, status="ACTIVE",
     )
+    events_repo = QuotaEventsRepository()
+    txn_items = [
+        events_repo.grant_terminal_txn_item(
+            tenant_id=TENANT, grant_id="g-950", to_status="EXPIRED",
+            approved_amount_read=50_000_000, revoked_by="sweeper",
+            revoked_at="2026-09-02T00:00:00+00:00",
+        ),
+        TenantBudgetsRepository().grant_revoke_txn_item(
+            target_pk=TENANT, target_sk=budget_sk(PERIOD),
+            approved_amount_microusd=50_000_000,
+        ),
+    ]
     import boto3
 
     boto3.client("dynamodb", region_name="us-east-1").transact_write_items(TransactItems=txn_items)
@@ -225,7 +249,7 @@ def test_b5_950_regression_setting_a_new_baseline_survives_the_grants_later_expi
 # ---------------------------------------------------------------------------
 
 def test_b6_r28_approval_refuses_to_apply_a_grant_to_a_suspended_pool(
-    dynamodb_mock, quota_events_table,
+    dynamodb_mock, quota_events_table, monkeypatch,
 ):
     """An approval must not apply a grant to a pool whose `status` is
     "suspended" — such a grant ticks toward expiry delivering nothing while
@@ -252,16 +276,17 @@ def test_b6_r28_approval_refuses_to_apply_a_grant_to_a_suspended_pool(
 
     seed_request(
         boto3_table(), request_id="req-suspended", tenant_id=TENANT, user_id="u1",
-        requested_amount_microusd=1_000, requested_expires_at=9_999_999_999,
+        asked_amount_microusd=1_000,
     )
     admin = AuthenticatedUser(
         user_id="admin-1", email="admin@example.com", org_id="admin-1",
         roles=["admin"], raw_claims={}, auth_kind="cognito",
     )
+    freeze_grants_clock(monkeypatch, 1_788_307_200)
     with pytest.raises(grants.PoolSuspended):
         grants.approve_limit_raise(
             actor=admin, request_id="req-suspended", approved_amount_microusd=1_000,
-            expires_at=1_788_307_500, now_epoch=1_788_307_200,
+            expires_at=1_788_307_500,
         )
 
     row = TenantBudgetsRepository().get(TENANT, PERIOD, consistent_read=True)
