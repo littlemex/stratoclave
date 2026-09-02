@@ -92,3 +92,51 @@ log_info "Pushing image to ECR..."
 
 log_info "Docker image pushed successfully!"
 log_info "ECR URI: $ECR_URI:latest"
+
+# --- Lambda image (backend/Dockerfile.lambda) --------------------------------
+# The scheduled jobs (ledger projector/reconciler, certificate issuer, quota
+# reconciler/period-rollover, quota grant sweeper) run a SEPARATE image built
+# from backend/Dockerfile.lambda: it bakes in the AWS Lambda Runtime Interface
+# Client, which the uvicorn image above does not have and will not run under.
+# Nothing before this point built or pushed it, so following only the steps
+# above leaves every one of those Lambda functions pointing at either a
+# nonexistent tag or, worse, the ECS backend's own image.
+#
+# It shares this repository with the ECS backend image (a second repository
+# was considered and rejected: every one of the four scheduled-job stacks
+# already takes `lambdaRepository` as the SAME ecrStack.repository, and
+# splitting it would touch stacks outside this fix, wire a second repository
+# through all of them, and still not by itself stop a mistagged push — a
+# distinct tag NAMESPACE does that with a one-line change). It MUST NOT share
+# a TAG: iac/bin/iac.ts fails synth if LAMBDA_IMAGE_TAG equals the backend's
+# own IMAGE_TAG, because the ECR repository's IMMUTABLE policy only blocks
+# re-pushing an EXISTING tag — it does not stop two different images from
+# being pushed under the same tag one after another, which would silently
+# retag whichever image ECS is currently running.
+#
+# Skippable with BUILD_LAMBDA_IMAGE=false for a backend-only re-deploy that
+# does not touch any scheduled-job code.
+BUILD_LAMBDA_IMAGE="${BUILD_LAMBDA_IMAGE:-true}"
+if [ "$BUILD_LAMBDA_IMAGE" = "true" ]; then
+    # Same reasoning as the platform note on the backend image above: the
+    # Lambda Runtime Interface Client binary is architecture-specific too, and
+    # a Lambda function defaults to x86_64.
+    PLATFORM="${PLATFORM:-linux/amd64}"
+    LAMBDA_IMAGE_TAG="lambda-${BUILD_TAG}"
+
+    log_info "Building Lambda image (backend/Dockerfile.lambda) for $PLATFORM..."
+    "$CONTAINER_CLI" build --platform "$PLATFORM" -f Dockerfile.lambda -t stratoclave-backend-lambda:latest .
+
+    log_info "Tagging Lambda image..."
+    "$CONTAINER_CLI" tag stratoclave-backend-lambda:latest "$ECR_URI:$LAMBDA_IMAGE_TAG"
+
+    log_info "Pushing Lambda image to ECR..."
+    "$CONTAINER_CLI" push "$ECR_URI:$LAMBDA_IMAGE_TAG"
+
+    log_info "Lambda image pushed successfully!"
+    log_info "ECR URI: $ECR_URI:$LAMBDA_IMAGE_TAG"
+    log_info "Export this before deploying the quota-reconciler / quota-grants stacks:"
+    log_info "  export LAMBDA_IMAGE_TAG=$LAMBDA_IMAGE_TAG"
+else
+    log_warn "Skipping Lambda image build (BUILD_LAMBDA_IMAGE=false)"
+fi

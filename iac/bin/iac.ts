@@ -689,6 +689,45 @@ if (app.node.tryGetContext('certificateScheduler') === true ||
   certificateSchedulerStack.addDependency(dynamoDBStack);
 }
 
+// The three Lambda functions below (reconciler, period-rollover, grant sweeper)
+// run backend/Dockerfile.lambda — a DIFFERENT image from the uvicorn one ECS
+// runs (it bakes in the AWS Lambda Runtime Interface Client). The older
+// scheduled-Lambda stacks above (ledgerProjectorStack, certificateSchedulerStack)
+// resolve their tag as `LAMBDA_IMAGE_TAG || IMAGE_TAG || 'latest'`, which lets an
+// operator who has never built backend/Dockerfile.lambda deploy anyway, silently
+// pointing the Lambda at the ECS backend's own image — it starts, but the RIC
+// entrypoint the backend image lacks means every invocation fails, not synth.
+// Worse, the reverse mistake (pushing a Lambda image under the tag the backend
+// is running) would retarget ECS's running image, and the ECR repository's
+// IMMUTABLE tag policy does not stop that: it only blocks re-pushing a tag that
+// already exists, not two different images sharing a fresh one.
+//
+// `resolveLambdaImageTag` closes both directions at synth time rather than
+// leaving either to be discovered at runtime or by an accidental push: it
+// requires an explicit, distinct tag instead of falling back to the backend's.
+function resolveLambdaImageTag(stackKind: string): string {
+  const tag = process.env.LAMBDA_IMAGE_TAG;
+  if (!tag) {
+    throw new Error(
+      `LAMBDA_IMAGE_TAG must be set to deploy ${stackKind}. Its Lambda functions run ` +
+        'backend/Dockerfile.lambda (the AWS Lambda Runtime Interface Client image), a ' +
+        'different artifact from the ECS backend image that iac/scripts/build-and-push.sh ' +
+        'now also builds and pushes. Run it, then export the LAMBDA_IMAGE_TAG it prints. ' +
+        'See docs/DEPLOYMENT.md, "Post-deploy: quota gated stacks".',
+    );
+  }
+  const backendTag = process.env.IMAGE_TAG || 'latest';
+  if (tag === backendTag) {
+    throw new Error(
+      `LAMBDA_IMAGE_TAG ("${tag}") must not equal the ECS backend's IMAGE_TAG ` +
+        `("${backendTag}"). They name different images sharing one ECR repository; a ` +
+        'shared tag means a push meant for one can silently retarget the other. Use a ' +
+        'distinct tag (build-and-push.sh prefixes its Lambda tag with "lambda-").',
+    );
+  }
+  return tag;
+}
+
 // Daily tenant pool-ceiling reconciler. Its OWN stack, on the same convention as
 // the projector and the certificate scheduler above: every scheduled job in this
 // repository is its own stack, and putting this one on the service stack would
@@ -702,12 +741,16 @@ if (app.node.tryGetContext('quotaReconciler') === true ||
       env,
       prefix,
       lambdaRepository: ecrStack.repository,
-      lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+      lambdaImageTag: resolveLambdaImageTag('quota-reconciler'),
       tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
       // The seat counts the pool rows are compared AGAINST. The reconciler exists
       // because an equation over the pool row alone cannot see a membership delta
       // applied twice, so the membership table is not optional here.
       userTenantsTable: dynamoDBStack.userTenantsTable,
+      // grant_target_row_exists (mvp/grants.py) reads this on every pass; see the
+      // prop doc on QuotaReconcilerStackProps for the AccessDeniedException a real
+      // deploy hit without it.
+      quotaEventsTable: dynamoDBStack.quotaEventsTable,
       description: `[${prefix}] Daily tenant pool-ceiling reconciliation against sources`,
     });
   quotaReconcilerStack.addDependency(ecrStack);
@@ -729,7 +772,7 @@ if (app.node.tryGetContext('quotaGrants') === true ||
       env,
       prefix,
       lambdaRepository: ecrStack.repository,
-      lambdaImageTag: process.env.LAMBDA_IMAGE_TAG || process.env.IMAGE_TAG || 'latest',
+      lambdaImageTag: resolveLambdaImageTag('quota-grants'),
       quotaEventsTable: dynamoDBStack.quotaEventsTable,
       // The rows a revocation moves. Not optional: a sweep that could read grants
       // and not write pools would take grants terminal while leaving their capacity
@@ -928,11 +971,17 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   // the managed basic-execution policy, and the `/index/*` wildcard a table grant
   // necessarily produces for a job that reads through a GSI.
   //
-  // NOTE for whoever reads this next: `quotaReconcilerStack` is missing from this
-  // list and carries the identical findings. It is not added here because it is not
-  // this change's file to fix, and it went unnoticed because `cdk synth` is not part
-  // of the jest suite — so nag findings on a context-gated stack are invisible until
-  // somebody deploys it.
+  // `quotaReconcilerStack` carries the identical findings (AwsSolutions-IAM4 x2,
+  // AwsSolutions-IAM5 x1) and is suppressed here on the same list. A previous
+  // version of this comment predicted exactly this stack would fail a real
+  // deploy because it was missing from this block and `cdk synth` was not part
+  // of the jest suite, so the gap was invisible until somebody deployed it — it
+  // did, and it failed with those three errors. `nag-synth.test.ts` now runs a
+  // real `cdk synth --all` with every context-gated stack enabled, specifically
+  // so a stack missing from this list fails CI instead of a real deploy.
+  if (quotaReconcilerStack) {
+    NagSuppressions.addStackSuppressions(quotaReconcilerStack, appLevelSuppressions);
+  }
   if (quotaGrantsStack) {
     NagSuppressions.addStackSuppressions(quotaGrantsStack, appLevelSuppressions);
   }

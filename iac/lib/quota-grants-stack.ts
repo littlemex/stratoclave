@@ -68,6 +68,20 @@ export class QuotaGrantsStack extends cdk.Stack {
 
     const metricNamespace = `${prefix}/Grants`;
 
+    // A dedicated, CDK-managed log group, on the same pattern as
+    // `certificate-scheduler-stack.ts`'s `IssuerLogGroup`. A Lambda's DEFAULT
+    // `/aws/lambda/<function-name>` group is created lazily by the Lambda
+    // service on first invocation, not at deploy time — so importing it via
+    // `fromLogGroupName` pointed the metric filters below at a log group that
+    // does not exist yet on a fresh account, and `AWS::Logs::MetricFilter`
+    // fails CREATE with a ResourceNotFoundException the first time this stack
+    // is deployed, rolling the whole stack back before the sweeper ever runs.
+    const sweeperLogGroup = new logs.LogGroup(this, 'GrantSweeperLogGroup', {
+      logGroupName: `/lambda/${prefix}-quota-grant-sweeper`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     this.sweeper = new lambda.DockerImageFunction(this, 'GrantSweeper', {
       functionName: `${prefix}-quota-grant-sweeper`,
       code: lambda.DockerImageCode.fromEcr(lambdaRepository, {
@@ -85,6 +99,7 @@ export class QuotaGrantsStack extends cdk.Stack {
         DYNAMODB_TENANT_BUDGETS_TABLE: tenantBudgetsTable.tableName,
         STRATOCLAVE_METRIC_NAMESPACE: metricNamespace,
       },
+      logGroup: sweeperLogGroup,
       description:
         "Revokes grants whose window has closed, returning their capacity to the tenant's pool.",
     });
@@ -99,8 +114,7 @@ export class QuotaGrantsStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.sweeper)],
     });
 
-    const logGroup = logs.LogGroup.fromLogGroupName(
-      this, 'GrantSweeperLogGroup', `/aws/lambda/${prefix}-quota-grant-sweeper`);
+    const logGroup = sweeperLogGroup;
 
     // (1) The sweeper stopped. Deployment-scoped: a run names no single tenant, and
     // saying so explicitly is what stops a per-tenant signal losing its attribution
