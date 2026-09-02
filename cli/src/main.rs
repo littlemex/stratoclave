@@ -31,6 +31,8 @@ mod config;
 mod mvp;
 mod output;
 mod policy;
+#[cfg(test)]
+mod test_env;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
