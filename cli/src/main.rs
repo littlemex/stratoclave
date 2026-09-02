@@ -81,7 +81,8 @@ enum Commands {
     },
     /// Launch OpenAI codex via Stratoclave proxy
     Codex {
-        /// Override model ID (e.g. openai.gpt-5.4)
+        /// Override model ID (e.g. openai.gpt-5.6-sol). Omit to use the
+        /// deployment's advertised default, or `stratoclave.default_codex_model`.
         #[arg(long)]
         model: Option<String>,
         /// Attribution group id (x-sc-group-id header), [A-Za-z0-9._:-]{1,64}.
