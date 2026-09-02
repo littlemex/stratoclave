@@ -327,4 +327,58 @@ test.describe('the tenant administrator deciding a raise', () => {
     // approving it and watching her still get refused.
     await expect(page.getByText('$10.00')).toBeVisible()
   })
+
+  test('shows the remaining grant cap before he types an amount, and blocks the ask until it fits', async ({
+    page,
+  }) => {
+    // The amount-side twin of the expiry case above, and the real defect
+    // this closes: `LimitRaiseApproval.tsx` used to fetch the tenant's
+    // ceiling composition (`ns.getPoolBudget`) for `PoolBudgetCard` alone and
+    // never carry `remaining_grant_cap_microusd` down to the amount field —
+    // so he learned the cap only from the 422 `grant_cap_exceeded` a
+    // submitted approval came back with. Her ask is $200; the tenant's
+    // baseline-derived cap here is $50, a fifth of it — the same shape a real
+    // tenant with a small baseline produces.
+    await seedAdminSession(page)
+    await mockCommonRoutes(page)
+    await page.route('**/api/mvp/admin/limit-raises?**', (route) =>
+      route.fulfill({ json: { requests: [pendingRequest()], reason_codes: [] } }),
+    )
+    await page.route(`**/api/mvp/admin/tenants/${TENANT_ID}/pool-budget**`, (route) =>
+      route.fulfill({
+        json: tenantPoolNow({
+          grant_cap_microusd: null,
+          effective_grant_cap_microusd: 50_000_000,
+          grant_cap_is_derived: true,
+          remaining_grant_cap_microusd: 50_000_000,
+        }),
+      }),
+    )
+
+    await page.goto(`/admin/tenants/${TENANT_ID}/limit-raises`)
+
+    // Visible before the amount field is touched, prose rather than only an
+    // attribute — the amount input takes decimal text ("$1,000.50"), which
+    // an `<input max>` cannot constrain, unlike the expiry case's
+    // `datetime-local` field.
+    const capHint = page.getByTestId('lr-remaining-grant-cap')
+    await expect(capHint).toBeVisible()
+    await expect(capHint).toContainText('$50.00')
+    await expect(capHint).toContainText(/derived from baseline/i)
+
+    // The pre-filled $200 ask already exceeds the $50 cap, so the warning and
+    // the disabled button appear with no typing at all.
+    await expect(page.getByTestId('lr-amount-over-cap')).toBeVisible()
+    await expect(page.getByTestId('lr-approve-button')).toBeDisabled()
+
+    // Brought inside the cap, and given the comment `givingLess` requires
+    // whenever the approved figure undercuts the ask — the warning clears
+    // and the button is enabled, proving the block was the cap check and not
+    // something else on the row.
+    const amountInput = page.getByTestId('lr-approve-amount')
+    await amountInput.fill('40')
+    await page.getByTestId('lr-decision-comment').fill('capped by the tenant grant cap')
+    await expect(page.getByTestId('lr-amount-over-cap')).toBeHidden()
+    await expect(page.getByTestId('lr-approve-button')).toBeEnabled()
+  })
 })

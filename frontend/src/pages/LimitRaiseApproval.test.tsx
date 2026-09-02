@@ -268,6 +268,79 @@ describe('LimitRaiseApproval — R28: latest permissible expiry shown before typ
   })
 })
 
+// R36/B6 — the amount-side twin of R28 above. The real defect this closes:
+// an approver used to learn the tenant's remaining grant cap only from a 422
+// `grant_cap_exceeded` AFTER typing an amount and clicking approve, while the
+// requester's own 402 `raise_hint` already carried `remaining_cap_microusd`
+// (C14.22) — the one reader who actually sets the figure was the one reader
+// who could not see it first. `remaining_grant_cap_microusd` comes from the
+// SAME `getPoolBudget` call this page already makes for `PoolBudgetCard`
+// (POOL_FIXTURE's own field, $8.00 here), never a second endpoint and never
+// a client-side reimplementation of `effective_grant_cap_for_row`.
+describe('LimitRaiseApproval — R36/B6: remaining grant cap shown before typing an amount', () => {
+  it('shows the remaining grant cap BEFORE any value is typed, and disables approval when the pre-filled ask exceeds it', async () => {
+    render(withRouting(<LimitRaiseApproval />))
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-remaining-grant-cap')).toBeInTheDocument(),
+    )
+    // Visible prose, same standard R28 holds the expiry bound to — not just
+    // an attribute nobody reads.
+    const capHint = screen.getByTestId('lr-remaining-grant-cap')
+    expect(capHint.textContent).toMatch(/\$8\.00/)
+    expect(capHint.textContent).toMatch(/derived from baseline/i)
+
+    // The request's own ask is $200, ten times POOL_FIXTURE's $8 cap — the
+    // exact shape of the real defect (a small baseline-derived cap on a
+    // tenant asking for far more than it). Blocked BEFORE the round trip,
+    // not discovered from its refusal.
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-amount-over-cap')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('lr-approve-button')).toBeDisabled()
+    expect(mockApproveLimitRaise).not.toHaveBeenCalled()
+  })
+
+  it('clears the over-cap warning and re-enables approval once the typed amount is brought within the cap', async () => {
+    const user = userEvent.setup()
+    render(withRouting(<LimitRaiseApproval />))
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-amount-over-cap')).toBeInTheDocument(),
+    )
+
+    const amountInput = screen.getByTestId('lr-approve-amount')
+    await user.clear(amountInput)
+    await user.type(amountInput, '5')
+    // A comment is required whenever the approved figure is LESS than the
+    // ask (the pre-existing `givingLess` rule) — $5 against a $200 ask
+    // trips it, same as it would with no cap involved.
+    await user.type(screen.getByTestId('lr-decision-comment'), 'capped by tenant grant cap')
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('lr-amount-over-cap')).not.toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('lr-approve-button')).not.toBeDisabled()
+  })
+
+  it('renders a zero remaining cap plainly (never hidden, never a silently larger figure)', async () => {
+    mockGetPoolBudget.mockReset()
+    mockGetPoolBudget.mockResolvedValue({
+      ...POOL_FIXTURE,
+      baseline_microusd: 0,
+      effective_grant_cap_microusd: 0,
+      remaining_grant_cap_microusd: 0,
+    })
+    render(withRouting(<LimitRaiseApproval />))
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-remaining-grant-cap')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('lr-remaining-grant-cap').textContent).toMatch(/\$0\.00/)
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-amount-over-cap')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('lr-approve-button')).toBeDisabled()
+  })
+})
+
 describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume action', () => {
   it('renders the mode sentence verbatim, not a paraphrase of `mode`', async () => {
     render(withRouting(<LimitRaiseApproval />))
