@@ -46,8 +46,8 @@ headroom counter is **self-contained in one attribute** — no pre-read at all.
 Measured, derived from `pool_row_schema.worst_case_pool_item_bytes()` (the
 closed-world declaration of this row's attributes and their maximum value
 widths — see [`../benchmarks/ledger-latency.md`](../benchmarks/ledger-latency.md)):
-the worst-case pool item is **599 bytes**, 425 bytes under DynamoDB's
-1,024-byte write-unit boundary. This number is recomputed whenever the
+the worst-case pool item is **599 bytes**. That leaves a margin of 425 bytes under
+DynamoDB's 1,024-byte write-unit boundary. This number is recomputed whenever the
 declaration changes (see `backend/tests/test_ledger_hot_path_flatness_claim_l39a.py`,
 which fails if this sentence's figure and the declaration's computed figure
 ever diverge), so the WCU-proportional-to-size argument this design rests on
