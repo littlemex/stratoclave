@@ -8,24 +8,26 @@
 // seat tracking, and (before this test's target lands) also the one role
 // with no page anywhere that shows it happened.
 //
-// Checked before writing this file: zero matches for "pool" across all three
-// files under frontend/src/pages/team-lead/ (contract's own verification).
-// `frontend/src/lib/api.ts`'s `api.teamLead` object has no
-// getPoolBudget/setPoolBudget method at all today either -- the gap is both
-// "no query" and "no render". This file's mock supplies the shape those
-// methods are expected to have (mirroring `api.admin.getPoolBudget`'s
-// existing shape plus F1's new seat_count/manual_limit_microusd/mode
-// fields), so the test is evidence about the RENDER, independent of exactly
-// how the implementer names the client method.
-//
-// Every test below fails today because `TeamLeadTenantDetail` renders no
-// pool information of any kind -- there is no element to find.
+// **Convergence correction.** This file's own header claimed "zero matches
+// for 'pool' across all three files under frontend/src/pages/team-lead/"
+// and "`api.teamLead` has no getPoolBudget/setPoolBudget method at all
+// today" -- neither survives contact with the real, already-shipped
+// `frontend/src/pages/team-lead/TeamLeadTenantDetail.tsx` (which renders
+// the shared `PoolBudgetCard` with `poolApi={api.teamLead}`) and
+// `frontend/src/lib/api.ts`'s real `api.teamLead.getPoolBudget`/
+// `setPoolBudget`. A4 is already satisfied; what was wrong was this file's
+// own guess at `PoolBudget`'s shape -- the same `mode`/
+// `pool-mode-resume-button` guess `AdminTenantDetail.ceiling.test.tsx` made
+// and was corrected for, applied here too (`mode_sentence`/`seat_tracked`,
+// `resume_action` rendered as `pool-follow-seats-button`).
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { PoolBudget } from '@/lib/api'
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -74,6 +76,42 @@ const BASE_TENANT = {
   status: 'active',
 }
 
+// The real shape (`mvp/admin_tenants.py::_pool_response`/`_mode_sentence`),
+// mirrored from the same fixture builder as
+// `AdminTenantDetail.ceiling.test.tsx` -- one shared surface, one shape.
+function poolBudget(overrides: Partial<PoolBudget> = {}): PoolBudget {
+  return {
+    tenant_id: 'owned-co',
+    period: '2026-09',
+    status: 'active',
+    pool_limit_microusd: 400_000_000,
+    pool_reserved_microusd: 0,
+    pool_settled_microusd: 0,
+    remaining_microusd: 400_000_000,
+    over_ceiling_microusd: 0,
+    pool_limit_usd_cents: 40_000,
+    remaining_usd_cents: 40_000,
+    mode_sentence:
+      "This pool follows the tenant's seat count: 2 seats entitle it to " +
+      "$400.00 a month, and it moves by one seat's worth whenever somebody " +
+      'joins or leaves. Setting a figure by hand stops that.',
+    seat_tracked: true,
+    seat_count: 2,
+    seat_rate_microusd: 200_000_000,
+    seat_entitlement_microusd: 400_000_000,
+    manual_limit_microusd: null,
+    pool_granted_microusd: 0,
+    baseline_microusd: 400_000_000,
+    entitlement_exceeds_figure: false,
+    resume_action: null,
+    grant_cap_microusd: null,
+    effective_grant_cap_microusd: 400_000_000,
+    grant_cap_is_derived: true,
+    remaining_grant_cap_microusd: 400_000_000,
+    ...overrides,
+  }
+}
+
 beforeEach(() => {
   mockGetTenant.mockReset().mockResolvedValue(BASE_TENANT)
   mockMembers.mockReset().mockResolvedValue({ tenant_id: 'owned-co', members: [] })
@@ -86,35 +124,41 @@ beforeEach(() => {
 
 describe('A4 / R21: the team-lead tenant view also renders the pool mode as a sentence', () => {
   it('renders a seat-tracked sentence naming the seat count', async () => {
-    mockGetPoolBudget.mockResolvedValue({
-      tenant_id: 'owned-co', period: '2026-09', status: 'active',
-      pool_limit_microusd: 400_000_000, pool_reserved_microusd: 0,
-      pool_settled_microusd: 0, remaining_microusd: 400_000_000,
-      pool_limit_usd_cents: 40_000, remaining_usd_cents: 40_000,
-      mode: 'seat_tracked', seat_count: 2, manual_limit_microusd: null,
-    })
+    mockGetPoolBudget.mockResolvedValue(poolBudget())
 
     render(withProviders(<TeamLeadTenantDetail />))
 
     const sentence = await screen.findByTestId('pool-mode-sentence')
     expect(sentence.textContent).toContain('2')
-    expect(screen.queryByTestId('pool-mode-resume-button')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('pool-follow-seats-button')).not.toBeInTheDocument()
   })
 
   it('renders a manual sentence with a resume action after the team lead sets a figure', async () => {
     // This is the hazard A4 names: the team lead's OWN write
     // (PUT .../pool-budget) is what produces this state.
-    mockGetPoolBudget.mockResolvedValue({
-      tenant_id: 'owned-co', period: '2026-09', status: 'active',
-      pool_limit_microusd: 100_000_000, pool_reserved_microusd: 0,
-      pool_settled_microusd: 0, remaining_microusd: 100_000_000,
-      pool_limit_usd_cents: 10_000, remaining_usd_cents: 10_000,
-      mode: 'manual', seat_count: 2, manual_limit_microusd: 100_000_000,
-    })
+    mockGetPoolBudget.mockResolvedValue(
+      poolBudget({
+        pool_limit_microusd: 100_000_000,
+        remaining_microusd: 100_000_000,
+        pool_limit_usd_cents: 10_000,
+        remaining_usd_cents: 10_000,
+        mode_sentence:
+          'This pool is held at $100.00, a figure set by hand, and no longer ' +
+          "follows the tenant's seat count. The seats would entitle it to " +
+          '$400.00, which is more than the figure, so the figure is now the ' +
+          'smaller of the two. Sending {"follow_seats": true} to this endpoint ' +
+          'returns it to the seat count.',
+        seat_tracked: false,
+        manual_limit_microusd: 100_000_000,
+        baseline_microusd: 100_000_000,
+        entitlement_exceeds_figure: true,
+        resume_action: 'follow_seats',
+      }),
+    )
 
     render(withProviders(<TeamLeadTenantDetail />))
 
     await screen.findByTestId('pool-mode-sentence')
-    expect(screen.getByTestId('pool-mode-resume-button')).toBeInTheDocument()
+    expect(screen.getByTestId('pool-follow-seats-button')).toBeInTheDocument()
   })
 })
