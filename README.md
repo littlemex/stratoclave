@@ -240,16 +240,20 @@ for where a broker is the better choice.
 - **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
   `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
   them to the OpenAI-compatible models on Amazon Bedrock's bedrock-runtime
-  service — OpenAI GPT-5.x (`gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`),
-  xAI Grok (`grok-4.6`), and Google Gemma (`gemma-4-31b`). Because all of these
-  speak the same OpenAI wire shape, adding one is a registry entry, not a new
-  transport. The `stratoclave codex` CLI
+  service — OpenAI GPT-5.6 (`gpt-5.6-sol`, `gpt-5.6-terra`), xAI Grok
+  (`grok-4.6`), and others; `GET /openai/v1/models` on your own deployment is
+  the authority on the current list, which turns over every few months.
+  Because all of these speak the same OpenAI wire shape, adding one is a
+  registry entry, not a new transport. The `stratoclave codex` CLI
   subcommand wraps the `codex` binary against this endpoint with an ephemeral
   key; the `--codex` flag on `stratoclave setup` patches `~/.codex/config.toml`
   for direct use. Controlled by the `STRATOCLAVE_CODEX_ENABLED` ECS env flag, which
-  **defaults to `false`**: a route that exposes a provider surface is opted into, the
-  same way the money flags are conservative. Set `STRATOCLAVE_CODEX_ENABLED=true` to
-  serve the OpenAI routes; until then they return `503`.
+  **defaults to `true`**: codex is not itself a money or safety control — a request
+  through it still runs the same reservation/settlement pipeline as the Anthropic
+  route — so it ships on by default like that route does. Set
+  `STRATOCLAVE_CODEX_ENABLED=false` to turn it off (e.g. under strict residency,
+  since this route's model registry currently pins its OpenAI models to
+  `us-east-2` regardless of the deploy region).
 - **Two-level credit governance, enforced pre-flight.** Every tenant has a
   default credit, every user can carry a per-user override, and every
   inference call — to `/v1/messages` (Anthropic), `/v1/chat/completions`
@@ -595,7 +599,8 @@ stratoclave claude -- "Summarize this repository in one sentence"
 
 # Run OpenAI codex through Stratoclave (codex must be installed separately).
 # Mints a short-lived responses:send-only key; ~/.codex/config.toml is untouched.
-stratoclave codex --model "$CODEX_MODEL" -- "Summarize this repository in one sentence"
+# `--model` is optional: omitting it uses the deployment's advertised default.
+stratoclave codex -- "Summarize this repository in one sentence"
 
 # Open the web console in a pre-authenticated tab
 stratoclave ui open
@@ -628,7 +633,7 @@ client = openai.OpenAI(
     api_key="sk-stratoclave-xxxxxxxx...",  # issue via CLI or web console
 )
 resp = client.responses.create(
-    model="openai.gpt-5.4",
+    model="openai.gpt-5.6-sol",
     input="Hello",
 )
 print(resp.output_text)
