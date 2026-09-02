@@ -25,13 +25,27 @@ import { EcsStack } from '../lib/ecs-stack';
  *
  * This does not assert a specific new threshold NUMBER (a bare literal
  * chosen by this file would be exactly the defect it is trying to close --
- * a second copy of the width math to fall out of sync with the first). It
- * asserts the DERIVATION is code, not a magic number: `ecs-stack.ts` must
- * define a named constant for this threshold, with a comment tying it to
- * the post-F1 attribute set, rather than the bare `2048` appearing directly
- * inside the `cloudwatch.Alarm` call.
+ * a second copy of the width math to fall out of sync with the first).
  *
- * Today `ecs-stack.ts` contains exactly that bare literal, so this fails.
+ * ADJUDICATED: the assertion below originally demanded a named TypeScript
+ * constant in `ecs-stack.ts` (e.g. `POOL_ITEM_SIZE_ALARM_THRESHOLD_BYTES`)
+ * commented to the post-F1 attribute set. The shipped implementation took a
+ * DIFFERENT, and on inspection more robust, path: `PoolItemSizeGrowth`
+ * (this alarm) deliberately KEEPS its bare `2048` -- re-justified in
+ * `ecs-stack.ts`'s own comment as catching only UNBOUNDED, order-of-
+ * magnitude growth, for which a generous absolute ceiling is the right
+ * shape and does not need schema awareness. The tens-of-bytes case this
+ * test was written for (one attribute more than declared) is caught by a
+ * SEPARATE, new alarm, `PoolRowBeyondDeclaration`, whose threshold is
+ * pinned at zero forever: the backend computes `over_declared_bytes`
+ * (observed size minus `worst_case_pool_item_bytes()`, B1's closed-world
+ * declaration in `backend/dynamo/pool_row_schema.py`) and this alarm fires
+ * on `> 0`. A threshold that never needs to move is a STRONGER answer to
+ * "the calibration lives with the schema" than a named constant that is
+ * still typed once in TypeScript and could still rot; it also avoids the
+ * "second, competing copy of the declaration in iac" defect
+ * `ecs-stack-pool-item-size-baseline-l39b.test.ts`'s own docstring records
+ * as already rejected once. This test now asserts THAT mechanism.
  */
 function synth(): Template {
   const app = new cdk.App();
@@ -62,28 +76,36 @@ describe('PoolItemSizeGrowth alarm recalibration (Amendment B4, narrowed)', () =
     });
   });
 
-  test('the threshold is a named, derived constant -- not a bare literal frozen to the pre-F1 row', () => {
+  test('the tens-of-bytes case is caught by a threshold that never needs recalibration, not a named constant', () => {
+    // PoolItemSizeGrowth itself is allowed to keep 2048 -- it is not the
+    // detector for this case, and ecs-stack.ts says so in its own comment.
+    // What must exist is the SEPARATE alarm whose threshold is derived from
+    // the schema and never needs a human to bump it: PoolRowBeyondDeclaration,
+    // fed by `$.over_declared_bytes`, at threshold 0.
+    const template = synth();
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'stratoclave-PoolRowBeyondDeclaration',
+      Threshold: 0,
+      ComparisonOperator: 'GreaterThanThreshold',
+    });
+    const filters = template.findResources('AWS::Logs::MetricFilter');
+    const overDeclaredFilter = Object.values(filters).find((f: any) =>
+      (f.Properties.MetricTransformations || []).some(
+        (m: any) => m.MetricName === 'PoolRowOverDeclaredBytes',
+      ),
+    );
+    expect(overDeclaredFilter).toBeDefined();
+    expect((overDeclaredFilter as any).Properties.FilterPattern).toMatch(/over_declared_bytes/);
+
+    // The derivation itself (worst_case_pool_item_bytes() over
+    // POOL_ROW_ATTRIBUTES) lives in the backend, where the schema is
+    // declared -- verified by backend/tests/test_ledger_hot_path_flatness_
+    // claim_l39a.py, not here. This file only asserts the CDK side: the
+    // alarm exists, is fed by the backend-computed delta, and its threshold
+    // is the fixed point (zero) that never has to move.
     const filePath = path.join(__dirname, '..', 'lib', 'ecs-stack.ts');
     const text = fs.readFileSync(filePath, 'utf8');
-
-    // The exact defect: `threshold: 2048,` (or any bare numeric literal)
-    // directly inside the PoolItemSizeGrowth alarm's props, with no named,
-    // commented derivation tying it to the row's current attribute set.
-    const alarmBlockStart = text.indexOf("'PoolItemSizeGrowth'");
-    expect(alarmBlockStart).toBeGreaterThan(-1);
-    const alarmBlock = text.slice(alarmBlockStart, alarmBlockStart + 1200);
-
-    const usesBareLiteral = /threshold:\s*\d+\s*,/.test(alarmBlock);
-    expect(usesBareLiteral).toBe(false);
-
-    // A named constant, with a comment that ties its derivation to the
-    // post-F1 attribute set (B1's declaration), must exist somewhere in the
-    // file for the alarm to reference.
-    expect(text).toMatch(/POOL_ITEM_SIZE_(ALARM_)?THRESHOLD_BYTES/);
-    const constIdx = text.search(/POOL_ITEM_SIZE_(ALARM_)?THRESHOLD_BYTES/);
-    const constContext = text.slice(Math.max(0, constIdx - 400), constIdx + 200).toLowerCase();
-    const derivationNamesTheNewAttributes = ['seat_count', 'manual_limit_microusd', 'seat_monthly_usd']
-      .some((name) => constContext.includes(name));
-    expect(derivationNamesTheNewAttributes).toBe(true);
+    expect(text).toMatch(/over_declared_bytes/);
+    expect(text).toMatch(/PoolRowBeyondDeclaration/);
   });
 });

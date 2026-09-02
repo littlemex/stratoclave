@@ -48,6 +48,19 @@ export interface QuotaReconcilerStackProps extends cdk.StackProps {
   tenantBudgetsTable: dynamodb.ITable;
   /** The seat counts it compares them against. */
   userTenantsTable: dynamodb.ITable;
+  /**
+   * The grants `grant_target_row_exists` (registered in `mvp/grants.py`) walks to
+   * find one pointing at a pool row that no longer exists. That check runs on
+   * every pass, unconditionally, the same as every other registered check — so
+   * this table is not optional: without it `QuotaEventsRepository()` falls back
+   * to the hard-coded default table name (`dynamo/client.py::quota_events_table_name`),
+   * which is wrong for any prefix other than `stratoclave`, and the reconciler's
+   * role has no grant on it either way. Both together turned every invocation
+   * into an unhandled `AccessDeniedException` on a real deploy — caught only by
+   * actually invoking the function, because the unit tests set every table env
+   * var through one shared fixture regardless of what iac wires.
+   */
+  quotaEventsTable: dynamodb.ITable;
   /** How often. Daily by default: every finding here is a slow drift. */
   schedule?: events.Schedule;
 }
@@ -60,9 +73,24 @@ export class QuotaReconcilerStack extends cdk.Stack {
     super(scope, id, props);
     const {
       prefix, lambdaRepository, lambdaImageTag, tenantBudgetsTable, userTenantsTable,
+      quotaEventsTable,
     } = props;
 
     const metricNamespace = `${prefix}/CreditLedger`;
+
+    // A dedicated, CDK-managed log group per function, on the same pattern as
+    // `certificate-scheduler-stack.ts`'s `IssuerLogGroup`. A Lambda's DEFAULT
+    // `/aws/lambda/<function-name>` group is created lazily by the Lambda
+    // service on first invocation, not at deploy time — so `fromLogGroupName`
+    // (importing a group that does not exist yet) left the metric filters
+    // below pointing at nothing on a fresh account, and `AWS::Logs::MetricFilter`
+    // fails CREATE with a ResourceNotFoundException the first time this stack
+    // is deployed, rolling the whole stack back before either Lambda ever runs.
+    const reconcilerLogGroup = new logs.LogGroup(this, 'ReconcilerLogGroup', {
+      logGroupName: `/lambda/${prefix}-quota-reconciler`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
     this.reconciler = new lambda.DockerImageFunction(this, 'Reconciler', {
       functionName: `${prefix}-quota-reconciler`,
@@ -78,15 +106,19 @@ export class QuotaReconcilerStack extends cdk.Stack {
       environment: {
         DYNAMODB_TENANT_BUDGETS_TABLE: tenantBudgetsTable.tableName,
         DYNAMODB_USER_TENANTS_TABLE: userTenantsTable.tableName,
+        // grant_target_row_exists (mvp/grants.py) walks this table on every pass.
+        DYNAMODB_QUOTA_EVENTS_TABLE: quotaEventsTable.tableName,
         STRATOCLAVE_METRIC_NAMESPACE: metricNamespace,
       },
+      logGroup: reconcilerLogGroup,
       description:
         'Compares each tenant pool row to its sources (memberships, declared seat rate).',
     });
-    // READ ONLY, on both tables. The absence of a write grant is what makes
+    // READ ONLY, on all three tables. The absence of a write grant is what makes
     // "never repairs" a property of the deployment rather than of the code.
     tenantBudgetsTable.grantReadData(this.reconciler);
     userTenantsTable.grantReadData(this.reconciler);
+    quotaEventsTable.grantReadData(this.reconciler);
 
     // --- Period rollover: create each month's pool row for tenants that had one ---
     // The pool row is keyed by calendar month and a MISSING row means "not pooled",
@@ -94,6 +126,12 @@ export class QuotaReconcilerStack extends cdk.Stack {
     // membership changes therefore left every tenant with stable membership
     // unpooled for the whole month — failing open, in the direction that admits
     // spend, on the common case. This job is what makes the row exist.
+    const rolloverLogGroup = new logs.LogGroup(this, 'PeriodRolloverLogGroup', {
+      logGroupName: `/lambda/${prefix}-quota-period-rollover`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     this.periodRollover = new lambda.DockerImageFunction(this, 'PeriodRollover', {
       functionName: `${prefix}-quota-period-rollover`,
       code: lambda.DockerImageCode.fromEcr(lambdaRepository, {
@@ -106,6 +144,7 @@ export class QuotaReconcilerStack extends cdk.Stack {
         DYNAMODB_TENANT_BUDGETS_TABLE: tenantBudgetsTable.tableName,
         STRATOCLAVE_METRIC_NAMESPACE: metricNamespace,
       },
+      logGroup: rolloverLogGroup,
       description:
         "Creates each period's pool row for tenants holding the prior period's row.",
     });
@@ -127,14 +166,11 @@ export class QuotaReconcilerStack extends cdk.Stack {
       ],
     });
 
-    const logGroup = logs.LogGroup.fromLogGroupName(
-      this, 'ReconcilerLogGroup', `/aws/lambda/${prefix}-quota-reconciler`);
-
     // (1) A row disagrees with its sources. Per-tenant, so it goes through the
     // shared construct: the metric is undimensioned and the matched line names
     // the tenant, which resolves in one query.
     new TenantAlarm(this, 'PoolCeilingDefect', {
-      logGroup,
+      logGroup: reconcilerLogGroup,
       prefix,
       scope: 'tenant',
       metricNamespace,
@@ -163,7 +199,7 @@ export class QuotaReconcilerStack extends cdk.Stack {
     // a pass that found nothing. That distinction is the whole difference between
     // the two alarms here.
     new TenantAlarm(this, 'PoolCeilingChecksMissing', {
-      logGroup,
+      logGroup: reconcilerLogGroup,
       prefix,
       scope: 'deployment',
       metricNamespace,
@@ -178,9 +214,6 @@ export class QuotaReconcilerStack extends cdk.Stack {
       alarmDescription:
         'Either the daily pool-ceiling reconciler stopped emitting, or the row declaration names a check that nothing registered. Both mean an attribute that looks covered is not being compared to anything. Do not treat a quiet metric here as a healthy one.',
     });
-
-    const rolloverLogGroup = logs.LogGroup.fromLogGroupName(
-      this, 'PeriodRolloverLogGroup', `/aws/lambda/${prefix}-quota-period-rollover`);
 
     // (3) A tenant the rollover could not carry forward. Per-tenant, so it goes
     // through the shared construct. This is the alarm that matters most in this
