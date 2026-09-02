@@ -128,10 +128,12 @@ export function PoolBudgetCard({
               <PoolStat
                 label={t('admin_tenant_detail.pool.reserved_label')}
                 value={fmtMicroUsd(pool.pool_reserved_microusd)}
+                testId="pool-reserved"
               />
               <PoolStat
                 label={t('admin_tenant_detail.pool.settled_label')}
                 value={fmtMicroUsd(pool.pool_settled_microusd)}
+                testId="pool-settled"
               />
               {/* The composition, so the total above can be checked against
                   something. The granted line is simply zero until grants exist,

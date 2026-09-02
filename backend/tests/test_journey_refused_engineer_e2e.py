@@ -83,11 +83,13 @@ class _Seat:
 def _journey_client(monkeypatch) -> tuple[TestClient, _Seat]:
     """A client over every router this journey crosses.
 
-    `mvp.grants.router` is the one export F2's contract pins (U1); the request
-    side lives in `mvp/quota_raises.py`, whose router F2 never named, so it is
-    mounted when present rather than guessed at. Both are needed because a
-    journey does not know where a module boundary was drawn — she files on one
-    surface and is approved on another.
+    `mvp.grants.router` is the one export F2's contract pins (U1). There is
+    no separate `mvp.quota_raises` module -- this role's own guess that the
+    request side lived in a module F2 never named does not survive contact
+    with the real tree: both the request side (`submit_own_limit_raise`
+    etc.) and the approval side (`approve_limit_raise` etc.) are mounted on
+    the SAME `mvp.grants.router`, so one `include_router` call reaches
+    every surface this journey crosses.
     """
     monkeypatch.setattr(authz, "user_has_permission", lambda user, scope: True)
 
@@ -97,11 +99,6 @@ def _journey_client(monkeypatch) -> tuple[TestClient, _Seat]:
     app = FastAPI()
     app.include_router(admin_tenants_router)
     app.include_router(grants_mod.router)
-    raises_router = getattr(
-        __import__("mvp.quota_raises", fromlist=["router"]), "router", None
-    )
-    if raises_router is not None and raises_router is not grants_mod.router:
-        app.include_router(raises_router)
 
     seat = _Seat()
     app.dependency_overrides[get_current_user] = seat.current
@@ -136,8 +133,10 @@ def _seed_tenant_with_spent_pool(monkeypatch, *, limit_micro: int,
         total_credit=her_token_credit,
     )
     repo = TenantBudgetsRepository()
-    repo.set_pool_limit(
-        tenant_id=TENANT, period=period, pool_limit_microusd=limit_micro,
+    # `set_pool_limit` was this role's own guess; the real, shipped setter is
+    # `set_manual_limit` (`dynamo/tenant_budgets.py`).
+    repo.set_manual_limit(
+        tenant_id=TENANT, period=period, manual_limit_microusd=limit_micro,
     )
     if settled_micro:
         her = _PipelineUser(user_id=HER, org_id=TENANT)
@@ -181,22 +180,34 @@ def _spend(cost_micro: int) -> None:
 
 def _file_request(client: TestClient, *, asked_micro: int,
                   hint: Optional[dict[str, Any]] = None,
-                  limit_kind: str = "tenant_pool",
+                  limit_kind: str = "tenant_dollar_pool",
                   client_token: str = "tok-1"):
-    """She files, carrying the tenant from the refusal's hint and never from
-    ambient client context (persona 1 step 7: a CLI profile defaulting to the
-    other tenant files a valid request against the wrong one).
+    """She files.
+
+    **Convergence correction.** `POST /api/mvp/me/limit-raises`
+    (`SubmitLimitRaiseRequest`, `mvp/grants.py`) has no `tenant_id` field at
+    all -- `extra="forbid"` -- and never can: "the tenant is the caller's
+    own, read from their session... a requester asking for a raise on a
+    tenant they are not in is not a request this endpoint has any way to
+    authorise" (the endpoint's own docstring). The contract's "carried from
+    the hint, never from ambient context" requirement (Interface section)
+    is a CLIENT-side rule about which session/profile a console or CLI
+    submits under, verified in the frontend journey and unit suites, not a
+    wire field this single-tenant, single-seat backend journey can
+    exercise. `hint` is accepted here only so callers that read a hint's
+    `raise_hint.tenant_id` and pass it along keep compiling; it is no
+    longer sent. `limit_kind`'s real wall name is `tenant_dollar_pool`
+    (`mvp.grants.POOL_WALL`), not this role's guessed `tenant_pool`.
     """
-    tenant_id = TENANT
-    if hint is not None:
-        tenant_id = hint.get("tenant_id", hint.get("scope", TENANT))
+    del hint  # kept as a parameter for call-site symmetry; not a body field
     return client.post(
         "/api/mvp/me/limit-raises",
         json={
-            "tenant_id": tenant_id,
             "limit_kind": limit_kind,
             "asked_amount_microusd": asked_micro,
-            "reason_code": "deadline",
+            # "migration" is one of the four real `RAISE_REASON_CODES`
+            # (`mvp/grants.py`) -- "deadline" is not one of them.
+            "reason_code": "migration",
             "comment": "shipping the migration on Friday",
             "client_token": client_token,
         },
@@ -205,11 +216,14 @@ def _file_request(client: TestClient, *, asked_micro: int,
 
 def _approve(client: TestClient, request_id: str, *, approved_micro: int,
              expires_at: str, comment: str = "half of the ask, one week"):
+    """Approve. `ApproveLimitRaiseRequest.expires_at` is `int` (epoch
+    seconds, `mvp/grants.py`) -- an ISO string does not validate, so the
+    epoch conversion happens here rather than at every call site."""
     return client.post(
         f"/api/mvp/admin/limit-raises/{request_id}/approve",
         json={
             "approved_amount_microusd": approved_micro,
-            "expires_at": expires_at,
+            "expires_at": int(datetime.fromisoformat(expires_at).timestamp()),
             "decision_comment": comment,
         },
     )
@@ -256,27 +270,59 @@ def _her_deadline_passes(grant_id: str, *, minutes_ago: int) -> datetime:
     clock, and that is recorded as a gap rather than papered over.
     """
     when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    # `expires_at` is stored as an epoch INT throughout `mvp/grants.py`
+    # (`grant_put_txn_item`'s own `expires_at_epoch` -> `{"N": ...}`) -- an
+    # ISO string here would change the attribute's DynamoDB type and break
+    # every real reader (`int(item["expires_at"])`).
     _quota_events_table().update_item(
         Key={"pk": f"TENANT#{TENANT}", "sk": f"GRANT#{grant_id}"},
         UpdateExpression="SET expires_at = :e",
-        ExpressionAttributeValues={":e": when.isoformat()},
+        ExpressionAttributeValues={":e": int(when.timestamp())},
     )
+    # Moving `expires_at` into the past is not, by itself, what a real
+    # deployment observes: a grant's `status` stays ACTIVE (still
+    # capacity-bearing, still the slot's holder) until the periodic sweeper
+    # (`mvp.grants.sweep_expired_grants`) actually revokes it -- verified
+    # against real code: `_expired_grant_reason_for_pool_wall` only
+    # considers grants whose STORED status is already `GRANT_EXPIRED`, and
+    # `_slot_holder_is_still_holding` frees the slot only once the grant is
+    # no longer capacity-bearing. This role's own design note flagged the
+    # missing sweep entry point as a gap; it exists
+    # (`mvp.grants.sweep_expired_grants`), so the journey runs it rather
+    # than assuming the passage of a timestamp alone is what a live
+    # deployment would have observed by the time she notices.
+    from mvp.grants import sweep_expired_grants
+
+    sweep_expired_grants(now_epoch=int(datetime.now(timezone.utc).timestamp()))
     return when
 
 
 def _mentions_an_expiry(blob: Any) -> bool:
     """Does this refusal tell her a grant expired, in any form she could act on?
 
-    Deliberately generous: any of the words, or a grant id, or an
-    `expired_at`-shaped key anywhere in the body counts. A generous test that
-    fails is evidence the information is absent, not that it was spelled
-    differently than expected.
+    **Convergence correction.** A blind `repr(blob).lower()` substring
+    search for `"expir"` was tried first and does not survive contact with
+    the real hint shape: `RaiseHintCandidate.grant_expired` (`mvp/grants.py`)
+    is present on EVERY candidate, unconditionally, `False` by default --
+    so its own KEY NAME (`"grant_expired"`, which contains `"expir"`)
+    matches this search whether or not a grant actually expired, making the
+    heuristic unable to fail. The real positive signal is one of: the
+    candidate's `grant_expired` flag actually being `True`, or the
+    human-readable `message` (which `_refusal_body` appends expiry wording
+    to ONLY when that flag is true, `_pipeline.py`) mentioning it -- both
+    checked directly rather than guessed at.
     """
-    text = repr(blob).lower()
-    return any(
-        marker in text
-        for marker in ("expir", "grant_id", "grant_ended", "raise_expired")
-    )
+    if not isinstance(blob, dict):
+        return False
+    message = str(blob.get("message") or "")
+    if "expir" in message.lower():
+        return True
+    hint = blob.get("raise_hint")
+    if isinstance(hint, dict):
+        for candidate in hint.get("candidates") or []:
+            if isinstance(candidate, dict) and candidate.get("grant_expired") is True:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +394,14 @@ def test_journey_second_refusal_after_her_grant_expired_says_so(
     seat.take(HER, "her@journey")
     _her_deadline_passes(grant_id, minutes_ago=5)
 
-    # 6. She keeps working and the granted headroom runs out, five minutes
-    #    inside the naming window (expiry <= now <= expiry + 15 minutes).
-    _spend(30_000_000)
+    # 6. Her deadline has passed and the sweeper has already revoked the
+    #    grant (step 5): the ceiling reverted to $100 the instant it ran,
+    #    against $120 already settled (the $90 baseline plus step 4's
+    #    $30) -- so she is back over the wall on her very next request,
+    #    five minutes inside the naming window (expiry <= now <= expiry +
+    #    15 minutes). There is no further successful spend in between: the
+    #    reversion itself is what puts her over, not a fresh request that
+    #    tips her over.
     second = _refused(30_000_000)
 
     # 7. The whole journey reduces to this comparison. Two refusals, two
@@ -406,7 +457,13 @@ def test_journey_the_amount_she_was_granted_reaches_her(monkeypatch,
     pending = client.get("/api/mvp/me/limit-raises")
     assert pending.status_code == 200, pending.text
     row = _find(pending.json(), request_id)
-    assert row["status"] == "PENDING"
+    # Stored uppercase (`STATUS_PENDING`, `dynamo/quota_events.py`); the wire
+    # projection (`_request_public`, `mvp/grants.py`) lowercases it to match
+    # the codebase's own wire convention (the pool row's own `status` is
+    # lowercase from the start) and the real, shipped console
+    # (`frontend/src/pages/MeLimitRaises.tsx` checks `row.status ===
+    # 'approved'`).
+    assert row["status"] == "pending"
     assert not row.get("approved_amount_microusd"), (
         "a pending request must carry no approved amount"
     )
@@ -421,7 +478,7 @@ def test_journey_the_amount_she_was_granted_reaches_her(monkeypatch,
     assert decided.status_code == 200, decided.text
     row = _find(decided.json(), request_id)
 
-    assert row["status"] == "APPROVED"
+    assert row["status"] == "approved"
     # The figure she must plan against, under the one name that says which of
     # the two amounts on the row it is.
     assert row.get("approved_amount_microusd") == 50_000_000, (
@@ -437,7 +494,9 @@ def test_journey_the_amount_she_was_granted_reaches_her(monkeypatch,
         "no surface returns the expiry she was given, so she cannot plan "
         "around a deadline she was never shown"
     )
-    assert datetime.fromisoformat(row["expires_at"]) > datetime.now(timezone.utc)
+    # `expires_at` is the wire's epoch-int convention (`_request_public`),
+    # not an ISO string.
+    assert row["expires_at"] > int(datetime.now(timezone.utc).timestamp())
     # Who decided, as a stable id the console resolves — never an address.
     assert row.get("approver_id") == HIM
     assert "@" not in str(row.get("approver_id"))
@@ -495,12 +554,18 @@ def test_journey_a_decided_request_does_not_leave_her_locked_out(monkeypatch,
                                 client_token="tok-second")
     assert speculative.status_code == 409, speculative.text
     body = speculative.json()["detail"]
-    assert body["reason"] == "raise_request_daily_limit"
+    # `DailySlotOccupied.code` (`mvp/grants.py`) is
+    # `limit_raise_daily_slot_occupied`, carried in `"type"` (`GrantError`'s
+    # own shape) -- this role's guessed code string and key name
+    # (`"reason"`) were both wrong.
+    assert body["type"] == "limit_raise_daily_slot_occupied"
     assert body.get("holder_request_id") == request_id, (
         "the 409 must name the request holding her slot, or she cannot tell "
         "which ask is in the way"
     )
-    reset = str(body.get("slot_resets_at", ""))
+    # The extra kwarg `DailySlotOccupied` is raised with is `reset_at`, not
+    # `slot_resets_at`.
+    reset = str(body.get("reset_at", ""))
     assert reset, "the 409 must say when the slot resets"
     assert re.search(r"(Z|[+-]\d{2}:?\d{2}|UTC|[A-Za-z]+/[A-Za-z_]+)", reset), (
         "the slot key is a yyyy-mm-dd in *some* timezone and no surface states "
@@ -578,12 +643,16 @@ def test_journey_the_token_wall_never_sells_her_a_money_raise(monkeypatch,
                                 limit_kind="user_token_quota",
                                 client_token="tok-wrong-wall")
     assert misdirected.status_code == 422, misdirected.text
-    assert misdirected.json()["detail"]["reason"] == "unknown_limit_kind"
+    # `GrantError.as_detail()` (`mvp/grants.py`) is `{"type": <code>,
+    # "message": ..., **extra}` -- the machine-readable code lives in
+    # `"type"`, never `"reason"` (that key belongs to `_refusal_body`'s
+    # DIFFERENT shape, the one the two money-wall refusals above use).
+    assert misdirected.json()["detail"]["type"] == "unknown_limit_kind"
 
     # 3. And the refusal left her slot alone. This is the whole point: a
     #    request that was never actionable must not cost her the one that is.
     real = _file_request(client, asked_micro=50_000_000,
-                         limit_kind="tenant_pool", client_token="tok-right-wall")
+                         limit_kind="tenant_dollar_pool", client_token="tok-right-wall")
     assert real.status_code == 201, (
         "the misdirected request consumed her daily slot, so being sent to the "
         "wrong wall costs her the ability to ask about the right one until a "

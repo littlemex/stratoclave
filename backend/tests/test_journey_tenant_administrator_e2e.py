@@ -77,11 +77,9 @@ class _Seat:
 def _journey_client(monkeypatch) -> tuple[TestClient, _Seat]:
     """Every router this journey crosses.
 
-    `mvp.grants.router` is the one export F2's contract pins (U1); the request
-    side lives in `mvp/quota_raises.py`, whose router F2 never named, so it is
-    mounted when present rather than guessed at. A journey does not know where a
-    module boundary was drawn — he approves on one surface and reads the ceiling
-    on another.
+    `mvp.grants.router` is the one export F2's contract pins (U1). There is
+    no separate `mvp.quota_raises` module -- both the request and approval
+    sides are mounted on this one router.
     """
     monkeypatch.setattr(authz, "user_has_permission", lambda user, scope: True)
 
@@ -91,11 +89,6 @@ def _journey_client(monkeypatch) -> tuple[TestClient, _Seat]:
     app = FastAPI()
     app.include_router(admin_tenants_router)
     app.include_router(grants_mod.router)
-    raises_router = getattr(
-        __import__("mvp.quota_raises", fromlist=["router"]), "router", None
-    )
-    if raises_router is not None and raises_router is not grants_mod.router:
-        app.include_router(raises_router)
 
     seat = _Seat()
     app.dependency_overrides[get_current_user] = seat.current
@@ -164,13 +157,21 @@ def _in(minutes: int) -> str:
 
 
 def _file(client: TestClient, tenant_id: str, *, asked: int, token: str):
+    """File.
+
+    **Convergence correction.** `SubmitLimitRaiseRequest` (`mvp/grants.py`)
+    has no `tenant_id` field (`extra="forbid"`; the tenant is always the
+    caller's own session), its real wall name is `tenant_dollar_pool`
+    (`mvp.grants.POOL_WALL`), and "deadline" is not one of the four real
+    `RAISE_REASON_CODES`.
+    """
+    del tenant_id  # kept for call-site symmetry; not a body field
     return client.post(
         "/api/mvp/me/limit-raises",
         json={
-            "tenant_id": tenant_id,
-            "limit_kind": "tenant_pool",
+            "limit_kind": "tenant_dollar_pool",
             "asked_amount_microusd": asked,
-            "reason_code": "deadline",
+            "reason_code": "usage_spike",
             "comment": "a week of headroom",
             "client_token": token,
         },
@@ -179,11 +180,14 @@ def _file(client: TestClient, tenant_id: str, *, asked: int, token: str):
 
 def _approve(client: TestClient, request_id: str, *, approved: int,
              expires_in_minutes: int = 60 * 24 * 7, comment: str = "approved"):
+    """`ApproveLimitRaiseRequest.expires_at` is `int` (epoch seconds,
+    `mvp/grants.py`), not an ISO string."""
     return client.post(
         f"/api/mvp/admin/limit-raises/{request_id}/approve",
         json={
             "approved_amount_microusd": approved,
-            "expires_at": _in(expires_in_minutes),
+            "expires_at": int(
+                datetime.fromisoformat(_in(expires_in_minutes)).timestamp()),
             "decision_comment": comment,
         },
     )
@@ -194,7 +198,10 @@ def _live_grant_id(client: TestClient, tenant_id: str) -> str:
     assert listed.status_code == 200, listed.text
     payload = listed.json()
     grants = payload["grants"] if isinstance(payload, dict) else payload
-    live = [g for g in grants if g.get("status") == "ACTIVE"]
+    # `_grant_public` (`mvp/grants.py`) lowercases the wire `status` (the
+    # codebase's own convention -- the pool row's own `status` is lowercase
+    # from the start); the stored, internal value is uppercase `ACTIVE`.
+    live = [g for g in grants if g.get("status") == "active"]
     assert live, f"an approved grant that is in no inventory: {payload}"
     return live[0]["grant_id"]
 
@@ -271,7 +278,9 @@ def test_journey_setting_a_figure_while_a_grant_is_live_lands_where_he_meant(
                                      "period": period})
     assert retyped.status_code == 409, retyped.text
     detail = retyped.json()["detail"]
-    assert detail["reason"] == "figure_includes_active_grant"
+    # `apply_pool_budget_request` (`mvp/admin_tenants.py`) raises this 409
+    # with the machine-readable code in `"type"`, not `"reason"`.
+    assert detail["type"] == "figure_includes_active_grant"
     # The refusal has to decompose the number, or he cannot tell what to type
     # instead and the only escape is retyping the same figure.
     assert detail.get("pool_granted_microusd") == 50_000_000
@@ -286,7 +295,13 @@ def test_journey_setting_a_figure_while_a_grant_is_live_lands_where_he_meant(
     )
 
     # A week later the grant ends. This is the step that lands wrong.
-    ended = client.post(f"/api/mvp/admin/limit-grants/{grant_id}/revoke")
+    # `POST .../revoke` requires `tenant_id` as a query param (the grant
+    # row's own partition key) AND a body (`RevokeGrantRequest`, optional
+    # `reason`) -- neither is optional at the transport level.
+    ended = client.post(
+        f"/api/mvp/admin/limit-grants/{grant_id}/revoke",
+        params={"tenant_id": tenant_id}, json={},
+    )
     assert ended.status_code == 200, ended.text
     assert _limit(tenant_id, period) == 5_000_000_000, (
         f"the ceiling landed at {_limit(tenant_id, period)} rather than the "
@@ -334,9 +349,11 @@ def test_journey_he_cannot_approve_into_a_suspended_pool(monkeypatch,
     UserTenantsRepository().ensure(
         user_id=HER, tenant_id=tenant_id, role="user", total_credit=1_000_000_000,
     )
-    TenantBudgetsRepository().set_pool_limit(
+    # `set_pool_limit` was this role's own guess; the real setter is
+    # `set_manual_limit`.
+    TenantBudgetsRepository().set_manual_limit(
         tenant_id=tenant_id, period=period,
-        pool_limit_microusd=1_000_000_000, status="suspended",
+        manual_limit_microusd=1_000_000_000, status="suspended",
     )
     limit_before = _limit(tenant_id, period)
 
@@ -410,8 +427,8 @@ def test_journey_a_negative_headroom_is_shown_to_both_of_them_unclamped(
     UserTenantsRepository().ensure(
         user_id=HER, tenant_id=tenant_id, role="user", total_credit=1_000_000_000,
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=100_000_000,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=100_000_000,
     )
     her = _PipelineUser(user_id=HER, org_id=tenant_id)
 
@@ -441,7 +458,8 @@ def test_journey_a_negative_headroom_is_shown_to_both_of_them_unclamped(
     # headroom goes signed-negative and that is correct: the $115 was admitted
     # while the grant was live.
     assert client.post(
-        f"/api/mvp/admin/limit-grants/{grant_id}/revoke"
+        f"/api/mvp/admin/limit-grants/{grant_id}/revoke",
+        params={"tenant_id": tenant_id}, json={},
     ).status_code == 200
     assert _headroom(tenant_id, period) == -30_000_000
     assert _identity_holds(tenant_id, period), "100 - 40 - 90 = -30"
@@ -454,9 +472,12 @@ def test_journey_a_negative_headroom_is_shown_to_both_of_them_unclamped(
     )
     assert shown.status_code == 200, shown.text
     body = shown.json()
-    assert body.get("pool_headroom_microusd") == -30_000_000, (
-        "the admin read reports "
-        f"{body.get('pool_headroom_microusd', body.get('remaining_microusd'))} "
+    # `PoolBudgetResponse` (`mvp/admin_tenants.py`) names this field
+    # `remaining_microusd`, not `pool_headroom_microusd` (that name is the
+    # REPOSITORY-level dict's key, `TenantBudgetsRepository.pool_summary`,
+    # not the wire response's).
+    assert body.get("remaining_microusd") == -30_000_000, (
+        f"the admin read reports {body.get('remaining_microusd')} "
         "for a pool that is $30 over its ceiling; a figure clamped at zero tells "
         "him to top up by any amount and hides that the first $30 of whatever he "
         "grants buys nothing"
