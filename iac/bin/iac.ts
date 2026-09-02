@@ -679,6 +679,7 @@ if (app.node.tryGetContext('certificateScheduler') === true ||
       routingSignalsTable: dynamoDBStack.routingSignalsTable,
       tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
       tenantsTable: dynamoDBStack.tenantsTable,
+      usageLogsTable: dynamoDBStack.usageLogsTable,
       certTenantIds,
       settleWindowDays: process.env.CERT_SETTLE_WINDOW_DAYS
         ? parseInt(process.env.CERT_SETTLE_WINDOW_DAYS, 10)

@@ -42,6 +42,20 @@ export interface CertificateSchedulerStackProps extends cdk.StackProps {
   /** The tenants table (tenant enumeration when CERT_TENANT_IDS is unset). */
   tenantsTable: dynamodb.ITable;
   /**
+   * The UsageLogs table. `mvp.learning.savings.savings_certificate` ->
+   * `vsr_reconcile.reconcile_day` -> `_query_usage_day` reads billed usage rows
+   * from here UNCONDITIONALLY, for every tenant, on every run -- there is no
+   * feature flag or empty-day short-circuit ahead of it. This was missing
+   * (both the grant and the env var) until a static reachability audit
+   * (`backend/scripts/scheduled_lambda_env_audit.py`) walked the handler's
+   * real call graph and found it: the issuer's role had no IAM grant on this
+   * table at all, so a real deploy would hit AccessDeniedException on the
+   * very first tenant with any billed usage, the same failure mode
+   * `DYNAMODB_TENANTS_TABLE` (above) and `DYNAMODB_QUOTA_EVENTS_TABLE`
+   * (`quota-reconciler-stack.ts`) hit before it.
+   */
+  usageLogsTable: dynamodb.ITable;
+  /**
    * Explicit tenant list to certify (comma-separated). Fable slice-4 (a):
    * coverage is a DECLARED input, not an implicit registry scan. Unset = the
    * Lambda enumerates the tenants table.
@@ -62,9 +76,29 @@ export class CertificateSchedulerStack extends cdk.Stack {
     const settleWindow = props.settleWindowDays ?? 2;
     const hour = props.scheduleHourUtc ?? 3;
 
+    // `DYNAMODB_TENANTS_TABLE` is not optional even though `certTenantIds` is the
+    // documented default coverage path (CERT_TENANT_IDS unset): `_resolve_tenant_ids()`
+    // (backend/mvp/learning/certificate_scheduler.py) then falls back to
+    // `TenantsRepository().list_all(...)`, and without this env var that repository
+    // resolves its table name from `DYNAMODB_TENANTS_TABLE`'s own fallback
+    // (`dynamo/tenants.py::table_name()` -> `"stratoclave-<x>"`), which is wrong for
+    // any prefix other than `stratoclave` -- the same class of bug the pool
+    // reconciler hit on a real deploy (`DYNAMODB_QUOTA_EVENTS_TABLE`, see
+    // `quota-reconciler-stack.ts`). Read the grant below and this env var from the
+    // SAME `props.tenantsTable`, so permission and name cannot drift apart again.
+    //
+    // `props.tenantBudgetsTable` is granted read below but is NOT wired into `env`:
+    // the handler's own module graph (certificate_store -> decision_log ->
+    // signals_table_name, and _resolve_tenant_ids -> TenantsRepository) never
+    // resolves a tenant-budgets table name today, so an env var here would be
+    // dead configuration the handler cannot reach. `scheduled-job-env-wiring.test.ts`
+    // asserts this by construction: it fails on an env var the handler NEEDS and is
+    // missing, not on a grant broader than what the handler currently reads.
     const env: Record<string, string> = {
       CERT_SETTLE_WINDOW_DAYS: String(settleWindow),
       DYNAMODB_ROUTING_SIGNALS_TABLE: props.routingSignalsTable.tableName,
+      DYNAMODB_TENANTS_TABLE: props.tenantsTable.tableName,
+      DYNAMODB_USAGE_LOGS_TABLE: props.usageLogsTable.tableName,
     };
     if (props.certTenantIds) env.CERT_TENANT_IDS = props.certTenantIds;
 
@@ -100,6 +134,7 @@ export class CertificateSchedulerStack extends cdk.Stack {
     props.routingSignalsTable.grant(this.issuer, 'dynamodb:PutItem');
     props.tenantBudgetsTable.grantReadData(this.issuer);
     props.tenantsTable.grantReadData(this.issuer);
+    props.usageLogsTable.grantReadData(this.issuer);
 
     // Daily at `hour`:00 UTC. cron (not rate) so the run time is stable and the
     // event `time` the handler reads lands on a predictable day boundary.
