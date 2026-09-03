@@ -32,7 +32,7 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
-## Unreleased
+## [1.2.0] — 2026-09-03
 
 ### Added
 
@@ -66,12 +66,71 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   the ledger already stores, reporting as-charged against as-repriced. Read-only: the charge
   of record stands, and a correction remains a separate, idempotent adjustment event.
   Clauses C2.9 and C2.10.
+- **A tenant's money ceiling is derived from one rule, and a person at it can ask for
+  more.** The ceiling was a stored number with an attribute beside it saying whether the
+  number followed seat count; setting a figure by hand switched that attribute and the
+  ceiling then stopped following seats forever. It is now `baseline + granted`, where the
+  baseline is an operator's figure when one is present and seats times a stored per-seat
+  rate when it is not — clauses C14.1 through C14.14. Clearing the figure removes it
+  rather than writing the seat term back, so the tenant returns to following seats.
+- **A raise is a request, a decision, and a time-bounded grant that expires on its own**
+  (clauses C14.15 through C14.25). One undecided request per person per tenant per UTC day
+  through a row that is also the caller's idempotency anchor; the approver's authority is a
+  condition check inside the transaction that moves the money, so a permission revoked
+  mid-flight cancels it; a scheduled sweep revokes an expired grant and returns its
+  capacity in the same transaction that takes the grant terminal. Nobody decides their own
+  request.
+- **The period boundary has an owner.** A tenant whose membership did not change on the
+  first of the month previously had no current-period row, and the admission path read a
+  missing row as "never pooled" and admitted with no ceiling at all. A scheduled pass rolls
+  the row forward, the membership path still does it if it arrives first, and a missing row
+  is now refused rather than read as unlimited (C14.13).
+- **The refusal says what to do about itself.** A `402` names the wall that refused,
+  whether that wall is raisable, and — for the raisable one — the candidates the request
+  actually priced, the shortfall, and what is left of the tenant's aggregate cap, so a
+  screen cannot offer an amount no approver may grant (C14.22, C14.26). A refusal that
+  follows a grant expiring recently says so (C14.27).
+- **Surfaces show the ceiling's composition rather than its total**, the same card for the
+  operator and the team lead, a requester's own view carrying the approved amount beside
+  the amount asked for, and a per-tenant grant inventory reconciled per target row
+  (C14.28 through C14.30).
+- **A daily reconciler compares the pool row against its sources** — seat count from
+  memberships, granted capacity from the grants themselves — because an equation over the
+  row alone cannot see a membership delta applied twice (C14.9).
+- **A build-time check that a scheduled job's stack passes the tables its handler reads**
+  (C14.32). Every repository resolves its table with a fallback naming another
+  deployment's table, so an unset variable does not fail loudly; the audit walks the
+  handler's call graph and the stack's synthesised environment must cover it. Its
+  blind spots are stated in the clause rather than implied.
 - The usage row now records `cache_read_tokens` and `cache_write_tokens` when the provider
   reported them. That row's stated purpose is that spend be re-derivable from it, and two
   legs out of four could only re-derive a request that used no prompt cache.
 
 ### Changed
 
+- **`remaining_microusd` is signed and no longer clamped at zero**, and the clamped
+  synonym that briefly sat beside it is gone rather than kept. The clamp made a tenant cut
+  below its committed spend look exactly like a tenant sitting precisely at its limit;
+  `over_ceiling_microusd` carries the size of the overshoot as a separate fact (C14.29).
+  This is the pool and admin surface, not one of the three inference routes, so it is a
+  minor change under the compatibility statement above — but a client reading that field
+  must expect a negative number.
+- **Request and grant `status` appear on the wire in the spelling they are stored in**
+  (`PENDING`, `APPROVED`, `ACTIVE`, `REVOKE_BLOCKED`), so a value read from the API
+  compares against the stored one with no translation step. These endpoints are new in
+  this release, so nothing depended on the earlier lowercased projection.
+- **The `sizing` attribute is gone**; the mode is derived from whether an operator's figure
+  is present. Storage layout is not part of the compatibility surface, and a migration
+  (`backend/migrations/pool_ceiling_migration.py`) moves existing rows onto the rule,
+  dividing by the rate it seeded rather than by whatever the live environment says today
+  and refusing to run where a grant is already present.
+- **The pool reconciler and the grant sweep are their own stacks behind context flags**, on
+  the convention every scheduled job in this repository already follows, because a Lambda
+  image cannot be created against an ECR repository the same deploy has only just made.
+  They are a REQUIRED second pass after the image exists, not an option:
+  [`DEPLOYMENT.md`](docs/DEPLOYMENT.md) states it with the consequence rather than the
+  feature name, since without them a grant never expires and a pool still vanishes on the
+  first of the month.
 - **`STRATOCLAVE_CODEX_ENABLED` now defaults to TRUE** (it briefly defaulted to FALSE in
   the change recorded below for 1.0.0 — see that entry for why, and why this reverses
   it). Codex does not itself gate money or safety: every request through it runs the
@@ -119,6 +178,30 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   reaches the models it exists to reach.
 - `default` is now priced at the dearest rate any registry entry is billed at rather than
   at the Opus tier, because Opus is no longer the ceiling.
+
+### Fixed
+
+- **Sign-in was broken on every deployment made through the documented path.**
+  `deploy-all.sh` wrote the Cognito domain into the frontend config with a scheme the CDK
+  output already carried, producing `https://https://…`.
+- **A refusal reached the console as `422 Unprocessable Entity`.** The API client kept an
+  error's `detail` only when it was a string and discarded it when it was an object, which
+  is the shape every refusal in this codebase uses — so exceeding the approvable cap, or
+  filing twice in a day, told the caller nothing.
+- **The documented first-admin procedure could not work at all**: the endpoint it named
+  requires an authenticated actor holding `users:create`, so it returned 401 before
+  reaching the gate it documented. `DEPLOYMENT.md` now describes the path that works.
+- **Two scheduled stacks imported their Lambda log group instead of creating it**, which
+  fails on the first deploy of a fresh account, and the certificate scheduler was missing
+  two table environment variables — one of them with no IAM grant at all.
+- **The image built for the service carried no `--platform`**, silently producing an arm64
+  image that Fargate surfaces only as a task exiting 255.
+- **A grant list was silently truncated at 500 rows**, and the retirement drain and the
+  orphan hunt both start from that list — so a tenant with more lifetime grants than that
+  could be archived while a grant still bore capacity, against C14.23.
+- **A rate migration could re-rate a row that had become an operator's figure** between the
+  scan and the write, because the condition guarded the two figures it compared against and
+  a row can acquire a figure without moving either.
 
 ## [1.1.0] — 2026-08-31
 
@@ -276,6 +359,7 @@ the commits in `v0.1.0..v0.2.0`.
 
 First tagged release. See the tag annotation.
 
+[1.2.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.2.0
 [1.1.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.1.0
 [1.0.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.0.0
 [0.2.0]: https://github.com/littlemex/stratoclave/releases/tag/v0.2.0
