@@ -6,12 +6,18 @@
 //!   ├── claude    [--model X] -- [claude-args]
 //!   ├── codex     [--model X] -- [codex-args]
 //!   ├── usage     show [--since-days N] [--limit M]
+//!   ├── limit-raise { request | list | withdraw }
 //!   ├── admin
 //!   │   ├── user   { create | list | show | delete | assign-tenant | set-credit }
 //!   │   ├── tenant { create | list | show | delete | set-owner | members | usage | pool-budget }
+//!   │   │       pool-budget { set | show | follow-seats }
+//!   │   ├── limit-raise { list | approve | reject }
+//!   │   ├── limit-grant { list | revoke }
 //!   │   └── usage  show [--tenant T] [--user U] [--since X] [--until Y] [--limit N]
 //!   ├── team-lead
-//!   │   └── tenant { create | list | show | members | usage }
+//!   │   ├── tenant { create | list | show | members | usage }
+//!   │   ├── limit-raise { list | approve | reject }
+//!   │   └── limit-grant { list | revoke }
 //!   └── ui        { open | url }
 //!
 //! Invoked with no arguments and a non-TTY stdin, the binary falls back
@@ -25,6 +31,8 @@ mod config;
 mod mvp;
 mod output;
 mod policy;
+#[cfg(test)]
+mod test_env;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -73,7 +81,8 @@ enum Commands {
     },
     /// Launch OpenAI codex via Stratoclave proxy
     Codex {
-        /// Override model ID (e.g. openai.gpt-5.4)
+        /// Override model ID (e.g. openai.gpt-5.6-sol). Omit to use the
+        /// deployment's advertised default, or `stratoclave.default_codex_model`.
         #[arg(long)]
         model: Option<String>,
         /// Attribution group id (x-sc-group-id header), [A-Za-z0-9._:-]{1,64}.
@@ -106,6 +115,12 @@ enum Commands {
     Usage {
         #[command(subcommand)]
         action: UsageAction,
+    },
+    /// Ask for more of your tenant's money ceiling, for a bounded window
+    #[command(name = "limit-raise")]
+    LimitRaise {
+        #[command(subcommand)]
+        action: LimitRaiseAction,
     },
     /// Per-run billing breakdown (frozen rating from the credit ledger)
     Billing {
@@ -205,6 +220,85 @@ enum ApiKeyAction {
         scopes: Vec<String>,
         #[arg(long = "expires-days")]
         expires_days: Option<u32>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LimitRaiseAction {
+    /// File a raise against your own tenant's ceiling (one per day)
+    Request {
+        /// How much more, in USD: "500", "$500", "500.50"
+        #[arg(long)]
+        limit_usd: String,
+        /// Why. `list` prints the accepted values.
+        #[arg(long)]
+        reason: String,
+        /// Free text for the approver. Never logged, never echoed in an error.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Idempotency key. Re-running with the same one returns the request the
+        /// first run created instead of spending today's allowance again; omit it
+        /// and one is generated per invocation.
+        #[arg(long)]
+        client_token: Option<String>,
+    },
+    /// Your own raises, and the reasons this deployment accepts
+    List,
+    /// Take back a pending raise, which frees today's slot
+    Withdraw { request_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum LimitRaiseAdminAction {
+    /// An approver's queue for one tenant
+    List {
+        #[arg(long)]
+        tenant: String,
+        /// PENDING | APPROVED | REJECTED | WITHDRAWN
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Approve a raise, creating a grant that expires
+    Approve {
+        request_id: String,
+        /// How much to grant, in USD. May not exceed what was asked for.
+        #[arg(long)]
+        limit_usd: String,
+        /// When the grant ends, as epoch seconds. At least 5 minutes out and no
+        /// later than the end of the billing period: a grant may not outlive the
+        /// period it was granted in, or the period boundary would destroy its
+        /// capacity instead of releasing it.
+        #[arg(long)]
+        expires_at: i64,
+        /// Required when granting less than was asked for.
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Reject a raise, with a reason the requester is given
+    Reject {
+        request_id: String,
+        /// Required. A refusal with no reason is indistinguishable from a broken
+        /// feature, and the requester has nothing to act on either way.
+        #[arg(long)]
+        comment: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LimitGrantAction {
+    /// A tenant's grants, with the reconciliation against its pool row
+    List {
+        #[arg(long)]
+        tenant: String,
+    },
+    /// End a live grant early, giving its capacity back now
+    Revoke {
+        grant_id: String,
+        /// The grant's tenant. Required: a grant row is partitioned by tenant.
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -336,6 +430,18 @@ enum AdminAction {
     Billing {
         #[command(subcommand)]
         action: AdminBillingAction,
+    },
+    /// Decide money-ceiling raises for any tenant
+    #[command(name = "limit-raise")]
+    LimitRaise {
+        #[command(subcommand)]
+        action: LimitRaiseAdminAction,
+    },
+    /// Inspect and end live grants for any tenant
+    #[command(name = "limit-grant")]
+    LimitGrant {
+        #[command(subcommand)]
+        action: LimitGrantAction,
     },
 }
 
@@ -519,6 +625,19 @@ enum AdminPoolBudgetAction {
         #[arg(long)]
         period: Option<String>,
     },
+    /// Return the ceiling to the tenant's seat count, clearing a hand-set figure
+    ///
+    /// The reversal. Setting a figure stops the ceiling following the seat count;
+    /// this is what starts it again, so a tenant that has grown is not held at a
+    /// number chosen when it was smaller. It is a separate subcommand rather than
+    /// `set --limit-usd 0`, because zero is a legal ceiling meaning every request
+    /// refused.
+    FollowSeats {
+        tenant_id: String,
+        /// Billing period YYYY-MM (UTC). Defaults to the current month.
+        #[arg(long)]
+        period: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -544,6 +663,18 @@ enum TeamLeadAction {
     Tenant {
         #[command(subcommand)]
         action: TeamLeadTenantAction,
+    },
+    /// Decide money-ceiling raises for a tenant you own
+    #[command(name = "limit-raise")]
+    LimitRaise {
+        #[command(subcommand)]
+        action: LimitRaiseAdminAction,
+    },
+    /// Inspect and end live grants for a tenant you own
+    #[command(name = "limit-grant")]
+    LimitGrant {
+        #[command(subcommand)]
+        action: LimitGrantAction,
     },
 }
 
@@ -658,6 +789,7 @@ async fn main() -> ExitCode {
         }
         Some(Commands::Usage { action }) => dispatch_usage(action).await,
         Some(Commands::Billing { action }) => dispatch_billing(action).await,
+        Some(Commands::LimitRaise { action }) => dispatch_limit_raise(action).await,
         Some(Commands::Admin { action }) => dispatch_admin(action).await,
         Some(Commands::TeamLead { action }) => dispatch_team_lead(action).await,
         Some(Commands::Ui { action }) => dispatch_ui(&action).await,
@@ -892,6 +1024,13 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 AdminPoolBudgetAction::Show { tenant_id, period } => wrap(
                     mvp::admin::tenant_pool_budget_show(&tenant_id, period.as_deref()).await,
                 ),
+                AdminPoolBudgetAction::FollowSeats { tenant_id, period } => wrap(
+                    mvp::admin::tenant_pool_budget_follow_seats(
+                        &tenant_id,
+                        period.as_deref(),
+                    )
+                    .await,
+                ),
             },
             AdminTenantAction::RoutingConfig(action) => match action {
                 AdminRoutingConfigAction::Get { tenant_id, user } => wrap(
@@ -933,6 +1072,72 @@ async fn dispatch_admin(action: AdminAction) -> ExitCode {
                 } => wrap(mvp::billing::admin_run_show(&tenant, &run_id, json).await),
             },
         },
+        AdminAction::LimitRaise { action } => dispatch_approver_raise("admin", action).await,
+        AdminAction::LimitGrant { action } => dispatch_approver_grant("admin", action).await,
+    }
+}
+
+/// The requester's own raises.
+async fn dispatch_limit_raise(action: LimitRaiseAction) -> ExitCode {
+    match action {
+        LimitRaiseAction::Request {
+            limit_usd,
+            reason,
+            comment,
+            client_token,
+        } => wrap(
+            mvp::limits::raise_request(
+                &limit_usd, &reason, comment.as_deref(), client_token.as_deref(),
+            )
+            .await,
+        ),
+        LimitRaiseAction::List => wrap(mvp::limits::raise_list().await),
+        LimitRaiseAction::Withdraw { request_id } => {
+            wrap(mvp::limits::raise_withdraw(&request_id).await)
+        }
+    }
+}
+
+/// One dispatcher for both approver forms, with `scope` naming which authority is
+/// being exercised. The two forms share every argument and differ only in the
+/// authority the backend binds the decision to, so sharing the dispatcher is what
+/// keeps the admin and team-lead surfaces from drifting apart in the arguments they
+/// accept — a difference there would look like a capability difference.
+async fn dispatch_approver_raise(scope: &str, action: LimitRaiseAdminAction) -> ExitCode {
+    match action {
+        LimitRaiseAdminAction::List { tenant, status } => wrap(
+            mvp::limits::raise_list_for_tenant(scope, &tenant, status.as_deref()).await,
+        ),
+        LimitRaiseAdminAction::Approve {
+            request_id,
+            limit_usd,
+            expires_at,
+            comment,
+        } => wrap(
+            mvp::limits::raise_approve(
+                scope, &request_id, &limit_usd, expires_at, comment.as_deref(),
+            )
+            .await,
+        ),
+        LimitRaiseAdminAction::Reject {
+            request_id,
+            comment,
+        } => wrap(mvp::limits::raise_reject(scope, &request_id, &comment).await),
+    }
+}
+
+async fn dispatch_approver_grant(scope: &str, action: LimitGrantAction) -> ExitCode {
+    match action {
+        LimitGrantAction::List { tenant } => {
+            wrap(mvp::limits::grant_list(scope, &tenant).await)
+        }
+        LimitGrantAction::Revoke {
+            grant_id,
+            tenant,
+            reason,
+        } => wrap(
+            mvp::limits::grant_revoke(scope, &tenant, &grant_id, reason.as_deref()).await,
+        ),
     }
 }
 
@@ -967,6 +1172,12 @@ async fn dispatch_team_lead(action: TeamLeadAction) -> ExitCode {
                 since_days,
             } => wrap(mvp::team_lead::tenant_usage(&tenant_id, since_days).await),
         },
+        TeamLeadAction::LimitRaise { action } => {
+            dispatch_approver_raise("team-lead", action).await
+        }
+        TeamLeadAction::LimitGrant { action } => {
+            dispatch_approver_grant("team-lead", action).await
+        }
     }
 }
 

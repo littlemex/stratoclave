@@ -23,6 +23,8 @@ import { CognitoStack } from '../lib/cognito-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
 import { LedgerProjectorStack } from '../lib/ledger-projector-stack';
 import { CertificateSchedulerStack } from '../lib/certificate-scheduler-stack';
+import { QuotaReconcilerStack } from '../lib/quota-reconciler-stack';
+import { QuotaGrantsStack } from '../lib/quota-grants-stack';
 import { WafStack } from '../lib/waf-stack';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -465,6 +467,9 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_UI_TICKETS_TABLE: dynamoDBStack.uiTicketsTable.tableName,
     // A-1/A-2: tenant dollar pool budgets + admin-editable model pricing.
     DYNAMODB_TENANT_BUDGETS_TABLE: dynamoDBStack.tenantBudgetsTable.tableName,
+    // Limit raises: the request, the grant, and the daily slot. Set on the SERVICE
+    // task because the raise endpoints live in the API, not only on the sweeper.
+    DYNAMODB_QUOTA_EVENTS_TABLE: dynamoDBStack.quotaEventsTable.tableName,
     DYNAMODB_PRICING_CONFIG_TABLE: dynamoDBStack.pricingConfigTable.tableName,
     // Per-IP rate-limit counters, shared across ECS tasks (multi-task/AZ safe).
     DYNAMODB_RATE_LIMITS_TABLE: dynamoDBStack.rateLimitsTable.tableName,
@@ -674,6 +679,7 @@ if (app.node.tryGetContext('certificateScheduler') === true ||
       routingSignalsTable: dynamoDBStack.routingSignalsTable,
       tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
       tenantsTable: dynamoDBStack.tenantsTable,
+      usageLogsTable: dynamoDBStack.usageLogsTable,
       certTenantIds,
       settleWindowDays: process.env.CERT_SETTLE_WINDOW_DAYS
         ? parseInt(process.env.CERT_SETTLE_WINDOW_DAYS, 10)
@@ -682,6 +688,101 @@ if (app.node.tryGetContext('certificateScheduler') === true ||
     });
   certificateSchedulerStack.addDependency(ecrStack);
   certificateSchedulerStack.addDependency(dynamoDBStack);
+}
+
+// The three Lambda functions below (reconciler, period-rollover, grant sweeper)
+// run backend/Dockerfile.lambda — a DIFFERENT image from the uvicorn one ECS
+// runs (it bakes in the AWS Lambda Runtime Interface Client). The older
+// scheduled-Lambda stacks above (ledgerProjectorStack, certificateSchedulerStack)
+// resolve their tag as `LAMBDA_IMAGE_TAG || IMAGE_TAG || 'latest'`, which lets an
+// operator who has never built backend/Dockerfile.lambda deploy anyway, silently
+// pointing the Lambda at the ECS backend's own image — it starts, but the RIC
+// entrypoint the backend image lacks means every invocation fails, not synth.
+// Worse, the reverse mistake (pushing a Lambda image under the tag the backend
+// is running) would retarget ECS's running image, and the ECR repository's
+// IMMUTABLE tag policy does not stop that: it only blocks re-pushing a tag that
+// already exists, not two different images sharing a fresh one.
+//
+// `resolveLambdaImageTag` closes both directions at synth time rather than
+// leaving either to be discovered at runtime or by an accidental push: it
+// requires an explicit, distinct tag instead of falling back to the backend's.
+function resolveLambdaImageTag(stackKind: string): string {
+  const tag = process.env.LAMBDA_IMAGE_TAG;
+  if (!tag) {
+    throw new Error(
+      `LAMBDA_IMAGE_TAG must be set to deploy ${stackKind}. Its Lambda functions run ` +
+        'backend/Dockerfile.lambda (the AWS Lambda Runtime Interface Client image), a ' +
+        'different artifact from the ECS backend image that iac/scripts/build-and-push.sh ' +
+        'now also builds and pushes. Run it, then export the LAMBDA_IMAGE_TAG it prints. ' +
+        'See docs/DEPLOYMENT.md, "Post-deploy: quota gated stacks".',
+    );
+  }
+  const backendTag = process.env.IMAGE_TAG || 'latest';
+  if (tag === backendTag) {
+    throw new Error(
+      `LAMBDA_IMAGE_TAG ("${tag}") must not equal the ECS backend's IMAGE_TAG ` +
+        `("${backendTag}"). They name different images sharing one ECR repository; a ` +
+        'shared tag means a push meant for one can silently retarget the other. Use a ' +
+        'distinct tag (build-and-push.sh prefixes its Lambda tag with "lambda-").',
+    );
+  }
+  return tag;
+}
+
+// Daily tenant pool-ceiling reconciler. Its OWN stack, on the same convention as
+// the projector and the certificate scheduler above: every scheduled job in this
+// repository is its own stack, and putting this one on the service stack would
+// have made it the exception. Same posture too — gated behind the
+// `quotaReconciler` context flag, inert until the Lambda image exists.
+let quotaReconcilerStack: QuotaReconcilerStack | undefined;
+if (app.node.tryGetContext('quotaReconciler') === true ||
+    app.node.tryGetContext('quotaReconciler') === 'true') {
+  quotaReconcilerStack = new QuotaReconcilerStack(
+    app, stackName(prefix, 'quota-reconciler'), {
+      env,
+      prefix,
+      lambdaRepository: ecrStack.repository,
+      lambdaImageTag: resolveLambdaImageTag('quota-reconciler'),
+      tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+      // The seat counts the pool rows are compared AGAINST. The reconciler exists
+      // because an equation over the pool row alone cannot see a membership delta
+      // applied twice, so the membership table is not optional here.
+      userTenantsTable: dynamoDBStack.userTenantsTable,
+      // grant_target_row_exists (mvp/grants.py) reads this on every pass; see the
+      // prop doc on QuotaReconcilerStackProps for the AccessDeniedException a real
+      // deploy hit without it.
+      quotaEventsTable: dynamoDBStack.quotaEventsTable,
+      description: `[${prefix}] Daily tenant pool-ceiling reconciliation against sources`,
+    });
+  quotaReconcilerStack.addDependency(ecrStack);
+  quotaReconcilerStack.addDependency(dynamoDBStack);
+}
+
+// The sweep that ends granted capacity when its window closes. Its own stack, on
+// the same convention as the reconciler above, and gated behind the same kind of
+// context flag so a normal deploy is unaffected until the Lambda image exists.
+//
+// An APPEND rather than an edit anywhere above: this block adds a stack and touches
+// nothing that was already here, which is what keeps a shared file like this one
+// merging mechanically.
+let quotaGrantsStack: QuotaGrantsStack | undefined;
+if (app.node.tryGetContext('quotaGrants') === true ||
+    app.node.tryGetContext('quotaGrants') === 'true') {
+  quotaGrantsStack = new QuotaGrantsStack(
+    app, stackName(prefix, 'quota-grants'), {
+      env,
+      prefix,
+      lambdaRepository: ecrStack.repository,
+      lambdaImageTag: resolveLambdaImageTag('quota-grants'),
+      quotaEventsTable: dynamoDBStack.quotaEventsTable,
+      // The rows a revocation moves. Not optional: a sweep that could read grants
+      // and not write pools would take grants terminal while leaving their capacity
+      // on the ceiling forever.
+      tenantBudgetsTable: dynamoDBStack.tenantBudgetsTable,
+      description: `[${prefix}] Revokes expired limit-raise grants and returns their capacity`,
+    });
+  quotaGrantsStack.addDependency(ecrStack);
+  quotaGrantsStack.addDependency(dynamoDBStack);
 }
 
 // --- 8. Backend Config (static Parameter Store values) ---
@@ -866,6 +967,24 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   }
   if (certificateSchedulerStack) {
     NagSuppressions.addStackSuppressions(certificateSchedulerStack, appLevelSuppressions);
+  }
+  // The same app-level suppressions every other scheduled-Lambda stack here takes:
+  // the managed basic-execution policy, and the `/index/*` wildcard a table grant
+  // necessarily produces for a job that reads through a GSI.
+  //
+  // `quotaReconcilerStack` carries the identical findings (AwsSolutions-IAM4 x2,
+  // AwsSolutions-IAM5 x1) and is suppressed here on the same list. A previous
+  // version of this comment predicted exactly this stack would fail a real
+  // deploy because it was missing from this block and `cdk synth` was not part
+  // of the jest suite, so the gap was invisible until somebody deployed it — it
+  // did, and it failed with those three errors. `nag-synth.test.ts` now runs a
+  // real `cdk synth --all` with every context-gated stack enabled, specifically
+  // so a stack missing from this list fails CI instead of a real deploy.
+  if (quotaReconcilerStack) {
+    NagSuppressions.addStackSuppressions(quotaReconcilerStack, appLevelSuppressions);
+  }
+  if (quotaGrantsStack) {
+    NagSuppressions.addStackSuppressions(quotaGrantsStack, appLevelSuppressions);
   }
 }
 

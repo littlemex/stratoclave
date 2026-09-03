@@ -48,6 +48,9 @@ class UsageLogEntry(BaseModel):
     # rows = unknown, never True.
     requested_model_id: Optional[str] = None
     fallback_occurred: Optional[bool] = None
+    #: F3 (contract R38): the cause, read straight off the row (see
+    #: `mvp.me.UsageHistoryEntry.fallback_reason` for the full rationale).
+    fallback_reason: Optional[str] = None
 
 
 class UsageLogsResponse(BaseModel):
@@ -95,6 +98,9 @@ def _to_entry(item: dict[str, Any]) -> UsageLogEntry:
         ),
         fallback_occurred=_derive_fallback(
             item.get("requested_model_id"), str(item.get("model_id") or "")
+        ),
+        fallback_reason=(
+            str(item["fallback_reason"]) if item.get("fallback_reason") else None
         ),
     )
 

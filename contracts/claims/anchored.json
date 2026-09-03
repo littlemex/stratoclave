@@ -364,7 +364,7 @@
   {
    "id": "cl-99cc36f57540",
    "claim": "- Bedrock bearer tokens minted with a 15-minute TTL (capped in `openai_responses.py`); the token lives only in the ECS task heap for the duration of one request and is never persisted to DynamoDB or logs,",
-   "anchor": "contract:C12.5@60b55405"
+   "anchor": "contract:C12.5@ccf8dfb3"
   },
   {
    "id": "cl-1763ff51d73a",
@@ -1037,7 +1037,7 @@
   {
    "id": "cl-98723c33000c",
    "claim": "The backend sets it to `null` so that creator logs, screenshots, and shell history never contain a reusable credential.",
-   "anchor": "contract:C12.2@c35704a2,C12.5@60b55405"
+   "anchor": "contract:C12.2@c35704a2,C12.5@ccf8dfb3"
   },
   {
    "id": "cl-f772f79858dc",
@@ -1388,7 +1388,7 @@
   {
    "id": "cl-6e3690082e1f",
    "claim": "The plaintext of an API key is returned **once**, in the response to `POST /api/mvp/me/api-keys`, and is never stored on the server.",
-   "anchor": "contract:C12.5@60b55405"
+   "anchor": "contract:C12.5@ccf8dfb3"
   },
   {
    "id": "cl-3702dca544a0",
@@ -1448,7 +1448,7 @@
   {
    "id": "cl-192b660ec030",
    "claim": "Long-lived API keys; plaintext never stored",
-   "anchor": "contract:C12.5@60b55405"
+   "anchor": "contract:C12.5@ccf8dfb3"
   },
   {
    "id": "cl-1438d80bb82d",
@@ -1621,7 +1621,7 @@
   {
    "id": "cl-24f581bc5868",
    "claim": "Reading prices must not become subscribing to a paid product, so the token is never stored, logged or returned, and the test fixtures have it stripped.",
-   "anchor": "contract:C12.5@60b55405",
+   "anchor": "contract:C12.5@ccf8dfb3",
    "note": "the offer token is the credential-shaped artefact C12.5 already covers"
   },
   {
@@ -1796,10 +1796,309 @@
    "note": "restates C1's own Not-guaranteed (N) boundary and points at it; the sentence is the boundary rather than a claim past it"
   },
   {
-   "id": "cl-373c5642b9cd",
-   "claim": "Nothing counts seats by querying them, which is why the figure cannot drift from the memberships that produced it.",
-   "anchor": "contract:C14.4",
-   "note": "the delta is the only writer of the seat-scaled figure, so there is no second derivation to disagree with it; C14.4 is what the delta's exactness is recorded as"
+   "id": "cl-484362f524f6",
+   "claim": "Presence, INCLUDING zero, means \"this figure\".** The sentinel has to be absence rather than zero, and the reason is not aesthetic: `limit_usd_cents` accepts `0` today and it means every request refused, so reading `0` as \"follow the seats\" would silently reverse the meaning of a request every existing caller can already make.",
+   "anchor": "contract:C14.7@c3909932",
+   "note": "the clause states the sentinel and why zero could not be it"
+  },
+  {
+   "id": "cl-30903ebd27e7",
+   "claim": "Before this existed, a figure set once stopped seat tracking permanently: there was no request that could undo it, so a tenant that grew from four people to forty kept the number somebody typed when it was four.",
+   "anchor": "contract:C14.8@a21fb137",
+   "note": "the reversibility clause; the sentence describes the state before it and the clause is what makes it past tense"
+  },
+  {
+   "id": "cl-bab53fcd8c96",
+   "claim": "On a row holding a figure that means the row can still say its entitlement has outgrown the figure — which is the one thing an operator cannot work out by looking at the figure.",
+   "anchor": "contract:C14.4@4c0ee8d8",
+   "note": "the clause states that the seat count moves on a row holding a figure, which is what makes the report possible"
+  },
+  {
+   "id": "cl-e37a724bc95b",
+   "claim": "**The rate is not a live knob.** Each row stores the per-seat rate its own ceiling was computed at, so that ceiling is reproducible; the deployment records the rate in force once.",
+   "anchor": "contract:C14.11@d1533fbb",
+   "note": "the clause states the stored rate, the recorded rate in force, and the refusal to start"
+  },
+  {
+   "id": "cl-6bbd77c21c79",
+   "claim": "Changing the rate is `migrations.pool_ceiling_migration --recompute-seat-rate`, which recomputes every seat-tracked row and leaves rows holding an operator's figure alone.",
+   "anchor": "contract:C14.11@d1533fbb",
+   "note": "the same clause names the migration and that rows holding a figure are untouched"
+  },
+  {
+   "id": "cl-0fb328229b6f",
+   "claim": "The admission path never counts seats by querying them, so the ceiling costs no membership read.",
+   "anchor": "contract:C14.3@d971de67",
+   "note": "'never counts seats by querying them' is scoped to the ADMISSION path in the sentence itself; C14.9's reconciler does query them, deliberately, and off the request path"
+  },
+  {
+   "id": "cl-395d172b9440",
+   "claim": "A delta applied twice moves the seat count and the ceiling together, in the same direction, so every equation over the row still balances while the tenant admits an extra seat's worth of spend a month.",
+   "anchor": "contract:C14.9@3ed4e6c6",
+   "note": "the clause states exactly this failure and why an intra-row identity cannot see it"
+  },
+  {
+   "id": "cl-ac18c67a7a32",
+   "claim": "It reports and never repairs, because a repair would destroy the evidence of how the row got that way and could only guess which side of the disagreement is right.",
+   "anchor": "contract:C14.9@3ed4e6c6",
+   "note": "'reports and never repairs' is the clause's own wording, and the read-only grant in the reconciler stack is what enforces it"
+  },
+  {
+   "id": "cl-7ed90cbbf499",
+   "claim": "The rule that makes the cut-over safe beforehand is exactly what makes a re-run unsafe afterwards, so every phase refuses outright on a table where any row carries a granted amount.",
+   "anchor": "contract:C14.12@d1717e28",
+   "note": "the clause states the same refusal as a precondition every phase checks, and names the read that makes a re-run unsafe"
+  },
+  {
+   "id": "cl-cac5356f294b",
+   "claim": "Its unit of work is deliberately \"tenants with a prior-period row\" rather than \"all tenants\": pool budgeting is opt-in, the prior row is the opt-in signal, and a job that created rows for everyone would be inventing ceilings for tenants who were deliberately left unpooled.",
+   "anchor": "contract:C14.13@13021301",
+   "note": "the clause states the unit of work and why a tenant that never had a pool must not acquire one"
+  },
+  {
+   "id": "cl-73ffa150f659",
+   "claim": "**And a missing row does not read as an unpooled tenant.** An absent row has always meant \"not pooled\", which is right, and once the row is per-period that reading acquires a second case it cannot tell apart: a tenant that *is* pooled whose row for this period has not been created.",
+   "anchor": "contract:C14.13@13021301",
+   "note": "the clause states the miss guard and the condition that separates the two meanings of an absent row"
+  },
+  {
+   "id": "cl-0a1c9ba0c5bf",
+   "claim": "Both layers are needed, and neither is sufficient: the schedule alone would return the ceiling to fail-open in any month the job failed, and the guard alone would refuse every pooled tenant from midnight until the job ran.",
+   "anchor": "contract:C14.13@13021301",
+   "note": "the clause states that both layers are load-bearing and what each one alone would fail to do"
+  },
+  {
+   "id": "cl-b6c56af3d180",
+   "claim": "`DEFAULT_TENANT_CREDIT` is read at call time and never touches an allowance that already exists, so changing it is already effectively live; its problem is that it is **invisible** — there is no way to see the value in force, or which users received which default, or that it changed at all.",
+   "anchor": "debt:C14.14@163ad404",
+   "note": "true as qualified: the default IS already safe to change and IS invisible. What would close it is the operator-facing setting and audit event C14.14 names, which is not built"
+  },
+  {
+   "id": "cl-a22adf28344e",
+   "claim": "The current period's stored rate never moves, so the boot-time refusal stays honest and no ceiling changes under a tenant mid-month.",
+   "anchor": "debt:C14.14@163ad404",
+   "note": "true of the design as it stands, and stated in a section about work not done. What would close it is the queued-rate mechanism C14.14 names; until then there is no way to change the rate at a boundary at all"
+  },
+  {
+   "id": "cl-cd896fd12f7c",
+   "claim": "Either setting without an audit event naming the actor, the old value, the new value, and for the rate the period it takes effect in — the same discipline every other ceiling writer here already follows.",
+   "anchor": "debt:C14.14@163ad404",
+   "note": "a prohibition on work not yet done rather than a guarantee about shipped code. What would close it is C14.14's settings carrying the audit event this sentence requires of them"
+  },
+  {
+   "id": "cl-6d1601a8813f",
+   "claim": "It never touches the baseline, and that is the whole reason the two writes are safe to make without a compare-and-swap.",
+   "anchor": "contract:C14.7@c3909932,C14.3@d971de67",
+   "note": "the identity puts the granted term outside the baseline (C14.7) and C14.3 is the clause about how this ceiling's writers are guarded; the sentence's claim is that the grant writes need no CAS, which follows from the granted term being additive"
+  },
+  {
+   "id": "cl-54e5e351dbe2",
+   "claim": "There is nothing for a CAS to protect, so an approval composes with a concurrent hire, a concurrent operator set and a concurrent reserve rather than racing all three.",
+   "anchor": "contract:C14.4@4c0ee8d8,C14.15@e00188ee",
+   "note": "composing with a membership delta is C14.4's per-seat write, and composing with a revocation is C14.15's; 'racing all three' is the property those two rows carry"
+  },
+  {
+   "id": "cl-17791be94565",
+   "claim": "A blocked grant is one whose subtraction could not be made to commit, so the capacity was never actually given back and the row is right to still be counting it.",
+   "anchor": "contract:C14.18@4740bad5"
+  },
+  {
+   "id": "cl-ac64c08e1b89",
+   "claim": "A reconciler that treated it as returned would report every row holding a blocked grant as broken, continuously, for exactly as long as the fault lasted — which is when an operator most needs it quiet about everything else.",
+   "anchor": "descriptive:states what a DIFFERENT design would do, not what this one guarantees; the guarantee itself is C14.18 and is anchored on the sentence that makes it"
+  },
+  {
+   "id": "cl-eb13b21399cb",
+   "claim": "So the index holds exactly the work outstanding, rather than every grant that ever existed behind a filter — and a filter is what `Limit` is applied before, which is how a bounded sweep ends up never reaching the work sitting behind a full page of finished rows.",
+   "anchor": "contract:C14.15@e00188ee",
+   "note": "index membership rather than a filter is the mechanism C14.15's third column names"
+  },
+  {
+   "id": "cl-f15be0cb638d",
+   "claim": "The heartbeat also fires on **empty** runs, because a signal that only appears when there was work cannot tell \"nothing expired\" from \"nobody is looking\".",
+   "anchor": "contract:C14.15@e00188ee",
+   "note": "the heartbeat on empty runs is what makes the absence alarm in iac/lib/quota-grants-stack.ts able to distinguish the two cases"
+  },
+  {
+   "id": "cl-71d9759173c9",
+   "claim": "**A grant that cannot be revoked becomes `REVOKE_BLOCKED` and is alarmed, not retried forever.** After a bounded number of attempts it is marked, leaves the index so one poison grant cannot consume every run from then on, and keeps counting its amount — honestly.",
+   "anchor": "contract:C14.18@4740bad5"
+  },
+  {
+   "id": "cl-529f475847b3",
+   "claim": "The pool is deliberately untouched: the capacity was never returned, and writing it back would be the system asserting something it does not know.",
+   "anchor": "contract:C14.18@4740bad5",
+   "note": "the pool keeping a blocked grant's amount is the same fact as the grant still bearing capacity"
+  },
+  {
+   "id": "cl-30052d53851a",
+   "claim": "The reset destroys the money instead of releasing it, on every granted row at once, on the 1st, silently.",
+   "anchor": "descriptive:describes what WOULD happen if the expiry pin were removed; the pin itself is C14.16 and is anchored on the sentence that states it"
+  },
+  {
+   "id": "cl-8f52c397373b",
+   "claim": "An approval also refuses an expiry less than five minutes out, and refuses **every** expiry when fewer than five minutes remain in the period — the window is then unsatisfiable, and saying so is better than accepting a grant that expires before it can admit a request while still consuming the tenant's cap headroom.",
+   "anchor": "contract:C14.16@55f42290"
+  },
+  {
+   "id": "cl-30a290afed87",
+   "claim": "**The cost, stated because it is real.** A DynamoDB condition on a *missing* attribute fails, so the apply guard cannot be a row-side condition on the cap.",
+   "anchor": "contract:C14.17@9580babc",
+   "note": "C14.17's own row carries this boundary in the form the lint wants -- the guard is caller-side and does not catch a concurrent baseline change -- so the sentence is anchored to the clause that states the limit rather than restating it"
+  },
+  {
+   "id": "cl-a2f965a4694e",
+   "claim": "`pool_granted_microusd` is absent on any row that has not been granted to yet, and a comparison against a missing attribute fails — so a guard written as `pool_granted_microusd <= :remaining` **alone** refuses the first grant of every period on every tenant, and reports it as the cap being exceeded when nothing has been granted at all.",
+   "anchor": "contract:C14.17@9580babc",
+   "note": "C14.17's third column names the condition that admits the attribute's absence, which is what this sentence is about"
+  },
+  {
+   "id": "cl-882d9d18823a",
+   "claim": "**The tenant it binds is the one read from the request or grant row**, never a value the caller supplied.",
+   "anchor": "contract:C14.20@41d7515a"
+  },
+  {
+   "id": "cl-afe5e69af205",
+   "claim": "It matters most for the tenant owner, who holds the approval authority for their own tenant and would otherwise be the one path in this feature that never expires.",
+   "anchor": "descriptive:explains WHY self-approval is refused; the refusal itself is C14.20"
+  },
+  {
+   "id": "cl-f1ebb023bd54",
+   "claim": "Every `402` names the wall that refused, whether that wall can be raised, and — for the one that can — what an approver still has room to grant.",
+   "anchor": "contract:C14.22@a5d718f0"
+  },
+  {
+   "id": "cl-361d1e4a4dbd",
+   "claim": "Grantability is read from the same declaration the admission path enforces, so the refusal path and the raise path cannot disagree about which wall is which.",
+   "anchor": "contract:C14.22@a5d718f0"
+  },
+  {
+   "id": "cl-0a6ea4301f18",
+   "claim": "Whether anybody set a cap, what number is in force, and which of those two you are looking at are different questions, and a console showing a single figure cannot tell an operator whether it will move when the tenant hires.",
+   "anchor": "descriptive:argues why the cap is reported as three fields rather than one; the composition the read carries is C14.23's surface and C14.17's cap"
+  },
+  {
+   "id": "cl-588e284b40bc",
+   "claim": "Archiving over one leaves a grant pinned to a pool row nobody will look at again: the sweep keeps trying to revoke it, the reconciler keeps counting it against a cap for a tenant that no longer exists, and its capacity can never be released because releasing means moving a retired tenant's ceiling.",
+   "anchor": "contract:C14.23@bd572700",
+   "note": "the consequence the retirement refusal exists to prevent, which is the clause's own reason"
+  },
+  {
+   "id": "cl-0c3d504337a2",
+   "claim": "That excess is temporary, not permanent — the sweep subtracts the grant once at expiry and the ceiling lands exactly on the figure the operator typed, never below it.",
+   "anchor": "contract:C14.23@bd572700",
+   "note": "quota-raises.md section 9's restatement of the same mechanism C14.23's cell states: set_manual_limit ADDs the delta against the OLD baseline and never touches the granted term, so the figure typed while a grant is live is exactly what remains once that grant expires"
+  },
+  {
+   "id": "cl-16fbfad398c6",
+   "claim": "But a window of extra capacity nobody asked for is indistinguishable, from the figure alone, from an operator who genuinely wants that number as the new baseline, for whom the same jump-then-settle is correct — the number alone cannot tell the two readings apart, which is why it is a refusal naming the composition rather than a silent reinterpretation.",
+   "anchor": "contract:C14.23@bd572700",
+   "note": "states the boundary the refusal exists to cross: the two plausible readings of the typed figure produce the identical resting ceiling once the grant expires and differ only during the grant's remaining life, so no downstream check on the number alone can distinguish them"
+  },
+  {
+   "id": "cl-6bf463db753c",
+   "claim": "- **Nothing sets the aggregate cap.** It is read wherever it matters and no request writes it, so today it is either absent — the derived default, which is the case every tenant is in — or set out of band.",
+   "anchor": "debt:C14.24@ca4ee538",
+   "note": "what would close it: a request that SETS grant_cap_microusd, with an audit event and a read surface -- the attribute is already carried across a period boundary and already read by the approval guard and the daily check, so the gap is a writer and a surface, not a mechanism. Named under Open items in CONTRACTS.md and in quota-raises.md section 11."
+  },
+  {
+   "id": "cl-5a0ea779006f",
+   "claim": "Every lifecycle rule, the refusals, the sweep, the checks",
+   "anchor": "descriptive:a cell in the ownership table at the end of the document -- it names a file, not a guarantee. It matches the lint because the row reads as 'every ... rule'"
+  },
+  {
+   "id": "cl-5fdc0e5c11e2",
+   "claim": "The orphan hunt starts from grants and would never see them, and the user-deletion path archives memberships without touching them — so a deleted user's old slots stay.",
+   "anchor": "descriptive:states what the orphan hunt and the deletion path do NOT reach, which is the declaration that slot rows are dead storage rather than a claim about what this gateway enforces; the hunt's own guarantee is C14.19 and is anchored on the sentence that makes it"
+  },
+  {
+   "id": "cl-e39add9aac62",
+   "claim": "`STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's own admission ceiling are process-wide environment values, not per-tenant configuration — every tenant on a deployment is priced from the same seat figure and bounded by the same maximum, so two otherwise-unrelated tenants are coupled through this one setting rather than independently configurable ([docs/design/limits.md](docs/design/limits.md) §3).",
+   "anchor": "contract:C14.11@d1533fbb,C14.6@2332dbb3",
+   "note": "one clause per conjunct (CONTRACT-F4-claims.md R41): C14.11 the seat rate is one deployment-wide figure enforced by a boot-time refusal; C14.6 the pool's admission ceiling is the same MAX_POOL_BUDGET_USD_CENTS constant for every tenant creation. 'Coupled' and 'not per-tenant configuration' are this sentence's own restatement of what the two clauses already establish, not a new guarantee"
+  },
+  {
+   "id": "cl-8140cdf19788",
+   "claim": "**`STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's own admission ceiling (`MAX_POOL_BUDGET_USD_CENTS`) are process-wide values, not per-tenant configuration.** Every tenant on a given deployment is priced from the same seat figure and bounded by the same maximum — there is no per-tenant override for either — so two otherwise-unrelated tenants on the same deployment are coupled through this one process-wide setting rather than independently configurable.",
+   "anchor": "contract:C14.11@d1533fbb,C14.6@2332dbb3",
+   "note": "restates README.md's cl-e39add9aac62 in limits.md section 3, its other named home (CONTRACT-F4-claims.md R41); same two clauses, one per conjunct"
+  },
+  {
+   "id": "cl-d46f5f46ce06",
+   "claim": "So a report saying \"up to $G of this period's spend was covered by the grant\" is sound — the grant genuinely raised the ceiling by `G` and the tenant could not have spent past its baseline without it — but a report attributing a *specific* charge to the grant rather than to the baseline is stating something this row does not track and cannot answer.",
+   "anchor": "contract:C14.25@1c9f04b6",
+   "note": "grant-supported spend is an upper bound on what the grant covered, never an attribution of which dollar came from it, because C14.25 establishes the pool's headroom counter is one fungible number rather than tagged sub-balances (CONTRACT-F4-claims.md R41)"
+  },
+  {
+   "id": "cl-d0f9eb77116d",
+   "claim": "The shape was shipped final, with degenerate (one-candidate) content, so a client written against the early shape renders a fuller one unchanged — filling it later is an append, never a second wire change.",
+   "anchor": "contract:C14.26@2393f9f8",
+   "note": "F3's own restatement of the premise C14.26 fills: the hint's shape does not change shape when it gains content, only grows it"
+  },
+  {
+   "id": "cl-1fe8f75b885d",
+   "claim": "A *quota* cascade is the opposite case: `QuotaExhausted` is caught and the cascade genuinely tries every candidate up to the one that finally 402s, so that hint's `candidates` holds one entry per candidate actually priced, none of them grantable (only the pool wall is), and `unattempted_model_ids` is empty because nothing here was skipped.",
+   "anchor": "contract:C14.26@2393f9f8",
+   "note": "the quota-cascade half of C14.26's fill"
+  },
+  {
+   "id": "cl-000bab100009",
+   "claim": "Both cases add `minimum_raise_microusd` (the smallest raise that clears the cheapest **grantable** priced candidate, zero when none was), `requested_model_id` and `target_shortfall_microusd` (the candidate the caller actually wanted, and its own shortfall — \"her own number\", never a cheaper candidate's), `router_mode` (`cascade`/`pin`/`fallback_disabled`), `pricing_version` and `priced_at`.",
+   "anchor": "contract:C14.26@2393f9f8",
+   "note": "the added-fields half of C14.26's fill"
+  },
+  {
+   "id": "cl-e3e426b3b043",
+   "claim": "**Where the fill lands.** `mvp/_pipeline.py`'s `_reserve_over_candidates` builds the multi-candidate hint from `priced_tried` at the single `_err_402` that ends the cascade; its per-candidate `reserve_credit` calls (the pool-wall path) build the one-candidate hint and, on a pool refusal, the caller augments it with the tail it never got to try.",
+   "anchor": "contract:C14.26@2393f9f8",
+   "note": "names the mechanism C14.26's Verified-by column already cites"
+  },
+  {
+   "id": "cl-1e921a990ab9",
+   "claim": "**The refusal.** A pool refusal's candidate carries `grant_expired: true` when a grant against the same wall has `expires_at` within `[expires_at, expires_at + 15 minutes]` of now — three five-minute sweep intervals, so a late sweep still gets to name the cause — computed by the pure function `fallback_reason_for_expired_grant(grant_expires_at, now_epoch, grant_wall, blocked_wall)`, which also requires the grant's wall and the refusing wall to be the *same* one: a grant against the pool cannot explain a per-model refusal just because it expired recently.",
+   "anchor": "contract:C14.27@db24af4c",
+   "note": "the refusal half of C14.27"
+  },
+  {
+   "id": "cl-38a1beee5611",
+   "claim": "**The usage row.** `usage_logs.record()` takes one additive attribute, `fallback_reason`, set at settle time — never derived after the fact, because the cause is a fact about the router's decision, not something the two model ids can reconstruct.",
+   "anchor": "contract:C14.27@db24af4c",
+   "note": "the usage-row half of C14.27"
+  },
+  {
+   "id": "cl-5d19d01ffa94",
+   "claim": "Today it can only ever be `\"quota_exhausted\"`: the cascade advances past a candidate on `QuotaExhausted` alone, and a pool-wall refusal aborts the whole request rather than being caught and advanced past (section 8's own \"leaves on a pool refusal\"), so a *successfully served* fallback can never have been caused by a grant expiring at the pool wall — only a refusal can, which is what the candidate flag above is for.",
+   "anchor": "contract:C14.27@db24af4c",
+   "note": "states C14.27's own boundary in the same breath as its guarantee -- the reachable cause set is closed, not open-ended"
+  },
+  {
+   "id": "cl-1f2abdff0c77",
+   "claim": "A cheaper candidate that would fit is genuinely never tried once a pricier one hits the pool wall; that is a defect in the cascade itself, not a gap in this attribute, and it belongs to whichever change eventually lets the loop advance past a pool refusal rather than abandoning the request.",
+   "anchor": "debt:C14.31",
+   "note": "the same defect C14.31 names as an open item, restated where a reader of the fallback-cause mechanism would otherwise assume the gap is in that attribute rather than in the cascade underneath it"
+  },
+  {
+   "id": "cl-e78d97513fdc",
+   "claim": "The **self-service request view** (`frontend/src/pages/MeLimitRaises.tsx`, route `/me/limit-raises`) shows the walls that apply to the caller before any refusal — a new endpoint, `GET /me/limit-raises/wall-status`, reduced to exactly enough for a requester to see whether asking makes sense (no `manual_limit`, no seat internals: those are an approver's business) — and the caller's own requests, joined to their decision (R24: a decided request states its approved amount and expiry, never the bare status word).",
+   "anchor": "contract:C14.28@12e264c6,C14.30@5e0cf804",
+   "note": "C14.28 covers the request-decision join; C14.30 covers the wall-status endpoint"
+  },
+  {
+   "id": "cl-42cfc43250d2",
+   "claim": "The **grant inventory** (`frontend/src/pages/GrantsInventory.tsx`, standalone routes `/{admin,team-lead}/tenants/:tenantId/limit-grants`) renders one total per target row, never a tenant-wide sum, and a `REVOKE_BLOCKED` grant's reason next to its row.",
+   "anchor": "contract:C14.29@9786dc41"
+  },
+  {
+   "id": "cl-c327e5f405bb",
+   "claim": "The password is **never** written to stdout/stderr (and therefore never reaches CloudWatch Logs); it is stashed once in AWS Secrets Manager:",
+   "anchor": "contract:C12.5@ccf8dfb3",
+   "note": "the one instance of C12.5 that is checked rather than argued -- the bootstrap password reaches Secrets Manager and neither the logger nor stderr"
+  },
+  {
+   "id": "cl-dbf40fe924a5",
+   "claim": "Verified against a real deployment on 2026-09-02: the documented `ALLOW_ADMIN_CREATION` + `bootstrap-admin.sh` path 401s as described above; `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` is the path that actually works.",
+   "anchor": "evidence:A human can actually get through the console",
+   "note": "the documented first-admin path was tried on a real deployment and returned 401; the sentence reports that run"
   }
  ]
 }

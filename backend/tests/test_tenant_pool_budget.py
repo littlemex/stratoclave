@@ -172,7 +172,7 @@ def test_context_delegates_refund_to_repo(seed_tenant_with_pool):
 
 
 def test_headroom_initialized_and_maintained(seed_tenant_with_pool):
-    """set_pool_limit seeds pool_headroom = limit; a reserve decrements it; a
+    """set_manual_limit seeds pool_headroom = limit; a reserve decrements it; a
     settle returns the (reserved - actual) net — headroom == limit - reserved -
     settled holds throughout."""
     seed = seed_tenant_with_pool
@@ -244,7 +244,7 @@ def test_many_reserves_all_succeed_within_headroom(seed_tenant_with_pool):
     assert p["pool_headroom_microusd"] == 5_000_000 - n * amt
 
 
-def test_set_pool_limit_shifts_headroom_by_delta_not_clobber(seed_tenant_with_pool):
+def test_set_manual_limit_shifts_headroom_by_delta_not_clobber(seed_tenant_with_pool):
     """Fable review finding 3: changing the ceiling mid-period must shift headroom
     by the ceiling DELTA and preserve reserved/settled — never rewrite headroom
     from a stale read (which would drop a concurrent reserve's move). Raising 5M
@@ -259,20 +259,23 @@ def test_set_pool_limit_shifts_headroom_by_delta_not_clobber(seed_tenant_with_po
     assert _pool(seed)["pool_headroom_microusd"] == 4_000_000
 
     # RAISE 5M -> 8M: headroom shifts +3M to 7M, reserved untouched.
-    repo.set_pool_limit(tenant_id=tid, period=period, pool_limit_microusd=8_000_000)
+    repo.set_manual_limit(tenant_id=tid, period=period, manual_limit_microusd=8_000_000)
     p = _pool(seed)
     assert p["pool_limit_microusd"] == 8_000_000
     assert p["pool_reserved_microusd"] == 1_000_000
     assert p["pool_headroom_microusd"] == 7_000_000
 
     # LOWER 8M -> 0.5M (below the 1M reserved): headroom goes negative, remaining
-    # clamps to 0, and a new reserve is refused (402) — no over-admission.
-    repo.set_pool_limit(tenant_id=tid, period=period, pool_limit_microusd=500_000)
+    # REPORTS that deficit rather than clamping to 0, and a new reserve is refused
+    # (402) — no over-admission.
+    repo.set_manual_limit(tenant_id=tid, period=period, manual_limit_microusd=500_000)
     p = _pool(seed)
     assert p["pool_reserved_microusd"] == 1_000_000  # still preserved
     raw = repo.get(tid, period)
     assert int(raw["pool_headroom_microusd"]) == -500_000
-    assert p["remaining_microusd"] == 0
+    # The reported figure IS the counter, sign included. Clamping it here made the
+    # row's two readings of headroom disagree in exactly the case that matters.
+    assert p["remaining_microusd"] == -500_000
     with pytest.raises(HTTPException) as exc:
         reserve_credit(user, 1, pricing_key="opus", cost_microusd=1)
     assert exc.value.status_code == 402

@@ -189,8 +189,8 @@ class TestARetryCanTellCommittedFromNotCommitted:
         period = current_period()
         UserTenantsRepository().ensure(user_id=f"u-{tenant}", tenant_id=tenant,
                                        role="user", total_credit=10 ** 9)
-        TenantBudgetsRepository().set_pool_limit(
-            tenant_id=tenant, period=period, pool_limit_microusd=limit)
+        TenantBudgetsRepository().set_manual_limit(
+            tenant_id=tenant, period=period, manual_limit_microusd=limit)
         return period
 
     def _authorize(self, tenant, amount, key):

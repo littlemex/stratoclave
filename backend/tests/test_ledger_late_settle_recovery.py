@@ -38,8 +38,8 @@ def _seed(tenant_id="acme-late"):
         user_id=user.user_id, tenant_id=tenant_id, role="user",
         total_credit=1_000_000_000,
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=10_000_000_000,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=10_000_000_000,
     )
     return user, period
 

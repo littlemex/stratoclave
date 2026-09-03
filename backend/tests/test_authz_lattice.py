@@ -27,6 +27,13 @@ CONCRETE = [
     "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
     "apikeys:revoke", "apikeys:revoke-self",
     "billing:read", "billing:write",
+    # Money-ceiling raises (mvp/authz.py::ALL_SCOPES carries the full review
+    # comment). Three scopes: filing a raise for one's own tenant, deciding
+    # one for a tenant an actor owns, and deciding one for ANY tenant --
+    # three different authorities. No implication edge between them: the
+    # ladder here is read-breadth only (see `tenants:update-own` below for
+    # the same precedent) and neither of these is a read.
+    "limits:approve", "limits:approve-own", "limits:raise-self",
     "messages:send", "responses:send",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
     # A write on an owned tenant. Reviewed as a new scope rather than a reuse of

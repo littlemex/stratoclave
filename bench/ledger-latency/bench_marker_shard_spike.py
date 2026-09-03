@@ -148,6 +148,7 @@ def main(argv=None) -> int:
     from boto3.dynamodb.conditions import Key
 
     from dynamo.tenant_budgets import TenantBudgetsRepository, budget_sk, current_period
+    from pool_fixture import seed_verified_pool
 
     os.makedirs(args.out_dir, exist_ok=True)
     period = current_period()
@@ -164,9 +165,16 @@ def main(argv=None) -> int:
         # applied map + a share of the pool. The single-row case (n=1) reuses the
         # real budget row.
         if n == 1:
-            budgets.set_pool_limit(tenant_id=args.tenant, period=period,
-                                   pool_limit_microusd=args.pool_microusd, status="active")
-            # ensure the applied map exists on the real row.
+            # R39c: routed through the verified fixture, not a bare
+            # set_manual_limit call.
+            seed_verified_pool(budgets, tenant_id=args.tenant, period=period,
+                              manual_limit_microusd=args.pool_microusd,
+                              status="active")
+            # ensure the applied map exists on the real row. NOTE (F4, found
+            # while wiring this script to the R39c fixture, not fixed here):
+            # `ensure_applied_map` does not exist anywhere in this repository
+            # and this call raises AttributeError today, before and
+            # independent of this epic. Left as-is; not this part's defect.
             budgets.ensure_applied_map(tenant_id=args.tenant, period=period)
             return [budget_sk(period)]
         sks = []

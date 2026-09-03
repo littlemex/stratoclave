@@ -177,6 +177,16 @@ ALL_SCOPES: tuple[str, ...] = (
     "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
     "apikeys:revoke", "apikeys:revoke-self",
     "billing:read", "billing:write",
+    # Money-ceiling raises. Three scopes, and the split is the point rather than
+    # granularity for its own sake: filing a raise is something every end user
+    # does for their own tenant, deciding one is an authority, and deciding one
+    # for a tenant you own is a DIFFERENT authority from deciding one for any
+    # tenant. `limits:approve` is deployment-global at the write path -- which is
+    # why the approval transaction also binds the tenant it read from the row --
+    # and `limits:approve-own` is the form a team lead holds, paired with the
+    # ownership check on its routes. There is no implication edge between them:
+    # the ladder here is read breadth, and neither of these is a read.
+    "limits:approve", "limits:approve-own", "limits:raise-self",
     "messages:send", "responses:send",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
     # `tenants:update-own` is a WRITE on a tenant the actor owns, deliberately

@@ -44,6 +44,8 @@ from mvp.admin_pricing import router as mvp_admin_pricing_router
 from mvp.admin_routing import router as mvp_admin_routing_router
 from mvp.admin_usage import router as mvp_admin_usage_router
 from mvp.team_lead import router as mvp_team_lead_router
+# Money-ceiling raises: the request, the approval, and the grant that expires.
+from mvp.grants import router as mvp_grants_router
 from mvp.cognito_auth import router as mvp_cognito_auth_router
 # Phase S: AWS SSO / STS login.
 from mvp.sso_exchange import router as mvp_sso_exchange_router
@@ -163,6 +165,18 @@ async def lifespan(app: FastAPI):
 
     _active_price_source = _validate_price_source()
     logger.info("price_source_active", source=_active_price_source)
+
+    # Refuse to serve traffic when this task's configured per-seat rate disagrees
+    # with the rate the stored pool rows were computed at. Same posture, and the
+    # same reason, as the price source above: the request path cannot detect a
+    # ceiling computed at the wrong rate, because such a ceiling is a perfectly
+    # plausible number. Startup is the only place this can be a hard error, and a
+    # check that lives only in a repository module is a check production never
+    # runs.
+    from dynamo.tenant_budgets import assert_seat_rate_in_force
+
+    _rate_in_force = assert_seat_rate_in_force()
+    logger.info("seat_rate_in_force", rate_microusd=_rate_in_force)
 
     # External VSR (task #13): perform the version-pin handshake at startup so a
     # consult can be honored only after the running VSR's contract+build match
@@ -457,6 +471,7 @@ app.include_router(mvp_admin_routing_router)     # /api/mvp/admin/tenants/{id}[/
 app.include_router(mvp_admin_usage_router)       # /api/mvp/admin/usage-logs
 app.include_router(mvp_admin_pricing_router)     # /api/mvp/admin/pricing-config (read-only)
 app.include_router(mvp_team_lead_router)         # /api/mvp/team-lead/tenants[*]
+app.include_router(mvp_grants_router)            # /api/mvp/{me,admin,team-lead}/limit-{raises,grants}[*]
 app.include_router(mvp_cognito_auth_router)      # /api/mvp/auth/login, /respond
 # Phase S
 app.include_router(mvp_sso_exchange_router)              # POST /api/mvp/auth/sso-exchange

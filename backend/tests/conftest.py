@@ -73,6 +73,7 @@ _TABLE_ENVS = {
     "DYNAMODB_ROUTING_SIGNALS_TABLE": "stratoclave-routing-signals",
     "DYNAMODB_SAAR_MEMORY_TABLE": "stratoclave-saar-memory",
     "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
+    "DYNAMODB_QUOTA_EVENTS_TABLE": "stratoclave-quota-events",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -174,7 +175,12 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
         _rl._rl_client = None
         dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
-        # UserTenants: PK user_id, SK tenant_id
+        # UserTenants: PK user_id, SK tenant_id. `tenant-id-index` mirrors
+        # iac/lib/dynamodb-stack.ts (PK tenant_id, SK user_id) -- production
+        # code (admin_tenants.list_tenant_users, team_lead's equivalent, and
+        # F1's seat-count reconciler) queries it for a tenant's live
+        # membership; it was missing from this mock table entirely (nothing
+        # under moto exercised that query path before F1).
         dynamodb.create_table(
             TableName=_TABLE_ENVS["DYNAMODB_USER_TENANTS_TABLE"],
             KeySchema=[
@@ -184,6 +190,16 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
             AttributeDefinitions=[
                 {"AttributeName": "user_id", "AttributeType": "S"},
                 {"AttributeName": "tenant_id", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "tenant-id-index",
+                    "KeySchema": [
+                        {"AttributeName": "tenant_id", "KeyType": "HASH"},
+                        {"AttributeName": "user_id", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
             ],
             BillingMode="PAY_PER_REQUEST",
         )
@@ -270,6 +286,63 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
                         {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
                     ],
                     "Projection": {"ProjectionType": "ALL"},
+                },
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # QuotaEvents: PK pk, SK sk, holding three row kinds in one collection —
+        # a user's daily raise slot, a raise request, and the grant an approval
+        # produces. Two indexes, and the SPARSENESS of each is load-bearing rather
+        # than an optimisation:
+        #   tenant-status-index (tenant_id, status#created_at) — an approver's
+        #     queue. Slot rows deliberately do not write the bare `tenant_id`, so
+        #     they are absent from it by construction.
+        #   grant-expiry-index (grant_status, expires_at) — the sweeper's work
+        #     list. `grant_status` is written only while a grant is ACTIVE and
+        #     REMOVEd in the same transaction as every terminal transition, so a
+        #     revoked grant leaves the index rather than being filtered out of it.
+        # In the SHARED fixture and not a private one: a grant row is a thing
+        # cross-part tests have to be able to seed, and a fixture inside one test
+        # file would pass that file and leave every other one unable to.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_QUOTA_EVENTS_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "tenant_id", "AttributeType": "S"},
+                {"AttributeName": "status_created_at", "AttributeType": "S"},
+                {"AttributeName": "grant_status", "AttributeType": "S"},
+                {"AttributeName": "expires_at", "AttributeType": "N"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "tenant-status-index",
+                    "KeySchema": [
+                        {"AttributeName": "tenant_id", "KeyType": "HASH"},
+                        {"AttributeName": "status_created_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+                {
+                    "IndexName": "grant-expiry-index",
+                    "KeySchema": [
+                        {"AttributeName": "grant_status", "KeyType": "HASH"},
+                        {"AttributeName": "expires_at", "KeyType": "RANGE"},
+                    ],
+                    # The projection the sweeper needs to revoke without a second
+                    # read: the amount to subtract and the row to subtract it from.
+                    "Projection": {
+                        "ProjectionType": "INCLUDE",
+                        "NonKeyAttributes": [
+                            "grant_id", "tenant_id", "approved_amount_microusd",
+                            "target_pk", "target_sk", "period",
+                        ],
+                    },
                 },
             ],
             BillingMode="PAY_PER_REQUEST",
@@ -409,8 +482,11 @@ def seed_tenant_with_pool(dynamodb_mock) -> dict:
     UserTenantsRepository().ensure(
         user_id=user_id, tenant_id=tenant_id, role="user", total_credit=1_000_000_000
     )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=pool_limit_microusd
+    # An operator's own figure, which is what this fixture always seeded: the
+    # ceiling is $5.00 because a test said so, not because of a seat count. Same
+    # effective ceiling as before, through the setter that now writes a figure.
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=pool_limit_microusd
     )
     return {
         "user_id": user_id,

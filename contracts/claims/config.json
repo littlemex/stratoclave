@@ -8,7 +8,8 @@
   "docs/ADMIN_GUIDE.md",
   "docs/DEPLOYMENT.md",
   "docs/design/price-feeds.md",
-  "docs/design/limits.md"
+  "docs/design/limits.md",
+  "docs/design/quota-raises.md"
  ],
  "min_sentence_length": 40,
  "guarantee_terms": [

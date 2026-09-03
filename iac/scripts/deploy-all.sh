@@ -23,6 +23,13 @@ set -euo pipefail
 #   9. Build the Frontend with the CDK outputs embedded and sync to S3
 #  10. Invalidate CloudFront
 #
+# NOT deployed here: the quota gated stacks (<Prefix>QuotaReconcilerStack,
+# <Prefix>QuotaGrantsStack). They need the Lambda image built from
+# backend/Dockerfile.lambda, which does not exist until `build-and-push.sh` has
+# run once, so they are a REQUIRED second pass documented in the "Next steps"
+# this script prints and in docs/DEPLOYMENT.md ("Post-deploy: quota gated
+# stacks") — not an optional extra.
+#
 # Admin user creation is **NOT** performed here. Run `scripts/bootstrap-admin.sh`
 # after the stack is healthy to create the first administrator.
 #
@@ -253,7 +260,7 @@ else
   "cognito": {
     "user_pool_id": "$COGNITO_USER_POOL_ID",
     "client_id": "$COGNITO_CLIENT_ID",
-    "domain": "https://$COGNITO_DOMAIN",
+    "domain": "$COGNITO_DOMAIN",
     "region": "$REGION"
   },
   "api": {
@@ -292,11 +299,21 @@ echo "  ALB endpoint:  http://$ALB_DNS"
 echo "  User Pool ID:  $COGNITO_USER_POOL_ID"
 echo ""
 echo "Next steps:"
-echo "  1. Push the Backend container image:"
+echo "  1. Push the Backend container image (also builds+pushes the scheduled-Lambda"
+echo "     image and prints the LAMBDA_IMAGE_TAG the next step needs):"
 echo "     cd $IAC_DIR && ./scripts/build-and-push.sh"
-echo "  2. Create the first admin user:"
-echo "     $PROJECT_ROOT/scripts/bootstrap-admin.sh --email admin@example.com"
-echo "  3. Share the CloudFront URL with CLI users:"
+echo "  2. REQUIRED second pass — deploy the quota gated stacks (skipping this leaves"
+echo "     limit-raise grants that never expire and tenant pools that vanish on the"
+echo "     1st for any tenant whose membership did not change that month):"
+echo "     cd $IAC_DIR && LAMBDA_IMAGE_TAG=<tag from step 1> npx cdk deploy \\"
+echo "       ${PREFIX}-quota-reconciler ${PREFIX}-quota-grants \\"
+echo "       -c quotaReconciler=true -c quotaGrants=true --require-approval never"
+echo "  3. Create the first admin user (bootstrap-admin.sh is stale — see"
+echo "     docs/DEPLOYMENT.md 'Post-deploy: first admin'):"
+echo "     export STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL=admin@example.com"
+echo "     cd $IAC_DIR && npx cdk deploy ${PREFIX}-ecs --require-approval never"
+echo "     aws secretsmanager get-secret-value --secret-id ${PREFIX}/bootstrap-admin-temp-password --query SecretString --output text"
+echo "  4. Share the CloudFront URL with CLI users:"
 echo "     stratoclave setup https://$CLOUDFRONT_DOMAIN"
 echo ""
 echo "Log: $DEPLOYMENT_LOG"

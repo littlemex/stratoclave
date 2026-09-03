@@ -226,6 +226,12 @@ class UsageHistoryEntry(BaseModel):
     # None means "unknown", NOT "no fallback" (and never True).
     requested_model_id: Optional[str] = None
     fallback_occurred: Optional[bool] = None
+    #: F3 (contract R38): WHY, not just THAT. Read straight off the row --
+    #: never derived, unlike `fallback_occurred` -- because the cause is a
+    #: fact about the router's decision at reserve time and there is no
+    #: second source to derive it from. `None` on every row written before
+    #: this field existed, and on a row where no fallback occurred.
+    fallback_reason: Optional[str] = None
 
 
 class UsageHistoryResponse(BaseModel):
@@ -382,6 +388,9 @@ def usage_history(
             ),
             fallback_occurred=_derive_fallback(
                 it.get("requested_model_id"), str(it.get("model_id") or "")
+            ),
+            fallback_reason=(
+                str(it["fallback_reason"]) if it.get("fallback_reason") else None
             ),
         )
         for it in resp.get("Items", [])

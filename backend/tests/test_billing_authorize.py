@@ -55,8 +55,8 @@ def _seed(tenant_id="acme-authcap", limit=10_000_000_000, *, user_ids=()):
             user_id=uid, tenant_id=tenant_id, role="user",
             total_credit=1_000_000_000,
         )
-    TenantBudgetsRepository().set_pool_limit(
-        tenant_id=tenant_id, period=period, pool_limit_microusd=limit,
+    TenantBudgetsRepository().set_manual_limit(
+        tenant_id=tenant_id, period=period, manual_limit_microusd=limit,
     )
     return tenant_id, period
 
@@ -880,8 +880,8 @@ def test_idempotency_survives_period_boundary(dynamodb_mock, monkeypatch):
     # Seed a pool for the PREVIOUS period and authorize there (the "before midnight"
     # commit), by monkeypatching current_period to return prev for that one call.
     UserTenantsRepository().ensure(user_id=f"user-{tenant}", tenant_id=tenant, role="user", total_credit=10**9)
-    TenantBudgetsRepository().set_pool_limit(tenant_id=tenant, period=prev, pool_limit_microusd=10**10)
-    TenantBudgetsRepository().set_pool_limit(tenant_id=tenant, period=cur, pool_limit_microusd=10**10)
+    TenantBudgetsRepository().set_manual_limit(tenant_id=tenant, period=prev, manual_limit_microusd=10**10)
+    TenantBudgetsRepository().set_manual_limit(tenant_id=tenant, period=cur, manual_limit_microusd=10**10)
 
     import mvp._pipeline as pl
     monkeypatch.setattr(pl, "current_period", lambda: prev)

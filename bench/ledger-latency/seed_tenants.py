@@ -22,11 +22,16 @@ def tenant_ids(prefix: str, count: int) -> list[str]:
 
 def seed(prefix: str, count: int, pool_microusd: int) -> None:
     from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+    from pool_fixture import seed_verified_pool
     repo = TenantBudgetsRepository()
     period = current_period()
     for tid in tenant_ids(prefix, count):
-        repo.set_pool_limit(tenant_id=tid, period=period,
-                            pool_limit_microusd=pool_microusd, status="active")
+        # Every benchmark downstream inherits these rows -- R39c: a row seeded
+        # by a bare pool_limit_microusd figure is not explained by its own
+        # source attributes once the epic's schema exists, so this is the one
+        # call every seeder routes through.
+        seed_verified_pool(repo, tenant_id=tid, period=period,
+                          manual_limit_microusd=pool_microusd, status="active")
     print(f"[seed] {count} tenants ({prefix}00..{prefix}{count-1:02d}) "
           f"pool={pool_microusd} micro-USD for period {period}")
 

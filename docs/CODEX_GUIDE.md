@@ -1,4 +1,4 @@
-<!-- Last updated: 2026-07-10 -->
+<!-- Last updated: 2026-09-03 -->
 <!-- Applies to: Stratoclave main with `feature/openai-responses-proxy` (or later) -->
 
 # Using Stratoclave with OpenAI Codex CLI
@@ -30,15 +30,26 @@ configurations that need to survive across runs (CI, remote workers).
 
 ## Prerequisites
 
-- A working Stratoclave deployment where `STRATOCLAVE_CODEX_ENABLED=true` is set on
-  the ECS task (the default in `iac/bin/iac.ts`).
+- A Stratoclave deployment where `STRATOCLAVE_CODEX_ENABLED` is not explicitly set to
+  a falsy value. **This is the default**: with neither `STRATOCLAVE_CODEX_ENABLED` nor
+  the deprecated `CODEX_ENABLED` present in the deploy environment, the stack
+  synthesises `true`. The one reason to turn it off is residency — this route's model
+  registry currently pins every OpenAI model to `us-east-2` regardless of the deploy
+  region — in which case set `STRATOCLAVE_CODEX_ENABLED=false` at deploy time.
 - `codex` CLI installed locally and able to reach the deployment's
   CloudFront URL over HTTPS. Test with
   `codex --version` (≥ 0.136.0 recommended).
 - The Bedrock account behind your deployment must have model access
-  enabled for the OpenAI families you intend to call:
-    - `openai.gpt-5.4` — us-west-2 only
-    - `openai.gpt-5.5` — us-east-2 only
+  enabled for the OpenAI families you intend to call, and **the deployment's own
+  allowlist is the authority on which names it accepts** — ask it rather than
+  trusting a list in a document, because these names turn over every few months:
+
+  ```
+  curl -sS -H "Authorization: Bearer $TOKEN" "$STRATOCLAVE_URL/openai/v1/models"
+  ```
+
+  A name outside that list is refused with `invalid_model`, and the refusal names the
+  accepted alternatives.
 - Your stratoclave user role must carry the `responses:send` scope.
   All three default roles (`admin`, `team_lead`, `user`) carry it
   out-of-the-box; check `backend/permissions.json` for the live
@@ -65,8 +76,21 @@ stratoclave auth sso --profile your-aws-sso-profile      # SSO / saml2aws / IAM 
 # Run codex through Stratoclave. Trailing args are passed through.
 stratoclave codex -- exec --skip-git-repo-check "Explain this repo"
 stratoclave codex -- "Open codex TUI through Stratoclave"
-stratoclave codex --model openai.gpt-5.5 -- "Use 5.5 for this run"
+
+# Or pin a specific model instead of the deployment's default:
+stratoclave codex --model "$CODEX_MODEL" -- exec --skip-git-repo-check "Explain this repo"
 ```
+
+**`--model` is optional.** `codex`'s own built-in default is not a name this
+gateway's allowlist has any reason to contain, so the wrapper never lets that default
+reach codex: omitting `--model` makes it pass the deployment's advertised default
+instead (`stratoclave setup` reads it from `.well-known/stratoclave-config` into
+`~/.stratoclave/config.toml`'s `[defaults].codex_model`; re-run `setup` after the
+deployment changes its default). A CLI that has never run `setup` against a
+codex-enabled deployment falls back to a literal the CLI carries itself
+(`openai.gpt-5.6-sol` as of this writing) — still a name the registry accepts, just not
+necessarily the deployment's preferred one. Set `CODEX_MODEL` (or `--model` directly)
+to a name the models endpoint above returned when you want something else.
 
 What `stratoclave codex` does under the hood:
 
@@ -173,7 +197,7 @@ The result in `~/.codex/config.toml`:
 
 ```toml
 model_provider = "stratoclave"
-model = "openai.gpt-5.4"
+model = "openai.gpt-5.6-sol"
 
 # Bedrock's OpenAI Responses endpoint does not implement the
 # `web_search` tool today; codex must not send it as a tool type
@@ -191,7 +215,7 @@ project_root_markers = []
 # codex's built-in model catalog does not list the GPT-5 family.
 # Without an explicit context window codex warns "Model metadata for
 # ... not found. Defaulting to fallback metadata" on every startup.
-model_context_window = 400000
+model_context_window = 200000
 
 [model_providers.stratoclave]
 name                   = "Stratoclave (OpenAI via Bedrock)"
@@ -209,7 +233,7 @@ stream_idle_timeout_ms = 600000
 export STRATOCLAVE_OPENAI_KEY="sk-stratoclave-XXXXXXXX..."
 codex exec --skip-git-repo-check "Reply with: PONG"
 codex                                            # interactive TUI
-codex --model openai.gpt-5.5 exec "Use 5.5 once"
+codex --model openai.gpt-5.6-terra exec "Use the other tier once"
 ```
 
 ### Step 4. Revoking when finished
@@ -242,10 +266,10 @@ Stratoclave's auth, credit, and audit layers.**
 
 ```toml
 model_provider = "amazon-bedrock"
-model = "openai.gpt-5.4"
+model = "openai.gpt-5.6-sol"
 
 [model_providers.amazon-bedrock.aws]
-region = "us-west-2"
+region = "us-east-2"
 profile = "your-aws-profile"     # uses AWS SDK credential chain
 ```
 
@@ -270,12 +294,13 @@ or B instead.
 After running codex through Stratoclave:
 
 ```bash
-# Self usage summary (CLI). Should show an openai.gpt-5.4 row.
+# Self usage summary (CLI). Should show an openai.gpt-5.6-sol row (or
+# whichever model you passed via --model).
 stratoclave usage show --since-days 1 --limit 5
 
 # Or open the web console:
 stratoclave ui open
-# → "My usage" → "Tokens by model" includes openai.gpt-5.4
+# → "My usage" → "Tokens by model" includes openai.gpt-5.6-sol
 # → "API keys" → last_used_at on your key updates
 ```
 
@@ -286,10 +311,15 @@ reservation already accounts for them via a multiplier (1× / 2× / 4× / 8×).
 
 ## Choosing a model and region
 
-| Model            | Bedrock region    | Stratoclave aliases                  |
-|------------------|-------------------|--------------------------------------|
-| `openai.gpt-5.4` | `us-west-2`       | `gpt-5.4`, `openai.gpt-5.4`          |
-| `openai.gpt-5.5` | `us-east-2`       | `gpt-5.5`, `openai.gpt-5.5`          |
+| Model                  | Bedrock region | Stratoclave aliases                     |
+|------------------------|-----------------|-----------------------------------------|
+| `openai.gpt-5.6-sol`   | `us-east-2`     | `gpt-5.6-sol`, `openai.gpt-5.6-sol`     |
+| `openai.gpt-5.6-terra` | `us-east-2`     | `gpt-5.6-terra`, `openai.gpt-5.6-terra` |
+
+This table is a point-in-time snapshot; the model catalog turns over every few months
+(the Prerequisites section above already says so once — this note is here so a reader
+who jumped straight to this table sees it too). `GET /openai/v1/models` on your own
+deployment is the authority.
 
 The region is per-model, not per-deployment. The Stratoclave control
 plane runs in us-east-1 and makes a cross-region HTTPS call to
@@ -300,9 +330,21 @@ inference. To add a new model: append a `ModelEntry` to
 ## Troubleshooting
 
 **`HTTP 503 OpenAI Responses API is not enabled`**
-— `STRATOCLAVE_CODEX_ENABLED` is not `"true"` on the ECS task. Check the env
-on the running task definition; redeploy with `STRATOCLAVE_CODEX_ENABLED=true` in
-`iac/bin/iac.ts`.
+— `STRATOCLAVE_CODEX_ENABLED` was explicitly set to a falsy value on the ECS task
+(codex defaults to enabled, so this does not happen on its own). Check the env on the
+running task definition; redeploy with `STRATOCLAVE_CODEX_ENABLED=true` (or simply
+unset) in `iac/bin/iac.ts`.
+
+**`stratoclave codex` prints "ERROR: Reconnecting... 1/5" through "5/5" and then fails**
+— This looks like a network problem but usually is not: codex logs every failed
+provider call the same way, including a request the gateway refused outright (most
+commonly `402 Payment Required` — the tenant's budget for the period is exhausted).
+Once the retries are exhausted, codex prints the gateway's raw JSON refusal on the same
+line, and `stratoclave codex` follows it with a `[STRATOCLAVE]` block naming which wall
+refused, whether it can be raised, and the exact shortfall — read that line rather than
+the "Reconnecting" ones above it. If it says `grantable=true`, ask an admin, or run
+`stratoclave limit-raise request --limit-usd <amount> --reason <reason>` yourself if
+your role permits it.
 
 **`HTTP 403 Missing permission: responses:send`**
 — Either your role does not carry the scope (check `backend/permissions.json`),

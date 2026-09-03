@@ -83,6 +83,11 @@
     "@aws-cdk/aws-elasticloadbalancingV2:albDualstackWithoutPublicIpv4SecurityGroupRulesDefault": true,
     "@aws-cdk/aws-iam:oidcRejectUnauthorizedConnections": true,
     "@aws-cdk/core:enableAdditionalMetadataCollection": true,
-    "@aws-cdk/aws-lambda:createNewPoliciesWithAddToRolePolicy": true
+    "@aws-cdk/aws-lambda:createNewPoliciesWithAddToRolePolicy": true,
+    "availability-zones:account=123456789012:region=us-east-1": [
+      "us-east-1a",
+      "us-east-1b",
+      "us-east-1c"
+    ]
   }
 }

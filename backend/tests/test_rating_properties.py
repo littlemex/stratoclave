@@ -63,9 +63,9 @@ class RatingFreezeMachine(RuleBasedStateMachine):
             user_id=self.user.user_id, tenant_id=self.tenant_id,
             role="user", total_credit=10**12,
         )
-        TenantBudgetsRepository().set_pool_limit(
+        TenantBudgetsRepository().set_manual_limit(
             tenant_id=self.tenant_id, period=self.period,
-            pool_limit_microusd=10**12,
+            manual_limit_microusd=10**12,
         )
         pricing.reset_cache()
         pricing.reset_version_cache()

@@ -9,8 +9,8 @@ redesign did not break the CLI/UI-facing contract:
   2. A real pipeline reserve decrements the remaining the UI shows.
   3. A real settle (actual < reserved) returns the remainder to remaining.
   4. An admin ceiling RAISE preserves settled and lifts remaining by the delta.
-  5. An admin ceiling CUT below spend clamps remaining to 0 AND makes the next
-     reserve fail 402 (headroom went negative) — no over-admission.
+  5. An admin ceiling CUT below spend REPORTS the deficit as a negative
+     remaining AND makes the next reserve fail 402 — no over-admission.
 
 This is the live CLI/UI verification for the headroom hot-path change: every
 number the operator sees in the dashboard is asserted against the ledger.
@@ -101,10 +101,21 @@ def test_headroom_admin_http_contract_end_to_end(monkeypatch, dynamodb_mock):
     assert r2.json()["pool_settled_microusd"] == 4_000_000
     assert r2.json()["remaining_microusd"] == 76_000_000
 
-    # 5. Admin CUT to $3 (< $4 settled) → remaining clamps to 0 and the next
-    #    reserve is refused 402 (headroom negative, no over-admission).
+    # 5. Admin CUT to $3 (< $4 settled) → the pool is $1 over its ceiling, and
+    #    remaining SAYS SO: -$1, not 0. A zero here is the defect this assertion
+    #    used to encode — an over-ceiling pool that reports nothing left looks
+    #    identical to one sitting exactly at its ceiling, so an operator granting
+    #    more capacity sees the same 0 before and after and cannot tell whether
+    #    the grant did anything. The next reserve is still refused 402.
     r3 = client.put(base, json={"limit_usd_cents": 300, "period": period})
-    assert r3.json()["remaining_microusd"] == 0
+    body3 = r3.json()
+    deficit = 4_000_000 - 3_000_000  # settled $4 against a $3 ceiling
+    assert body3["remaining_microusd"] == -deficit
+    assert body3["remaining_microusd"] == (
+        body3["pool_limit_microusd"]
+        - body3["pool_reserved_microusd"]
+        - body3["pool_settled_microusd"]
+    ), "remaining must be the identity, over the ceiling as well as under it"
     with pytest.raises(HTTPException) as exc:
         reserve_credit(user, 1, pricing_key="opus", cost_microusd=1)
     assert exc.value.status_code == 402

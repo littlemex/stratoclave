@@ -240,16 +240,20 @@ for where a broker is the better choice.
 - **OpenAI Responses API endpoint.** `POST /openai/v1/responses` and
   `GET /openai/v1/models` accept OpenAI Responses-API payloads and forward
   them to the OpenAI-compatible models on Amazon Bedrock's bedrock-runtime
-  service — OpenAI GPT-5.x (`gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`),
-  xAI Grok (`grok-4.6`), and Google Gemma (`gemma-4-31b`). Because all of these
-  speak the same OpenAI wire shape, adding one is a registry entry, not a new
-  transport. The `stratoclave codex` CLI
+  service — OpenAI GPT-5.6 (`gpt-5.6-sol`, `gpt-5.6-terra`), xAI Grok
+  (`grok-4.6`), and others; `GET /openai/v1/models` on your own deployment is
+  the authority on the current list, which turns over every few months.
+  Because all of these speak the same OpenAI wire shape, adding one is a
+  registry entry, not a new transport. The `stratoclave codex` CLI
   subcommand wraps the `codex` binary against this endpoint with an ephemeral
   key; the `--codex` flag on `stratoclave setup` patches `~/.codex/config.toml`
   for direct use. Controlled by the `STRATOCLAVE_CODEX_ENABLED` ECS env flag, which
-  **defaults to `false`**: a route that exposes a provider surface is opted into, the
-  same way the money flags are conservative. Set `STRATOCLAVE_CODEX_ENABLED=true` to
-  serve the OpenAI routes; until then they return `503`.
+  **defaults to `true`**: codex is not itself a money or safety control — a request
+  through it still runs the same reservation/settlement pipeline as the Anthropic
+  route — so it ships on by default like that route does. Set
+  `STRATOCLAVE_CODEX_ENABLED=false` to turn it off (e.g. under strict residency,
+  since this route's model registry currently pins its OpenAI models to
+  `us-east-2` regardless of the deploy region).
 - **Two-level credit governance, enforced pre-flight.** Every tenant has a
   default credit, every user can carry a per-user override, and every
   inference call — to `/v1/messages` (Anthropic), `/v1/chat/completions`
@@ -280,8 +284,15 @@ for where a broker is the better choice.
   spend are counted differently — all in integer micro-USD, never floating
   point. **A tenant gets a dollar pool at creation** — `seats x $200` a month by
   default (`STRATOCLAVE_SEAT_MONTHLY_USD`), following the seat count until an
-  operator sets a figure of their own — so the ceiling a fresh deployment
-  enforces is denominated in the unit the invoice arrives in. The per-user token
+  operator sets a figure of their own, and following it again when they ask it to
+  (`{"follow_seats": true}`) — so the ceiling a fresh deployment enforces is
+  denominated in the unit the invoice arrives in, and choosing a figure once is not
+  a decision a tenant is stuck with. `STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's
+  own admission ceiling are process-wide environment values, not per-tenant
+  configuration — every tenant on a deployment is priced from the same seat figure
+  and bounded by the same maximum, so two otherwise-unrelated tenants are coupled
+  through this one setting rather than independently configurable
+  ([docs/design/limits.md](docs/design/limits.md) §3). The per-user token
   quota remains, at a deliberately loose ten million tokens
   (`DEFAULT_TENANT_CREDIT`), as a fairness device between a tenant's users
   rather than as a budget: a token count cannot state a cost, since one million
@@ -588,6 +599,7 @@ stratoclave claude -- "Summarize this repository in one sentence"
 
 # Run OpenAI codex through Stratoclave (codex must be installed separately).
 # Mints a short-lived responses:send-only key; ~/.codex/config.toml is untouched.
+# `--model` is optional: omitting it uses the deployment's advertised default.
 stratoclave codex -- "Summarize this repository in one sentence"
 
 # Open the web console in a pre-authenticated tab
@@ -621,7 +633,7 @@ client = openai.OpenAI(
     api_key="sk-stratoclave-xxxxxxxx...",  # issue via CLI or web console
 )
 resp = client.responses.create(
-    model="openai.gpt-5.4",
+    model="openai.gpt-5.6-sol",
     input="Hello",
 )
 print(resp.output_text)

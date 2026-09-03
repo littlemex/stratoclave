@@ -103,9 +103,16 @@ symptom of the design flaw, not a number to tune against.
 preserved; the marker item is FIXED-SIZE (no map growth) and O(1) per operation
 regardless of table size — the structural fix for the item-growth blowup. It stays
 on the tenant partition (SK-scoped), which is what kills the growth; the
-single-partition WCU ceiling remains bounded by the pool item itself and is a
+single-partition WCU ceiling remains bounded by the pool item itself, now widened by
+`seat_count`, `manual_limit_microusd` and `seat_rate_microusd`, and is a
 SEPARATE concern deferred to a future sharded-pool PR (Fable Q1: moving markers to
 their own `PK=hold_id` table would gain only ~2× and not touch the real ceiling).
+That bound is still the pool item, and its magnitude has moved: the ceiling rule
+adds the operator's figure, the seat count and the stored seat rate to the row, so
+the bound is now the width the row's own declaration allows
+(`dynamo.pool_row_schema.worst_case_pool_item_bytes()`) rather than the handful of counters
+it was when this was written. The row is still O(1) in the number of holds, which
+is the property this paragraph is about.
 Cost ~2 WCU/item + the transaction tax (warm p50 ≈ 10–20 ms — within the p50
 target), predictable instead of "fast then dies". This supersedes the shipped
 marker-in-pool-item map. Confirmed with Fable; the PR-1 scope, as landed:
@@ -190,14 +197,19 @@ removing a tenant from the allowlist mid-flight still settles cleanly). CDK wire
 it via `EcsStackProps.reserveProtocolCanaryTenants` (dark by default — no env var
 until set). Graduation ladder:
   1. **Shadow/Canary**: add ONE low-traffic internal tenant to the allowlist. Watch
-     `PoolItemSizeBytes` (must stay flat < ~200 B — the live proof the item-growth
-     bug is gone, replacing the redundant 2×-provisioned c=1×3000 re-benchmark),
+     `PoolItemSizeBytes` (must stay flat at whatever the row's own declaration
+     allows — `pool_row_schema.worst_case_pool_item_bytes()`, derived, not a figure typed here, so a
+     schema change moves the bound with it; the live proof the item-growth bug is
+     gone, replacing the redundant 2×-provisioned c=1×3000 re-benchmark),
      the ledger drift alarms (must stay zero), and
      `PoolReconcileCreditBackInvariant` (must never fire). The `pool_item_size`
      gauge is emitted once per reconcile (cold path).
   2. **Full**: once the canary bakes clean, set the global
      `STRATOCLAVE_RESERVE_PROTOCOL=pending` (all tenants) and drop the allowlist.
-Observability shipped with this: `PoolItemSizeBytes` gauge + growth alarm (>2 KB),
+Observability shipped with this: `PoolItemSizeBytes` gauge + two alarms — a coarse
+>2 KB one for unbounded per-hold growth, which is orders of magnitude, and a tight
+`PoolRowBeyondDeclaration` at zero over the declared width, which is tens of bytes
+and catches an attribute nobody declared —
 `PoolReconcileCreditBackInvariant` alarm, and the reconcile summary now splits
 `retire_failures` from `credit_back_deferred`.
 

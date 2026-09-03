@@ -467,9 +467,10 @@ fn logical_normalize(p: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// `STRATOCLAVE_CODEX_STATE_DIR` is process-global, so the tests that touch it
-    /// run under one lock.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// `STRATOCLAVE_CODEX_STATE_DIR` is process-global, and so is the `HOME` these tests
+    /// fall back to when it is unset -- which other modules' tests repoint. One lock for the
+    /// whole environment, owned by none of them: see `crate::test_env`.
+    use crate::test_env::env_lock;
 
     /// Read what the tests need: the keys a rewrite would carry over from the file
     /// currently in the directory.
@@ -506,7 +507,7 @@ mod tests {
 
     #[test]
     fn empty_flag_and_empty_env_fall_through_to_the_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         std::env::set_var("STRATOCLAVE_CODEX_STATE_DIR", "");
         let resolved = resolve_state_dir(Some("")).expect("resolve");
         std::env::remove_var("STRATOCLAVE_CODEX_STATE_DIR");
@@ -519,7 +520,7 @@ mod tests {
 
     #[test]
     fn env_var_is_used_when_no_flag_is_given() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         std::env::set_var("STRATOCLAVE_CODEX_STATE_DIR", "/tmp/sc-codex-env");
         let resolved = resolve_state_dir(None).expect("resolve");
         std::env::remove_var("STRATOCLAVE_CODEX_STATE_DIR");

@@ -52,7 +52,7 @@ backend some other way (outside compose), set them yourself:
 | Variable | Value | Why |
 |---|---|---|
 | `ENVIRONMENT` | `development` | Anything other than `production` skips the Cognito/OIDC/CORS hard-requirement checks in `backend/main.py` — this mode never uses Cognito, it authenticates with a `sk-stratoclave-*` API key. |
-| `STRATOCLAVE_CODEX_ENABLED` | `true` | Off by default in a deployment (`backend/mvp/openai_responses.py`), and set explicitly here because a local demo wants all three routes. Without it, `/openai/v1/responses` returns `503` — `make demo` would silently be a two-route demo instead of three. |
+| `STRATOCLAVE_CODEX_ENABLED` | `true` | Already the default (`backend/mvp/openai_responses.py`); set explicitly here so the local demo does not depend on that default staying unchanged. Without it (or with it explicitly set to a falsy value), `/openai/v1/responses` returns `503` — `make demo` would silently be a two-route demo instead of three. |
 | `AWS_ENDPOINT_URL_DYNAMODB` | `http://dynamodb-local:8000` | The one line that makes DynamoDB local. Read by botocore directly; no application code change. Bedrock has no such override — inference stays real. |
 | `AWS_PROFILE` | your shell's `AWS_PROFILE`, else `default` | Which credentials the gateway container uses to call Bedrock. |
 | `AWS_REGION` | your shell's `AWS_REGION`, else `us-east-1` | Region for the DynamoDB Local client and any AWS client that doesn't pick its own region per call. |

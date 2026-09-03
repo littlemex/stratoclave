@@ -482,20 +482,23 @@ def delete_user_endpoint(
             extra={"user_id": user_id, "error": str(e)},
         )
 
-    # Archive UserTenants rows (preserve history).
-    from datetime import datetime, timezone
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Archive UserTenants rows (preserve history), THROUGH the one seat-delta
+    # writer. This used to be a raw `update_item` here, which archived the
+    # membership and told the tenant pool nothing: the departure never gave its
+    # seat's money back, so a tenant that deleted users kept a ceiling scaled to
+    # people who no longer existed. The error is upward — a ceiling that is too
+    # high admits spend rather than refusing it — so it is not cosmetic drift, and
+    # a raw write here is exactly what `archive_membership` exists to prevent.
     user_tenants_repo = UserTenantsRepository()
     resp = user_tenants_repo._table.query(
         KeyConditionExpression=boto3_key("user_id").eq(user_id),
     )
     for ut in resp.get("Items", []):
-        user_tenants_repo._table.update_item(
-            Key={"user_id": user_id, "tenant_id": ut["tenant_id"]},
-            UpdateExpression="SET #s = :archived, updated_at = :now",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":archived": "archived", ":now": now_iso},
-        )
+        # Unconditionally, without pre-filtering on the read: the archive is
+        # conditional on the row being active, so an already-archived row moves no
+        # seat and a concurrent archive cannot double-count one.
+        user_tenants_repo.archive_membership(
+            user_id=user_id, tenant_id=str(ut["tenant_id"]))
 
     log_audit_event(
         event="user_deleted",

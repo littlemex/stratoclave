@@ -58,6 +58,8 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly saarMemoryTable: dynamodb.Table;
   /** Ledger P0-1: append-only, event-sourced credit ledger (money source of truth). RETAIN + PITR, no TTL */
   public readonly creditLedgerTable: dynamodb.Table;
+  /** Limit-raise requests, the grants approvals produce, and the daily slot. */
+  public readonly quotaEventsTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -376,6 +378,61 @@ export class DynamoDBStack extends cdk.Stack {
       sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
     });
 
+    // Limit raises: the request, the grant an approval produces, and the daily
+    // slot that is also the client token's anchor. One item collection:
+    //   PK "USER#<id>",    SK "SLOT#<tenant>#<yyyy-mm-dd>"
+    //   PK "REQUEST#<id>", SK "REQUEST"
+    //   PK "TENANT#<id>",  SK "GRANT#<id>"
+    //
+    // Two indexes, and the SPARSENESS of each is a mechanism rather than a saving.
+    // `tenant-status-index` is an approver's queue keyed on the BARE tenant id --
+    // a prefixed value would make it unqueryable from an id a caller holds -- and
+    // slot rows deliberately never write that attribute, so they are absent from it
+    // by construction rather than by a filter. `grant-expiry-index` is the
+    // sweeper's work list, partitioned on an attribute written only while a grant
+    // is ACTIVE and REMOVEd in the same transaction as every terminal transition:
+    // a revoked grant leaves the index immediately, so exactly-once revocation does
+    // not rest on the sweeper filtering correctly.
+    //
+    // NO STREAM and NO TTL, both deliberate. A stream was proposed on the reasoning
+    // that a later part would consume it; no part has an event-source mapping, a
+    // consumer, permissions or a DLQ, and enabling one later is a one-line change
+    // to this table — so it stays off rather than being watched. TTL is refused for
+    // the reason the hold reaper refuses it: a grant row is the record of capacity
+    // that was given, and a TTL delete would remove the record without giving the
+    // capacity back.
+    //
+    // PITR and RETAIN: a grant is why a tenant's ceiling was what it was on a given
+    // day, so it is audit state in the same sense the ledger is.
+    this.quotaEventsTable = new dynamodb.Table(this, 'QuotaEventsTable', {
+      ...baseTableProps,
+      removalPolicy: auditRemovalPolicy,
+      pointInTimeRecovery: true,
+      tableName: `${prefix}-quota-events`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+    this.quotaEventsTable.addGlobalSecondaryIndex({
+      indexName: 'tenant-status-index',
+      partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'status_created_at', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.quotaEventsTable.addGlobalSecondaryIndex({
+      indexName: 'grant-expiry-index',
+      partitionKey: { name: 'grant_status', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'expires_at', type: dynamodb.AttributeType.NUMBER },
+      // INCLUDE, not ALL: exactly what the sweeper needs to revoke a grant without
+      // a second read — the amount to subtract and the row to subtract it from.
+      // Projecting everything would put the requester's own comment into an index
+      // the sweeper reads on every tick, which is a place R13 keeps it out of.
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: [
+        'grant_id', 'tenant_id', 'approved_amount_microusd',
+        'target_pk', 'target_sk', 'period',
+      ],
+    });
+
     // A-2: admin-editable per-model pricing. PK "CONFIG#pricing", SK versioned
     // rate rows + a CURRENT pointer. Small, rarely written, keyed reads only.
     this.pricingConfigTable = new dynamodb.Table(this, 'PricingConfigTable', {
@@ -503,6 +560,8 @@ export class DynamoDBStack extends cdk.Stack {
       this.saarMemoryTable.tableArn,
       this.creditLedgerTable.tableArn,
       `${this.creditLedgerTable.tableArn}/index/*`,
+      this.quotaEventsTable.tableArn,
+      `${this.quotaEventsTable.tableArn}/index/*`,
     ];
 
     // Parameter Store exports
@@ -529,6 +588,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableObservabilityParam', 'dynamodb/table-observability', this.observabilityTable],
       ['TableRoutingSignalsParam', 'dynamodb/table-routing-signals', this.routingSignalsTable],
       ['TableSaarMemoryParam', 'dynamodb/table-saar-memory', this.saarMemoryTable],
+      ['TableQuotaEventsParam', 'dynamodb/table-quota-events', this.quotaEventsTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {

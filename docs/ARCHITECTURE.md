@@ -915,7 +915,7 @@ Response shape (schema_version = `"1"`):
     "default_model": "us.anthropic.claude-opus-4-7",
     "callback_port": 18080,
     "codex": {
-      "default_model": "openai.gpt-5.4",
+      "default_model": "openai.gpt-5.6-sol",
       "openai_base_path": "/openai/v1",
       "supported_regions": ["us-east-2", "us-west-2"]
     }
@@ -923,10 +923,10 @@ Response shape (schema_version = `"1"`):
 }
 ```
 
-The `cli.codex` block is present **only when `STRATOCLAVE_CODEX_ENABLED=true`** is set on
-the ECS task; it is absent entirely when the OpenAI Responses path is
-disabled. Old CLIs that never see `cli.codex` simply never offer the
-`codex` subcommand bootstrap.
+The `cli.codex` block is present **only when `STRATOCLAVE_CODEX_ENABLED` evaluates to
+true** — the default — on the ECS task; it is absent entirely when the OpenAI Responses
+path has been explicitly disabled. Old CLIs that never see `cli.codex` simply never
+offer the `codex` subcommand bootstrap.
 
 `api_endpoint` above is the sample deployment URL used throughout these docs;
 your actual value is whatever CloudFront URL `deploy-all.sh` prints at the end

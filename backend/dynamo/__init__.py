@@ -54,6 +54,7 @@ from .tenant_budgets import (
     current_period,
 )
 from .credit_ledger import CreditLedgerRepository
+from .quota_events import QuotaEventsRepository
 
 __all__ = [
     "CreditLedgerRepository",
@@ -83,5 +84,6 @@ __all__ = [
     "UiTicketsRepository",
     "TicketNotFoundError",
     "TenantBudgetsRepository",
+    "QuotaEventsRepository",
     "current_period",
 ]

@@ -93,14 +93,22 @@ describe('resolveRegionConfig — region decoupling', () => {
     expect(computed).toEqual(disabledValues.map(() => false));
   });
 
-  test('STRATOCLAVE_CODEX_ENABLED defaults to false: route exposure must be opted into', () => {
-    // This is the flipped default (NEW): every other flag that gates money or
-    // route exposure (STRATOCLAVE_HARD_CEILING_GATE, STRATOCLAVE_UNOBSERVED_HOLDS,
-    // STRATOCLAVE_RESIDENCY, STRATOCLAVE_RESERVE_PROTOCOL) ships conservative;
-    // codex used to be the one flag that defaulted ON. An operator who never
-    // set this var gets codex OFF, matching the backend's own bare-getenv default.
-    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).codexEnabled).toBe(false);
-    expect(resolveRegionConfig(baseEnv()).codexEnabled).toBe(false);
+  test('STRATOCLAVE_CODEX_ENABLED defaults to true: codex ships on, like the Anthropic route', () => {
+    // Codex is not a money/safety gate the way STRATOCLAVE_HARD_CEILING_GATE,
+    // STRATOCLAVE_UNOBSERVED_HOLDS, STRATOCLAVE_RESIDENCY, and
+    // STRATOCLAVE_RESERVE_PROTOCOL are — every request through it still goes
+    // through the same reservation/settlement pipeline and the same
+    // pool/quota walls as the Anthropic route. Defaulting it off gates
+    // nothing but the CLI's usability: an operator who deploys and never
+    // separately discovers and sets this var gets a `stratoclave codex` that
+    // 503s for a reason nothing at deploy time mentioned. Codex is one of
+    // this gateway's two supported CLIs, not an optional add-on, so an
+    // operator who never sets this var gets it ON, matching the backend's
+    // own bare-getenv default — the explicit opt-OUT is
+    // STRATOCLAVE_CODEX_ENABLED=false (e.g. for strict non-US residency,
+    // since the codex path is registry-pinned to us-east-2/us-west-2).
+    expect(resolveRegionConfig(baseEnv({ STRATOCLAVE_REGION: 'us-east-1' })).codexEnabled).toBe(true);
+    expect(resolveRegionConfig(baseEnv()).codexEnabled).toBe(true);
   });
 
   test('CODEX_ENABLED (deprecated bare name) is honoured as a fallback', () => {
@@ -210,9 +218,11 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
 
   test('NEW-1: codex enabled defeats residency even with everything else pinned', () => {
     // OPENAI_BEDROCK_REGIONS is a no-op hint; codex is registry-pinned to
-    // us-west-2/us-east-2, so strict must still throw. Codex must be
-    // EXPLICITLY enabled here: the default flipped to false, so this case no
-    // longer exercises itself for free the way it did when codex defaulted on.
+    // us-west-2/us-east-2, so strict must still throw. STRATOCLAVE_CODEX_ENABLED
+    // is passed EXPLICITLY here even though codex now defaults to true too —
+    // this test's point is that pinning it true (as an operator migrating an
+    // old, explicitly-configured deployment would) still defeats strict
+    // residency; the no-env-var case is covered by the next test.
     expect(() =>
       resolveRegionConfig(
         baseEnv({
@@ -223,6 +233,43 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
           STRATOCLAVE_RESIDENCY: 'strict',
           OPENAI_BEDROCK_REGIONS: 'eu-west-1',
           STRATOCLAVE_CODEX_ENABLED: 'true',
+        }),
+      ),
+    ).toThrow(/us-west-2\(codex\)|us-east-2\(codex\)|Bedrock is reachable/);
+  });
+
+  test('NEW-9: codex defaulting to true now surfaces on a non-US body region even with no codex var set at all', () => {
+    // Direct consequence of the default flip (contract R1 for this change):
+    // before, an operator who deployed to a non-US region and never touched
+    // any codex var got a residency-silent synth, because codex defaulted
+    // off and never reached the US registry regions. Now the same env
+    // produces a warning (non-strict) because codex defaults ON and its
+    // registry pin (us-east-2/us-west-2) is unconditionally reachable unless
+    // explicitly disabled. This is not a regression to paper over: it is the
+    // residency analysis correctly describing what the deployment will
+    // actually do at runtime.
+    const cfg = resolveRegionConfig(
+      baseEnv({
+        STRATOCLAVE_REGION: 'eu-west-1',
+        BEDROCK_PRIMARY_REGION: 'eu-west-1',
+        STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+        DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
+        // No STRATOCLAVE_RESIDENCY, no STRATOCLAVE_CODEX_ENABLED: residency
+        // intent still triggers off the non-default body region alone.
+      }),
+    );
+    expect(cfg.codexEnabled).toBe(true);
+    expect(cfg.residencyWarnings.join('\n')).toMatch(/us-west-2\(codex\)|us-east-2\(codex\)/);
+    // Same env, but STRATOCLAVE_RESIDENCY=strict: the warning becomes a hard
+    // synth failure, forcing the explicit opt-out this deployment needs.
+    expect(() =>
+      resolveRegionConfig(
+        baseEnv({
+          STRATOCLAVE_REGION: 'eu-west-1',
+          BEDROCK_PRIMARY_REGION: 'eu-west-1',
+          STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+          DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6',
+          STRATOCLAVE_RESIDENCY: 'strict',
         }),
       ),
     ).toThrow(/us-west-2\(codex\)|us-east-2\(codex\)|Bedrock is reachable/);

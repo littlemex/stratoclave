@@ -25,6 +25,26 @@ export const queryClient = new QueryClient({
 })
 
 // --- HTTP helpers ---
+/**
+ * F3 (contract R36/R38/U4): a refusal's `detail` is an OBJECT for every
+ * limit-raise/grant/hint endpoint (`{"type": ..., "reason": ..., "message":
+ * ..., "raise_hint": {...}, ...}` -- `GrantError.as_detail()` and
+ * `_refusal_body()` both shape it this way), never a bare string. The
+ * pre-existing check below (`typeof body?.detail === 'string'`) silently
+ * discarded exactly that shape -- correct for the plain-string 40x bodies
+ * most of this app's existing pages throw, but it left every structured
+ * refusal's `raise_hint`/`blocker`/`grantable`/machine `reason` unreachable
+ * from a caller, which is what the self-service request view needs to
+ * pre-fill from. `err.detailBody` carries the parsed object (whatever shape
+ * it is) alongside the pre-existing `err.detail` string, so no existing
+ * caller of the string field changes behaviour.
+ */
+export interface ApiError extends Error {
+  status: number
+  detail?: string
+  detailBody?: unknown
+}
+
 async function jsonRequest<T>(
   path: string,
   init?: RequestInit,
@@ -32,18 +52,35 @@ async function jsonRequest<T>(
   const res = await authFetch(path, init)
   if (!res.ok) {
     let detail: string | undefined
+    let detailBody: unknown
     try {
       const body = await res.clone().json()
+      detailBody = body?.detail
       detail = typeof body?.detail === 'string' ? body.detail : undefined
     } catch {
       // ignore
     }
-    const err = new Error(detail ?? `${res.status} ${res.statusText}`) as Error & {
-      status: number
-      detail?: string
-    }
+    // Every structured refusal this backend throws (`credit_exhausted`,
+    // `grant_cap_exceeded`, `figure_includes_active_grant`, ...) sends
+    // `detail` as an OBJECT with its own `.message`, not a string -- so
+    // `detail` above stays undefined for every one of them, and a caller
+    // that only checked `e.detail ?? e.message` used to see the opaque
+    // "422 Unprocessable Entity" / "402 Payment Required" instead of the
+    // message the backend wrote for exactly this case. `err.detail` keeps
+    // its existing string-or-undefined contract for callers that already
+    // narrow `detailBody` themselves; only the Error's own `.message` (the
+    // fallback every such caller already reads) gains the richer text.
+    const structuredMessage =
+      typeof detailBody === 'object' && detailBody !== null &&
+      typeof (detailBody as { message?: unknown }).message === 'string'
+        ? (detailBody as { message: string }).message
+        : undefined
+    const err = new Error(
+      detail ?? structuredMessage ?? `${res.status} ${res.statusText}`,
+    ) as ApiError
     err.status = res.status
     err.detail = detail
+    err.detailBody = detailBody
     throw err
   }
   if (res.status === 204) return undefined as T
@@ -110,6 +147,8 @@ export interface UsageHistoryEntry {
   // a fallback.
   requested_model_id?: string | null
   fallback_occurred?: boolean | null
+  // R38 (F3): WHY, not just THAT. See `UsageLogEntry.fallback_reason`.
+  fallback_reason?: string | null
 }
 
 export interface UsageHistoryResponse {
@@ -210,9 +249,43 @@ export interface PoolBudget {
   pool_limit_microusd: number
   pool_reserved_microusd: number
   pool_settled_microusd: number
+  // SIGNED and never clamped. A ceiling lowered below committed spend leaves a
+  // deficit, and its magnitude is what an operator acts on: floored at zero,
+  // "nothing left" and "already $400 over" read identically.
   remaining_microusd: number
+  // A DIFFERENT fact, not a restatement: the magnitude of the overshoot, zero
+  // whenever there is none, so a surface need not inspect a sign.
+  over_ceiling_microusd: number
   pool_limit_usd_cents: number
   remaining_usd_cents: number
+  // The ceiling's composition, so the total beside it can be checked. The mode is
+  // a SENTENCE and not a state name: a field spelling "per_seat" named a state and
+  // told the reader nothing they could act on.
+  mode_sentence: string
+  seat_tracked: boolean
+  seat_count: number
+  seat_rate_microusd: number
+  seat_entitlement_microusd: number
+  // null exactly when the ceiling follows the seats: ABSENCE is the sentinel, and
+  // zero is a figure meaning every request refused.
+  manual_limit_microusd: number | null
+  // Zero until grants exist; rendered anyway so the parts always add up to the
+  // total printed beside them.
+  pool_granted_microusd: number
+  baseline_microusd: number
+  entitlement_exceeds_figure: boolean
+  resume_action: string | null
+  // R21b (F3): three facts, not one, because collapsing them loses the one
+  // that matters. `grant_cap_microusd` is the STORED figure, null when
+  // nobody set one; `effective_grant_cap_microusd` is the number actually
+  // in force either way; `grant_cap_is_derived` says which of those two a
+  // surface is looking at, so it can render "derived from baseline" rather
+  // than a number an approver might mistake for a fixed cap.
+  grant_cap_microusd: number | null
+  effective_grant_cap_microusd: number
+  grant_cap_is_derived: boolean
+  // What an approver still has room to grant right now (R28/R36's B6 half).
+  remaining_grant_cap_microusd: number
 }
 
 // P0-11: tenant/user routing config (chain, quotas, allowlist). This is the
@@ -259,11 +332,166 @@ export interface UsageLogEntry {
   // P0-11 fallback visibility. null = legacy row (unknown), never a fallback.
   requested_model_id?: string | null
   fallback_occurred?: boolean | null
+  // R38 (F3): WHY, not just THAT -- read straight off the row, never derived.
+  // null on a legacy row and on a row where no fallback occurred.
+  fallback_reason?: string | null
 }
 
 export interface UsageLogsResponse {
   logs: UsageLogEntry[]
   next_cursor?: string | null
+}
+
+// --- F3: limit raises, grants, and the hint a 402 carries -----------------
+//
+// Mirrors backend/mvp/grants.py's RaiseHint/RaiseHintCandidate exactly (B2:
+// F2 ships the model, F3 fills it -- no renames, no removals on either
+// side of the wire). `blocker` and `router_mode` are closed enums server-side
+// but typed as `string` here deliberately: "both clients render an unknown
+// code rather than failing closed" (the F3 contract's own Interface
+// section) means a value this build has never seen must still render, not
+// throw at a TypeScript-narrowed switch.
+export interface RaiseHintCandidate {
+  blocker: string
+  wall: string
+  model_id: string | null
+  estimated_cost_microusd: number | null
+  shortfall_microusd: number | null
+  grantable: boolean
+  grant_expired: boolean
+}
+
+export interface RaiseHint {
+  candidates: RaiseHintCandidate[]
+  remaining_cap_microusd: number
+  reason_codes: string[]
+  minimum_raise_microusd: number
+  unattempted_model_ids: string[]
+  tenant_id: string | null
+  requested_model_id: string | null
+  target_shortfall_microusd: number | null
+  router_mode: string | null
+  pricing_version: string | null
+  priced_at: string | null
+}
+
+// A 402 refusal's full structured body (`mvp._pipeline._refusal_body`).
+// `ApiError.detailBody` is `unknown` at the type level (any endpoint can
+// throw one); callers narrow to this shape only after checking `type`.
+export interface CreditExhaustedDetail {
+  type: 'credit_exhausted'
+  reason: string
+  message: string
+  wall: string
+  blocker: string
+  grantable: boolean
+  raise_hint?: RaiseHint
+}
+
+export function isCreditExhaustedDetail(
+  detail: unknown,
+): detail is CreditExhaustedDetail {
+  return (
+    typeof detail === 'object' &&
+    detail !== null &&
+    (detail as { type?: unknown }).type === 'credit_exhausted'
+  )
+}
+
+export interface LimitRaiseRequest {
+  request_id: string
+  tenant_id: string
+  user_id: string
+  status: string
+  limit_kind: string
+  reason_code: string
+  asked_amount_microusd: number
+  created_at: string
+  decided_at?: string
+  grant_id?: string
+  decision_comment?: string
+  // The requester's OWN free-text justification, R12's "the comment" on the
+  // approver's queue -- distinct from `decision_comment` (the approver's
+  // reply, addressed back to the requester). Optional: not yet returned by
+  // `admin_list_limit_raises` (backend gap, out of this fork's scope --
+  // reported upstream); rendered when present so this component is correct
+  // the day the field ships.
+  comment?: string
+  // R30's "at request time" half: not yet captured by `submit_limit_raise`
+  // (backend gap, out of this fork's scope -- reported upstream). Optional
+  // so the UI degrades honestly ("not recorded") until it exists.
+  observed_limit_microusd?: number | null
+  observed_remaining_microusd?: number | null
+  observed_at?: string | null
+  // R24: always present -- null for a pending request, populated for a
+  // decided one. `approver_id` is a stable user id (never an address); the
+  // console resolves it to a display name on demand.
+  approved_amount_microusd: number | null
+  expires_at: number | null
+  approver_id: string | null
+}
+
+export interface LimitRaisesResponse {
+  tenant_id?: string
+  requests: LimitRaiseRequest[]
+  reason_codes: string[]
+}
+
+export interface LimitGrant {
+  grant_id: string
+  tenant_id: string
+  request_id: string
+  status: string
+  approved_amount_microusd: number
+  expires_at: number
+  period: string
+  target_pk: string
+  target_sk: string
+  approver_user_id: string
+  created_at: string
+  capacity_bearing: boolean
+  revoke_blocked: boolean
+  revoke_attempts: number
+  revoked_at?: string
+  revoked_by?: string
+  revoke_reason?: string
+  revoke_blocked_reason?: string
+  blocked_at?: string
+}
+
+// R25/B4: reconciled PER TARGET ROW, never a single tenant-wide sum -- a
+// UI that sums across rows reintroduces exactly the defect the amendment
+// closes (a stale prior-period row's grants going uncounted or double
+// counted). `reconcile_tenant_grants`'s own shape.
+export interface GrantReconciliationRow {
+  target_pk: string
+  target_sk: string
+  period: string
+  active_only_sum_microusd: number
+  capacity_bearing_sum_microusd: number
+  blocked_grant_ids: string[]
+  pool_granted_microusd: number
+  drift_microusd: number
+  grant_cap_microusd: number | null
+  effective_grant_cap_microusd: number
+  cap_is_derived: boolean
+  remaining_cap_microusd: number
+  cap_exceeded: boolean
+}
+
+export interface GrantReconciliation {
+  reconciler: 'tenant_grants'
+  tenant_id: string
+  period: string | null
+  rows: GrantReconciliationRow[]
+  orphans: unknown[]
+  clean: boolean
+}
+
+export interface LimitGrantsResponse {
+  tenant_id: string
+  grants: LimitGrant[]
+  reconciliation: GrantReconciliation
 }
 
 // #66: read-only effective pricing table (built-in defaults <- overrides).
@@ -482,6 +710,52 @@ export const api = {
     )
   },
 
+  // R12/R36: file a raise against the caller's own tenant's money ceiling.
+  // `tenant_id` is deliberately absent from the body -- the backend reads it
+  // from the session, never from a client-supplied field (see the F3
+  // contract's own Interface note, mirrored in U4's navigation-state design:
+  // the tenant a submission targets comes from the hint that sent the
+  // caller here, never from ambient client state).
+  submitLimitRaise: (body: {
+    asked_amount_microusd: number
+    reason_code: string
+    client_token: string
+    limit_kind?: string
+    comment?: string
+  }) =>
+    jsonRequest<LimitRaiseRequest>('/api/mvp/me/limit-raises', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(body),
+    }),
+
+  // R24: the join is the whole point -- a decided request carries its own
+  // approved amount, expiry and approver; the caller never has to
+  // cross-reference the grant inventory to learn what it was granted.
+  listMyLimitRaises: (limit?: number) => {
+    const q = limit ? `?limit=${limit}` : ''
+    return jsonRequest<LimitRaisesResponse>(`/api/mvp/me/limit-raises${q}`)
+  },
+
+  withdrawLimitRaise: (request_id: string) =>
+    jsonRequest<LimitRaiseRequest>(
+      `/api/mvp/me/limit-raises/${encodeURIComponent(request_id)}/withdraw`,
+      { method: 'POST' },
+    ),
+
+  // R12: the walls that apply to the caller, reachable before any refusal.
+  myWallStatus: () =>
+    jsonRequest<{
+      tenant_id: string
+      period: string
+      pool: {
+        status: string
+        pool_limit_microusd: number
+        remaining_microusd: number
+        remaining_grant_cap_microusd: number
+      } | null
+    }>('/api/mvp/me/limit-raises/wall-status'),
+
   // L5-d: the caller's own per-run charge breakdown (redacted — no cost/margin).
   // The runtime `assertNoCostLeak` backstop turns a redaction regression into a
   // loud client error instead of a silent leak into the DOM.
@@ -636,9 +910,14 @@ export const api = {
         `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/pool-budget${q}`,
       )
     },
+    // Exactly one of `limit_usd_cents` (a figure; zero means every request
+    // refused) and `follow_seats: true` (the reversal). The backend refuses a body
+    // carrying both or neither, rather than picking one.
     setPoolBudget: (
       tenant_id: string,
-      body: { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' },
+      body:
+        | { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' }
+        | { follow_seats: true; period?: string },
     ) =>
       jsonRequest<PoolBudget>(
         `/api/mvp/admin/tenants/${encodeURIComponent(tenant_id)}/pool-budget`,
@@ -813,6 +1092,50 @@ export const api = {
         `/api/mvp/admin/api-keys/by-key-id/${encodeURIComponent(key_id)}`,
         { method: 'DELETE' },
       ),
+
+    // R12 (tenant approval view), global approver (`limits:approve`).
+    listLimitRaises: (tenant_id: string, status?: string) => {
+      const params = new URLSearchParams({ tenant_id })
+      if (status) params.set('status', status)
+      return jsonRequest<LimitRaisesResponse>(
+        `/api/mvp/admin/limit-raises?${params.toString()}`,
+      )
+    },
+    approveLimitRaise: (
+      request_id: string,
+      body: { approved_amount_microusd: number; expires_at: number; decision_comment?: string },
+    ) =>
+      jsonRequest<{ request: LimitRaiseRequest; grant: LimitGrant }>(
+        `/api/mvp/admin/limit-raises/${encodeURIComponent(request_id)}/approve`,
+        { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
+    rejectLimitRaise: (request_id: string, decision_comment: string) =>
+      jsonRequest<LimitRaiseRequest>(
+        `/api/mvp/admin/limit-raises/${encodeURIComponent(request_id)}/reject`,
+        {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({ decision_comment }),
+        },
+      ),
+    // R25: the inventory, reconciled per target row (never a single sum).
+    listLimitGrants: (tenant_id: string) =>
+      jsonRequest<LimitGrantsResponse>(
+        `/api/mvp/admin/limit-grants?tenant_id=${encodeURIComponent(tenant_id)}`,
+      ),
+    revokeLimitGrant: (tenant_id: string, grant_id: string, reason?: string) =>
+      jsonRequest<LimitGrant>(
+        `/api/mvp/admin/limit-grants/${encodeURIComponent(grant_id)}/revoke?tenant_id=${encodeURIComponent(tenant_id)}`,
+        { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ reason }) },
+      ),
+    // R28: shown before it is typed, so the approver sees the bound rather
+    // than discovering it from a refusal.
+    latestPermissibleExpiry: (period?: string) => {
+      const q = period ? `?period=${encodeURIComponent(period)}` : ''
+      return jsonRequest<{ period: string; latest_permissible_expiry: number }>(
+        `/api/mvp/admin/limit-raises/latest-permissible-expiry${q}`,
+      )
+    },
   },
 
   apiKeys: {
@@ -861,6 +1184,29 @@ export const api = {
           body: JSON.stringify(body),
         },
       ),
+    // A team lead can SET this ceiling, and setting it is the write that ends seat
+    // tracking -- so without the read, the one role that can silently leave seat
+    // tracking is the one role that cannot see it happened.
+    getPoolBudget: (tenant_id: string, period?: string) => {
+      const q = period ? `?period=${encodeURIComponent(period)}` : ''
+      return jsonRequest<PoolBudget>(
+        `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}/pool-budget${q}`,
+      )
+    },
+    setPoolBudget: (
+      tenant_id: string,
+      body:
+        | { limit_usd_cents: number; period?: string; status?: 'active' | 'suspended' }
+        | { follow_seats: true; period?: string },
+    ) =>
+      jsonRequest<PoolBudget>(
+        `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}/pool-budget`,
+        {
+          method: 'PUT',
+          headers: jsonHeaders,
+          body: JSON.stringify(body),
+        },
+      ),
     members: (tenant_id: string) =>
       jsonRequest<TeamLeadMembersResponse>(
         `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}/members`,
@@ -869,6 +1215,49 @@ export const api = {
       const q = sinceDays ? `?since_days=${sinceDays}` : ''
       return jsonRequest<UsageBucket>(
         `/api/mvp/team-lead/tenants/${encodeURIComponent(tenant_id)}/usage${q}`,
+      )
+    },
+
+    // R12, for a tenant the caller OWNS (`limits:approve-own`) rather than any
+    // tenant (`limits:approve`) -- a distinct authority, reached at a distinct
+    // route, per the backend's own separation.
+    listLimitRaises: (tenant_id: string, status?: string) => {
+      const params = new URLSearchParams({ tenant_id })
+      if (status) params.set('status', status)
+      return jsonRequest<LimitRaisesResponse>(
+        `/api/mvp/team-lead/limit-raises?${params.toString()}`,
+      )
+    },
+    approveLimitRaise: (
+      request_id: string,
+      body: { approved_amount_microusd: number; expires_at: number; decision_comment?: string },
+    ) =>
+      jsonRequest<{ request: LimitRaiseRequest; grant: LimitGrant }>(
+        `/api/mvp/team-lead/limit-raises/${encodeURIComponent(request_id)}/approve`,
+        { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
+    rejectLimitRaise: (request_id: string, decision_comment: string) =>
+      jsonRequest<LimitRaiseRequest>(
+        `/api/mvp/team-lead/limit-raises/${encodeURIComponent(request_id)}/reject`,
+        {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({ decision_comment }),
+        },
+      ),
+    listLimitGrants: (tenant_id: string) =>
+      jsonRequest<LimitGrantsResponse>(
+        `/api/mvp/team-lead/limit-grants?tenant_id=${encodeURIComponent(tenant_id)}`,
+      ),
+    revokeLimitGrant: (tenant_id: string, grant_id: string, reason?: string) =>
+      jsonRequest<LimitGrant>(
+        `/api/mvp/team-lead/limit-grants/${encodeURIComponent(grant_id)}/revoke?tenant_id=${encodeURIComponent(tenant_id)}`,
+        { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ reason }) },
+      ),
+    latestPermissibleExpiry: (period?: string) => {
+      const q = period ? `?period=${encodeURIComponent(period)}` : ''
+      return jsonRequest<{ period: string; latest_permissible_expiry: number }>(
+        `/api/mvp/team-lead/limit-raises/latest-permissible-expiry${q}`,
       )
     },
   },

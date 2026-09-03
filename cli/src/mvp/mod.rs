@@ -4,6 +4,7 @@
 //!   stratoclave claude   -- [args]
 //!   stratoclave codex    -- [args]
 //!   stratoclave usage    show
+//!   stratoclave limit-raise { request | list | withdraw }
 //!   stratoclave admin    user|tenant|usage ...
 //!   stratoclave team-lead tenant ...
 
@@ -19,6 +20,7 @@ pub mod codex_cmd;
 pub mod codex_home;      // CODEX_HOME placement: durable state vs --ephemeral-codex-state.
 pub mod config;
 pub mod ephemeral_key;   // Scope-parameterized ephemeral sk-stratoclave-* mint/revoke.
+pub mod limits;          // Money-ceiling raises: request, decide, revoke.
 pub mod sc_headers;      // Validation + carrier for x-sc-* attribution/pin headers.
 pub mod sso;
 pub mod team_lead;

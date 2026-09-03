@@ -72,6 +72,32 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Changed
 
+- **`STRATOCLAVE_CODEX_ENABLED` now defaults to TRUE** (it briefly defaulted to FALSE in
+  the change recorded below for 1.0.0 — see that entry for why, and why this reverses
+  it). Codex does not itself gate money or safety: every request through it runs the
+  same reservation/settlement pipeline and the same pool/quota walls as the Anthropic
+  route. Defaulting it off did not make anything safer; it made `stratoclave codex`
+  return a bare 503, for a reason nothing at deploy time mentioned, to any operator who
+  deployed this gateway and never separately discovered and set an extra env var. Codex
+  is one of this gateway's two supported CLIs, not an optional add-on. Set
+  `STRATOCLAVE_CODEX_ENABLED=false` to opt back out (e.g. under strict residency, since
+  this route's model registry pins the call to us-east-2/us-west-2 regardless of the
+  deploy region).
+- **The CLI's own fallback default model for `stratoclave codex`** (used only when
+  neither an env var nor `~/.stratoclave/config.toml` names one — i.e. a CLI that has
+  never run `stratoclave setup` against a codex-enabled deployment) **changed from
+  `openai.gpt-5.4` to `openai.gpt-5.6-sol`.** The old value was codex's own upstream
+  default, carried over unexamined; it is not in this gateway's model registry at all,
+  so a bare `stratoclave codex` (no `--model`) on such a CLI failed immediately with
+  `invalid_model`.
+- **`stratoclave codex` now clarifies a non-retryable 4xx from the gateway** (a 402
+  budget refusal, most concretely) instead of leaving codex's own retry loop to make it
+  look like a broken connection. codex logs every failed provider call the same way
+  regardless of cause, including "Reconnecting... N/5" for a request the gateway refused
+  outright — the wrapper now relays codex's stderr line-for-line as before, but the
+  moment it sees a terminal 4xx (anything 400-499 except 429), it also prints the
+  gateway's own refusal body as prose: which wall refused, whether it can be raised, and
+  the exact shortfall, none of it invented.
 - **The bundled rate table now holds measured in-region list prices.** Every row was read
   from the provider's own APIs on 2026-08-31 and is pinned with its provenance in
   `tests/test_pricing_floor.py`. Notable corrections: GPT-5.6 sol was carried at

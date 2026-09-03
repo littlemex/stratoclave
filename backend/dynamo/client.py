@@ -76,6 +76,23 @@ def tenant_budgets_table_name() -> str:
     return table_name("DYNAMODB_TENANT_BUDGETS_TABLE", "stratoclave-tenant-budgets")
 
 
+def quota_events_table_name() -> str:
+    """Limit-raise requests, the grants approvals produce, and the daily slot.
+
+    PK `pk`, SK `sk`, with three row kinds in one collection: `USER#<id>` /
+    `SLOT#<tenant>#<yyyy-mm-dd>`, `REQUEST#<id>` / `REQUEST`, and
+    `TENANT#<id>` / `GRANT#<id>`. Two indexes: `tenant-status-index` for an
+    approver's queue and `grant-expiry-index`, sparse on an attribute written
+    only while a grant is ACTIVE, for the sweeper that revokes them.
+
+    Resolved HERE rather than from an environment read inside the repository,
+    which is the point: a second way to find a table name is a second place a
+    deployment's naming can be wrong, and the repository that forked the
+    convention would be the one nobody thought to check.
+    """
+    return table_name("DYNAMODB_QUOTA_EVENTS_TABLE", "stratoclave-quota-events")
+
+
 def pricing_config_table_name() -> str:
     """Admin-editable per-model pricing used to convert tokens to micro-USD.
 

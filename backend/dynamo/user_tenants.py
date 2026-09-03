@@ -239,28 +239,107 @@ class UserTenantsRepository:
         return default_tenant_credit(), "global_default"
 
     def _adjust_pool_seat_delta_best_effort(self, *, tenant_id: str, seat_delta: int) -> None:
-        """Apply a membership change to `tenant_id`'s CURRENT-period dollar pool
-        (L4), if that pool is `sizing="per_seat"`.
+        """Apply a membership change to `tenant_id`'s CURRENT-period dollar pool.
+
+        THE ONE SEAT-DELTA WRITER. Every membership transition — a hire, a
+        departure, a resurrection, a tenant switch, a user deletion — goes through
+        here, and a path that archives a membership without calling it leaves the
+        seat count stale by exactly that seat with nothing saying so.
 
         Best-effort and silent by design: a membership write (a user gaining or
         losing an active row) must never fail, or be forced to retry, because of
         the tenant pool's unrelated state.
-        `TenantBudgetsRepository.adjust_pool_for_seat_delta` already no-ops
-        safely when the pool is `sizing="fixed"`, has no `sizing` attribute, or
-        has no row for the period at all; any OTHER, unexpected error is
-        swallowed here rather than surfacing on a request whose own write (the
+        `TenantBudgetsRepository.adjust_pool_for_seat_delta` already no-ops safely
+        when the row carries an operator's figure (moving the seat count and not
+        the money) or has no row for the period at all; any OTHER, unexpected error
+        is swallowed here rather than surfacing on a request whose own write (the
         membership row itself) already committed successfully.
+
+        The period row is ensured first, so a membership change on the 1st lands on
+        a rolled-forward row instead of on nothing. Without it the delta silently
+        no-ops for the whole first membership change of every month.
         """
         try:
             from .tenant_budgets import TenantBudgetsRepository, current_period
 
-            TenantBudgetsRepository().adjust_pool_for_seat_delta(
+            repo = TenantBudgetsRepository()
+            period = current_period()
+            repo.ensure_current_period_row(tenant_id=tenant_id, period=period)
+            repo.adjust_pool_for_seat_delta(
                 tenant_id=tenant_id,
-                period=current_period(),
+                period=period,
                 seat_delta=seat_delta,
             )
         except Exception:  # noqa: BLE001 — never fail a membership write for this
             pass
+
+    def active_membership_counts(self) -> dict[str, int]:
+        """Active membership count per tenant, from ONE strongly consistent pass.
+
+        A `Scan` with `ConsistentRead=True` rather than a query per tenant on the
+        tenant GSI, for two reasons that point the same way: a GSI read cannot be
+        strongly consistent, and a seat count read eventually is a figure that was
+        already stale when whoever asked for it wrote it down. One pass over this
+        table also costs less than one query per tenant.
+
+        A row with no `status` counts as active, matching every other reader here.
+
+        This lives on the repository that OWNS memberships rather than beside
+        either of its callers, because the migration's backfill and the daily
+        reconciler must count seats the same way: two implementations of "how many
+        seats does this tenant have" would eventually be two numbers, and the
+        reconciler comparing against the other one would report the fleet broken.
+        """
+        counts: dict[str, int] = {}
+        kwargs: dict[str, Any] = {"ConsistentRead": True}
+        while True:
+            resp = self._table.scan(**kwargs)
+            for it in resp.get("Items", []):
+                if str(it.get("status", "active")) != "active":
+                    continue
+                tid = str(it.get("tenant_id") or "")
+                if tid:
+                    counts[tid] = counts.get(tid, 0) + 1
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                return counts
+            kwargs["ExclusiveStartKey"] = lek
+
+    def archive_membership(self, *, user_id: str, tenant_id: str) -> bool:
+        """Archive one membership row and account for the seat it gave up.
+
+        The seat-aware archive. A caller that sets `status = "archived"` with its
+        own `update_item` does the same thing to the row and NOT the same thing to
+        the tenant: the seat is gone and the ceiling still counts it, so a tenant
+        that deletes users keeps a ceiling scaled to people who are not there. The
+        error is upward — it admits spend rather than refusing it — which is why it
+        is not cosmetic drift.
+
+        Conditional on the row being ACTIVE, so the seat delta is applied at most
+        once per transition: a second archive of an already-archived row returns
+        False and moves nothing. That condition is what makes this safe to call on
+        a retry, and it is why the caller must not pre-filter on a read.
+        """
+        try:
+            self._table.update_item(
+                Key={"user_id": user_id, "tenant_id": tenant_id},
+                UpdateExpression="SET #s = :archived, updated_at = :now",
+                ConditionExpression=(
+                    "attribute_exists(user_id) AND "
+                    "(#s = :active OR attribute_not_exists(#s))"),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":archived": "archived",
+                    ":active": "active",
+                    ":now": _now_iso(),
+                },
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False  # already archived, or gone — no seat to give back
+            raise
+        self._adjust_pool_seat_delta_best_effort(tenant_id=tenant_id, seat_delta=-1)
+        return True
 
     # ----- credit operations -----
     def remaining_credit(self, user_id: str, tenant_id: str) -> int:

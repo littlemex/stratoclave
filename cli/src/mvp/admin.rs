@@ -397,6 +397,29 @@ pub async fn tenant_pool_budget_set(
     Ok(())
 }
 
+/// Return the tenant's pool ceiling to its seat count, clearing a hand-set figure.
+///
+/// The reversal a figure used to have none of. `{"follow_seats": true}` is a
+/// separate field on the wire rather than a magic number, because there is no
+/// number that could carry it: zero is a legal ceiling meaning every request
+/// refused, and reading it as "follow the seats" would reverse the meaning of a
+/// request existing callers already make.
+pub async fn tenant_pool_budget_follow_seats(
+    tenant_id: &str,
+    period: Option<&str>,
+) -> Result<()> {
+    let client = ApiClient::new()?;
+    let mut body = json!({ "follow_seats": true });
+    if let Some(p) = period {
+        body["period"] = Value::String(p.to_string());
+    }
+    let path = format!("/api/mvp/admin/tenants/{tenant_id}/pool-budget");
+    let res: Value = client.put_json(&path, &body).await?;
+    println!("[OK] Pool budget now follows the seat count");
+    print_pool_budget(&res);
+    Ok(())
+}
+
 /// Show the tenant's pool budget and live usage for a period.
 ///
 /// The backend returns 404 when no pool is set for the period (pool budgeting
@@ -661,6 +684,23 @@ fn print_pool_budget(v: &Value) {
         .get("remaining_microusd")
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
+    let over_ceiling_micro = v
+        .get("over_ceiling_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let granted_micro = v
+        .get("pool_granted_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let baseline_micro = v
+        .get("baseline_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let entitlement_micro = v
+        .get("seat_entitlement_microusd")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let seats = v.get("seat_count").and_then(|x| x.as_i64()).unwrap_or(0);
 
     println!(
         "  tenant_id:  {}",
@@ -672,12 +712,49 @@ fn print_pool_budget(v: &Value) {
         "  limit:      {} ({limit_micro} micro-USD)",
         format_cents_as_usd(limit_cents)
     );
+    // The ceiling's COMPOSITION, printed under the total it adds up to. The total
+    // on its own cannot be checked against anything: it does not say whether the
+    // figure follows the seats or was typed by a person, and it does not say what
+    // the seats would have entitled the tenant to.
+    println!("  ceiling is: seats {baseline_or_seats} + granted {granted} = {total}",
+        baseline_or_seats = format!("{baseline_micro} micro-USD"),
+        granted = format!("{granted_micro} micro-USD"),
+        total = format!("{limit_micro} micro-USD"));
+    println!("  seats:      {seats} (entitling {entitlement_micro} micro-USD)");
     println!("  reserved:   {reserved_micro} micro-USD (in-flight requests)");
     println!("  settled:    {settled_micro} micro-USD (recorded spend)");
+    // SIGNED and never clamped: "nothing left" and "already several hundred
+    // dollars over the ceiling" are different problems with different fixes, and a
+    // figure floored at zero reports them identically.
     println!(
-        "  remaining:  {} ({remaining_micro} micro-USD)",
+        "  available:  {} ({remaining_micro} micro-USD)",
         format_cents_as_usd(remaining_cents)
     );
+    if over_ceiling_micro > 0 {
+        println!(
+            "  over ceiling by: {} ({over_ceiling_micro} micro-USD) — committed spend \
+             exceeds the ceiling, so every new request is refused until the period \
+             rolls over or the ceiling is raised",
+            format_cents_as_usd(over_ceiling_micro / 10_000)
+        );
+    }
+    // The mode as a SENTENCE. A field spelling "per_seat" named a state and said
+    // nothing an operator could act on -- not what the tenant is entitled to, not
+    // how the state was entered, and not how to leave it.
+    if let Some(sentence) = v.get("mode_sentence").and_then(|x| x.as_str()) {
+        println!("  mode:       {sentence}");
+    }
+    if v.get("entitlement_exceeds_figure")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
+        println!(
+            "  note:       the seats now entitle this tenant to more than the figure \
+             it is held at; `stratoclave admin tenant pool-budget follow-seats \
+             {tenant}` returns it to the seat count",
+            tenant = v.get("tenant_id").and_then(|x| x.as_str()).unwrap_or("")
+        );
+    }
 }
 
 #[cfg(test)]

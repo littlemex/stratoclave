@@ -42,32 +42,152 @@ figure as dollars.
 
 A tenant created through the ordinary route, with nothing set by hand, gets:
 
-- a dollar pool for the current period marked `sizing = "per_seat"`, written at zero and
+- a dollar pool for the current period that follows the seat count, written at zero and
   maintained at `seats x $200` — zero is the honest ceiling for a tenant nobody is a member of
   yet, and the first membership brings it to one seat;
 - a per-user token quota of ten million tokens, stamped onto the tenant as `default_credit` and
   resolved onto each membership as `total_credit`;
 - no per-model quota.
 
+**`STRATOCLAVE_SEAT_MONTHLY_USD` and the pool's own admission ceiling
+(`MAX_POOL_BUDGET_USD_CENTS`) are process-wide values, not per-tenant
+configuration.** Every tenant on a given deployment is priced from the same
+seat figure and bounded by the same maximum — there is no per-tenant override
+for either — so two otherwise-unrelated tenants on the same deployment are
+coupled through this one process-wide setting rather than independently
+configurable. Raising or lowering either moves every tenant's ceiling in the
+same direction at once.
+
 The pool is the ceiling that binds first, and that is deliberate. It is set **below** the sum of any
 per-user money ceilings a later change may add, because a per-seat pool equal to the sum of the
 individual ceilings can never bind — the individuals would exhaust themselves first, and a ceiling
 that cannot bind is decoration.
 
-`seats` is the count of active memberships, and the pool equals it **at every moment** rather than
-at creation only: a membership added or removed moves the limit and the headroom by exactly one seat,
-as an atomic delta on the row, under the same guard the ceiling-set path uses. Nothing counts seats
-by querying them, which is why the figure cannot drift from the memberships that produced it.
+`seats` is the count of active memberships, and the pool tracks it as the memberships change rather
+than being sized once at creation: a membership added or removed moves the stored seat count, and on a
+seat-tracked row moves the limit and the headroom by exactly one seat, as an atomic delta on the row.
+The admission path never counts seats by querying them, so the ceiling costs no membership read.
 
-## 4. Where an operator's own figure takes over
+Drift between the stored count and the memberships is possible, and it is checked rather than assumed
+away. A delta applied twice moves the seat count and the ceiling together, in the same direction, so
+every equation over the row still balances while the tenant admits an extra seat's worth of spend a
+month. That is invisible to any intra-row check, so a daily reconciler counts the memberships and
+compares. It reports and never repairs, because a repair would destroy the evidence of how the row got
+that way and could only guess which side of the disagreement is right.
 
-The moment an operator sets a pool figure explicitly — through the admin route or, for their own
-tenant, through the team-lead route — the row is marked `sizing = "fixed"` and stops following seats.
-A figure a person chose is not overwritten by a later hire.
+## 4. The rule: what the ceiling is, and how it is reversed
 
-**A row with no `sizing` attribute is `fixed`.** Every pool row written before this document existed
-has none, and each one is a figure someone set by hand; reading absence as `per_seat` would make
-those ceilings start moving behind the operator's back.
+The ceiling is not a mode stored on the row. It is a rule over three attributes, and the mode falls
+out of it:
+
+```
+seat_term  = seat_count x seat_rate
+baseline   = manual_limit  if manual_limit is PRESENT  else seat_term
+pool_limit = baseline + coalesce(pool_granted, 0)
+```
+
+`pool_granted_microusd` is any granted amount, and it is zero until grants exist. The identity is
+written with the `coalesce` from the start so it is true of every row that exists today, rather than
+becoming true when granting ships.
+
+**Absence of `manual_limit_microusd` means "follow the seat count". Presence, INCLUDING zero, means
+"this figure".** The sentinel has to be absence rather than zero, and the reason is not aesthetic:
+`limit_usd_cents` accepts `0` today and it means every request refused, so reading `0` as "follow the
+seats" would silently reverse the meaning of a request every existing caller can already make. No
+existing caller can send absence, which is exactly what makes it a safe sentinel.
+
+The moment an operator sets a figure explicitly — through the admin route or, for their own tenant,
+through the team-lead route — the row holds that figure and stops following seats. A figure a person
+chose is not overwritten by a later hire.
+
+**The reversal is `{"follow_seats": true}`**, on the same endpoint, and it REMOVES the attribute
+rather than writing the seat term into it. Writing the term back would leave a figure behind, and the
+next hire would not move it. Before this existed, a figure set once stopped seat tracking permanently:
+there was no request that could undo it, so a tenant that grew from four people to forty kept the
+number somebody typed when it was four.
+
+`seat_count` moves on every membership change whether or not money moves with it. On a row holding a
+figure that means the row can still say its entitlement has outgrown the figure — which is the one
+thing an operator cannot work out by looking at the figure.
+
+**Every writer of this ceiling.** The list is derived from the row's own declaration
+(`dynamo.pool_row_schema.ceiling_writers()`, from `POOL_ROW_ATTRIBUTES` in that module) rather than restated here,
+because a list written out in prose passes review while naming a subset the moment a writer is added:
+
+- `TenantBudgetsRepository.set_manual_limit` — an operator's figure (admin or team-lead route).
+- `TenantBudgetsRepository.clear_manual_limit` — the reversal.
+- `TenantBudgetsRepository.adjust_pool_for_seat_delta` — a membership change; the ONE seat-delta
+  writer, which every membership transition including a user deletion routes through.
+- `TenantBudgetsRepository._seed_pool_row` — creation, and the period rollover's new row.
+- `migrations.pool_ceiling_migration.phase_m1_add_attributes` — seeds `seat_count` and
+  `manual_limit` without moving any effective limit.
+- `migrations.pool_ceiling_migration.phase_m2_backfill` — the CAS backfill onto the observed row.
+- `migrations.pool_ceiling_migration.recompute_seat_tracked_rows` — the seat-rate recompute.
+- `TenantBudgetsRepository.reconcile_headroom` — self-heals `pool_headroom` from the reserved and
+  settled mirrors it is defined against.
+- `TenantBudgetsRepository.reserve_txn_item` and `TenantBudgetsRepository.settle_txn_item` — a
+  request holding money against the ceiling and then spending it move headroom by construction.
+- `TenantBudgetsRepository.reserve_commit_txn_items` — the same movement for a batch of holds
+  committed in one transaction.
+- `TenantBudgetsRepository.pool_credit_back` — a released hold returns its headroom.
+- `TenantBudgetsRepository.grant_apply_txn_item` and `TenantBudgetsRepository.grant_revoke_txn_item`
+  — F2's grant apply and revoke, the two writers of `pool_granted_microusd`; both also move
+  `pool_limit_microusd` and `pool_headroom_microusd` by the same amount, which is why they are
+  ceiling writers and not merely a ledger entry beside one.
+
+`pool_headroom_microusd` is on this list for the same reason `pool_limit_microusd` is: the ceiling
+is not just the limit, it is the limit less what has already been spent against it, and R29 asks
+this row to be able to say a signed "over ceiling by" figure. A writer that moves headroom without
+moving the limit is still a writer of the ceiling in the sense this section means.
+
+**The rate is not a live knob.** Each row stores the per-seat rate its own ceiling was computed at, so
+that ceiling is reproducible; the deployment records the rate in force once. A process configured with
+a different figure **refuses to start**, because a ceiling recomputed at a rate nobody chose is a
+perfectly plausible number and nothing afterwards can tell it from a correct one. Changing the rate is
+`migrations.pool_ceiling_migration --recompute-seat-rate`, which recomputes every seat-tracked row and
+leaves rows holding an operator's figure alone.
+
+**The period boundary has an owner, and it has two.** A new calendar month's row is created from the
+previous month's, carrying the attributes the declaration classifies as carried and recomputing the
+rest, so a seat-tracked row arrives seat-tracked with the same seats and a row holding a figure
+arrives holding it. What does not arrive is the spend, the reservations, or the granted term.
+
+A **scheduled job** creates that row for every tenant holding the previous period's row, on the daily
+reconciler's schedule — on the 1st it does the rollovers and on other days it finds nothing to do. Its
+unit of work is deliberately "tenants with a prior-period row" rather than "all tenants": pool
+budgeting is opt-in, the prior row is the opt-in signal, and a job that created rows for everyone
+would be inventing ceilings for tenants who were deliberately left unpooled. A **membership change**
+also creates the row if it arrives first, because a hire at five past midnight on the 1st should not
+wait for a scheduled run.
+
+**And a missing row does not read as an unpooled tenant.** An absent row has always meant "not
+pooled", which is right, and once the row is per-period that reading acquires a second case it cannot
+tell apart: a tenant that *is* pooled whose row for this period has not been created. The previous
+period's row is what separates them. Present means the row is missing and a priced request is refused
+with `pool_period_row_missing`; absent means the tenant is genuinely unpooled and nothing changes for
+it. Both layers are needed, and neither is sufficient: the schedule alone would return the ceiling to
+fail-open in any month the job failed, and the guard alone would refuse every pooled tenant from
+midnight until the job ran. Together the row exists in the ordinary case, and when it does not the
+failure is loud and lands on the side that refuses spend rather than admitting it.
+
+**The granted term has an owner, and it is a whole mechanism.** `pool_granted` is the sum of the
+raises currently in force: an amount a person approved, with an expiry, applied to the row the
+approval read. It moves through exactly two writers, both pure additions on top of whichever
+baseline is in force, which is why they need no compare-and-swap while every writer listed above
+does. A raise is asked for, decided, and ends by itself — the scheduled sweep is what makes the
+"ends by itself" true, and its absence alarm is what makes the sweep trustworthy. The aggregate
+cap on what may be granted is absent by default, meaning derived from this row's baseline and
+evaluated now, for the same reason the ceiling's own sentinel is absence rather than zero: a
+materialised default freezes at the moment it is written. The full statement is
+[quota-raises.md](quota-raises.md), and section 4 of it is the one to read from here — a grant may
+not outlive its period, and the rollover's reset of this attribute is safe only because of that.
+
+**The migration to this rule is one-shot.** No phase of it may be re-run once grants exist. Its
+cut-over reads a row carrying neither new attribute as `manual_limit = pool_limit`, which is right
+while the total is only ever a baseline and destructive once the total can also contain granted money:
+the grant would be folded permanently into the operator's figure, on every such row at once. The rule
+that makes the cut-over safe beforehand is exactly what makes a re-run unsafe afterwards, so every
+phase refuses outright on a table where any row carries a granted amount.
 
 ## 5. What is bounded and what is not
 
@@ -79,3 +199,43 @@ that boundary is stated in [CONTRACTS.md](CONTRACTS.md) under C1 and measured in
 The token quota bounds nothing in money, by construction of section 2. It is documented here so that
 nobody reads its number as a budget, and so that an operator who wants a money ceiling per user knows
 that today the answer is the per-model quota's user scope, one model at a time.
+
+## 6. Future work: operator-editable defaults
+
+Not built. Recorded here as a direction, because both figures are environment variables today and the
+reason each one is not a live setting is different — so a single "expose them in the console" change
+would get one of them wrong.
+
+**The two are not the same problem.** The seat rate is not a live knob on purpose: a ceiling
+recomputed at a rate nobody chose is a plausible number, and nothing afterwards distinguishes it from
+a correct one, which is why a differently-configured process refuses to start. `DEFAULT_TENANT_CREDIT`
+is read at call time and never touches an allowance that already exists, so changing it is already
+effectively live; its problem is that it is **invisible** — there is no way to see the value in force,
+or which users received which default, or that it changed at all. One needs a safe moment and the
+other needs a surface, and treating them alike is the trap.
+
+**The period boundary is the right seam for the rate**, for the reason the rollover in section 4 makes
+true: at a boundary the new row is being *written* from carried attributes, so a new rate applies to a
+row being created rather than to a row being mutated. The current period's stored rate never moves, so
+the boot-time refusal stays honest and no ceiling changes under a tenant mid-month. That makes it a
+**queued** change — the rate that takes effect at the next reset, withdrawable before the boundary
+leaves nothing behind — and not an immediate one.
+`--recompute-seat-rate` keeps its job as the deliberate restatement of the *current* period, which is a
+rarer intention than "from next month we charge differently"; a console offering only the immediate
+form would push operators into the destructive one for a routine task.
+
+**Four things must not be built.** A rate change that recomputes existing rows on save, which is the
+boot-time refusal re-introduced through a button — an operator who wants that wants the migration, and
+the surface should say so and link to it. A default-credit change that moves existing users'
+allowances, which is a different action with a different blast radius, and conflating them means
+adjusting a default silently re-limits everyone. Either setting without an audit event naming the
+actor, the old value, the new value, and for the rate the period it takes effect in — the same
+discipline every other ceiling writer here already follows. And a settings table holding "the current
+rate", which would be a second answer to a question the row already answers, and the two can disagree
+while both look authoritative. The setting holds the next period's rate only.
+
+**What it would take.** A setting for each, read and written under the permissions the admin and
+team-lead routes already use, with one audit event per write; the rollover reading the queued rate
+rather than the environment; and the boot-time check comparing against the period's stored rate rather
+than against the process's environment. That last part is what turns the environment variable into a
+bootstrap default rather than the source of truth, and it is the piece that makes the rest coherent.

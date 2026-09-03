@@ -21,6 +21,7 @@ const NAV: NavItem[] = [
   { to: '/me/usage', labelKey: 'nav.my_usage' },
   { to: '/me/billing', labelKey: 'nav.my_billing' },
   { to: '/me/api-keys', labelKey: 'nav.my_api_keys' },
+  { to: '/me/limit-raises', labelKey: 'nav.my_limit_raises' },
   { to: '/admin/users', labelKey: 'nav.admin_users', when: 'admin' },
   { to: '/admin/tenants', labelKey: 'nav.admin_tenants', when: 'admin' },
   { to: '/admin/usage', labelKey: 'nav.admin_usage', when: 'admin' },

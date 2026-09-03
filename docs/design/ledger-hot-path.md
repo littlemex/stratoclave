@@ -43,6 +43,19 @@ Why headroom, not a `used` counter with a computed ceiling: DynamoDB's
 to read `limit` first (re-introducing the pre-read and a stale-limit risk). A
 headroom counter is **self-contained in one attribute** — no pre-read at all.
 
+Measured, derived from `pool_row_schema.worst_case_pool_item_bytes()` (the
+closed-world declaration of this row's attributes and their maximum value
+widths — see [`../benchmarks/ledger-latency.md`](../benchmarks/ledger-latency.md)):
+the worst-case pool item is **599 bytes**. That leaves a margin of 425 bytes under
+DynamoDB's 1,024-byte write-unit boundary. This number is recomputed whenever the
+declaration changes (see `backend/tests/test_ledger_hot_path_flatness_claim_l39a.py`,
+which fails if this sentence's figure and the declaration's computed figure
+ever diverge), so the WCU-proportional-to-size argument this design rests on
+holds **by construction** rather than by a byte count someone typed in and
+never re-checked: the item is **fixed at a size the declaration bounds, not
+unboundedly growing**, and stays inside its first write unit for every value
+the declaration permits.
+
 What this changes qualitatively:
 
 - **The snapshot-invalidation storm disappears.** The old snapshot CAS made every
@@ -69,7 +82,7 @@ Counterpart operations:
   `headroom += (reserved_amount − actual)`.
 - `release` / `reclaim` (unconditional ADD): return the hold's full amount →
   `headroom += amount`.
-- `set_pool_limit` (raise/lower) is NOT an unconditional ADD (Fable review
+- `set_manual_limit` (raise/lower) is NOT an unconditional ADD (Fable review
   finding 3): it is a **conditional delta-CAS** — `SET pool_limit = :new
   ADD pool_headroom (:new − :old)` guarded by `pool_limit = :old`, with a small
   bounded retry on `ConditionalCheckFailed` (a competing admin write). This

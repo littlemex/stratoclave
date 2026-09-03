@@ -8,13 +8,35 @@
 use anyhow::{anyhow, Result};
 use std::env;
 
+/// Last-resort default for `default_codex_model` when neither an env var nor
+/// `~/.stratoclave/config.toml` names one — i.e. a CLI that has never run
+/// `stratoclave setup` against this (or any) deployment. Kept in sync with
+/// the backend's own last-resort (`well_known.py::_DEFAULT_CODEX_MODEL_FALLBACK`,
+/// `"us.openai.gpt-5.6-sol"` there — same model, the CLI spells it without the
+/// `us.` inference-profile prefix, both are registered aliases of the same
+/// registry entry) only in the sense that both must resolve to a model this
+/// gateway actually serves; the two literals are allowed to drift in exact
+/// spelling; they must not drift into naming different tiers.
+const DEFAULT_CODEX_MODEL_FALLBACK: &str = "openai.gpt-5.6-sol";
+
 /// Configuration values consumed by the CLI's MVP commands.
 pub struct MvpConfig {
     /// Public API endpoint, e.g. `https://d123.cloudfront.net` or `http://alb-xxx`.
     pub api_endpoint: String,
     /// Default Anthropic model surfaced to `claude` (`ANTHROPIC_MODEL`).
     pub default_model: String,
-    /// Default OpenAI model surfaced to `codex`. Defaults to `openai.gpt-5.4`.
+    /// Default OpenAI model surfaced to `codex`. Precedence: env var, then
+    /// `~/.stratoclave/config.toml`'s `[defaults].codex_model` (written by
+    /// `stratoclave setup` from the deployment's own
+    /// `.well-known/stratoclave-config` `cli.codex.default_model` —
+    /// `DEFAULT_CODEX_MODEL` on the backend), then this crate's own literal
+    /// fallback (`DEFAULT_CODEX_MODEL_FALLBACK`) for a CLI that has never run
+    /// `setup` against a codex-enabled deployment. The fallback used to be
+    /// `openai.gpt-5.4` — codex's OWN built-in default — which is not in this
+    /// gateway's model registry at all: any operator who never ran `setup`
+    /// (or ran it while codex was still opt-in, before it defaulted on) got
+    /// `invalid_model` on `stratoclave codex` with no `--model` flag. See
+    /// `DEFAULT_CODEX_MODEL_FALLBACK`.
     pub default_codex_model: String,
     /// Sub-path under `api_endpoint` that exposes the OpenAI Responses API
     /// (e.g. `/openai/v1`). When unset, defaults to `/openai/v1`.
@@ -62,7 +84,7 @@ impl MvpConfig {
                     .as_ref()
                     .and_then(|c| c.default_codex_model.clone())
             })
-            .unwrap_or_else(|| "openai.gpt-5.4".to_string());
+            .unwrap_or_else(|| DEFAULT_CODEX_MODEL_FALLBACK.to_string());
 
         // 4. OpenAI base path under the api_endpoint.
         let codex_openai_base_path = env::var("STRATOCLAVE_CODEX_OPENAI_BASE_PATH")
@@ -199,9 +221,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
-    use std::sync::Mutex;
 
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     struct HomeGuard {
         _tmp: tempfile::TempDir,
@@ -238,7 +258,7 @@ mod tests {
     }
 
     fn setup_home(toml: &str) -> (HomeGuard, std::sync::MutexGuard<'static, ()>) {
-        let guard = ENV_GUARD.lock().unwrap();
+        let guard = crate::test_env::env_lock();
         let tmp = tempfile::TempDir::new().expect("mktemp");
         let dir = tmp.path().join(".stratoclave");
         fs::create_dir_all(&dir).unwrap();
@@ -273,7 +293,7 @@ model = "claude-opus-4-7"
         let cfg = MvpConfig::load().expect("nested schema should load");
         assert_eq!(cfg.api_endpoint, "https://example.cloudfront.net");
         assert_eq!(cfg.default_model, "claude-opus-4-7");
-        assert_eq!(cfg.default_codex_model, "openai.gpt-5.4");
+        assert_eq!(cfg.default_codex_model, DEFAULT_CODEX_MODEL_FALLBACK);
         assert!(cfg.codex_openai_base_path.is_none());
     }
 
@@ -287,7 +307,7 @@ default_model = "claude-sonnet-4-6"
         let cfg = MvpConfig::load().expect("flat schema should load");
         assert_eq!(cfg.api_endpoint, "https://legacy.cloudfront.net");
         assert_eq!(cfg.default_model, "claude-sonnet-4-6");
-        assert_eq!(cfg.default_codex_model, "openai.gpt-5.4");
+        assert_eq!(cfg.default_codex_model, DEFAULT_CODEX_MODEL_FALLBACK);
     }
 
     #[test]

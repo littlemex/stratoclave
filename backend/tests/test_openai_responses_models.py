@@ -6,7 +6,8 @@ authentication layer:
   - GET /openai/v1/models requires `responses:send` and lists only
     `provider="openai"` entries from the registry.
   - A `messages:send`-scoped API key cannot reach `POST /openai/v1/responses`.
-  - When `STRATOCLAVE_CODEX_ENABLED` is unset/false, the route returns HTTP 503.
+  - When `STRATOCLAVE_CODEX_ENABLED` is explicitly false, the route returns
+    HTTP 503; when unset it defaults to enabled.
   - The deprecated bare `CODEX_ENABLED` name is honoured as a fallback and
     logs a deprecation warning exactly once per process.
 """
@@ -90,13 +91,30 @@ def test_codex_disabled_returns_503(monkeypatch):
     assert resp.status_code == 503
 
 
-def test_codex_defaults_disabled_when_unset(monkeypatch):
-    """Route exposure must be opted into: neither env var set => 503, matching
-    the money flags' conservative-by-default posture (this used to default
-    enabled, which was the dangerous outlier)."""
+def test_codex_defaults_enabled_when_unset(monkeypatch):
+    """Neither env var set => enabled. Codex does not itself gate money or
+    safety (every request through it still runs the same reservation/
+    settlement pipeline and pool/quota walls as the Anthropic route), so
+    defaulting it off only hid `stratoclave codex` behind an undiscoverable
+    env var — a deployed-per-the-docs operator got a 503 with nothing at
+    deploy time explaining why. The explicit opt-out remains
+    STRATOCLAVE_CODEX_ENABLED=false."""
     from mvp.openai_responses import _codex_enabled
 
     monkeypatch.delenv("STRATOCLAVE_CODEX_ENABLED", raising=False)
+    monkeypatch.delenv("CODEX_ENABLED", raising=False)
+    assert _codex_enabled() is True
+
+
+def test_codex_explicit_empty_string_still_disables(monkeypatch):
+    """An explicit empty string on either name means "set, evaluates to
+    disabled" — the same convention `iac/lib/region-config.ts` uses on the
+    synth side. `value or "true"` would treat `''` as falsy and silently
+    re-enable codex for an operator who explicitly set the var to nothing;
+    the implementation must use `value if value is not None else "true"`."""
+    from mvp.openai_responses import _codex_enabled
+
+    monkeypatch.setenv("STRATOCLAVE_CODEX_ENABLED", "")
     monkeypatch.delenv("CODEX_ENABLED", raising=False)
     assert _codex_enabled() is False
 
