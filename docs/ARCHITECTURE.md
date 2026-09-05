@@ -814,6 +814,43 @@ formatting, usage parsing — so the endpoint exists in exactly one place.
 - Converse has no equivalent for `response_format` or `top_logprobs`, so those are
   rejected on the `messages` branch only — the OpenAI-compatible endpoint serves both natively.
 
+**The usage block, and why summing it is not optional.** The gateway bills four
+disjoint token legs and reports all four (C8.4). `prompt_tokens` and
+`completion_tokens` keep the meanings OpenAI gives them — uncached input, and
+output — and `total_tokens` keeps OpenAI's formula, which is their sum. The cache
+legs are reported alongside as `cache_read_input_tokens` and
+`cache_creation_input_tokens`, and they are **not** inside `prompt_tokens` and not
+inside `total_tokens`:
+
+```
+charged legs = prompt_tokens + completion_tokens
+             + cache_read_input_tokens + cache_creation_input_tokens
+```
+
+The reason they are separate fields rather than folded into `prompt_tokens` is that
+Bedrock prices a cache read and a cache write at their own rates and reports them
+disjointly from `inputTokens` — a measured request carried `inputTokens` 10 with a
+cache leg of 3,524 and a provider total of 3,538. OpenAI's
+`prompt_tokens_details.cached_tokens` is defined as a *subset* of `prompt_tokens`,
+so putting a disjoint count there would be a value that reads as valid and is
+wrong; a caller subtracting it would have under-counted that request by 3,524
+input tokens. **The consequence for a caller is real and is stated rather than
+hidden:** a client that reads only the three standard fields sees a total lower
+than what it is charged, so a cost calculation over this gateway must sum the four
+legs. A leg the provider did not report is absent or `null`, never `0`, because a
+zero is a measurement and absence is not (C8.1).
+
+**Reasoning content.** On the Converse transport a model with extended thinking
+enabled returns reasoning blocks, and these are forwarded as `reasoning_content`,
+separate from `content`, on both the streaming and non-streaming paths. This is a
+field that did not previously appear: an application that renders message fields
+generically, or concatenates every delta it receives, will start displaying a
+model's thinking to its end users unless it decides otherwise. The signature and
+redacted legs are carried too, because a leg the gateway cannot represent is
+reported rather than dropped (C13.4) — but the request direction is not
+implemented, so a prior turn's signature cannot be sent back and **multi-turn
+thinking combined with tool use is not supported**.
+
 **Registry regions and residency.** `ModelEntry.bedrock_region` is asymmetric by
 design. For `responses` entries it is authoritative — each bedrock-runtime model is
 offered in specific regions. For `messages` entries it is advisory: every Converse

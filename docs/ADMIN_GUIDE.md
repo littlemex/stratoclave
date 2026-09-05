@@ -438,10 +438,37 @@ The backend emits structured JSON logs to CloudWatch Logs group `/ecs/<prefix>-b
 Useful CloudWatch Logs Insights query:
 
 ```
-fields @timestamp, event, actor_email, target_email, tenant_id
+fields @timestamp, event, actor_id, actor_email_hash, target_id, target_type, tenant_id
 | filter event like /^admin_|^user_|^tenant_|^sso_|^trusted_account_|^api_key_|^credit_/
 | sort @timestamp desc
 ```
+
+Every field named there is one the writer emits, and
+`backend/tests/test_audit_query_names_real_fields.py` compares the list against the
+writer's own payload so this query cannot go stale without a test failing.
+
+An audit line identifies the actor two ways and carries the address neither time.
+`actor_id` is the identity to resolve against the Users table, and
+`actor_email_hash` is a marker for the actor's address, and it is the same digest a
+usage row carries as `user_email_hash`, so one actor can be matched across the audit
+trail and the usage ledger. Searching by a known address therefore means computing
+the marker first:
+
+```bash
+python3 -c "import sys; sys.path.insert(0, 'backend'); from dynamo.usage_logs import hash_user_email; print(hash_user_email('someone@example.com'))"
+```
+
+Then filter on the value it prints. Going the other way is not possible and is not
+meant to be: the marker is what a line carries instead of the address. It is a
+one-way digest with no key, so a reader holding a list of candidate addresses can
+confirm which one produced a marker by computing each — that is pseudonymisation and
+a log-hygiene measure, not anonymisation, and it should not be described as the
+latter to an auditor. What it does buy is that an address is not sitting in plaintext
+in a log group retained for 90 days.
+
+For an SSO invite the invited address is the subject rather than the actor, so
+`target_id` is a marker too. The invite record itself still holds the address, so
+"who was invited" is answered from the invite, not from the log line.
 
 | Event                                                                           | Emitted by |
 | ------------------------------------------------------------------------------- | ---------- |

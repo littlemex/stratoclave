@@ -236,11 +236,6 @@
    "anchor": "descriptive:a pointer to the reach-map in EVIDENCE.md and the tiers it uses"
   },
   {
-   "id": "cl-96868f70bb83",
-   "claim": "**No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), but retaining their reservations is opt-in and off by default, so today such an outcome still returns its budget. See the crash-safe row below.",
-   "anchor": "contract:C1.1@a32b5b92,C1.2@f5b97cc2,C1.5@9cd99058,C8.3@893d48b7"
-  },
-  {
    "id": "cl-3655fa510675",
    "claim": "**No client bypass**, and **pre-call reservation is shipped** — `litellm/proxy/spend_tracking/budget_reservation.py` (first committed 2026-04-30) reserves before the call, fails closed when the reservation cannot be written, clamps adversarial `max_tokens`, and covers seven scopes. The admission counter is a `DualCache` (in-process + Redis) with the DB as an authority that catches up; the code documents recovery paths for Redis restart / cross-pod reset. **We have not tested whether the ceiling holds through cache loss, and we do not claim it fails.** The honest difference is the guarantee level, not the presence of a reservation. Verify against the version you deploy",
    "anchor": "descriptive:describes LiteLLM's own pre-call reservation feature and where its code lives"
@@ -1065,16 +1060,6 @@
    "anchor": "contract:C6.6@610e00e8"
   },
   {
-   "id": "cl-4a21d1bbc3e9",
-   "claim": "Whether a reservation is **kept** when the gateway never observed the provider's outcome (a read timeout, a 5xx, a 200 it could not parse). Default **off**, in which case the outcome is still classified and logged (`provider_attempt_failed`) but the reservation is returned exactly as before. Turning it on makes the dollar ceiling bind on calls that may have been billed while the caller saw nothing, and the reaper no longer hands the headroom back either: a hold whose provider call had departed moves to `RETAINED` and is ended only by an operator, at the figure the provider's own record shows or as a release when it shows none (`GET`/`POST /api/mvp/admin/tenants/{tenant_id}/pool-retained…`). So read [`design/charge-loss.md`](design/charge-loss.md) section 7 first: the exposure accounting and saturation alarms it asks for do not exist yet, so under a provider outage a tenant's headroom can fill with retentions and the first signal is a refusal. `held_microusd` on the list endpoint is the figure to watch. Measured evidence for the rows this reads: [`MEASUREMENTS.md`](MEASUREMENTS.md).",
-   "anchor": "contract:C8.3@893d48b7"
-  },
-  {
-   "id": "cl-ad4fb83134ab",
-   "claim": "Turns the sound reservation **bound** into an admission gate, so a request that cannot fit the pool is refused with `402 request_does_not_fit_pool_limit` instead of admitted on an estimate. Default **off**. Do not enable it without first running the shadow measurement — [`design/hard-ceiling.md`](design/hard-ceiling.md) section 9b states the refusal-rate target, and section 4 the assumptions the guarantee rests on.",
-   "anchor": "contract:C1.5@9cd99058"
-  },
-  {
    "id": "cl-a01f39da8b46",
    "claim": "Upper bound on how many expired holds one reaper pass reclaims (default `5`), so a backlog cannot turn into one unbounded transaction.",
    "anchor": "contract:C3.2a@b34d2f58"
@@ -1393,7 +1378,8 @@
   {
    "id": "cl-3702dca544a0",
    "claim": "The seed is idempotent: re-running it (by redeploying or restarting) is always safe, and it is a no-op when the version is already current.",
-   "anchor": "contract:C7.4@0aca25b5"
+   "anchor": "contract:C7.5@eb3867b6",
+   "note": "the seed clause; idempotency is what the clause states and test_bootstrap_seed.py checks"
   },
   {
    "id": "cl-ac86e4fc530a",
@@ -1463,12 +1449,14 @@
   {
    "id": "cl-d60a15fce23f",
    "claim": "- **`default-org` always exists.** The seed inserts it with `ConditionExpression = attribute_not_exists(tenant_id)`.",
-   "anchor": "contract:C7.4@0aca25b5"
+   "anchor": "contract:C7.5@eb3867b6",
+   "note": "the seed clause; the ConditionExpression the sentence quotes is the mechanism the clause names"
   },
   {
    "id": "cl-bf5315f3bf1b",
    "claim": "A tenant deletion will never remove `default-org`.",
-   "anchor": "contract:C7.4@0aca25b5"
+   "anchor": "contract:C7.5@eb3867b6",
+   "note": "the seed clause; the delete path refuses default-org"
   },
   {
    "id": "cl-c64f79b501cb",
@@ -1488,12 +1476,14 @@
   {
    "id": "cl-c5f46776f54e",
    "claim": "The `default-org` tenant is seeded automatically on first backend startup and cannot be deleted; it is the fallback for users with no explicit tenant assignment.",
-   "anchor": "contract:C7.4@0aca25b5"
+   "anchor": "contract:C7.5@eb3867b6",
+   "note": "the seed clause; seeded on startup and refused by delete"
   },
   {
    "id": "cl-4a82b1186fce",
    "claim": "The `default-org` tenant cannot be archived.",
-   "anchor": "contract:C7.4@0aca25b5"
+   "anchor": "contract:C7.5@eb3867b6",
+   "note": "the seed clause; the archive path refuses default-org for the same reason as delete"
   },
   {
    "id": "cl-b5b90dd0ba55",
@@ -1528,7 +1518,8 @@
   {
    "id": "cl-19076cf18bc4",
    "claim": "Every `cdk synth` / `cdk deploy` runs the `AwsSolutionsChecks` Aspect from `cdk-nag`.",
-   "anchor": "contract:C7.4@0aca25b5"
+   "anchor": "contract:C7.6@2e217e91",
+   "note": "the cdk-nag clause; iac/test/nag-synth.test.ts is what makes it checkable"
   },
   {
    "id": "cl-1a808bb92565",
@@ -2099,6 +2090,66 @@
    "claim": "Verified against a real deployment on 2026-09-02: the documented `ALLOW_ADMIN_CREATION` + `bootstrap-admin.sh` path 401s as described above; `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` is the path that actually works.",
    "anchor": "evidence:A human can actually get through the console",
    "note": "the documented first-admin path was tried on a real deployment and returned 401; the sentence reports that run"
+  },
+  {
+   "id": "cl-9bb2a5711461",
+   "claim": "**The usage block, and why summing it is not optional.** The gateway bills four disjoint token legs and reports all four (C8.4).",
+   "anchor": "contract:C8.4@eda7e198",
+   "note": "the clause is exactly this: every billed leg is reported, and the legs are disjoint"
+  },
+  {
+   "id": "cl-755059844720",
+   "claim": "A leg the provider did not report is absent or `null`, never `0`, because a zero is a measurement and absence is not (C8.1).",
+   "anchor": "contract:C8.1@66732b35",
+   "note": "C8.1 is the absent-is-not-zero rule; this sentence states it for the response side"
+  },
+  {
+   "id": "cl-76817b6558dc",
+   "claim": "The signature and redacted legs are carried too, because a leg the gateway cannot represent is reported rather than dropped (C13.4) — but the request direction is not implemented, so a prior turn's signature cannot be sent back and **multi-turn thinking combined with tool use is not supported**.",
+   "anchor": "contract:C13.4@50585e29",
+   "note": "C13.4 requires an unrepresentable member to be reported; the sentence also carries its own limit, that multi-turn thinking with tools is unsupported"
+  },
+  {
+   "id": "cl-f3e3ecb2874a",
+   "claim": "Every field named there is one the writer emits, and `backend/tests/test_audit_query_names_real_fields.py` compares the list against the writer's own payload so this query cannot go stale without a test failing.",
+   "anchor": "contract:C12.6@64e4a80a",
+   "note": "the clause names test_audit_query_names_real_fields.py, which is the comparison this sentence describes"
+  },
+  {
+   "id": "cl-27ef478d0489",
+   "claim": "Whether a reservation is **kept** when the gateway never observed the provider's outcome (a read timeout, a 5xx, a 200 it could not parse). Default **on** — `provider_outcome.unobserved_holds_enforced()` returns true when the variable is unset, so the shipped artifact keeps the reservation. Setting it to a falsy value gives back the weaker behaviour: the outcome is still classified and logged (`provider_attempt_failed`) but the reservation is returned as though the call were free, which it was not. Leaving it on makes the dollar ceiling bind on calls that may have been billed while the caller saw nothing, and the reaper no longer hands the headroom back either: a hold whose provider call had departed moves to `RETAINED` and is ended only by an operator, at the figure the provider's own record shows or as a release when it shows none (`GET`/`POST /api/mvp/admin/tenants/{tenant_id}/pool-retained…`). So read [`design/charge-loss.md`](design/charge-loss.md) section 7 first: the exposure accounting and saturation alarms it asks for do not exist yet, so under a provider outage a tenant's headroom can fill with retentions and the first signal is a refusal. `held_microusd` on the list endpoint is the figure to watch. Measured evidence for the rows this reads: [`MEASUREMENTS.md`](MEASUREMENTS.md).",
+   "anchor": "contract:C7.4@8bf3e2a5",
+   "note": "the documented default of a money flag, which is what C7.4 now makes checkable"
+  },
+  {
+   "id": "cl-86d19d152df8",
+   "claim": "Turns the sound reservation **bound** into an admission gate, so a request that cannot fit the pool is refused with `402 request_does_not_fit_pool_limit` instead of admitted on an estimate. Default **on** — `reservation_bound.py` reads it with `default=True`, so the shipped artifact prices admission from a byte-count bound rather than an estimate. Before turning it OFF, read the shadow measurement — [`design/hard-ceiling.md`](design/hard-ceiling.md) section 9b states the refusal-rate target, and section 4 the assumptions the guarantee rests on.",
+   "anchor": "contract:C7.4@8bf3e2a5",
+   "note": "same: the other money gate's documented default"
+  },
+  {
+   "id": "cl-a60972f00633",
+   "claim": "The default stated in each row is compared against the code that produces it by `test_documented_money_flag_defaults.py`, so a flag whose default changes cannot leave this table behind.",
+   "anchor": "contract:C7.4@8bf3e2a5",
+   "note": "the sentence describes the comparison C7.4 cites as its enforcement"
+  },
+  {
+   "id": "cl-2ea71bb8ef8c",
+   "claim": "Emails are recorded as stable SHA-256 markers rather than plaintext (`core/logging.py`); a usage row stores the marker ([CONTRACTS.md](./docs/design/CONTRACTS.md) C12.1) and so does an audit line, by every route an address reaches the audit writer (C12.6).",
+   "anchor": "contract:C12.6@64e4a80a",
+   "note": "the audit writer's own clause; the sentence names both stores the marker appears in"
+  },
+  {
+   "id": "cl-5ffbad142c8d",
+   "claim": "**C12.4, the universal form of this claim, is deliberately still at level B**: only two writers are checked, nothing sweeps every logging call, and third-party loggers are a separate residual the clause names as an open item.",
+   "anchor": "boundary:the sentence states its own limit -- two writers checked, no sweep, third-party loggers named as a separate residual",
+   "note": "a sentence about a clause NOT holding universally; it carries the boundary rather than claiming the property"
+  },
+  {
+   "id": "cl-8c9448b6dd1f",
+   "claim": "**No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), and `STRATOCLAVE_UNOBSERVED_HOLDS` **defaults on**, so such an outcome KEEPS its reservation rather than handing the budget back as though the call were free. An operator can set that flag falsy to get the weaker behaviour back. See the crash-safe row below.",
+   "anchor": "contract:C1.5@9cd99058",
+   "note": "the admission-bound clause the comparison row is about; the row now states the money gates' real default"
   }
  ]
 }
