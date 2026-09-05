@@ -55,8 +55,10 @@ from dynamo import UserTenantsRepository
 from dynamo.user_tenants import CreditExhaustedError
 
 from ._bedrock_clients import bedrock_runtime_client
-from ._converse_core import cache_tokens_from_usage
+from ._converse_core import usage_from_bedrock
+from ._converse_types import additional_model_request_fields as _additional_model_request_fields
 from . import _money
+from . import provider_outcome as _provider_outcome
 from ._pipeline import (
     release_pool as _release_pool,
     reserve_credit,
@@ -302,10 +304,31 @@ class AnthropicMessage(BaseModel):
 
 class AnthropicMessagesRequest(BaseModel):
     # Anthropic's Messages API is not frozen: Claude Code / Claude
-    # Desktop / the Anthropic SDKs routinely ship new top-level
-    # fields (``tools``, ``tool_choice``, ``metadata``, ``service_tier``,
-    # ``anthropic_beta``, ``thinking``, ``cache_control``, ...) that
-    # we forward to Bedrock without needing to understand.
+    # Desktop / the Anthropic SDKs routinely ship new top-level fields, and
+    # ``extra="allow"`` is what keeps a new one from 422ing the request
+    # outright. That is a narrower claim than this comment used to make:
+    # "allowed to arrive" is not "forwarded to Bedrock", and for ``thinking``
+    # those were false to conflate — `_build_bedrock_kwargs` built only
+    # `modelId`/`messages`/`inferenceConfig`/`system`/`toolConfig` and never
+    # `additionalModelRequestFields`, so a `thinking`-enabled request was
+    # accepted and silently dropped (verified against real Bedrock: a
+    # `{"type":"enabled","budget_tokens":2048}` request came back with a
+    # single `text` block, `stop_reason: end_turn`, and no error).
+    # `_build_bedrock_kwargs` now extracts an explicit ALLOWLIST of such
+    # fields into `additionalModelRequestFields` (see
+    # `_converse_types.additional_model_request_fields`). On THIS route that
+    # allowlist is ``top_k`` and ``anthropic_beta`` only: ``thinking`` is
+    # deliberately still not forwarded here, because this route's response
+    # builder emits `text` and `tool_use` blocks and would discard the
+    # reasoning it produced — billing the caller for output it cannot read is
+    # worse than declining the parameter. The OpenAI-shaped route forwards it,
+    # because that one renders `reasoning_content`. ``tools``/``tool_choice``
+    # are likewise read by name, into `toolConfig`, below.
+    # Everything else outside those two groups (``metadata``,
+    # ``service_tier``, and any field neither Anthropic nor this gateway has
+    # invented yet) is accepted and genuinely unused: `extra="allow"` exists
+    # so a new field never 422s a request, not so every field this gateway
+    # does not understand silently reaches the model anyway.
     # Z-hotfix (2026-04): the original sweep-1 C-H locked this model
     # with ``extra="forbid"``, which meant every `stratoclave claude`
     # invocation 422'd the moment the CLI sent `tools`. The body
@@ -571,6 +594,28 @@ def _build_bedrock_kwargs(
             else:
                 tool_config["toolChoice"] = {"auto": {}}
         kwargs["toolConfig"] = tool_config
+
+    # additionalModelRequestFields (thinking / top_k / anthropic_beta): the
+    # ONLY Converse channel these travel on — there is no `inferenceConfig`
+    # or `toolConfig` field for any of them. Added here, inside the function
+    # that BUILDS the payload the hard-ceiling survey below reads, so the
+    # field is in `kwargs` before that survey runs and before the reserve —
+    # never appended afterward, which would price a smaller payload than the
+    # one actually sent. See `_converse_types.additional_model_request_fields`
+    # for the allowlist and why it is one, not "every extra field".
+    #
+    # `renders_reasoning=False`: this route's response builder below emits `text`
+    # and `tool_use` blocks only, so a reasoning block Bedrock returns here is
+    # dropped. Forwarding `thinking` anyway would bill the caller for thinking
+    # tokens it can never read, and — when the output budget goes entirely to
+    # thinking — hand back an empty reply with a full bill. Not honouring the
+    # parameter is the better failure: the caller's request behaves as it did
+    # before, rather than costing more and returning less. The flag is what this
+    # wire flips once it renders reasoning back as the Messages API's own
+    # `thinking` block type.
+    amrf = _additional_model_request_fields(body, renders_reasoning=False)
+    if amrf:
+        kwargs["additionalModelRequestFields"] = amrf
 
     return kwargs
 
@@ -1015,10 +1060,26 @@ def messages(
         _run_ending(hold.claim_unobserved(exc=e))
         raise
 
-    usage = resp.get("usage", {})
-    input_tokens = int(usage.get("inputTokens", 0))
-    output_tokens = int(usage.get("outputTokens", 0))
-    cache_read, cache_write = cache_tokens_from_usage(usage)
+    usage_event = usage_from_bedrock(resp.get("usage"))
+    if usage_event is None:
+        # The provider responded (we have a 200 and a `resp` dict) but its
+        # usage block is absent/empty/malformed. Settling this as a zero
+        # would be the exact C8.1 defect: a billed call recorded as free and
+        # fully observed, not as unobserved. This is the identical case
+        # `chat_completions.py`'s non-streaming Converse path reports as
+        # `SUBMITTED_UNSETTLED` — the ceiling stays held (subject to
+        # `STRATOCLAVE_UNOBSERVED_HOLDS`) rather than a zero being invented,
+        # and the same provider response must cost the same money regardless
+        # of which wire format it arrived on.
+        _run_ending(hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED))
+        raise HTTPException(
+            status_code=502,
+            detail={"type": "api_error", "message": "upstream response carried no readable usage"},
+        )
+    input_tokens = usage_event.input
+    output_tokens = usage_event.output
+    cache_read = usage_event.cache_read
+    cache_write = usage_event.cache_write
     _run_ending(hold.claim_settle(_money.Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -1051,6 +1112,23 @@ def messages(
         cache_read_tokens=cache_read,
     )
 
+    # `input_tokens`/`output_tokens` keep today's meaning. The two cache legs
+    # use the field names the Anthropic Messages API itself defines
+    # (`cache_read_input_tokens`/`cache_creation_input_tokens`) — there is no
+    # naming choice to make here, unlike the OpenAI-shaped route. A leg the
+    # provider did not report is OMITTED, never `0` (C8.4's rule: a zero is
+    # a plausible-looking wrong value, and this is the same "billed 3,538,
+    # reported 14" shape for whichever field would have carried the missing
+    # amount).
+    usage_out: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    if cache_read is not None:
+        usage_out["cache_read_input_tokens"] = cache_read
+    if cache_write is not None:
+        usage_out["cache_creation_input_tokens"] = cache_write
+
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -1059,10 +1137,7 @@ def messages(
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        },
+        "usage": usage_out,
     }
 
 

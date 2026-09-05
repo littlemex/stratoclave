@@ -340,9 +340,6 @@
   "cl-489b7b86c750": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
-  "cl-4a21d1bbc3e9": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
   "cl-4a82b1186fce": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -673,9 +670,6 @@
   "cl-964972efded8": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
-  "cl-96868f70bb83": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
   "cl-97843e025e44": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -759,9 +753,6 @@
   },
   "cl-aca38f5d7f56": {
    "first_seen": "docs/design/limits.md and the README's budget paragraph (money-first defaults, C1.9)"
-  },
-  "cl-ad4fb83134ab": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-ad63e182250c": {
    "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
@@ -1212,6 +1203,36 @@
   },
   "cl-dbf40fe924a5": {
    "first_seen": "the deployment guide records that the documented first-admin path was tried on a real deployment and 401'd"
+  },
+  "cl-9bb2a5711461": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-755059844720": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-76817b6558dc": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-f3e3ecb2874a": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-27ef478d0489": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-86d19d152df8": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-a60972f00633": {
+   "first_seen": "added by the router-requests change: the caller-facing usage contract, the audit query, and the money-flag defaults"
+  },
+  "cl-2ea71bb8ef8c": {
+   "first_seen": "added by the router-requests change: the audit marker, C12.4's stated boundary, and the corrected money-gate default"
+  },
+  "cl-8c9448b6dd1f": {
+   "first_seen": "added by the router-requests change: the audit marker, C12.4's stated boundary, and the corrected money-gate default"
+  },
+  "cl-5ffbad142c8d": {
+   "first_seen": "added by the router-requests change: C12.4's stated boundary in the README"
   }
  },
  "retired": {
@@ -1254,6 +1275,21 @@
    "disposition": "reworded-to",
    "target": "cl-d2d92e0588ee",
    "why": "the two money flags were flipped to default on and renamed into the STRATOCLAVE_ namespace, so the sentence stating the default changed"
+  },
+  "cl-4a21d1bbc3e9": {
+   "disposition": "reworded-to",
+   "target": "cl-27ef478d0489",
+   "why": "the STRATOCLAVE_UNOBSERVED_HOLDS row stated a default of off; the code returns true when the variable is unset, so the row was corrected and the sentence re-hashed"
+  },
+  "cl-ad4fb83134ab": {
+   "disposition": "reworded-to",
+   "target": "cl-86d19d152df8",
+   "why": "the STRATOCLAVE_HARD_CEILING_GATE row stated a default of off; the flag is read with default=True, so the row was corrected and the sentence re-hashed"
+  },
+  "cl-96868f70bb83": {
+   "disposition": "reworded-to",
+   "target": "cl-8c9448b6dd1f",
+   "why": "the bypass-proof comparison row said retaining an unobserved hold was opt-in and off by default; the flag defaults on, so the row was corrected and the sentence re-hashed"
   }
  },
  "detector": {
@@ -1418,7 +1454,7 @@
     "C7.1": "E",
     "C7.2": "E",
     "C7.3": "E",
-    "C7.4": "B",
+    "C7.4": "E",
     "C8.1": "E",
     "C8.2": "B",
     "C8.3": "B",
@@ -1475,7 +1511,15 @@
     "C14.29": "B",
     "C14.30": "B",
     "C14.31": "N",
-    "C14.32": "N"
+    "C14.32": "N",
+    "C7.5": "E",
+    "C7.6": "B",
+    "C8.4": "E",
+    "C8.5": "E",
+    "C8.6": "N",
+    "C8.7": "N",
+    "C12.6": "E",
+    "C13.4": "E"
    }
   },
   "retired": {},
