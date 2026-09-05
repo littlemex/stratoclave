@@ -32,7 +32,7 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
-## [Unreleased]
+## [1.4.0] — 2026-09-06
 
 Found after 1.3.0 was cut, while asking what regression tests the release's own
 findings deserved.
@@ -482,7 +482,7 @@ the commits in `v0.1.0..v0.2.0`.
 
 First tagged release. See the tag annotation.
 
-[Unreleased]: https://github.com/littlemex/stratoclave/compare/v1.3.0...HEAD
+[1.4.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.4.0
 [1.3.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.3.0
 [1.2.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.2.0
 [1.1.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.1.0
