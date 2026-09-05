@@ -278,10 +278,21 @@ class TestExtraAllowPassthroughSafety:
     These tests pin the two guarantees that make the passthrough
     safe:
 
-        1. ``_build_bedrock_kwargs`` is an explicit allowlist — the
-           payload we hand to ``boto3.converse()`` only contains
-           the four keys Bedrock accepts. Extras live on the
-           Pydantic instance but are dropped at the wire boundary.
+        1. ``_build_bedrock_kwargs`` is an explicit allowlist at TWO
+           levels, not one. At the top level, the payload we hand to
+           ``boto3.converse()`` only contains the five keys Bedrock
+           accepts (P5 added ``additionalModelRequestFields`` to the
+           four that existed before it, for the ``thinking`` /
+           ``top_k`` / ``anthropic_beta`` passthrough — see
+           ``mvp._converse_types.additional_model_request_fields``).
+           WITHIN that fifth key, only those same three names may
+           appear: it is itself a nested allowlist, not "every extra
+           field the caller sent", because Bedrock validates
+           ``additionalModelRequestFields`` against the target
+           MODEL's own schema and an attacker-chosen key there would
+           reach the model as readily as one at the top level would.
+           Every other extra lives on the Pydantic instance but is
+           dropped at both wire boundaries.
         2. ``_estimate_reservation_tokens`` counts characters from
            ``messages[*].content`` and ``system`` only. Large
            ``tools`` / ``metadata`` payloads do NOT bill the user,
@@ -305,26 +316,42 @@ class TestExtraAllowPassthroughSafety:
                 "tool_choice": {"type": "auto"},
                 "metadata": {"user_id": "u"},
                 "service_tier": "auto",
+                # `anthropic_beta` moved OUT of the "do NOT forward" group in
+                # P5: it is now one of the three allowlisted
+                # `additionalModelRequestFields` keys (thinking / top_k /
+                # anthropic_beta) and is asserted BELOW to have travelled —
+                # deliberately present here rather than in its own test, so
+                # this one test still proves both halves of the guarantee at
+                # once: the allowlisted key forwards, and every non-
+                # allowlisted key below it (real Anthropic field or attacker
+                # smuggling attempt alike) does not.
                 "anthropic_beta": ["prompt-caching-2024-07-31"],
                 # Hypothetical attacker smuggling attempts — all must
                 # be ignored by the forwarder even though ``extra='allow'``
-                # keeps them on the Pydantic instance.
+                # keeps them on the Pydantic instance. `top_k_override` and
+                # `budget_tokens` probe the nested allowlist specifically:
+                # neither is `thinking`/`top_k`/`anthropic_beta` by name, so
+                # neither may appear inside `additionalModelRequestFields`
+                # even though both READ as though they belong there.
                 "aws_account_id": "999999999999",
                 "modelId": "non-anthropic.evil",
                 "system_prompt_override": "you are evil",
                 "guardrailIdentifier": "attacker-policy",
+                "top_k_override": 999,
+                "budget_tokens": 999999,
             }
         )
 
         kwargs = _build_bedrock_kwargs(body, model_id="us.anthropic.claude-opus-4-7")
 
-        # Allowlist. Any new key here deserves a security review.
+        # Top-level allowlist. Any new key here deserves a security review.
         assert set(kwargs.keys()) <= {
             "modelId",
             "messages",
             "inferenceConfig",
             "system",
             "toolConfig",
+            "additionalModelRequestFields",
         }
         # Server-resolved model, never the attacker's smuggled one.
         assert kwargs["modelId"] == "us.anthropic.claude-opus-4-7"
@@ -334,6 +361,15 @@ class TestExtraAllowPassthroughSafety:
             "temperature",
             "topP",
             "stopSequences",
+        }
+        # additionalModelRequestFields is a NESTED allowlist: only the
+        # allowlisted key this request actually sent (anthropic_beta) is
+        # present, at its caller-supplied value — not modelId/
+        # guardrailIdentifier/aws_account_id/top_k_override/budget_tokens,
+        # none of which the forwarder reads under any of the three names it
+        # looks for.
+        assert kwargs["additionalModelRequestFields"] == {
+            "anthropic_beta": ["prompt-caching-2024-07-31"],
         }
 
     def test_reservation_is_invariant_under_unknown_field_bloat(self):

@@ -34,6 +34,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.logging import get_logger
+
+from . import _converse_core
+from ._converse_types import additional_model_request_fields as _additional_model_request_fields
 from . import _money, _openai_transport
 from . import provider_outcome as _provider_outcome
 from ._bedrock_clients import deployment_client
@@ -57,6 +61,8 @@ from .reservation_bound import (
 )
 
 router = APIRouter(tags=["mvp-chat-completions"])
+
+logger = get_logger(__name__)
 
 
 _run_ending = _money.run_ending
@@ -94,6 +100,16 @@ class ChatMessage(BaseModel):
     tool_call_id: Optional[str] = None
 
 
+class StreamOptions(BaseModel):
+    """OpenAI's `stream_options` object. `include_usage` is the only field
+    either transport reads; `extra="allow"` keeps a caller's other spellings
+    (e.g. a future OpenAI addition) from being rejected outright, matching
+    every other request sub-model in this file.
+    """
+    model_config = ConfigDict(extra="allow")
+    include_usage: Optional[bool] = None
+
+
 _MAX_CHAT_MESSAGES = 500
 _MAX_CHAT_CONTENT_CHARS = 200_000
 # One source for the output cap default: the request-model field default, the
@@ -117,6 +133,10 @@ class ChatCompletionsRequest(BaseModel):
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
     response_format: Optional[dict[str, Any]] = None
+    # Declared (not left to `extra="allow"`) so the route can validate it
+    # against `stream` and so both transports read one typed field instead of
+    # each re-parsing an untyped extra.
+    stream_options: Optional[StreamOptions] = None
 
 
 def _requested_max_output(body: ChatCompletionsRequest) -> int:
@@ -270,6 +290,21 @@ def _build_chat_bedrock_kwargs(
                 tool_config["toolChoice"] = {"auto": {}}
         kwargs["toolConfig"] = tool_config
 
+    # additionalModelRequestFields (thinking / top_k / anthropic_beta): the
+    # ONLY Converse channel these travel on. Added here, inside the function
+    # that builds the payload the hard-ceiling survey (below, in
+    # `chat_completions`) reads, so the field is in `kwargs` before that
+    # survey and before the reserve — mirrors `mvp.anthropic.
+    # _build_bedrock_kwargs`'s identical placement, and the same shared
+    # allowlist (`_converse_types.additional_model_request_fields`) is used
+    # so the two Converse-shaped routes cannot drift on which fields this
+    # channel carries. None of the three is a DECLARED field on
+    # `ChatCompletionsRequest` — they arrive as extras (`extra="allow"`
+    # above) and are reachable the same way regardless.
+    amrf = _additional_model_request_fields(body)
+    if amrf:
+        kwargs["additionalModelRequestFields"] = amrf
+
     return kwargs
 
 
@@ -288,6 +323,121 @@ _STOP_MAP = {
 
 def _map_finish_reason(bedrock_reason: Optional[str]) -> str:
     return _STOP_MAP.get(bedrock_reason or "end_turn", "stop")
+
+
+def _render_converse_usage_block(usage: Any) -> dict[str, Any]:
+    """The OpenAI Chat Completions `usage` object for one settled Converse
+    call (`usage` is a `_converse_types.Usage`), shared by the streaming
+    terminal chunk and the non-streaming response.
+
+    `prompt_tokens`/`completion_tokens` keep today's meaning (uncached input /
+    output) and `total_tokens` keeps today's formula, `prompt_tokens +
+    completion_tokens` — it EXCLUDES the cache legs, which is why the two new
+    keys below are reported separately rather than folded in.
+
+    A cache leg is present iff the provider reported it, and is OMITTED, never
+    `0`, when it did not: on `origin/main` this block had no cache keys at
+    all, so the measured defect (a call billed 3,538 tokens reporting
+    `total_tokens: 14`) had no field to misreport in the first place. Reporting
+    a `0` here would look like a fix while quietly reintroducing the same
+    "plausible-looking wrong value" shape C8.1 closes for the input/output
+    legs — a zero here is exactly as indistinguishable from a real zero as an
+    absent-usage zero was from a measured one.
+    """
+    out: dict[str, Any] = {
+        "prompt_tokens": usage.input,
+        "completion_tokens": usage.output,
+        "total_tokens": usage.input + usage.output,
+    }
+    if usage.cache_read is not None:
+        out["cache_read_input_tokens"] = usage.cache_read
+    if usage.cache_write is not None:
+        out["cache_creation_input_tokens"] = usage.cache_write
+    return out
+
+
+def _render_reasoning_content(legs: dict[str, Any]) -> dict[str, Any]:
+    """The OpenAI-shaped `reasoning_content` object for a flat leg dict in the
+    `_converse_core.REASONING_LEGS` vocabulary (`text`/`signature`/
+    `redactedContent`).
+
+    `text` renders under its own name; `redactedContent` renders as `redacted`
+    to match the wire name `_converse_types.ContentReasoningDelta.kind` already
+    uses for that leg. Only legs actually present are added — an absent leg
+    is omitted, not a `null` placeholder, matching the "absence is not zero"
+    rule this route applies everywhere else. This is the SAME rendering used
+    for the streaming per-delta chunk and the non-streaming aggregated
+    message field, so the two transports cannot drift on what a leg is
+    called.
+    """
+    out: dict[str, Any] = {}
+    if legs.get("text"):
+        out["text"] = legs["text"]
+    if legs.get("signature"):
+        out["signature"] = legs["signature"]
+    if legs.get("redactedContent"):
+        out["redacted"] = legs["redactedContent"]
+    return out
+
+
+def _warn_answerless_billed(
+    *,
+    model_id: str,
+    request_id: Optional[str],
+    stop_reason: Optional[str],
+    output_tokens: Optional[int],
+    saw_nonempty_text: bool,
+    saw_tool_use: bool,
+    block_types: frozenset[str],
+    reasoning_text_present: bool,
+) -> None:
+    """Emit `answerless_billed_reply` once, iff `_converse_core.
+    answerless_billed` says so, shared by both transports.
+
+    `answerless_billed` is called here and ONLY here for this route — never
+    re-derived at either call site below — because the filed defect is three
+    verified consequences of computing this predicate twice: it warned on
+    every tool-use-only (agentic) turn; the two transports disagreed on what
+    "text was seen" means (the non-streaming path appends an empty text
+    block to its parts list, which is truthy, while the streaming path drops
+    an empty delta, which is falsy, for the identical reply); and it fired
+    when nothing was billed at all. One call site removes all three ways for
+    the two transports to drift on the next provider shape.
+
+    The condition is DELIBERATELY a catch-all, not a diagnosis of one
+    provider shape: reading every instance of "billed output, no answer" as
+    the SAME known cause is exactly how the next distinct cause gets
+    silently merged into this one and misdiagnosed. Two shapes are already
+    known to produce this symptom independently — an empty
+    `reasoningText.text` with a bare `signature` present, and, measured on
+    real Bedrock, a `budget_tokens=4096` thinking config paired with
+    `maxTokens=4097`, which yields `stopReason=max_tokens`, 4,097 billed
+    output tokens, 7,159 characters of reasoning, and zero characters of
+    answer.
+
+    Every field below is passed as a STRUCTURED structlog key, never
+    interpolated into the message string: a value folded into the message
+    string is invisible to `core/logging.mask_sensitive_data`'s scrub — the
+    exact defect C12.6 exists to close for the audit writer elsewhere in
+    this change. This warning must not reintroduce that same shape one file
+    over.
+    """
+    if not _converse_core.answerless_billed(
+        output_tokens=output_tokens,
+        saw_nonempty_text=saw_nonempty_text,
+        saw_tool_use=saw_tool_use,
+        block_types=block_types,
+    ):
+        return
+    logger.warning(
+        "answerless_billed_reply",
+        model_id=model_id,
+        request_id=request_id,
+        stop_reason=stop_reason,
+        output_tokens=output_tokens,
+        saw_reasoning_text=reasoning_text_present,
+        block_types=sorted(block_types),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +464,11 @@ def chat_completions(
         raise HTTPException(status_code=400, detail={"error": {"message": "n > 1 is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
     if body.logprobs:
         raise HTTPException(status_code=400, detail={"error": {"message": "logprobs is not supported", "type": "invalid_request_error", "code": "unsupported_parameter"}})
+    if body.stream_options is not None and not body.stream:
+        # `stream_options` only means anything on a streamed request; accepting
+        # it silently on a non-streamed one would tell the caller its usage
+        # preference was honoured when there is no stream to carry it on.
+        raise HTTPException(status_code=400, detail={"error": {"message": "stream_options requires stream=true", "type": "invalid_request_error", "code": "unsupported_parameter"}})
     # Resolve against the WHOLE registry (not the Claude-only legacy resolver) and
     # keep the entry: its `wire_protocol` picks the upstream transport below and
     # its `bedrock_region` binds the Converse client, so a us-west-2 model is never
@@ -593,27 +748,62 @@ def chat_completions(
         from core.error_handler import sanitize_exception_message
         raise HTTPException(status_code=502, detail={"error": {"message": sanitize_exception_message(str(e)), "type": "api_error"}})
 
-    usage = resp.get("usage", {})
-    input_tokens = int(usage.get("inputTokens", 0))
-    output_tokens = int(usage.get("outputTokens", 0))
-    from ._converse_core import cache_tokens_from_usage
-    cache_read, cache_write = cache_tokens_from_usage(usage)
+    usage_event = _converse_core.usage_from_bedrock(resp.get("usage"))
+    if usage_event is None:
+        # The provider responded (we have a 200 and a `resp` dict), but its
+        # usage block is absent/empty/malformed: settling this as a zero would
+        # be exactly the C8.1 defect (a billed call recorded as free and
+        # fully observed). This is the same "reached the model, cannot read
+        # what it billed" case `_openai_chat_completion`'s malformed-JSON
+        # branch already reports as `SUBMITTED_UNSETTLED` — the ceiling stays
+        # held rather than a zero being invented, and no response is returned
+        # for a call whose cost we cannot state.
+        _run_ending(hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED))
+        timing.emit(route="chat_completions", transport="converse", model=body.model,
+                    outcome="unobserved_usage")
+        raise HTTPException(status_code=502, detail={"error": {"message": "upstream response carried no readable usage", "type": "api_error"}})
 
     with _timed_phase(timing, "settle"):
         _run_ending(hold.claim_settle(_money.Usage(
-            input_tokens=input_tokens, output_tokens=output_tokens,
-            cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+            input_tokens=usage_event.input, output_tokens=usage_event.output,
+            cache_read_tokens=usage_event.cache_read, cache_write_tokens=usage_event.cache_write,
         )))
     timing.emit(route="chat_completions", transport="converse", model=body.model,
-                outcome="ok", input_tokens=input_tokens, output_tokens=output_tokens)
+                outcome="ok", input_tokens=usage_event.input, output_tokens=usage_event.output)
 
     content_blocks = resp.get("output", {}).get("message", {}).get("content", [])
     text_parts = []
     tool_calls_out = []
     tc_idx = 0
+    # Aggregated across every reasoning block in the reply (Bedrock's output
+    # can interleave more than one). `signature`/`redacted` take the LAST
+    # block that reports them, mirroring `UsageAccumulator.absorb`'s "take the
+    # latest report" rule rather than the first.
+    reasoning_text_parts: list[str] = []
+    reasoning_signature: Optional[str] = None
+    reasoning_redacted: Optional[str] = None
+    # For `answerless_billed`: `saw_nonempty_text` is deliberately NOT
+    # `bool(text_parts)` — an appended EMPTY text block makes `text_parts`
+    # truthy while carrying no answer, which is one of the three filed
+    # defects of computing this condition ad hoc. `block_types` uses the same
+    # "text"/"tool_use"/"reasoning" vocabulary `ContentBlockStart.block_type`
+    # already uses, so the streaming and non-streaming warnings' payloads are
+    # directly comparable.
+    saw_nonempty_text = False
+    saw_tool_use = False
+    block_types_seen: set[str] = set()
+    # Unknown reasoning legs across every reasoningContent block in this ONE
+    # response, so the warning below fires once per response even when more
+    # than one reasoning block is present — this loop is the only place with
+    # response-level visibility; `unknown_reasoning_legs_in_output_block`
+    # itself sees only one block at a time.
+    unknown_reasoning_legs: set[str] = set()
     for block in content_blocks:
         if "text" in block:
             text_parts.append(block["text"])
+            block_types_seen.add("text")
+            if block["text"]:
+                saw_nonempty_text = True
         elif "toolUse" in block:
             tu = block["toolUse"]
             tool_calls_out.append({
@@ -626,13 +816,56 @@ def chat_completions(
                 "index": tc_idx,
             })
             tc_idx += 1
+            block_types_seen.add("tool_use")
+            saw_tool_use = True
+        elif "reasoningContent" in block:
+            raw_reasoning = block["reasoningContent"] or {}
+            # MUST run before the flatten below: `reasoning_legs_from_
+            # output_block`'s `candidate` dict only ever has the three known
+            # names, so a fourth leg is never even constructed into it and
+            # there is nothing left there to detect (C13.4).
+            unknown_reasoning_legs |= _converse_core.unknown_reasoning_legs_in_output_block(raw_reasoning)
+            legs = _converse_core.reasoning_legs_from_output_block(raw_reasoning)
+            block_types_seen.add("reasoning")
+            if legs.get("text"):
+                reasoning_text_parts.append(legs["text"])
+            if legs.get("signature"):
+                reasoning_signature = legs["signature"]
+            if legs.get("redactedContent"):
+                reasoning_redacted = legs["redactedContent"]
+
+    if unknown_reasoning_legs:
+        # Same event name and shape as the streaming path's set-difference
+        # warning (`_converse_core.normalized_events`) — one provider-
+        # vocabulary defect, one event name, regardless of transport.
+        logger.warning("unknown_reasoning_leg", legs=sorted(unknown_reasoning_legs))
 
     stop_reason = resp.get("stopReason", "end_turn")
     finish_reason = _map_finish_reason(stop_reason)
 
+    _warn_answerless_billed(
+        model_id=model_id,
+        request_id=ctx.request_id if ctx else None,
+        stop_reason=stop_reason,
+        output_tokens=usage_event.output,
+        saw_nonempty_text=saw_nonempty_text,
+        saw_tool_use=saw_tool_use,
+        block_types=frozenset(block_types_seen),
+        reasoning_text_present=bool("".join(reasoning_text_parts)),
+    )
+
     message_out: dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
     if tool_calls_out:
         message_out["tool_calls"] = tool_calls_out
+    if reasoning_text_parts or reasoning_signature or reasoning_redacted:
+        # Separate from `content`, on the message — not accepted back on a
+        # subsequent request: multi-turn thinking with tools remains
+        # unsupported and is named as a debt (interface note).
+        message_out["reasoning_content"] = _render_reasoning_content({
+            "text": "".join(reasoning_text_parts),
+            "signature": reasoning_signature,
+            "redactedContent": reasoning_redacted,
+        })
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -646,11 +879,7 @@ def chat_completions(
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        },
+        "usage": _render_converse_usage_block(usage_event),
     }
 
 
@@ -1004,6 +1233,13 @@ async def _stream_chat(
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
+    # `stream_options.include_usage` is the caller's opt-in to OpenAI's usage
+    # chunk convention: every non-terminal chunk carries `"usage": null` and a
+    # separate, final `choices: []` chunk carries the real usage — emitted
+    # only if the provider actually reported one. Absent
+    # `stream_options` (the default), behaviour is byte-identical to before
+    # this change: no `usage` key anywhere, no extra chunk.
+    include_usage = bool(body.stream_options and body.stream_options.include_usage)
 
     def _sse(data: dict) -> bytes:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
@@ -1015,23 +1251,66 @@ async def _stream_chat(
             self.stop_reason = None
             self._tool_calls: list[dict] = []
             self._tc_idx = 0
+            # Bedrock reports usage at most once per stream (the metadata
+            # event); a later report just replaces this rather than
+            # accumulating, so a second `metadata` event still produces only
+            # one terminal chunk (interface: "two metadata events produce one
+            # chunk").
+            self._final_usage = None
+            # For `answerless_billed`, gathered across the whole
+            # stream so `epilogue` can call the shared predicate exactly
+            # once, on generator exhaustion — the same "billed but no
+            # answer" question the non-streaming path asks over its
+            # `content_blocks` loop, asked here over the event sequence
+            # instead since there is no such list on this transport.
+            self._saw_nonempty_text = False
+            self._saw_tool_use = False
+            self._block_types_seen: set[str] = set()
+            self._reasoning_text_present = False
+
+        def _usage_field(self) -> dict:
+            return {"usage": None} if include_usage else {}
 
         def prologue(self):
             yield _sse({
                 "id": chat_id, "object": "chat.completion.chunk",
                 "created": created, "model": body.model,
                 "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                **self._usage_field(),
             })
 
         def render_event(self, event):
             t = self._t
             if isinstance(event, t.ContentTextDelta):
+                # `normalized_events` only yields `ContentTextDelta` for
+                # non-empty text (`if text:` guard) — see its docstring — so
+                # reaching here already means non-empty; no separate falsy
+                # check is needed, unlike the non-streaming path where an
+                # appended EMPTY text block would otherwise read as "seen".
+                self._saw_nonempty_text = True
+                self._block_types_seen.add("text")
                 yield _sse({
                     "id": chat_id, "object": "chat.completion.chunk",
                     "created": created, "model": body.model,
                     "choices": [{"index": 0, "delta": {"content": event.text}, "finish_reason": None}],
+                    **self._usage_field(),
+                })
+            elif isinstance(event, t.ContentReasoningDelta):
+                # `event.kind` is already "text" | "signature" | "redacted" —
+                # the exact wire names `reasoning_content` uses, so no second
+                # name mapping is spelled here.
+                self._block_types_seen.add("reasoning")
+                if event.kind == "text":
+                    self._reasoning_text_present = True
+                yield _sse({
+                    "id": chat_id, "object": "chat.completion.chunk",
+                    "created": created, "model": body.model,
+                    "choices": [{"index": 0, "delta": {"reasoning_content": {event.kind: event.value}}, "finish_reason": None}],
+                    **self._usage_field(),
                 })
             elif isinstance(event, t.ContentToolUseStart):
+                self._saw_tool_use = True
+                self._block_types_seen.add("tool_use")
                 tc = {"index": self._tc_idx, "id": event.tool_use_id, "type": "function",
                       "function": {"name": event.name, "arguments": ""}}
                 self._tc_idx += 1
@@ -1039,6 +1318,7 @@ async def _stream_chat(
                     "id": chat_id, "object": "chat.completion.chunk",
                     "created": created, "model": body.model,
                     "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": None}],
+                    **self._usage_field(),
                 })
             elif isinstance(event, t.ContentToolUseDelta):
                 yield _sse({
@@ -1047,20 +1327,61 @@ async def _stream_chat(
                     "choices": [{"index": 0, "delta": {"tool_calls": [
                         {"index": self._tc_idx - 1, "function": {"arguments": event.partial_json}}
                     ]}, "finish_reason": None}],
+                    **self._usage_field(),
                 })
             elif isinstance(event, t.MessageStop):
                 self.stop_reason = event.stop_reason
+            elif isinstance(event, t.Usage):
+                # Not rendered here — buffered until `epilogue`, which is the
+                # only place a terminal usage-only chunk is emitted (at most
+                # once, and only on clean completion; see `epilogue` and
+                # `error_event`).
+                self._final_usage = event
 
         def epilogue(self):
+            # Reached only on generator exhaustion (see the note on the
+            # `[DONE]` line below), which is exactly "once per request" for
+            # this transport — the same guarantee the non-streaming path
+            # gets for free by sitting after its one content-blocks loop.
+            _warn_answerless_billed(
+                model_id=model_id,
+                request_id=request_id,
+                stop_reason=self.stop_reason,
+                output_tokens=self._final_usage.output if self._final_usage is not None else None,
+                saw_nonempty_text=self._saw_nonempty_text,
+                saw_tool_use=self._saw_tool_use,
+                block_types=frozenset(self._block_types_seen),
+                reasoning_text_present=self._reasoning_text_present,
+            )
             finish_reason = _map_finish_reason(self.stop_reason)
             yield _sse({
                 "id": chat_id, "object": "chat.completion.chunk",
                 "created": created, "model": body.model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                **self._usage_field(),
             })
+            if include_usage and self._final_usage is not None:
+                # The terminal usage-only chunk: `choices: []` (not a delta),
+                # emitted iff the provider actually reported usage — a stream
+                # that ended without one invents nothing (C8.1's rule applied
+                # to this transport's own framing).
+                yield _sse({
+                    "id": chat_id, "object": "chat.completion.chunk",
+                    "created": created, "model": body.model,
+                    "choices": [],
+                    "usage": _render_converse_usage_block(self._final_usage),
+                })
+            # Reached only on generator exhaustion (the normal end of the
+            # `for event in normalized_events(...)` loop in `_budget_flow.
+            # run_stream`), never on `MessageStop` itself — `MessageStop` only
+            # sets `self.stop_reason` above and yields nothing.
             yield b"data: [DONE]\n\n"
 
         def error_event(self, message):
+            # An error-terminated stream gets its error frame and NO usage
+            # chunk: `epilogue` is not called on this path (see
+            # `_budget_flow.run_stream`'s `except` branches), so there is
+            # nothing here that could invent one.
             yield _sse({"error": {"message": message, "type": "api_error"}})
 
     def _invoke(*, body, model_id):

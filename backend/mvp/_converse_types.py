@@ -37,7 +37,92 @@ class NormalizedRequest:
     # Converse additionalModelRequestFields: thinking {type, budget_tokens},
     # top_k, anthropic_beta, etc. Without this the core would silently drop
     # thinking/top_k — the same silent-drop class as the tools bug being fixed.
+    # NOTE: this dataclass is not on the live request path today (the two
+    # Converse-shaped routes build `kwargs` dicts directly — `mvp.anthropic.
+    # _build_bedrock_kwargs` / `mvp.chat_completions._build_chat_bedrock_kwargs`
+    # — rather than constructing a `NormalizedRequest`); this field is a
+    # forward-looking receptacle, not itself the fix. The actual wiring for
+    # `additionalModelRequestFields` is `additional_model_request_fields()`
+    # below, called directly from both `_build_*_kwargs` functions.
     additional_model_request_fields: Optional[dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# additionalModelRequestFields passthrough — shared by both Converse-shaped
+# routes (`mvp.anthropic._build_bedrock_kwargs` and `mvp.chat_completions.
+# _build_chat_bedrock_kwargs`), declared once so `/v1/messages` and
+# `/v1/chat/completions` cannot drift on what this channel carries.
+# ---------------------------------------------------------------------------
+# Bedrock Converse validates `additionalModelRequestFields` against the
+# TARGET MODEL's own request schema, not this gateway's — a key the model
+# does not recognise comes back as an upstream `ValidationException` the
+# caller cannot act on. That is why this is an explicit ALLOWLIST rather than
+# "every unrecognised top-level field forwarded verbatim": forwarding every
+# extra would turn this gateway's own forward-compatible `extra="allow"` (a
+# new Anthropic/OpenAI field must not 422 the request) into a 502 the moment
+# a caller sent a field the model does not also recognise under this name —
+# the gateway would be converting its own forward-compatibility into an
+# upstream error the caller cannot act on, exactly what `extra="allow"`
+# exists to avoid.
+#
+# Starting set: `thinking` is the one verified missing on real Bedrock
+# traffic — a `thinking`-enabled request came back with a single `text`
+# block, `stop_reason: end_turn`, and no error, because nothing in either
+# route ever built `additionalModelRequestFields` at all. `top_k` and
+# `anthropic_beta` are the two other native Anthropic-on-Converse controls
+# with no field in `inferenceConfig`/`toolConfig` to travel on instead.
+ADDITIONAL_MODEL_REQUEST_FIELD_KEYS: tuple[str, ...] = (
+    "thinking", "top_k", "anthropic_beta",
+)
+
+#: Keys whose EFFECT is output the caller must be able to read back. Forwarding one
+#: to a wire that cannot render the result bills the caller for tokens it never
+#: receives, which is worse than not honouring the parameter at all -- the same
+#: reasoning as C13.1, one step further on: a parameter this gateway cannot honour
+#: END TO END is not honoured half way.
+#:
+#: `thinking` is here because reasoning is rendered on the OpenAI-shaped route
+#: (`reasoning_content`) and NOT on the Anthropic Messages route, whose response
+#: builder emits `text` and `tool_use` blocks only. Honouring it there would mean a
+#: caller pays for thinking tokens and, when the output budget goes entirely to
+#: thinking, receives an empty reply with a full bill. `top_k` and `anthropic_beta`
+#: are not listed: neither produces output blocks, so neither can go unrendered.
+#:
+#: Removing a key from this set is how the Anthropic wire earns `thinking`, once it
+#: renders reasoning back as that API's own `thinking` block type.
+RENDERED_ONLY_FIELD_KEYS: frozenset[str] = frozenset({"thinking"})
+
+
+def additional_model_request_fields(
+    body: Any, *, renders_reasoning: bool = True
+) -> Optional[dict[str, Any]]:
+    """The `additionalModelRequestFields` dict for a Converse `kwargs` build, or
+    `None`.
+
+    `body` is a pydantic request model with `extra="allow"`
+    (`AnthropicMessagesRequest` / `ChatCompletionsRequest`), so an allowlisted
+    key the caller sent is reachable by plain `getattr` regardless of whether
+    the request model DECLARES the field (`AnthropicMessagesRequest.top_k`,
+    validated `ge=1, le=500`) or it only arrives as an extra (`thinking`,
+    `anthropic_beta`, and `top_k` on the OpenAI-shaped route, which declares
+    none of the three): pydantic v2's `extra="allow"` sets extra fields as
+    real attributes on the instance, not only in `model_extra`.
+
+    Returns `None`, never `{}`, when no allowlisted key is present, so a
+    request that sends none of them produces `kwargs` byte-identical to one
+    built before this function existed.
+
+    `renders_reasoning=False` drops the keys in `RENDERED_ONLY_FIELD_KEYS`, for a
+    transport whose response builder cannot return what they produce.
+    """
+    out: dict[str, Any] = {}
+    for key in ADDITIONAL_MODEL_REQUEST_FIELD_KEYS:
+        if key in RENDERED_ONLY_FIELD_KEYS and not renders_reasoning:
+            continue
+        value = getattr(body, key, None)
+        if value is not None:
+            out[key] = value
+    return out or None
 
 
 @dataclass

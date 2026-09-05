@@ -55,6 +55,14 @@ class AnthropicStreamState:
     message_id: str = field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:24]}")
     input_tokens: int = 0
     output_tokens: int = 0
+    # `None` = the provider has not reported this leg on this stream, distinct
+    # from a reported zero (C8.4, same "absence is not zero" rule as
+    # `_converse_core.cache_tokens_from_usage`). Bedrock's `metadata.usage` is
+    # already validated by `usage_from_bedrock` before it reaches
+    # `normalized_events`'s `Usage` event, so this state only ever sees a
+    # leg the provider actually reported or nothing at all.
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
     stop_reason: Optional[str] = None
 
 
@@ -148,12 +156,36 @@ def render_stream_event(
     elif isinstance(event, t.Usage):
         state.input_tokens = event.input or state.input_tokens
         state.output_tokens = event.output or state.output_tokens
+        # An explicit report — including a reported zero — is what the
+        # provider said; `or` would treat that zero as "keep the previous
+        # value" (same rule as `_converse_types.UsageAccumulator.absorb`).
+        if event.cache_read is not None:
+            state.cache_read_tokens = event.cache_read
+        if event.cache_write is not None:
+            state.cache_write_tokens = event.cache_write
     elif isinstance(event, t.MessageStop):
         state.stop_reason = event.stop_reason
 
 
 def stream_epilogue(state: AnthropicStreamState) -> Iterable[bytes]:
-    """Trailing SSE: message_delta (usage + stop), message_stop."""
+    """Trailing SSE: message_delta (usage + stop), message_stop.
+
+    `input_tokens`/`output_tokens` keep today's meaning. The two cache legs
+    render under the field names the Anthropic Messages API itself defines
+    (`cache_read_input_tokens`/`cache_creation_input_tokens`) and are OMITTED,
+    never `0`, when the provider did not report them — the same rule
+    `chat_completions._render_converse_usage_block` applies on the OpenAI-shaped
+    route, so the same Bedrock response costs the same money and reports the
+    same shape of truth regardless of which wire format carried it.
+    """
+    usage_out: dict[str, Any] = {
+        "input_tokens": state.input_tokens,
+        "output_tokens": state.output_tokens,
+    }
+    if state.cache_read_tokens is not None:
+        usage_out["cache_read_input_tokens"] = state.cache_read_tokens
+    if state.cache_write_tokens is not None:
+        usage_out["cache_creation_input_tokens"] = state.cache_write_tokens
     yield _sse_event(
         "message_delta",
         {
@@ -162,10 +194,7 @@ def stream_epilogue(state: AnthropicStreamState) -> Iterable[bytes]:
                 "stop_reason": map_stop_reason(state.stop_reason),
                 "stop_sequence": None,
             },
-            "usage": {
-                "input_tokens": state.input_tokens,
-                "output_tokens": state.output_tokens,
-            },
+            "usage": usage_out,
         },
     )
     yield _sse_event("message_stop", {"type": "message_stop"})
