@@ -66,6 +66,44 @@ def mask_sensitive_data(logger: Any, method_name: str, event_dict: EventDict) ->
     return event_dict
 
 
+#: Third-party loggers whose DEBUG output is the wire, not a message this gateway
+#: composed. `botocore` at DEBUG prints every request and response body it exchanges
+#: with DynamoDB verbatim, so a `development` deployment was putting whole rows from the
+#: users, tenants, user-tenants and permissions tables into a log group retained for
+#: ninety days — including email addresses, which is the plaintext this project's clause
+#: C12.4 forbids. `mask_sensitive_data` cannot help: the address is inside a serialised
+#: body in the message position, which is the same blind spot the audit writer had.
+#:
+#: They are floored at INFO in EVERY environment rather than only in production. The
+#: development default exists to make this gateway's own logs verbose, and a third-party
+#: library's wire dump is not this gateway's log. An operator who genuinely wants a
+#: botocore trace can raise it deliberately after `setup_logging` has run.
+NOISY_THIRD_PARTY_LOGGERS: tuple[str, ...] = (
+    "botocore",
+    "boto3",
+    "boto3.resources",
+    "urllib3",
+    "s3transfer",
+)
+
+#: The floor those loggers are held at. WARNING would also stop the leak, but INFO keeps
+#: a retry or a throttle visible, which is operationally useful and carries no body.
+THIRD_PARTY_LOG_FLOOR = logging.INFO
+
+
+def _floor_third_party_loggers() -> None:
+    """Stop a third-party library's DEBUG wire dump reaching the log sink.
+
+    Called after `basicConfig`, because `basicConfig` sets the ROOT level and these
+    loggers inherit it. Setting each one explicitly overrides that inheritance without
+    touching the level this gateway's own loggers run at.
+    """
+    for name in NOISY_THIRD_PARTY_LOGGERS:
+        logger = logging.getLogger(name)
+        if logger.level == logging.NOTSET or logger.level < THIRD_PARTY_LOG_FLOOR:
+            logger.setLevel(THIRD_PARTY_LOG_FLOOR)
+
+
 def setup_logging(environment: str = "development") -> None:
     """
     Setup structured logging
@@ -102,6 +140,7 @@ def setup_logging(environment: str = "development") -> None:
             stream=sys.stdout,
             level=logging.INFO,
         )
+        _floor_third_party_loggers()
     else:
         # Console output for development
         structlog.configure(
@@ -121,6 +160,7 @@ def setup_logging(environment: str = "development") -> None:
             stream=sys.stdout,
             level=logging.DEBUG,
         )
+        _floor_third_party_loggers()
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
