@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
@@ -20,6 +21,7 @@ from typing import Any, Callable, Iterable, Optional
 from fastapi import Depends, HTTPException
 
 from dynamo import PermissionsRepository, TenantsRepository
+from dynamo.usage_logs import hash_user_email
 
 from .deps import AuthenticatedUser, get_current_user
 
@@ -440,6 +442,41 @@ def warn_if_admin_creation_enabled_in_production(logger: logging.Logger) -> None
 _audit_logger = logging.getLogger("stratoclave.audit")
 
 
+# Email-address pattern used to scrub the SERIALISED audit line (see
+# `log_audit_event` below), not a payload tree. Three properties are
+# deliberate:
+#
+# - Loose on the local part, anchored on a DOTTED domain (a required
+#   first label, optional further `.label` groups, then a mandatory `.` +
+#   a 2+ letter TLD). Missing a real address leaves plaintext PII in a
+#   durable log; matching a string that merely looks like one costs
+#   nothing worse than an extra marker in a log line. The asymmetry says:
+#   bias towards matching.
+# - Every quantified group draws from a character class that EXCLUDES the
+#   literal that follows it (the label class excludes "."), so for a
+#   FIXED starting position there is only one way to split a given run of
+#   characters between two adjacent groups, and a rejected candidate at
+#   that position backtracks past at most one prior group, not an
+#   interleaving of both.
+# - That is not sufficient by itself: `_audit_logger.info()` is called
+#   with attacker-influenced text (a `reason` string, a `details` value),
+#   and `.sub()` calls `.search()` from EVERY offset in the line. Each
+#   offset's failed attempt still does up to O(labels) internal
+#   backtracking before giving up, and a payload can control how many
+#   labels a bogus "almost-domain" has — one long run of
+#   "a." repeated with no valid TLD at the end reproduced a multi-SECOND
+#   scan on a payload of a few tens of KB. Every quantifier is therefore
+#   given an explicit upper bound (RFC 5321 sizes: 64-octet local part,
+#   63-octet label, generous label count, a real TLD is under 25 chars).
+#   The bound makes the worst-case backtrack at any one offset O(1)
+#   rather than O(n), which is what keeps the total scan O(n) rather than
+#   O(n^2); it does not change which real address is matched, since no
+#   real local part, label, or TLD is anywhere near these lengths.
+_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,20}\.[A-Za-z]{2,24}"
+)
+
+
 def log_audit_event(
     *,
     event: str,
@@ -456,6 +493,56 @@ def log_audit_event(
 
     Example `event` values: "admin_created", "tenant_owner_changed",
     "user_tenant_switched", "credit_overwritten", "user_deleted".
+
+    PII (C12.4): this writer serialises the whole `payload` into ONE
+    string and hands that string to `_audit_logger.info()` as the log
+    MESSAGE, not as structured fields. `core/logging.mask_sensitive_data`
+    masks a KEY named `actor_email` in `event_dict`; by the time that
+    processor runs there is no such key left anywhere in this call's
+    output for it to find, so relying on it here would be discipline —
+    the exact thing C12.4's own note already says does not hold. An
+    address can also reach this call by more routes than the one named
+    kwarg: inside `details`, inside a human-readable `reason` sentence,
+    AS `target_id` itself (an SSO invite is keyed by the address it
+    invites — see `admin_sso_invites.py`), as a dict KEY rather than a
+    value (same site), or inside a non-str leaf that only becomes text
+    because `json.dumps(..., default=str)` stringifies it (e.g. an
+    exception message). Two measures, covering all of the above:
+
+      1. `actor_email`, if given, is replaced on THIS dict — before
+         serialisation — by `actor_email_hash`: the SAME deterministic
+         `pii:<sha256>` digest `dynamo.usage_logs.hash_user_email` writes
+         into UsageLogs rows, not the 8-character ephemeral marker
+         `core/logging.mask_sensitive_data` uses for in-flight app logs.
+         Both tables are durable, and the only reason to keep any form of
+         the address at all is so the same actor hashes to the same
+         marker in both (acceptance P-E3) — a shorter or salted digest
+         would throw that correlation away for nothing.
+
+      2. Every other route is caught by scrubbing the fully SERIALISED
+         line, once, with `_EMAIL_RE`, after `json.dumps` has already
+         run — not by recursing over the payload tree beforehand. A
+         pre-serialisation walk of dict/list VALUES (the shape the
+         filed fix used) cannot see a dict KEY at all, and it runs
+         BEFORE `default=str` turns an arbitrary object into text, so it
+         is blind to whatever `json.dumps` itself produces afterward. By
+         the time the string exists, a key, a value, a sentence, and a
+         coerced exception message are all just characters, and the same
+         pass finds an address in any of them. Each match is replaced by
+         `hash_user_email(match)` IN PLACE, so a sentence like "<address>
+         already has a password-based account" keeps every word except
+         the address. An email address contains no `"`, so a match can
+         never straddle — and corrupt — a JSON string boundary, and the
+         replacement text (`pii:` + hex) introduces no `"` or `\\` either,
+         so the result stays valid JSON.
+
+    This digest is a correlation marker and a log-hygiene measure, NOT
+    anonymisation: it is unsalted and deterministic on purpose (P-E3
+    needs the same actor to land on the same marker in both tables), and
+    is therefore reversible by anyone who hashes a candidate address list
+    and checks for a match — exactly as easy as looking up a phone number
+    by its hash. Do not describe it as anonymisation in a doc or an
+    incident write-up.
     """
     payload: dict[str, Any] = {
         "event": event,
@@ -463,7 +550,7 @@ def log_audit_event(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if actor_email:
-        payload["actor_email"] = actor_email
+        payload["actor_email_hash"] = hash_user_email(actor_email)
     if target_id:
         payload["target_id"] = target_id
     if target_type:
@@ -478,4 +565,10 @@ def log_audit_event(
         payload["details"] = details
 
     # Using structlog, but audit entries are written as explicit single-line JSON for clarity.
-    _audit_logger.info(json.dumps(payload, default=str, ensure_ascii=False))
+    serialized = json.dumps(payload, default=str, ensure_ascii=False)
+    # One pass over the finished line catches every route an address can
+    # take into `payload` (see the docstring above) — a dict key, a
+    # `default=str`-coerced leaf, or plain text — that a walk over the
+    # dict before serialisation would miss.
+    scrubbed = _EMAIL_RE.sub(lambda m: hash_user_email(m.group(0)), serialized)
+    _audit_logger.info(scrubbed)
