@@ -32,6 +32,49 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
+## [Unreleased]
+
+Found after 1.3.0 was cut, while asking what regression tests the release's own
+findings deserved.
+
+### Fixed
+
+- **A third-party library's DEBUG output was writing provider bodies to the log.**
+  `setup_logging` puts the root logger at DEBUG for any environment that is not
+  `production`, and third-party loggers inherit that. botocore at DEBUG prints every
+  request and response body it exchanges with DynamoDB verbatim, so a deployment running
+  as `development` was writing whole rows from the users, tenants, user-tenants and
+  permissions tables into a log group retained for ninety days — email addresses among
+  them, which is the plaintext clause C12.4 forbids. `mask_sensitive_data` cannot reach
+  it: the address sits inside a serialised body in the message position rather than in a
+  field, the same blind spot that let the audit writer violate the same clause.
+  `core/logging.NOISY_THIRD_PARTY_LOGGERS` now floors botocore, boto3, urllib3 and
+  s3transfer at INFO in **every** environment, because a library's wire dump is not this
+  gateway's logging. This closes the third-party half of C12.4's residual; the half that
+  remains is this project's own writers.
+- **`payload_hash` did not cover `additionalModelRequestFields`**, so two requests with
+  identical messages and different thinking budgets collided on a pin recorded beside the
+  charge, although they produce different output and a different charge. The field is added
+  to the hash and deliberately not to the byte term, which is a bound on the input token
+  count that a few dozen bytes of provider configuration would inflate without covering
+  anything priced as input. The reservation bound always covered the field through
+  `envelope_bytes`, so this carries no pricing change.
+- **`_pipeline`'s docstring said `payload_hash` lets a retry "be verified byte-identical
+  rather than merely trusted to be".** Nothing compares it, on the request path or in any
+  reconciler. It is recorded, which makes a retry verifiable by whoever reads the row and
+  does not by itself stop one. The docstring now says that.
+
+### Added
+
+- **`_converse_types.FIELD_DISPOSITION`**: every top-level request field this gateway has
+  an opinion about, classified as `forwarded`, `read_by_name` or `accepted_and_unused`, and
+  checked by building the payload and looking. This closes the class the release's own
+  `thinking` defect belonged to: that field was named in a comment among fields "we forward
+  to Bedrock" and was never sent, and a list of forwarded fields did not catch it because
+  `thinking` was on such a list, in prose. Both directions are checked, so widening what
+  reaches the provider means moving a field between classes rather than editing one call
+  site, and a field in no class fails.
+
 ## [1.3.0] — 2026-09-06
 
 ### Fixed
@@ -439,6 +482,7 @@ the commits in `v0.1.0..v0.2.0`.
 
 First tagged release. See the tag annotation.
 
+[Unreleased]: https://github.com/littlemex/stratoclave/compare/v1.3.0...HEAD
 [1.3.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.3.0
 [1.2.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.2.0
 [1.1.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.1.0
