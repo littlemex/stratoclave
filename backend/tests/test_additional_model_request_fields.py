@@ -190,17 +190,24 @@ def test_anthropic_additional_model_request_fields_is_in_kwargs_before_survey():
     # `additionalModelRequestFields` is inside what gets counted even though
     # `survey_and_hash_converse_kwargs`'s own walk never names that key.
     assert nbytes_thinking > nbytes_plain
-    # NOTE (reported, not fixed by this change): `payload_hash` does NOT
-    # change here — it is measured, not merely implied — because the hash is
-    # built only from `canonical_for_hash` (text + image bytes from
-    # `messages`/`system`/`toolConfig`), which `additionalModelRequestFields`
-    # never touches. Two requests with identical messages but different
-    # `thinking` budgets collide on `payload_hash` today. That is a real gap
-    # in the hash's own stated purpose ("a retry that swapped ... must not
-    # pass the pin") but it is NOT a gap in the reservation BOUND itself,
-    # which is priced from `nbytes` (asserted above), not from the hash — see
-    # this change's report for why it is called out rather than fixed here.
-    assert hash_thinking == hash_plain
+    # `payload_hash` changes too, and this assertion used to require the
+    # opposite. The gap it documented was real: the hash was built only from
+    # `canonical_for_hash` (text and image bytes from
+    # `messages`/`system`/`toolConfig`), so two requests with identical
+    # messages and different `thinking` budgets collided on a pin recorded
+    # beside the charge — even though they produce different output and a
+    # different charge. It was never a gap in the reservation BOUND, which is
+    # priced from `nbytes` and always covered the field, so the fix carries no
+    # pricing change.
+    #
+    # `additionalModelRequestFields` is added to the hash and NOT to the byte
+    # term, deliberately: the byte term is a bound on the input token count and
+    # these are a few dozen bytes of provider configuration, so counting them
+    # there would inflate the bound without covering anything priced as input.
+    assert hash_thinking != hash_plain, (
+        "two requests differing only in an additionalModelRequestFields value "
+        "hash identically, so the pin cannot tell them apart"
+    )
 
 
 # ---------------------------------------------------------------------------

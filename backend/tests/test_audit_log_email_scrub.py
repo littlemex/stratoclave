@@ -6,12 +6,30 @@ ANY route a caller can get one into the payload. The router team filed
 four routes; review found two more that a naive "recursive walk over
 dict/list values, before json.dumps" fix passes while still leaking:
 
-  R1  the named ``actor_email`` argument                  (admin_tenants)
-  R2  an address as a VALUE inside ``details``             (admin_users)
-  R3  an address inside a human-readable ``reason`` sentence (sso_exchange)
-  R4  an address AS ``target_id`` itself                   (admin_sso_invites)
-  R5  an address as a dict KEY inside ``details``          (review finding)
-  R6  an address reachable only through ``default=str``    (review finding)
+  R1  the named ``actor_email`` argument                  LIVE, 43 call sites
+  R2  an address as a VALUE inside ``details``             LIVE, sso_exchange
+  R3  an address inside a human-readable ``reason`` sentence  no live call site
+  R4  an address AS ``target_id`` itself                   LIVE, admin_sso_invites
+  R5  an address as a dict KEY inside ``details``          no live call site
+  R6  an address reachable only through ``default=str``    no live call site
+
+Which of those are reproductions of a live leak and which are defensive is
+recorded above rather than left implied, because "six routes covered" reads
+like six leaks and three of them are not. Checked by walking every one of the
+47 ``log_audit_event`` call sites: R1, R2 and R4 carry an address today --
+``sso_exchange`` passes ``{"email": trusted.email}`` at two of them and an
+SSO invite is keyed by the address it invites. R3 as the requester described
+it does NOT exist: the one site that could produce it passes
+``{"reason": e.detail}``, and no ``HTTPException`` in the SSO gate
+interpolates an address into its detail.
+
+R3, R5 and R6 are kept anyway, and not as padding. The writer accepts an
+arbitrary ``details`` mapping and an arbitrary ``before``/``after``, so each
+is one exception message or one caller-supplied dict away from becoming live,
+with nothing in the type signature to stop it. R6 in particular is the one
+that distinguishes a complete fix from a plausible one, so deleting it
+because no call site exercises it today would remove the assertion that
+justified the fix's shape.
 
 R5 and R6 are the two that distinguish a complete fix (scrub the
 *serialised* string, once, after ``json.dumps(..., default=str)``) from

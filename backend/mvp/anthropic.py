@@ -314,16 +314,20 @@ class AnthropicMessagesRequest(BaseModel):
     # accepted and silently dropped (verified against real Bedrock: a
     # `{"type":"enabled","budget_tokens":2048}` request came back with a
     # single `text` block, `stop_reason: end_turn`, and no error).
-    # `_build_bedrock_kwargs` now extracts an explicit ALLOWLIST of such
-    # fields into `additionalModelRequestFields` (see
-    # `_converse_types.additional_model_request_fields`). On THIS route that
-    # allowlist is ``top_k`` and ``anthropic_beta`` only: ``thinking`` is
-    # deliberately still not forwarded here, because this route's response
-    # builder emits `text` and `tool_use` blocks and would discard the
-    # reasoning it produced — billing the caller for output it cannot read is
-    # worse than declining the parameter. The OpenAI-shaped route forwards it,
-    # because that one renders `reasoning_content`. ``tools``/``tool_choice``
-    # are likewise read by name, into `toolConfig`, below.
+    # What this gateway does with each field it has an opinion about is declared
+    # in `_converse_types.FIELD_DISPOSITION`, not in this comment. That is
+    # deliberate: the previous version of this comment listed ``thinking`` among
+    # fields "we forward to Bedrock", and it was not forwarded, because prose
+    # does not execute. `FIELD_DISPOSITION` does —
+    # `test_request_field_disposition_is_executable.py` builds the payload and
+    # checks each classification in both directions, so a field claimed as
+    # forwarded and then dropped fails a test rather than a caller's request.
+    #
+    # On THIS route ``thinking`` is withheld even though it is classified as
+    # forwarded, because the response builder below emits `text` and `tool_use`
+    # blocks and would discard the reasoning it produced; billing a caller for
+    # output it cannot read is worse than declining the parameter. See
+    # `RENDERED_ONLY_FIELD_KEYS`.
     # Everything else outside those two groups (``metadata``,
     # ``service_tier``, and any field neither Anthropic nor this gateway has
     # invented yet) is accepted and genuinely unused: `extra="allow"` exists

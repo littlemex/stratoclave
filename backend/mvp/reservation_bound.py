@@ -832,6 +832,20 @@ def survey_and_hash_converse_kwargs(kwargs: dict) -> tuple["ContentSurvey", int,
         # always hashes/counts identically regardless of dict ordering.
         _add_text(json.dumps(tool_config, sort_keys=True))
 
+    # Provider-behaviour fields travel in the payload too, and two requests that
+    # differ only here are different requests: the same messages with a different
+    # thinking budget produce different output and a different charge. They are
+    # added to the HASH only, not to `text_parts` -- the byte term is a bound on
+    # the INPUT token count and these are a few dozen bytes of configuration, so
+    # counting them there would inflate the bound without covering anything the
+    # provider prices as input. `envelope_bytes(kwargs)` already includes them in
+    # the reservation's byte count, which is the term that must dominate.
+    amrf = kwargs.get("additionalModelRequestFields")
+    if amrf:
+        hash_parts.append(
+            json.dumps(amrf, sort_keys=True).encode("utf-8", errors="surrogatepass")
+        )
+
     canonical_text = b"\x00".join(text_parts)
     canonical_for_hash = b"\x00".join(hash_parts)
     survey = ContentSurvey(

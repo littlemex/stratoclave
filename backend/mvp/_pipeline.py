@@ -2201,9 +2201,13 @@ def reserve_credit_for_model(
     counting both would double-charge) — a BOUND on the input token count, not
     an estimate. `payload_hash` is a hash of the ENTIRE canonical payload
     INCLUDING image bytes (a byte-length-only pin would let a retry swap an
-    image while keeping the length), pinned onto the hold alongside the byte
-    count (section 3a) so a retry can be verified byte-identical rather than
-    merely trusted to be. When `input_bytes` is supplied, the sound bound is
+    image while keeping the length) and the provider-behaviour fields in
+    `additionalModelRequestFields`, pinned onto the hold alongside the byte
+    count (section 3a). It is RECORDED, not compared: nothing on the request
+    path or in any reconciler reads it back, so it makes a retry verifiable
+    after the fact by whoever reads the row, and does not by itself stop one.
+    Saying it verifies would be the stronger claim, and the code does not make
+    it. When `input_bytes` is supplied, the sound bound is
     ALWAYS computed (and recorded — see `shadow_mode` below) by
     `mvp.reservation_bound` instead of the legacy `estimate_cost_microusd`, in
     the mode the tenant's `bound_mode` resolves to (`strict` — sound by

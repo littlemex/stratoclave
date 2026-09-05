@@ -92,6 +92,55 @@ ADDITIONAL_MODEL_REQUEST_FIELD_KEYS: tuple[str, ...] = (
 #: renders reasoning back as that API's own `thinking` block type.
 RENDERED_ONLY_FIELD_KEYS: frozenset[str] = frozenset({"thinking"})
 
+#: Every top-level Anthropic Messages request field this gateway has an opinion about, and
+#: WHAT it does with it. A total classification rather than a list to remember appending
+#: to, because the defect this closes was a field documented as forwarded and never sent:
+#: `thinking` was accepted by the request model, named in that model's own comment as
+#: something "we forward to Bedrock", and dropped, because nothing built
+#: `additionalModelRequestFields` at all.
+#:
+#: A list of forwarded fields would not have caught that -- `thinking` WAS on such a list,
+#: in prose. What catches it is that `forwarded` is a claim a test can execute: build the
+#: payload and look. `accepted_and_unused` is executable in the other direction, so a
+#: change that starts forwarding one of those must move it here first rather than silently
+#: widening what reaches the model.
+#:
+#: `read_by_name` is a field the builder consumes into a specific Converse key
+#: (`inferenceConfig`, `toolConfig`, `messages`, `system`) rather than passing through.
+#:
+#: This does not and cannot enumerate every field Anthropic will ever ship -- `extra="allow"`
+#: exists so a new one does not 422. It enumerates the ones this gateway claims to handle,
+#: which is the set a claim can be false about.
+FIELD_DISPOSITION: dict[str, str] = {
+    # forwarded verbatim inside additionalModelRequestFields, on a transport that can
+    # render what they produce
+    "thinking": "forwarded",
+    "top_k": "forwarded",
+    "anthropic_beta": "forwarded",
+    # consumed into a named Converse key
+    "model": "read_by_name",
+    "messages": "read_by_name",
+    "system": "read_by_name",
+    "max_tokens": "read_by_name",
+    "temperature": "read_by_name",
+    "top_p": "read_by_name",
+    "stop_sequences": "read_by_name",
+    "stream": "read_by_name",
+    "tools": "read_by_name",
+    "tool_choice": "read_by_name",
+    # accepted so a new SDK field does not 422, and genuinely not acted on. Moving one out
+    # of this group is a deliberate widening of what reaches the provider.
+    "metadata": "accepted_and_unused",
+    "service_tier": "accepted_and_unused",
+}
+
+FORWARDED_FIELDS: frozenset[str] = frozenset(
+    k for k, v in FIELD_DISPOSITION.items() if v == "forwarded"
+)
+ACCEPTED_AND_UNUSED_FIELDS: frozenset[str] = frozenset(
+    k for k, v in FIELD_DISPOSITION.items() if v == "accepted_and_unused"
+)
+
 
 def additional_model_request_fields(
     body: Any, *, renders_reasoning: bool = True
