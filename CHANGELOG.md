@@ -32,6 +32,86 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
+## [1.3.0] — 2026-09-06
+
+### Fixed
+
+- **A caller could not compute what it was charged.** The gateway bills four disjoint
+  token legs and reported two. On a measured request it billed 3,538 tokens and answered
+  `total_tokens: 14`, because the prompt-cache read and write legs were parsed, charged
+  through `pricing.BILLABLE_LEGS`, and never put on the wire. Both Converse-backed
+  transports now report `cache_read_input_tokens` and `cache_creation_input_tokens`,
+  present only when the provider reported that leg and never `0` as a stand-in. Clause
+  C8.4 in [`docs/design/CONTRACTS.md`](docs/design/CONTRACTS.md).
+- **An unreadable provider usage block settled as a measured zero.**
+  `normalized_events` read `int(usage.get("inputTokens", 0))`, so a `metadata` event with
+  an absent or empty usage block produced a usage report of zero that looked measured, and
+  the accumulator then marked the stream as having final usage. A billed call could settle
+  at nothing and be recorded as fully observed. `usage_from_bedrock` is now the single
+  constructor of a usage figure from a provider block and returns nothing rather than a
+  default, so the ending goes through the unobserved path. This was a violation of clause
+  C8.1.
+- **`stream_options` was accepted and ignored on the Converse path**, leaving a streaming
+  caller no way to compute its cost. It is now honoured: a terminal usage-only chunk at
+  most once and only when the provider reported usage, `"usage": null` on the chunks
+  before it, no usage chunk on an error-terminated stream, and `[DONE]` on exhaustion
+  only. `stream=false` with `stream_options` is a `400` naming the parameter, which is
+  what clause C13.1 requires.
+- **`thinking` never reached Bedrock.** `_build_bedrock_kwargs` never sent
+  `additionalModelRequestFields`, the only Converse channel those fields travel on, so a
+  request enabling extended thinking was accepted and dropped in silence. An allowlist of
+  `thinking`, `top_k` and `anthropic_beta` now reaches the provider, built inside the
+  payload builder so the hard-ceiling survey prices what is actually sent.
+- **The audit writer recorded an email address in plaintext**, against clause C12.4.
+  `mask_sensitive_data` masks a field and this writer serialises its whole payload into
+  the record's message, so the processor chain never saw one. The scrub now runs once over
+  the serialised line, which covers all six routes an address reaches the writer — the
+  four call sites plus a dict key and a value coerced by `default=str` after a tree walk.
+  `actor_email` becomes `actor_email_hash`, the digest a usage row carries as
+  `user_email_hash`. Clause C12.6.
+- **Four documents disagreed with the code about a money flag's default.**
+  `STRATOCLAVE_UNOBSERVED_HOLDS` and `STRATOCLAVE_HARD_CEILING_GATE` default on;
+  `DEPLOYMENT.md`, `EVIDENCE.md`, `README.md` and clause C7.4 said otherwise, and
+  `CONTRACTS.md` contradicted its own preamble. Corrected, and
+  `test_documented_money_flag_defaults.py` now compares every documented default against
+  the code that produces it.
+- **The documented operator audit query named a field that never existed.**
+  `ADMIN_GUIDE.md` selected `target_email`, so that column has always been blank. The
+  query is corrected and its field list is compared against the writer's own output by a
+  test.
+
+### Added
+
+- **Reasoning content reaches the caller.** `/v1/chat/completions` forwards it as
+  `reasoning_content`, separate from `content`, on both the streaming and non-streaming
+  paths. A reply that spends its whole output budget thinking previously arrived as an
+  empty success with a full bill; a measured one now returns 7,881 characters that were
+  being discarded. The three legs are normalised as independent conditions, since one
+  delta can carry an empty `text` and a non-empty `signature` together.
+- **An answer-less but billed reply is visible to the operator**, as
+  `answerless_billed_reply` on both transports, carrying the resolved model id, request
+  id, stop reason, output token count, whether reasoning text was present, and the block
+  types seen — all as structured keys. The condition is deliberately a catch-all, because
+  two distinct provider shapes produce the symptom, but a reply of nothing but tool-use
+  blocks is not answer-less and does not warn.
+- **A provider-side vocabulary member the gateway cannot represent is reported**, as
+  `unknown_reasoning_leg`, by an explicit set difference on both transports. Clause C13.4.
+- Clauses C8.5 through C8.7 state what happens to a provider call after a client
+  disconnect: the gateway issues no cancellation, a client timeout bounds neither the work
+  nor the charge, and the exposure is bounded by the reservation instead. C8.7 records
+  that no public ledger or export schema is published.
+
+### Changed
+
+- `/v1/messages` does not serve extended thinking. That route renders `text` and
+  `tool_use` blocks and would discard the reasoning the parameter produces, so `thinking`
+  is not forwarded there rather than billed for and thrown away. `/v1/chat/completions`
+  serves it. The README claimed otherwise and is corrected.
+- Clause C7.4 moves from **B** to **E** — a strengthening, so it stays within 1.x.
+  Clause C12.4 deliberately stays at **B**: this release fixes one writer, which closes an
+  instance and not the class, and the clause's note now records both residuals, including
+  third-party loggers that no sweep of this project's own writers can see.
+
 ## [1.2.0] — 2026-09-03
 
 ### Added
@@ -359,6 +439,7 @@ the commits in `v0.1.0..v0.2.0`.
 
 First tagged release. See the tag annotation.
 
+[1.3.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.3.0
 [1.2.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.2.0
 [1.1.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.1.0
 [1.0.0]: https://github.com/littlemex/stratoclave/releases/tag/v1.0.0
