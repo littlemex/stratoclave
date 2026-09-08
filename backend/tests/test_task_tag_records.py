@@ -306,6 +306,62 @@ class TestReservationWithNoRequestContextStillCarriesTheSentinelPair:
         assert item["task_tag"] == "unlabelled"
         assert item["task_tag_source"] == "absent"
 
+    def test_the_settle_ledger_event_carries_the_pair(self, dynamodb_mock):
+        """The SETTLE event is where the charge and its attribution meet.
+
+        The usage row and the ledger row are written by the same settle, but by
+        different builders, and only one of them was wired: the settle event read
+        `group_id` out of `facts` and not the pair, while the pair was sitting in
+        the same dict. So a row asserting what was spent carried no answer to what
+        it was spent on, and every check that looked at the usage row passed.
+
+        Drives the real settle rather than the builder, because the builder always
+        wrote whatever it was handed — the defect was entirely in what it was
+        handed.
+        """
+        from mvp._pipeline import reserve_credit_for_model, settle_reservation_and_log
+        from dynamo.credit_ledger import CreditLedgerRepository, ledger_pk
+        from dynamo.user_tenants import UserTenantsRepository
+        from mvp.deps import AuthenticatedUser
+
+        tenant = "settle-ledger-tag-tenant"
+        user_id = "user-ledger-tag"
+        period = self._seed(tenant)
+        UserTenantsRepository().ensure(
+            user_id=user_id, tenant_id=tenant, role="user", total_credit=10 ** 12)
+        user = AuthenticatedUser(
+            user_id=user_id, email="ledger@test.example", org_id=tenant, roles=["user"],
+            raw_claims={}, auth_kind="jwt", key_scopes=None, api_key_hash=None,
+        )
+
+        ctx = reserve_credit_for_model(
+            user, reservation_tokens=500, model_name="claude-sonnet-5",
+            input_tokens_est=400, max_output_tokens=100,
+            task_tag="migration-42", task_tag_source="asserted",
+        )
+        settle_reservation_and_log(
+            user=user, tenants_repo=ctx.tenants_repo, reservation=500,
+            actual_input_tokens=350, actual_output_tokens=80,
+            model_id="us.anthropic.claude-sonnet-5", context=ctx,
+        )
+
+        rows = CreditLedgerRepository()._table.query(
+            KeyConditionExpression=boto3_key("pk").eq(ledger_pk(tenant, period))
+        ).get("Items", [])
+        settles = [r for r in rows if r.get("event_type") == "SETTLE"]
+        assert settles, (
+            f"no SETTLE event was written; ledger rows were "
+            f"{[r.get('event_type') for r in rows]}"
+        )
+        for row in settles:
+            assert row.get("task_tag") == "migration-42", (
+                "the SETTLE event must carry the tag the reservation was made "
+                f"under; got {row.get('task_tag')!r}. An aggregation over the "
+                "ledger — the record of what was actually charged — would "
+                "otherwise have no attribution at all"
+            )
+            assert row.get("task_tag_source") == "asserted"
+
 
 # ---------------------------------------------------------------------------
 # Resolved once at the edge and carried, not re-read at emit time.

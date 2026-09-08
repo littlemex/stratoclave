@@ -5836,6 +5836,14 @@ def _settle_pool_side(
                 # this contract is organised around. The inline settle passes no
                 # source, so it is named here rather than implied.
                 source=facts.get("source") or "inline",
+                # Read out of facts for the same reason group_id above is: the
+                # reserve chokepoint stamped the pair onto the context and the
+                # caller put it in facts, so the settle event is the row where
+                # the charge and the tag it is attributed to finally meet. A
+                # SETTLE without them is the one row an aggregation over money
+                # would have to guess at.
+                task_tag=facts.get("task_tag"),
+                task_tag_source=facts.get("task_tag_source"),
             )
 
         _ledger_item = _mk_settle_event(
