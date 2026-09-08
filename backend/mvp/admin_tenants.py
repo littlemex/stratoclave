@@ -123,6 +123,14 @@ class UsageByTagRow(BaseModel):
     user_id: str
     task_tag: str
     requests: int
+    # How many of `requests` never carried an assertion at all, versus how
+    # many carried one the gateway dropped -- both are folded under
+    # `task_tag == "unlabelled"` above, and without this split "nobody
+    # tagged this" and "somebody mistyped a tag for a month" read as the
+    # same number (see `dynamo.usage_logs.TagAggregateRow`). Both are 0 on
+    # a row whose `task_tag` is a real assertion.
+    absent_count: int
+    dropped_grammar_count: int
     cost_microusd: int
     input_tokens: int
     output_tokens: int
@@ -154,6 +162,13 @@ class UsageByTagResponse(BaseModel):
     retention_policy_days: int
     retention_deletion_is_asynchronous: bool
     retention_boundary_period_may_fold_incompletely: bool
+    # A row's total is a FLOOR on spend for the work it names, not the work's
+    # total: a second request for the same work with no header (or a
+    # dropped one) lands under `unlabelled`, with nothing connecting it back
+    # to this tag. There is no mechanism that could attribute it -- doing so
+    # would mean inferring what an untagged request was for -- so this is
+    # disclosure, not something a future fix could remove.
+    tag_total_is_a_lower_bound: bool
 
 
 class RetainedHoldItem(BaseModel):
@@ -847,9 +862,10 @@ def usage_by_tag_response(
 
     Shared by the admin route and the team-lead route (`apply_pool_budget_
     request` is the existing precedent for this) so the aggregation and the
-    four disclosure fields (`tag_is_caller_asserted`, `retention_policy_days`,
+    five disclosure fields (`tag_is_caller_asserted`, `retention_policy_days`,
     `retention_deletion_is_asynchronous`,
-    `retention_boundary_period_may_fold_incompletely`) cannot drift between
+    `retention_boundary_period_may_fold_incompletely`,
+    `tag_total_is_a_lower_bound`) cannot drift between
     the two callers. Does NOT
     check that the tenant exists or that the caller may see it -- both
     callers already do that themselves before reaching here, by different
@@ -870,6 +886,8 @@ def usage_by_tag_response(
                 user_id=r.user_id,
                 task_tag=r.task_tag,
                 requests=r.requests,
+                absent_count=r.absent_count,
+                dropped_grammar_count=r.dropped_grammar_count,
                 cost_microusd=r.cost_microusd,
                 input_tokens=r.input_tokens,
                 output_tokens=r.output_tokens,
@@ -883,6 +901,7 @@ def usage_by_tag_response(
         retention_policy_days=RETENTION_DAYS,
         retention_deletion_is_asynchronous=True,
         retention_boundary_period_may_fold_incompletely=True,
+        tag_total_is_a_lower_bound=True,
     )
 
 

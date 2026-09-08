@@ -77,11 +77,25 @@ def hash_user_email(email: str) -> str:
 
 @dataclass(frozen=True)
 class TagAggregateRow:
-    """One (user, tag) total within a `TagAggregate`."""
+    """One (user, tag) total within a `TagAggregate`.
+
+    `absent_count` and `dropped_grammar_count` split `requests` by
+    `task_tag_source`, so the `unlabelled` row can distinguish "nobody
+    asserted a tag" from "somebody asserted one and the gateway dropped it"
+    -- both land on `task_tag == mvp.task_tag.SENTINEL`, and without this
+    split they are the same number. `dropped_grammar_count` folds BOTH
+    `mvp.task_tag.Source.DROPPED_GRAMMAR` and `DROPPED_RESERVED` rows (see
+    that enum's docstring for why) -- the two counts sum to `requests` for
+    every row, since a row's `task_tag` is always the sentinel when its
+    source is not `asserted`. A non-sentinel row is all `asserted`
+    requests, so both counts are 0 there.
+    """
 
     user_id: str
     task_tag: str
     requests: int
+    absent_count: int
+    dropped_grammar_count: int
     cost_microusd: int
     input_tokens: int
     output_tokens: int
@@ -329,9 +343,14 @@ class UsageLogsRepository:
                 key = (str(it.get("user_id") or ""), str(tag))
                 row = totals.setdefault(
                     key,
-                    {"requests": 0, "cost_microusd": 0, "input_tokens": 0, "output_tokens": 0},
+                    {"requests": 0, "absent_count": 0, "dropped_grammar_count": 0,
+                     "cost_microusd": 0, "input_tokens": 0, "output_tokens": 0},
                 )
                 row["requests"] += 1
+                if source == "absent":
+                    row["absent_count"] += 1
+                elif source in ("dropped_grammar", "dropped_reserved"):
+                    row["dropped_grammar_count"] += 1
                 row["cost_microusd"] += int(it.get("cost_microusd", 0) or 0)
                 row["input_tokens"] += int(it.get("input_tokens", 0) or 0)
                 row["output_tokens"] += int(it.get("output_tokens", 0) or 0)
@@ -348,6 +367,8 @@ class UsageLogsRepository:
                 user_id=uid,
                 task_tag=tag,
                 requests=v["requests"],
+                absent_count=v["absent_count"],
+                dropped_grammar_count=v["dropped_grammar_count"],
                 cost_microusd=v["cost_microusd"],
                 input_tokens=v["input_tokens"],
                 output_tokens=v["output_tokens"],
