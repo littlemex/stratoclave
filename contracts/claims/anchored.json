@@ -889,10 +889,10 @@
    "anchor": "contract:C1.1@a32b5b92,C1.5@9cd99058"
   },
   {
-   "id": "cl-562564e9abde",
-   "claim": "Two dimensions are not covered by it, and both are gaps rather than qualifications: the sweep runs on the reserve path, so a tenant that goes quiet for a month strands its hold until a scheduled reconciler picks it up (C3.3 — the reconciler exists for other work; registering this scan in it is the fix), and the per-user token reservation has no recovery path at all, because the hold row records the pool amount and not the token amount (C3.2b — carrying two more attributes through the write that already exists is the fix).",
-   "anchor": "debt:C3.2b,C3.3",
-   "note": "carrying the token amount and the user key on the hold write that already happens, and registering the inline holds with the scheduled reconciler that already exists"
+   "id": "cl-9946b451de78",
+   "claim": "The reclaim covers all three counters the admission transaction debits, not the pool alone: the hold freezes the token amount and its user row, and the quota amount with the scopes it moved, so the reversal rides the same transaction that restores the pool (C3.2b, C3.2c).",
+   "anchor": "debt:C3.3",
+   "note": "registering the inline holds with the scheduled reconciler that already exists"
   },
   {
    "id": "cl-bef9ad011cd6",
@@ -1095,8 +1095,8 @@
    "anchor": "descriptive:describes the AWS Guidance sample's architecture, which is not a proxy"
   },
   {
-   "id": "cl-6f68f3109486",
-   "claim": "**The pool reservation, yes; the charge, no** — a killed request's *pool* reservation self-heals via an *inline lazy* sweep on the reserve path (no separate reaper), while the per-user token reservation has no recovery path at all and the spend the provider billed can leave the ledger entirely (see [CONTRACTS.md](./docs/design/CONTRACTS.md) C3.2b and C3.5). Not instant: reclaim happens on the next reserve (≥ a 1800s TTL floor before a hold is sweep-eligible), so an idle tenant with no further traffic reclaims late, and a burst of crashes drains a few holds per reserve. **The reclaim records `actual = 0`, which asserts the provider charged nothing — and that assertion is measurably false for a request that died after its bytes left.** Measured on real Bedrock: a Converse call abandoned at a 2 s client read timeout was billed 1,493 output tokens while its caller received nothing. The reclaim therefore returns budget the account may have spent. Every reclaim now records whether the hold backed a provider call, so the size of that exposure is derivable from the ledger; holding it instead of returning it is not yet built",
+   "id": "cl-ee049bfef5db",
+   "claim": "**The reservations, yes; the charge, no** — a killed request's reservations self-heal via an *inline lazy* sweep on the reserve path (no separate reaper): the pool amount, and the per-user token and per-model quota counters, whose amounts and subjects the hold freezes at reserve time so the reclaim can reverse all three in the transaction that restores the pool. What can still leave the ledger is the spend the provider billed (see [CONTRACTS.md](./docs/design/CONTRACTS.md) C3.2b, C3.2c and C3.5). Not instant: reclaim happens on the next reserve (≥ a 1800s TTL floor before a hold is sweep-eligible), so an idle tenant with no further traffic reclaims late, and a burst of crashes drains a few holds per reserve. **The reclaim records `actual = 0`, which asserts the provider charged nothing — and that assertion is measurably false for a request that died after its bytes left.** Measured on real Bedrock: a Converse call abandoned at a 2 s client read timeout was billed 1,493 output tokens while its caller received nothing. The reclaim therefore returns budget the account may have spent. Every reclaim now records whether the hold backed a provider call, so the size of that exposure is derivable from the ledger; holding it instead of returning it is not yet built",
    "anchor": "debt:C8.3",
    "note": "watching held_microusd, which is what would let the flag default on; the retention itself now ships behind it"
   },

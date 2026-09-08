@@ -109,8 +109,8 @@ recovery.
 | --- | --- | --- |
 | **C3.1** Exactly one ending per reservation. Two mechanisms must not both be able to end the same one. | E for the mechanisms; **B** against an operator recreating the pool row | `test_contract_termination.py`, `test_money_lifecycle_discipline.py`. A hold does not name the incarnation of the pool row it debited, so deleting and recreating a period's row while a reservation is in flight lets the settle apply to a row that never held the debit — see the open items |
 | **C3.2a** …for the tenant dollar pool. | B | The hold row plus the reaper, bounded by the TTL and the next pooled request from that tenant (see C3.3) |
-| **C3.2b** …for the per-user token reservation. | **N (today)** | Nothing reaches it. The hold row records only the pool amount and `credit_used` is not period-scoped, so a crash between reserve and settle debits a user permanently — see the open items below |
-| **C3.2c** …for the per-model quota counter. | **N (today)** | Same shape as C3.2b, bounded instead by the counter's monthly TTL |
+| **C3.2b** …for the per-user token reservation. | B | The hold row plus the reaper, on the same mechanism as C3.2a and bounded the same way by C3.3. The hold freezes the amount this reservation added to `credit_used` and whose row it is (`dynamo.tenant_budgets.hold_put_txn_item`'s `reserved_tokens` / `hold_user_id`), because the reclaim is not the request that made the reservation and cannot otherwise know what to give back; the reversal rides the reclaim transaction the reaper already commits, so the counter is restored iff the pool is. `test_reaper_counter_giveback.py`. **The bound is worth naming for this counter in particular:** `credit_used` is not period-scoped and carries no TTL, so what C3.3's reachability gap leaves unreclaimed here accumulates rather than expiring |
+| **C3.2c** …for the per-model quota counter. | B | The same mechanism and the same reclaim transaction, from `quota_period` / `quota_amount` / `quota_tenant_scope` / `quota_user_scope` on the hold. The two scope flags are what stop a reversal writing into a row this reservation never touched, since `build_reserve_txn_items` writes the tenant row, the user row, or both, depending on which limits are configured. `test_reaper_counter_giveback.py`. Bounded by C3.3 and, unlike C3.2b, additionally by the counter row's own monthly TTL |
 | **C3.3** That mechanism's reachability does not depend on the tenant sending more traffic or on the calendar period. | N (today) | The sweep is request-driven and covers the current and previous period only — see the open items below |
 | **C3.4** An ended reservation cannot be ended again in either direction. | P + E | `test_billing_formal_z3.py`, `test_contract_termination.py` |
 | **C3.5** After any ending, counters and ledger agree, including when the settle that observed the usage never committed. | E, with one stated residual | `test_billing_write_discipline.py`, and `test_contract_owed_settle.py` (`test_the_reaper_posts_the_charge_instead_of_asserting_zero`, `test_a_second_sweep_cannot_post_the_charge_twice`, both mutation-checked). A settle that exhausts its retries now records what it observed as an OWED_SETTLE row, and the reclaim that follows honours it through the existing LATE_SETTLE recovery instead of asserting a settled delta of zero. At-most-once comes from the LATE_SETTLE sort key, so the row needs no mutation to be marked done and the ledger stays append-only. Both orders of the race are covered rather than one: the reaper looks for an owed row after it commits its reclaim, and the abandoned settle looks for a reclaim after it writes the row, so whichever party is second sees the other's write (`_redrive_owed_after_late_reclaim`). Checking only from the reaper's side left the interleaving where it read first and the row arrived a moment later, after which the hold was gone and nothing revisited it. **Residual:** a task that dies between observing the usage and writing that row still loses it; covering that needs a write-ahead on every settle, which is a cost on every request rather than on a rare one |
@@ -403,16 +403,6 @@ without paying a cost the clause names.
   change that carries the same proof obligations as the rest of that path, which is why it
   is here rather than done quietly.
 
-- **C3.2b and C3.2c, for the per-user token reservation and the per-model counter.**
-  The admission transaction debits up to three counters; the hold row records only the
-  pool amount, so a crash between
-  reserve and settle leaves `credit_used` debited with nothing to reach it. The
-  counter is not period-scoped, so it never resets. The change is small and named:
-  carry the token amount and the user key on the hold write that already happens,
-  and add one decrement item to the reclaim transaction that already happens. The
-  same edit closes C3.2c for the per-model counter. It is the largest distance in
-  these documents between how weak a sentence is and how little work would remove
-  the weakness, which is why it is stated this precisely.
 - **C14.31, the routing cascade never tries a cheaper candidate once a pricier one hits
   the pool wall.** The reserve loop prices candidates in chain order and the pool check
   is amount-dependent, so a cheaper fallback that would fit under the same headroom the
