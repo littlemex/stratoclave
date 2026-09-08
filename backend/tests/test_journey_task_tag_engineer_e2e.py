@@ -23,10 +23,20 @@ The journeys:
   A. She tags her work all month, typed three different ways, and asks what
      it cost.
   B. A header that never arrives -- a stray space her teammate told her to
-     add for clarity -- and what her own report lets her believe about the
-     work that carried it.
+     add for clarity -- and the two chances she now has to learn it: the
+     response to the very request that dropped it, and her own report at
+     month end.
   C. Her own project happens to be named the one word this feature reserves
      for work nobody tagged.
+
+Journey B was rewritten after its first version (`test_journey_a_dropped_
+tag_and_a_never_sent_one_look_identical_to_her`) found that a dropped tag
+and a never-sent one were indistinguishable on every surface. That finding
+was fixed (`absent_count` / `dropped_grammar_count` per row, plus
+`x-sc-task-tag-dropped` on the response to the request that dropped it) --
+so this journey now walks the same path and asserts the opposite of what it
+used to: that she CAN tell them apart, from two different places, without
+anyone's help.
 """
 from __future__ import annotations
 
@@ -41,7 +51,9 @@ from dynamo.tenants import TenantsRepository
 from dynamo.user_tenants import UserTenantsRepository
 from mvp._pipeline import reserve_credit, settle_reservation_and_log
 from mvp.deps import AuthenticatedUser, get_current_user
-from mvp.observability.context import build_request_context
+from mvp.observability.context import RequestContext, build_request_context
+from mvp.observability.context import response_headers as _response_headers
+from mvp.task_tag import HDR_TASK_TAG_DROPPED
 
 TENANT = "tagjourney-eng"
 HER = "engineer-tagger-1"
@@ -108,9 +120,12 @@ def _send(
     user: _PipelineUser, *, header: Optional[str], cost_micro: int,
     input_tokens: int = 100, output_tokens: int = 200,
     model: str = "us.anthropic.claude-opus-4-7",
-) -> None:
+) -> RequestContext:
     """One admitted-and-settled request that arrived carrying `header` under
-    `x-sc-task-tag`.
+    `x-sc-task-tag`. Returns the edge's own `RequestContext` so a caller can
+    inspect what the RESPONSE to this exact request would have carried
+    (`mvp.observability.context.response_headers(ctx)`) -- the moment-of
+    -failure signal, available before she ever reads a report.
 
     The (tag, source) pair is resolved by the REAL edge function
     `build_request_context` -- the same one `mvp.deps.get_request_context`
@@ -135,6 +150,7 @@ def _send(
         actual_input_tokens=input_tokens, actual_output_tokens=output_tokens,
         model_id=model, context=ctx, actual_cost_microusd=cost_micro,
     )
+    return ctx_headers
 
 
 def _me_client(user_id: str) -> TestClient:
@@ -230,30 +246,37 @@ def test_journey_she_tags_all_month_and_finds_out_what_it_cost(
 # ---------------------------------------------------------------------------
 
 
-def test_journey_a_dropped_tag_and_a_never_sent_one_look_identical_to_her(
+def test_journey_she_can_now_tell_a_dropped_tag_from_a_never_sent_one(
     monkeypatch, dynamodb_mock
 ):
     """She tags six calls "release-9". On two more, a teammate's shell alias
     appends " (staging)" for clarity -- a space and parentheses are not in
     the grammar this header is checked against (`mvp.task_tag.GRAMMAR`, the
     same `[A-Za-z0-9._:-]` pattern the correlation headers use). The
-    request is never refused, by design (`mvp.task_tag`'s whole reason to
-    exist): both calls are simply recorded as `unlabelled`. She also runs
-    one genuinely, deliberately untagged lookup that same month.
+    request is still never refused, by design (`mvp.task_tag`'s whole reason
+    to exist): both calls are still recorded as `unlabelled`. She also runs
+    one genuinely, deliberately untagged lookup that same month. This is the
+    identical walk `test_journey_a_dropped_tag_and_a_never_sent_one_look_
+    identical_to_her` took before the fix -- what changed is what she can
+    now learn from it, at two different moments.
 
-    What she would be told wrongly, reading her own report: that
-    "unlabelled" means "work she never meant to tag" -- when two-thirds of
-    that row's requests are the release she WAS tracking, mislabelled next
-    to a lookup she never intended to track at all, and there is no error,
-    warning, or count anywhere in the response that distinguishes a header
-    that failed from a header that was never sent.
+    The FIRST chance is at the moment of failure: the response to one of
+    her "release-9 (staging)" requests itself carries
+    `x-sc-task-tag-dropped: grammar` -- informational, never a status; the
+    request still succeeds -- so she could have caught it that same
+    instant, before it ever reached a monthly report.
 
-    Walks: six tagged calls, two calls whose header fails the grammar, one
-    genuinely untagged call, then her own report. Asserts the fold that
-    actually happens and that nothing on the row -- or the two disclosure
-    counters that sound like they might cover this
-    (`legacy_rows`/`malformed_rows`, which count something else entirely --
-    see `dynamo.usage_logs.UsageLogsRepository.record`) -- tells her apart.
+    The SECOND chance, if she missed the first, is her own report at month
+    end: `unlabelled`'s `dropped_grammar_count` and `absent_count` now split
+    the row's `requests` by why each one is there, so she can tell "the
+    gateway threw my tag away twice" from "I never meant to tag this at
+    all" without asking anyone or finding the calls herself.
+
+    Walks: six tagged calls, two calls whose header fails the grammar
+    (capturing the response context for one of them), one genuinely
+    untagged call, then her own report. Asserts both signals: the dropped
+    header on the request that triggered it, and the split counts on her
+    own row.
     """
     _seed_permissions(dynamodb_mock)
     period = _seed_tenant(monkeypatch)
@@ -261,10 +284,19 @@ def test_journey_a_dropped_tag_and_a_never_sent_one_look_identical_to_her(
 
     for _ in range(6):
         _send(her, header="release-9", cost_micro=2_000_000)
-    _send(her, header="release-9 (staging)", cost_micro=3_000_000)
+    dropped_ctx = _send(her, header="release-9 (staging)", cost_micro=3_000_000)
     _send(her, header="release-9 (staging)", cost_micro=4_000_000)
     _send(her, header=None, cost_micro=500_000)
 
+    # Chance #1: the moment of failure. The response to the very request
+    # that dropped her tag names why -- she never has to wait for a report.
+    headers = _response_headers(dropped_ctx)
+    assert headers.get(HDR_TASK_TAG_DROPPED) == "grammar", (
+        "the request that dropped her tag must say so on its own response, "
+        f"the earliest point she could have caught it: {headers}"
+    )
+
+    # Chance #2: her own report at month end, if she missed chance #1.
     client = _me_client(HER)
     resp = client.get(f"/api/mvp/me/usage/by-tag?period={period}")
     assert resp.status_code == 200, resp.text
@@ -273,15 +305,30 @@ def test_journey_a_dropped_tag_and_a_never_sent_one_look_identical_to_her(
 
     assert rows["release-9"]["requests"] == 6
     assert rows["release-9"]["cost_microusd"] == 12_000_000
-
-    # The point of the journey: two grammar-dropped "release-9" calls and one
-    # genuinely untagged call are ONE row, one count, one total.
-    unlabelled = rows["unlabelled"]
-    assert unlabelled["requests"] == 3, (
-        "two grammar-dropped 'release-9' calls and one genuinely untagged "
-        f"call must fold together if she cannot tell them apart: {body}"
+    assert rows["release-9"]["absent_count"] == 0
+    assert rows["release-9"]["dropped_grammar_count"] == 0, (
+        "every request under her own tag is a real assertion -- both new "
+        f"counts must be zero here: {rows['release-9']}"
     )
+
+    # The two grammar-dropped "release-9" calls and the one genuinely
+    # untagged call still fold into ONE row -- the tag string itself still
+    # cannot separate them -- but the row's own counts now can.
+    unlabelled = rows["unlabelled"]
+    assert unlabelled["requests"] == 3
     assert unlabelled["cost_microusd"] == 500_000 + 3_000_000 + 4_000_000
+    assert unlabelled["dropped_grammar_count"] == 2, (
+        "she can now read, off her own row, that two of these three "
+        f"requests carried a tag the gateway threw away: {unlabelled}"
+    )
+    assert unlabelled["absent_count"] == 1, (
+        "and that exactly one was never meant to be tagged at all -- the "
+        f"distinction the row could not draw before this fix: {unlabelled}"
+    )
+    assert (
+        unlabelled["dropped_grammar_count"] + unlabelled["absent_count"]
+        == unlabelled["requests"]
+    ), "the two new counts must account for every request in the row"
 
     assert body["legacy_rows"] == 0, (
         "these rows all carry the task_tag pair -- 'legacy' means a row "
@@ -292,16 +339,11 @@ def test_journey_a_dropped_tag_and_a_never_sent_one_look_identical_to_her(
         "'malformed' means exactly one of the two was ever written, not a "
         "grammar-dropped assertion"
     )
-    assert set(unlabelled.keys()) == {
-        "user_id", "task_tag", "requests", "cost_microusd",
-        "input_tokens", "output_tokens",
-    }, (
-        "no field on this row breaks the fold apart; if one is ever added, "
-        "this assertion is the one that should start failing"
-    )
-    # She would have to go find the two calls herself, off some record other
-    # than this one, and already suspect her header had a space in it, to
-    # ever learn two-thirds of "unlabelled" was a release she meant to track.
+    # What is STILL true, and is not a defect: the tag string alone -- the
+    # thing she would filter or group by -- is still "unlabelled" either
+    # way. The two counts are read-the-row connective tissue, not a second
+    # row; she cannot ask this report for "just my dropped release-9 work"
+    # and get it back under "release-9".
 
 
 def test_journey_the_project_named_after_the_reserved_word_vanishes(

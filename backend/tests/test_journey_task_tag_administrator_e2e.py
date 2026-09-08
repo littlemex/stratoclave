@@ -19,12 +19,24 @@ moto DynamoDB.
 The journeys:
   D. Two engineers do the same migration work; only one tags it. What the
      tenant-wide report lets him conclude about the tenant's migration
-     spend, and the one conclusion it does not support.
+     spend, and the one conclusion it still does not support -- on purpose.
   E. One tagger, one non-tagger, on the administrator's one tenant-wide
-     screen: what it tells him about each of them, and what it still
-     cannot.
+     screen: what it tells him about each of them now, and the one thing it
+     still does not.
   F. The team lead who owns this one tenant, and the admin who owns every
      tenant, reading the same tenant and period side by side.
+
+Journeys D and E were updated after their first versions found that a
+row's total could not be told apart from the work's total, and that two
+"unlabelled" rows for two different people were indistinguishable beyond
+the user_id column. Two rows-level counts (`absent_count`,
+`dropped_grammar_count`) and a `tag_total_is_a_lower_bound` disclosure flag
+were added in response -- both journeys now assert what changed. Neither
+finding was fully closed, deliberately: attributing an untagged request to
+the work it names would mean the gateway inferring what the request was
+for, the boundary this design is built against, and the two rows still
+carry the identical tag string no matter how differently their counts
+read. Both journeys say so explicitly rather than passing quietly.
 """
 from __future__ import annotations
 
@@ -165,8 +177,8 @@ def _journey_client(seat: _Seat) -> TestClient:
 
 
 _ROW_FIELDS = {
-    "user_id", "task_tag", "requests", "cost_microusd",
-    "input_tokens", "output_tokens",
+    "user_id", "task_tag", "requests", "absent_count", "dropped_grammar_count",
+    "cost_microusd", "input_tokens", "output_tokens",
 }
 
 
@@ -191,11 +203,23 @@ def test_journey_migration_spend_has_a_floor_not_a_total(monkeypatch, dynamodb_m
     partitions the read, so no other member's spend could ever land under
     it, checked directly below rather than assumed.
 
-    What the report does NOT let him conclude, and the gap this journey
-    exists to name: that `migration-42`'s total IS the tenant's migration
-    spend for the month. It is a floor, not a total, and there is nothing
-    in the response that would have told him so before B's own timesheet
-    said otherwise.
+    What the report does NOT let him conclude: that `migration-42`'s total
+    IS the tenant's migration spend for the month. It is a floor, not a
+    total. This used to be silent -- nothing in the response said so before
+    B's own timesheet did. It no longer is: `tag_total_is_a_lower_bound`
+    is now a field on the response itself, and B's row now carries
+    `absent_count`, so he can see, directly, that four of her requests never
+    asserted anything at all.
+
+    What is still true, deliberately, after that fix: knowing a shortfall
+    EXISTS is not the same as being able to size or attribute it. He can see
+    `absent_count=4` on B's row; he cannot see how many of those four were
+    migration work and how many were her unrelated lookup, because nothing
+    short of the gateway inferring what an untagged request was for could
+    tell him -- and that inference is the boundary this design is built
+    against, not a gap left open by oversight. This journey now ends
+    knowing the shortfall exists and still unable to attribute it; that is
+    the honest end state, not a residual defect.
     """
     _seed_permissions(dynamodb_mock)
     period = _seed_tenant(monkeypatch, members=[ENG_A, ENG_B])
@@ -226,16 +250,39 @@ def test_journey_migration_spend_has_a_floor_not_a_total(monkeypatch, dynamodb_m
     assert b_row["cost_microusd"] == 61_000_000, (
         f"B's migration work and her unrelated lookup are one number: {b_row}"
     )
-    assert set(b_row.keys()) == _ROW_FIELDS, (
-        "the report does not, and structurally cannot, break B's number "
-        f"apart by what the work actually was: {b_row}"
+    assert set(b_row.keys()) == _ROW_FIELDS
+
+    # The fix: the response now says its own totals are a floor, and B's row
+    # now says how many of her requests never asserted anything at all.
+    assert body["tag_total_is_a_lower_bound"] is True, (
+        "the response must disclose that a tag's total is a floor on the "
+        f"work it names, not the work's total: {body}"
+    )
+    assert b_row["absent_count"] == 4, (
+        f"B's row must now count her four unasserted requests: {b_row}"
+    )
+    assert b_row["dropped_grammar_count"] == 0, (
+        "none of B's calls carried a header at all, so none were dropped"
+    )
+    assert migration_row["absent_count"] == 0 and migration_row["dropped_grammar_count"] == 0, (
+        "every request under A's own tag is a real assertion"
     )
 
+    # What is still true, on purpose: `absent_count=4` tells him a shortfall
+    # of unknown composition exists; it does not tell him how much of it is
+    # migration work. There is no field that could -- attributing an
+    # untagged request to the tag it should have carried is exactly the
+    # inference this design refuses to make.
     real_migration_spend = 60_000_000 + 3 * 20_000_000
     assert migration_row["cost_microusd"] < real_migration_spend, (
         "the assertion this journey exists to fail loudly the day "
         "aggregation starts finding B's untagged migration work on its own: "
         f"tagged={migration_row['cost_microusd']} real={real_migration_spend}"
+    )
+    assert b_row["absent_count"] == b_row["requests"], (
+        "the count says ALL four are unattributed; it cannot say which "
+        "three were secretly migration work -- there is no field for that "
+        f"split, deliberately: {b_row}"
     )
 
 
@@ -257,10 +304,19 @@ def test_journey_the_tagger_and_the_non_tagger_on_one_screen(
     work kept separate from her one outlier), B gets exactly ONE -- and
     that neither member's number contains so much as one micro-dollar of
     the other's, checked directly rather than trusted from the tenant
-    partition alone. Also names what the screen still does NOT tell him:
-    A's "unlabelled" $2 and B's "unlabelled" $24 carry the identical tag
-    string, and nothing but the user_id column he reads himself says one is
-    a deliberate one-off and the other is the entirety of her month.
+    partition alone.
+
+    This journey's first version ended on a gap: A's "unlabelled" $2 and
+    B's "unlabelled" $24 carried the identical tag string, and nothing but
+    the user_id column he reads himself said one was a deliberate one-off
+    and the other was the entirety of her month. `absent_count` mitigates
+    that, and this journey now asserts the mitigation directly: A's
+    outlier row reads `absent_count=1`, B's reads `absent_count=4` -- a
+    small number next to a large one, legible without opening the user_id
+    column at all. What the fix does NOT change, and this journey still
+    names: both rows carry the identical `task_tag` string, "unlabelled",
+    either way. The count differs; the string he would filter or group by
+    does not.
     """
     _seed_permissions(dynamodb_mock)
     period = _seed_tenant(monkeypatch, members=[ENG_A, ENG_B])
@@ -291,12 +347,26 @@ def test_journey_the_tagger_and_the_non_tagger_on_one_screen(
         "neither member's row contains a cent of the other's spend"
     )
 
-    # What the screen still does not tell him: the two "unlabelled" rows
-    # carry the identical tag string and mean two entirely different things.
-    assert (
-        by_key[(ENG_A, "unlabelled")]["task_tag"]
-        == by_key[(ENG_B, "unlabelled")]["task_tag"]
-        == "unlabelled"
+    # The mitigation: he no longer needs the user_id column to tell an
+    # outlier from a whole untagged month -- the counts alone say so.
+    a_unlabelled = by_key[(ENG_A, "unlabelled")]
+    b_unlabelled = by_key[(ENG_B, "unlabelled")]
+    assert a_unlabelled["absent_count"] == 1, (
+        f"A's one deliberate outlier: {a_unlabelled}"
+    )
+    assert b_unlabelled["absent_count"] == 4, (
+        f"B's entire untagged month: {b_unlabelled}"
+    )
+    assert a_unlabelled["absent_count"] < b_unlabelled["absent_count"], (
+        "a small count next to a large one is legible on its own, without "
+        "reading which user_id owns which row"
+    )
+
+    # What the fix does NOT change, and this journey still names: the tag
+    # string itself -- the thing a filter or a group-by would key on -- is
+    # still identical for both of them.
+    assert a_unlabelled["task_tag"] == b_unlabelled["task_tag"] == "unlabelled", (
+        "the count differs; the string he would filter or group by does not"
     )
 
 
@@ -322,10 +392,13 @@ def test_journey_the_team_lead_and_the_admin_see_the_same_tenant(
 
     Asserts the two bodies are byte-for-byte the same (a fact the team lead
     can see must never read as a different number on the admin screen for
-    the tenant he actually owns), and separately that neither body carries
-    anything the other should not -- no email, no PII hash, nothing beyond
-    the six fields `UsageByTagRow` declares -- so "the same" is not hiding
-    "and also more" on either side.
+    the tenant he actually owns -- including the two newer per-row counts,
+    `absent_count`/`dropped_grammar_count`, which this parity check covers
+    for free since it compares the whole body rather than naming fields),
+    and separately that neither body carries anything the other should not
+    -- no email, no PII hash, nothing beyond the eight fields
+    `UsageByTagRow` declares -- so "the same" is not hiding "and also more"
+    on either side.
     """
     _seed_permissions(dynamodb_mock)
     period = _seed_tenant(monkeypatch, members=[ENG_A, ENG_B])
