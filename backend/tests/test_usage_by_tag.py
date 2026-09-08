@@ -18,12 +18,18 @@ Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
   the interface's own dataclass listing: rows / truncated / pages_read /
   legacy_rows only) — those two fields are added ONLY in the HTTP response
   body shown in the interface's "Endpoints" section. So P1.8, uniquely among
-  this file's three entries, can only be verified over real HTTP. Tested
-  against `GET /api/mvp/me/usage/by-tag`, reached through the fully-assembled
-  `main.app` (not a hand-picked router module) because the interface names
-  the PATH, never the FILE that will define it — going through `main.app`
-  is the one way to test the contracted path without guessing which of
-  `mvp/me.py` / a new `mvp/usage_by_tag.py` / elsewhere ends up owning it.
+  this file's three entries, can only be verified over real HTTP.
+
+  Amendment A2 names the endpoint homes: `GET /me/usage/by-tag` lives in
+  `backend/mvp/me.py`; the admin route AND the one shared implementation
+  live in `backend/mvp/admin_usage.py`; the team-lead mirror lives in
+  `backend/mvp/team_lead.py` and calls that same shared implementation, the
+  way the pool-budget routes already do. Tested by mounting exactly those
+  three routers (no `main.app`, now that the homes are named), and — because
+  "one shared implementation so the two cannot drift" is itself a contracted
+  property that nothing else in this suite checks — by asserting the admin
+  and team-lead routes return byte-identical bodies for the same tenant and
+  period.
 
   P1.9 "The aggregation reads the tenant partition over a period and folds
   in memory, which is unbounded for a large tenant | B | ... | a bounded
@@ -33,16 +39,17 @@ Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
   suite controls, so the test holds regardless of what per-page `Limit` the
   implementation happens to choose internally.
 
-Error contract (shared by all three by-tag endpoints): "`period` not
-matching `YYYY-MM` is a 400, matching the existing usage endpoints." This is
-flagged in the handoff report: the ACTUAL existing usage endpoints that
-validate a `period` this way (`admin_tenants.py`'s pool-budget routes, via
-`Query(pattern=r"^\\d{4}-\\d{2}$")`) return FastAPI's default 422 for that
-failure, not 400 — measured directly against this worktree, see the report.
-The interface's Error Contracts section states "400" as a bare fact twice
-elsewhere in the document; I have taken that literal, twice-stated number as
-the authoritative commitment over the (inaccurate) precedent it cites, since
-the number itself, not the analogy, is the actual interface obligation.
+Error contract (shared by all three by-tag endpoints), per Amendment A1:
+`period` not matching `YYYY-MM` is **422**, not 400. The interface's original
+Error Contracts section stated "400... matching the existing usage
+endpoints" — a self-contradiction, since every sibling endpoint validates
+`period` with `Query(default=None, pattern=r"^\\d{4}-\\d{2}$")`
+(`backend/mvp/team_lead.py:269`, `backend/mvp/admin_tenants.py:967/:1013/
+:1067/:1108`), which FastAPI answers with its own 422. A1 withdraws the 400:
+`period` is validated by that same `Query(pattern=...)`, so a malformed
+value is the FRAMEWORK's validation error, not a hand-rolled one — do not
+"fix" this back to 400; the whole point of A1 is that one way of validating
+a period across the API beats the specific digits the interface first wrote.
 """
 from __future__ import annotations
 
@@ -187,47 +194,69 @@ class TestP1_9_PageBoundIsReal:
 
 # ---------------------------------------------------------------------------
 # P1.8 — the response states tag_is_caller_asserted and history_horizon_days
-# as FIELDS. Only reachable over real HTTP (see module docstring).
+# as FIELDS, and the admin/team-lead mirror cannot drift. Only reachable
+# over real HTTP (see module docstring). Amendment A2 names the endpoint
+# homes, so this mounts exactly those three routers rather than main.app.
 # ---------------------------------------------------------------------------
 
 @dataclass
-class _FakeUser:
-    user_id: str = "user-11111111-1111-1111-1111-111111111111"
+class _FakeAdmin:
+    """An admin actor: passes `require_permission` (monkeypatched wide open
+    below regardless of the exact scope name each route ends up using) AND
+    `team_lead._require_owner`'s admin bypass, so the SAME actor can hit the
+    `/me`, `/admin` and `/team-lead` routes without needing a second,
+    ownership-scoped identity just to prove the admin/team-lead bodies
+    match."""
+
+    user_id: str = "admin-usage-by-tag"
     org_id: str = "acme-eng"
-    email: str = "test@example.com"
+    email: str = "admin@example.com"
     roles: list = None
     auth_kind: str = "jwt"
     key_scopes: list = None
 
     def __post_init__(self):
         if self.roles is None:
-            self.roles = ["user"]
+            self.roles = ["admin"]
 
 
 @pytest.fixture
-def full_app_client(dynamodb_mock, monkeypatch):
+def by_tag_client(dynamodb_mock, monkeypatch):
+    """Mounts exactly the three routers Amendment A2 names as the by-tag
+    endpoints' homes: `mvp.me` (`/me/usage/by-tag`), `mvp.admin_usage`
+    (the admin route and the one shared implementation), and `mvp.team_lead`
+    (the mirror that calls that same shared implementation)."""
     import mvp.authz as _authz
     monkeypatch.setattr(_authz, "user_has_permission", lambda user, perm: True)
 
-    import main
-    from mvp.deps import get_current_user
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    from mvp.deps import get_current_user
+    from mvp.me import router as me_router
+    from mvp.admin_usage import router as admin_usage_router
+    from mvp.team_lead import router as team_lead_router
+    from dynamo.tenants import TenantsRepository
 
-    main.app.dependency_overrides[get_current_user] = lambda: _FakeUser()
-    try:
-        with TestClient(main.app) as client:
-            yield client
-    finally:
-        main.app.dependency_overrides.pop(get_current_user, None)
+    # `team_lead._require_owner` looks the tenant up regardless of actor
+    # role, so it must exist even for the admin bypass path.
+    TenantsRepository().create(
+        tenant_id="acme-eng", name="Acme Eng", team_lead_user_id="someone-else",
+        default_credit=100_000, created_by="admin-usage-by-tag",
+    )
+
+    app = FastAPI()
+    app.include_router(me_router)
+    app.include_router(admin_usage_router)
+    app.include_router(team_lead_router)
+    app.dependency_overrides[get_current_user] = lambda: _FakeAdmin()
+    return TestClient(app)
 
 
 class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
-    def test_by_tag_response_carries_both_statements_as_fields(self, full_app_client):
+    def test_by_tag_response_carries_both_statements_as_fields(self, by_tag_client):
         from dynamo.tenant_budgets import current_period
 
-        resp = full_app_client.get(
-            f"/api/mvp/me/usage/by-tag?period={current_period()}"
-        )
+        resp = by_tag_client.get(f"/api/mvp/me/usage/by-tag?period={current_period()}")
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["tag_is_caller_asserted"] is True, (
@@ -240,14 +269,56 @@ class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
         )
         assert "rows" in body and "truncated" in body and "legacy_rows" in body
 
-    def test_period_not_matching_yyyy_mm_is_400(self, full_app_client):
-        """See module docstring: the interface's Error Contracts section
-        states this as a bare '400' twice; the endpoint it cites as
-        precedent actually returns 422 in this codebase today (verified
-        directly). This test enforces the literal, explicitly-stated
-        interface number."""
-        resp = full_app_client.get("/api/mvp/me/usage/by-tag?period=not-a-period")
-        assert resp.status_code == 400, (
-            f"malformed period must be a 400 per the interface's Error "
-            f"Contracts section, got {resp.status_code}: {resp.text}"
+    def test_period_not_matching_yyyy_mm_is_422(self, by_tag_client):
+        """Amendment A1: the 400 is withdrawn. `period` is validated by the
+        SAME `Query(default=None, pattern=r"^\\d{4}-\\d{2}$")` every sibling
+        endpoint uses (`team_lead.py:269`, `admin_tenants.py:967` etc.), so a
+        malformed value is FastAPI's own 422 -- the framework's validation,
+        not a hand-rolled endpoint-specific error. Do not "fix" this back to
+        400: consistency with the rest of the API is the reason this clause
+        exists at all.
+        """
+        resp = by_tag_client.get("/api/mvp/me/usage/by-tag?period=not-a-period")
+        assert resp.status_code == 422, (
+            f"malformed period must be FastAPI's 422 (Query pattern "
+            f"validation), per amendment A1 -- got {resp.status_code}: {resp.text}"
+        )
+
+
+class TestP1_8_AdminAndTeamLeadCannotDrift:
+    """'One shared implementation so the two cannot drift' (interface,
+    Endpoints section) is itself a contracted property. Nothing else in
+    this suite checks it directly — a test could pass both routes
+    individually while each hand-rolled its own, subtly different,
+    aggregation logic. This asserts the observable consequence: for the
+    same tenant and period, the two routes must return the identical body.
+    """
+
+    def test_admin_and_team_lead_bodies_match_for_the_same_tenant_and_period(
+        self, by_tag_client,
+    ):
+        from dynamo.usage_logs import UsageLogsRepository
+        from dynamo.tenant_budgets import current_period
+
+        period = current_period()
+        UsageLogsRepository().record(
+            tenant_id="acme-eng", user_id="user-1", user_email="u@x",
+            model_id="m", input_tokens=10, output_tokens=5, cost_microusd=100,
+            task_tag="billing-sync", task_tag_source="asserted",
+        )
+
+        admin_resp = by_tag_client.get(
+            f"/api/mvp/admin/tenants/acme-eng/usage/by-tag?period={period}"
+        )
+        team_lead_resp = by_tag_client.get(
+            f"/api/mvp/team-lead/tenants/acme-eng/usage/by-tag?period={period}"
+        )
+        assert admin_resp.status_code == 200, admin_resp.text
+        assert team_lead_resp.status_code == 200, team_lead_resp.text
+        assert admin_resp.json() == team_lead_resp.json(), (
+            "the admin route and the team-lead mirror must return the "
+            "IDENTICAL body for the same tenant/period -- a difference here "
+            "means the two routes are not actually sharing one implementation, "
+            "which is the exact drift the interface's 'one shared "
+            "implementation' sentence exists to prevent"
         )
