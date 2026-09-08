@@ -318,6 +318,11 @@ def is_capacity_bearing(status: str) -> bool:
 _BLOCKER_BY_WALL: dict[str, str] = {
     "tenant_dollar_pool": "tenant_pool",
     "user_token_quota": "personal_budget",
+    # P3.1's money ceiling. Deliberately NOT "personal_budget" -- that name is
+    # already taken by the TOKEN wall above, and reusing it would make a money
+    # refusal indistinguishable from a token refusal to a client reading the
+    # 402 body (I4).
+    "user_dollar_quota": "personal_spend",
 }
 
 #: The per-model wall's two public names, chosen by which scope actually refused.

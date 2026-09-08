@@ -544,6 +544,18 @@ class ReservationContext:
     quota_period: Optional[str] = None
     quota_tenant_limit: Optional[int] = None
     quota_user_limit: Optional[int] = None
+    # P3.1's per-user money ceiling bookkeeping, the SAME shape as the
+    # per-model quota fields above and deliberately separate from them (I6,
+    # point 1): `uq_period` is this reservation's OWN period for that wall,
+    # never `quota_period` or a fresh `current_period()` -- a request that
+    # configures both walls debits two rows, and one field cannot say which
+    # amount belongs to which if the two ever diverge (a period boundary
+    # crossed mid-request). `uq_user_id` mirrors `quota_user_id` for the same
+    # "one source of a fact, one name" reason the rest of this dataclass
+    # already follows, even though the value is always the same user.
+    uq_reserved_amount: int = 0
+    uq_user_id: Optional[str] = None
+    uq_period: Optional[str] = None
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md item 4): the
     # inputs the pool debit's `cost_microusd` was actually computed from, kept
     # so the SETTLE ledger terminal can carry a RECOMPUTABLE reservation rather
@@ -1374,6 +1386,30 @@ def _hold_counter_reversal_items(
                     amount,
                     tenant_scope=tenant_scope,
                     user_scope=user_scope,
+                )
+            )
+
+    # P3.4/I6: the per-user money ceiling's own give-back, from the SAME
+    # frozen facts discipline as the per-model quota above -- `uq_period` and
+    # `uq_amount` are what THIS hold's reserve actually committed (never
+    # re-derived from `period`/a fresh cost, for the same reason
+    # `quota_period` above is not `period`: a request that crosses a period
+    # boundary between reserve and reclaim must give back the period it
+    # actually reserved against). Unlike the per-model quota this wall is
+    # keyed on the user alone, so there is no scope to thread.
+    uq_period = hold.get("uq_period")
+    uq_amount = hold.get("uq_amount")
+    if uq_period and uq_amount is not None and hold_user_id:
+        amount = int(uq_amount)
+        if amount > 0:
+            from .routing import user_dollar_quota as _uq
+
+            items.append(
+                _uq.build_reverse_txn_item(
+                    tenant_id=tenant_id,
+                    user_id=str(hold_user_id),
+                    period=str(uq_period),
+                    amount=amount,
                 )
             )
     _log_incomplete_hold_facts(hold, tenant_id=tenant_id, period=period, hold_id=hold_id)
@@ -3199,6 +3235,24 @@ def reserve_credit(
                 logger.error("RateSnapshotFailed", pricing_key=pricing_key,
                              error=str(e))
                 raise _err_503("pricing_unavailable") from None
+
+    # P3.1: the per-user money ceiling. Resolved -- and, on the first
+    # admission that needs it, SEALED (P3.3) -- exactly once per call, from
+    # ONE read of the tenant row. I5's "one snapshot, one decision point":
+    # `configured_when` immediately below and the builder further down are
+    # both handed this SAME `_uq_base`, so neither can see an answer the
+    # other did not. Only worth resolving when there is a cost to check
+    # against a dollar ceiling at all, and only for an identified user (the
+    # wall is keyed on the user, never the tenant alone).
+    from .routing import user_dollar_quota as _uq
+
+    _uq_base: Optional[int] = None
+    if cost_microusd is not None and user.user_id:
+        from dynamo.tenants import TenantsRepository as _TenantsRepo
+
+        _uq_base = _TenantsRepo().seal_user_dollar_base(user.org_id, period)
+    _uq_configured = _uq.configured_when(_uq_base)
+
     budgets = TenantBudgetsRepository()
     pool = budgets.get(user.org_id, period) if cost_microusd is not None else None
 
@@ -3244,9 +3298,9 @@ def reserve_credit(
             # budget" refusal already uses.
             raise _err_503("pool_period_row_missing")
 
-    # No pool budget AND no per-model quota to enforce → original single-table
-    # fast path (fully backward compat).
-    if (pool is None or cost_microusd is None) and not quota_lines:
+    # No pool budget AND no per-model quota AND no per-user money ceiling to
+    # enforce → original single-table fast path (fully backward compat).
+    if (pool is None or cost_microusd is None) and not quota_lines and not _uq_configured:
         try:
             repo.reserve(
                 user_id=user.user_id,
@@ -3284,10 +3338,12 @@ def reserve_credit(
             measured_bound_microusd=_measured_bound_microusd,
         )
 
-    # No pool budget but a per-model quota IS configured → enforce the quota
-    # atomically alongside the per-user token reserve, WITHOUT a pool debit.
-    # (Fable F-3: quota enforcement must not be coupled to having a pool — a
-    # pool-less tenant with a per-model quota was previously served unmetered.)
+    # No pool budget but a per-model quota and/or the per-user money ceiling
+    # IS configured → enforce them atomically alongside the per-user token
+    # reserve, WITHOUT a pool debit. (Fable F-3: quota enforcement must not
+    # be coupled to having a pool — a pool-less tenant with a per-model quota
+    # was previously served unmetered; P3.1 extends the same rule to the
+    # money ceiling.)
     if pool is None or cost_microusd is None:
         return _reserve_quota_without_pool(
             user, reservation_tokens, repo=repo, period=period,
@@ -3295,6 +3351,7 @@ def reserve_credit(
             quota_model=quota_model, selected_model=selected_model,
             quota_reserved_amount=int(cost_microusd or 0),
             bound_microusd=bound_microusd,
+            uq_base=_uq_base,
         )
 
     # Pool budget present → atomic two-table reservation. Both the per-user
@@ -3517,6 +3574,13 @@ def reserve_credit(
 
             _quota_scopes = _quota_facts.reserved_scopes(
                 user.org_id, user.user_id, quota_model, period, quota_lines)
+        # P3.1: the per-user money ceiling's own item, built from the SAME
+        # `_uq_base` `reserve_credit` resolved-and-sealed once at the top of
+        # this call (I5) -- never re-read here.
+        uq_item = _uq.build_reserve_txn_items(
+            tenant_id=user.org_id, user_id=user.user_id, period=period,
+            amount=cost, base_microusd=_uq_base,
+        )
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=user.org_id,
             period=period,
@@ -3543,6 +3607,8 @@ def reserve_credit(
             quota_amount=cost if quota_lines else None,
             quota_tenant_scope=(_quota_scopes["tenant"] if _quota_scopes else None),
             quota_user_scope=(_quota_scopes["user"] if _quota_scopes else None),
+            uq_period=period if uq_item else None,
+            uq_amount=cost if uq_item else None,
         )
         txn_items = [user_txn, pool_txn, hold_txn]
         _quota_start = len(txn_items)
@@ -3550,8 +3616,14 @@ def reserve_credit(
         if quota_lines:
             txn_items.extend(quota_lines)
             _quota_count = len(quota_lines)
-        # RESERVE ledger event LAST, so the fixed pool/user/hold/quota indices the
-        # cancellation parsing relies on are unchanged. Its attribute_not_exists
+        # The money ceiling's item, after the per-model quota lines and before
+        # the ledger event -- keeping the ledger LAST (see below) so its own
+        # fixed position is untouched by whether this wall is configured.
+        _uq_start = len(txn_items)
+        if uq_item:
+            txn_items.extend(uq_item)
+        # RESERVE ledger event LAST, so the fixed pool/user/hold/quota/uq indices
+        # the cancellation parsing relies on are unchanged. Its attribute_not_exists
         # can only CCF on a hold_id collision (uuid → never in practice), and the
         # quota scan is bounded to the quota slice so a ledger CCF is never
         # misread as quota-exhausted. Positive reserved_delta makes the reserved
@@ -3604,8 +3676,29 @@ def reserve_credit(
             reasons = e.response.get("CancellationReasons", []) or []
             codes = {r.get("Code", "") for r in reasons}
             # txn_items order is [user_txn(0), pool_txn(1), hold_txn(2),
-            # *quota_lines(_quota_start..), RESERVE ledger(last)]. A
-            # ConditionalCheckFailed at a QUOTA index means the per-model quota is
+            # *quota_lines(_quota_start..), uq_item?(_uq_start), RESERVE ledger
+            # (last)]. Checked in I7's tie-break order -- non-grantable before
+            # grantable, then narrowest scope -- among the walls this
+            # transaction can even discover via CancellationReasons (the pool
+            # and per-user-token walls are pre-checked in Python above and
+            # never reach here as a CCF). The money ceiling is checked FIRST,
+            # ahead of the per-model quota: both are non-grantable, but a
+            # per-model quota refusal is remediable by cascading to a
+            # different model candidate while the money ceiling is not --
+            # checking it first means a request that failed BOTH in the same
+            # attempt is reported by the wall no candidate switch can fix,
+            # rather than by the one that would send the cascade off to try
+            # another model for no reason (the same user is still over the
+            # same ceiling on candidate two).
+            if uq_item and len(reasons) > _uq_start \
+                    and reasons[_uq_start].get("Code", "") == "ConditionalCheckFailed":
+                logger.info(
+                    "user_dollar_quota_exhausted",
+                    tenant_id=user.org_id, user_id=user.user_id, period=period,
+                )
+                raise _err_402(
+                    "user_dollar_quota_exhausted", wall="user_dollar_quota")
+            # A ConditionalCheckFailed at a QUOTA index means the per-model quota is
             # exhausted — NOT a snapshot race — so retrying would fail forever.
             # Surface QuotaExhausted so the caller's cascade advances to the next
             # model. (pool/user indices 0-1 are the retryable race; index 2 is the
@@ -3662,21 +3755,26 @@ def reserve_credit(
             quota_reserved_amount=cost if quota_lines else 0,
             quota_user_id=user.user_id,
             quota_period=period if quota_lines else None,
+            uq_reserved_amount=cost if uq_item else 0,
+            uq_user_id=user.user_id if uq_item else None,
+            uq_period=period if uq_item else None,
             measured_bound_microusd=_measured_bound_microusd,
         )
 
     # Pool row deleted mid-flight → per-user-only reservation is correct.
     if pool_vanished:
         # Pool disappeared mid-flight → no pool ceiling, but a configured
-        # per-model quota still applies. Route through the same quota-only path
-        # so quota is enforced and `selected_model` is set (Fable F-3).
-        if quota_lines:
+        # per-model quota and/or the per-user money ceiling still applies.
+        # Route through the same quota-only path so both are enforced and
+        # `selected_model` is set (Fable F-3; P3.1 extends the same rule).
+        if quota_lines or _uq_configured:
             return _reserve_quota_without_pool(
                 user, reservation_tokens, repo=repo, period=period,
                 pricing_key=pricing_key, quota_lines=quota_lines,
                 quota_model=quota_model, selected_model=selected_model,
                 quota_reserved_amount=int(cost_microusd or 0),
                 bound_microusd=bound_microusd,
+                uq_base=_uq_base,
             )
         try:
             repo.reserve(
@@ -4776,21 +4874,31 @@ def _reserve_quota_without_pool(
     repo,
     period: str,
     pricing_key: Optional[str],
-    quota_lines: list,
+    quota_lines: Optional[list],
     quota_model: Optional[str],
     selected_model: Optional[str],
     quota_reserved_amount: int,
     bound_microusd: Optional[int] = None,
+    uq_base: Optional[int] = None,
 ) -> ReservationContext:
-    """Reserve per-user tokens AND a per-model quota atomically, with NO pool.
+    """Reserve per-user tokens, a per-model quota, and/or the per-user money
+    ceiling atomically, with NO pool.
 
-    For tenants that configure a per-model quota but no dollar pool. Same
-    snapshot-optimistic retry as the pooled path, but the transaction is just
-    [user_txn, *quota_lines] — no pool debit, no HOLD row. A quota
-    ConditionalCheckFailed (index >= 1) means the quota is exhausted → raise
-    QuotaExhausted so the caller's cascade advances; a user-row CCF (index 0) is
-    the retryable snapshot race. Fails closed: a quota-configured request must
-    never slip through unmetered (the Fable F-3 hole).
+    For tenants that configure a per-model quota and/or the P3.1 money
+    ceiling but no dollar pool. Same snapshot-optimistic retry as the pooled
+    path, but the transaction is just [user_txn, *quota_lines, uq_item?] — no
+    pool debit, no HOLD row. A quota-line ConditionalCheckFailed means the
+    quota is exhausted → raise QuotaExhausted so the caller's cascade
+    advances to the next MODEL; the money ceiling's own CCF (if present) is
+    named separately below and is terminal instead -- advancing to a
+    different model would not help, the SAME user is over the SAME ceiling
+    regardless of which model is chosen. A user-row CCF (index 0) is the
+    retryable snapshot race. Fails closed: a configured request must never
+    slip through unmetered (the Fable F-3 hole, extended to P3.1).
+
+    `uq_base` is the value `reserve_credit` already resolved-and-sealed for
+    THIS period, threaded down rather than re-read here — the same "one
+    snapshot, one decision point" I5 requires of the pooled path.
 
     `bound_microusd`, when it differs from `quota_reserved_amount`, is the
     sound bound to RECORD on `measured_bound_microusd` — see `reserve_credit`'s
@@ -4800,6 +4908,13 @@ def _reserve_quota_without_pool(
     caller in `reserve_credit` passes it through anyway rather than assume
     that invariant holds forever.
     """
+    from .routing import user_dollar_quota as _uq
+
+    quota_lines = quota_lines or []
+    uq_item = _uq.build_reserve_txn_items(
+        tenant_id=user.org_id, user_id=user.user_id, period=period,
+        amount=quota_reserved_amount, base_microusd=uq_base,
+    )
     client = _low_level_client()
     saw_throttle = False
     for _attempt in range(_RESERVE_MAX_RETRIES):
@@ -4819,7 +4934,9 @@ def _reserve_quota_without_pool(
             user_id=user.user_id, tenant_id=user.org_id,
             tokens=reservation_tokens, expected_total=total,
         )
-        txn_items = [user_txn, *quota_lines]
+        _quota_start = 1
+        _uq_start = _quota_start + len(quota_lines)
+        txn_items = [user_txn, *quota_lines, *uq_item]
         try:
             client.transact_write_items(
                 TransactItems=txn_items,
@@ -4829,10 +4946,22 @@ def _reserve_quota_without_pool(
             if e.response.get("Error", {}).get("Code", "") != "TransactionCanceledException":
                 raise
             reasons = e.response.get("CancellationReasons", []) or []
+            # I7's tie-break: the money ceiling first (non-grantable AND not
+            # remediable by cascading), the per-model quota second (also
+            # non-grantable, but remediable by trying another model) -- see
+            # the identically-ordered check in `reserve_credit`'s pooled path
+            # for the full reasoning.
+            if uq_item and len(reasons) > _uq_start \
+                    and reasons[_uq_start].get("Code", "") == "ConditionalCheckFailed":
+                logger.info("user_dollar_quota_exhausted", tenant_id=user.org_id,
+                            user_id=user.user_id, period=period)
+                raise _err_402(
+                    "user_dollar_quota_exhausted", wall="user_dollar_quota")
             # Quota lines start at index 1 here (index 0 is the user row). A
             # ConditionalCheckFailed on any quota line = quota exhausted.
-            if quota_model is not None and len(reasons) > 1:
-                for _offset, r in enumerate(reasons[1:]):
+            if quota_model is not None and len(reasons) > _quota_start:
+                for _offset, r in enumerate(
+                        reasons[_quota_start:_quota_start + len(quota_lines)]):
                     if r.get("Code", "") == "ConditionalCheckFailed":
                         _scope = _quota_scope_of_line(
                             quota_lines[_offset], tenant_id=user.org_id,
@@ -4859,11 +4988,14 @@ def _reserve_quota_without_pool(
             pricing_key=pricing_key,
             tenant_id=user.org_id,
             pool_active=False,
-            quota_lines=quota_lines,
+            quota_lines=quota_lines or None,
             selected_model=selected_model,
-            quota_reserved_amount=quota_reserved_amount,
+            quota_reserved_amount=quota_reserved_amount if quota_lines else 0,
             quota_user_id=user.user_id,
-            quota_period=period,
+            quota_period=period if quota_lines else None,
+            uq_reserved_amount=quota_reserved_amount if uq_item else 0,
+            uq_user_id=user.user_id if uq_item else None,
+            uq_period=period if uq_item else None,
             measured_bound_microusd=(
                 int(bound_microusd) if bound_microusd is not None
                 else (int(quota_reserved_amount) if quota_reserved_amount else None)
@@ -4908,50 +5040,122 @@ def _quota_period(context) -> Optional[str]:
     return getattr(context, "quota_period", None)
 
 
-def _release_quota_for(context) -> None:
+def _uq_period(context) -> Optional[str]:
+    """The period the per-user MONEY ceiling was RESERVED against.
+
+    Same never-a-fresh-`current_period()` discipline as `_quota_period`, and a
+    SEPARATE field rather than a reuse of it (P3.4/I6, point 1): a request
+    that configures both walls debits two rows, and one field cannot say
+    which amount belongs to which if the two periods ever diverge (the same
+    midnight-crossing hazard `_quota_period`'s own docstring names, independently,
+    on two different rows).
+    """
+    return getattr(context, "uq_period", None)
+
+
+def _quota_adjust_txn_items(context, *, model: str, period: str, delta: int) -> list:
+    """This reservation's per-model quota adjustment, on EXACTLY the scopes it
+    actually reserved against -- read back from the committed `quota_lines`
+    (`mvp.routing.quota.reserved_scopes`), never re-derived from a config that
+    may have changed since reserve time. See `quota.build_adjust_txn_items`
+    for why the scopes must be explicit rather than "try both and let the
+    condition no-op the untouched one": this is composed into a transaction
+    alongside the UQ item below, and a `TransactWriteItems` is all-or-nothing.
+    """
+    from .routing import quota as _quota
+
+    lines = getattr(context, "quota_lines", None) or []
+    scopes = _quota.reserved_scopes(
+        getattr(context, "tenant_id", ""), getattr(context, "quota_user_id", None),
+        model, period, lines)
+    return _quota.build_adjust_txn_items(
+        tenant_id=getattr(context, "tenant_id", ""),
+        user_id=getattr(context, "quota_user_id", None),
+        model=model, period=period, delta=delta,
+        tenant_scope=scopes["tenant"], user_scope=scopes["user"])
+
+
+def _uq_adjust_txn_item(context, delta: int) -> Optional[dict]:
+    """This reservation's per-user money ceiling adjustment, or `None` when
+    the wall was not configured for it (opt-in, like every other wall)."""
+    period = _uq_period(context)
+    user_id = getattr(context, "uq_user_id", None)
+    if not period or not user_id:
+        return None
+    from .routing import user_dollar_quota as _uq
+
+    return _uq.build_adjust_txn_item(
+        tenant_id=getattr(context, "tenant_id", ""), user_id=user_id,
+        period=period, delta=delta)
+
+
+def _release_or_settle_quota_and_uq(
+    context, *, quota_delta: Optional[int], uq_delta: Optional[int], log_event: str
+) -> None:
+    """Move `used` by `quota_delta` on the per-model quota and by `uq_delta` on
+    the per-user money ceiling, in ONE `TransactWriteItems` (P3.4/I6) rather
+    than two independent bare `UpdateItem`s: a crash between two separate
+    writes is exactly the estimate-ceiling drift P3.4 exists to prevent. Both
+    deltas are optional (each wall is independently opt-in) and either or
+    both may be absent for a given reservation; if neither applies this is a
+    no-op that never touches the network.
+    """
     model = getattr(context, "selected_model", None)
-    amt = int(getattr(context, "quota_reserved_amount", 0) or 0)
     period = _quota_period(context)
-    if not model or amt <= 0 or not period:
+    items: list = []
+    if quota_delta is not None and model and period:
+        items.extend(_quota_adjust_txn_items(
+            context, model=model, period=period, delta=quota_delta))
+    if uq_delta is not None:
+        uq_item = _uq_adjust_txn_item(context, uq_delta)
+        if uq_item is not None:
+            items.append(uq_item)
+    if items:
+        try:
+            _low_level_client().transact_write_items(
+                TransactItems=items,
+                ClientRequestToken=_fresh_idempotency_token(),
+            )
+        except Exception:  # noqa: BLE001 — quota/UQ move must never fail the request
+            logger.warning(log_event, model=model, exc_info=True)
+
+
+def _release_quota_for(context) -> None:
+    amt = int(getattr(context, "quota_reserved_amount", 0) or 0)
+    uq_amt = int(getattr(context, "uq_reserved_amount", 0) or 0)
+    if amt <= 0 and uq_amt <= 0:
         return
     try:
-        from .routing import quota as _quota
-        _quota.release_quota(
-            tenant_id=getattr(context, "tenant_id", ""),
-            user_id=getattr(context, "quota_user_id", None),
-            model=model,
-            period=period,
-            reserved_amount=amt,
+        _release_or_settle_quota_and_uq(
+            context,
+            quota_delta=(-amt if amt > 0 else None),
+            uq_delta=(-uq_amt if uq_amt > 0 else None),
+            log_event="quota_release_failed",
         )
-    except Exception:  # noqa: BLE001 — quota release must never fail the request
-        logger.warning("quota_release_failed", model=model, exc_info=True)
     finally:
         # Idempotent: a second release/settle on the same context is a no-op
         # (Fable F-6), so no double -reserved can drive `used` negative.
         context.quota_reserved_amount = 0
+        context.uq_reserved_amount = 0
 
 
 def _settle_quota_for(context, actual_microusd: int) -> None:
-    model = getattr(context, "selected_model", None)
     reserved = int(getattr(context, "quota_reserved_amount", 0) or 0)
-    period = _quota_period(context)
-    if not model or reserved <= 0 or not period:
+    uq_reserved = int(getattr(context, "uq_reserved_amount", 0) or 0)
+    if reserved <= 0 and uq_reserved <= 0:
         return
+    actual = int(actual_microusd)
     try:
-        from .routing import quota as _quota
-        _quota.settle_quota(
-            tenant_id=getattr(context, "tenant_id", ""),
-            user_id=getattr(context, "quota_user_id", None),
-            model=model,
-            period=period,
-            reserved_amount=reserved,
-            actual_amount=int(actual_microusd),
+        _release_or_settle_quota_and_uq(
+            context,
+            quota_delta=(actual - reserved) if reserved > 0 else None,
+            uq_delta=(actual - uq_reserved) if uq_reserved > 0 else None,
+            log_event="quota_settle_failed",
         )
-    except Exception:  # noqa: BLE001 — quota settle must never fail the request
-        logger.warning("quota_settle_failed", model=model, exc_info=True)
     finally:
         # Idempotent (Fable F-6): clear so a later release/double-settle no-ops.
         context.quota_reserved_amount = 0
+        context.uq_reserved_amount = 0
 
 
 def _settled_only_txn_item(*, table_name: str, tenant_id: str, period: str, actual_microusd: int):

@@ -16,12 +16,20 @@ Design note (why ONE `used` counter, not reserved+settled):
   where `:headroom = limit - amount` is computed client-side.
 
   reserve : ADD used += amount   (cond: used <= limit - amount)  → cancels if over
-  settle  : ADD used += (actual - reserved)   (unconditional; actual<=reserved so
-            this is <= 0 — releases the over-reservation, leaves settled recorded)
+  settle  : ADD used += (actual - reserved)   (unconditional; releases the
+            over-reservation when actual < reserved, leaves settled recorded)
   release : ADD used += (-reserved)           (unconditional; invoke failed, no spend)
 
   Net: after settle, `used` == sum of settled actuals; after release, the
   reservation is fully removed. `used` never needs a separate reserved field.
+
+  P3.7's correction: `settle`'s delta is NOT bounded `<= 0`. `actual <= reserved`
+  is not a property this code has -- an overrun (`actual > reserved`) is a real,
+  accepted outcome (`mvp._pipeline.py`'s admission-checked-vs-actual accounting
+  computes `overrun = max(0, actual - reserved)` and records it), so the delta
+  can be POSITIVE. This module's own admission gate bounds RESERVED-in-flight
+  plus already-settled `used` at reserve time; it says nothing about what a
+  later settle discovers the actual spend to be.
 """
 from __future__ import annotations
 
@@ -205,15 +213,16 @@ def reserved_scopes(
     }
 
 
-def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
-    """One TransactWriteItems Update that gives back `amount` from a quota
-    row's `used` counter, for a reservation whose owning request cannot give
-    it back itself (a reaper reclaim, or a retained hold an operator later
-    releases). Gated on `attribute_exists(used)`, the SAME no-phantom-row
-    guard `_adjust_used` uses for settle/release: a scope this reservation
-    never actually reserved against has no `used` attribute to exist, so
-    the condition fails closed rather than creating a negative-`used` row
-    for a scope this specific reservation never touched.
+def _adjust_item(pk: str, sk: str, delta: int) -> dict[str, Any]:
+    """One TransactWriteItems Update that moves a quota row's `used` counter
+    by a SIGNED `delta`. Gated on `attribute_exists(used)`, the SAME
+    no-phantom-row guard `_adjust_used` uses for settle/release: a scope this
+    reservation never actually reserved against has no `used` attribute to
+    exist, so the condition fails closed rather than creating a
+    negative-`used` row for a scope this specific reservation never touched.
+    Carries no wall-clock value (P3.4/I6): the settle transaction this is
+    composed into reuses one idempotency token across retries, which requires
+    every item in it to be byte-identical on each retry.
     """
     return {
         "Update": {
@@ -221,9 +230,55 @@ def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
             "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
             "UpdateExpression": "ADD used :d",
             "ConditionExpression": "attribute_exists(used)",
-            "ExpressionAttributeValues": {":d": {"N": str(-int(amount))}},
+            "ExpressionAttributeValues": {":d": {"N": str(int(delta))}},
         }
     }
+
+
+def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
+    """`_adjust_item` specialised to a give-back: always negative, `amount`
+    given as the positive magnitude to return (the reaper's/a retained hold's
+    own convention -- see `build_reverse_txn_items` below)."""
+    return _adjust_item(pk, sk, -int(amount))
+
+
+def build_adjust_txn_items(
+    tenant_id: str,
+    user_id: Optional[str],
+    model: str,
+    period: str,
+    delta: int,
+    *,
+    tenant_scope: bool,
+    user_scope: bool,
+) -> list[dict[str, Any]]:
+    """Build the TransactWriteItems items that move `used` by `delta` (settle's
+    signed overrun-or-refund, or release's `-reserved`) on EXACTLY the scopes
+    THIS reservation actually reserved against (P3.4/I6).
+
+    Unlike `settle_quota`/`release_quota` below -- which try BOTH the tenant
+    and user pk unconditionally via bare, independent `update_item` calls,
+    relying on `attribute_exists(used)` to no-op whichever one this
+    reservation never touched -- this is meant to be composed into ONE
+    `TransactWriteItems` together with another wall's item (the new
+    `user_dollar_quota` counter). A `TransactWriteItems` is all-or-nothing, so
+    bundling an UNCONDITIONAL attempt at both pks would make a
+    single-scope-configured tenant fail this call on EVERY settle/release
+    (the untouched pk's guaranteed `ConditionalCheckFailed` would cancel the
+    whole transaction, including the scope that WAS legitimately reserved).
+    `tenant_scope`/`user_scope` are therefore REQUIRED -- exactly the same
+    requirement `build_reverse_txn_items` states for the reaper's reclaim, and
+    for the identical reason: only the caller's own reservation record
+    (`quota_lines`, read back through `reserved_scopes`) knows which scopes
+    this specific reservation actually wrote to.
+    """
+    sk = _sk(model, period)
+    items: list[dict[str, Any]] = []
+    if tenant_scope:
+        items.append(_adjust_item(_pk_tenant(tenant_id), sk, delta))
+    if user_scope and user_id:
+        items.append(_adjust_item(_pk_user(tenant_id, user_id), sk, delta))
+    return items
 
 
 def build_reverse_txn_items(
@@ -274,9 +329,13 @@ def settle_quota(
 ) -> None:
     """Settle: adjust `used` from the reserved estimate to the actual spend.
 
-    `used` already includes `reserved_amount` from the reserve. actual<=reserved
-    by construction, so we ADD (actual - reserved) (<= 0), leaving `used` equal
-    to settled actuals. Unconditional; never fails on quota grounds.
+    `used` already includes `reserved_amount` from the reserve, so we ADD
+    (actual - reserved), leaving `used` equal to settled actuals. NOT bounded
+    `<= 0` (P3.7 correction): `actual` can exceed `reserved` (an overrun --
+    the admission gate bounds what was RESERVED, not what a later settle
+    discovers was actually spent), in which case this delta is positive and
+    `used` moves above what reserve alone would have admitted. Unconditional;
+    never fails on quota grounds.
     """
     delta = int(actual_amount) - int(reserved_amount)
     if delta == 0:
