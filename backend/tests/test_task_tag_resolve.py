@@ -22,6 +22,18 @@ module `backend/mvp/task_tag.py`.
 on `ModuleNotFoundError` for that reason — the interface names a module this
 worktree does not have, which is the correct "surface absent" failure this
 phase is supposed to produce.
+
+Amendment A2 settled two readings this file originally flagged as choices
+rather than certainties:
+  - "blank" (in `resolve`'s docstring) includes whitespace-only, not just
+    `== ""`. `TestAbsentAndBlank.test_header_present_but_whitespace_only_is_absent`
+    is now a required assertion.
+  - "`GRAMMAR` reused not copied" means object identity
+    (`task_tag.GRAMMAR is mvp.observability.context._ID_GRAMMAR`), not
+    merely an equal pattern string. `TestDeclaredOnce
+    .test_grammar_is_the_correlation_id_grammar_reused_not_copied` stands as
+    originally written; the note below about the looser reading is kept so a
+    future reader understands why identity, not equality, is asserted.
 """
 from __future__ import annotations
 
@@ -190,17 +202,16 @@ class TestAbsentAndBlank:
         assert tag == SENTINEL
         assert source is Source.ABSENT
 
-    def test_header_present_but_whitespace_only_is_absent(self):
-        """Not literally required by rule #2, but the sibling correlation-id
-        module (mvp.observability.context._validate) treats a present,
-        whitespace-only header as absent ('empty ≡ absent' — a client that
-        sends the header with nothing meaningful in it plainly means no
-        tag). `resolve`'s docstring says 'None or blank'; this test reads
-        'blank' as including whitespace-only, following that sibling
-        precedent. Flagged in the handoff report as an interpretation, not a
-        certainty, in case the other worker read 'blank' as `== \"\"` only.
-        """
-        tag, source = resolve("   ")
+    @pytest.mark.parametrize("blank", ["   ", "\t", "\t\r\n", " 　"])
+    def test_header_present_but_whitespace_only_is_absent(self, blank):
+        """Settled by Amendment A2 (no longer a flagged interpretation):
+        `resolve`'s 'None or blank' includes whitespace-only, matching the
+        sibling correlation-id module (mvp.observability.context._validate)
+        treating a present, whitespace-only header as absent ('empty ≡
+        absent' — a client that sends the header with nothing meaningful in
+        it plainly means no tag). This is now a required assertion, not an
+        optional extra."""
+        tag, source = resolve(blank)
         assert tag == SENTINEL
         assert source is Source.ABSENT
 
