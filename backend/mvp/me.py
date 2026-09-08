@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo import TenantsRepository, UsageLogsRepository, UsersRepository, UserTenantsRepository
 
+from .admin_tenants import UsageByTagResponse, usage_by_tag_response
 from .authz import effective_permissions, log_audit_event, require_permission
 from .deps import AuthenticatedUser, get_current_user
 
@@ -398,4 +399,25 @@ def usage_history(
     return UsageHistoryResponse(
         history=history,
         next_cursor=_encode_cursor(resp.get("LastEvaluatedKey")),
+    )
+
+
+@router.get("/me/usage/by-tag", response_model=UsageByTagResponse)
+def my_usage_by_tag(
+    period: str = Query(
+        ..., pattern=r"^\d{4}-\d{2}$", description="Billing period 'YYYY-MM' (UTC)."
+    ),
+    user: AuthenticatedUser = Depends(require_permission("usage:read-self")),
+) -> UsageByTagResponse:
+    """The caller's own usage grouped by the caller-asserted task tag.
+
+    Through the same shared `usage_by_tag_response` the admin and team-lead
+    routes use, restricted to `user.org_id` / `user.user_id` -- the caller can
+    only ever see their own rows, never chosen by the caller (unlike the
+    admin/team-lead routes, which accept an explicit `user_id`). `period` is
+    validated by the same `pattern` every period-scoped route in this API
+    uses, so a malformed value is a 422, not a hand-rolled 400.
+    """
+    return usage_by_tag_response(
+        tenant_id=user.org_id, period=period, user_id=user.user_id,
     )
