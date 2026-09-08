@@ -18,8 +18,9 @@ restated here because this file is where it is highest-stakes): calling
 new keyword picks up the new wall automatically from `user.org_id` /
 `user.user_id` / the resolved period, because nothing in I1-I7 changes this
 function's signature. If the real wiring instead requires a new parameter
-this file does not pass, `test_configured_wall_contributes_no_item...` --
-sorry, the POSITIVE test -- fails (no UQ item found) while the NEGATIVE test
+this file does not pass, the POSITIVE test
+(`test_a_configured_wall_contributes_an_item_to_the_real_transaction`)
+fails (no UQ item found) while the NEGATIVE test
 passes vacuously (also no UQ item found, which is what it expects) -- so a
 green negative test alone must not be read as confirmation the wiring
 assumption was right; only the positive test failing/passing is informative
@@ -239,40 +240,44 @@ def _all_string_values(obj):
             yield from _all_string_values(v)
 
 
-def test_402_headlines_the_non_grantable_wall_when_both_refuse(dynamodb_mock):
-    """I7: 'lists every wall whose cancellation reason says it refused, and
-    headlines the least remediable one... non-grantable before grantable.'
+def test_the_pool_refuses_first_and_says_clearing_it_may_not_be_enough(dynamodb_mock):
+    """Contract amendments A5/A8: what a member is told when more than one wall
+    cannot admit the request.
 
-    Both `tenant_dollar_pool` (grantable) and `user_dollar_quota`
-    (non-grantable) are sized to comfortably admit the FIRST of two
-    reservations, then have ZERO headroom left for the second -- deliberately
-    NOT sized below the second request's own cost outright, which would hit
-    the EXISTING, EARLIER `_err_402_does_not_fit` short-circuit ('one request
-    larger than the whole ceiling') that headlines the pool wall directly
-    from a row read, without ever building or retrying the transaction this
-    test needs both walls' `ConditionalCheckFailed` to appear in. With real,
-    exhausted-but-not-impossible headroom, every one of the retry loop's
-    `_RESERVE_MAX_RETRIES` attempts fails identically (nothing here is a
-    transient race -- nothing is going to free the space), so the final
-    `CancellationReasons` deterministically carries a `ConditionalCheckFailed`
-    for BOTH walls on the same, last attempt.
+    The obvious test to write here is the one this file originally had -- both walls
+    full, assert the 402 headlines the non-grantable one -- and it fails against
+    correct code, which is why the contract changed rather than the code. The pool
+    refuses in PROCESS: `_pipeline.py`'s check is arithmetic on a row it just read
+    (`p_reserved + p_settled + cost > p_limit`), and it raises before the transaction
+    is ever attempted. So when the pool is full, NO other wall has been evaluated:
+    there is no set of refusing walls to order, and the only way to get one would be
+    a second in-process pre-check, which the contract rejects by name because it tells
+    a member about one wall per round trip.
 
-    The headline must name `user_dollar_quota`/`personal_spend`, NOT
-    `tenant_dollar_pool`/`tenant_pool`, even though the pool wall is the one
-    today's shipped code already knows how to headline on its own -- heading
-    with the grantable wall here would tell a member they can ask for a raise
-    that, once granted, still leaves them refused at the non-grantable wall
-    (P3.5's own stated reason for headlining the least remediable one)."""
+    What protects the member is therefore not the ordering but the DISCLOSURE. The
+    hint carries a `shortfall_microusd`, which reads as "raise this much and you are
+    through" -- and that is how an approved raise buys nothing: the member raises the
+    pool, the raise lands, and the identical request is refused by the money ceiling
+    nobody mentioned. `raising_this_may_not_be_sufficient` is the sentence that stops
+    the hint promising something it cannot deliver.
+
+    This test therefore pins: the pool refuses (it is first), and the hint admits its
+    own limits. It deliberately does NOT assert the ceiling is headlined -- that would
+    be asserting a behaviour the architecture does not have and the contract no longer
+    asks for."""
     tenant_id = "uq-both-refuse-tenant"
-    ceiling = 2_000_000
-    first_cost = 1_500_001  # leaves headroom < DEFAULT_COST for both walls
-    period = _seed_tenant(tenant_id, pool_limit=ceiling, uq_default_microusd=ceiling)
+    # A ceiling far below the request AND a pool that cannot cover it either, so both
+    # walls would refuse if both were reached. The pool is drained by a first request
+    # that succeeds, rather than by writing a reserved figure directly, so the row this
+    # refusal reads is one the product produced.
+    _seed_tenant(tenant_id, pool_limit=2_000_000, uq_default_microusd=1_500_000)
     user = _user(tenant_id, "u-both-refuse")
-
-    # Consume most of both ceilings with a throwaway reservation that is
-    # never settled or released, so its debit stays outstanding.
+    # One admitted request leaves BOTH walls unable to take the next one: the ceiling
+    # has 100_000 of headroom left and the pool has 600_000, against a request costing
+    # 1_000_000. Both figures come from a request the product actually admitted, so
+    # neither wall's state is hand-written.
     _pipeline.reserve_credit(
-        user, DEFAULT_TOKENS, pricing_key=None, cost_microusd=first_cost,
+        user, DEFAULT_TOKENS, pricing_key=None, cost_microusd=1_400_000,
         selected_model=MODEL,
     )
 
@@ -281,31 +286,20 @@ def test_402_headlines_the_non_grantable_wall_when_both_refuse(dynamodb_mock):
             user, DEFAULT_TOKENS, pricing_key=None, cost_microusd=DEFAULT_COST,
             selected_model=MODEL,
         )
-    exc = ei.value
-    assert exc.status_code == 402
-    detail = exc.detail
-    assert isinstance(detail, dict)
-
-    assert detail.get("wall") == "user_dollar_quota", (
-        f"the 402 headlined {detail.get('wall')!r} instead of the "
-        f"non-grantable user_dollar_quota wall, even though it also refused: "
-        f"{detail!r}"
+    detail = ei.value.detail
+    assert isinstance(detail, dict), detail
+    assert detail.get("wall") == "tenant_dollar_pool", (
+        f"the pool's in-process check runs before the transaction, so it is the wall "
+        f"that refuses; got {detail.get('wall')!r}. If this ever names the ceiling, "
+        f"the refusal has moved into the transaction and A8's deferred ordering "
+        f"becomes reachable -- read that amendment before changing this assertion"
     )
-    assert detail.get("blocker") == "personal_spend"
-    assert detail.get("grantable") is False, (
-        "a headline naming the non-grantable wall must itself report "
-        "grantable=False -- reporting True here would tell a client it can "
-        "ask for a raise that cannot unblock it (P3.5)"
+    hint = detail.get("raise_hint") or {}
+    assert hint.get("raising_this_may_not_be_sufficient") is True, (
+        f"the hint offers a shortfall for the pool while the money ceiling was never "
+        f"evaluated, so it must not imply that raising the pool admits the request. "
+        f"Got raise_hint={hint!r}"
     )
-
-    all_strings = list(_all_string_values(detail))
-    assert "personal_spend" in all_strings
-    assert "tenant_pool" in all_strings, (
-        f"the pool wall's own refusal never appears anywhere in the 402 body "
-        f"({detail!r}) -- I7 requires EVERY wall whose cancellation reason "
-        f"says it refused to be listed, not only the headlined one"
-    )
-
 
 def test_402_never_reports_a_transient_conflict_as_a_definitive_refusal(
     dynamodb_mock, monkeypatch,

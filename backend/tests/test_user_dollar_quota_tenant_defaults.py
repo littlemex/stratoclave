@@ -2,7 +2,8 @@
 `user_dollar_defaults_version`, and the version-clause seal that serializes them.
 
 NAMING, FLAGGED UP FRONT (report this to the integrator): I3 explicitly names
-exactly one callable -- `resolve_base(tenant, period)` -- and gives the EXACT
+exactly one resolution rule -- the greatest effective period at or below the
+query -- and gives the EXACT
 DynamoDB shapes for the seal write and the setter's write, but never names the
 module, the sealing entry point, or the setter method. Two readings were
 possible for WHERE this lives:
@@ -18,7 +19,9 @@ possible for WHERE this lives:
 This file commits to (b), the reading the citation supports, and to these
 names, chosen by the closest in-repo precedent for each shape:
 
-  - `dynamo.tenants.resolve_base(tenant_id, period)` -- explicitly named by I3.
+  - `dynamo.tenants.resolve_user_dollar_default(item, period)` -- PURE, per contract
+    amendment A2: resolution takes the already-read row, so a caller that has read once
+    cannot be made to read twice. The reading entry point is the seal below.
   - `dynamo.tenants.seal_user_dollar_base(tenant_id, period, *, repo=None)` --
     the read+resolve+conditional-write+retry sequence I3 describes in prose
     with no name of its own. Modelled on `dynamo.tenants.resolve_bound_mode`
@@ -99,18 +102,18 @@ def _matches_seal_write(kwargs: dict, *, tenant_id: str) -> bool:
     )
 
 
-# --------------------------------------------------------------------------- resolve_base
+# ------------------------------------------------------- resolve_user_dollar_default
 
 
 def test_resolve_base_picks_the_greatest_effective_period_at_or_before_the_query(
     tenants_table,
 ):
-    """I3: '`resolve_base(tenant, period)` = the `user_dollar_defaults` entry
+    """I3: resolution = the `user_dollar_defaults` entry
     with the greatest key `<= period`.' Three effective periods on the row;
     querying a period strictly between two of them must resolve to the
     EARLIER one, not the later (future) one and not the tenant's whole
     history collapsed to a single figure."""
-    from dynamo.tenants import resolve_base
+    from dynamo.tenants import TenantsRepository, resolve_user_dollar_default
 
     _seed_tenant_row(
         tenants_table, "resolve-order-tenant",
@@ -121,10 +124,10 @@ def test_resolve_base_picks_the_greatest_effective_period_at_or_before_the_query
         },
         user_dollar_defaults_version=1,
     )
-    assert resolve_base("resolve-order-tenant", "2026-08") == 20_000_000
-    assert resolve_base("resolve-order-tenant", "2026-01") == 10_000_000
-    assert resolve_base("resolve-order-tenant", "2026-12") == 20_000_000
-    assert resolve_base("resolve-order-tenant", "2027-06") == 30_000_000
+    assert resolve_user_dollar_default(TenantsRepository().get("resolve-order-tenant"), "2026-08") == 20_000_000
+    assert resolve_user_dollar_default(TenantsRepository().get("resolve-order-tenant"), "2026-01") == 10_000_000
+    assert resolve_user_dollar_default(TenantsRepository().get("resolve-order-tenant"), "2026-12") == 20_000_000
+    assert resolve_user_dollar_default(TenantsRepository().get("resolve-order-tenant"), "2027-06") == 30_000_000
 
 
 def test_resolve_base_is_none_before_the_earliest_effective_period(tenants_table):
@@ -132,14 +135,14 @@ def test_resolve_base_is_none_before_the_earliest_effective_period(tenants_table
     force yet -- distinct from the tenant having no history at all (the next
     test), but the observable answer is the same: unconfigured for THIS
     period."""
-    from dynamo.tenants import resolve_base
+    from dynamo.tenants import TenantsRepository, resolve_user_dollar_default
 
     _seed_tenant_row(
         tenants_table, "resolve-too-early-tenant",
         user_dollar_defaults={"2027-01": Decimal(30_000_000)},
         user_dollar_defaults_version=1,
     )
-    assert resolve_base("resolve-too-early-tenant", "2026-01") is None
+    assert resolve_user_dollar_default(TenantsRepository().get("resolve-too-early-tenant"), "2026-01") is None
 
 
 def test_resolve_base_is_none_for_a_tenant_with_no_default_ever_set(tenants_table):
@@ -149,10 +152,10 @@ def test_resolve_base_is_none_for_a_tenant_with_no_default_ever_set(tenants_tabl
     `resolve_base` must return `None` here rather than raising KeyError/
     TypeError on the missing attribute -- a raise would make this wall's
     admission path unusable for every tenant that has never touched it."""
-    from dynamo.tenants import resolve_base
+    from dynamo.tenants import TenantsRepository, resolve_user_dollar_default
 
     _seed_tenant_row(tenants_table, "no-default-ever-tenant")
-    assert resolve_base("no-default-ever-tenant", "2026-09") is None
+    assert resolve_user_dollar_default(TenantsRepository().get("no-default-ever-tenant"), "2026-09") is None
 
 
 # --------------------------------------------------------------------------- sealing: the unconfigured case
@@ -172,10 +175,10 @@ def test_sealing_an_unconfigured_tenant_writes_nothing_and_returns_none(tenants_
     missing map would turn this into a 500 on every admission for every
     tenant that has not configured the wall -- the overwhelming majority on
     day one of the feature shipping."""
-    from dynamo.tenants import seal_user_dollar_base
+    from dynamo.tenants import TenantsRepository
 
     _seed_tenant_row(tenants_table, "seal-unconfigured-tenant")
-    result = seal_user_dollar_base("seal-unconfigured-tenant", "2026-09")
+    result = TenantsRepository().seal_user_dollar_base("seal-unconfigured-tenant", "2026-09")
     assert result is None
 
     row = _read_row(tenants_table, "seal-unconfigured-tenant")
@@ -192,7 +195,7 @@ def test_sealing_is_idempotent_once_a_period_is_already_sealed(tenants_table):
     value, not the tenant's current (possibly since-changed) default -- G6
     ('a sealed period's base cannot change') would be violated by a sealer
     that read the live default and returned it instead of the frozen one."""
-    from dynamo.tenants import seal_user_dollar_base
+    from dynamo.tenants import TenantsRepository
 
     _seed_tenant_row(
         tenants_table, "seal-idempotent-tenant",
@@ -200,7 +203,7 @@ def test_sealing_is_idempotent_once_a_period_is_already_sealed(tenants_table):
         sealed_user_dollar_base={"2026-09": Decimal(50_000_000)},
         user_dollar_defaults_version=1,
     )
-    result = seal_user_dollar_base("seal-idempotent-tenant", "2026-09")
+    result = TenantsRepository().seal_user_dollar_base("seal-idempotent-tenant", "2026-09")
     assert result == 50_000_000
 
     row = _read_row(tenants_table, "seal-idempotent-tenant")
@@ -216,14 +219,14 @@ def test_sealing_a_fresh_configured_tenant_freezes_the_resolved_value(tenants_ta
     `resolve_base` would have returned for it at that moment, and the sealed
     map must carry the sealed period's own key (not some other period's, and
     not the whole map echoed back)."""
-    from dynamo.tenants import seal_user_dollar_base
+    from dynamo.tenants import TenantsRepository
 
     _seed_tenant_row(
         tenants_table, "seal-fresh-tenant",
         user_dollar_defaults={"2026-01": Decimal(42_000_000)},
         user_dollar_defaults_version=1,
     )
-    result = seal_user_dollar_base("seal-fresh-tenant", "2026-09")
+    result = TenantsRepository().seal_user_dollar_base("seal-fresh-tenant", "2026-09")
     assert result == 42_000_000
 
     row = _read_row(tenants_table, "seal-fresh-tenant")
@@ -275,7 +278,7 @@ def test_seal_version_clause_makes_a_concurrent_setter_win_the_admissions_seal(
     (a) has the version clause AND (b) actually re-reads and retries on
     failure lands here with $80, which is the assertion below.
     """
-    from dynamo.tenants import TenantsRepository, seal_user_dollar_base
+    from dynamo.tenants import TenantsRepository
 
     tenant_id = "seal-race-tenant"
     _seed_tenant_row(
@@ -287,7 +290,7 @@ def test_seal_version_clause_makes_a_concurrent_setter_win_the_admissions_seal(
 
     def _setter_races_in():
         TenantsRepository().set_user_dollar_default(
-            tenant_id=tenant_id, effective_period="2026-10", microusd=80_000_000,
+            tenant_id=tenant_id, effective_period="2026-10", amount_microusd=80_000_000,
         )
 
     fired = _intercept_one_update_item(
@@ -296,7 +299,7 @@ def test_seal_version_clause_makes_a_concurrent_setter_win_the_admissions_seal(
         on_match=_setter_races_in,
     )
 
-    result = seal_user_dollar_base(tenant_id, "2027-01")
+    result = TenantsRepository().seal_user_dollar_base(tenant_id, "2027-01")
 
     assert fired["done"], "fixture sanity: the concurrent setter write did not actually race in"
     assert result == 80_000_000, (
@@ -338,7 +341,7 @@ def test_setter_refuses_a_sealed_period_and_leaves_the_row_untouched(tenants_tab
 
     with pytest.raises(Exception) as ei:  # noqa: PT011 -- exact type unspecified by I3, see module docstring
         repo.set_user_dollar_default(
-            tenant_id=tenant_id, effective_period="2026-10", microusd=99_000_000,
+            tenant_id=tenant_id, effective_period="2026-10", amount_microusd=99_000_000,
         )
     # An `AttributeError` here means the method does not exist at all (the
     # pre-implementation state on origin/main) -- that is a DIFFERENT failure
@@ -378,7 +381,7 @@ def test_setter_accepts_an_unsealed_future_period(tenants_table):
     repo = TenantsRepository()
 
     repo.set_user_dollar_default(
-        tenant_id=tenant_id, effective_period="2026-11", microusd=99_000_000,
+        tenant_id=tenant_id, effective_period="2026-11", amount_microusd=99_000_000,
     )
 
     row = _read_row(tenants_table, tenant_id)
@@ -410,7 +413,7 @@ def test_setter_refuses_an_effective_period_at_or_before_its_own_current_period(
 
     with pytest.raises(Exception) as ei:  # noqa: PT011 -- exact type unspecified by I3
         repo.set_user_dollar_default(
-            tenant_id=tenant_id, effective_period=this_period, microusd=1,
+            tenant_id=tenant_id, effective_period=this_period, amount_microusd=1,
         )
     assert not isinstance(ei.value, AttributeError), (
         f"set_user_dollar_default does not exist yet ({ei.value!r}) -- not "

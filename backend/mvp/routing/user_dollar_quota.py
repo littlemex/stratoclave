@@ -79,31 +79,31 @@ def build_reserve_txn_items(
     user_id: Optional[str],
     period: str,
     amount: int,
-    base_microusd: Optional[int],
-    granted_microusd: int = 0,
+    ceiling: Optional[int],
 ) -> list[dict[str, Any]]:
     """Build the (0 or 1) TransactWriteItems entries admitting `amount` against
     this user's per-period money ceiling.
 
-    `base_microusd` is the value `dynamo.tenants.TenantsRepository.
+    `ceiling` is the value `dynamo.tenants.TenantsRepository.
     seal_user_dollar_base` already resolved-and-sealed for `period` -- passed
     in rather than re-read here, which is the whole point of I5's "one
     snapshot, one decision point": a caller that read the base ONCE, decided
     `configured_when` from it, and then had this builder re-read it could see
     a DIFFERENT answer at build time (a default that was absent a moment ago
     and is now present admits the request against a ceiling this call never
-    priced). `base_microusd is None` (unconfigured, or no `user_id` to key the
+    priced). `ceiling is None` (unconfigured, or no `user_id` to key the
     row on) is this builder's OWN half of that contract: it returns no item,
     the same "not configured" answer `configured_when` gave the caller a
     moment earlier from the identical value.
 
-    `granted_microusd` defaults to 0 and PR 3 never passes anything else
-    (O3.2) -- carried as a parameter rather than hardcoded so PR 4's raise
-    path is an argument, not an edit to this arithmetic.
+    The grant is added by the CALLER, not here. This builder conditions on the
+    number it was handed, so PR 4's raise path changes what the caller resolves
+    and leaves this signature alone. A `granted` parameter here would be a
+    surface with no writer in this change, which is the same defect as the pin
+    clause O3.2 defers for that reason.
     """
-    if base_microusd is None or not user_id:
+    if ceiling is None or not user_id:
         return []
-    ceiling = int(base_microusd) + int(granted_microusd)
     sk = uq_sk(period)
     expires_at = _quota._period_expiry(period)
     return [_reserve_item(uq_pk(tenant_id, user_id), sk, int(amount), ceiling, expires_at)]

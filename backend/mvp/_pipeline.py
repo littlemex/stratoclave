@@ -3579,7 +3579,7 @@ def reserve_credit(
         # this call (I5) -- never re-read here.
         uq_item = _uq.build_reserve_txn_items(
             tenant_id=user.org_id, user_id=user.user_id, period=period,
-            amount=cost, base_microusd=_uq_base,
+            amount=cost, ceiling=_uq_ceiling(_uq_base),
         )
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=user.org_id,
@@ -4913,7 +4913,7 @@ def _reserve_quota_without_pool(
     quota_lines = quota_lines or []
     uq_item = _uq.build_reserve_txn_items(
         tenant_id=user.org_id, user_id=user.user_id, period=period,
-        amount=quota_reserved_amount, base_microusd=uq_base,
+        amount=quota_reserved_amount, ceiling=_uq_ceiling(uq_base),
     )
     client = _low_level_client()
     saw_throttle = False
@@ -5028,6 +5028,21 @@ def release_pool(context) -> None:
     _release_quota_for(context)
 
 
+def _uq_ceiling(base_microusd: Optional[int]) -> Optional[int]:
+    """The per-user money ceiling from its sealed base: `base + coalesce(granted, 0)`.
+
+    Composed here rather than inside the builder so the builder conditions on the one
+    number it needs, and so PR 4's raise path changes THIS function instead of a
+    signature every call site repeats. `granted` is zero until that PR ships its
+    writer -- carried as arithmetic rather than as a builder parameter, because a
+    parameter nothing can set is the same untestable surface the pin clause is
+    deferred for.
+    """
+    if base_microusd is None:
+        return None
+    return int(base_microusd) + 0
+
+
 def _quota_period(context) -> Optional[str]:
     """The period the quota was RESERVED against — never a fresh current_period().
 
@@ -5111,10 +5126,18 @@ def _release_or_settle_quota_and_uq(
         if uq_item is not None:
             items.append(uq_item)
     if items:
+        # A token DERIVED from the reservation, not a fresh one. Both items are
+        # unconditional `ADD used :d` and deliberately timestamp-free, so a lost-ack
+        # retry re-sends byte-identical params; with a fresh token DynamoDB would treat
+        # that as a new request and apply the delta a second time, moving both counters
+        # twice. A fresh token is right where a cancelled transaction writes nothing and
+        # the retry re-reads first; it is wrong here, where the write is unconditional.
+        # The tag separates settle from release so the two never share a token.
+        _primary = str(getattr(context, "hold_id", None) or _quota_period(context) or "")
         try:
             _low_level_client().transact_write_items(
                 TransactItems=items,
-                ClientRequestToken=_fresh_idempotency_token(),
+                ClientRequestToken=_derived_token(_primary, f"quota-uq-{log_event}"),
             )
         except Exception:  # noqa: BLE001 — quota/UQ move must never fail the request
             logger.warning(log_event, model=model, exc_info=True)

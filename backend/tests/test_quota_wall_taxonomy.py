@@ -263,6 +263,11 @@ def test_u1_raise_hint_is_importable_and_shaped_per_b4():
         "router_mode": None,
         "pricing_version": None,
         "priced_at": None,
+        # Added with the per-user money ceiling: a refusal names ONE wall, and some
+        # walls refuse before the transaction runs, so clearing the named one is not
+        # known to be sufficient. Asserted here because this test's whole purpose is
+        # that the hint's shape is pinned rather than drifting silently.
+        "raising_this_may_not_be_sufficient": True,
     }
 
 
