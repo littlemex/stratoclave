@@ -30,6 +30,7 @@ from dynamo import CreditLedgerRepository
 from dynamo.tenant_budgets import TenantBudgetsRepository, current_period, hold_sk as _hsk
 from dynamo.user_tenants import UserTenantsRepository
 from mvp import _pipeline
+from mvp import task_tag as task_tag_mod
 from mvp.billing_authorize import (
     decode_authorization_id,
     encode_authorization_id,
@@ -248,6 +249,8 @@ def test_capture_after_reclaim_raises_external_hold_reclaimed(dynamodb_mock):
     # ExternalHoldReclaimed guard. Simulate that: build a ctx by hand as the
     # pre-reap rehydrate would have, then settle.
     ctx = _pipeline.ReservationContext(
+        task_tag=task_tag_mod.SENTINEL,
+        task_tag_source=task_tag_mod.Source.ABSENT.value,
         tenants_repo=UserTenantsRepository(),
         reservation_tokens=0,
         pool_reserved_microusd=900_000,

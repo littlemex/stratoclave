@@ -15,6 +15,14 @@ Carries the three observability identifiers through a request:
                            the unit the future offline evaluator learns routing
                            policy for. Client-supplied via ``x-sc-group-id``;
                            ``None`` when absent.
+  * ``task_tag``         — a caller-asserted, UNVERIFIED label for the work a
+                           request belongs to, resolved once here from
+                           ``x-sc-task-tag`` by ``mvp.task_tag.resolve`` and
+                           carried, never re-read. Never empty; the reserved
+                           sentinel when nothing was asserted. See
+                           ``mvp.task_tag`` for why this is a separate,
+                           never-raising resolver rather than a header this
+                           module validates itself.
 
 Client contract is HTTP headers, NOT body fields: the request body is forwarded
 to Bedrock, so stuffing correlation ids into it either fails upstream validation
@@ -82,10 +90,20 @@ class RequestContext:
     group_id: Optional[str]   # client header, else None
     workflow_run_supplied: bool  # True iff the client sent the run id
     received_at_ms: int
+    # See ``task_tag`` above. Required, no default -- see ``SpanDraft`` in
+    # ``observability/store.py`` for why a default here would be unsafe.
+    task_tag: str
+    task_tag_source: str
     # SAAR: the client-supplied routing session id (``x-sc-session-id``), or None
     # when absent. Opaque, grammar-validated. NOT a tenant selector — see the
     # module docstring and ``session_key``.
     session_id_supplied: Optional[str] = None
+    # `mvp.task_tag.dropped_reason(task_tag_source)`, computed once here so the
+    # response echo (``response_headers``) never re-resolves the header.
+    # ``"reserved"`` / ``"grammar"`` when the tag was dropped; `None` when it
+    # was not (absent or asserted) — a client never needs telling its own tag
+    # stuck.
+    task_tag_dropped_reason: Optional[str] = None
 
     def session_key(self) -> str:
         """The SAAR session key for this request: the explicit ``x-sc-session-id``
@@ -131,6 +149,7 @@ def build_request_context(
     workflow_run_id_header: Optional[str],
     session_id_header: Optional[str] = None,
     request_id: Optional[str] = None,
+    task_tag_header: Optional[str] = None,
 ) -> RequestContext:
     """Assemble a RequestContext from the authenticated tenant + raw headers.
 
@@ -139,10 +158,19 @@ def build_request_context(
     yields a fresh server-generated run id (a run of one span). The optional
     ``x-sc-session-id`` is validated by the same grammar (empty ≡ absent) and is
     the preferred SAAR session key; absence is the compatible default.
+
+    ``task_tag_header`` is resolved once, here, by ``mvp.task_tag.resolve`` --
+    NOT by ``_validate`` above. That resolver never raises for any value, so
+    this function does not raise for ``task_tag_header`` either (unlike the
+    other headers): a task tag must never be able to refuse a request.
     """
+    from ..task_tag import dropped_reason as _task_tag_dropped_reason
+    from ..task_tag import resolve as _resolve_task_tag
+
     group_id = _validate(HDR_GROUP_ID, group_id_header)
     supplied_run = _validate(HDR_WORKFLOW_RUN_ID, workflow_run_id_header)
     session_id = _validate(HDR_SESSION_ID, session_id_header)
+    task_tag, task_tag_source = _resolve_task_tag(task_tag_header)
 
     rid = request_id or f"req_{uuid.uuid4().hex[:16]}"
     workflow_run_id = supplied_run or f"wr_{uuid.uuid4().hex[:16]}"
@@ -156,14 +184,28 @@ def build_request_context(
         workflow_run_supplied=supplied_run is not None,
         received_at_ms=int(time.time() * 1000),
         session_id_supplied=session_id,
+        task_tag=task_tag,
+        task_tag_source=task_tag_source.value,
+        task_tag_dropped_reason=_task_tag_dropped_reason(task_tag_source),
     )
 
 
 def response_headers(ctx: RequestContext) -> dict[str, str]:
     """Correlation headers to echo on the response: the assigned span id and
     the (possibly server-generated) workflow-run id, so a client that did not
-    pre-generate a run id can reuse it for later calls in the same run."""
-    return {
+    pre-generate a run id can reuse it for later calls in the same run.
+
+    ``x-sc-task-tag-dropped`` is added only when ``ctx.task_tag_dropped_reason``
+    is set -- i.e. only when the request's tag was actually dropped. The value
+    is read from `ctx` (resolved once at the edge), never re-resolved from the
+    request's header here.
+    """
+    headers = {
         HDR_SPAN_ID: ctx.span_id,
         HDR_WORKFLOW_RUN_ID: ctx.workflow_run_id,
     }
+    if ctx.task_tag_dropped_reason is not None:
+        from ..task_tag import HDR_TASK_TAG_DROPPED
+
+        headers[HDR_TASK_TAG_DROPPED] = ctx.task_tag_dropped_reason
+    return headers

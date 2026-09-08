@@ -37,12 +37,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Two lanes on two runners, at the same time. Five files hold 329s of the suite's
-  # 752s of serial work and the longest single test is 90s, so no amount of
-  # parallelism inside one lane gets the whole suite under that one test — the wall
-  # clock is set by whichever lane is slower, which is why they are separate jobs
-  # rather than one job with two steps. Neither lane deselects anything: every test
-  # runs on every commit, and `heavy` marks where a test runs, not whether.
+  # The fast lane, plus one job per heavy file, all at the same time. Measured on
+  # this repository's own CI rather than a developer machine, because the two
+  # differ by more than a factor of two: one serial job was 12m32s, the fast lane
+  # alone is 2m31s, and the heavy files packed into a single job were 7m40s — so
+  # the whole pull request waited on that one job.
+  #
+  # Splitting per file makes the wall clock the SLOWEST FILE instead of their sum.
+  # It cannot go below the longest single test: three of these files hold exactly
+  # one test each, the longest of them ~86s locally, and no number of workers
+  # divides one test. Going under that floor means lowering the example counts
+  # those tests set deliberately, which is a coverage decision and not this
+  # change's to make.
+  #
+  # Neither lane deselects anything: every test runs on every commit, and `heavy`
+  # marks WHERE a test runs, not whether.
   backend:
     name: backend / pytest (fast lane)
     runs-on: ubuntu-latest
@@ -66,9 +75,43 @@ jobs:
         # per process, so a worker per process each gets its own.
         run: pytest -q -m "not heavy" -n auto tests/
 
-  backend-heavy:
-    name: backend / pytest (heavy lane)
+  # The marker stays the single source of truth for what is heavy; this job only
+  # turns it into a list of files. Nothing is installed here, so it costs a
+  # checkout and a grep.
+  heavy-files:
+    name: backend / heavy lane file list
     runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.find.outputs.files }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: find
+        working-directory: backend
+        # An empty list would give `fromJSON` an empty matrix, and an empty matrix
+        # SKIPS its job silently — the heavy tests would stop running and the run
+        # would still be green. So an empty result fails here instead.
+        run: |
+          set -euo pipefail
+          files=$(grep -rl '^pytestmark = pytest.mark.heavy' tests/ | sort)
+          if [ -z "$files" ]; then
+            echo "no file carries a module-level heavy marker; refusing to produce" \
+                 "an empty matrix, which would skip the heavy tests and stay green" >&2
+            exit 1
+          fi
+          echo "$files"
+          json=$(printf '%s\n' "$files" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "files=$json" >> "$GITHUB_OUTPUT"
+
+  backend-heavy:
+    name: backend / pytest (${{ matrix.file }})
+    needs: heavy-files
+    runs-on: ubuntu-latest
+    strategy:
+      # Every heavy file reports its own result. One slow file failing must not
+      # cancel the others, or a rerun tells you less than the first run did.
+      fail-fast: false
+      matrix:
+        file: ${{ fromJSON(needs.heavy-files.outputs.files) }}
     defaults:
       run:
         working-directory: backend
@@ -82,7 +125,11 @@ jobs:
       - name: Install runtime + dev dependencies
         run: pip install -r requirements-dev.txt
       - name: Run pytest
-        run: pytest -q -m heavy -n auto tests/
+        # `-m heavy` as well as the path: the path bounds collection to one file,
+        # and the marker keeps a file that ever holds a mix of heavy and ordinary
+        # tests from running its ordinary ones twice, once here and once in the
+        # fast lane.
+        run: pytest -q -m heavy -n auto "${{ matrix.file }}"
 
   local:
     name: local / offline paths + local-mode wiring

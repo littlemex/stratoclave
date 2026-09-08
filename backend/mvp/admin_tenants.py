@@ -119,6 +119,58 @@ class UsageBucket(BaseModel):
     sample_size: int = 0
 
 
+class UsageByTagRow(BaseModel):
+    user_id: str
+    task_tag: str
+    requests: int
+    # How many of `requests` never carried an assertion at all, versus how
+    # many carried one the gateway dropped -- both are folded under
+    # `task_tag == "unlabelled"` above, and without this split "nobody
+    # tagged this" and "somebody mistyped a tag for a month" read as the
+    # same number (see `dynamo.usage_logs.TagAggregateRow`). Both are 0 on
+    # a row whose `task_tag` is a real assertion.
+    absent_count: int
+    dropped_grammar_count: int
+    cost_microusd: int
+    input_tokens: int
+    output_tokens: int
+
+
+class UsageByTagResponse(BaseModel):
+    period: str
+    rows: list[UsageByTagRow]
+    truncated: bool
+    # Rows with no tag attributes at all (predate this feature); counted, not
+    # folded into a row (see `dynamo.usage_logs.UsageLogsRepository.record`).
+    legacy_rows: int
+    # Rows with EXACTLY ONE of the two tag attributes -- corruption to
+    # surface, not history to absorb. `record` refuses
+    # to write one of these; a nonzero count here means something OTHER than
+    # `record` wrote to this table.
+    malformed_rows: int
+    # A consumer of this response would otherwise have to assume both of the
+    # following on its own: that `task_tag` describes the work (it is the
+    # caller's unverified assertion, never checked against anything), and
+    # that history is unbounded (it is not -- see `retention_policy_days`).
+    tag_is_caller_asserted: bool
+    # Expiry eligibility, not a query horizon: DynamoDB's TTL sweep is
+    # asynchronous, so a row older than this may still be read back until the
+    # sweep actually runs, and a `period` straddling the boundary may fold
+    # incompletely -- some of its rows swept, some not yet, at query time. The
+    # two booleans below say both of those to a consumer of this JSON, because
+    # a number alone reads as a guarantee that the fold is complete.
+    retention_policy_days: int
+    retention_deletion_is_asynchronous: bool
+    retention_boundary_period_may_fold_incompletely: bool
+    # A row's total is a FLOOR on spend for the work it names, not the work's
+    # total: a second request for the same work with no header (or a
+    # dropped one) lands under `unlabelled`, with nothing connecting it back
+    # to this tag. There is no mechanism that could attribute it -- doing so
+    # would mean inferring what an untagged request was for -- so this is
+    # disclosure, not something a future fix could remove.
+    tag_total_is_a_lower_bound: bool
+
+
 class RetainedHoldItem(BaseModel):
     """One reservation being held back pending a decision about what it cost."""
 
@@ -801,6 +853,79 @@ def get_tenant_usage(
         user_email = str(it.get("user_email") or it.get("user_id") or "unknown")
         bucket.by_user[user_email] = bucket.by_user.get(user_email, 0) + tokens
     return bucket
+
+
+def usage_by_tag_response(
+    *, tenant_id: str, period: str, user_id: Optional[str] = None,
+) -> UsageByTagResponse:
+    """Aggregate one tenant's usage by (user, task_tag) for `period`.
+
+    Shared by the admin route and the team-lead route (`apply_pool_budget_
+    request` is the existing precedent for this) so the aggregation and the
+    five disclosure fields (`tag_is_caller_asserted`, `retention_policy_days`,
+    `retention_deletion_is_asynchronous`,
+    `retention_boundary_period_may_fold_incompletely`,
+    `tag_total_is_a_lower_bound`) cannot drift between
+    the two callers. Does NOT
+    check that the tenant exists or that the caller may see it -- both
+    callers already do that themselves before reaching here, by different
+    rules (admin: exists; team-lead: owns it). Does NOT validate `period`'s
+    shape either -- every caller's own `Query(pattern=...)` already rejects
+    a malformed one with a 422 before this function is reached, the same way
+    every other period-scoped route in this file does.
+    """
+    from dynamo.usage_logs import RETENTION_DAYS
+
+    agg = UsageLogsRepository().aggregate_by_tag(
+        tenant_id=tenant_id, period=period, user_id=user_id,
+    )
+    return UsageByTagResponse(
+        period=period,
+        rows=[
+            UsageByTagRow(
+                user_id=r.user_id,
+                task_tag=r.task_tag,
+                requests=r.requests,
+                absent_count=r.absent_count,
+                dropped_grammar_count=r.dropped_grammar_count,
+                cost_microusd=r.cost_microusd,
+                input_tokens=r.input_tokens,
+                output_tokens=r.output_tokens,
+            )
+            for r in agg.rows
+        ],
+        truncated=agg.truncated,
+        legacy_rows=agg.legacy_rows,
+        malformed_rows=agg.malformed_rows,
+        tag_is_caller_asserted=True,
+        retention_policy_days=RETENTION_DAYS,
+        retention_deletion_is_asynchronous=True,
+        retention_boundary_period_may_fold_incompletely=True,
+        tag_total_is_a_lower_bound=True,
+    )
+
+
+@router.get("/{tenant_id}/usage/by-tag", response_model=UsageByTagResponse)
+def get_tenant_usage_by_tag(
+    tenant_id: str,
+    period: str = Query(
+        ..., pattern=r"^\d{4}-\d{2}$", description="Billing period 'YYYY-MM' (UTC)."
+    ),
+    user_id: Optional[str] = None,
+    _admin: AuthenticatedUser = Depends(require_permission("usage:read-all")),
+) -> UsageByTagResponse:
+    """One tenant's usage grouped by the caller-asserted task tag.
+
+    `user_id`, when given, restricts the aggregation to that one member.
+    Unlike the other period-scoped routes in this file, `period` is required
+    here (there is no "current period" reading for a usage report) -- but it
+    is validated by the same `pattern`, so a malformed value gets the same
+    422 every sibling route already gives.
+    """
+    tenant = TenantsRepository().get(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return usage_by_tag_response(tenant_id=tenant_id, period=period, user_id=user_id)
 
 
 def apply_pool_budget_request(

@@ -41,10 +41,12 @@ from dynamo.user_tenants import CreditExhaustedError, is_unlimited
 from .admin_tenants import (
     PoolBudgetResponse,
     SetPoolBudgetRequest,
+    UsageByTagResponse,
     _MICRO_USD_PER_CENT,
     _pool_response,
     _provision_seat_pool,
     apply_pool_budget_request,
+    usage_by_tag_response,
 )
 from .credit_ops import CreditAction
 
@@ -476,3 +478,25 @@ def get_own_tenant_usage(
         email = str(it.get("user_email") or "unknown")
         bucket.by_user_email[email] = bucket.by_user_email.get(email, 0) + tokens
     return bucket
+
+
+@router.get("/{tenant_id}/usage/by-tag", response_model=UsageByTagResponse)
+def get_own_tenant_usage_by_tag(
+    tenant_id: str,
+    period: str = Query(
+        ..., pattern=r"^\d{4}-\d{2}$", description="Billing period 'YYYY-MM' (UTC)."
+    ),
+    user_id: Optional[str] = None,
+    actor: AuthenticatedUser = Depends(require_permission("usage:read-own-tenant")),
+) -> UsageByTagResponse:
+    """The caller's own tenant's usage grouped by the caller-asserted task tag.
+
+    The admin-only ``GET /admin/tenants/{id}/usage/by-tag`` mirror: same query
+    parameters (including the same `pattern` validation on `period`, so a
+    malformed value 422s the same way here), same response shape, through the
+    same shared `usage_by_tag_response`, so a task-tag total looks identical
+    regardless of which route read it. Reuses `_require_owner`, the same
+    ownership check every other team-lead-scoped read in this router uses.
+    """
+    _require_owner(tenant_id, actor)
+    return usage_by_tag_response(tenant_id=tenant_id, period=period, user_id=user_id)

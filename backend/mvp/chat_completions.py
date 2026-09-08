@@ -634,6 +634,8 @@ def chat_completions(
             workflow_run_id=ctx.workflow_run_id if ctx else None,
             group_id=ctx.group_id if ctx else None,
             request_id=ctx.request_id if ctx else None,
+            task_tag=ctx.task_tag if ctx else None,
+            task_tag_source=ctx.task_tag_source if ctx else None,
             vsr_decision=_shadow_vsr,
             # Hard-ceiling reservation bound: this route has no reasoning-
             # effort concept (unlike openai_responses.py), so effort_multiplier

@@ -506,6 +506,11 @@ def get_request_context(
     correlation ids can never address another tenant's records. A malformed
     (present but out-of-grammar) header is a 400; absence is the compatible
     default and never errors.
+
+    ``x-sc-task-tag`` is a different kind of header: it is resolved by
+    ``mvp.task_tag.resolve``, which never raises, so a malformed tag never
+    turns into a 400 here — it is recorded as dropped instead (see
+    ``mvp.task_tag``).
     """
     from .observability.context import (
         HDR_GROUP_ID,
@@ -514,6 +519,7 @@ def get_request_context(
         InvalidCorrelationHeader,
         build_request_context,
     )
+    from .task_tag import HDR_TASK_TAG
 
     try:
         return build_request_context(
@@ -521,6 +527,7 @@ def get_request_context(
             group_id_header=request.headers.get(HDR_GROUP_ID),
             workflow_run_id_header=request.headers.get(HDR_WORKFLOW_RUN_ID),
             session_id_header=request.headers.get(HDR_SESSION_ID),
+            task_tag_header=request.headers.get(HDR_TASK_TAG),
         )
     except InvalidCorrelationHeader as e:
         raise HTTPException(

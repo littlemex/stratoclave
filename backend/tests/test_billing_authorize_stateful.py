@@ -48,8 +48,6 @@ import pytest
 from boto3.dynamodb.conditions import Key
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-
-pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
 from hypothesis.stateful import (
     Bundle,
     RuleBasedStateMachine,
@@ -58,6 +56,9 @@ from hypothesis.stateful import (
     invariant,
     rule,
 )
+from mvp import task_tag as task_tag_mod
+
+pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
 
 AMOUNT = st.integers(min_value=1, max_value=500_000)   # micro-USD per authorize
 CAPTURE_FRACTION = st.integers(min_value=0, max_value=100)
@@ -384,6 +385,8 @@ class ExternalAuthcapMachine(RuleBasedStateMachine):
             # RECLAIM'd hold row is gone, so we rebuild the same shape a rehydrate
             # produced pre-reclaim) to drive the SETTLE-vs-RECLAIM branch directly.
             ctx = ReservationContext(
+                task_tag=task_tag_mod.SENTINEL,
+                task_tag_source=task_tag_mod.Source.ABSENT.value,
                 tenants_repo=UserTenantsRepository(),
                 reservation_tokens=0,
                 pool_reserved_microusd=meta["amount"],
