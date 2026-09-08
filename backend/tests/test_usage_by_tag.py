@@ -22,7 +22,11 @@ Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
 
   Amendment A2 names the endpoint homes: `GET /me/usage/by-tag` lives in
   `backend/mvp/me.py`; the admin route AND the one shared implementation
-  live in `backend/mvp/admin_usage.py`; the team-lead mirror lives in
+  live in `backend/mvp/admin_tenants.py` (A4 corrects A2, which first said
+  `admin_usage.py`: the route is the tenant-scoped
+  `/admin/tenants/{tenant_id}/usage/by-tag`, and the shared implementation
+  the pool-budget routes already use for exactly this admin-plus-team-lead
+  pattern lives in `admin_tenants.py`); the team-lead mirror lives in
   `backend/mvp/team_lead.py` and calls that same shared implementation, the
   way the pool-budget routes already do. Tested by mounting exactly those
   three routers (no `main.app`, now that the homes are named), and — because
@@ -223,9 +227,12 @@ class _FakeAdmin:
 @pytest.fixture
 def by_tag_client(dynamodb_mock, monkeypatch):
     """Mounts exactly the three routers Amendment A2 names as the by-tag
-    endpoints' homes: `mvp.me` (`/me/usage/by-tag`), `mvp.admin_usage`
-    (the admin route and the one shared implementation), and `mvp.team_lead`
-    (the mirror that calls that same shared implementation)."""
+    endpoints' homes, corrected by A4: `mvp.me` (`/me/usage/by-tag`),
+    `mvp.admin_tenants` (the tenant-scoped admin route AND the one shared
+    implementation — A4 withdraws A2's `admin_usage.py`: the shared
+    admin-plus-team-lead pattern already lives in `admin_tenants.py`, where
+    the pool-budget routes keep theirs), and `mvp.team_lead` (the mirror
+    that calls that same shared implementation)."""
     import mvp.authz as _authz
     monkeypatch.setattr(_authz, "user_has_permission", lambda user, perm: True)
 
@@ -233,7 +240,7 @@ def by_tag_client(dynamodb_mock, monkeypatch):
     from fastapi.testclient import TestClient
     from mvp.deps import get_current_user
     from mvp.me import router as me_router
-    from mvp.admin_usage import router as admin_usage_router
+    from mvp.admin_tenants import router as admin_tenants_router
     from mvp.team_lead import router as team_lead_router
     from dynamo.tenants import TenantsRepository
 
@@ -246,7 +253,7 @@ def by_tag_client(dynamodb_mock, monkeypatch):
 
     app = FastAPI()
     app.include_router(me_router)
-    app.include_router(admin_usage_router)
+    app.include_router(admin_tenants_router)
     app.include_router(team_lead_router)
     app.dependency_overrides[get_current_user] = lambda: _FakeAdmin()
     return TestClient(app)
