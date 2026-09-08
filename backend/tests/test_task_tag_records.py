@@ -19,29 +19,29 @@ Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
 P1.6's own literal scenario — a request whose header changes AFTER the edge
 resolved it — cannot be constructed against a real HTTP client (a sent
 request's headers are fixed for its whole lifetime; there is no library-level
-way to mutate them mid-flight). The two tests below are the closest
-observable proxies the interface actually supports:
+way to mutate them mid-flight).
 
-  (a) `RequestContext` is declared `@dataclass(frozen=True)` with `task_tag`
-      as a plain field, not a method that re-derives on each read — so once
-      built at the edge, the value literally cannot be reassigned.
-  (b) `SpanDraft` (`mvp/observability/store.py`) is the OTHER place a
-      resolved tag is threaded through, and it is frozen too, built once and
-      handed to the (possibly-later, possibly-background) emit code. The
-      draft carries only the ALREADY-RESOLVED `task_tag`/`task_tag_source`
-      strings, never a raw header — so `_emit_sync` has nothing to re-derive
-      from even if it wanted to; it can only write back what the draft
-      already says. This is flagged in the handoff report as the chosen
-      reading of P1.6, since the literal "header mutated after the edge"
-      scenario has no HTTP-constructible form.
+Amendment A2 replaces that scenario with a constructible one, and this file
+now tests it directly rather than through a structural proxy: the original
+two proxy tests (RequestContext's frozen-ness; SpanDraft echoing whatever it
+is handed) each asserted a fact a RE-READING implementation would ALSO
+satisfy, so neither one actually distinguished "carried" from "re-read".
+`TestP1_6_ResolvedOnceAndCarried` now overrides the `get_request_context`
+FastAPI dependency (`mvp.deps`) with a `RequestContext` resolved from ONE
+header string, while the live HTTP request carries a DIFFERENT header
+string, and asserts the persisted row carries the OVERRIDE's value — the one
+"the edge" actually resolved — not whatever a fresh read of the live header
+would have produced. See that class's own docstring for why this
+construction is faithful to the interface (`get_request_context` IS "the
+edge" the interface's `build_request_context` describes) without needing to
+know or guess how the code between the edge and the `UsageLogs` write is
+internally wired.
 """
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from unittest.mock import patch
 
-import boto3
 import pytest
 from boto3.dynamodb.conditions import Key as boto3_key
 from fastapi import FastAPI
@@ -237,58 +237,83 @@ class TestP1_5_LegacyRowsAreUnknownNotUnlabelled:
 # ---------------------------------------------------------------------------
 
 class TestP1_6_ResolvedOnceAndCarried:
-    def test_request_context_task_tag_field_is_frozen(self):
-        """(a) RequestContext is a frozen dataclass; task_tag/task_tag_source
-        are plain fields set once by build_request_context, never a
-        re-derived property — so nothing downstream can cause a second
-        resolution by mutating the context after the edge."""
-        from mvp.observability.context import build_request_context
+    """Amendment A2 replaces the original proxy tests here (RequestContext's
+    frozen-ness; SpanDraft echoing itself) with the real test the
+    coordinator specified: a re-reading implementation would satisfy both of
+    those proxies too, since neither one ever puts a SECOND, DIFFERENT
+    header value in front of the code under test.
 
-        ctx = build_request_context(
-            tenant_id="acme-eng", group_id_header=None, workflow_run_id_header=None,
-            task_tag_header="Original-Tag",
-        )
-        assert ctx.task_tag == "original-tag"
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            ctx.task_tag = "mutated-tag"
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            ctx.task_tag_source = "asserted"
+    The construction: `get_request_context` (`mvp.deps`) is the FastAPI
+    dependency that resolves the tag "at the edge" — it is already
+    `Depends(...)`-injected into `mvp.anthropic`'s handler (imported by name
+    from `mvp.deps`, so it is the identical callable object regardless of
+    which module's namespace names it). Overriding it via
+    `app.dependency_overrides` replaces dependency resolution entirely: the
+    override can return a `RequestContext` built with ANY `task_tag`,
+    independent of whatever header the live HTTP request actually carries.
 
-    def test_span_and_rollup_write_back_exactly_the_drafts_already_resolved_value(
-        self, dynamodb_mock,
+    So the request sent on the wire carries `x-sc-task-tag: Header-Value`
+    (which `task_tag.resolve` would canonicalise to `"header-value"` if
+    read fresh), while the injected context carries `task_tag=
+    "context-value"` (built via the real `build_request_context`, with a
+    DIFFERENT header string, so nothing here hand-constructs an internal
+    field). A correct implementation carries the edge value through to the
+    `UsageLogs` row: `"context-value"`. An implementation that re-reads the
+    header at emit time (the defect P1.6 exists to catch) would instead
+    write `"header-value"` — the two are deliberately different strings so
+    a re-reading implementation cannot accidentally satisfy this test.
+    """
+
+    def test_settle_path_carries_the_edge_context_not_a_fresh_header_read(
+        self, dynamodb_mock, monkeypatch,
     ):
-        """(b) `SpanDraft` carries only the already-resolved strings; `_emit_sync`
-        (mvp/observability/store.py) must write them back VERBATIM under
-        `task_tag`/`task_tag_source`, on both the span item and the rollup
-        item, 'always' per the interface (unlike UsageLogs, where the two
-        kwargs are optional and default-free). If emit-time code re-derived
-        the tag from something else instead of trusting the draft, this
-        would fail by writing a different value (or none at all)."""
-        from mvp.observability import store as S
+        from mvp.anthropic import router as anthropic_router
+        from mvp.deps import get_current_user, get_request_context
+        from mvp.observability.context import build_request_context
+        import mvp.authz as _authz
 
-        draft = S.SpanDraft(
-            tenant_id="acme-eng", request_id="req_tag1", span_id="req_tag1",
-            group_id=None, workflow_run_id="run-tag1", model_alias="m",
-            committed_model_id="cm", committed_region="us-east-1",
-            breaker_stage="closed", attempts_total=1, targets_distinct=1,
-            stream=True, started_at_ms=1_000,
-            task_tag="edge-resolved-tag", task_tag_source="asserted",
+        monkeypatch.setattr(_authz, "user_has_permission", lambda user, perm: True)
+
+        from dynamo.user_tenants import UserTenantsRepository
+        UserTenantsRepository().ensure(
+            user_id=_FakeUser().user_id, tenant_id=_FakeUser().org_id,
+            role="user", total_credit=10**9)
+
+        # Built through the real constructor (not hand-assembled), with a
+        # header string the live HTTP request will NOT send.
+        edge_ctx = build_request_context(
+            tenant_id=_FakeUser().org_id, group_id_header=None,
+            workflow_run_id_header=None, task_tag_header="Context-Value",
         )
-        snap = S._AccSnapshot(
-            input_tokens=1, output_tokens=2, cache_read_tokens=0,
-            cache_write_tokens=0, stop_reason="end_turn", saw_final_usage=True,
+        assert edge_ctx.task_tag == "context-value"  # sanity: canonical form
+
+        app = FastAPI()
+        app.include_router(anthropic_router)
+        app.dependency_overrides[get_current_user] = lambda: _FakeUser()
+        app.dependency_overrides[get_request_context] = lambda: edge_ctx
+
+        with patch("mvp.routing.infrarouter.bedrock_client") as mock_routing, \
+             patch("mvp.anthropic._bedrock_client") as mock_bedrock:
+            mock_routing.return_value.converse_stream.side_effect = _mock_converse_stream
+            mock_bedrock.return_value.converse.side_effect = _mock_converse
+            client = TestClient(app)
+            # The WIRE header differs from the injected context's tag. If
+            # anything downstream re-read this header instead of trusting
+            # edge_ctx, the row would carry "header-value" instead.
+            resp = client.post("/v1/messages", headers={"x-sc-task-tag": "Header-Value"},
+                                json={
+                                    "model": "us.anthropic.claude-opus-4-7",
+                                    "messages": [{"role": "user", "content": "hi"}],
+                                    "max_tokens": 50, "stream": False,
+                                })
+
+        assert resp.status_code == 200, resp.text
+        item = _usage_row_for(edge_ctx.request_id)
+        assert item.get("task_tag") == "context-value", (
+            "the UsageLogs row must carry the value the EDGE (injected "
+            "RequestContext) resolved, not a fresh read of the live "
+            f"x-sc-task-tag header — got {item.get('task_tag')!r} (the "
+            "header's own canonical form would have been 'header-value')"
         )
-        S._emit_sync(draft, "completed", snap)
-
-        table = boto3.resource("dynamodb", region_name="us-east-1").Table(
-            "stratoclave-observability")
-        span = table.get_item(Key={
-            "pk": "TENANT#acme-eng#RUN#run-tag1",
-            "sk": f"SPAN#{1000:013d}#req_tag1"})["Item"]
-        rollup = table.get_item(
-            Key={"pk": "TENANT#acme-eng#RUN#run-tag1", "sk": "ROLLUP"})["Item"]
-
-        assert span["task_tag"] == "edge-resolved-tag"
-        assert span["task_tag_source"] == "asserted"
-        assert rollup["task_tag"] == "edge-resolved-tag"
-        assert rollup["task_tag_source"] == "asserted"
+        assert item.get("task_tag") != "header-value"
+        assert item.get("task_tag_source") == "asserted"
