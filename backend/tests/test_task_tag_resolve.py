@@ -200,10 +200,27 @@ class TestAbsentAndBlank:
 
 
 # ---------------------------------------------------------------------------
-# The reserved sentinel, in ANY casing, can never be asserted.
+# The reserved sentinel, in ANY casing, can never be asserted -- and WHY it
+# was dropped is distinguishable from a genuinely malformed tag.
 # ---------------------------------------------------------------------------
 
 class TestSentinelIsReserved:
+    """Typing the reserved word on purpose and sending a malformed header
+    are two different mistakes, and conflating them was silent: a team
+    whose project is actually called "Unlabelled" had every call recorded,
+    never refused, and the tag vanished with no error and no row under that
+    name -- indistinguishable from a header that simply failed the grammar.
+
+    `resolve()` checks the canonical form against the sentinel BEFORE the
+    length and grammar checks, so the reserved word reports
+    `Source.DROPPED_RESERVED` while a genuinely malformed value still
+    reports `Source.DROPPED_GRAMMAR` — two different reasons behind the
+    same recorded value. The response carries `x-sc-task-tag-dropped` with
+    `reserved` or `grammar` so the caller learns which happened at the
+    moment it happens; those two words are exactly what these two source
+    values are for.
+    """
+
     @pytest.mark.parametrize("bad", [
         "unlabelled",
         "UNLABELLED",
@@ -212,15 +229,44 @@ class TestSentinelIsReserved:
         "  unlabelled  ",
         "  UNLABELLED  ",
     ])
-    def test_asserted_sentinel_in_any_casing_drops_not_asserts(self, bad):
+    def test_asserted_sentinel_in_any_casing_drops_as_reserved(self, bad):
         tag, source = resolve(bad)
         assert tag == SENTINEL
-        assert source is Source.DROPPED_GRAMMAR, (
+        assert source is Source.DROPPED_RESERVED, (
             f"resolve({bad!r}) must never report Source.ASSERTED for the "
-            "reserved sentinel — an asserted 'Unlabelled' merging with "
-            "genuinely untagged spend is exactly what this reservation "
-            "exists to block"
+            "reserved sentinel, and must report DROPPED_RESERVED "
+            "specifically, not DROPPED_GRAMMAR — an asserted 'Unlabelled' "
+            "merging with genuinely untagged spend is exactly what this "
+            "reservation exists to block, and the caller can only learn "
+            "which mistake happened if the two reasons stay distinct"
         )
+
+    def test_a_genuinely_malformed_tag_still_drops_as_grammar_not_reserved(self):
+        """Guards against the two reasons collapsing back into one: a value
+        that is malformed but is NOT the reserved word must still report
+        DROPPED_GRAMMAR. A future change that makes the reserved-word check
+        too broad, or that checks it instead of (rather than before) the
+        grammar check, could otherwise report every dropped tag as
+        "reserved" and lose this distinction entirely."""
+        tag, source = resolve("has space")
+        assert tag == SENTINEL
+        assert source is Source.DROPPED_GRAMMAR
+
+    @pytest.mark.parametrize("bad,expected_source", [
+        ("unlabelled", Source.DROPPED_RESERVED),
+        ("has space", Source.DROPPED_GRAMMAR),
+    ])
+    def test_both_dropped_sources_still_record_the_same_sentinel_tag(
+        self, bad, expected_source,
+    ):
+        """The recorded VALUE is unchanged either way — only the REASON is
+        newly distinguishable. A reader who looks only at `task_tag` must
+        see the identical sentinel for a reserved word and for a malformed
+        value; the whole distinction lives in `task_tag_source`, never in
+        `task_tag` itself."""
+        tag, source = resolve(bad)
+        assert tag == SENTINEL
+        assert source is expected_source
 
     def test_a_real_tag_that_merely_contains_unlabelled_is_still_asserted(self):
         """Non-vacuity: the reservation is on the CANONICAL FORM equalling
