@@ -1,41 +1,31 @@
-"""PR1 (per-user-money-raises, task tags) — P1.1, P1.5, P1.6.
+"""Tests for the task tag reaching a `UsageLogs` row.
 
-Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
+A request that asserts a tag must produce a row carrying it. A row written
+before this pair of attributes existed must never be mistaken for a row
+that was deliberately left untagged — the two are different facts, and
+merging them would make every historical row look intentionally
+unlabelled. That same ambiguity can also arrive through a different path
+than an old row: a reservation made with no request context at all must
+still carry the sentinel pair all the way to settle, because a pair that a
+missing context can null lands on exactly the same row shape as a legacy
+one, just by a different route. And the value a row carries must be the
+one resolved at the request's edge, not something re-derived later, because
+a second read of the raw header could disagree with what the row claims was
+resolved.
 
-  P1.1 "No record carries a task tag, so usage cannot be grouped by the work
-  it was for | H | Requirement 4 is unsatisfiable without it | a request with
-  a tag produces a `UsageLogs` row carrying it"
-
-  P1.5 "A record written before this PR must not read as `unlabelled` | A |
-  Absence is a legacy fact, not a labelling fact... | a row without the
-  attributes is reported as `unknown`, never as `unlabelled`; the reader has
-  no default"
-
-  P1.6 "The tag must be resolved once at the edge and carried, not re-read at
-  emit time | D | A second read can disagree with the value the record
-  claims was resolved | a request whose header is mutated after the edge
-  still records the edge's value"
-
-P1.6's own literal scenario — a request whose header changes AFTER the edge
-resolved it — cannot be constructed against a real HTTP client (a sent
-request's headers are fixed for its whole lifetime; there is no library-level
-way to mutate them mid-flight).
-
-Amendment A2 replaces that scenario with a constructible one, and this file
-now tests it directly rather than through a structural proxy: the original
-two proxy tests (RequestContext's frozen-ness; SpanDraft echoing whatever it
-is handed) each asserted a fact a RE-READING implementation would ALSO
-satisfy, so neither one actually distinguished "carried" from "re-read".
-`TestP1_6_ResolvedOnceAndCarried` now overrides the `get_request_context`
-FastAPI dependency (`mvp.deps`) with a `RequestContext` resolved from ONE
-header string, while the live HTTP request carries a DIFFERENT header
-string, and asserts the persisted row carries the OVERRIDE's value — the one
-"the edge" actually resolved — not whatever a fresh read of the live header
-would have produced. See that class's own docstring for why this
-construction is faithful to the interface (`get_request_context` IS "the
-edge" the interface's `build_request_context` describes) without needing to
-know or guess how the code between the edge and the `UsageLogs` write is
-internally wired.
+The no-request-context property is tested by driving a real reservation
+and settle with no `RequestContext` in the chain. The resolved-at-the-edge
+property has no HTTP-constructible test of its most literal form:
+a sent request's headers are fixed for its whole lifetime, and there is no
+library-level way to mutate them mid-flight after the edge has already
+resolved them. Instead, the last test below overrides the
+`get_request_context` FastAPI dependency directly with a `RequestContext`
+resolved from one header string, while the live HTTP request carries a
+DIFFERENT header string, and asserts the persisted row carries the
+OVERRIDE's value — the one actually resolved at the edge — never a fresh
+read of the live header. See that test's own docstring for why this
+construction exercises the real code path without needing to know how the
+code between the edge and the `UsageLogs` write is internally wired.
 """
 from __future__ import annotations
 
@@ -49,7 +39,7 @@ from fastapi.testclient import TestClient
 
 
 # ---------------------------------------------------------------------------
-# P1.1 — a request with a tag produces a UsageLogs row carrying it.
+# A request with a tag produces a UsageLogs row carrying it.
 # Fixture modelled on tests/test_request_context_http.py's api_client.
 # ---------------------------------------------------------------------------
 
@@ -142,8 +132,8 @@ class TestP1_1_ATaggedRequestProducesATaggedRow:
 
     def test_absent_tag_still_lands_with_sentinel_and_absent_source(self, api_client):
         """A request with NO header still gets a task_tag written (SENTINEL,
-        ABSENT) — distinguishing a post-PR untagged row from a pre-PR
-        legacy row with no attributes at all (see P1.5 below)."""
+        ABSENT) — distinguishing a genuinely untagged row from a legacy row
+        with no attributes at all (see the legacy-row tests below)."""
         resp = _post(api_client)
         assert resp.status_code == 200
         span_id = resp.headers["x-sc-span-id"]
@@ -153,17 +143,17 @@ class TestP1_1_ATaggedRequestProducesATaggedRow:
 
 
 # ---------------------------------------------------------------------------
-# P1.5 — a pre-PR row (no tag attributes at all) must read as "unknown",
-# never as "unlabelled"; record() never defaults the attribute at write time.
+# A legacy row (no tag attributes at all) must read as "unknown", never as
+# "unlabelled"; record() never defaults the attribute at write time.
 # ---------------------------------------------------------------------------
 
 class TestP1_5_LegacyRowsAreUnknownNotUnlabelled:
     def test_record_without_task_tag_kwargs_writes_neither_attribute(self, dynamodb_mock):
-        """Write-side precondition for P1.5: exactly like `cache_read_tokens`
-        / `fallback_reason` before it, `record()` must not default
-        `task_tag`/`task_tag_source` when the caller omits them — a legacy
-        (pre-PR) row is simulated by calling `record()` the way every
-        caller did before this PR: with no task-tag keywords at all."""
+        """Exactly like `cache_read_tokens` / `fallback_reason` before it,
+        `record()` must not default `task_tag`/`task_tag_source` when the
+        caller omits them — a legacy row is simulated by calling `record()`
+        the way every caller did before this pair of attributes existed:
+        with no task-tag keywords at all."""
         from dynamo.usage_logs import UsageLogsRepository
 
         item = UsageLogsRepository().record(
@@ -173,7 +163,7 @@ class TestP1_5_LegacyRowsAreUnknownNotUnlabelled:
         assert "task_tag" not in item, (
             "record() must never substitute SENTINEL for an omitted task_tag "
             "— a legacy row must be indistinguishable from one written before "
-            "this PR shipped, i.e. carry neither attribute at all"
+            "this pair of attributes existed, i.e. carry neither attribute at all"
         )
         assert "task_tag_source" not in item
 
@@ -189,27 +179,26 @@ class TestP1_5_LegacyRowsAreUnknownNotUnlabelled:
         assert item["task_tag_source"] == "asserted"
 
     def test_legacy_row_is_counted_not_folded_under_sentinel(self, dynamodb_mock):
-        """Read-side: `aggregate_by_tag`'s own contract (dynamo/usage_logs.py
-        `TagAggregate.legacy_rows`) is the one described reader of tag
-        attributes. A pre-PR row (no attributes) must be counted in
-        `legacy_rows` and must NOT contribute a `rows` entry keyed on the
-        sentinel — that would assert "this request was unlabelled", a fact
-        the row does not contain. A genuine post-PR untagged row (sentinel +
-        source=absent) DOES belong under the sentinel in `rows`, and the two
-        must not be conflated."""
+        """`aggregate_by_tag`'s `TagAggregate.legacy_rows` is the one reader
+        of tag attributes on the read side. A legacy row (no attributes)
+        must be counted in `legacy_rows` and must NOT contribute a `rows`
+        entry keyed on the sentinel — that would assert "this request was
+        unlabelled", a fact the row does not contain. A genuinely untagged
+        row (sentinel + source=absent) DOES belong under the sentinel in
+        `rows`, and the two must not be conflated."""
         from dynamo.usage_logs import UsageLogsRepository
         from dynamo.tenant_budgets import current_period
 
         repo = UsageLogsRepository()
         period = current_period()
 
-        # A pre-PR row: no task_tag kwargs at all.
+        # A legacy row: no task_tag kwargs at all.
         repo.record(
             tenant_id="acme-eng", user_id="user-1", user_email="user@acme.example",
             model_id="claude-haiku-4-5", input_tokens=10, output_tokens=5,
             cost_microusd=100,
         )
-        # A genuine post-PR untagged row: header absent, resolved to the
+        # A genuinely untagged row: header absent, resolved to the
         # sentinel with source=absent.
         repo.record(
             tenant_id="acme-eng", user_id="user-1", user_email="user@acme.example",
@@ -219,29 +208,120 @@ class TestP1_5_LegacyRowsAreUnknownNotUnlabelled:
 
         result = repo.aggregate_by_tag(tenant_id="acme-eng", period=period)
         assert result.legacy_rows == 1, (
-            f"expected exactly the one pre-PR row counted as legacy, got "
+            f"expected exactly the one legacy row counted as legacy, got "
             f"{result.legacy_rows}"
         )
         sentinel_rows = [r for r in result.rows if r.task_tag == "unlabelled"]
         assert len(sentinel_rows) == 1, (
-            "exactly one row should carry the sentinel in `rows` (the genuine "
-            "post-PR untagged request) — the legacy row must not also appear "
-            f"here; got rows={result.rows!r}"
+            "exactly one row should carry the sentinel in `rows` (the "
+            "genuinely untagged request) — the legacy row must not also "
+            f"appear here; got rows={result.rows!r}"
         )
         assert sentinel_rows[0].requests == 1
         assert sentinel_rows[0].cost_microusd == 200
 
 
 # ---------------------------------------------------------------------------
-# P1.6 — resolved once at the edge and carried, not re-read at emit time.
+# A reservation made with no request context at all must still carry the
+# sentinel pair through to settle — never neither attribute.
+# ---------------------------------------------------------------------------
+
+class TestReservationWithNoRequestContextStillCarriesTheSentinelPair:
+    """A route can reach the reservation chokepoint (`reserve_credit_for_model`)
+    with no `RequestContext` at all and pass `task_tag=None,
+    task_tag_source=None` — the same shape every route already sends for its
+    other correlation ids when the context is absent (`ctx.X if ctx else
+    None`). The reservation this produces, and the `UsageLogs` row a
+    subsequent settle writes for it, must carry the sentinel pair
+    (`"unlabelled"` / `"absent"`) — never neither attribute, which would make
+    the row indistinguishable from one written before this pair of
+    attributes existed. A pair that can be silently nulled by an absent
+    context is the same ambiguity a legacy row exists to be told apart
+    from, arriving through a different path than a legacy row does.
+    """
+
+    def _seed(self, tenant: str) -> str:
+        from dynamo.tenants import TenantsRepository
+        from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+
+        TenantsRepository().create(
+            tenant_id=tenant, name="No Request Context", team_lead_user_id="admin-owned",
+            default_credit=10_000_000, created_by="test")
+        period = current_period()
+        TenantBudgetsRepository().set_manual_limit(
+            tenant_id=tenant, period=period, manual_limit_microusd=1_000_000_000)
+        return period
+
+    def test_settle_without_a_request_context_writes_the_sentinel_pair(
+        self, dynamodb_mock,
+    ):
+        from mvp._pipeline import reserve_credit_for_model, settle_reservation_and_log
+        from dynamo.user_tenants import UserTenantsRepository
+        from dynamo.usage_logs import UsageLogsRepository
+        from mvp.deps import AuthenticatedUser
+
+        tenant = "no-request-context-tenant"
+        user_id = "user-no-ctx"
+        self._seed(tenant)
+        UserTenantsRepository().ensure(
+            user_id=user_id, tenant_id=tenant, role="user", total_credit=10 ** 12)
+        user = AuthenticatedUser(
+            user_id=user_id, email="noctx@test.example", org_id=tenant, roles=["user"],
+            raw_claims={}, auth_kind="jwt", key_scopes=None, api_key_hash=None,
+        )
+
+        ctx = reserve_credit_for_model(
+            user, reservation_tokens=500, model_name="claude-sonnet-5",
+            input_tokens_est=400, max_output_tokens=100,
+            # No RequestContext reached this call — the same shape a route
+            # already sends for group_id/workflow_run_id/request_id when
+            # its own context is None.
+            task_tag=None, task_tag_source=None,
+        )
+        assert ctx.task_tag == "unlabelled", (
+            "a reservation made with no request context must carry the "
+            f"sentinel, not None — got {ctx.task_tag!r}"
+        )
+        assert ctx.task_tag_source == "absent"
+
+        settle_reservation_and_log(
+            user=user, tenants_repo=ctx.tenants_repo, reservation=500,
+            actual_input_tokens=350, actual_output_tokens=80,
+            model_id="us.anthropic.claude-sonnet-5", context=ctx,
+        )
+
+        items = UsageLogsRepository()._table.query(
+            KeyConditionExpression=boto3_key("tenant_id").eq(tenant)
+        ).get("Items", [])
+        assert items, "settle did not write a UsageLogs row"
+        item = items[0]
+
+        assert "task_tag" in item and "task_tag_source" in item, (
+            "a request with no request context must still write BOTH "
+            "attributes, carrying the sentinel pair — writing neither "
+            "attribute makes this row indistinguishable from one written "
+            "before the pair existed, which is the exact ambiguity this "
+            "pair exists to prevent"
+        )
+        assert item["task_tag"] == "unlabelled"
+        assert item["task_tag_source"] == "absent"
+
+
+# ---------------------------------------------------------------------------
+# Resolved once at the edge and carried, not re-read at emit time.
 # ---------------------------------------------------------------------------
 
 class TestP1_6_ResolvedOnceAndCarried:
-    """Amendment A2 replaces the original proxy tests here (RequestContext's
-    frozen-ness; SpanDraft echoing itself) with the real test the
-    coordinator specified: a re-reading implementation would satisfy both of
-    those proxies too, since neither one ever puts a SECOND, DIFFERENT
-    header value in front of the code under test.
+    """Overrides the `get_request_context` FastAPI dependency with a
+    `RequestContext` resolved from ONE header string, while the live HTTP
+    request carries a DIFFERENT header string, and asserts the persisted
+    row carries the OVERRIDE's value — not whatever a fresh read of the
+    live header would have produced. A test that only checked that
+    `RequestContext` is frozen, or that a hand-built span record echoes
+    whatever it is constructed with, would pass equally well against an
+    implementation that re-reads the header at emit time, since neither of
+    those checks ever puts a second, different header value in front of
+    the code under test — this one does.
 
     The construction: `get_request_context` (`mvp.deps`) is the FastAPI
     dependency that resolves the tag "at the edge" — it is already
@@ -259,9 +339,9 @@ class TestP1_6_ResolvedOnceAndCarried:
     DIFFERENT header string, so nothing here hand-constructs an internal
     field). A correct implementation carries the edge value through to the
     `UsageLogs` row: `"context-value"`. An implementation that re-reads the
-    header at emit time (the defect P1.6 exists to catch) would instead
-    write `"header-value"` — the two are deliberately different strings so
-    a re-reading implementation cannot accidentally satisfy this test.
+    header at emit time would instead write `"header-value"` — the two are
+    deliberately different strings so a re-reading implementation cannot
+    accidentally satisfy this test.
     """
 
     def test_settle_path_carries_the_edge_context_not_a_fresh_header_read(
