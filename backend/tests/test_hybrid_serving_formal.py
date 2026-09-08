@@ -26,6 +26,9 @@ import z3
 from hypothesis import given, settings, strategies as st
 
 from mvp import pricing
+import pytest
+
+pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
 
 
 _TOKENS_PER_MTOK = 1_000_000

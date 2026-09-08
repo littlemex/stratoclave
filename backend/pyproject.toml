@@ -41,6 +41,14 @@ markers = [
     # Exhaustive replay of the vLLM SAAR blog's nine scenarios against the SAAR
     # decision core. Pure + deterministic (no AWS); runs every commit.
     "saar_scenario: vLLM SAAR blog scenario coverage (deterministic, no AWS)",
+    # Five files hold the suite's whole tail: the Hypothesis stateful machines, the
+    # rating property freeze, and the hybrid-serving money-parity proofs. Serially they
+    # are 329s of the suite's 752s, and the longest single test is 90s — so no number of
+    # workers gets the whole suite below that one test. Marked so CI can start them in
+    # their own lane at the same time as everything else, which is what turns a 12-minute
+    # wall clock into the 3 minutes the slowest lane takes. NOT a quarantine: they run on
+    # every commit, in parallel with the rest.
+    "heavy: dominates the suite's tail; run in its own CI lane, not deselected",
 ]
 
 [tool.ruff]

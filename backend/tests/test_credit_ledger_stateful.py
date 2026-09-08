@@ -38,6 +38,8 @@ import pytest
 from boto3.dynamodb.conditions import Key
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
+
+pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
 from hypothesis.stateful import (
     Bundle,
     RuleBasedStateMachine,
