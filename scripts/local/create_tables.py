@@ -180,6 +180,28 @@ TABLES: list[dict[str, Any]] = [
             {"name": "run-index", "pk": ("gsi1pk", S), "sk": ("gsi1sk", S)},
         ],
     },
+    {
+        # Grant rows: the record of capacity that was given, and the requests that
+        # asked for it. The backend reads this table, so a local environment without
+        # it cannot exercise the raise flow at all — the failure arrives as a
+        # ResourceNotFoundException from a route that looks unrelated.
+        "name": "stratoclave-quota-events",
+        "pk": ("pk", S), "sk": ("sk", S),
+        "gsis": [
+            {"name": "tenant-status-index",
+             "pk": ("tenant_id", S), "sk": ("status_created_at", S)},
+            # INCLUDE, matching the IaC: the sweeper reads only the amount to
+            # subtract and the row to subtract it from. Projected faithfully rather
+            # than widened, so a query that reads an unprojected attribute fails
+            # here too instead of only after deployment.
+            {"name": "grant-expiry-index",
+             "pk": ("grant_status", S), "sk": ("expires_at", N),
+             "projection": ("INCLUDE", [
+                 "grant_id", "tenant_id", "approved_amount_microusd",
+                 "target_pk", "target_sk", "period",
+             ])},
+        ],
+    },
 ]
 
 
@@ -198,6 +220,18 @@ def _attr_defs(spec: dict[str, Any]) -> list[dict[str, str]]:
                 name, typ = gsi[key]
                 seen[name] = typ
     return [{"AttributeName": n, "AttributeType": t} for n, t in seen.items()]
+
+
+def _projection(gsi: dict[str, Any]) -> dict[str, Any]:
+    """This index's projection, defaulting to ALL — see the call site for why a
+    narrowed projection is carried over rather than widened."""
+    spec = gsi.get("projection")
+    if spec is None:
+        return {"ProjectionType": "ALL"}
+    kind, attributes = spec
+    if kind == "INCLUDE":
+        return {"ProjectionType": "INCLUDE", "NonKeyAttributes": list(attributes)}
+    return {"ProjectionType": kind}
 
 
 def _key_schema(pk: tuple[str, str], sk: Optional[tuple[str, str]]) -> list[dict[str, str]]:
@@ -226,10 +260,14 @@ def create_table(client, spec: dict[str, Any]) -> str:
             {
                 "IndexName": g["name"],
                 "KeySchema": _key_schema(g["pk"], g.get("sk")),
-                # Every production GSI is at least ALL-projected or narrower;
-                # ALL is the safe superset for a local dev tool (only affects
-                # RCU cost in production, never correctness here).
-                "Projection": {"ProjectionType": "ALL"},
+                # ALL by default because that is the CDK default every IaC index
+                # but one relies on. Where the IaC narrows a projection, this
+                # narrows it too: a WIDER local index is not the harmless superset
+                # it looks like, because a query reading an attribute the
+                # production index does not project then succeeds here and fails
+                # only once deployed — the local environment exists to catch that,
+                # not to hide it.
+                "Projection": _projection(g),
             }
             for g in spec["gsis"]
         ]
