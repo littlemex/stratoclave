@@ -155,7 +155,7 @@ def build_reverse_txn_item(
     at -- reversal is not a limit, it is what undoes one.
 
     Gated on `attribute_exists(used)`, the SAME no-phantom-row guard
-    `quota._reverse_item`/`quota._adjust_used` use: a reservation this
+    `quota._reverse_item`/`quota._adjust_item` use: a reservation this
     specific row never actually admitted has no `used` attribute to exist, so
     the condition fails closed rather than creating a negative-`used` row for
     a (user, period) this reservation never touched.

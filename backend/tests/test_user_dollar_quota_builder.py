@@ -15,7 +15,7 @@ parameter names. This file calls every builder with EXPLICIT KEYWORDS —
 `tenant_id`/`user_id`/`period`/`delta` for the adjust builder — inferred from
 the sibling `mvp.routing.quota` module's own `build_reserve_txn_items(tenant_id,
 user_id, model, period, amount, tenant_limit, user_limit=None)` and
-`_adjust_used`'s `delta` naming. If the shipped names differ, every call site
+`quota._adjust_item`'s `delta` naming. If the shipped names differ, every call site
 below fails with a `TypeError` on an unexpected keyword — which is the
 observable form of the divergence this split is designed to surface, not a
 defect in these tests.
@@ -285,7 +285,7 @@ def test_build_adjust_txn_item_accepts_a_negative_delta_for_release(uq_table):
 
 
 def test_build_adjust_txn_item_is_a_noop_on_a_row_with_no_used_attribute(uq_table):
-    """The same `attribute_exists(used)` guard `quota._adjust_used` uses,
+    """The same `attribute_exists(used)` guard `quota._adjust_item` uses,
     stated in I6 requirement 2 for BOTH reversal directions. Settling a
     request that never actually reserved against this wall (e.g. the tenant
     had no default at the time it was priced, then got one before settle) must
@@ -296,7 +296,7 @@ def test_build_adjust_txn_item_is_a_noop_on_a_row_with_no_used_attribute(uq_tabl
     )
     client = boto3.client("dynamodb", region_name="us-east-1")
     # Must not raise -- either the builder's own condition swallows the
-    # ConditionalCheckFailed the way `quota._adjust_used` does, or (if this
+    # ConditionalCheckFailed the way `quota._adjust_item` does, or (if this
     # builder is a pure item-builder with no I/O, matching `build_reverse_txn_item`
     # / `build_reserve_txn_items`) the SAME condition-failure contract applies
     # and it is the CALLER's job to swallow it -- either way, the row must stay

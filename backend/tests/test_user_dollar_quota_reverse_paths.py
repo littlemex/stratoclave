@@ -195,7 +195,7 @@ def test_settle_overrunning_the_reservation_lands_a_positive_delta(dynamodb_mock
     `actual_cost_microusd` GREATER than what was reserved must leave `used`
     at the ACTUAL amount, which here is deliberately ABOVE the configured
     ceiling (`UQ_CEILING`) -- proving the settle adjustment is unconditional
-    (no ceiling re-check at settle time), exactly like `quota._adjust_used`
+    (no ceiling re-check at settle time), exactly like `quota._adjust_item`
     already is for the per-model wall. A settle that clamped the delta at
     zero, or refused to exceed the ceiling, would leave `used` at
     `DEFAULT_COST` here instead of the larger actual figure asserted below.
