@@ -45,6 +45,8 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
+
 from mvp.pricing import (
     RateSnapshot,
     baseline_rates,

@@ -14,6 +14,12 @@
 pytest==9.0.3
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
+# Process-level parallelism. The suite's table names are fixed in conftest, which would
+# collide under threads and does not under processes: moto's state is per-process, so each
+# worker gets its own. Measured on 10 cores: 12m32s serial, 4m51s at -n 8, with identical
+# pass/skip/xfail counts across two runs and two distribution modes. `--dist loadfile` is
+# SLOWER (5m52s) because pinning a file to one worker traps the 90s test.
+pytest-xdist==3.8.0
 
 # AWS SDK mock for backend tests
 moto[dynamodb,cognitoidp,sts]==5.2.2

@@ -394,9 +394,6 @@
   "cl-5624b9f97e03": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
-  "cl-562564e9abde": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
   "cl-56fbc20b27d1": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -509,9 +506,6 @@
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-6eb9864ae5f2": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
-  "cl-6f68f3109486": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-6fdc5e1b20ed": {
@@ -1233,6 +1227,12 @@
   },
   "cl-5ffbad142c8d": {
    "first_seen": "added by the router-requests change: C12.4's stated boundary in the README"
+  },
+  "cl-9946b451de78": {
+   "first_seen": "added by the C3.2b/C3.2c level correction: the reclaim covers all three counters the admission transaction debits, so the sentence that said otherwise was reworded"
+  },
+  "cl-ee049bfef5db": {
+   "first_seen": "added by the C3.2b/C3.2c level correction: the reclaim covers all three counters the admission transaction debits, so the sentence that said otherwise was reworded"
   }
  },
  "retired": {
@@ -1290,6 +1290,16 @@
    "disposition": "reworded-to",
    "target": "cl-8c9448b6dd1f",
    "why": "the bypass-proof comparison row said retaining an unobserved hold was opt-in and off by default; the flag defaults on, so the row was corrected and the sentence re-hashed"
+  },
+  "cl-562564e9abde": {
+   "disposition": "reworded-to",
+   "target": "cl-9946b451de78",
+   "why": "the reclaim's coverage of the token and per-model counters ships, so the sentence stating that the token reservation has no recovery path became false; the obligation moved to the sentence that states what the reclaim now covers"
+  },
+  "cl-6f68f3109486": {
+   "disposition": "reworded-to",
+   "target": "cl-ee049bfef5db",
+   "why": "the reclaim's coverage of the token and per-model counters ships, so the sentence stating that the token reservation has no recovery path became false; the obligation moved to the sentence that states what the reclaim now covers"
   }
  },
  "detector": {

@@ -48,7 +48,6 @@ import pytest
 from boto3.dynamodb.conditions import Key
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-from mvp import task_tag as task_tag_mod
 from hypothesis.stateful import (
     Bundle,
     RuleBasedStateMachine,
@@ -57,6 +56,9 @@ from hypothesis.stateful import (
     invariant,
     rule,
 )
+from mvp import task_tag as task_tag_mod
+
+pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
 
 AMOUNT = st.integers(min_value=1, max_value=500_000)   # micro-USD per authorize
 CAPTURE_FRACTION = st.integers(min_value=0, max_value=100)
