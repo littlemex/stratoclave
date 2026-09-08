@@ -48,7 +48,7 @@ from boto3.dynamodb.conditions import Key as boto3_key
 # untagged aggregate into three rows with correct totals.
 # ---------------------------------------------------------------------------
 
-class TestP1_7_GroupingByUserTagPeriod:
+class TestUsageAggregatesByUserTagAndPeriod:
     def test_two_tags_and_untagged_aggregate_into_three_rows(self, dynamodb_mock):
         from dynamo.usage_logs import UsageLogsRepository
         from dynamo.tenant_budgets import current_period
@@ -125,7 +125,7 @@ class TestP1_7_GroupingByUserTagPeriod:
 # rather than silently reading past it.
 # ---------------------------------------------------------------------------
 
-class TestP1_9_PageBoundIsReal:
+class TestPageBoundAndTruncationFlag:
     def test_max_pages_is_a_named_constant(self):
         from dynamo.usage_logs import MAX_AGGREGATE_PAGES
 
@@ -237,7 +237,7 @@ def by_tag_client(dynamodb_mock, monkeypatch):
     return TestClient(app)
 
 
-class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
+class TestByTagResponseDisclosesRetentionCaveatsAndValidatesPeriod:
     def test_by_tag_response_carries_both_statements_as_fields(self, by_tag_client):
         """The response states `retention_policy_days`, and
         `history_horizon_days` must be absent rather than kept alongside it
@@ -306,7 +306,7 @@ class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
         )
 
 
-class TestP1_8_AdminAndTeamLeadCannotDrift:
+class TestAdminAndTeamLeadCannotDrift:
     """The admin route and its team-lead mirror share one implementation so
     the two cannot drift apart. Nothing else in this suite checks that
     directly — a test could pass both routes individually while each

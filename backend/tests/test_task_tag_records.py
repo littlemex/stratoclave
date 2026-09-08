@@ -118,7 +118,7 @@ def _usage_row_for(request_id: str) -> dict:
     return matches[0]
 
 
-class TestP1_1_ATaggedRequestProducesATaggedRow:
+class TestATaggedRequestProducesATaggedRow:
     def test_asserted_tag_lands_on_the_usage_log_row(self, api_client):
         resp = _post(api_client, headers={"x-sc-task-tag": "Billing-Sync"})
         assert resp.status_code == 200
@@ -147,7 +147,7 @@ class TestP1_1_ATaggedRequestProducesATaggedRow:
 # "unlabelled"; record() never defaults the attribute at write time.
 # ---------------------------------------------------------------------------
 
-class TestP1_5_LegacyRowsAreUnknownNotUnlabelled:
+class TestLegacyRowsAreUnknownNotUnlabelled:
     def test_record_without_task_tag_kwargs_writes_neither_attribute(self, dynamodb_mock):
         """Exactly like `cache_read_tokens` / `fallback_reason` before it,
         `record()` must not default `task_tag`/`task_tag_source` when the
@@ -311,7 +311,7 @@ class TestReservationWithNoRequestContextStillCarriesTheSentinelPair:
 # Resolved once at the edge and carried, not re-read at emit time.
 # ---------------------------------------------------------------------------
 
-class TestP1_6_ResolvedOnceAndCarried:
+class TestTheTagIsCarriedFromTheEdgeNotReReadAtEmit:
     """Overrides the `get_request_context` FastAPI dependency with a
     `RequestContext` resolved from ONE header string, while the live HTTP
     request carries a DIFFERENT header string, and asserts the persisted
