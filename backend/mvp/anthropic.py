@@ -948,6 +948,8 @@ def messages(
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        task_tag=ctx.task_tag if ctx else None,
+        task_tag_source=ctx.task_tag_source if ctx else None,
         # Observability: the VSR consult decision, joined to the committed model
         # on the reserve-time decision record (None when the feature is off). The
         # real VSR wins; shadow only fills in when the real VSR was silent (the
@@ -1210,6 +1212,8 @@ async def _stream_messages(
         # here would take the AUTHORITATIVE span emit down with the best-effort
         # signal — inverting the record hierarchy.
         from .observability.store import SpanDraft, emit_span_and_rollup
+        from .task_tag import SENTINEL as _TASK_TAG_SENTINEL
+        from .task_tag import Source as _TaskTagSource
 
         routed = _routed_box.get("routed")
         target = routed.target if routed else None
@@ -1228,6 +1232,11 @@ async def _stream_messages(
             targets_distinct=len({a.target for a in attempts}),
             stream=True,
             started_at_ms=_started_at_ms,
+            # Read from `ctx` (resolved once at the edge), not re-read here.
+            task_tag=(ctx.task_tag if ctx else _TASK_TAG_SENTINEL),
+            task_tag_source=(
+                ctx.task_tag_source if ctx else _TaskTagSource.ABSENT.value
+            ),
         )
         emit_span_and_rollup(draft, status, acc)
 

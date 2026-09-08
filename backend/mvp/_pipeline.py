@@ -48,6 +48,8 @@ if TYPE_CHECKING:
 
 from core.logging import get_logger
 from dynamo import UsageLogsRepository, UserTenantsRepository
+from .task_tag import SENTINEL as _TASK_TAG_SENTINEL
+from .task_tag import Source as _TaskTagSource
 from dynamo.tenant_budgets import (
     TenantBudgetsRepository,
     current_period,
@@ -496,6 +498,20 @@ class ReservationContext:
 
     tenants_repo: UserTenantsRepository
     reservation_tokens: int
+    # Caller-asserted task tag (see `mvp.task_tag`) and how it was resolved,
+    # resolved once at the edge and carried here, same as `workflow_run_id`
+    # / `group_id` / `request_id` below. Required, no default -- see
+    # `SpanDraft` in `observability/store.py` for why a default here would
+    # be unsafe. Every one of the seven constructions in this file states
+    # an explicit answer: five state `task_tag.SENTINEL` /
+    # `task_tag.Source.ABSENT.value` because at an internal reconstruction
+    # (no live `RequestContext` in scope) that IS the truth -- no label was
+    # recorded for this object. The two at the reserve chokepoint
+    # (`reserve_credit_for_model`) state `task_tag or SENTINEL` /
+    # `task_tag_source or Source.ABSENT.value` -- the caller's value when
+    # it supplied one, the sentinel pair when it did not.
+    task_tag: str
+    task_tag_source: str
     pool_reserved_microusd: int = 0
     period: Optional[str] = None
     pricing_key: Optional[str] = None
@@ -736,6 +752,11 @@ class ReservationContext:
                     run_id_is_fallback=True,
                     settle_reason="release",
                     source=getattr(self, "source", None) or "inline",
+                    # `self` IS the ReservationContext the
+                    # reserve chokepoint stamped -- a real value, not a
+                    # placeholder, unlike the sparse `run_id` above.
+                    task_tag=self.task_tag,
+                    task_tag_source=self.task_tag_source,
                 )
             )
         try:
@@ -993,6 +1014,13 @@ def resolve_retained_hold(
     ctx = ReservationContext(
         tenants_repo=UserTenantsRepository(),
         reservation_tokens=0,
+        # An operator resolving a retained hold, not a live request: no
+        # `RequestContext` is in scope, and `dynamo.tenant_budgets`'s
+        # retained-hold row carries no tag attribution to recover.
+        # SENTINEL/ABSENT is the truth, not a placeholder — nothing
+        # downstream overwrites this context.
+        task_tag=_TASK_TAG_SENTINEL,
+        task_tag_source=_TaskTagSource.ABSENT.value,
         pool_reserved_microusd=amount,
         period=period,
         tenant_id=tenant_id,
@@ -1197,7 +1225,8 @@ def _recover_owed_settle_after_reclaim(*, client, budgets, tenant_id: str,
     facts = {
         k: owed.get(k) for k in (
             "span_id", "request_id", "group_id", "model_id", "pricing_version",
-            "pricing_key", "tokens_in", "tokens_out")
+            "pricing_key", "tokens_in", "tokens_out",
+            "task_tag", "task_tag_source")
         if owed.get(k) is not None
     }
     raw_rating = owed.get("rating")
@@ -2183,6 +2212,8 @@ def reserve_credit_for_model(
     workflow_run_id: Optional[str] = None,
     group_id: Optional[str] = None,
     request_id: Optional[str] = None,
+    task_tag: Optional[str] = None,
+    task_tag_source: Optional[str] = None,
     saar_prefer_model: Optional[str] = None,
     vsr_decision: Optional[dict] = None,
     input_bytes: Optional[int] = None,
@@ -2528,6 +2559,16 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Coerced, not assigned bare: `task_tag` is `Optional[str]` on this
+        # function's own signature (`None` for a caller with no
+        # `RequestContext`, e.g. `ctx.task_tag if ctx else None` at each of
+        # the three route call sites), while `ctx.task_tag` is a required,
+        # never-`None` field. A bare assignment would null it on exactly
+        # that path, and `record`'s both-or-neither gate would then write
+        # neither attribute -- a row indistinguishable from one written
+        # before the pair existed.
+        ctx.task_tag = task_tag or _TASK_TAG_SENTINEL
+        ctx.task_tag_source = task_tag_source or _TaskTagSource.ABSENT.value
         # Carry the VSR consult decision (observability only) so the decision
         # record can be joined to the committed/billed model by span_id.
         ctx.vsr_decision = vsr_decision
@@ -2573,6 +2614,10 @@ def reserve_credit_for_model(
         ctx.workflow_run_id = workflow_run_id
         ctx.group_id = group_id
         ctx.request_id = request_id
+        # Coerced for the same reason as the chokepoint above (this branch
+        # stamps its own `ctx` rather than going through `_stamp_requested`).
+        ctx.task_tag = task_tag or _TASK_TAG_SENTINEL
+        ctx.task_tag_source = task_tag_source or _TaskTagSource.ABSENT.value
         # Observability: carry + record the VSR decision (fire-and-forget). A
         # hard pin normally has no multi-candidate decision_facts, so this is the
         # only place a hard-applied VSR decision reaches the decision log.
@@ -3222,6 +3267,14 @@ def reserve_credit(
         return ReservationContext(
             tenants_repo=repo,
             reservation_tokens=reservation_tokens,
+            # Placeholder, not a final answer: every return from this
+            # function reaches settle only via the `reserve_credit_for_model`
+            # chokepoint (`_stamp_requested` / the `vsr_hard_model` branch),
+            # which overwrites both fields with `task_tag or SENTINEL` /
+            # `task_tag_source or Source.ABSENT.value` before returning --
+            # the value below is replaced, never read by any consumer.
+            task_tag=_TASK_TAG_SENTINEL,
+            task_tag_source=_TaskTagSource.ABSENT.value,
             period=period,
             pricing_key=pricing_key,
             rate_snapshot=_rate_snap,
@@ -3592,6 +3645,10 @@ def reserve_credit(
         return ReservationContext(
             tenants_repo=repo,
             reservation_tokens=reservation_tokens,
+            # Placeholder, overwritten before returning -- see the fast-path
+            # return above.
+            task_tag=_TASK_TAG_SENTINEL,
+            task_tag_source=_TaskTagSource.ABSENT.value,
             pool_reserved_microusd=cost,
             period=period,
             pricing_key=pricing_key,
@@ -3632,6 +3689,10 @@ def reserve_credit(
         return ReservationContext(
             tenants_repo=repo,
             reservation_tokens=reservation_tokens,
+            # Placeholder, overwritten before returning -- see the earlier
+            # returns in this function.
+            task_tag=_TASK_TAG_SENTINEL,
+            task_tag_source=_TaskTagSource.ABSENT.value,
             period=period,
             pricing_key=pricing_key,
             rate_snapshot=_rate_snap,
@@ -4462,6 +4523,15 @@ def _rehydrate_from_hold(
     return ReservationContext(
         tenants_repo=UserTenantsRepository(),
         reservation_tokens=0,
+        # Rebuilt from the persisted HOLD row alone, in a SEPARATE HTTP call
+        # from the original reserve (external capture/void) -- no live
+        # `RequestContext` is available to read a real tag from, and unlike
+        # `workflow_run_id` (restored from the row's own `run_id` attribute,
+        # above), `dynamo.tenant_budgets`'s hold row carries no task-tag
+        # attribute, so there is nothing to read back and the sentinel pair
+        # is what is persisted.
+        task_tag=_TASK_TAG_SENTINEL,
+        task_tag_source=_TaskTagSource.ABSENT.value,
         pool_reserved_microusd=pool_reserved,
         period=period,
         pricing_key=pricing_key,
@@ -4678,6 +4748,14 @@ def rehydrate_reservation_context(
     return ReservationContext(
         tenants_repo=UserTenantsRepository(),
         reservation_tokens=0,
+        # Legacy (pre-enrichment) rehydration path, from the durable RESERVE
+        # ledger event rather than the HOLD row. `workflow_run_id` is
+        # restored from `reserve_evt.get("run_id")` (above) because the
+        # RESERVE event carries that attribute; it carries no task-tag
+        # attribute, so there is nothing to read back and the sentinel pair
+        # is what is persisted.
+        task_tag=_TASK_TAG_SENTINEL,
+        task_tag_source=_TaskTagSource.ABSENT.value,
         pool_reserved_microusd=pool_reserved,
         period=period,
         pricing_key=pricing_key,
@@ -4772,6 +4850,11 @@ def _reserve_quota_without_pool(
         return ReservationContext(
             tenants_repo=repo,
             reservation_tokens=reservation_tokens,
+            # Placeholder, overwritten before returning -- this function is
+            # reached only from `reserve_credit`'s quota-without-pool
+            # branches, themselves reached only via the reserve chokepoint.
+            task_tag=_TASK_TAG_SENTINEL,
+            task_tag_source=_TaskTagSource.ABSENT.value,
             period=period,
             pricing_key=pricing_key,
             tenant_id=user.org_id,
@@ -4966,6 +5049,8 @@ def _recover_spend_via_late_settle(
             rating=facts.get("rating"),
             tokens_in=facts.get("tokens_in"),
             tokens_out=facts.get("tokens_out"),
+            task_tag=facts.get("task_tag"),
+            task_tag_source=facts.get("task_tag_source"),
         ),
         ledger.terminal_conditioncheck_is_reclaim(
             tenant_id=tenant_id, period=period, hold_id=hold_id
@@ -5481,6 +5566,10 @@ def settle_reservation_and_log(
                     # attribution (not in the run_id chain), so it is safe.
                     "run_id": context.workflow_run_id,
                     "group_id": context.group_id,
+                    # Same "pure attribution, not in the run_id chain"
+                    # reasoning as group_id above.
+                    "task_tag": context.task_tag,
+                    "task_tag_source": context.task_tag_source,
                     # Hard-ceiling overrun record (see above). Named
                     # "admission_checked_microusd" here (NOT the bare
                     # "reserved_microusd" the ledger item ultimately uses,
@@ -5614,6 +5703,13 @@ def settle_reservation_and_log(
             context.measured_bound_microusd if context is not None else None
         ),
         fallback_reason=_fallback_reason,
+        # Read from the context the reserve chokepoint stamped, never
+        # re-resolved from a header here. A `None` context (no reservation
+        # at all) writes neither attribute; any real context's pair is
+        # never `None` (the chokepoint coerces it), so this is the only
+        # path to a legacy-shaped row.
+        task_tag=(context.task_tag if context is not None else None),
+        task_tag_source=(context.task_tag_source if context is not None else None),
     )
 
 

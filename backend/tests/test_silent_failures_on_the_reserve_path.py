@@ -26,6 +26,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from mvp import _pipeline
+from mvp import task_tag as task_tag_mod
 
 
 def _cancelled(*reasons: str) -> ClientError:
@@ -47,6 +48,8 @@ def _context(monkeypatch, client) -> _pipeline.ReservationContext:
     monkeypatch.setattr(_pipeline.time, "sleep", lambda *_a, **_k: None)
     ctx = _pipeline.ReservationContext(
         tenants_repo=MagicMock(), reservation_tokens=4_000, period="2026-08",
+        task_tag=task_tag_mod.SENTINEL,
+        task_tag_source=task_tag_mod.Source.ABSENT.value,
     )
     ctx.tenant_id = "acme"
     ctx.pool_active = True

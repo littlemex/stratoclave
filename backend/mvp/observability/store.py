@@ -97,6 +97,14 @@ class SpanDraft:
     targets_distinct: int
     stream: bool
     started_at_ms: int
+    # Caller-asserted, unverified task tag (see ``mvp.task_tag``) and how it
+    # was resolved. Required, no default: a draft built without this pair
+    # would otherwise fall back to writing `unlabelled`/`absent` on its own,
+    # which reads exactly like a request that genuinely carried no tag --
+    # the caller must decide, so a forgotten pair fails the construction
+    # instead of silently picking that reading for it.
+    task_tag: str
+    task_tag_source: str
 
 
 @dataclass(frozen=True)
@@ -295,6 +303,10 @@ def _emit_sync(draft: SpanDraft, status: str, snap: _AccSnapshot) -> None:
             **({"cache_write_tokens": snap.cache_write_tokens}
                if snap.cache_write_tokens is not None else {}),
             "stop_reason": snap.stop_reason or "",
+            # Always written, unlike the cache legs above: a task tag always
+            # has a value (SENTINEL when unasserted), never "not reported".
+            "task_tag": draft.task_tag,
+            "task_tag_source": draft.task_tag_source,
             "started_at_ms": draft.started_at_ms,
             "finalized_at_ms": now_ms,
             "duration_ms": max(0, now_ms - draft.started_at_ms),
@@ -314,6 +326,7 @@ def _emit_sync(draft: SpanDraft, status: str, snap: _AccSnapshot) -> None:
         "#first": "first_seen_ms", "#lastst": "last_status",
         "#lastms": "last_finalized_ms", "#exp": "expires_at",
         "#tid": "tenant_id", "#rid": "run_id", "#rt": "record_type",
+        "#tasktag": "task_tag", "#tasktagsrc": "task_tag_source",
     })
     values.update({
         # Set-once GSI keys (sparse: only the ROLLUP carries them; keys never
@@ -327,6 +340,11 @@ def _emit_sync(draft: SpanDraft, status: str, snap: _AccSnapshot) -> None:
         ":tid": draft.tenant_id,
         ":rid": run_id,
         ":rt": "workflow_run_rollup",
+        # Overwritten every update, like #lastst/#lastms: the rollup reflects
+        # the MOST RECENTLY finalized span's tag, not a fold over every span
+        # in the run (a run's spans are not guaranteed to share one tag).
+        ":tasktag": draft.task_tag,
+        ":tasktagsrc": draft.task_tag_source,
     })
     table.update_item(
         Key={"pk": pk, "sk": "ROLLUP"},
@@ -336,7 +354,8 @@ def _emit_sync(draft: SpanDraft, status: str, snap: _AccSnapshot) -> None:
             "       #g1sk = if_not_exists(#g1sk, :g1sk),"
             "       #first = if_not_exists(#first, :first),"
             "       #tid = :tid, #rid = :rid, #rt = :rt,"
-            "       #lastst = :lastst, #lastms = :lastms, #exp = :exp"
+            "       #lastst = :lastst, #lastms = :lastms, #exp = :exp,"
+            "       #tasktag = :tasktag, #tasktagsrc = :tasktagsrc"
         ),
         ExpressionAttributeNames=names,
         ExpressionAttributeValues=values,

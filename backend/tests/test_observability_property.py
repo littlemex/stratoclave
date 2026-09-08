@@ -23,6 +23,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from mvp._converse_types import UsageAccumulator
+from mvp import task_tag
 from mvp.observability.store import (
     TERMINAL_STATUSES,
     SpanDraft,
@@ -229,6 +230,7 @@ def _draft() -> SpanDraft:
         committed_model_id="m", committed_region="r",
         breaker_stage="closed", attempts_total=1, targets_distinct=1,
         stream=True, started_at_ms=0,
+        task_tag=task_tag.SENTINEL, task_tag_source=task_tag.Source.ABSENT.value,
     )
 
 

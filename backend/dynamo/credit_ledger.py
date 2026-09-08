@@ -241,6 +241,8 @@ class CreditLedgerRepository:
         estimate_inputs: Optional[dict] = None,
         reaped_hold_facts: Optional[dict] = None,
         source: Optional[str] = None,
+        task_tag: Optional[str] = None,
+        task_tag_source: Optional[str] = None,
     ) -> dict[str, Any]:
         """Build the ledger Put for a terminal money move (SETTLE/RELEASE/RECLAIM).
 
@@ -293,6 +295,13 @@ class CreditLedgerRepository:
         LATE_SETTLE, correlatable within this partition without new
         instrumentation. Sizing a write-off budget from this number as though it
         were a leak would size it wrong.
+
+        `task_tag` / `task_tag_source` (see `mvp.task_tag`):
+        the caller-asserted tag, read from the same `ReservationContext` the
+        caller already has (never re-resolved here). Omitted (like every
+        other optional attribution field above) when the caller has none to
+        give -- the async reaper's RECLAIM has no live context to read one
+        from.
         """
         if event_type not in _TERMINAL_TYPES:
             raise ValueError(f"terminal_event_txn_item: {event_type} is not a terminal type")
@@ -341,6 +350,8 @@ class CreditLedgerRepository:
             # An ending outlives everything it ended, so this is where the fact
             # belongs.
             ("source", source),
+            ("task_tag", task_tag),
+            ("task_tag_source", task_tag_source),
         ):
             if val:
                 item[key] = {"S": str(val)}
@@ -395,6 +406,8 @@ class CreditLedgerRepository:
         tokens_out: Optional[int] = None,
         actor: str = "caller",
         ts_ms: Optional[int] = None,
+        task_tag: Optional[str] = None,
+        task_tag_source: Optional[str] = None,
     ) -> dict[str, Any]:
         """Build the ledger Put for a LATE_SETTLE (spend recovered after RECLAIM).
 
@@ -434,6 +447,8 @@ class CreditLedgerRepository:
             ("model_id", model_id),
             ("pricing_version", pricing_version),
             ("pricing_key", pricing_key),
+            ("task_tag", task_tag),
+            ("task_tag_source", task_tag_source),
         ):
             if val:
                 item[key] = {"S": str(val)}
@@ -764,7 +779,8 @@ class CreditLedgerRepository:
             "ts_ms": _now_ms(),
         }
         for key in ("span_id", "request_id", "group_id", "model_id",
-                    "pricing_version", "pricing_key", "settle_reason"):
+                    "pricing_version", "pricing_key", "settle_reason",
+                    "task_tag", "task_tag_source"):
             val = (facts or {}).get(key)
             if val:
                 item[key] = str(val)

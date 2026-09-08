@@ -34,6 +34,8 @@ import time
 from typing import Any, Optional
 
 from ..observability.store import _safe_key_token
+from ..task_tag import SENTINEL as _TASK_TAG_SENTINEL
+from ..task_tag import Source as _TaskTagSource
 
 SCHEMA_VERSION = 1
 
@@ -81,6 +83,8 @@ def build_decision_item(
     estimate_inputs: dict,
     created_at_ms: int,
     vsr: Optional[dict] = None,
+    task_tag: str = _TASK_TAG_SENTINEL,
+    task_tag_source: str = _TaskTagSource.ABSENT.value,
 ) -> dict[str, Any]:
     """PURE builder for the reserve-time decision record.
 
@@ -95,6 +99,16 @@ def build_decision_item(
         the ledger/usage-log keyed by the same `span_id`, it proves "the VSR
         advised X, the request committed Y, and it was billed Z" without a new
         table. Absent entirely when the feature is off (dark ship).
+    `task_tag` / `task_tag_source` (see `mvp.task_tag`): the
+    caller-asserted tag resolved once at the edge and carried onto the
+    `ReservationContext`, same as `group_id` above — written always (like
+    `group_id`, unlike `vsr`). The default is a NAMED DEBT, not a safe
+    fallback: several existing tests call this builder directly with
+    neither keyword, and defaulting to the unasserted reading is what lets
+    those calls keep passing rather than requiring an edit. A real caller
+    that forgot the pair would write the same "unasserted" reading for a
+    request that may actually have been tagged, which is indistinguishable
+    from a genuine absence.
     No TTL attribute (audit record). Deterministic sk → an idempotent retry
     overwrites byte-identically.
     """
@@ -114,6 +128,8 @@ def build_decision_item(
         "chosen": chosen,
         "rejected": list(rejected),
         "estimate_inputs": dict(estimate_inputs),
+        "task_tag": task_tag,
+        "task_tag_source": task_tag_source,
     }
     # Only attach the VSR block when the feature acted — keeps the record
     # byte-identical to today for every non-VSR request (dark ship + smaller item).
@@ -138,6 +154,8 @@ def build_outcome_item(
     savings_vs_max_servable: Optional[int],
     counterfactual_vs_requested_microusd: Optional[int],
     counterfactual_vs_max_servable_microusd: Optional[int],
+    task_tag: str = _TASK_TAG_SENTINEL,
+    task_tag_source: str = _TaskTagSource.ABSENT.value,
 ) -> dict[str, Any]:
     """PURE builder for the settle-time outcome record.
 
@@ -147,6 +165,11 @@ def build_outcome_item(
     escalated to a pricier model) — never clamped. `savings_basis` and both
     pricing versions are stamped so the figure is reconstructable and its
     estimate-nature is explicit.
+
+    `task_tag` / `task_tag_source`: same default and the same reason for it
+    as `build_decision_item` above; a reader joining decision+outcome by
+    (run_id, span_id) gets the same value from both, since both are read
+    from the one edge-resolved `ReservationContext`, never re-resolved.
     """
     return {
         "pk": _decision_pk(tenant_id, _day(settled_at_ms)),
@@ -179,6 +202,8 @@ def build_outcome_item(
         "savings_vs_requested_microusd": savings_vs_requested,
         "savings_vs_max_servable_microusd": savings_vs_max_servable,
         "savings_basis": SAVINGS_BASIS,
+        "task_tag": task_tag,
+        "task_tag_source": task_tag_source,
     }
 
 
@@ -236,6 +261,15 @@ def record_decision_from_context(context) -> None:
             estimate_inputs=estimate_inputs,
             created_at_ms=_now_ms(),
             vsr=vsr,
+            # `getattr(..., default)` only covers a MISSING attribute; an
+            # object that HAS `task_tag` set to `None` would pass it straight
+            # through. `or` coerces that case too, so this can never write a
+            # null pair.
+            task_tag=getattr(context, "task_tag", None) or _TASK_TAG_SENTINEL,
+            task_tag_source=(
+                getattr(context, "task_tag_source", None)
+                or _TaskTagSource.ABSENT.value
+            ),
         )
         emit_decision(item)
     except Exception:  # noqa: BLE001 — decision logging must never break a request.
@@ -456,6 +490,16 @@ def record_outcome_from_context(
             savings_vs_max_servable=savings_max,
             counterfactual_vs_requested_microusd=cf_requested,
             counterfactual_vs_max_servable_microusd=cf_max,
+            # Same values the paired decision record carries (both read from
+            # this same context, never re-resolved), with the same `or`
+            # coercion `record_decision_from_context` uses: `getattr`'s
+            # default only covers a missing attribute, not one present and
+            # set to `None`.
+            task_tag=getattr(context, "task_tag", None) or _TASK_TAG_SENTINEL,
+            task_tag_source=(
+                getattr(context, "task_tag_source", None)
+                or _TaskTagSource.ABSENT.value
+            ),
         )
         emit_decision(item)
     except Exception:  # noqa: BLE001 — outcome logging must never break settle.

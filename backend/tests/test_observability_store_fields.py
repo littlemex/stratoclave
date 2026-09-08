@@ -13,6 +13,7 @@ import boto3
 import pytest
 
 from mvp.observability import store as S
+from mvp import task_tag
 
 
 def _draft(**over):
@@ -22,6 +23,7 @@ def _draft(**over):
         committed_model_id="cm", committed_region="us-east-1",
         breaker_stage="closed", attempts_total=1, targets_distinct=1,
         stream=True, started_at_ms=1_000,
+        task_tag=task_tag.SENTINEL, task_tag_source=task_tag.Source.ABSENT.value,
     )
     base.update(over)
     return S.SpanDraft(**base)

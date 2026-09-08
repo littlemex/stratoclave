@@ -663,6 +663,8 @@ async def create_response(
         workflow_run_id=ctx.workflow_run_id if ctx else None,
         group_id=ctx.group_id if ctx else None,
         request_id=ctx.request_id if ctx else None,
+        task_tag=ctx.task_tag if ctx else None,
+        task_tag_source=ctx.task_tag_source if ctx else None,
         vsr_decision=_shadow_vsr,
         # Hard-ceiling reservation bound: `_multiplier` above is this route's
         # own effort_multiplier (contract section 3: "resolve it from that
