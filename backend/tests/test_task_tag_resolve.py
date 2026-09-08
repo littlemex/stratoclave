@@ -1,39 +1,26 @@
-"""PR1 (per-user-money-raises, task tags) — the one canonicaliser.
+"""Tests for `mvp.task_tag`: the single place a client-supplied task tag is
+canonicalised, validated, and resolved to a value safe to persist.
 
-Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`, new
-module `backend/mvp/task_tag.py`.
+`canonical()` and `resolve()` must be the ONLY place a tag is normalised
+anywhere in this codebase, and `GRAMMAR` must be the exact same compiled
+pattern the correlation-id module already validates client headers with —
+not a recompiled copy of its text — so the two grammars cannot drift apart
+from each other the next time either one is edited.
 
-  P1.2 "The tag must be resolved by one pure total function, declared once,
-  with its canonical form and its reserved sentinel" — verified by a property
-  test (idempotent canonicalisation) and a static check that no module
-  outside the declaration normalises a tag.
+`resolve()` must never raise, for any input: a malformed, over-long,
+control-character-bearing, or `#`-bearing tag has to resolve to "no tag was
+recorded" rather than end the request, because a tag that can refuse a
+request has no safe place to sit relative to a money reservation. The
+HTTP-level half of that guarantee — the endpoint itself returns the same
+status with or without a tag — is in `test_task_tag_never_refuses.py`.
 
-  P1.3 "A malformed tag must not refuse the request" — this file pins the
-  pure function's half of that guarantee: `resolve` never raises, and a
-  malformed / over-long / control-character / '#'-bearing tag is dropped to
-  the sentinel with source `dropped_grammar` rather than raising. The
-  HTTP-level half (the endpoint returns the SAME status as no tag at all) is
-  `test_task_tag_never_refuses.py`.
-
-  P1.4 "`unlabelled` must be unusable as an asserted tag" — the reserved
-  token, in ANY casing, resolves to `dropped_grammar`, never to `asserted`.
+The reserved sentinel (`"unlabelled"`) can never be the CANONICAL FORM of an
+asserted tag, in any casing: if it could, a caller who deliberately typed
+"Unlabelled" would be indistinguishable from a caller who sent nothing at
+all, which would corrupt the one grouping this tag exists to support.
 
 `mvp.task_tag` does not exist at the base commit, so every test below fails
-on `ModuleNotFoundError` for that reason — the interface names a module this
-worktree does not have, which is the correct "surface absent" failure this
-phase is supposed to produce.
-
-Amendment A2 settled two readings this file originally flagged as choices
-rather than certainties:
-  - "blank" (in `resolve`'s docstring) includes whitespace-only, not just
-    `== ""`. `TestAbsentAndBlank.test_header_present_but_whitespace_only_is_absent`
-    is now a required assertion.
-  - "`GRAMMAR` reused not copied" means object identity
-    (`task_tag.GRAMMAR is mvp.observability.context._ID_GRAMMAR`), not
-    merely an equal pattern string. `TestDeclaredOnce
-    .test_grammar_is_the_correlation_id_grammar_reused_not_copied` stands as
-    originally written; the note below about the looser reading is kept so a
-    future reader understands why identity, not equality, is asserted.
+on `ModuleNotFoundError`.
 """
 from __future__ import annotations
 
@@ -60,7 +47,7 @@ _TASK_TAG_MODULE = _BACKEND_ROOT / "mvp" / "task_tag.py"
 
 
 # ---------------------------------------------------------------------------
-# P1.2 — sentinel / grammar sanity, and the "declared once" structural checks
+# Sentinel / grammar sanity, and the "declared once" structural checks.
 # ---------------------------------------------------------------------------
 
 class TestDeclaredOnce:
@@ -74,23 +61,21 @@ class TestDeclaredOnce:
         assert HDR_TASK_TAG == "x-sc-task-tag"
 
     def test_grammar_is_the_correlation_id_grammar_reused_not_copied(self):
-        """The interface is explicit: 'GRAMMAR: re.Pattern # the
-        correlation-id grammar, reused not copied'. A second `re.compile`
-        with an identical-looking pattern string is exactly the drift this
-        entry exists to prevent (a future edit to one grammar silently stops
-        applying to the other) — so this checks the SAME compiled Pattern
-        object, not merely an equal `.pattern` string.
+        """GRAMMAR must be the SAME compiled Pattern object the
+        correlation-id module already validates client headers with, not a
+        second `re.compile` of an identical-looking pattern string — a copy
+        can silently drift from the original the next time either one is
+        edited, while sharing the one object cannot.
         """
         assert GRAMMAR is _ID_GRAMMAR
 
     def test_no_other_module_defines_its_own_nfkc_normaliser(self):
-        """P1.2's static check, adapted from this suite's existing convention
-        for 'this module does not contain such a call'
-        (test_ledger_is_append_only_in_code.py): `canonical()` is documented
-        as 'NFKC, then casefold, then strip' — a second canonicaliser
-        anywhere else in `mvp/` or `dynamo/` would almost certainly reach for
-        `unicodedata.normalize(\"NFKC\", ...)` too, which is the seam (S3)
-        P1.2 exists to close before PR 4 can inherit it.
+        """`canonical()` is documented as 'NFKC, then casefold, then strip'
+        and is the only place a tag is ever normalised. A second
+        canonicaliser anywhere else in `mvp/` or `dynamo/` would almost
+        certainly reach for `unicodedata.normalize(\"NFKC\", ...)` too, and
+        two independently maintained normalisers are a defect even while
+        they happen to agree, because nothing keeps them agreeing tomorrow.
         """
         offenders = []
         for root in (_BACKEND_ROOT / "mvp", _BACKEND_ROOT / "dynamo"):
@@ -107,7 +92,7 @@ class TestDeclaredOnce:
 
 
 # ---------------------------------------------------------------------------
-# P1.2 — canonical() is idempotent (the named property test)
+# canonical() is idempotent.
 # ---------------------------------------------------------------------------
 
 class TestCanonicalIdempotent:
@@ -127,7 +112,7 @@ class TestCanonicalIdempotent:
 
 
 # ---------------------------------------------------------------------------
-# P1.2 / P1.3 — resolve() is total (never raises) over arbitrary input
+# resolve() is total (never raises) over arbitrary input.
 # ---------------------------------------------------------------------------
 
 class TestResolveIsTotal:
@@ -150,8 +135,8 @@ class TestResolveIsTotal:
 
 
 # ---------------------------------------------------------------------------
-# P1.3 — malformed / over-long / control-character / '#' tags never raise,
-# and are recorded as dropped_grammar (never ASSERTED, never an exception).
+# Malformed / over-long / control-character / '#' tags never raise, and are
+# recorded as dropped_grammar (never ASSERTED, never an exception).
 # ---------------------------------------------------------------------------
 
 class TestMalformedTagsDropNotRaise:
@@ -185,39 +170,37 @@ class TestMalformedTagsDropNotRaise:
 
 
 # ---------------------------------------------------------------------------
-# P1.3 — absence (no header) and presence-but-empty both resolve to ABSENT,
-# never to DROPPED_GRAMMAR and never to an exception.
+# Absence (no header) and presence-but-empty-or-blank both resolve to
+# ABSENT, never to DROPPED_GRAMMAR and never to an exception.
 # ---------------------------------------------------------------------------
 
 class TestAbsentAndBlank:
     def test_header_absent_is_absent(self):
-        """rule #2 negative case: header absent."""
+        """No header at all resolves to the sentinel with source ABSENT."""
         tag, source = resolve(None)
         assert tag == SENTINEL
         assert source is Source.ABSENT
 
     def test_header_present_but_empty_is_absent(self):
-        """rule #2 negative case: header present but empty."""
+        """A header sent with an empty value means the same thing as no
+        header at all, not a malformed value."""
         tag, source = resolve("")
         assert tag == SENTINEL
         assert source is Source.ABSENT
 
     @pytest.mark.parametrize("blank", ["   ", "\t", "\t\r\n", " 　"])
     def test_header_present_but_whitespace_only_is_absent(self, blank):
-        """Settled by Amendment A2 (no longer a flagged interpretation):
-        `resolve`'s 'None or blank' includes whitespace-only, matching the
-        sibling correlation-id module (mvp.observability.context._validate)
-        treating a present, whitespace-only header as absent ('empty ≡
-        absent' — a client that sends the header with nothing meaningful in
-        it plainly means no tag). This is now a required assertion, not an
-        optional extra."""
+        """A header that is present but carries only whitespace means the
+        same thing as no header at all, matching the sibling correlation-id
+        module's treatment of client headers: a client sending nothing
+        meaningful plainly means no tag, not a malformed one."""
         tag, source = resolve(blank)
         assert tag == SENTINEL
         assert source is Source.ABSENT
 
 
 # ---------------------------------------------------------------------------
-# P1.4 — the reserved sentinel, in ANY casing, can never be asserted.
+# The reserved sentinel, in ANY casing, can never be asserted.
 # ---------------------------------------------------------------------------
 
 class TestSentinelIsReserved:
@@ -235,7 +218,8 @@ class TestSentinelIsReserved:
         assert source is Source.DROPPED_GRAMMAR, (
             f"resolve({bad!r}) must never report Source.ASSERTED for the "
             "reserved sentinel — an asserted 'Unlabelled' merging with "
-            "genuinely untagged spend is exactly what P1.4 exists to block"
+            "genuinely untagged spend is exactly what this reservation "
+            "exists to block"
         )
 
     def test_a_real_tag_that_merely_contains_unlabelled_is_still_asserted(self):

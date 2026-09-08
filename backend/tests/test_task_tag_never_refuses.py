@@ -1,34 +1,26 @@
-"""PR1 (per-user-money-raises, task tags) — P1.3: a malformed tag must not
-refuse the request.
+"""A malformed task tag must not refuse the request.
 
-Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
-
-  "A malformed tag must not refuse the request | C | A label that can refuse
-  has to be sequenced against money, and there is no correct sequence: before
-  the reserve it masks the 402 that names the grantable wall, after it a
-  refusal strands debited counters | test_task_tag_never_refuses.py: a
-  malformed, an over-long and a control-character tag each return the same
-  status as no tag at all, and the row records dropped_grammar"
-
-`test_task_tag_resolve.py` already pins this at the pure-function level
-(`resolve` never raises). This file pins the OTHER half: the live HTTP edge
-(`GET`/`POST` through `mvp.deps.get_request_context`, wired the same way
-`x-sc-group-id` / `x-sc-workflow-run-id` already are — see
-`tests/test_request_context_http.py`, which this file's fixture is modelled
-on almost verbatim) must not turn a bad `x-sc-task-tag` header into a 400,
-unlike `x-sc-group-id`, which DOES 400 on the same kind of malformed value
-(`InvalidCorrelationHeader`). That asymmetry — same grammar, opposite
-failure mode — is the entire point of P1.2's note that `task_tag.resolve` is
-deliberately NOT `mvp.observability.context._validate`.
+A tag that CAN refuse a request has to be sequenced against the credit
+reservation, and there is no correct place to put that check: before the
+reserve it would mask the 402 that names the wall a grant could raise;
+after the reserve, a refusal would strand counters that were already
+debited. So the live HTTP edge (through `mvp.deps.get_request_context`,
+wired the same way `x-sc-group-id` / `x-sc-workflow-run-id` already are —
+see `tests/test_request_context_http.py`, which this file's fixture is
+modelled on almost verbatim) must not turn a bad `x-sc-task-tag` header into
+a 400, unlike `x-sc-group-id`, which DOES 400 on the same kind of malformed
+value. That asymmetry — same grammar, opposite failure mode — is exactly
+why `task_tag.resolve` is a separate function from the correlation-id
+validator, deliberately never sharing its raising behaviour.
+`test_task_tag_resolve.py` already pins the pure-function half of this
+guarantee (`resolve` never raises); this file pins the HTTP half.
 
 At the base commit, `mvp.deps.get_request_context` takes no
 `task_tag_header`, so nothing yet reads `x-sc-task-tag` at all — every test
-below observes a 200 with no evidence the tag was ever looked at (the
-`_captured` request has no task-tag-shaped attribute, and the persisted
-`UsageLogs` row carries no `task_tag`/`task_tag_source` keys). That is the
-correct "surface absent" failure for this phase: nothing raises, so nothing
-here fails on an exception — it fails because the assertions about
-`task_tag`/`task_tag_source` being present and correct do not hold yet.
+below observes a 200 with no evidence the tag was ever looked at, and the
+persisted `UsageLogs` row carries no `task_tag`/`task_tag_source` keys.
+Nothing here fails on an exception; it fails because the assertions about
+those two keys being present and correct do not hold yet.
 """
 from __future__ import annotations
 
@@ -128,8 +120,8 @@ class TestMalformedTagNeverRefuses:
 
     @pytest.mark.parametrize("bad", [
         "has space",           # malformed
-        "a" * 65,               # over-long (rule #2 negative case)
-        "tag\x00name",          # control character (rule #2 negative case)
+        "a" * 65,               # over-long
+        "tag\x00name",          # control character (NUL)
         "tag\rname",            # control character (CR)
         "tag#name",             # DynamoDB key delimiter
     ])
@@ -137,8 +129,8 @@ class TestMalformedTagNeverRefuses:
         resp = _post(api_client, headers={"x-sc-task-tag": bad})
         assert resp.status_code == 200, (
             f"a malformed x-sc-task-tag ({bad!r}) refused the request with "
-            f"{resp.status_code} — P1.3 requires it be sequenced as if the "
-            "header were never sent"
+            f"{resp.status_code} — it must be sequenced as if the header "
+            "were never sent"
         )
 
     @pytest.mark.parametrize("bad", [

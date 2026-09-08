@@ -1,68 +1,38 @@
-"""PR1 (per-user-money-raises, task tags) — P1.7, P1.8, P1.9.
+"""Tests for grouping usage by (user, tag, period), and for what the
+aggregation's response tells a consumer of it.
 
-Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
+Three requests split across two tags, plus one untagged, must aggregate
+into exactly three rows with correct per-row totals — tested directly
+against `UsageLogsRepository.aggregate_by_tag`, since the endpoint that
+will eventually call it is reachable only by its HTTP path, while the
+aggregation itself is fully specified as a `TagAggregate` of
+`TagAggregateRow`.
 
-  P1.7 "Usage cannot be grouped by (user, tag, period) | H | Requirement 4 |
-  three requests under two tags and one untagged aggregate into three rows
-  with correct totals" — tested directly against
-  `UsageLogsRepository.aggregate_by_tag`, the interface's fully-specified new
-  read (`dynamo/usage_logs.py`). The endpoint that will eventually call it is
-  named only by path in the interface, not by file, so the row-shape /
-  totals contract is pinned at the repository boundary, which the interface
-  DOES name precisely (a `TagAggregate` of `TagAggregateRow`).
+The response must also state, as fields rather than as documentation, that
+the tag is the caller's own unverified assertion, and the caveats that
+make its retention figure honest: DynamoDB TTL deletion is asynchronous, so
+a row past the retention figure can still be returned, and a period
+straddling that boundary can fold incompletely. `TagAggregate` itself
+carries no such fields (only rows / truncated / pages_read / legacy_rows),
+so this half is verifiable only over real HTTP, mounting the three routers
+the by-tag paths actually live in: `mvp.me`, `mvp.admin_tenants`, and
+`mvp.team_lead`. Because the admin route and its team-lead mirror share one
+implementation, this file also asserts they return byte-identical bodies
+for the same tenant and period — nothing else here checks that directly,
+and two routes could otherwise pass individually while quietly diverging.
 
-  P1.8 "The aggregation must state that the tag is the caller's unverified
-  assertion, and must state its 90-day horizon | A | ... | the response
-  carries both statements as fields, not as prose in a doc" — `TagAggregate`
-  itself has no `tag_is_caller_asserted` / `retention_policy_days` fields (see
-  the interface's own dataclass listing: rows / truncated / pages_read /
-  legacy_rows only) — those fields are added ONLY in the HTTP response
-  body shown in the interface's "Endpoints" section. So P1.8, uniquely among
-  this file's three entries, can only be verified over real HTTP.
+The aggregation reads a tenant's partition over a period and folds it in
+memory, which is unbounded for a large tenant, so it must stop at a named,
+bounded page count and say so honestly in the response rather than reading
+past it silently — tested against real moto pagination (DynamoDB's own
+~1MB-per-response page boundary), not an artificially small `Limit` this
+suite controls, so the test holds regardless of what per-page `Limit` the
+implementation happens to choose internally.
 
-  Amendment A7.2 renames `history_horizon_days` to `retention_policy_days`
-  and REMOVES the old name (not kept as an alias): DynamoDB TTL deletion is
-  asynchronous, so the old name claimed a query horizon the query does not
-  enforce. A6.3 adds two caveat booleans that make the retained number
-  honest: `retention_deletion_is_asynchronous` and
-  `retention_boundary_period_may_fold_incompletely`. This is a
-  contract-driven test change, not a test fitted to code — see the test's
-  own docstring below.
-
-  Amendment A2 names the endpoint homes: `GET /me/usage/by-tag` lives in
-  `backend/mvp/me.py`; the admin route AND the one shared implementation
-  live in `backend/mvp/admin_tenants.py` (A4 corrects A2, which first said
-  `admin_usage.py`: the route is the tenant-scoped
-  `/admin/tenants/{tenant_id}/usage/by-tag`, and the shared implementation
-  the pool-budget routes already use for exactly this admin-plus-team-lead
-  pattern lives in `admin_tenants.py`); the team-lead mirror lives in
-  `backend/mvp/team_lead.py` and calls that same shared implementation, the
-  way the pool-budget routes already do. Tested by mounting exactly those
-  three routers (no `main.app`, now that the homes are named), and — because
-  "one shared implementation so the two cannot drift" is itself a contracted
-  property that nothing else in this suite checks — by asserting the admin
-  and team-lead routes return byte-identical bodies for the same tenant and
-  period.
-
-  P1.9 "The aggregation reads the tenant partition over a period and folds
-  in memory, which is unbounded for a large tenant | B | ... | a bounded
-  page count with an explicit truncation flag in the response; the bound is
-  a named constant" — tested against real moto pagination (DynamoDB's own
-  ~1MB-per-response page boundary), not an artificially small `Limit` this
-  suite controls, so the test holds regardless of what per-page `Limit` the
-  implementation happens to choose internally.
-
-Error contract (shared by all three by-tag endpoints), per Amendment A1:
-`period` not matching `YYYY-MM` is **422**, not 400. The interface's original
-Error Contracts section stated "400... matching the existing usage
-endpoints" — a self-contradiction, since every sibling endpoint validates
-`period` with `Query(default=None, pattern=r"^\\d{4}-\\d{2}$")`
-(`backend/mvp/team_lead.py:269`, `backend/mvp/admin_tenants.py:967/:1013/
-:1067/:1108`), which FastAPI answers with its own 422. A1 withdraws the 400:
-`period` is validated by that same `Query(pattern=...)`, so a malformed
-value is the FRAMEWORK's validation error, not a hand-rolled one — do not
-"fix" this back to 400; the whole point of A1 is that one way of validating
-a period across the API beats the specific digits the interface first wrote.
+A `period` that does not match `YYYY-MM` is FastAPI's own 422 (`Query`
+pattern validation) — the same mechanism every sibling endpoint already
+uses to validate a period, so a malformed value here must not be a
+hand-rolled, endpoint-specific error.
 """
 from __future__ import annotations
 
@@ -74,8 +44,8 @@ from boto3.dynamodb.conditions import Key as boto3_key
 
 
 # ---------------------------------------------------------------------------
-# P1.7 — grouping by (user, tag, period): three requests under two tags plus
-# one untagged aggregate into three rows with correct totals.
+# Grouping by (user, tag, period): three requests under two tags plus one
+# untagged aggregate into three rows with correct totals.
 # ---------------------------------------------------------------------------
 
 class TestP1_7_GroupingByUserTagPeriod:
@@ -151,8 +121,8 @@ class TestP1_7_GroupingByUserTagPeriod:
 
 
 # ---------------------------------------------------------------------------
-# P1.9 — the page bound is real and named, and truncation is reported
-# honestly rather than silently reading past it.
+# The page bound is real and named, and truncation is reported honestly
+# rather than silently reading past it.
 # ---------------------------------------------------------------------------
 
 class TestP1_9_PageBoundIsReal:
@@ -206,11 +176,10 @@ class TestP1_9_PageBoundIsReal:
 
 
 # ---------------------------------------------------------------------------
-# P1.8 — the response states tag_is_caller_asserted and retention_policy_days
-# (with its two caveat booleans, A6.3/A7.2) as FIELDS, and the admin/team-lead
-# mirror cannot drift. Only reachable
-# over real HTTP (see module docstring). Amendment A2 names the endpoint
-# homes, so this mounts exactly those three routers rather than main.app.
+# The response states tag_is_caller_asserted and retention_policy_days
+# (with its two caveat booleans) as FIELDS, and the admin/team-lead mirror
+# cannot drift. Only reachable over real HTTP (see module docstring), so
+# this mounts the three routers the by-tag endpoints actually live in.
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -236,13 +205,12 @@ class _FakeAdmin:
 
 @pytest.fixture
 def by_tag_client(dynamodb_mock, monkeypatch):
-    """Mounts exactly the three routers Amendment A2 names as the by-tag
-    endpoints' homes, corrected by A4: `mvp.me` (`/me/usage/by-tag`),
-    `mvp.admin_tenants` (the tenant-scoped admin route AND the one shared
-    implementation — A4 withdraws A2's `admin_usage.py`: the shared
-    admin-plus-team-lead pattern already lives in `admin_tenants.py`, where
-    the pool-budget routes keep theirs), and `mvp.team_lead` (the mirror
-    that calls that same shared implementation)."""
+    """Mounts the three routers the by-tag endpoints actually live in:
+    `mvp.me` (`/me/usage/by-tag`), `mvp.admin_tenants` (the tenant-scoped
+    admin route AND the one shared implementation — the same
+    admin-plus-team-lead pattern the pool-budget routes already use), and
+    `mvp.team_lead` (the mirror that calls that same shared
+    implementation)."""
     import mvp.authz as _authz
     monkeypatch.setattr(_authz, "user_has_permission", lambda user, perm: True)
 
@@ -271,24 +239,25 @@ def by_tag_client(dynamodb_mock, monkeypatch):
 
 class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
     def test_by_tag_response_carries_both_statements_as_fields(self, by_tag_client):
-        """Amendment A7.2 renames `history_horizon_days` to
-        `retention_policy_days` and REMOVES the old name outright (it is not
-        kept as an alias): the old name claimed a query horizon the query
-        does not enforce, since DynamoDB TTL deletion is asynchronous, so a
-        row older than the number can still be returned and a period
-        straddling it can fold incompletely. This is a contract-driven test
-        change, not a test fitted to code -- the field rename and the two
-        new caveat booleans below come from A7.2/A6.3, not from reading any
-        implementation.
+        """The response states `retention_policy_days`, and
+        `history_horizon_days` must be absent rather than kept alongside it
+        as an alias: the old name claimed a query horizon the query does
+        not enforce, since DynamoDB TTL deletion is asynchronous, so a row
+        older than the number can still be returned and a period straddling
+        it can fold incompletely. Keeping both names would ship that false
+        claim beside its own correction, and two fields carrying one fact
+        is a duplication this suite treats as a defect on sight -- this is
+        a deliberate naming decision this test enforces, not a test written
+        to match whatever an implementation happens to call the field.
 
-        `tag_is_caller_asserted` is unaffected by A7.2 and is still
-        asserted here. The two new caveats
+        `tag_is_caller_asserted` is a separate statement and still asserted
+        here. The two caveat booleans
         (`retention_deletion_is_asynchronous`,
         `retention_boundary_period_may_fold_incompletely`) are the part that
-        makes the retained number honest -- P1.8 is about what a consumer of
-        this JSON is told, so a test that checked only the number and not
-        these caveats would be checking the weaker half of the same
-        obligation.
+        makes the retained number honest -- a consumer of this JSON is told
+        both the number and its limits, so a test that checked only the
+        number and not these caveats would be checking the weaker half of
+        the same obligation.
         """
         from dynamo.tenant_budgets import current_period
 
@@ -296,18 +265,19 @@ class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["tag_is_caller_asserted"] is True, (
-            "the by-tag response must state, as a field, that the tag is the "
-            "caller's unverified assertion -- P1.8"
+            "the by-tag response must state, as a field, that the tag is "
+            "the caller's unverified assertion"
         )
         assert body["retention_policy_days"] == 90, (
             "the by-tag response must state, as a field, the 90-day "
             f"retention policy -- got {body.get('retention_policy_days')!r}"
         )
         assert "history_horizon_days" not in body, (
-            "A7.2 removed history_horizon_days outright (not kept as an "
+            "history_horizon_days must be absent outright (not kept as an "
             "alias beside retention_policy_days) -- its return would ship "
             "the false 'query horizon' claim next to its own correction, "
-            "which is exactly the duplication A7.2 exists to prevent"
+            "which is exactly the duplication one name for one number is "
+            "meant to prevent"
         )
         assert body["retention_deletion_is_asynchronous"] is True, (
             "the response must state, as a field, that TTL deletion is "
@@ -321,28 +291,28 @@ class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
         assert "rows" in body and "truncated" in body and "legacy_rows" in body
 
     def test_period_not_matching_yyyy_mm_is_422(self, by_tag_client):
-        """Amendment A1: the 400 is withdrawn. `period` is validated by the
-        SAME `Query(default=None, pattern=r"^\\d{4}-\\d{2}$")` every sibling
-        endpoint uses (`team_lead.py:269`, `admin_tenants.py:967` etc.), so a
-        malformed value is FastAPI's own 422 -- the framework's validation,
-        not a hand-rolled endpoint-specific error. Do not "fix" this back to
-        400: consistency with the rest of the API is the reason this clause
-        exists at all.
+        """`period` is validated by the SAME `Query(default=None,
+        pattern=r"^\\d{4}-\\d{2}$")` every sibling endpoint uses
+        (`team_lead.py:269`, `admin_tenants.py:967` etc.), so a malformed
+        value is FastAPI's own 422 -- the framework's validation, not a
+        hand-rolled endpoint-specific error. Do not "fix" this to 400:
+        consistency with the rest of the API validating a period the same
+        way is the reason to keep it a 422 here.
         """
         resp = by_tag_client.get("/api/mvp/me/usage/by-tag?period=not-a-period")
         assert resp.status_code == 422, (
             f"malformed period must be FastAPI's 422 (Query pattern "
-            f"validation), per amendment A1 -- got {resp.status_code}: {resp.text}"
+            f"validation) -- got {resp.status_code}: {resp.text}"
         )
 
 
 class TestP1_8_AdminAndTeamLeadCannotDrift:
-    """'One shared implementation so the two cannot drift' (interface,
-    Endpoints section) is itself a contracted property. Nothing else in
-    this suite checks it directly — a test could pass both routes
-    individually while each hand-rolled its own, subtly different,
-    aggregation logic. This asserts the observable consequence: for the
-    same tenant and period, the two routes must return the identical body.
+    """The admin route and its team-lead mirror share one implementation so
+    the two cannot drift apart. Nothing else in this suite checks that
+    directly — a test could pass both routes individually while each
+    hand-rolled its own, subtly different, aggregation logic. This asserts
+    the observable consequence: for the same tenant and period, the two
+    routes must return the identical body.
     """
 
     def test_admin_and_team_lead_bodies_match_for_the_same_tenant_and_period(
@@ -370,6 +340,6 @@ class TestP1_8_AdminAndTeamLeadCannotDrift:
             "the admin route and the team-lead mirror must return the "
             "IDENTICAL body for the same tenant/period -- a difference here "
             "means the two routes are not actually sharing one implementation, "
-            "which is the exact drift the interface's 'one shared "
-            "implementation' sentence exists to prevent"
+            "which is exactly the drift a shared implementation is meant "
+            "to prevent"
         )
