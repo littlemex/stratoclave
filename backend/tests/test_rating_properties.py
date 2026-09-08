@@ -32,6 +32,8 @@ from hypothesis.stateful import (
 
 from mvp import pricing
 
+pytestmark = pytest.mark.heavy   # see `heavy` in pyproject.toml: own CI lane
+
 
 class _User:
     def __init__(self, user_id, org_id):
