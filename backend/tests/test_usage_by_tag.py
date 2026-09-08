@@ -14,11 +14,20 @@ Contract: `change-pipeline/per-user-money-raises/03-impl/HANDOFF-PR1.md`.
   P1.8 "The aggregation must state that the tag is the caller's unverified
   assertion, and must state its 90-day horizon | A | ... | the response
   carries both statements as fields, not as prose in a doc" — `TagAggregate`
-  itself has no `tag_is_caller_asserted` / `history_horizon_days` fields (see
+  itself has no `tag_is_caller_asserted` / `retention_policy_days` fields (see
   the interface's own dataclass listing: rows / truncated / pages_read /
-  legacy_rows only) — those two fields are added ONLY in the HTTP response
+  legacy_rows only) — those fields are added ONLY in the HTTP response
   body shown in the interface's "Endpoints" section. So P1.8, uniquely among
   this file's three entries, can only be verified over real HTTP.
+
+  Amendment A7.2 renames `history_horizon_days` to `retention_policy_days`
+  and REMOVES the old name (not kept as an alias): DynamoDB TTL deletion is
+  asynchronous, so the old name claimed a query horizon the query does not
+  enforce. A6.3 adds two caveat booleans that make the retained number
+  honest: `retention_deletion_is_asynchronous` and
+  `retention_boundary_period_may_fold_incompletely`. This is a
+  contract-driven test change, not a test fitted to code — see the test's
+  own docstring below.
 
   Amendment A2 names the endpoint homes: `GET /me/usage/by-tag` lives in
   `backend/mvp/me.py`; the admin route AND the one shared implementation
@@ -197,8 +206,9 @@ class TestP1_9_PageBoundIsReal:
 
 
 # ---------------------------------------------------------------------------
-# P1.8 — the response states tag_is_caller_asserted and history_horizon_days
-# as FIELDS, and the admin/team-lead mirror cannot drift. Only reachable
+# P1.8 — the response states tag_is_caller_asserted and retention_policy_days
+# (with its two caveat booleans, A6.3/A7.2) as FIELDS, and the admin/team-lead
+# mirror cannot drift. Only reachable
 # over real HTTP (see module docstring). Amendment A2 names the endpoint
 # homes, so this mounts exactly those three routers rather than main.app.
 # ---------------------------------------------------------------------------
@@ -261,6 +271,25 @@ def by_tag_client(dynamodb_mock, monkeypatch):
 
 class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
     def test_by_tag_response_carries_both_statements_as_fields(self, by_tag_client):
+        """Amendment A7.2 renames `history_horizon_days` to
+        `retention_policy_days` and REMOVES the old name outright (it is not
+        kept as an alias): the old name claimed a query horizon the query
+        does not enforce, since DynamoDB TTL deletion is asynchronous, so a
+        row older than the number can still be returned and a period
+        straddling it can fold incompletely. This is a contract-driven test
+        change, not a test fitted to code -- the field rename and the two
+        new caveat booleans below come from A7.2/A6.3, not from reading any
+        implementation.
+
+        `tag_is_caller_asserted` is unaffected by A7.2 and is still
+        asserted here. The two new caveats
+        (`retention_deletion_is_asynchronous`,
+        `retention_boundary_period_may_fold_incompletely`) are the part that
+        makes the retained number honest -- P1.8 is about what a consumer of
+        this JSON is told, so a test that checked only the number and not
+        these caveats would be checking the weaker half of the same
+        obligation.
+        """
         from dynamo.tenant_budgets import current_period
 
         resp = by_tag_client.get(f"/api/mvp/me/usage/by-tag?period={current_period()}")
@@ -270,9 +299,24 @@ class TestP1_8_ResponseStatesCallerAssertedAndHorizonAsFields:
             "the by-tag response must state, as a field, that the tag is the "
             "caller's unverified assertion -- P1.8"
         )
-        assert body["history_horizon_days"] == 90, (
-            "the by-tag response must state, as a field, the 90-day history "
-            f"horizon -- got {body.get('history_horizon_days')!r}"
+        assert body["retention_policy_days"] == 90, (
+            "the by-tag response must state, as a field, the 90-day "
+            f"retention policy -- got {body.get('retention_policy_days')!r}"
+        )
+        assert "history_horizon_days" not in body, (
+            "A7.2 removed history_horizon_days outright (not kept as an "
+            "alias beside retention_policy_days) -- its return would ship "
+            "the false 'query horizon' claim next to its own correction, "
+            "which is exactly the duplication A7.2 exists to prevent"
+        )
+        assert body["retention_deletion_is_asynchronous"] is True, (
+            "the response must state, as a field, that TTL deletion is "
+            "asynchronous -- without it, retention_policy_days reads as an "
+            "enforced horizon rather than the policy figure it actually is"
+        )
+        assert body["retention_boundary_period_may_fold_incompletely"] is True, (
+            "the response must state, as a field, that a period straddling "
+            "the retention boundary may fold incompletely"
         )
         assert "rows" in body and "truncated" in body and "legacy_rows" in body
 
