@@ -98,6 +98,12 @@ class RequestContext:
     # when absent. Opaque, grammar-validated. NOT a tenant selector — see the
     # module docstring and ``session_key``.
     session_id_supplied: Optional[str] = None
+    # `mvp.task_tag.dropped_reason(task_tag_source)`, computed once here so the
+    # response echo (``response_headers``) never re-resolves the header.
+    # ``"reserved"`` / ``"grammar"`` when the tag was dropped; `None` when it
+    # was not (absent or asserted) — a client never needs telling its own tag
+    # stuck.
+    task_tag_dropped_reason: Optional[str] = None
 
     def session_key(self) -> str:
         """The SAAR session key for this request: the explicit ``x-sc-session-id``
@@ -158,6 +164,7 @@ def build_request_context(
     this function does not raise for ``task_tag_header`` either (unlike the
     other headers): a task tag must never be able to refuse a request.
     """
+    from ..task_tag import dropped_reason as _task_tag_dropped_reason
     from ..task_tag import resolve as _resolve_task_tag
 
     group_id = _validate(HDR_GROUP_ID, group_id_header)
@@ -179,14 +186,26 @@ def build_request_context(
         session_id_supplied=session_id,
         task_tag=task_tag,
         task_tag_source=task_tag_source.value,
+        task_tag_dropped_reason=_task_tag_dropped_reason(task_tag_source),
     )
 
 
 def response_headers(ctx: RequestContext) -> dict[str, str]:
     """Correlation headers to echo on the response: the assigned span id and
     the (possibly server-generated) workflow-run id, so a client that did not
-    pre-generate a run id can reuse it for later calls in the same run."""
-    return {
+    pre-generate a run id can reuse it for later calls in the same run.
+
+    ``x-sc-task-tag-dropped`` is added only when ``ctx.task_tag_dropped_reason``
+    is set -- i.e. only when the request's tag was actually dropped. The value
+    is read from `ctx` (resolved once at the edge), never re-resolved from the
+    request's header here.
+    """
+    headers = {
         HDR_SPAN_ID: ctx.span_id,
         HDR_WORKFLOW_RUN_ID: ctx.workflow_run_id,
     }
+    if ctx.task_tag_dropped_reason is not None:
+        from ..task_tag import HDR_TASK_TAG_DROPPED
+
+        headers[HDR_TASK_TAG_DROPPED] = ctx.task_tag_dropped_reason
+    return headers
