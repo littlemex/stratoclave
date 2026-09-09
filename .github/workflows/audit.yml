@@ -12,9 +12,13 @@ name: audit
 #                  case-by-case with a comment justifying the deferral.
 #   - cargo-audit: reads Cargo.lock, reports against the RustSec advisory DB.
 #                  --deny warnings turns advisories into a non-zero exit.
-#   - npm audit  : reads package-lock.json. The default exit code is non-zero
-#                  on any finding at moderate or higher; we keep that strict
-#                  default and run on both `iac/` and `frontend/` lockfiles.
+#   - npm audit  : reads package-lock.json. Its default exits non-zero on any
+#                  finding at moderate or higher; both jobs below deliberately
+#                  raise the bar to `--audit-level=high`, so a moderate finding
+#                  is reported and does NOT block. Run on both `iac/` and
+#                  `frontend/` lockfiles. (This said the strict default was kept,
+#                  which sent a reader looking for a moderate gate that does not
+#                  exist — and, once, to bundle two unnecessary major bumps.)
 #
 # Triage policy: a CVE finding blocks merge until either (a) bumped to a
 # fixed version, or (b) explicitly deferred via the per-tool ignore
