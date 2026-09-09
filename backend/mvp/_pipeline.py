@@ -618,6 +618,17 @@ class ReservationContext:
     workflow_run_id: Optional[str] = None
     group_id: Optional[str] = None
     request_id: Optional[str] = None
+    #: Cached seed for the quota/ceiling settle's idempotency token, minted on FIRST use.
+    #:
+    #: The token has two requirements that pull against each other: it must be the SAME
+    #: across retries of one settle (so a lost ack dedupes instead of moving `used` twice)
+    #: and DIFFERENT between reservations (so one request's settle is not mistaken for
+    #: another's). A value cached on the context satisfies both, because a context is one
+    #: reservation and outlives its own retries.
+    #:
+    #: Only reached when neither `hold_id` nor `request_id` is available. See
+    #: `_settle_token_seed` for what went wrong when the fallback was a shared string.
+    _settle_seed: Optional[str] = None
     # Reservation origin. "external" marks a hold created by the external
     # authorize/capture API (not an inline LLM request). It changes exactly ONE
     # money behaviour: on a settle that loses the terminal race to a reaper
@@ -5145,6 +5156,49 @@ def _uq_adjust_txn_item(context, delta: int) -> Optional[dict]:
         period=period, delta=delta)
 
 
+def _settle_token_seed(context) -> str:
+    """A value unique to THIS reservation and stable across its own retries.
+
+    The quota/ceiling settle derives its `ClientRequestToken` from this. It used to derive
+    it from `hold_id or period`, and the fallback was the bug: an UNPOOLED reservation has
+    no hold -- `_reserve_quota_without_pool` writes no HOLD row -- so the seed became the
+    bare period string, which is identical for every unpooled request in the month and
+    shared across every tenant and user.
+
+    The consequence, observed on real infrastructure once these settles started running at
+    all: the first unpooled settle of a period succeeded, and every later one sent the same
+    token with a different delta, so DynamoDB refused it with
+    `IdempotentParameterMismatchException`, the surrounding `except` swallowed it, and the
+    counter kept the reserved bound. A member's ceiling read 3522 micro-USD for a request
+    that cost 41 -- 86 times what they spent.
+
+    It was invisible before, not absent: unpooled reservations never reached this call, so
+    two of them never collided.
+
+    `hold_id` first, because a pooled reservation already keyed on it and that behaviour is
+    left byte-identical. Then `request_id`. Then a cached uuid4 -- reached only if a
+    reservation has neither identity, and chosen over sending no token at all because
+    without one a lost-ack retry would apply the delta twice and drive `used` BELOW what
+    the member spent, letting them past their ceiling.
+    """
+    for attr in ("hold_id", "request_id"):
+        value = getattr(context, attr, None)
+        if value:
+            return str(value)
+    seed = getattr(context, "_settle_seed", None)
+    if not seed:
+        seed = f"ctx-{uuid.uuid4()}"
+        try:
+            context._settle_seed = seed
+        except Exception:  # noqa: BLE001 — a context that cannot cache still gets a token.
+            # Frozen or slotted object: the token is then unique per CALL rather than per
+            # reservation, which loses retry dedupe but never collides between requests.
+            # The worse failure of the two is the collision, so this direction is chosen
+            # deliberately rather than by omission.
+            pass
+    return str(seed)
+
+
 def _release_or_settle_quota_and_uq(
     context, *, quota_delta: Optional[int], uq_delta: Optional[int], log_event: str
 ) -> None:
@@ -5174,7 +5228,7 @@ def _release_or_settle_quota_and_uq(
         # twice. A fresh token is right where a cancelled transaction writes nothing and
         # the retry re-reads first; it is wrong here, where the write is unconditional.
         # The tag separates settle from release so the two never share a token.
-        _primary = str(getattr(context, "hold_id", None) or _quota_period(context) or "")
+        _primary = _settle_token_seed(context)
         try:
             _low_level_client().transact_write_items(
                 TransactItems=items,
@@ -5903,9 +5957,6 @@ def settle_reservation_and_log(
                 actual_microusd=actual_cost_microusd,
                 error_code="non_client_error",
             )
-        # Settle the per-model quota too: move `used` from the reserved estimate
-        # to the actual spend (actual<=reserved so used only ever decreases here).
-        _settle_quota_for(context, int(actual_cost_microusd))
         # P0 decision log: fire-and-forget the OUTCOME record — the measured
         # charge (from the frozen rating we just wrote) plus the counterfactual
         # savings against the requested / max-servable baselines at THIS request's
@@ -5923,6 +5974,31 @@ def settle_reservation_and_log(
             )
         except Exception:  # noqa: BLE001 — decision logging never breaks settle.
             pass
+
+    # ----- the quota and per-user-ceiling settle (pooled or NOT) -----
+    # Move `used` from the reserved estimate to the actual spend on the per-model quota
+    # and on the per-user money ceiling. `actual <= reserved` under a sound bound, so this
+    # normally only decreases `used`; an overrun is signed and recorded as one.
+    #
+    # OUTSIDE the pool block, and it used to be inside it. These two counters belong to
+    # walls that are configured independently of any dollar pool -- the per-user ceiling
+    # reads only `user_dollar_defaults` -- so a tenant with no pool reserved the BOUND at
+    # admission and never had it walked down to what the request actually cost. Observed
+    # on real infrastructure: a ceiling charged 1542 micro-USD for a request that cost 41,
+    # so a member exhausted their personal allowance roughly 37 times too early.
+    #
+    # The asymmetry is what makes this an oversight rather than a decision: the RELEASE
+    # path (`release_pool` -> `_release_quota_for`) was already unconditional, so a FAILED
+    # request gave its reservation back correctly and a SUCCESSFUL one did not. Nobody
+    # designs that. `build_adjust_txn_item`'s own docstring calls itself "settle and
+    # release's item", so settling was always the intent.
+    #
+    # Placed AFTER the pool block rather than before it so the pooled path's ordering is
+    # unchanged, and guarded only on having an actual cost: `_settle_quota_for` returns
+    # immediately when neither counter reserved anything, and clears both amounts in a
+    # `finally`, so a double-settle is a no-op.
+    if context is not None and actual_cost_microusd is not None:
+        _settle_quota_for(context, int(actual_cost_microusd))
 
     # ALWAYS record usage, even if the pool settle above failed: the Bedrock
     # call happened and its cost must be auditable. This is deliberately outside
