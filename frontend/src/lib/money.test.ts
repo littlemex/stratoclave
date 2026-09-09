@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { fmtMicroUsd, fmtMicroUsdRate, parseUsdToCents } from './money'
+import { fmtMicroUsd, fmtMicroUsdCharge, fmtMicroUsdRate, parseUsdToCents } from './money'
 
 describe('parseUsdToCents', () => {
   it('parses a plain integer dollar amount', () => {
@@ -123,5 +123,30 @@ describe('fmtMicroUsdRate', () => {
   it('groups thousands and signs negatives', () => {
     expect(fmtMicroUsdRate(1_000_000_000)).toBe('$1,000')
     expect(fmtMicroUsdRate(-2_500_000)).toBe('-$2.5')
+  })
+})
+
+describe('fmtMicroUsdCharge — a nonzero charge is never shown as $0.00', () => {
+  it('shows a sub-cent charge at full precision', () => {
+    // The real figure from a real request through a real gateway, found in a real browser: the
+    // by-tag report rendered "$0.00" beside a request count of 1. `fmtMicroUsdRate`'s own
+    // comment already warned that the cent formatter "would show a real sub-cent rate as
+    // $0.00"; nothing had put that warning next to a COST REPORT until a browser did.
+    expect(fmtMicroUsdCharge(53)).toBe('$0.000053')
+  })
+
+  it('shows cents once the charge reaches a cent, because that is how a bill reads', () => {
+    expect(fmtMicroUsdCharge(10_000)).toBe('$0.01')
+    expect(fmtMicroUsdCharge(4_500_000)).toBe('$4.50')
+    expect(fmtMicroUsdCharge(60_000_000)).toBe('$60.00')
+  })
+
+  it('shows zero as zero', () => {
+    // A genuinely free row must not be dressed up in six decimals.
+    expect(fmtMicroUsdCharge(0)).toBe('$0.00')
+  })
+
+  it('keeps a sub-cent refund visibly nonzero too', () => {
+    expect(fmtMicroUsdCharge(-53)).toBe('-$0.000053')
   })
 })

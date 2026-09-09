@@ -35,12 +35,34 @@ export function fmtMicroUsdRate(micro: number): string {
   const neg = micro < 0
   const abs = Math.abs(Math.trunc(micro))
   const dollars = Math.floor(abs / 1_000_000)
-  const frac6 = String(abs % 1_000_000).padStart(6, '0').replace(/0+$/, '')
+  const frac6 = String(abs % 1_000_000)
+    .padStart(6, '0')
+    .replace(/0+$/, '')
   const sign = neg ? '-' : ''
   // Pin en-US grouping so the thousands separator is always ',' and never
   // collides with the fixed '.' decimal point on a non-US runtime locale.
   const whole = dollars.toLocaleString('en-US')
   return frac6 ? `${sign}$${whole}.${frac6}` : `${sign}$${whole}`
+}
+
+/**
+ * A charge that is never displayed as $0.00 unless it really is zero.
+ *
+ * `fmtMicroUsd` truncates to whole cents, which is right for a budget or an approval — those are
+ * figures a person types in cents. It is wrong for a CHARGE, and `fmtMicroUsdRate`'s own comment
+ * already says why: a real sub-cent value "would show a real sub-cent rate as $0.00".
+ *
+ * Found in a real browser against a real gateway: one request cost 53 micro-USD and the by-tag
+ * report rendered "$0.00" beside it. A cost report whose column cannot show the cost tells a
+ * reader the work was free, which is the same false belief the report's other disclosures exist
+ * to prevent — arrived at by rounding instead of by a missing attribute.
+ *
+ * Cents when the value reaches a cent, because that is what a person reads a bill in. Full
+ * precision only when it does not, because the alternative there is a lie. Zero is zero.
+ */
+export function fmtMicroUsdCharge(micro: number): string {
+  if (micro !== 0 && Math.abs(Math.trunc(micro)) < 10_000) return fmtMicroUsdRate(micro)
+  return fmtMicroUsd(micro)
 }
 
 // Parse a user-typed dollar string ("500", "$500", "1,000", "500.50") into
