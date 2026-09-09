@@ -37,6 +37,10 @@ pub async fn run(
 
     let api_client = ApiClient::new(app_config, token, sc_headers)?;
 
+    // The tag drop is deterministic for a given tag, so warn once per session rather than
+    // once per turn: repeating identical text every turn trains the reader to ignore it.
+    let mut warned_tag_dropped = false;
+
     // Cap on retained turns (user+assistant entries). The whole history is
     // re-sent every turn (the Messages API is stateless), so without a bound a
     // long session grows unboundedly, eventually exceeds the model context and
@@ -89,6 +93,15 @@ pub async fn run(
                 history.push(ChatTurn::user(input));
                 match api_client.send_turns(&history).await {
                     Ok(response) => {
+                        if !warned_tag_dropped {
+                            if let Some(reason) = response.task_tag_dropped.as_deref() {
+                                crate::mvp::sc_headers::warn_if_task_tag_dropped(
+                                    api_client.sc_headers(),
+                                    Some(reason),
+                                );
+                                warned_tag_dropped = true;
+                            }
+                        }
                         println!();
                         println!("{}", response.message);
                         if !response.complete {

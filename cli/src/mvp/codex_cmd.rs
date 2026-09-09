@@ -844,9 +844,18 @@ mod tests {
                     })
                     .collect()
             };
-            let (g, w, p) = (gen(64, false), gen(64, false), gen(128, true));
-            let h = ScHeaders::validated(Some(g.clone()), Some(w.clone()), Some(p.clone()))
-                .expect("generated values must validate");
+            // Four headers, each at ITS max: the tag shares the 64-char id bound, and the
+            // point of the property is the total emitted size, so leaving it out would test a
+            // smaller worst case than the one that ships.
+            let (g, w, p, tt) =
+                (gen(64, false), gen(64, false), gen(128, true), gen(64, false));
+            let h = ScHeaders::validated(
+                Some(g.clone()),
+                Some(w.clone()),
+                Some(p.clone()),
+                Some(tt.clone()),
+            )
+            .expect("generated values must validate");
             let body = codex_config_body(
                 "https://example.test/openai/v1",
                 "openai.gpt-5.4",
@@ -860,7 +869,8 @@ mod tests {
             assert_eq!(ht["x-sc-group-id"].as_str(), Some(g.as_str()));
             assert_eq!(ht["x-sc-workflow-run-id"].as_str(), Some(w.as_str()));
             assert_eq!(ht["x-sc-model-pin"].as_str(), Some(p.as_str()));
-            assert_eq!(ht.len(), 3);
+            assert_eq!(ht["x-sc-task-tag"].as_str(), Some(tt.as_str()));
+            assert_eq!(ht.len(), 4);
         }
     }
 

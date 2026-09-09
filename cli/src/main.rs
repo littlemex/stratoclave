@@ -75,6 +75,14 @@ enum Commands {
         /// Pins every request to exactly this model — no cascade. Before child args.
         #[arg(long)]
         model_pin: Option<String>,
+        /// Label this work for later billing aggregation (x-sc-task-tag header),
+        /// [A-Za-z0-9._:-]{1,64}. Falls back to $STRATOCLAVE_TASK_TAG; setting both
+        /// to different values is an error. NOT a secret and NOT for personal data:
+        /// the value reaches the child process, every tool it spawns, and everyone
+        /// who can read this tenant's billing records. `UNLABELLED` is reserved and
+        /// is dropped. Before child args.
+        #[arg(long)]
+        task_tag: Option<String>,
         /// Extra args passed to claude
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -97,6 +105,14 @@ enum Commands {
         /// Pins every request to exactly this model — no cascade. Before child args.
         #[arg(long)]
         model_pin: Option<String>,
+        /// Label this work for later billing aggregation (x-sc-task-tag header),
+        /// [A-Za-z0-9._:-]{1,64}. Falls back to $STRATOCLAVE_TASK_TAG; setting both
+        /// to different values is an error. NOT a secret and NOT for personal data:
+        /// the value reaches the child process, every tool it spawns, and everyone
+        /// who can read this tenant's billing records. `UNLABELLED` is reserved and
+        /// is dropped. Before child args.
+        #[arg(long)]
+        task_tag: Option<String>,
         /// Directory used as CODEX_HOME, where codex keeps sessions, history, and
         /// directory-trust answers. Default: $STRATOCLAVE_CODEX_STATE_DIR, else
         /// ~/.stratoclave/codex-state. Never the user's ~/.codex.
@@ -765,13 +781,15 @@ async fn main() -> ExitCode {
             group_id,
             workflow_run_id,
             model_pin,
+            task_tag,
             args,
-        }) => dispatch_claude(model, group_id, workflow_run_id, model_pin, args).await,
+        }) => dispatch_claude(model, group_id, workflow_run_id, model_pin, task_tag, args).await,
         Some(Commands::Codex {
             model,
             group_id,
             workflow_run_id,
             model_pin,
+            task_tag,
             codex_state_dir,
             ephemeral_codex_state,
             args,
@@ -781,6 +799,7 @@ async fn main() -> ExitCode {
                 group_id,
                 workflow_run_id,
                 model_pin,
+                task_tag,
                 codex_state_dir,
                 ephemeral_codex_state,
                 args,
@@ -832,17 +851,24 @@ async fn dispatch_auth(action: AuthAction) -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_claude(
     model: Option<String>,
     group_id: Option<String>,
     workflow_run_id: Option<String>,
     model_pin: Option<String>,
+    task_tag: Option<String>,
     args: Vec<String>,
 ) -> ExitCode {
     // Validate the x-sc-* header flags BEFORE run() loads config or mints an
     // ephemeral key, so a malformed value costs zero network calls. Exit code 2
     // marks a usage/validation error, matching clap's own convention.
-    let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
+    let headers = match mvp::sc_headers::ScHeaders::for_wrapper(
+        group_id,
+        workflow_run_id,
+        model_pin,
+        task_tag,
+    ) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[ERROR] {e:#}");
@@ -864,11 +890,17 @@ async fn dispatch_codex(
     group_id: Option<String>,
     workflow_run_id: Option<String>,
     model_pin: Option<String>,
+    task_tag: Option<String>,
     codex_state_dir: Option<String>,
     ephemeral_codex_state: bool,
     args: Vec<String>,
 ) -> ExitCode {
-    let headers = match mvp::sc_headers::ScHeaders::validated(group_id, workflow_run_id, model_pin) {
+    let headers = match mvp::sc_headers::ScHeaders::for_wrapper(
+        group_id,
+        workflow_run_id,
+        model_pin,
+        task_tag,
+    ) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[ERROR] {e:#}");
