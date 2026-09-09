@@ -1006,12 +1006,59 @@
       <h2 class="section-title" data-ja="3 つの役割、3 つの入り口" data-en="Three roles, three ways in">3 つの役割、3 つの入り口</h2>
       <p class="problem-line" data-ja="セキュリティ責任者は、バックエンドが乗っ取られたときに、それが顧客の Identity Center や SAML IdP へ踏み台にされないかを気にする。" data-en="A security owner worries whether a backend compromise could pivot into the customer's Identity Center or SAML IdP.">セキュリティ責任者は、バックエンドが乗っ取られたときに、それが顧客の Identity Center や SAML IdP へ踏み台にされないかを気にする。</p>
 
-      <div class="chiprow" style="margin-top:0">
-        <span class="chip on mono" data-ja="admin" data-en="admin">admin</span>
-        <span class="chip on mono" data-ja="team_lead" data-en="team_lead">team_lead</span>
-        <span class="chip on mono" data-ja="user" data-en="user">user</span>
-        <span class="chip mono" data-ja="すべてテナント内に限定" data-en="all scoped to one tenant">すべてテナント内に限定</span>
+      <div class="diagram-shell">
+        <svg viewBox="0 0 900 300" role="img" aria-labelledby="idax-title idax-desc" style="width:100%; height:auto;">
+          <title id="idax-title" data-ja="入り口と役割が独立していることを示す図" data-en="Diagram showing that the way in and the role are independent">入り口と役割が独立していることを示す図</title>
+          <desc id="idax-desc" data-ja="3 つの入り口はいずれも同じ本人確認に収束し、そこから 3 つの役割へ分岐する。入り口が役割を決めることはない" data-en="All three ways in converge on the same verified identity, which then fans out to three roles. The way in never determines the role">3 つの入り口はいずれも同じ本人確認に収束し、そこから 3 つの役割へ分岐する。入り口が役割を決めることはない</desc>
+
+          <text x="20" y="26" font-size="11.5" font-weight="600" class="lbl-muted" data-ja="入り口 — どう証明するか" data-en="Way in — how you prove it">入り口 — どう証明するか</text>
+          <text x="880" y="26" text-anchor="end" font-size="11.5" font-weight="600" class="lbl-muted" data-ja="役割 — 何ができるか" data-en="Role — what you may do">役割 — 何ができるか</text>
+
+          <!-- three ways in -->
+          <rect class="box" x="20" y="52" width="232" height="46" rx="4"></rect>
+          <text x="36" y="72" font-size="12.5" data-ja="Cognito" data-en="Cognito">Cognito</text>
+          <text x="36" y="89" font-size="10.5" class="lbl-muted" data-ja="メール + パスワード" data-en="email + password">メール + パスワード</text>
+
+          <rect class="box" x="20" y="118" width="232" height="46" rx="4"></rect>
+          <text x="36" y="138" font-size="12.5" data-ja="Vouch-by-STS" data-en="Vouch-by-STS">Vouch-by-STS</text>
+          <text x="36" y="155" font-size="10.5" class="lbl-muted" data-ja="署名した sts:GetCallerIdentity" data-en="a signed sts:GetCallerIdentity">署名した sts:GetCallerIdentity</text>
+
+          <rect class="box" x="20" y="184" width="232" height="46" rx="4"></rect>
+          <text x="36" y="204" font-size="12.5" data-ja="API キー" data-en="API key">API キー</text>
+          <text x="36" y="221" font-size="10.5" class="lbl-muted mono">sk-stratoclave-*</text>
+
+          <!-- converge -->
+          <path class="line" d="M252,75 L392,140"></path>
+          <path class="line" d="M252,141 L392,141"></path>
+          <path class="line" d="M252,207 L392,142"></path>
+
+          <rect class="box-primary" x="392" y="112" width="116" height="58" rx="4"></rect>
+          <text x="450" y="136" text-anchor="middle" font-size="12.5" font-weight="600" data-ja="本人確認" data-en="Verified identity">本人確認</text>
+          <text x="450" y="153" text-anchor="middle" font-size="10" class="lbl-muted" data-ja="ここで一本になる" data-en="one path from here">ここで一本になる</text>
+
+          <!-- fan out -->
+          <path class="line-primary" d="M508,140 L648,75"></path>
+          <path class="line-primary" d="M508,141 L648,141"></path>
+          <path class="line-primary" d="M508,142 L648,207"></path>
+
+          <!-- three roles, inside one tenant -->
+          <rect x="634" y="40" width="252" height="202" rx="6" fill="none" stroke="hsl(var(--border))" stroke-width="1" stroke-dasharray="4 4"></rect>
+          <rect class="box" x="648" y="52" width="224" height="46" rx="4"></rect>
+          <text x="664" y="72" font-size="12.5" class="mono">admin</text>
+          <text x="664" y="89" font-size="10.5" class="lbl-muted" data-ja="テナント全体" data-en="the whole tenant">テナント全体</text>
+
+          <rect class="box" x="648" y="118" width="224" height="46" rx="4"></rect>
+          <text x="664" y="138" font-size="12.5" class="mono">team_lead</text>
+          <text x="664" y="155" font-size="10.5" class="lbl-muted" data-ja="自分のチーム" data-en="their own team">自分のチーム</text>
+
+          <rect class="box" x="648" y="184" width="224" height="46" rx="4"></rect>
+          <text x="664" y="204" font-size="12.5" class="mono">user</text>
+          <text x="664" y="221" font-size="10.5" class="lbl-muted" data-ja="自分だけ" data-en="only themselves">自分だけ</text>
+
+          <text x="760" y="262" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="どの役割も 1 つのテナントの外へは出られない" data-en="no role reaches outside its one tenant">どの役割も 1 つのテナントの外へは出られない</text>
+        </svg>
       </div>
+      <div class="fig-label" data-ja="入り口が役割を決めることはない。3 x 3 のどの組み合わせも成り立つ" data-en="The way in never determines the role: any of the nine combinations is valid">入り口が役割を決めることはない。3 x 3 のどの組み合わせも成り立つ</div>
 
       <div class="feature-block" style="margin-top:1.8rem">
         <div>
@@ -1030,12 +1077,7 @@
         </div>
       </div>
 
-      <div class="chiprow">
-        <span class="chip mono" data-ja="Cognito メール+パスワード" data-en="Cognito email + password">Cognito メール+パスワード</span>
-        <span class="chip mono" data-ja="Vouch-by-STS" data-en="Vouch-by-STS">Vouch-by-STS</span>
-        <span class="chip mono">sk-stratoclave-*</span>
-      </div>
-      <p class="muted" style="font-size:0.92rem; margin-top:0.6rem" data-ja="API キーはスコープを絞れて、ユーザーごとに有効なキー数の上限があります。" data-en="API keys can have their scope narrowed, and each user has a cap on active keys.">API キーはスコープを絞れて、ユーザーごとに有効なキー数の上限があります。</p>
+      <p class="muted" style="font-size:0.92rem; margin-top:1.4rem" data-ja="3 つ目の入り口である API キーは、さらにスコープを絞れます。ユーザーごとに有効なキー数の上限もあります。" data-en="The third way in, the API key, can have its scope narrowed further, and each user has a cap on how many keys are active at once.">3 つ目の入り口である API キーは、さらにスコープを絞れます。ユーザーごとに有効なキー数の上限もあります。</p>
     </section>
 
     <section id="edge">
