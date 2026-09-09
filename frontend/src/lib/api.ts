@@ -429,6 +429,55 @@ export interface LimitRaiseRequest {
   approved_amount_microusd: number | null
   expires_at: number | null
   approver_id: string | null
+  // Present only when the request carried one. `task_tag` is the CANONICAL form
+  // the gateway stored (not necessarily what was typed), and `task_tag_source`
+  // says how it came to have that value -- `asserted`, or one of the dropped
+  // reasons. Rendered as text; never re-validated on read, since a value stored
+  // by an older client was checked by that client's rules, not this build's.
+  task_tag?: string
+  task_tag_source?: string
+}
+
+/**
+ * Mirrors `mvp/admin_tenants.py`'s `UsageByTagRow` / `UsageByTagResponse`.
+ *
+ * Most of these fields are DISCLOSURE rather than data, and each one exists to stop
+ * a specific false belief a reader would otherwise form. They are typed as required
+ * (not optional) because the backend sends them unconditionally, and a client that
+ * treats them as optional will quietly render a report without them.
+ */
+export interface UsageByTagRow {
+  user_id: string
+  task_tag: string
+  requests: number
+  /** Nonzero only on the `unlabelled` row: requests that carried no assertion. */
+  absent_count: number
+  /** Nonzero only on the `unlabelled` row: requests whose tag was discarded. */
+  dropped_grammar_count: number
+  cost_microusd: number
+  input_tokens: number
+  output_tokens: number
+}
+
+export interface UsageByTagResponse {
+  period: string
+  rows: UsageByTagRow[]
+  /** The fold did not cover the period; every total below is partial. */
+  truncated: boolean
+  /** Rows predating the feature: counted, never folded into a tag. */
+  legacy_rows: number
+  /** Rows with exactly one of the two tag attributes. `record` refuses to write
+   *  one, so a nonzero value means something else wrote to that table. */
+  malformed_rows: number
+  /** The tag was never checked against anything. */
+  tag_is_caller_asserted: boolean
+  retention_policy_days: number
+  retention_deletion_is_asynchronous: boolean
+  retention_boundary_period_may_fold_incompletely: boolean
+  /** A row's total is a floor on spend for the work it names, not the work's
+   *  total: an untagged or dropped request for the same work lands under
+   *  `unlabelled` with nothing connecting it back. */
+  tag_total_is_a_lower_bound: boolean
 }
 
 export interface LimitRaisesResponse {
@@ -722,12 +771,31 @@ export const api = {
     client_token: string
     limit_kind?: string
     comment?: string
+    // The caller's own label for the work, sent verbatim. The gateway
+    // canonicalises (NFKC then case-fold) and owns the reserved word, so this
+    // client must not pre-normalise: a lowercased copy would show the requester
+    // something other than what was filed.
+    task_tag?: string
   }) =>
     jsonRequest<LimitRaiseRequest>('/api/mvp/me/limit-raises', {
       method: 'POST',
       headers: jsonHeaders,
       body: JSON.stringify(body),
     }),
+
+  /**
+   * The caller's OWN usage grouped by task tag.
+   *
+   * Takes only `period`. There is no `tenant_id` and no `user_id` parameter to
+   * pass, by design on the server side (`me.py`'s route derives both from the
+   * session), so this call cannot be steered at somebody else's rows even by a
+   * caller who wants to. The tenant-scoped reports are separate, separately
+   * permissioned surfaces.
+   */
+  myUsageByTag: (period: string) =>
+    jsonRequest<UsageByTagResponse>(
+      `/api/mvp/me/usage/by-tag?period=${encodeURIComponent(period)}`,
+    ),
 
   // R24: the join is the whole point -- a decided request carries its own
   // approved amount, expiry and approver; the caller never has to
@@ -753,6 +821,20 @@ export const api = {
         pool_limit_microusd: number
         remaining_microusd: number
         remaining_grant_cap_microusd: number
+      } | null
+      // `null` when the wall does not apply to the caller's tenant -- the
+      // per-user ceiling is configured per tenant, and one that never set a
+      // default has no personal ceiling to raise. Same reading `pool` gives.
+      // Optional at the type level so a build talking to an older backend
+      // (before this block shipped) type-checks and renders as "unknown"
+      // rather than reading `undefined` as "not configured".
+      user_dollar?: {
+        base_microusd: number
+        granted_microusd: number
+        ceiling_microusd: number
+        used_microusd: number
+        remaining_microusd: number
+        base_is_sealed: boolean
       } | null
     }>('/api/mvp/me/limit-raises/wall-status'),
 
