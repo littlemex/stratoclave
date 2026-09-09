@@ -3246,11 +3246,21 @@ def reserve_credit(
     # wall is keyed on the user, never the tenant alone).
     from .routing import user_dollar_quota as _uq
 
+    # P4.6/I7: the SAME `granted_microusd` this call folds into the wall's
+    # ceiling is the value it pins into the admission's ConditionExpression
+    # (`_uq.build_reserve_txn_items`'s own `granted_read`), read ONCE here --
+    # never re-read by either consumer -- so the two agree by construction.
+    # Only worth reading when the wall is even configured: an unconfigured
+    # wall's ceiling is `None` regardless of what any row holds.
     _uq_base: Optional[int] = None
+    _uq_granted = 0
     if cost_microusd is not None and user.user_id:
         from dynamo.tenants import TenantsRepository as _TenantsRepo
 
         _uq_base = _TenantsRepo().seal_user_dollar_base(user.org_id, period)
+        if _uq_base is not None:
+            _uq_granted = _uq.read_granted_microusd(
+                user.org_id, user.user_id, period)
     _uq_configured = _uq.configured_when(_uq_base)
 
     budgets = TenantBudgetsRepository()
@@ -3351,7 +3361,7 @@ def reserve_credit(
             quota_model=quota_model, selected_model=selected_model,
             quota_reserved_amount=int(cost_microusd or 0),
             bound_microusd=bound_microusd,
-            uq_base=_uq_base,
+            uq_base=_uq_base, uq_granted=_uq_granted,
         )
 
     # Pool budget present → atomic two-table reservation. Both the per-user
@@ -3575,11 +3585,16 @@ def reserve_credit(
             _quota_scopes = _quota_facts.reserved_scopes(
                 user.org_id, user.user_id, quota_model, period, quota_lines)
         # P3.1: the per-user money ceiling's own item, built from the SAME
-        # `_uq_base` `reserve_credit` resolved-and-sealed once at the top of
-        # this call (I5) -- never re-read here.
+        # `_uq_base`/`_uq_granted` `reserve_credit` resolved once at the top of
+        # this call (I5) -- never re-read here. `granted_read=_uq_granted`
+        # (P4.6/I7) pins the SAME grant figure `_uq_ceiling` folded into the
+        # ceiling, so a revoke racing this reservation trips the admission's
+        # clause instead of silently over-admitting against a ceiling that
+        # was already lowered.
         uq_item = _uq.build_reserve_txn_items(
             tenant_id=user.org_id, user_id=user.user_id, period=period,
-            amount=cost, ceiling=_uq_ceiling(_uq_base),
+            amount=cost, ceiling=_uq_ceiling(_uq_base, _uq_granted),
+            granted_read=_uq_granted,
         )
         hold_txn = budgets.hold_put_txn_item(
             tenant_id=user.org_id,
@@ -3677,27 +3692,26 @@ def reserve_credit(
             codes = {r.get("Code", "") for r in reasons}
             # txn_items order is [user_txn(0), pool_txn(1), hold_txn(2),
             # *quota_lines(_quota_start..), uq_item?(_uq_start), RESERVE ledger
-            # (last)]. Checked in I7's tie-break order -- non-grantable before
-            # grantable, then narrowest scope -- among the walls this
-            # transaction can even discover via CancellationReasons (the pool
-            # and per-user-token walls are pre-checked in Python above and
-            # never reach here as a CCF). The money ceiling is checked FIRST,
-            # ahead of the per-model quota: both are non-grantable, but a
-            # per-model quota refusal is remediable by cascading to a
-            # different model candidate while the money ceiling is not --
-            # checking it first means a request that failed BOTH in the same
-            # attempt is reported by the wall no candidate switch can fix,
-            # rather than by the one that would send the cascade off to try
-            # another model for no reason (the same user is still over the
-            # same ceiling on candidate two).
-            if uq_item and len(reasons) > _uq_start \
-                    and reasons[_uq_start].get("Code", "") == "ConditionalCheckFailed":
-                logger.info(
-                    "user_dollar_quota_exhausted",
-                    tenant_id=user.org_id, user_id=user.user_id, period=period,
-                )
-                raise _err_402(
-                    "user_dollar_quota_exhausted", wall="user_dollar_quota")
+            # (last)]. Checked in P4.7/I6's tie-break order -- non-grantable
+            # before grantable, derived from `is_grantable_wall` rather than
+            # a written order -- among the walls this transaction can even
+            # discover via CancellationReasons (the pool and per-user-token
+            # walls are pre-checked in Python above and never reach here as a
+            # CCF). The per-model quota is checked FIRST: it is non-grantable
+            # (`is_grantable_wall("per_model_quota")` is always False) AND
+            # remediable by cascading to a different model candidate. The
+            # per-user money ceiling is checked SECOND, not first as it once
+            # was -- P4.1 made it grantable, and with a raise path now behind
+            # it, headlining IT ahead of a per-model refusal would tell the
+            # member a grant fixes something a candidate switch was already
+            # going to fix for free, while burying the wall a raise cannot
+            # help with at all. A request that failed BOTH in the same
+            # attempt is reported by the per-model quota either way, since
+            # `QuotaExhausted` (raised below) is not a `_err_402` this
+            # ordering headlines -- it is the cascade's own signal to try
+            # another candidate, which is exactly the remediation a
+            # non-grantable-but-cascadable wall deserves priority for.
+            #
             # A ConditionalCheckFailed at a QUOTA index means the per-model quota is
             # exhausted — NOT a snapshot race — so retrying would fail forever.
             # Surface QuotaExhausted so the caller's cascade advances to the next
@@ -3726,6 +3740,14 @@ def reserve_credit(
                             quota_scope=_scope,
                         )
                         raise QuotaExhausted(quota_model, _scope)
+            if uq_item and len(reasons) > _uq_start \
+                    and reasons[_uq_start].get("Code", "") == "ConditionalCheckFailed":
+                logger.info(
+                    "user_dollar_quota_exhausted",
+                    tenant_id=user.org_id, user_id=user.user_id, period=period,
+                )
+                raise _err_402(
+                    "user_dollar_quota_exhausted", wall="user_dollar_quota")
             if codes & {
                 "ThrottlingError",
                 "ProvisionedThroughputExceeded",
@@ -3774,7 +3796,7 @@ def reserve_credit(
                 quota_model=quota_model, selected_model=selected_model,
                 quota_reserved_amount=int(cost_microusd or 0),
                 bound_microusd=bound_microusd,
-                uq_base=_uq_base,
+                uq_base=_uq_base, uq_granted=_uq_granted,
             )
         try:
             repo.reserve(
@@ -4880,6 +4902,7 @@ def _reserve_quota_without_pool(
     quota_reserved_amount: int,
     bound_microusd: Optional[int] = None,
     uq_base: Optional[int] = None,
+    uq_granted: int = 0,
 ) -> ReservationContext:
     """Reserve per-user tokens, a per-model quota, and/or the per-user money
     ceiling atomically, with NO pool.
@@ -4896,9 +4919,10 @@ def _reserve_quota_without_pool(
     retryable snapshot race. Fails closed: a configured request must never
     slip through unmetered (the Fable F-3 hole, extended to P3.1).
 
-    `uq_base` is the value `reserve_credit` already resolved-and-sealed for
-    THIS period, threaded down rather than re-read here — the same "one
-    snapshot, one decision point" I5 requires of the pooled path.
+    `uq_base`/`uq_granted` are the values `reserve_credit` already
+    resolved-and-sealed / read for THIS period, threaded down rather than
+    re-read here — the same "one snapshot, one decision point" I5 requires of
+    the pooled path.
 
     `bound_microusd`, when it differs from `quota_reserved_amount`, is the
     sound bound to RECORD on `measured_bound_microusd` — see `reserve_credit`'s
@@ -4913,7 +4937,8 @@ def _reserve_quota_without_pool(
     quota_lines = quota_lines or []
     uq_item = _uq.build_reserve_txn_items(
         tenant_id=user.org_id, user_id=user.user_id, period=period,
-        amount=quota_reserved_amount, ceiling=_uq_ceiling(uq_base),
+        amount=quota_reserved_amount, ceiling=_uq_ceiling(uq_base, uq_granted),
+        granted_read=uq_granted,
     )
     client = _low_level_client()
     saw_throttle = False
@@ -4946,17 +4971,13 @@ def _reserve_quota_without_pool(
             if e.response.get("Error", {}).get("Code", "") != "TransactionCanceledException":
                 raise
             reasons = e.response.get("CancellationReasons", []) or []
-            # I7's tie-break: the money ceiling first (non-grantable AND not
-            # remediable by cascading), the per-model quota second (also
-            # non-grantable, but remediable by trying another model) -- see
-            # the identically-ordered check in `reserve_credit`'s pooled path
-            # for the full reasoning.
-            if uq_item and len(reasons) > _uq_start \
-                    and reasons[_uq_start].get("Code", "") == "ConditionalCheckFailed":
-                logger.info("user_dollar_quota_exhausted", tenant_id=user.org_id,
-                            user_id=user.user_id, period=period)
-                raise _err_402(
-                    "user_dollar_quota_exhausted", wall="user_dollar_quota")
+            # P4.7/I6's tie-break: non-grantable before grantable, derived
+            # from `is_grantable_wall` rather than a written order -- see the
+            # identically-ordered check in `reserve_credit`'s pooled path for
+            # the full reasoning. The per-model quota (non-grantable,
+            # remediable by cascading) is checked BEFORE the per-user money
+            # ceiling (grantable since P4.1) for that reason.
+            #
             # Quota lines start at index 1 here (index 0 is the user row). A
             # ConditionalCheckFailed on any quota line = quota exhausted.
             if quota_model is not None and len(reasons) > _quota_start:
@@ -4970,6 +4991,12 @@ def _reserve_quota_without_pool(
                                     model=quota_model, period=period,
                                     quota_scope=_scope)
                         raise QuotaExhausted(quota_model, _scope)
+            if uq_item and len(reasons) > _uq_start \
+                    and reasons[_uq_start].get("Code", "") == "ConditionalCheckFailed":
+                logger.info("user_dollar_quota_exhausted", tenant_id=user.org_id,
+                            user_id=user.user_id, period=period)
+                raise _err_402(
+                    "user_dollar_quota_exhausted", wall="user_dollar_quota")
             codes = {r.get("Code", "") for r in reasons}
             if codes & {"ThrottlingError", "ProvisionedThroughputExceeded",
                         "TransactionConflict", "RequestLimitExceeded"}:
@@ -5028,19 +5055,21 @@ def release_pool(context) -> None:
     _release_quota_for(context)
 
 
-def _uq_ceiling(base_microusd: Optional[int]) -> Optional[int]:
-    """The per-user money ceiling from its sealed base: `base + coalesce(granted, 0)`.
+def _uq_ceiling(
+    base_microusd: Optional[int], granted_microusd: int = 0,
+) -> Optional[int]:
+    """The per-user money ceiling from its sealed base: `base + granted`
+    (P4.6's writer for the arithmetic P3.1 shipped as `base + 0`).
 
-    Composed here rather than inside the builder so the builder conditions on the one
-    number it needs, and so PR 4's raise path changes THIS function instead of a
-    signature every call site repeats. `granted` is zero until that PR ships its
-    writer -- carried as arithmetic rather than as a builder parameter, because a
-    parameter nothing can set is the same untestable surface the pin clause is
-    deferred for.
+    Composed here rather than inside the builder so the builder conditions on
+    the two numbers it needs without recomputing either, and so a caller that
+    reads `base_microusd`/`granted_microusd` ONCE (I5's "one snapshot, one
+    decision point") and decides `configured_when` from the base gets the
+    SAME ceiling the builder prices this call against.
     """
     if base_microusd is None:
         return None
-    return int(base_microusd) + 0
+    return int(base_microusd) + int(granted_microusd)
 
 
 def _quota_period(context) -> Optional[str]:

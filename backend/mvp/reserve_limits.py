@@ -163,12 +163,12 @@ RESERVE_LIMITS: tuple[LimitKind, ...] = (
         ),
         module_name="mvp.routing.user_dollar_quota",
         builder_qualname="build_reserve_txn_items",
-        # Money-denominated but NOT raisable (P3.6): being micro-USD does not
-        # make a limit grantable, and PR 3 ships no raise path, flip, or slot
-        # for this wall at all (O3.1) -- grantable=True here would be a
-        # promise the raise endpoint (`mvp.grants.submit_limit_raise`) cannot
-        # keep, since it accepts only `POOL_WALL`.
-        grantable=False,
+        # The SECOND grantable wall (P4.1). Being money-denominated never made
+        # this raisable on its own (P3.6's own reasoning survives unchanged);
+        # what changed is that PR 4 ships the writer this flag promises --
+        # `mvp.grants.submit_limit_raise` now accepts this wall's name and
+        # `approve_limit_raise` now has a target to point a grant at.
+        grantable=True,
         configured_when=_resolve(
             "mvp.routing.user_dollar_quota", "configured_when"),
     ),

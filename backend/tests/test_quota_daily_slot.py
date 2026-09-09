@@ -150,12 +150,22 @@ def test_r33_slot_key_shape_embeds_tenant_in_the_sort_key(dynamodb_mock, quota_e
     what `submit_limit_raise` does."""
     from dynamo.quota_events import QuotaEventsRepository
 
-    key_a = QuotaEventsRepository.slot_key(USER, TENANT_A, DAY)
-    key_b = QuotaEventsRepository.slot_key(USER, TENANT_B, DAY)
+    key_a = QuotaEventsRepository.slot_key(USER, TENANT_A, "tenant_dollar_pool", DAY)
+    key_b = QuotaEventsRepository.slot_key(USER, TENANT_B, "tenant_dollar_pool", DAY)
     assert key_a["pk"] == key_b["pk"], "same user => same partition"
     assert key_a["sk"] != key_b["sk"], "different tenant => different item entirely"
     assert TENANT_A in key_a["sk"]
     assert TENANT_B in key_b["sk"]
+
+    # The key now also separates WALLS, and the reason is the same shape as the
+    # tenant's: one member refused by two different limits must be able to ask about
+    # both, and a shared key made the second ask wait a day.
+    same_tenant_other_wall = QuotaEventsRepository.slot_key(
+        USER, TENANT_A, "user_dollar_quota", DAY)
+    assert same_tenant_other_wall["sk"] != key_a["sk"], (
+        "same user, same tenant, same day, DIFFERENT wall => different item, or a "
+        "raise against one limit consumes the day's only slot for the other"
+    )
 
 
 # ---------------------------------------------------------------------------

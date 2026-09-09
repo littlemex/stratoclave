@@ -190,10 +190,32 @@ def test_negative_headroom_condition_has_no_attribute_not_exists_disjunct():
     sample."""
     items = build_reserve_txn_items(
         tenant_id="acme", user_id="u1", period="2026-09", amount=6000, ceiling=5000,
+        granted_read=0,
     )
     cond = items[0]["Update"]["ConditionExpression"]
-    assert "attribute_not_exists" not in cond
-    assert cond.strip() == "used <= :headroom"
+
+    # Scoped to the `used` clause, deliberately. This asserted that the WHOLE
+    # expression was `used <= :headroom`, which was true when the item carried one
+    # clause and became the thing blocking a second one — the granted pin, which the
+    # contract requires by exact form and which needs its own
+    # `attribute_not_exists(granted_microusd)` branch so a member who has never had a
+    # raise is not refused. Widening the assertion to the whole string would have
+    # silently permitted the regression this test exists to catch; narrowing it to the
+    # clause under test keeps the original intent and lets the sibling clause exist.
+    used_clause = cond.split(" AND (", 1)[0]
+    assert "attribute_not_exists(used)" not in used_clause, (
+        f"with headroom negative the `used` clause must NOT carry the "
+        f"`attribute_not_exists(used) OR` prefix, or one request larger than the whole "
+        f"ceiling is admitted against an absent row. Got {used_clause!r}"
+    )
+    assert used_clause.strip("() ") == "used <= :headroom", (
+        f"and it must be exactly that comparison, not a redundant always-false clause "
+        f"appended alongside the disjunct. Got {used_clause!r}"
+    )
+    assert "attribute_not_exists(granted_microusd)" in cond, (
+        f"the granted pin's own absent-attribute branch must be present, or every "
+        f"member who has never had a raise is refused. Got {cond!r}"
+    )
 
 
 def test_reserve_item_ttl_is_derived_from_period_not_the_clock():
