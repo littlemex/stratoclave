@@ -63,6 +63,40 @@ jobs:
         # we use the committed dev example so the app can render the
         # sign-in page without touching a real Cognito backend.
         run: cp public/config.json.dev.example public/config.json
+      - name: Drop apt sources this job does not need
+        # `playwright install --with-deps` runs `apt-get update`, and apt fails the whole
+        # command if ANY configured repository serves a bad index. The runner image ships
+        # Google's Chrome repository, which this job never reads: Playwright downloads its
+        # own Chromium build, and `--with-deps` only wants shared libraries from Ubuntu's
+        # own archives.
+        #
+        # That repository published an index whose hash did not match its own Release file
+        # ("Hash Sum mismatch", a Release created at 17:16 against a Packages.gz last
+        # modified at 09:41 -- a publishing race on their side), and took this job down
+        # with it. A re-run would very likely have passed, and that is precisely why this
+        # is worth removing instead of retrying: the job had a hard dependency on a
+        # third-party package index that contributes nothing to it.
+        #
+        # Removed by CONTENT rather than by filename. `rm -f` on one known path would
+        # silently do nothing if the image ever renames the file, leaving the dependency
+        # in place and the next outage looking like a new problem.
+        run: |
+          set -euo pipefail
+          # `|| true` on the grep, and it is load-bearing: with `pipefail`, a grep that
+          # matches NOTHING exits 1 and takes the whole step down. Verified locally --
+          # without it this step failed on an image that simply did not have the source,
+          # which is the opposite of what it is for. It must be a no-op when there is
+          # nothing to remove.
+          { sudo grep -rl "dl.google.com" \
+              /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true; } \
+            | xargs -r sudo rm -f
+          if sudo grep -rq "dl.google.com" \
+              /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+            echo "::error::an apt source still points at dl.google.com after removal"
+            exit 1
+          fi
+          echo "no apt source references dl.google.com"
+
       - name: Install Playwright browsers (chromium only)
         run: npx playwright install --with-deps chromium
       - name: Run Playwright smoke
