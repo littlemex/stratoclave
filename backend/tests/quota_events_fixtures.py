@@ -79,6 +79,47 @@ def freeze_grants_clock(monkeypatch: "pytest.MonkeyPatch", epoch_seconds: int) -
     monkeypatch.setattr(grants, "datetime", _FixedDt)
 
 
+def freeze_tenant_budgets_clock(monkeypatch: "pytest.MonkeyPatch", epoch_seconds: int) -> None:
+    """Pin `dynamo.tenant_budgets`'s clock to an exact instant -- the SAME
+    convention `freeze_grants_clock` uses one module over, and a DIFFERENT
+    module than it: `current_period()` (what HANDOFF-PR4's period-currency
+    refusal compares "the request's pinned period" against) lives here, in
+    its OWN `datetime` name, not in `mvp.grants`'s. `freeze_grants_clock`
+    alone controls `mvp.grants._now_epoch()` (the slot's date, the 300-second
+    grant-window bound) but leaves `current_period()` reading the real wall
+    clock -- which is invisible on any day this suite happens to run inside
+    the calendar month a test's literals assume, and wrong the one day a
+    month boundary falls between a filing and a decision. A test that needs
+    two DIFFERENT periods to exist (one at filing time, a later one at
+    approval time) must call this alongside `freeze_grants_clock` at each
+    instant it moves the clock to, or the two functions disagree about "now"
+    in a way no real clock ever does.
+    """
+    import datetime as dt
+
+    from dynamo import tenant_budgets
+
+    fixed = dt.datetime.fromtimestamp(epoch_seconds, tz=dt.timezone.utc)
+
+    class _FixedDt(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.replace(tzinfo=tz or dt.timezone.utc)
+
+    monkeypatch.setattr(tenant_budgets, "datetime", _FixedDt)
+
+
+def freeze_all_quota_clocks(monkeypatch: "pytest.MonkeyPatch", epoch_seconds: int) -> None:
+    """`freeze_grants_clock` + `freeze_tenant_budgets_clock` together, for a
+    test that needs `mvp.grants._now_epoch()` and
+    `dynamo.tenant_budgets.current_period()` to agree on "now" -- see the
+    latter's own docstring for why moving only one of the two is a bug in the
+    test, not merely an incomplete one.
+    """
+    freeze_grants_clock(monkeypatch, epoch_seconds)
+    freeze_tenant_budgets_clock(monkeypatch, epoch_seconds)
+
+
 def seed_tenant(
     tenant_id: str, *, team_lead_user_id: str = "admin-owned", name: Optional[str] = None,
 ) -> None:
@@ -105,8 +146,14 @@ def slot_pk(user_id: str) -> str:
     return f"USER#{user_id}"
 
 
-def slot_sk(tenant_id: str, date_str: str) -> str:
-    return f"SLOT#{tenant_id}#{date_str}"
+def slot_sk(tenant_id: str, date_str: str, wall: str = "tenant_dollar_pool") -> str:
+    """Mechanical adaptation for I2: `dynamo.quota_events.QuotaEventsRepository
+    .slot_key` gained `wall` as its (positional) third argument, so the raw sort
+    key this fixture builds gains it too. Defaulted to the pool wall's name so
+    every existing caller of `seed_slot` -- all of them exercising the
+    pool-wall daily slot -- keeps seeding the exact row `submit_limit_raise`'s
+    own default (`limit_kind=POOL_WALL`) reads back, unchanged."""
+    return f"SLOT#{tenant_id}#{wall}#{date_str}"
 
 
 def request_pk(request_id: str) -> str:
@@ -124,9 +171,12 @@ def grant_sk(grant_id: str) -> str:
 def seed_slot(
     table, *, user_id: str, tenant_id: str, date_str: str, client_token: str,
     request_id: str, created_at: str = "2026-09-01T00:00:00+00:00",
+    wall: str = "tenant_dollar_pool",
 ) -> None:
+    """`wall` mechanically follows `slot_sk`'s own new parameter (I2), same
+    default and same reason -- see that function's docstring."""
     table.put_item(Item={
-        "pk": slot_pk(user_id), "sk": slot_sk(tenant_id, date_str),
+        "pk": slot_pk(user_id), "sk": slot_sk(tenant_id, date_str, wall),
         "client_token": client_token, "request_id": request_id,
         "created_at": created_at,
     })

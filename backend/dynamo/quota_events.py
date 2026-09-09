@@ -120,8 +120,18 @@ class QuotaEventsRepository:
 
     # ----- keys -----
     @staticmethod
-    def slot_key(user_id: str, tenant_id: str, date_str: str) -> dict[str, Any]:
-        return {"pk": f"USER#{user_id}", "sk": f"SLOT#{tenant_id}#{date_str}"}
+    def slot_key(user_id: str, tenant_id: str, wall: str, date_str: str) -> dict[str, Any]:
+        """I2: `wall` is POSITIONAL, third, between `tenant_id` and `date_str`
+        -- the other three call sites below are keyword-only, and this key
+        builder is already positional, so it stays that shape rather than
+        becoming the one keyword-only exception.
+
+        Two grantable walls (P4.1) otherwise share ONE slot per user per
+        tenant per day, so a member refused by both could only ask about one
+        of them today (G5). Keying the slot on the wall too is what makes the
+        daily allowance per-wall rather than per-tenant.
+        """
+        return {"pk": f"USER#{user_id}", "sk": f"SLOT#{tenant_id}#{wall}#{date_str}"}
 
     @staticmethod
     def request_key(request_id: str) -> dict[str, Any]:
@@ -142,10 +152,10 @@ class QuotaEventsRepository:
     # second request today" are answered by the same conditional write.
 
     def put_slot_if_absent(
-        self, *, user_id: str, tenant_id: str, date_str: str,
+        self, *, user_id: str, tenant_id: str, wall: str, date_str: str,
         client_token: str, request_id: str,
     ) -> bool:
-        """Claim today's slot for `(user_id, tenant_id)`. True iff this call
+        """Claim today's slot for `(user_id, tenant_id, wall)`. True iff this call
         claimed it; False means somebody (possibly this same caller retrying)
         got there first and the stored slot is the authority.
 
@@ -153,9 +163,18 @@ class QuotaEventsRepository:
         R13 keeps it out of every log, metric, key and error body -- but the
         comparison the slot exists to make is equality against what was sent, so
         the stored value is the value.
+
+        `expires_at` (I2): a day past `date_str`, one second past
+        `slot_reset_at` converted to epoch, so a slot this key shape orphans
+        (the old three-argument key this replaces) and every slot from now on
+        expire by DynamoDB TTL rather than accumulating one row per user per
+        tenant per wall per day forever.
         """
+        reset_epoch = int(datetime.strptime(
+            slot_reset_at(date_str), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc).timestamp())
         item = {
-            **self.slot_key(user_id, tenant_id, date_str),
+            **self.slot_key(user_id, tenant_id, wall, date_str),
             "client_token": str(client_token),
             "request_id": str(request_id),
             "user_id": str(user_id),
@@ -165,6 +184,7 @@ class QuotaEventsRepository:
             # grants. The tenant is already in the sort key.
             "slot_tenant_id": str(tenant_id),
             "created_at": _now_iso(),
+            "expires_at": reset_epoch,
         }
         try:
             self._table.put_item(
@@ -176,22 +196,22 @@ class QuotaEventsRepository:
             raise
 
     def get_slot(
-        self, *, user_id: str, tenant_id: str, date_str: str,
+        self, *, user_id: str, tenant_id: str, wall: str, date_str: str,
         consistent_read: bool = True,
     ) -> Optional[dict[str, Any]]:
         resp = self._table.get_item(
-            Key=self.slot_key(user_id, tenant_id, date_str),
+            Key=self.slot_key(user_id, tenant_id, wall, date_str),
             ConsistentRead=consistent_read)
         return resp.get("Item")
 
-    def delete_slot(self, *, user_id: str, tenant_id: str, date_str: str) -> None:
+    def delete_slot(self, *, user_id: str, tenant_id: str, wall: str, date_str: str) -> None:
         """Release today's slot. Unconditional, and safe only because the
         service layer has already established that the request the slot names is
         DECIDED and its grant is no longer bearing capacity -- see R22. A
         condition here would be guarding the wrong fact: the slot's own contents
         cannot say whether the request it points at has been decided."""
         self._table.delete_item(
-            Key=self.slot_key(user_id, tenant_id, date_str))
+            Key=self.slot_key(user_id, tenant_id, wall, date_str))
 
     # ------------------------------------------------------------------
     # The request
@@ -203,6 +223,7 @@ class QuotaEventsRepository:
         observed_limit_microusd: Optional[int] = None,
         observed_remaining_microusd: Optional[int] = None,
         observed_at: Optional[str] = None,
+        task_tag: Optional[str] = None, task_tag_source: Optional[str] = None,
     ) -> dict[str, Any]:
         """Write a PENDING request and return it.
 
@@ -250,6 +271,15 @@ class QuotaEventsRepository:
             # coerced towards zero here or anywhere it is later read.
             item["observed_remaining_microusd"] = Decimal(int(observed_remaining_microusd))
             item["observed_at"] = str(observed_at or now)
+        # I3/P4.5: the resolved (canonical tag, source) pair -- optional here
+        # only so a caller that never resolved one (a test seeding a bare
+        # request) does not have to invent a value; `submit_limit_raise`
+        # always resolves through `mvp.task_tag.resolve`, which is total, so
+        # its own calls always have both.
+        if task_tag is not None:
+            item["task_tag"] = str(task_tag)
+        if task_tag_source is not None:
+            item["task_tag_source"] = str(task_tag_source)
         self._table.put_item(
             Item=item, ConditionExpression="attribute_not_exists(pk)")
         return item
@@ -345,7 +375,8 @@ class QuotaEventsRepository:
         self, *, tenant_id: str, grant_id: str, request_id: str,
         approver_user_id: str, approved_amount_microusd: int,
         expires_at_epoch: int, target_pk: str, target_sk: str, period: str,
-        created_at: str,
+        created_at: str, limit_kind: str = "tenant_dollar_pool",
+        task_tag: Optional[str] = None, task_tag_source: Optional[str] = None,
     ) -> dict[str, Any]:
         """Transaction fragment creating an ACTIVE grant.
 
@@ -355,37 +386,59 @@ class QuotaEventsRepository:
         in August must reverse July's row; a revoke that asked
         `current_period()` would move a row the grant never raised, leaving
         July's ceiling permanently inflated and August's silently short.
+
+        `limit_kind` (I5) is what a REVOKE reads back to pick its builder --
+        the grant row is the only thing `sweep_expired_grants` ever has in
+        hand, never the original request, so the wall has to live here too,
+        not only on the request. Defaulted to the tenant pool's own name (a
+        LITERAL, not an import of `mvp.grants.POOL_WALL`: this module is
+        storage, and importing the layer above it to spell its own constant
+        back at it would be the layering violation this module's docstring
+        already warns against) so every grant this repository ever put before
+        this field existed still reads back as the wall it always was.
+
+        `task_tag`/`task_tag_source` (I3/P4.5) are the SAME resolved pair the
+        request carries, copied rather than re-resolved -- a second
+        resolution is the second canonicaliser seam S3 names, and the
+        question this pair answers later ("what was this approval for") is
+        about the grant, not only the ask.
         """
         key = self.grant_key(tenant_id, grant_id)
+        item: dict[str, Any] = {
+            "pk": {"S": key["pk"]},
+            "sk": {"S": key["sk"]},
+            "grant_id": {"S": str(grant_id)},
+            # Bare, for `tenant-status-index`.
+            "tenant_id": {"S": str(tenant_id)},
+            "request_id": {"S": str(request_id)},
+            "approver_user_id": {"S": str(approver_user_id)},
+            "status": {"S": GRANT_ACTIVE},
+            "status_created_at": {
+                "S": status_created_at(GRANT_ACTIVE, created_at)},
+            # The sparse expiry index's partition key. Present only
+            # while ACTIVE, so leaving the index is a REMOVE in the same
+            # transaction as the terminal transition rather than a
+            # follow-up write that can be lost.
+            GRANT_STATUS_ATTR: {"S": GRANT_ACTIVE},
+            "approved_amount_microusd": {
+                "N": str(int(approved_amount_microusd))},
+            "expires_at": {"N": str(int(expires_at_epoch))},
+            "target_pk": {"S": str(target_pk)},
+            "target_sk": {"S": str(target_sk)},
+            "period": {"S": str(period)},
+            "limit_kind": {"S": str(limit_kind)},
+            "created_at": {"S": created_at},
+            "revision": {"N": "1"},
+            "revoke_attempts": {"N": "0"},
+        }
+        if task_tag is not None:
+            item["task_tag"] = {"S": str(task_tag)}
+        if task_tag_source is not None:
+            item["task_tag_source"] = {"S": str(task_tag_source)}
         return {
             "Put": {
                 "TableName": self._name,
-                "Item": {
-                    "pk": {"S": key["pk"]},
-                    "sk": {"S": key["sk"]},
-                    "grant_id": {"S": str(grant_id)},
-                    # Bare, for `tenant-status-index`.
-                    "tenant_id": {"S": str(tenant_id)},
-                    "request_id": {"S": str(request_id)},
-                    "approver_user_id": {"S": str(approver_user_id)},
-                    "status": {"S": GRANT_ACTIVE},
-                    "status_created_at": {
-                        "S": status_created_at(GRANT_ACTIVE, created_at)},
-                    # The sparse expiry index's partition key. Present only
-                    # while ACTIVE, so leaving the index is a REMOVE in the same
-                    # transaction as the terminal transition rather than a
-                    # follow-up write that can be lost.
-                    GRANT_STATUS_ATTR: {"S": GRANT_ACTIVE},
-                    "approved_amount_microusd": {
-                        "N": str(int(approved_amount_microusd))},
-                    "expires_at": {"N": str(int(expires_at_epoch))},
-                    "target_pk": {"S": str(target_pk)},
-                    "target_sk": {"S": str(target_sk)},
-                    "period": {"S": str(period)},
-                    "created_at": {"S": created_at},
-                    "revision": {"N": "1"},
-                    "revoke_attempts": {"N": "0"},
-                },
+                "Item": item,
                 "ConditionExpression": "attribute_not_exists(pk)",
             }
         }

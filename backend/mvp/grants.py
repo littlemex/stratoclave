@@ -91,10 +91,16 @@ from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser
 from .reserve_limits import RESERVE_LIMITS, is_grantable_wall
 
-#: The one wall a raise can be filed against. Named from `RESERVE_LIMITS` rather
-#: than spelled here, so a rename of the limit kind cannot leave this module
-#: pointing at a wall that no longer exists.
+#: The tenant pool wall. Named from `RESERVE_LIMITS` rather than spelled here,
+#: so a rename of the limit kind cannot leave this module pointing at a wall
+#: that no longer exists.
 POOL_WALL = "tenant_dollar_pool"
+
+#: P4.1: the second grantable wall, the per-user money ceiling. Named the same
+#: way as `POOL_WALL` and for the same reason -- `mvp.routing.user_dollar_quota`
+#: is this wall's OWN module, and this is its `mvp.reserve_limits`-declared
+#: name, not a fresh literal.
+USER_DOLLAR_WALL = "user_dollar_quota"
 
 #: R11's two bounds on a grant's window. The minimum exists because a grant that
 #: expires before the requester can use it delivers nothing while consuming cap
@@ -243,6 +249,30 @@ class KillSwitchActive(GrantError):
 class DailySlotOccupied(GrantError):
     status_code = 409
     code = "limit_raise_daily_slot_occupied"
+
+
+class RequestPeriodElapsed(GrantError):
+    """P4.8/I4 point 1: the request's own pinned period is no longer the
+    current one. TERMINAL -- see `approve_limit_raise`'s own comment for why
+    this is not left `PENDING`: nothing can make a pinned period current
+    again, so leaving it re-approvable would only let the same discovery
+    repeat."""
+
+    status_code = 409
+    code = "limit_raise_period_elapsed"
+
+
+class PoolHeadroomShort(GrantError):
+    """P4.3/I4 point 2 (G4): approving THIS wall's grant would create capacity
+    the member cannot yet spend, because the tenant pool a spend still has to
+    clear is itself short of the amount. NOT terminal -- the request stays
+    `PENDING` (G4's own words: "re-approvable once the pool is raised"), so
+    this is the one refusal in this module that leaves the caller nothing to
+    retry-with-different-input: the fix is somebody else raising the pool,
+    named as the prerequisite rather than left implicit."""
+
+    status_code = 409
+    code = "pool_headroom_short"
 
 
 class ActiveGrantsRemain(GrantError):
@@ -455,12 +485,22 @@ def _hint_candidate(
     grant_expired: bool = False,
 ) -> RaiseHintCandidate:
     """The one constructor for a hint candidate, so `grantable` can never be
-    set to a value `blocker` disagrees with."""
+    set to a value the DECLARATION disagrees with.
+
+    `grantable=is_grantable_wall(wall)` (P4.1's fix to a wall-unaware spot):
+    with a single grantable wall this was equivalent to comparing `blocker`
+    against the pool's own public name, but with a SECOND grantable wall
+    (P4.1) that comparison would mark a `user_dollar_quota` candidate
+    non-grantable even though the registry now says otherwise. Reading the
+    declaration keeps this agreeing with `mvp.reserve_limits.RESERVE_LIMITS`
+    by construction rather than by two call sites happening to encode the
+    same fact.
+    """
     return RaiseHintCandidate(
         blocker=blocker, wall=wall, model_id=model,
         estimated_cost_microusd=estimated_cost_microusd,
         shortfall_microusd=shortfall_microusd,
-        grantable=(blocker == blocker_for_wall(POOL_WALL)),
+        grantable=is_grantable_wall(wall),
         grant_expired=grant_expired,
     )
 
@@ -810,6 +850,11 @@ def _request_public(item: dict[str, Any]) -> dict[str, Any]:
     # gets its own name rather than overwriting or being folded into it.
     if item.get("decision_comment") is not None:
         out["decision_comment"] = str(item["decision_comment"])
+    # I3/P4.5: the resolved tag, absent only on a row filed before this
+    # change existed to resolve one.
+    for name in ("task_tag", "task_tag_source"):
+        if item.get(name) is not None:
+            out[name] = str(item[name])
     return out
 
 
@@ -839,6 +884,10 @@ def _grant_public(item: dict[str, Any]) -> dict[str, Any]:
         "period": str(item.get("period") or ""),
         "target_pk": str(item.get("target_pk") or ""),
         "target_sk": str(item.get("target_sk") or ""),
+        # I5: which wall this grant is against, defaulted the same way the
+        # storage layer defaults it -- a grant put before this field existed
+        # was, by construction, always a pool grant.
+        "limit_kind": str(item.get("limit_kind") or POOL_WALL),
         "approver_user_id": str(item.get("approver_user_id") or ""),
         "created_at": str(item.get("created_at") or ""),
         "capacity_bearing": is_capacity_bearing(str(item.get("status") or "")),
@@ -850,7 +899,10 @@ def _grant_public(item: dict[str, Any]) -> dict[str, Any]:
         "revoke_attempts": int(item.get("revoke_attempts", 0)),
     }
     for name in ("revoked_at", "revoked_by", "revoke_reason",
-                 "revoke_blocked_reason", "blocked_at"):
+                 "revoke_blocked_reason", "blocked_at",
+                 # I3/P4.5: copied from the request at approval time (I3);
+                 # absent only on a grant put before this change existed.
+                 "task_tag", "task_tag_source"):
         if item.get(name) is not None:
             out[name] = str(item[name])
     return out
@@ -898,6 +950,7 @@ def _slot_holder_is_still_holding(
 def submit_limit_raise(
     *, actor: AuthenticatedUser, asked_amount_microusd: int, reason_code: str,
     client_token: str, limit_kind: str = POOL_WALL, comment: Optional[str] = None,
+    task_tag: Optional[str] = None,
 ) -> dict[str, Any]:
     """File a raise against the caller's own tenant's money ceiling.
 
@@ -919,11 +972,18 @@ def submit_limit_raise(
         # raised", because the answer a reader needs is the same: this is not a
         # thing a money raise can address. The body says which wall and whether it
         # is grantable, so the reader is not left guessing which of the two it hit.
+        #
+        # I1/P4.9: the grantable set is DERIVED from `RESERVE_LIMITS`, never
+        # spelled by hand -- naming only `POOL_WALL` here was already false the
+        # moment a second wall became grantable (P4.1), and a hand-maintained
+        # list is the second place that fact could go stale again.
+        grantable_walls = sorted(k.name for k in RESERVE_LIMITS if k.grantable)
         raise UnknownLimitKind(
             f"{wall!r} is not a limit a money raise can address. Only "
-            f"{POOL_WALL} is grantable; the token quota and the per-model quota "
-            f"are refused here rather than turned into a request no approver "
-            f"could act on.",
+            f"{', '.join(grantable_walls)} "
+            f"{'is' if len(grantable_walls) == 1 else 'are'} grantable; every "
+            f"other wall is refused here rather than turned into a request no "
+            f"approver could act on.",
             limit_kind=wall,
             grantable=wall in known and is_grantable_wall(wall),
             known=sorted(known),
@@ -966,9 +1026,17 @@ def submit_limit_raise(
         pass
     observed_at = _now_iso()
 
+    # I3/P4.5: the ONE canonicalisation, done once, before the slot-contention
+    # loop -- a second call inside the retry loop would be harmless (it is a
+    # pure function) but would read as if the tag could vary per attempt,
+    # which it must not.
+    from . import task_tag as _task_tag
+
+    resolved_tag, resolved_tag_source = _task_tag.resolve(task_tag)
+
     for _attempt in range(2):
         slot = repo.get_slot(
-            user_id=actor.user_id, tenant_id=tenant_id, date_str=date_str)
+            user_id=actor.user_id, tenant_id=tenant_id, wall=wall, date_str=date_str)
         if slot is not None:
             if str(slot.get("client_token") or "") == str(client_token):
                 # The same token twice is the same submission. Return what it
@@ -982,7 +1050,8 @@ def submit_limit_raise(
                 # writing the row. Reclaim and let this call complete what the
                 # last one started.
                 repo.delete_slot(
-                    user_id=actor.user_id, tenant_id=tenant_id, date_str=date_str)
+                    user_id=actor.user_id, tenant_id=tenant_id, wall=wall,
+                    date_str=date_str)
                 continue
             holder = _slot_holder_is_still_holding(repo, slot)
             if holder is not None:
@@ -993,11 +1062,13 @@ def submit_limit_raise(
                     holder_status=str(holder.get("status") or ""),
                     reset_at=slot_reset_at(date_str))
             repo.delete_slot(
-                user_id=actor.user_id, tenant_id=tenant_id, date_str=date_str)
+                user_id=actor.user_id, tenant_id=tenant_id, wall=wall,
+                date_str=date_str)
 
         request_id = f"lr_{uuid.uuid4().hex}"
         if not repo.put_slot_if_absent(
-                user_id=actor.user_id, tenant_id=tenant_id, date_str=date_str,
+                user_id=actor.user_id, tenant_id=tenant_id, wall=wall,
+                date_str=date_str,
                 client_token=str(client_token), request_id=request_id):
             continue  # somebody claimed it between the read and the write
         # The slot is claimed BEFORE the request row exists, and that order is
@@ -1011,7 +1082,8 @@ def submit_limit_raise(
             comment=comment, limit_kind=wall, created_at=_now_iso(),
             observed_limit_microusd=observed_limit_microusd,
             observed_remaining_microusd=observed_remaining_microusd,
-            observed_at=observed_at)
+            observed_at=observed_at,
+            task_tag=resolved_tag, task_tag_source=resolved_tag_source.value)
         log_audit_event(
             event="limit_raise_requested", actor_id=actor.user_id,
             actor_email=actor.email, target_id=request_id,
@@ -1093,10 +1165,19 @@ def approve_limit_raise(
     expires_at: int, decision_comment: Optional[str] = None,
     as_owner: bool = False,
 ) -> dict[str, Any]:
-    """Approve a raise: create a grant and apply it to the pool, atomically.
+    """Approve a raise: create a grant and apply it to the TARGET THE REQUEST NAMES,
+    atomically.
+
+    Which row that is depends on the wall: a pool raise moves the pool row's three
+    attributes, and a per-user money raise moves `granted_microusd` on that member's
+    own period row, in another table entirely. It applies to ONE of them and never
+    both -- an approval that also raised the pool would let a personal-raise approver
+    mint tenant capacity any member could spend, so "there is money" is enforced as a
+    PREREQUISITE instead: the approval refuses when a read observes the pool short of
+    the amount, and names the pool raise as the thing to do first.
 
     Four writes commit together or not at all -- the approver's authority, the
-    request's decision, the grant row, and the pool's three attributes. The
+    request's decision, the grant row, and the target's counter. The
     reason it is one transaction rather than four ordered writes is that every
     partial outcome is worse than a refusal: capacity granted with no grant record
     is capacity nothing will ever revoke, and a grant record with no capacity is a
@@ -1112,6 +1193,72 @@ def approve_limit_raise(
         repo, actor=actor, request_id=request_id)
     tenant_id = str(request.get("tenant_id") or "")
     asked = int(request.get("asked_amount_microusd", 0))
+    wall = str(request.get("limit_kind") or POOL_WALL)
+
+    # P4.8/I4 point 1, checked FIRST among this PR's three additions and
+    # ahead of every other guard: it is a property of WHEN this request was
+    # filed, not of anything the caller passed to THIS call, so there is no
+    # value in validating an amount or a window for a request this call is
+    # about to close anyway.
+    #
+    # "The request's pinned period" is read off the request's OWN
+    # `created_at` rather than a second stored attribute: every write in this
+    # module stamps `created_at` through `_now_iso()`, always a UTC ISO
+    # timestamp, so its first seven characters ARE the same `YYYY-MM`
+    # `current_period()` would have computed at that same instant -- deriving
+    # it costs no new writer and no new column.
+    #
+    # TERMINAL, not left PENDING (RequestPeriodElapsed, not GrantWindowTooShort):
+    # a request whose period has closed cannot be made current again by a
+    # later retry, so leaving it PENDING would only invite the same discovery
+    # on the next attempt, forever. This is what stops the request from being
+    # decided against a period a grant to it would be a no-op in.
+    _filed_period = str(request.get("created_at") or "")[:7]
+    _now_period = current_period()
+    if _filed_period and _filed_period != _now_period:
+        _elapsed_now_iso = _now_iso()
+        try:
+            repo.transact_write([
+                _authority_condition_check_item(
+                    actor=actor, tenant_id=tenant_id, as_owner=as_owner),
+                repo.decide_request_txn_item(
+                    request_id=request_id, to_status=STATUS_REJECTED,
+                    decided_by=actor.user_id, decided_at=_elapsed_now_iso,
+                    read_revision=int(request.get("revision", 1)),
+                    decision_comment=(
+                        f"Filed in {_filed_period}, which has already ended "
+                        f"({_now_period} is current). A grant can no longer be "
+                        f"pinned to a period the admission path will never read "
+                        f"again."),
+                ),
+            ])
+        except ClientError as exc:
+            if not _is_transaction_cancelled(exc):
+                raise
+            codes = _cancellation_codes(exc)
+            if _ccf_at(codes, 0):
+                raise AuthorityDenied(
+                    "The authority to decide raises for this tenant was not "
+                    "held at the instant this decision would have "
+                    "committed.", tenant_id=tenant_id) from None
+            if _ccf_at(codes, 1):
+                raise RequestNotPending(
+                    "This request was decided by somebody else while this "
+                    "decision was in flight.", status="") from None
+            raise
+        log_audit_event(
+            event="limit_raise_period_elapsed", actor_id=actor.user_id,
+            actor_email=actor.email, target_id=request_id,
+            target_type="limit_raise", tenant_id=tenant_id,
+            after={"filed_period": _filed_period, "current_period": _now_period})
+        raise RequestPeriodElapsed(
+            f"This request was filed in {_filed_period}, and that period is "
+            f"no longer current ({_now_period} is). It has been closed "
+            f"rather than approved: a grant pinned to {_filed_period} would "
+            f"land on a row the admission path never reads again, delivering "
+            f"nothing.",
+            tenant_id=tenant_id, filed_period=_filed_period,
+            current_period=_now_period)
 
     amount = int(approved_amount_microusd)
     # R3 is a PYTHON guard and not a DynamoDB condition, and that is the whole
@@ -1216,10 +1363,54 @@ def approve_limit_raise(
             remaining_cap_microusd=max(0, cap - granted_read),
             cap_is_derived=grant_cap_microusd(row) is None)
 
+    # P4.3/I4 point 2 (G4). Only the SECOND grantable wall needs this: a
+    # tenant-pool grant IS the pool, so there is no OTHER pool to be short
+    # against; a per-user grant, though, mints a ceiling the member can only
+    # spend if the tenant pool ALSO has room, and an approval that ignores
+    # that manufactures capacity nobody can spend without a SECOND raise --
+    # over-grant, not under-guarantee. Reuses `row`, the SAME in-process read
+    # already taken for the cap check two lines above, rather than a second
+    # read: it is already an in-process read of the pool, which is all G4
+    # asks for.
+    if wall == USER_DOLLAR_WALL:
+        _pool_limit = int(row.get("pool_limit_microusd", 0))
+        _pool_reserved = int(row.get("pool_reserved_microusd", 0))
+        _pool_settled = int(row.get("pool_settled_microusd", 0))
+        _pool_headroom = _pool_limit - _pool_reserved - _pool_settled
+        if _pool_headroom < amount:
+            raise PoolHeadroomShort(
+                f"Tenant {tenant_id}'s pool has {_pool_headroom} micro-USD of "
+                f"headroom, short of the {amount} micro-USD this approval "
+                f"would grant. Raising this member's own ceiling would create "
+                f"capacity she cannot yet spend -- the tenant pool is the "
+                f"prerequisite; raise it first, then re-approve this request.",
+                wall=POOL_WALL, tenant_id=tenant_id,
+                observed_headroom_microusd=_pool_headroom,
+                approved_amount_microusd=amount)
+
     grant_id = f"lg_{uuid.uuid4().hex}"
     now_iso = _now_iso()
-    target_pk = str(row.get("tenant_id") or tenant_id)
-    target_sk = str(row.get("sk") or budget_sk(period))
+    # P4.3/I4 point 3: "the target". The pool wall's target is the SAME pool
+    # row this function already read (unchanged); the per-user wall's target
+    # is COMPUTED, never copied from a row, because the member may not have
+    # spent in this period at all -- there may be no row to copy it from.
+    if wall == USER_DOLLAR_WALL:
+        from .routing import user_dollar_quota as _uq
+
+        _requester_user_id = str(request.get("user_id") or "")
+        target_pk = _uq.uq_pk(tenant_id, _requester_user_id)
+        target_sk = _uq.uq_sk(period)
+        apply_item = _uq.build_grant_apply_txn_item(
+            target_pk=target_pk, target_sk=target_sk,
+            approved_amount_microusd=amount,
+            expires_at=_uq.row_ttl_for_period(period))
+    else:
+        target_pk = str(row.get("tenant_id") or tenant_id)
+        target_sk = str(row.get("sk") or budget_sk(period))
+        apply_item = budgets.grant_apply_txn_item(
+            target_pk=target_pk, target_sk=target_sk,
+            approved_amount_microusd=amount, cap_minus_amount=cap_minus_amount)
+
     items = [
         _authority_condition_check_item(
             actor=actor, tenant_id=tenant_id, as_owner=as_owner),
@@ -1234,10 +1425,12 @@ def approve_limit_raise(
             tenant_id=tenant_id, grant_id=grant_id, request_id=request_id,
             approver_user_id=actor.user_id, approved_amount_microusd=amount,
             expires_at_epoch=expires, target_pk=target_pk, target_sk=target_sk,
-            period=period, created_at=now_iso),
-        budgets.grant_apply_txn_item(
-            target_pk=target_pk, target_sk=target_sk,
-            approved_amount_microusd=amount, cap_minus_amount=cap_minus_amount),
+            period=period, created_at=now_iso, limit_kind=wall,
+            # I3/P4.5: copied from the request, not re-resolved -- the
+            # question asked later is about THIS approval.
+            task_tag=request.get("task_tag"),
+            task_tag_source=request.get("task_tag_source")),
+        apply_item,
     ]
     try:
         repo.transact_write(items)
@@ -1277,7 +1470,7 @@ def approve_limit_raise(
         target_type="limit_raise", tenant_id=tenant_id,
         after={"grant_id": grant_id, "approved_amount_microusd": amount,
                "asked_amount_microusd": asked, "expires_at": expires,
-               "period": period, "target_sk": target_sk,
+               "period": period, "target_sk": target_sk, "limit_kind": wall,
                "approved_for_less": amount < asked})
     return {
         "request": _request_public(repo.get_request(request_id) or {}),
@@ -1367,8 +1560,35 @@ def _revoke_txn_items(
     the pool is decremented by exactly the figure the row still holds, so a grant
     mutated between the read and the write cannot have a stale amount subtracted
     for it.
+
+    I5: the SECOND fragment is selected by the grant's OWN `limit_kind`, not
+    by any wall a caller supplies -- a grant is pinned to the wall it was
+    approved against for its whole life, so the row that says which wall it
+    is is the only place this decision may read from. `budgets
+    .grant_revoke_txn_item` is pool-shaped despite its generic parameter
+    names (I5's own finding: it moves three POOL attributes and writes to the
+    tenant-budgets table); a `limit_kind` of `user_dollar_quota` therefore
+    selects `mvp.routing.user_dollar_quota.build_grant_revoke_txn_item`
+    instead, which is this wall's OWN builder on this wall's OWN table.
+    Still ONE selector for both endings: the branch is on the wall, not on
+    `to_status`, so early-revoke and expiry keep sharing it.
     """
     amount = int(grant.get("approved_amount_microusd", 0))
+    wall = str(grant.get("limit_kind") or POOL_WALL)
+    if wall == USER_DOLLAR_WALL:
+        from .routing import user_dollar_quota as _uq
+
+        grant_period = str(grant.get("period") or "")
+        give_back_fragment = _uq.build_grant_revoke_txn_item(
+            target_pk=str(grant.get("target_pk") or ""),
+            target_sk=str(grant.get("target_sk") or ""),
+            approved_amount_microusd=amount,
+            expires_at=_uq.row_ttl_for_period(grant_period))
+    else:
+        give_back_fragment = budgets.grant_revoke_txn_item(
+            target_pk=str(grant.get("target_pk") or ""),
+            target_sk=str(grant.get("target_sk") or ""),
+            approved_amount_microusd=amount)
     return [
         repo.grant_terminal_txn_item(
             tenant_id=str(grant.get("tenant_id") or ""),
@@ -1376,10 +1596,7 @@ def _revoke_txn_items(
             to_status=to_status, approved_amount_read=amount,
             revoked_by=revoked_by, revoked_at=revoked_at,
             revoke_reason=revoke_reason),
-        budgets.grant_revoke_txn_item(
-            target_pk=str(grant.get("target_pk") or ""),
-            target_sk=str(grant.get("target_sk") or ""),
-            approved_amount_microusd=amount),
+        give_back_fragment,
     ]
 
 
@@ -1957,6 +2174,11 @@ class SubmitLimitRaiseRequest(BaseModel):
     client_token: str = Field(min_length=1, max_length=128)
     limit_kind: str = Field(default=POOL_WALL, min_length=1, max_length=64)
     comment: Optional[str] = Field(default=None, max_length=1024)
+    #: I3/P4.5. Resolved through `mvp.task_tag.resolve` -- the one
+    #: canonicaliser (S3) -- never validated here: `resolve` is total and
+    #: never refuses, so a length bound here would only be a SECOND opinion
+    #: about a value the service layer already has a total answer for.
+    task_tag: Optional[str] = Field(default=None, max_length=1024)
 
 
 class ApproveLimitRaiseRequest(BaseModel):
@@ -2055,7 +2277,8 @@ def submit_own_limit_raise(
         submit_limit_raise, actor=actor,
         asked_amount_microusd=body.asked_amount_microusd,
         reason_code=body.reason_code, client_token=body.client_token,
-        limit_kind=body.limit_kind, comment=body.comment)
+        limit_kind=body.limit_kind, comment=body.comment,
+        task_tag=body.task_tag)
 
 
 @router.get("/me/limit-raises")

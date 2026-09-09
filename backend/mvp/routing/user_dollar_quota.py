@@ -39,6 +39,8 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from dynamo.client import get_dynamodb_resource
+
 from . import quota as _quota
 
 # The table this wall's row lives on. NOT re-derived from `quota._TABLE`
@@ -49,12 +51,41 @@ from . import quota as _quota
 _TABLE = os.getenv("DYNAMODB_MODEL_QUOTAS_TABLE", "stratoclave-model-quotas")
 
 
+def _table():
+    return get_dynamodb_resource().Table(_TABLE)
+
+
 def uq_pk(tenant_id: str, user_id: str) -> str:
     return f"TENANT#{tenant_id}#USER#{user_id}"
 
 
 def uq_sk(period: str) -> str:
     return f"UQ#{period}"
+
+
+def read_granted_microusd(tenant_id: str, user_id: str, period: str) -> int:
+    """The per-user row's OWN `granted_microusd`, read ONCE per admission
+    attempt (P4.6/I7).
+
+    Zero when the row does not exist (a member who has never had a raise
+    approved) or when the attribute is absent on an existing row (a member
+    whose row exists only because a reservation created it) -- the same
+    "missing reads as zero" convention `used` already carries on this row.
+
+    The caller hands this SAME integer to two places that must agree: the
+    ceiling arithmetic (`base + granted`, composed by `mvp._pipeline
+    ._uq_ceiling`) and the pin this module's own `build_reserve_txn_items`
+    puts in the admission's ConditionExpression. Reading it once here, before
+    either, is what makes them agree by construction rather than by both
+    happening to re-read the same row and getting lucky.
+    """
+    resp = _table().get_item(
+        Key={"pk": uq_pk(tenant_id, user_id), "sk": uq_sk(period)},
+        ConsistentRead=True)
+    item = resp.get("Item")
+    if not item:
+        return 0
+    return int(item.get("granted_microusd", 0) or 0)
 
 
 def configured_when(base_microusd: Optional[int]) -> bool:
@@ -80,53 +111,78 @@ def build_reserve_txn_items(
     period: str,
     amount: int,
     ceiling: Optional[int],
+    granted_read: int = 0,
 ) -> list[dict[str, Any]]:
     """Build the (0 or 1) TransactWriteItems entries admitting `amount` against
     this user's per-period money ceiling.
 
     `ceiling` is the value `dynamo.tenants.TenantsRepository.
-    seal_user_dollar_base` already resolved-and-sealed for `period` -- passed
-    in rather than re-read here, which is the whole point of I5's "one
-    snapshot, one decision point": a caller that read the base ONCE, decided
-    `configured_when` from it, and then had this builder re-read it could see
-    a DIFFERENT answer at build time (a default that was absent a moment ago
-    and is now present admits the request against a ceiling this call never
-    priced). `ceiling is None` (unconfigured, or no `user_id` to key the
-    row on) is this builder's OWN half of that contract: it returns no item,
-    the same "not configured" answer `configured_when` gave the caller a
-    moment earlier from the identical value.
+    seal_user_dollar_base` already resolved-and-sealed for `period`, ADDED to
+    the caller's own `read_granted_microusd` read (PR 4's own arithmetic,
+    `mvp._pipeline._uq_ceiling`) -- passed in rather than re-read here, which
+    is the whole point of I5's "one snapshot, one decision point": a caller
+    that read the base and the grant ONCE, decided `configured_when` and
+    priced this call from them, and then had this builder re-read either
+    could see a DIFFERENT answer at build time. `ceiling is None`
+    (unconfigured, or no `user_id` to key the row on) is this builder's OWN
+    half of that contract: it returns no item, the same "not configured"
+    answer `configured_when` gave the caller a moment earlier from the
+    identical value.
 
-    The grant is added by the CALLER, not here. This builder conditions on the
-    number it was handed, so PR 4's raise path changes what the caller resolves
-    and leaves this signature alone. A `granted` parameter here would be a
-    surface with no writer in this change, which is the same defect as the pin
-    clause O3.2 defers for that reason.
+    `granted_read` (P4.6/I7) is the SAME grant figure the caller folded into
+    `ceiling` -- handed here SEPARATELY, not decomposed from `ceiling`, so
+    this builder can pin the exact number it was told was live rather than
+    a base/granted split it would otherwise have to reconstruct.
     """
     if ceiling is None or not user_id:
         return []
     sk = uq_sk(period)
     expires_at = _quota._period_expiry(period)
-    return [_reserve_item(uq_pk(tenant_id, user_id), sk, int(amount), ceiling, expires_at)]
+    return [_reserve_item(
+        uq_pk(tenant_id, user_id), sk, int(amount), ceiling, expires_at,
+        int(granted_read))]
 
 
-def _reserve_item(pk: str, sk: str, amount: int, ceiling: int, expires_at: int) -> dict[str, Any]:
+def _reserve_item(
+    pk: str, sk: str, amount: int, ceiling: int, expires_at: int,
+    granted_read: int = 0,
+) -> dict[str, Any]:
     """One TransactWriteItems Update admitting `amount` against `ceiling`.
 
-    Byte-for-byte the same two-branch shape as `quota._reserve_item`
-    (I2 pins it there: "the shipped shape at quota.py:136-141"), because the
-    reason for the two branches is identical here: a missing `used` reads as
-    0, so `attribute_not_exists(used) OR used <= :headroom` is fine for an
-    ordinary first reservation, but a request LARGER than the whole ceiling
+    The `used` clause is byte-for-byte the same two-branch shape as
+    `quota._reserve_item` (I2 pins it there: "the shipped shape at
+    quota.py:136-141"), because the reason for the two branches is identical
+    here: a missing `used` reads as 0, so
+    `attribute_not_exists(used) OR used <= :headroom` is fine for an ordinary
+    first reservation, but a request LARGER than the whole ceiling
     (`headroom < 0`) must never be admitted even as a first reservation --
     dropping the `attribute_not_exists` disjunct in that case is what stops
     that (the disjunct would otherwise short-circuit TRUE on the missing-row
     case and over-admit a single oversized request past the ceiling).
+
+    The `granted_microusd` clause (P4.6, exact form I7) is ANDed onto it. It
+    pins the grant figure the caller read when it composed `ceiling`: a
+    revoke landing between that read and this commit lowers
+    `granted_microusd` under `:granted_read` and trips the clause, refusing a
+    request priced against capacity that no longer exists; an approval
+    landing in that same window only RAISES `granted_microusd`, so the `>=`
+    (not `=`) lets it through rather than refusing a member at the exact
+    moment their raise landed. The `attribute_not_exists` branch is for the
+    ordinary unraised member (no `granted_microusd` at all): it must fail
+    unless the caller's own read also saw nothing (`:granted_read = :zero`),
+    which is the same "the read and the write must agree about absence"
+    shape the `used` clause already carries.
     """
     headroom = ceiling - amount
     if headroom >= 0:
-        condition = "attribute_not_exists(used) OR used <= :headroom"
+        used_condition = "attribute_not_exists(used) OR used <= :headroom"
     else:
-        condition = "used <= :headroom"
+        used_condition = "used <= :headroom"
+    granted_condition = (
+        "((attribute_not_exists(granted_microusd) AND :granted_read = :zero) "
+        "OR granted_microusd >= :granted_read)"
+    )
+    condition = f"({used_condition}) AND {granted_condition}"
     return {
         "Update": {
             "TableName": _TABLE,
@@ -136,6 +192,104 @@ def _reserve_item(pk: str, sk: str, amount: int, ceiling: int, expires_at: int) 
             "ExpressionAttributeValues": {
                 ":amt": {"N": str(int(amount))},
                 ":headroom": {"N": str(int(headroom))},
+                ":ttl": {"N": str(int(expires_at))},
+                ":granted_read": {"N": str(int(granted_read))},
+                ":zero": {"N": "0"},
+            },
+        }
+    }
+
+
+def row_ttl_for_period(period: str) -> int:
+    """The SAME period-end-plus-grace TTL `build_reserve_txn_items` already
+    sets on this row (`quota._period_expiry`), exposed for `mvp.grants`'
+    apply/revoke builders (I5) to pass as their own `expires_at` -- reached
+    through this module's own public surface rather than by a sibling module
+    importing `mvp.routing.quota`'s underscore-prefixed function directly,
+    which is the same "this module owns its own reads/writes" boundary this
+    file's docstring already draws for `_TABLE`."""
+    return _quota._period_expiry(period)
+
+
+def build_grant_apply_txn_item(
+    *, target_pk: str, target_sk: str, approved_amount_microusd: int,
+    expires_at: int,
+) -> dict[str, Any]:
+    """P4.3/P4.4's per-user apply: `granted_microusd += approved_amount_microusd`
+    on the (user, period) row a raise was just approved against.
+
+    No `ConditionExpression`, and that absence is deliberate rather than an
+    omission (unlike the revoke builder below, which floors). The member may
+    not have spent in this period at all -- I4 point 3's own reasoning for why
+    `target_pk`/`target_sk` are COMPUTED rather than read off an existing row
+    -- so this write must be able to CREATE the row, and a condition that
+    required anything to already exist would refuse exactly the member this
+    grant is for.
+
+    `expires_at` (caller-computed, the same period-end-plus-grace TTL
+    `build_reserve_txn_items` already sets) is written with `if_not_exists`
+    for the reason stated in the handoff: a row an approval creates for a
+    member who has not spent yet must still expire, and `if_not_exists` is
+    what keeps a LATER first reservation's own `if_not_exists(expires_at, ...)`
+    from being the only writer that ever tried.
+    """
+    amount = int(approved_amount_microusd)
+    return {
+        "Update": {
+            "TableName": _TABLE,
+            "Key": {"pk": {"S": target_pk}, "sk": {"S": target_sk}},
+            "UpdateExpression": (
+                "ADD granted_microusd :g SET "
+                "expires_at = if_not_exists(expires_at, :ttl)"
+            ),
+            "ExpressionAttributeValues": {
+                ":g": {"N": str(amount)},
+                ":ttl": {"N": str(int(expires_at))},
+            },
+        }
+    }
+
+
+def build_grant_revoke_txn_item(
+    *, target_pk: str, target_sk: str, approved_amount_microusd: int,
+    expires_at: int,
+) -> dict[str, Any]:
+    """I5: the per-user revoke, selected by the grant's `limit_kind` in
+    `mvp.grants._revoke_txn_items` -- NOT `TenantBudgetsRepository
+    .grant_revoke_txn_item`, which is pool-shaped despite its generic
+    parameter names (it moves three POOL attributes, conditions on a pool
+    attribute, and writes to the tenant-budgets table) and cannot address a
+    `UQ#{period}` row on this wall's table.
+
+    `ADD granted_microusd :neg SET expires_at = if_not_exists(expires_at,
+    :ttl)`, gated on `attribute_exists(granted_microusd) AND
+    granted_microusd >= :g` -- the exact floor I5 specifies, and the exact
+    reason the pool builder's own floor exists: an absent `granted_microusd`
+    means nothing was ever granted, so a revoke against it must fail rather
+    than treat the absence as zero and subtract, which would drive the term
+    (and with it this wall's ceiling) negative. `coalesce` is not a DynamoDB
+    function and does not appear here; this is the shipped idiom (assert
+    existence, then compare) the pool builder already uses.
+
+    `expires_at` with `if_not_exists`, same as the apply item and for the
+    same reason -- this write must never be the reason a row's TTL is unset.
+    """
+    amount = int(approved_amount_microusd)
+    return {
+        "Update": {
+            "TableName": _TABLE,
+            "Key": {"pk": {"S": target_pk}, "sk": {"S": target_sk}},
+            "UpdateExpression": (
+                "ADD granted_microusd :neg SET "
+                "expires_at = if_not_exists(expires_at, :ttl)"
+            ),
+            "ConditionExpression": (
+                "attribute_exists(granted_microusd) AND "
+                "granted_microusd >= :g"
+            ),
+            "ExpressionAttributeValues": {
+                ":g": {"N": str(amount)},
+                ":neg": {"N": str(-amount)},
                 ":ttl": {"N": str(int(expires_at))},
             },
         }

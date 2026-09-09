@@ -201,15 +201,27 @@ def test_an_unconfigured_wall_contributes_no_item_and_admission_proceeds(
 # --------------------------------------------------------------------------- I4: the registry entry itself (exact literals)
 
 
-def test_registry_entry_is_non_grantable_unlike_the_pool_wall():
-    """I4/I6's own framing for WHY I7 is testable now: '`tenant_dollar_pool`
-    is `grantable=True` today and the new wall is `grantable=False`.' Pins
-    both literals directly against the registry -- the source of truth I7's
-    headline ordering (non-grantable before grantable) reads from."""
+def test_both_money_walls_are_grantable_and_the_token_wall_is_not():
+    """Deliberately reversed, and this test is the evidence the change is real.
+
+    It asserted `user_dollar_quota.grantable is False`, which was TRUE and CORRECT
+    when the ceiling shipped: there was no raise path for it, and declaring it
+    grantable would have printed a hint pointing at a request the code refused. The
+    raise path now exists, so the same assertion has become the thing standing in the
+    way, and flipping it is a behaviour change somebody decided rather than a rename
+    somebody absorbed.
+
+    Both money walls are now raisable and the TOKEN wall still is not, which is the
+    distinction worth pinning: money can be granted, a token allowance is a different
+    lever with a different owner. The refusal-ordering rule reads grantability from
+    here, so this is also what makes that rule non-trivial for the first time — with
+    one grantable wall it had nothing to order.
+    """
     from mvp.reserve_limits import limit_kind
 
     assert limit_kind("tenant_dollar_pool").grantable is True
-    assert limit_kind("user_dollar_quota").grantable is False
+    assert limit_kind("user_dollar_quota").grantable is True
+    assert limit_kind("user_token_quota").grantable is False
 
 
 def test_public_blocker_name_is_personal_spend_not_personal_budget():
