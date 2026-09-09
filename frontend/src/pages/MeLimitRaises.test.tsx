@@ -13,7 +13,7 @@
 // not that a field exists.
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -318,5 +318,262 @@ describe('MeLimitRaises — B6: the hint must not recommend a raise no approver 
     render(withClient(<MeLimitRaises />, { raiseHint: hint }))
     await waitFor(() => expect(screen.getByDisplayValue('0.40')).toBeInTheDocument())
     expect(screen.queryByText(/no approver|could not (be )?grant/i)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The task tag, the wall choice, and the idempotency token
+// ---------------------------------------------------------------------------
+
+/** Fill the two fields the submit button requires, so a test can press it. */
+async function fillMinimumViableRequest() {
+  // Waiting for the OPTION, not just the select: the reason codes arrive with the
+  // `listMyLimitRaises` response, and a `<select>` silently ignores a value that has
+  // no matching option -- which leaves the submit button disabled and the failure
+  // reads as "the page never submitted" rather than "the test raced the fetch".
+  await waitFor(() =>
+    expect(screen.getByRole('option', { name: 'usage_spike' })).toBeInTheDocument(),
+  )
+  fireEvent.change(screen.getByTestId('lr-reason-select'), {
+    target: { value: 'usage_spike' },
+  })
+  fireEvent.change(screen.getByTestId('lr-amount-input'), { target: { value: '50' } })
+}
+
+const WITH_REASONS = { requests: [], reason_codes: ['usage_spike'] }
+
+describe('MeLimitRaises — the idempotency token is per press, not per mount', () => {
+  it('two submissions from ONE mount carry DIFFERENT client tokens', async () => {
+    // The defect: `submit_limit_raise` treats a repeated `client_token` as a replay
+    // and returns the request the FIRST call produced. With one token held for the
+    // component's lifetime, changing the amount and pressing again returned the
+    // earlier request while this page cleared the form and reported success -- the
+    // requester saw a submission of an amount she had not asked for, silently.
+    //
+    // Asserted on the TOKENS rather than on the rendered outcome on purpose: the
+    // rendered outcome of the bug is indistinguishable from success, which is
+    // exactly why nothing caught it.
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockResolvedValue({ ...PENDING_ROW })
+    render(withClient(<MeLimitRaises />))
+
+    await fillMinimumViableRequest()
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByTestId('lr-amount-input'), { target: { value: '500' } })
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(2))
+
+    const first = mockSubmit.mock.calls[0][0].client_token
+    const second = mockSubmit.mock.calls[1][0].client_token
+    expect(typeof first).toBe('string')
+    expect(first).not.toBe(second)
+    // And the second call really did carry the new amount, so the two presses are
+    // two distinct asks rather than one repeated.
+    expect(mockSubmit.mock.calls[1][0].asked_amount_microusd).toBe(500_000_000)
+  })
+})
+
+describe('MeLimitRaises — the wall the requester is filing against', () => {
+  it('sends the selected wall as limit_kind, using the registry key verbatim', async () => {
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockResolvedValue({ ...PENDING_ROW })
+    render(withClient(<MeLimitRaises />))
+
+    await fillMinimumViableRequest()
+    fireEvent.change(screen.getByTestId('lr-wall-select'), {
+      target: { value: 'user_dollar_quota' },
+    })
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1))
+    // The wire value must be the backend's `RESERVE_LIMITS` key: `submit_limit_raise`
+    // validates against that registry and refuses anything else, so a
+    // display-friendly spelling would be rejected server-side.
+    expect(mockSubmit.mock.calls[0][0].limit_kind).toBe('user_dollar_quota')
+  })
+
+  it('says that a filing consumes that wall\'s allowance for the day', async () => {
+    // The cost of choosing the wrong wall is a whole day, and the backend only says
+    // so after the slot is gone.
+    mockMine.mockResolvedValue(WITH_REASONS)
+    render(withClient(<MeLimitRaises />))
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-wall-slot-note')).toBeInTheDocument(),
+    )
+  })
+
+  it('distinguishes a tenant with no personal ceiling from a backend that cannot say', async () => {
+    mockMine.mockResolvedValue(WITH_REASONS)
+    // `null` -- the wall does not apply to this tenant.
+    mockWallStatus.mockResolvedValue({
+      tenant_id: 'acme-eng', period: '2026-09', pool: null, user_dollar: null,
+    })
+    const { unmount } = render(withClient(<MeLimitRaises />))
+    await waitFor(() =>
+      expect(screen.getByTestId('user-dollar-absent')).toBeInTheDocument(),
+    )
+    expect(screen.queryByTestId('user-dollar-unknown')).toBeNull()
+    unmount()
+
+    // Field absent entirely -- an older backend. Reporting "not configured" here
+    // would invent a fact from a missing key, and the requester would conclude the
+    // wall is off when nobody said so.
+    mockWallStatus.mockResolvedValue({
+      tenant_id: 'acme-eng', period: '2026-09', pool: null,
+    })
+    render(withClient(<MeLimitRaises />))
+    await waitFor(() =>
+      expect(screen.getByTestId('user-dollar-unknown')).toBeInTheDocument(),
+    )
+    expect(screen.queryByTestId('user-dollar-absent')).toBeNull()
+  })
+
+  it('shows the personal ceiling and what is left of it', async () => {
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockWallStatus.mockResolvedValue({
+      tenant_id: 'acme-eng',
+      period: '2026-09',
+      pool: null,
+      user_dollar: {
+        base_microusd: 10_000_000,
+        granted_microusd: 40_000_000,
+        ceiling_microusd: 50_000_000,
+        used_microusd: 12_000_000,
+        remaining_microusd: 38_000_000,
+        base_is_sealed: true,
+      },
+    })
+    render(withClient(<MeLimitRaises />))
+    // What is left to HER, which is the figure that decides whether asking makes
+    // sense -- and the ceiling it is left out of.
+    await waitFor(() => expect(screen.getByText(/\$38\.00/)).toBeInTheDocument())
+    expect(screen.getByText(/\$50\.00/)).toBeInTheDocument()
+    // A ceiling that is mostly granted room reads very differently from one that is
+    // mostly base, so the split is stated rather than folded into one number.
+    expect(screen.getByTestId('user-dollar-granted')).toBeInTheDocument()
+  })
+})
+
+describe('MeLimitRaises — the task tag', () => {
+  it('sends the tag VERBATIM, with its case intact', async () => {
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockResolvedValue({ ...PENDING_ROW })
+    render(withClient(<MeLimitRaises />))
+
+    await fillMinimumViableRequest()
+    fireEvent.change(screen.getByTestId('lr-task-tag-input'), {
+      target: { value: 'Migration-42' },
+    })
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1))
+    // NOT `migration-42`. The gateway canonicalises; a client that pre-lowercased
+    // would be a second canonicaliser, and would show the requester a different
+    // string from the one it filed.
+    expect(mockSubmit.mock.calls[0][0].task_tag).toBe('Migration-42')
+  })
+
+  it('omits the tag entirely when it is blank, rather than sending an empty string', async () => {
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockResolvedValue({ ...PENDING_ROW })
+    render(withClient(<MeLimitRaises />))
+    await fillMinimumViableRequest()
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1))
+    // A raise with no tag is accepted: the tag is attribution, not authorisation.
+    expect(mockSubmit.mock.calls[0][0].task_tag).toBeUndefined()
+  })
+
+  it('refuses to submit a tag outside the grammar, and says which characters are allowed', async () => {
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockResolvedValue({ ...PENDING_ROW })
+    render(withClient(<MeLimitRaises />))
+    await fillMinimumViableRequest()
+    fireEvent.change(screen.getByTestId('lr-task-tag-input'), {
+      target: { value: 'has space' },
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-task-tag-invalid')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('lr-submit-button')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+    expect(mockSubmit).not.toHaveBeenCalled()
+  })
+
+  it('accepts the reserved word, because that meaning belongs to the gateway', async () => {
+    // A UI that rejected UNLABELLED would hold a second copy of the reserved list,
+    // and would refuse a tag the gateway accepts-and-reports-on.
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockResolvedValue({ ...PENDING_ROW })
+    render(withClient(<MeLimitRaises />))
+    await fillMinimumViableRequest()
+    fireEvent.change(screen.getByTestId('lr-task-tag-input'), {
+      target: { value: 'UNLABELLED' },
+    })
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1))
+    expect(mockSubmit.mock.calls[0][0].task_tag).toBe('UNLABELLED')
+  })
+
+  it('shows the stored tag on her own request, and says so when there is none', async () => {
+    mockMine.mockResolvedValue({
+      requests: [
+        { ...PENDING_ROW, request_id: 'lr_tagged', task_tag: 'migration-42' },
+        { ...PENDING_ROW, request_id: 'lr_bare' },
+      ],
+      reason_codes: [],
+    })
+    render(withClient(<MeLimitRaises />))
+    await waitFor(() => expect(screen.getByText('migration-42')).toBeInTheDocument())
+    // Not blank: a requester holding both needs to see which is which.
+    expect(screen.getAllByRole('row').length).toBeGreaterThan(2)
+  })
+
+  it('names the wall on each of her requests', async () => {
+    mockMine.mockResolvedValue({
+      requests: [
+        { ...PENDING_ROW, request_id: 'lr_pool', limit_kind: 'tenant_dollar_pool' },
+        { ...PENDING_ROW, request_id: 'lr_user', limit_kind: 'user_dollar_quota' },
+        // A wall this build has never heard of renders its key rather than nothing:
+        // erasing the one field that tells two rows apart is worse than showing a
+        // machine name.
+        { ...PENDING_ROW, request_id: 'lr_future', limit_kind: 'some_future_wall' },
+      ],
+      reason_codes: [],
+    })
+    render(withClient(<MeLimitRaises />))
+    await waitFor(() => expect(screen.getByText('some_future_wall')).toBeInTheDocument())
+  })
+})
+
+describe('MeLimitRaises — the day is already spent', () => {
+  it('names the request already on file instead of showing an error', async () => {
+    // Somebody unsure whether their submission landed needs to be told that it did.
+    // A red line saying the submission failed is the opposite of the truth.
+    mockMine.mockResolvedValue(WITH_REASONS)
+    mockSubmit.mockRejectedValue(
+      Object.assign(new Error('You have already filed a limit raise today'), {
+        status: 409,
+        detailBody: {
+          type: 'limit_raise_daily_slot_occupied',
+          message: 'You have already filed a limit raise today',
+          holder_request_id: 'lr_earlier',
+          holder_status: 'PENDING',
+          reset_at: '2026-09-10T00:00:00+00:00',
+        },
+      }),
+    )
+    render(withClient(<MeLimitRaises />))
+    await fillMinimumViableRequest()
+    fireEvent.click(screen.getByTestId('lr-submit-button'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('lr-slot-occupied')).toBeInTheDocument(),
+    )
+    // The id is what lets her go and look at it.
+    expect(screen.getByText(/lr_earlier/)).toBeInTheDocument()
+    expect(screen.getByText(/2026-09-10/)).toBeInTheDocument()
   })
 })

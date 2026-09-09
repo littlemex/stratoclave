@@ -19,6 +19,7 @@ import Callback from '@/pages/Callback'
 import Login from '@/pages/Login'
 import Dashboard from '@/pages/Dashboard'
 import MeUsage from '@/pages/MeUsage'
+import MeUsageByTag from '@/pages/MeUsageByTag'
 import MeBilling from '@/pages/MeBilling'
 import MeApiKeys from '@/pages/MeApiKeys'
 import MeLimitRaises from '@/pages/MeLimitRaises'
@@ -74,6 +75,7 @@ export default function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<Dashboard />} />
               <Route path="/me/usage" element={<MeUsage />} />
+              <Route path="/me/usage/by-tag" element={<MeUsageByTag />} />
               <Route path="/me/billing" element={<MeBilling />} />
               <Route path="/me/api-keys" element={<MeApiKeys />} />
               <Route path="/me/limit-raises" element={<MeLimitRaises />} />

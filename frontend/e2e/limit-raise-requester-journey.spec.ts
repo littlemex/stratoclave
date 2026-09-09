@@ -144,8 +144,13 @@ async function mockCommonRoutes(page: Page) {
   // R12: "the walls that apply to the caller" -- called unconditionally on
   // mount by the real component. No pool row keeps this test's assertions
   // focused on the request list.
+  // `user_dollar: null` rather than an omitted key: this deployment DOES report the
+  // per-user wall and is saying the tenant has not configured one. Omitting it would
+  // exercise the older-backend branch in every case in this file.
   await page.route('**/api/mvp/me/limit-raises/wall-status', (route) =>
-    route.fulfill({ json: { tenant_id: 'acme-eng', period: '2026-09', pool: null } }),
+    route.fulfill({
+      json: { tenant_id: 'acme-eng', period: '2026-09', pool: null, user_dollar: null },
+    }),
   )
 }
 
@@ -286,5 +291,232 @@ test.describe('the refused engineer reading her own request', () => {
     const pending = page.getByTestId('lr-status-pending')
     await expect(pending).toBeVisible()
     await expect(pending).toContainText(/did not (change|queue)|not (been )?queued|waiting for .* approve/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The engineer who wants to label the work, and to find it again later
+// ---------------------------------------------------------------------------
+//
+// Two steps she walks that no unit test can walk: choosing which of two ceilings
+// to file against when the two are different asks with different approvers, and
+// coming back at the end of the month to total what a piece of work cost. Both are
+// satisfiable by green unit tests on every endpoint involved while she still ends
+// up filing against the wrong wall or reading a total as the cost of the work.
+
+test.describe('the engineer labelling the work she is about to pay for', () => {
+  test('files against her personal ceiling with a tag, and the tag survives verbatim', async ({
+    page,
+  }) => {
+    // The step: she was refused by her OWN ceiling, not the tenant pool, and she
+    // wants this month's migration spend findable later. Two things must be true at
+    // the end -- the request went against the wall she picked, and the tag reached
+    // the server as she typed it. A page that quietly lowercased it, or that filed
+    // against the default wall because the selector was decorative, passes every
+    // endpoint's own tests and fails her.
+    let captured: Record<string, unknown> | null = null
+    let filed = false
+
+    await seedUserSession(page)
+    await mockCommonRoutes(page)
+    // Her tenant DOES have a per-user ceiling, and she has already spent most of it.
+    await page.unroute('**/api/mvp/me/limit-raises/wall-status')
+    await page.route('**/api/mvp/me/limit-raises/wall-status', (route) =>
+      route.fulfill({
+        json: {
+          tenant_id: 'acme-eng',
+          period: '2026-09',
+          pool: {
+            status: 'active',
+            pool_limit_microusd: 400_000_000,
+            remaining_microusd: 380_000_000,
+            remaining_grant_cap_microusd: 200_000_000,
+          },
+          user_dollar: {
+            base_microusd: 10_000_000,
+            granted_microusd: 0,
+            ceiling_microusd: 10_000_000,
+            used_microusd: 9_800_000,
+            remaining_microusd: 200_000,
+            base_is_sealed: true,
+          },
+        },
+      }),
+    )
+
+    const filedRow = () => ({
+      request_id: 'req-tagged',
+      tenant_id: 'acme-eng',
+      limit_kind: String(captured?.limit_kind ?? ''),
+      status: 'PENDING',
+      reason_code: String(captured?.reason_code ?? 'migration'),
+      asked_amount_microusd: Number(captured?.asked_amount_microusd ?? 0),
+      approved_amount_microusd: null,
+      expires_at: null,
+      approver_id: null,
+      decision_comment: null,
+      created_at: '2026-09-09T09:00:00Z',
+      observed_limit_microusd: null,
+      observed_remaining_microusd: null,
+      observed_at: null,
+      // The gateway stores the CANONICAL form, which differs in case from what she
+      // typed. Her own list therefore shows her `migration-42`, not `Migration-42`,
+      // and that is correct rather than a bug to paper over in the UI.
+      task_tag: String(captured?.task_tag ?? '').toLowerCase(),
+      task_tag_source: 'asserted',
+    })
+
+    await page.route('**/api/mvp/me/limit-raises', (route) => {
+      if (route.request().method() === 'POST') {
+        captured = route.request().postDataJSON()
+        filed = true
+        return route.fulfill({ status: 201, json: filedRow() })
+      }
+      return route.fulfill({
+        json: {
+          tenant_id: 'acme-eng',
+          requests: filed ? [filedRow()] : [],
+          reason_codes: REASON_CODES,
+        },
+      })
+    })
+
+    await page.goto('/me/limit-raises')
+
+    // Before she chooses: she can see that her own ceiling is nearly gone while the
+    // tenant pool is fine. This is what makes the choice informed rather than a
+    // guess, and a guess costs her a whole day -- the slot is per wall per person
+    // per UTC day.
+    await expect(page.getByTestId('wall-user-dollar')).toContainText('$0.20')
+    await expect(page.getByTestId('wall-pool')).toContainText('$380.00')
+    await expect(page.getByTestId('lr-wall-slot-note')).toBeVisible()
+
+    await page.getByTestId('lr-wall-select').selectOption('user_dollar_quota')
+    await page.getByTestId('lr-amount-input').fill('50')
+    await page.getByTestId('lr-reason-select').selectOption('migration')
+    await page.getByTestId('lr-task-tag-input').fill('Migration-42')
+    await page.getByTestId('lr-submit-button').click()
+
+    await expect.poll(() => captured).not.toBeNull()
+    // The wall she picked, spelled the way the backend's registry spells it.
+    expect(captured?.limit_kind).toBe('user_dollar_quota')
+    // Her capitals intact. A client that pre-canonicalised would be a second
+    // canonicaliser, and would show her a string it did not send.
+    expect(captured?.task_tag).toBe('Migration-42')
+
+    // And afterwards her own list tells her which ceiling and which tag, so two
+    // raises against two walls are not one indistinguishable pair of rows.
+    await expect(page.getByTestId('lr-row-task-tag')).toContainText('migration-42')
+    // Scoped to the CELL: the same words are also the selector's option label, and a
+    // bare text match resolves to both.
+    await expect(page.getByRole('cell', { name: 'My personal ceiling' })).toBeVisible()
+  })
+
+  test('a second filing the same day is answered with the request she already has', async ({
+    page,
+  }) => {
+    // The step nobody designs for: she is not sure her submission landed, so she
+    // presses again. The truthful answer is that it went through, and the screen
+    // must say that rather than showing her a failure -- otherwise she files a
+    // support ticket about a request that exists.
+    await seedUserSession(page)
+    await mockCommonRoutes(page)
+    await page.route('**/api/mvp/me/limit-raises', (route) => {
+      if (route.request().method() === 'POST') {
+        return route.fulfill({
+          status: 409,
+          json: {
+            detail: {
+              type: 'limit_raise_daily_slot_occupied',
+              message: 'You have already filed a limit raise today.',
+              holder_request_id: 'req-earlier',
+              holder_status: 'PENDING',
+              reset_at: '2026-09-10T00:00:00+00:00',
+            },
+          },
+        })
+      }
+      return route.fulfill({
+        json: { tenant_id: 'acme-eng', requests: [], reason_codes: REASON_CODES },
+      })
+    })
+
+    await page.goto('/me/limit-raises')
+    await page.getByTestId('lr-amount-input').fill('50')
+    await page.getByTestId('lr-reason-select').selectOption('migration')
+    await page.getByTestId('lr-submit-button').click()
+
+    const notice = page.getByTestId('lr-slot-occupied')
+    await expect(notice).toBeVisible()
+    // The id of the request that already exists, so she can go and look at it.
+    await expect(notice).toContainText('req-earlier')
+    // And when she may try again, with its zone, because a reset time read in her
+    // own timezone is wrong for most of the world by up to a day.
+    await expect(notice).toContainText('2026-09-10')
+  })
+
+  test('reads her own spend by tag, and is told what the totals do not mean', async ({
+    page,
+  }) => {
+    // End of the month. She wants to know what the migration cost. The number alone
+    // is the trap: a request for the same work that carried no tag, or whose tag was
+    // discarded, is under `unlabelled` with nothing linking it back -- so the row is
+    // a floor. If the screen shows her $45.00 and she reports that as the cost of
+    // the migration, every endpoint involved was correct and she was still wrong.
+    await seedUserSession(page)
+    await mockCommonRoutes(page)
+    await page.route('**/api/mvp/me/usage/by-tag**', (route) =>
+      route.fulfill({
+        json: {
+          period: '2026-09',
+          rows: [
+            {
+              user_id: 'engineer-1',
+              task_tag: 'migration-42',
+              requests: 88,
+              absent_count: 0,
+              dropped_grammar_count: 0,
+              cost_microusd: 45_000_000,
+              input_tokens: 900_000,
+              output_tokens: 120_000,
+            },
+            {
+              user_id: 'engineer-1',
+              task_tag: 'unlabelled',
+              requests: 31,
+              absent_count: 30,
+              dropped_grammar_count: 1,
+              cost_microusd: 12_000_000,
+              input_tokens: 200_000,
+              output_tokens: 30_000,
+            },
+          ],
+          truncated: false,
+          legacy_rows: 0,
+          malformed_rows: 0,
+          tag_is_caller_asserted: true,
+          retention_policy_days: 95,
+          retention_deletion_is_asynchronous: true,
+          retention_boundary_period_may_fold_incompletely: true,
+          tag_total_is_a_lower_bound: true,
+        },
+      }),
+    )
+
+    await page.goto('/me/usage/by-tag')
+
+    await expect(page.getByText('migration-42')).toBeVisible()
+    await expect(page.getByText('$45.00')).toBeVisible()
+
+    // The two sentences that decide whether she reports that figure as the cost.
+    await expect(page.getByTestId('bt-lower-bound')).toBeVisible()
+    await expect(page.getByTestId('bt-caller-asserted')).toBeVisible()
+
+    // And the split inside the unlabelled bucket: 30 requests nobody tagged is a
+    // habit, 1 discarded tag is a mistake, and one number cannot say which.
+    const split = page.getByTestId('bt-row-unlabelled-split')
+    await expect(split).toBeVisible()
+    await expect(split).toContainText('30')
+    await expect(split).toContainText('1')
   })
 })

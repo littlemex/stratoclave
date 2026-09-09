@@ -104,6 +104,28 @@ def configured_when(base_microusd: Optional[int]) -> bool:
     return base_microusd is not None
 
 
+def read_row_figures(tenant_id: str, user_id: str, period: str) -> tuple[int, int]:
+    """`(granted_microusd, used)` off the per-user row in one read, both zero when
+    the row does not exist.
+
+    For READERS that want both -- the requester-facing wall status. Deliberately
+    NOT a widening of `read_granted_microusd`: that function's contract is about
+    one integer read once per admission attempt and pinned into the admission's
+    condition, and adding a second return value to it would put a display concern
+    inside the enforcement path. Two callers, two shapes, one row format.
+
+    Not `ConsistentRead`: this is a figure a person reads on a page, where a
+    strongly-consistent read buys nothing a page refresh does not, unlike the
+    admission path where the value is pinned into a condition.
+    """
+    resp = _table().get_item(
+        Key={"pk": uq_pk(tenant_id, user_id), "sk": uq_sk(period)})
+    item = resp.get("Item")
+    if not item:
+        return 0, 0
+    return int(item.get("granted_microusd", 0) or 0), int(item.get("used", 0) or 0)
+
+
 def build_reserve_txn_items(
     *,
     tenant_id: str,

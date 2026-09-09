@@ -24,7 +24,8 @@
     "language_switch_aria": "Switch display language",
     "language_en": "English",
     "language_ja": "日本語",
-    "admin_pricing": "Pricing"
+    "admin_pricing": "Pricing",
+    "my_usage_by_tag": "Usage by tag"
   },
   "login": {
     "title": "Stratoclave",
@@ -554,7 +555,27 @@
     "status_approved": "Approved {{amount}}, expires {{expires}}",
     "approved_by_label": "Approved by",
     "status_rejected": "Rejected",
-    "status_pending": "Waiting for your tenant's approver to review — this did not change what you can spend yet."
+    "status_pending": "Waiting for your tenant's approver to review — this did not change what you can spend yet.",
+    "wall_pool_title": "Tenant pool",
+    "wall_user_dollar_title": "Your personal ceiling",
+    "user_dollar_unknown": "This deployment does not report your personal ceiling yet.",
+    "user_dollar_absent": "Your tenant has not set a per-person spending ceiling, so there is nothing personal to raise.",
+    "user_dollar_remaining_label": "Remaining to you",
+    "user_dollar_ceiling_label": "Your ceiling",
+    "user_dollar_granted": "{{base}} base plus {{granted}} already granted to you this period.",
+    "wall_label": "Which ceiling stopped you",
+    "wall_option_pool": "Tenant pool",
+    "wall_option_user_dollar": "My personal ceiling",
+    "wall_slot_note": "You may file once per ceiling per day (UTC), so choose the one that actually refused you.",
+    "wall_user_dollar_unconfigured": "Your tenant has no per-person ceiling, so a request against it cannot be granted.",
+    "task_tag_label": "Task tag (optional)",
+    "task_tag_note": "A label for the work, so this spend can be totalled under it later. Visible to anyone who can read your tenant's billing records, so do not put personal data or secrets in it.",
+    "task_tag_invalid": "Use letters, digits, and . _ : - only, up to 64 characters.",
+    "task_tag_none": "none",
+    "col_wall": "Ceiling",
+    "col_task_tag": "Tag",
+    "slot_occupied": "You have already filed against this ceiling today. Here is that request.",
+    "slot_resets_at": "You can file again after {{at}}."
   },
   "limit_raise_approval": {
     "label": "Approve limit raises",
@@ -577,7 +598,16 @@
     "decision_comment_label": "Decision comment",
     "approve": "Approve",
     "reject": "Reject",
-    "decide_error_fallback": "The decision could not be recorded"
+    "decide_error_fallback": "The decision could not be recorded",
+    "refusal_pool_short_title": "The tenant pool cannot cover this yet",
+    "refusal_pool_short_body": "Raising this person's ceiling now would give them room they still could not spend, because a spend also has to clear the tenant pool. Raise the pool first, then approve this same request.",
+    "refusal_pool_short_figures": "Pool headroom {{headroom}}, this approval needs {{needed}}.",
+    "refusal_pool_short_cta": "Go to the tenant pool",
+    "refusal_pool_short_still_pending": "Nothing was decided. The request is still waiting and can be approved once the pool is raised — the requester does not need to file again.",
+    "refusal_elapsed_title": "This request has been closed",
+    "refusal_elapsed_body": "It was filed in {{filed}}, and {{current}} is now the current period. A grant for a past period would land where nothing reads it.",
+    "refusal_elapsed_terminal": "This cannot be reopened. If the person still needs the room, ask them to file again for the current period.",
+    "refusal_unknown": "The server refused this decision for a reason this console does not recognise. Nothing was decided."
   },
   "grants_inventory": {
     "label": "Grant inventory",
@@ -753,5 +783,33 @@
     "col_source": "Source",
     "source_default": "default",
     "source_override": "override"
+  },
+  "me_usage_by_tag": {
+    "label": "My usage",
+    "title": "Usage by tag",
+    "intro": "What you spent in a period, grouped by the tag you attached to the work. Read the notes below the period picker before comparing any of these figures to an approval.",
+    "period_title": "Period",
+    "period_label": "Billing period (UTC)",
+    "period_invalid": "Use the form YYYY-MM, for example 2026-09.",
+    "load": "Load",
+    "load_error": "Could not load the report.",
+    "reading_title": "Reading these numbers",
+    "lower_bound": "A tag's total is a floor, not the cost of the work. A request for the same work that carried no tag, or whose tag was discarded, is counted under “unlabelled” with nothing linking it back — so the real cost of the work can only be higher than the row shows.",
+    "caller_asserted": "Tags are what the person running the work typed. Nothing checks a tag against anything, so a total answers “what was labelled this” and never “what this work was”.",
+    "retention": "Rows become eligible for deletion after {{days}} days.",
+    "retention_async": "Deletion runs in the background, so older rows may still appear here for a while.",
+    "retention_boundary": "A period at that edge can total incompletely, with some of its rows already deleted and some not.",
+    "table_title": "Tags",
+    "truncated": "This period was too large to fold completely, so every total below is partial.",
+    "not_truncated": "The whole period was folded.",
+    "legacy_rows": "{{count}} older rows carry no tag information at all and are counted here rather than placed in a row.",
+    "malformed_title": "Some rows look corrupted",
+    "malformed_body": "{{count}} rows carry only half of their tag information. The recorder refuses to write such a row, so something else wrote to this table. Worth reporting rather than reading past.",
+    "empty": "Nothing recorded for this period.",
+    "col_tag": "Tag",
+    "col_requests": "Requests",
+    "col_cost": "Cost",
+    "col_tokens": "Tokens",
+    "unlabelled_split": "{{absent}} carried no tag; {{dropped}} had a tag that was discarded."
   }
 }
