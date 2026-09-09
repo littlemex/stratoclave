@@ -1,0 +1,1550 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stratoclave</title>
+<style>
+  :root{
+    --background: 220 20% 8%;
+    --foreground: 210 20% 94%;
+    --card: 220 18% 11%;
+    --muted-foreground: 215 14% 66%;
+    --primary: 200 85% 62%;
+    --secondary: 220 14% 18%;
+    --border: 220 12% 18%;
+    --accent: 355 60% 48%;
+    --radius: 0.25rem;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    /* Japanese prose should only break at phrase boundaries (punctuation, ASCII
+       spaces already in the text), never mid-word inside a compound or a
+       katakana run. overflow-wrap is a last-resort so a long clause cannot
+       overflow its card. Inherited, so it applies to every data-ja element
+       without repeating it per selector. Harmless for English: word-break
+       only changes CJK-cluster breaking, Latin text still breaks at spaces. */
+    word-break: keep-all;
+    line-break: strict;
+    overflow-wrap: break-word;
+  }
+  h1,h2,h3,h4{
+    font-family: Fraunces, "Iowan Old Style", serif;
+    font-weight: 600;
+    line-height: 1.2;
+    margin: 0 0 0.5rem 0;
+    letter-spacing: -0.01em;
+  }
+  code, .mono, .fig-label, .ledger, .ledger *{
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  p{ margin: 0 0 1rem 0; color: hsl(var(--foreground)); }
+  .muted{ color: hsl(var(--muted-foreground)); }
+  a{ color: hsl(var(--primary)); text-decoration: none; }
+  a:hover{ text-decoration: underline; }
+
+  .wrap{ max-width: 1040px; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* header */
+  header.top{
+    position: sticky; top: 0; z-index: 50;
+    background: hsl(var(--background) / 0.92);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  header.top .wrap{
+    display: flex; align-items: center; justify-content: space-between;
+    padding-top: 0.9rem; padding-bottom: 0.9rem;
+  }
+  .brand{ display:flex; align-items:center; gap: 0.6rem; }
+  .brand .mark{
+    width: 22px; height: 22px; border-radius: var(--radius);
+    background: hsl(var(--primary));
+    display: inline-block;
+    position: relative;
+    overflow: hidden;
+  }
+  .brand .mark::after{
+    content:"";
+    position:absolute; inset:0;
+    background: linear-gradient(135deg, transparent 40%, hsl(var(--background) / 0.35) 40%, hsl(var(--background) / 0.35) 60%, transparent 60%);
+  }
+  .brand .name{ font-family: Fraunces, serif; font-weight: 600; font-size: 1.05rem; }
+  .brand .name .oss{
+    font-family: Inter, sans-serif; font-weight: 500; font-size: 0.68rem;
+    color: hsl(var(--muted-foreground));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 0.1rem 0.4rem;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+
+  .langtoggle{
+    display: inline-flex;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .langtoggle button{
+    font-family: Inter, sans-serif;
+    background: transparent;
+    color: hsl(var(--muted-foreground));
+    border: none;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .langtoggle button[aria-pressed="true"]{
+    background: hsl(var(--secondary));
+    color: hsl(var(--foreground));
+  }
+  .langtoggle button:focus-visible{ outline: 2px solid hsl(var(--primary)); outline-offset: -2px; }
+
+  /* sections */
+  main{ display:block; }
+  section{ padding: 3.2rem 0; border-bottom: 1px solid hsl(var(--border)); }
+  section:last-of-type{ border-bottom: none; }
+  section.hero{ padding-top: 4rem; padding-bottom: 3rem; }
+  .eyebrow{
+    font-family: Inter, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.72rem;
+    color: hsl(var(--primary));
+    margin-bottom: 0.8rem;
+    font-weight: 600;
+  }
+  /* The vw term is steep enough to keep shrinking below ~650px: at the old
+     2.3rem floor the second line ran 23px long on a phone and dropped its last
+     character onto a line of its own. */
+  .hero h1{ font-size: clamp(1.7rem, 7.6vw, 3.1rem); max-width: 20ch; word-break: keep-all; line-break: strict; }
+  .hero .lede{ font-size: 1.05rem; color: hsl(var(--muted-foreground)); max-width: 60ch; }
+  .hero .oss-line{
+    display:inline-flex; align-items:center; gap:0.5rem;
+    font-size: 0.85rem; color: hsl(var(--muted-foreground));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 0.35rem 0.7rem;
+    margin-top: 0.5rem;
+  }
+  .oss-line .dot{
+    width:7px; height:7px; border-radius:50%;
+    background: hsl(var(--primary));
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.18);
+  }
+
+  /* surfaces strip */
+  .surfaces{ display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:1rem; margin-top:1.5rem; }
+  .surface-card{
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 1rem 1.1rem;
+  }
+  .surface-card .tag{
+    font-size: 0.7rem; color: hsl(var(--primary)); text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 0.3rem; font-family: Inter, sans-serif; font-weight:600;
+  }
+  .surface-card code{ font-size: 0.82rem; color: hsl(var(--foreground)); }
+
+  h2.section-title{ font-size: clamp(1.4rem, 2.3vw, 1.75rem); }
+  #flagship h2.section-title{ font-size: clamp(1.75rem, 3vw, 2.2rem); }
+  .section-intro{ max-width: 58ch; color: hsl(var(--muted-foreground)); font-size: 0.95rem; }
+
+  /* pain -> capability cards */
+  .capgrid{ display:grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap:1.1rem; margin-top:1.8rem; }
+  .cap-card{
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 1.2rem 1.3rem;
+    display:flex; flex-direction:column; gap:0.6rem;
+  }
+  .pain-line{
+    font-family: Inter, sans-serif;
+    font-size: 0.82rem;
+    color: hsl(var(--accent));
+    display:flex; gap:0.5rem; align-items:flex-start;
+  }
+  .pain-line .bar{
+    flex:0 0 3px; width:3px; border-radius:2px;
+    background: hsl(var(--accent));
+    margin-top: 0.15rem;
+    align-self: stretch;
+  }
+  .cap-card h3{ font-size: 1.15rem; }
+  .cap-card p{ font-size: 0.92rem; color: hsl(var(--muted-foreground)); margin-bottom:0; }
+
+  /* diagrams */
+  .diagram-shell{
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 1.4rem;
+    margin-top: 1.6rem;
+    overflow-x: auto;
+  }
+  .fig-label{ font-size: 0.72rem; color: hsl(var(--muted-foreground)); margin-top: 0.7rem; text-align:center; }
+  svg text{ font-family: Inter, sans-serif; fill: hsl(var(--foreground)); }
+  svg .lbl-muted{ fill: hsl(var(--muted-foreground)); }
+  svg .lbl-accent{ fill: hsl(var(--accent)); }
+  svg .box{ fill: hsl(var(--secondary)); stroke: hsl(var(--border)); stroke-width:1; }
+  svg .box-primary{ fill: hsl(var(--card)); stroke: hsl(var(--primary)); stroke-width:1.25; }
+  svg .line{ stroke: hsl(var(--border)); stroke-width:1.5; fill:none; }
+  svg .line-primary{ stroke: hsl(var(--primary)); stroke-width:2; fill:none; }
+  svg .line-accent{ stroke: hsl(var(--accent)); stroke-width:2; fill:none; }
+  svg .dot-primary{ fill: hsl(var(--primary)); }
+  svg .dot-accent{ fill: hsl(var(--accent)); }
+
+  /* demo panel */
+  .demo-shell{
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 1.6rem;
+    margin-top: 1.8rem;
+  }
+  .demo-grid{ display:grid; grid-template-columns: 1fr 1fr; gap: 1.6rem; }
+  @media (max-width: 780px){ .demo-grid{ grid-template-columns: 1fr; } }
+  .control-row{ margin-bottom: 1.1rem; }
+  .control-row label{
+    display:block; font-family: Inter, sans-serif; font-size: 0.8rem; color: hsl(var(--muted-foreground));
+    margin-bottom: 0.4rem;
+  }
+  .control-row input[type="range"]{ width: 100%; accent-color: hsl(var(--primary)); }
+  .control-row input[type="text"]{
+    width: 100%;
+    background: hsl(var(--background));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    color: hsl(var(--foreground));
+    padding: 0.5rem 0.6rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.85rem;
+  }
+  .ceiling-readout{ font-family: "JetBrains Mono", monospace; color: hsl(var(--primary)); font-size:1.1rem; }
+  button.btn{
+    font-family: Inter, sans-serif;
+    background: hsl(var(--primary));
+    color: hsl(220 20% 8%);
+    border: none;
+    border-radius: var(--radius);
+    padding: 0.6rem 1.1rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.btn:hover{ filter: brightness(1.08); }
+  button.btn.secondary{
+    background: transparent;
+    color: hsl(var(--foreground));
+    border: 1px solid hsl(var(--border));
+  }
+  button.btn:disabled{ opacity:0.4; cursor:not-allowed; }
+  button.btn.raise{
+    background: hsl(var(--accent));
+    color: hsl(210 20% 96%);
+  }
+
+  .flow-track{
+    position: relative;
+    height: 64px;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    background: hsl(var(--background));
+    margin-bottom: 1.1rem;
+    overflow: hidden;
+  }
+  .flow-track .stagelbl{
+    position:absolute; top:6px; font-size:0.62rem; color: hsl(var(--muted-foreground));
+    font-family: Inter, sans-serif; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .flow-track .puck{
+    position:absolute; top: 26px; left: 4%;
+    width: 14px; height:14px; border-radius:50%;
+    background: hsl(var(--primary));
+    box-shadow: 0 0 0 4px hsl(var(--primary) / 0.18);
+    transition: left 0.5s ease, background 0.3s ease, box-shadow 0.3s ease;
+  }
+  .flow-track .puck.refused{
+    background: hsl(var(--accent));
+    box-shadow: 0 0 0 4px hsl(var(--accent) / 0.18);
+  }
+
+  table.ledger{ width:100%; border-collapse: collapse; font-size: 0.78rem; }
+  table.ledger th, table.ledger td{
+    text-align:left; padding: 0.4rem 0.5rem;
+    border-bottom: 1px solid hsl(var(--border));
+    white-space: nowrap;
+  }
+  table.ledger th{ color: hsl(var(--muted-foreground)); font-weight:500; font-family: Inter, sans-serif; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.04em; }
+  table.ledger tr.refused td{ color: hsl(var(--accent)); }
+  .scrollbox{ max-height: 220px; overflow-y: auto; border: 1px solid hsl(var(--border)); border-radius: var(--radius); }
+
+  .refusal-note{
+    display:none;
+    margin-top: 0.9rem;
+    border: 1px solid hsl(var(--accent) / 0.5);
+    background: hsl(var(--accent) / 0.08);
+    border-radius: var(--radius);
+    padding: 0.8rem 1rem;
+    font-size: 0.86rem;
+  }
+  .refusal-note.show{ display:block; }
+  .refusal-note strong{ color: hsl(var(--accent)); }
+  .raise-row{ margin-top: 0.7rem; display:flex; gap:0.6rem; align-items:center; flex-wrap: wrap; }
+
+  .tagbox{ margin-top: 1.6rem; }
+  table.tagtable{ width:100%; border-collapse: collapse; font-size: 0.82rem; margin-top:0.6rem; }
+  table.tagtable th, table.tagtable td{ text-align:left; padding: 0.35rem 0.5rem; border-bottom: 1px solid hsl(var(--border)); }
+  table.tagtable th{ color: hsl(var(--muted-foreground)); font-family: Inter, sans-serif; font-weight:500; font-size:0.68rem; text-transform:uppercase; }
+
+  footer{ padding: 2.4rem 0 3.5rem 0; }
+  footer .wrap{ display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.8rem; }
+  footer .muted{ font-size: 0.82rem; }
+
+  .visually-hidden{
+    position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap;
+  }
+
+  /* ---- richer visual system: glow, depth, contrast panels, chips ---- */
+
+  .hero{ position:relative; overflow:hidden; }
+  .hero::before{
+    content:"";
+    position:absolute; top:-220px; left:50%; width:900px; height:520px;
+    transform: translateX(-50%);
+    background: radial-gradient(closest-side, hsl(var(--primary) / 0.16), transparent 72%);
+    pointer-events:none;
+    z-index:0;
+  }
+  .hero > *{ position:relative; z-index:1; }
+
+  section{ padding: 5.5rem 0; }
+  #flagship{ padding: 6.5rem 0 5.75rem; }
+  .eyebrow-row{ display:flex; align-items:center; gap:0.6rem; margin-bottom:0.6rem; }
+  .step-chip{
+    font-family: Inter, sans-serif; font-size: 0.68rem; font-weight:700;
+    color: hsl(var(--muted-foreground)); background: transparent;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); padding: 0.1rem 0.45rem; letter-spacing:0.02em;
+  }
+  /* Reserve the filled, high-contrast treatment for the single flagship
+     guarantee (01) — every other step is supporting detail and should read
+     quieter, so the numbered chips don't flatten the priority order into a
+     component-library repeat pattern. */
+  #flagship .step-chip{
+    color: hsl(var(--background)); background: hsl(var(--primary));
+    border-color: transparent;
+  }
+  #flagship .eyebrow{ color: hsl(var(--primary)); }
+  section:not(#flagship) .eyebrow-row .eyebrow{ color: hsl(var(--muted-foreground)); }
+
+  /* problem -> as-is -> with-stratoclave shape */
+  .problem-line{
+    font-size: 1.02rem; max-width: 58ch; margin: 0 0 1.8rem 0;
+  }
+  .problem-line strong{ color: hsl(var(--foreground)); }
+
+  .contrast{
+    display:grid; grid-template-columns: 1fr 1fr; gap: 1.4rem;
+  }
+  @media (max-width: 820px){ .contrast{ grid-template-columns: 1fr; } }
+  .contrast-panel{
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) * 2);
+    padding: 1.3rem 1.4rem 1.5rem;
+    display:flex; flex-direction:column;
+  }
+  .contrast-panel.bad{ border-color: hsl(var(--accent) / 0.35); }
+  .contrast-panel.good{ border-color: hsl(var(--primary) / 0.4); }
+  .contrast-head{ display:flex; align-items:center; gap:0.5rem; margin-bottom:0.9rem; }
+  .contrast-dot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+  .contrast-panel.bad .contrast-dot{ background: hsl(var(--accent)); box-shadow: 0 0 0 4px hsl(var(--accent)/0.16); }
+  .contrast-panel.good .contrast-dot{ background: hsl(var(--primary)); box-shadow: 0 0 0 4px hsl(var(--primary)/0.16); }
+  .contrast-head h3{ font-size: 1.02rem; margin:0; }
+  .contrast-panel .sub{ font-size:0.82rem; color: hsl(var(--muted-foreground)); margin: 0 0 1rem 0; }
+
+  /* shared controls bar for a contrast pair */
+  .run-controls{
+    display:flex; flex-wrap:wrap; gap:1.6rem; align-items:flex-end;
+    background: hsl(var(--card)); border:1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) * 2); padding:1.2rem 1.4rem; margin-bottom:1.4rem;
+  }
+  .run-controls .control-row{ margin-bottom:0; min-width:200px; flex:1; }
+  .run-controls .runbtn-wrap{ flex:0 0 auto; }
+
+  /* swarm field */
+  .swarm-field{
+    position:relative; height:130px; margin-bottom:1rem;
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+    background:
+      linear-gradient(90deg, transparent 0 96%, hsl(var(--foreground)/0.06) 96%),
+      hsl(var(--background));
+    overflow:hidden;
+  }
+  .swarm-dot{
+    position:absolute; width:7px; height:7px; border-radius:50%;
+    background: hsl(var(--primary));
+    left:2%; top:50%;
+    opacity:0;
+    transition: left 1.1s cubic-bezier(.2,.7,.3,1), opacity 0.3s ease, top 0.6s ease, transform 0.5s ease, background 0.3s ease;
+  }
+  .swarm-dot.settled{ opacity:1; }
+  .swarm-dot.refused{ opacity:1; background: hsl(var(--accent)); }
+  /* Both outcomes STAY visible once they come to rest: the resting state is the
+     argument. The left panel ends with every dot piled at the far edge; the right
+     panel ends with the settled ones there and the refused ones dropped short of
+     it. Fading them out left the largest element on the page an empty box. */
+  .swarm-dot.refused.deflected{ transform: translateY(46px) scale(0.75); opacity:0.75; }
+  .swarm-dot.landed{ opacity:0.9; }
+
+  .budget-bar-wrap{ margin-bottom:0.6rem; }
+  .budget-bar{
+    position:relative; height:20px; border-radius: 4px;
+    background: hsl(var(--secondary));
+    border: 1px solid hsl(var(--border));
+    overflow:hidden;
+  }
+  .budget-bar .fill{
+    position:absolute; left:0; top:0; bottom:0; width:0%;
+    background: hsl(var(--primary));
+    transition: width 1.6s cubic-bezier(.2,.7,.3,1), background 0.4s ease;
+  }
+  .budget-bar .fill.over{ background: hsl(var(--accent)); }
+  .budget-bar .ceiling-tick{
+    position:absolute; top:-4px; bottom:-4px; width:2px;
+    background: hsl(var(--foreground)); left:0%;
+  }
+  .budget-bar .ceiling-tick::after{
+    content: "";
+  }
+  .contrast-result{
+    font-family: "JetBrains Mono", monospace; font-size:0.86rem;
+    margin-top:0.7rem; min-height: 2.4em;
+  }
+  .contrast-result .over{ color: hsl(var(--accent)); font-weight:600; }
+  .contrast-result .ok{ color: hsl(var(--primary)); font-weight:600; }
+
+  /* small feature chip rows */
+  .chiprow{ display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:1rem; }
+  .chip{
+    font-family: "JetBrains Mono", monospace; font-size:0.76rem;
+    border:1px solid hsl(var(--border)); border-radius: var(--radius);
+    padding: 0.3rem 0.6rem; color: hsl(var(--muted-foreground));
+    background: hsl(var(--card));
+  }
+  .chip.on{ color: hsl(var(--primary)); border-color: hsl(var(--primary)/0.4); }
+  /* Blue is evidence, not chrome: outside the two sections that carry the core
+     guarantee, an "on" chip is just a factual label (an endpoint, a WAF rule,
+     a role name) rather than an active/success state, so it stays neutral. */
+  section:not(#flagship):not(#mechanics) .chip.on{
+    color: hsl(var(--foreground)); border-color: hsl(var(--border));
+  }
+
+  /* compact feature block: pain + one visual + capability, no forced as-is demo */
+  .feature-block{
+    display:grid; grid-template-columns: 1.1fr 1fr; gap:1.6rem; align-items:center;
+    margin-top: 1.6rem;
+  }
+  @media (max-width: 820px){ .feature-block{ grid-template-columns: 1fr; } }
+  .feature-block .visual{
+    background: hsl(var(--card)); border:1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) * 2); padding:1.2rem;
+    min-height: 140px; display:flex; align-items:center; justify-content:center;
+  }
+
+  /* terminal block */
+  .terminal{
+    background: hsl(220 22% 6%); border:1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) * 2); padding:0.9rem 1.1rem;
+    font-family: "JetBrains Mono", monospace; font-size:0.82rem; width:100%;
+    color: hsl(var(--foreground)); line-height:1.7;
+  }
+  .terminal .p{ color: hsl(var(--primary)); }
+  .terminal .c{ color: hsl(var(--muted-foreground)); }
+
+  /* audit log strip */
+  .audit-list{ list-style:none; margin:0; padding:0; width:100%; }
+  .audit-list li{
+    display:flex; justify-content:space-between; gap:1rem;
+    font-family:"JetBrains Mono", monospace; font-size:0.76rem;
+    padding:0.4rem 0; border-bottom:1px solid hsl(var(--border));
+    color: hsl(var(--muted-foreground));
+  }
+  .audit-list li:last-child{ border-bottom:none; }
+  .audit-list .who{ color: hsl(var(--foreground)); }
+
+  /* cascade fallback chain */
+  .cascade{ display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; width:100%; justify-content:center; }
+  .cascade .node{
+    border:1px solid hsl(var(--border)); border-radius: var(--radius);
+    padding:0.5rem 0.8rem; font-family:"JetBrains Mono",monospace; font-size:0.78rem;
+    background: hsl(var(--secondary)); color: hsl(var(--muted-foreground));
+    position:relative;
+  }
+  .cascade .node.active{ border-color: hsl(var(--primary)); color: hsl(var(--foreground)); background: hsl(var(--card)); }
+  .cascade .node.exhausted{ color: hsl(var(--accent)); text-decoration: line-through; opacity:0.7; }
+  .cascade .arrow{ color: hsl(var(--muted-foreground)); }
+
+  /* identity sequence */
+  .idseq{ display:flex; flex-direction:column; gap:0.55rem; width:100%; }
+  .idseq .step{
+    display:flex; align-items:baseline; gap:0.6rem;
+    font-family:"JetBrains Mono",monospace; font-size:0.78rem;
+    color: hsl(var(--muted-foreground));
+    opacity:0.35; transition: opacity 0.4s ease;
+  }
+  .idseq .step.done{ opacity:0.65; color: hsl(var(--foreground)); }
+  .idseq .step.on{ opacity:1; color: hsl(var(--foreground)); }
+  .idseq .step .n{ color: hsl(var(--primary)); flex:0 0 1.4em; }
+
+  /* layered depth for topology */
+  .topo-shell{ perspective: 1400px; }
+  .topo-shell svg{ transform: rotateX(3deg); transform-origin: 50% 100%; }
+
+  /* governance mini-diagrams (auto-looping, no controls) */
+  .leak-row{ width:100%; display:flex; flex-direction:column; gap:0.55rem; }
+  .leak-app{ display:flex; align-items:center; gap:0.6rem; }
+  .leak-app .name{ font-family:"JetBrains Mono",monospace; font-size:0.68rem; color:hsl(var(--muted-foreground)); width:64px; flex:0 0 auto; }
+  .leak-bar{ position:relative; flex:1; height:12px; border-radius:3px; background:hsl(var(--secondary)); overflow:hidden; }
+  .leak-bar .fill{ position:absolute; left:0; top:0; bottom:0; width:0%; background:hsl(var(--primary)); animation: leakgrow 4.5s ease-in-out infinite; }
+  .leak-bar.b2 .fill{ animation-delay: 0.4s; }
+  .leak-bar.b3 .fill{ animation-delay: 0.9s; background:hsl(var(--accent)); animation-name: leakover; }
+  @keyframes leakgrow{ 0%{ width:4%; } 55%{ width:62%; } 100%{ width:44%; } }
+  @keyframes leakover{ 0%{ width:4%; } 60%{ width:100%; } 100%{ width:70%; } }
+
+  .pool-diagram{ width:100%; display:flex; flex-direction:column; gap:0.7rem; }
+  .pool-outer-label{ font-family:"JetBrains Mono",monospace; font-size:0.68rem; color:hsl(var(--muted-foreground)); display:flex; justify-content:space-between; }
+  .pool-outer{ height:14px; border-radius:3px; background:hsl(var(--secondary)); border:1px solid hsl(var(--border)); overflow:hidden; }
+  .pool-outer .fill{ height:100%; width:78%; background:hsl(var(--primary)); animation: poolshrink 4.5s ease-in-out infinite; }
+  .pool-users{ display:flex; gap:0.5rem; }
+  .pool-user{ flex:1; }
+  .pool-user .lbl{ font-family:"JetBrains Mono",monospace; font-size:0.62rem; color:hsl(var(--muted-foreground)); margin-bottom:0.2rem; }
+  .pool-user-bar{ height:10px; border-radius:3px; background:hsl(var(--secondary)); overflow:hidden; }
+  .pool-user-bar .fill{ height:100%; width:60%; background:hsl(var(--primary)); animation: poolshrink 4.5s ease-in-out infinite; }
+  .pool-user-bar.u2 .fill{ animation-delay: 0s; }
+  @keyframes poolshrink{ 0%{ width:96%; } 55%{ width:34%; } 100%{ width:96%; } }
+
+  /* breaker gauges */
+  .gauge{ position:relative; height:16px; border-radius:4px; background:hsl(var(--secondary)); border:1px solid hsl(var(--border)); overflow:hidden; margin-top:1rem; }
+  .gauge-fill{ position:absolute; left:0; top:0; bottom:0; width:0%; background:hsl(var(--primary)); }
+  #gaugeBadFill{ animation: gaugebad 5.5s ease-in-out infinite; }
+  @keyframes gaugebad{ 0%{ width:2%; background:hsl(var(--primary)); } 76%{ width:98%; background:hsl(var(--primary)); } 80%{ width:100%; background:hsl(var(--accent)); } 100%{ width:100%; background:hsl(var(--accent)); } }
+  #gaugeGoodFill{ animation: gaugegood 4.5s ease-in-out infinite; }
+  @keyframes gaugegood{ 0%{ width:2%; } 55%{ width:58%; } 100%{ width:80%; } }
+  .gauge-stage{
+    position:absolute; top:-1.6rem; left:55%; transform: translateX(-50%);
+    font-family:"JetBrains Mono",monospace; font-size:0.66rem; color: hsl(var(--primary));
+    opacity:0; animation: stagelabel 4.5s ease-in-out infinite;
+  }
+  .gauge-stage::before{ content: "advisory"; }
+  [lang="ja"] .gauge-stage::before{ content: "advisory (先読み)"; }
+  @keyframes stagelabel{ 0%{ opacity:0; } 45%{ opacity:0; } 60%{ opacity:1; } 95%{ opacity:1; } 100%{ opacity:0; } }
+
+  .cascade .node.active{ animation: caseglow 2.4s ease-in-out infinite; }
+  @keyframes caseglow{ 0%,100%{ box-shadow: 0 0 0 0 hsl(var(--primary)/0.35); } 50%{ box-shadow: 0 0 0 5px hsl(var(--primary)/0.16); } }
+
+  @media (prefers-reduced-motion: reduce){
+    *{ animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="name">Stratoclave<span class="oss" data-ja="OSS" data-en="OSS">OSS</span></span>
+    </div>
+    <div class="langtoggle" role="group" aria-label="Language">
+      <button id="btn-ja" type="button" aria-pressed="true">JA</button>
+      <button id="btn-en" type="button" aria-pressed="false">EN</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow" data-ja="Amazon Bedrock 向けゲートウェイ" data-en="A gateway for Amazon Bedrock">Amazon Bedrock 向けゲートウェイ</div>
+      <h1 data-ja="同時リクエストに、共有予算を超えさせない" data-en="Stop concurrent calls from overspending a shared budget">同時リクエストに、共有予算を超えさせない</h1>
+      <p class="lede" data-ja="Stratoclave は、モデルを呼ぶ前にテナントとユーザーのドル予算を強制し、その結果を監査のために記録する Amazon Bedrock 向けゲートウェイです。" data-en="Stratoclave enforces per-tenant and per-user dollar budgets before every model call, then records the result for audit — a gateway in front of Amazon Bedrock.">Stratoclave は、モデルを呼ぶ前にテナントとユーザーのドル予算を強制し、その結果を監査のために記録する Amazon Bedrock 向けゲートウェイです。</p>
+      <span class="oss-line"><span class="dot" aria-hidden="true"></span><span data-ja="オープンソースで公開" data-en="Released as open source">オープンソースで公開</span></span>
+
+      <div class="surfaces">
+        <div class="surface-card">
+          <div class="tag" data-ja="Anthropic 互換" data-en="Anthropic-compatible">Anthropic 互換</div>
+          <p class="muted" style="margin-bottom:0" data-ja="Anthropic Messages API をそのまま話せます。" data-en="Speak the Anthropic Messages API as-is.">Anthropic Messages API をそのまま話せます。</p>
+        </div>
+        <div class="surface-card">
+          <div class="tag" data-ja="OpenAI 互換" data-en="OpenAI-compatible">OpenAI 互換</div>
+          <p class="muted" style="margin-bottom:0" data-ja="OpenAI 互換のエンドポイントも提供します。" data-en="An OpenAI-compatible surface is also available.">OpenAI 互換のエンドポイントも提供します。</p>
+        </div>
+        <div class="surface-card">
+          <div class="tag" data-ja="CLI" data-en="CLI">CLI</div>
+          <p class="muted" style="margin-bottom:0"><code data-ja="stratoclave claude / stratoclave codex" data-en="stratoclave claude / stratoclave codex">stratoclave claude / stratoclave codex</code> <span data-ja="でそのまま使えます。" data-en="wrap the tools you already run.">でそのまま使えます。</span></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="flagship">
+      <div class="eyebrow-row"><span class="step-chip">01</span><span class="eyebrow" style="margin:0" data-ja="最重要の保証" data-en="The headline guarantee">最重要の保証</span></div>
+      <h2 class="section-title" data-ja="大量の同時リクエストでも、上限は超えない" data-en="Under load, it never overshoots the ceiling">大量の同時リクエストでも、上限は超えない</h2>
+      <p class="problem-line" data-ja="プラットフォームリードは上限を 1 つ設定したはずなのに、月末の請求はそれを超えている。原因はアプリ自身が書く「残高を確認してから使う」処理にある。確認と使用が別の処理である限り、同時に来た呼び出しは全員同じ残高を見て、全員が使ってしまう。" data-en="A platform lead sets one ceiling, then watches the month-end bill blow past it. The cause is the check-then-act pattern applications write for themselves: as long as checking and spending are two separate steps, a burst of concurrent calls all see the same balance, and all of them spend.">プラットフォームリードは上限を 1 つ設定したはずなのに、月末の請求はそれを超えている。原因はアプリ自身が書く「残高を確認してから使う」処理にある。確認と使用が別の処理である限り、同時に来た呼び出しは全員同じ残高を見て、全員が使ってしまう。</p>
+
+      <div class="run-controls">
+        <div class="control-row">
+          <label for="swarmCeiling" data-ja="共有の上限" data-en="Shared ceiling">共有の上限</label>
+          <input type="range" id="swarmCeiling" min="0.10" max="2.00" step="0.05" value="0.50">
+          <div class="ceiling-readout" id="swarmCeilingReadout">$0.50</div>
+        </div>
+        <div class="control-row">
+          <label for="swarmConcurrency" data-ja="同時リクエスト数" data-en="Concurrent requests">同時リクエスト数</label>
+          <input type="range" id="swarmConcurrency" min="20" max="200" step="5" value="60">
+          <div class="ceiling-readout" id="swarmConcurrencyReadout">60</div>
+        </div>
+        <div class="runbtn-wrap">
+          <button type="button" class="btn" id="swarmRunBtn" data-ja="もう一度実行" data-en="Run it again">もう一度実行</button>
+        </div>
+      </div>
+      <p class="fig-label" style="text-align:left; margin-top:-0.4rem; margin-bottom:1rem" data-ja="下は実行時の様子。ブラウザ内のシミュレーションで、実際の課金は発生しません。" data-en="Below is what a run looks like — an in-browser simulation, not a live measurement.">下は実行時の様子。ブラウザ内のシミュレーションで、実際の課金は発生しません。</p>
+
+      <div class="contrast">
+        <div class="contrast-panel bad">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="確認してから使う (自前実装)" data-en="Check, then act (what apps write themselves)">確認してから使う (自前実装)</h3></div>
+          <p class="sub" data-ja="各呼び出しが残高を確認してから、あとで使う。同時に来た呼び出しは、みな同じ残高を見ている。" data-en="Each call checks the remaining balance, then spends afterward. Concurrent calls all see the same balance.">各呼び出しが残高を確認してから、あとで使う。同時に来た呼び出しは、みな同じ残高を見ている。</p>
+          <div class="swarm-field" id="naiveField" aria-hidden="true"></div>
+          <div class="budget-bar-wrap">
+            <div class="budget-bar"><div class="fill" id="naiveFill"></div><div class="ceiling-tick" id="naiveTick"></div></div>
+          </div>
+          <div class="contrast-result mono" id="naiveResult"></div>
+        </div>
+
+        <div class="contrast-panel good">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="1 つのトランザクションで確保 (Stratoclave)" data-en="One transaction, before the call (Stratoclave)">1 つのトランザクションで確保 (Stratoclave)</h3></div>
+          <p class="sub" data-ja="呼び出し前に、テナントの残高へ単一の DynamoDB TransactWriteItems で確保する。競合した分は 402 で拒否される。" data-en="Before the model is invoked, a single DynamoDB TransactWriteItems reserves against the tenant balance. Whatever loses the race gets a 402.">呼び出し前に、テナントの残高へ単一の DynamoDB TransactWriteItems で確保する。競合した分は 402 で拒否される。</p>
+          <div class="swarm-field" id="scField" aria-hidden="true"></div>
+          <div class="budget-bar-wrap">
+            <div class="budget-bar"><div class="fill" id="scFill"></div><div class="ceiling-tick" id="scTick"></div></div>
+          </div>
+          <div class="contrast-result mono" id="scResult"></div>
+        </div>
+      </div>
+      <div class="fig-label" data-ja="同じ到着パターンを両方のパネルに与えている。差はメカニズムだけ" data-en="Both panels are driven by the exact same arrival pattern. The only difference is the mechanism">同じ到着パターンを両方のパネルに与えている。差はメカニズムだけ</div>
+    </section>
+
+    <section id="mechanics">
+      <div class="eyebrow-row"><span class="step-chip">02</span><span class="eyebrow" style="margin:0" data-ja="1 件がどう通るか" data-en="What happens to one request">1 件がどう通るか</span></div>
+      <h2 class="section-title" data-ja="予算を確保してから Bedrock を呼び、実費で確定する" data-en="Reserve the budget, then call Bedrock, then settle to actual cost">予算を確保してから Bedrock を呼び、実費で確定する</h2>
+      <p class="section-intro" data-ja="テナントかユーザーの予算を超える要求は、Bedrock に触れる前に拒否されます。ユーザーは CLI か SDK を使い、ゲートウェイのルーターと予算執行を経て、初めて Bedrock に触れます。" data-en="A request that would breach the tenant or user budget is rejected before Amazon Bedrock is ever called. A user goes through the CLI or SDK, then the gateway's router and budget enforcement, before Bedrock is touched.">テナントかユーザーの予算を超える要求は、Bedrock に触れる前に拒否されます。ユーザーは CLI か SDK を使い、ゲートウェイのルーターと予算執行を経て、初めて Bedrock に触れます。</p>
+
+      <div class="diagram-shell topo-shell">
+        <svg viewBox="0 0 900 260" role="img" aria-labelledby="arch-title arch-desc" style="width:100%; height:auto;">
+          <title id="arch-title" data-ja="トポロジー図" data-en="Topology diagram">トポロジー図</title>
+          <desc id="arch-desc" data-ja="ユーザーが CLI/SDK を通り、ゲートウェイのルーターと予算執行を経て Bedrock のモデルへ届く" data-en="A user passes through the CLI/SDK, then the gateway's router and budget enforcement, before reaching Bedrock models">ユーザーが CLI/SDK を通り、ゲートウェイのルーターと予算執行を経て Bedrock のモデルへ届く</desc>
+
+          <!-- left: user + client -->
+          <rect class="box" x="10" y="90" width="140" height="42" rx="4"></rect>
+          <text x="80" y="115" text-anchor="middle" font-size="13" data-ja="ユーザー" data-en="User">ユーザー</text>
+          <rect class="box" x="10" y="150" width="140" height="42" rx="4"></rect>
+          <text x="80" y="175" text-anchor="middle" font-size="12" data-ja="CLI / SDK" data-en="CLI / SDK">CLI / SDK</text>
+
+          <path class="line" d="M150,111 L330,120"></path>
+          <path class="line" d="M150,171 L330,140"></path>
+
+          <!-- gateway -->
+          <rect class="box-primary" x="330" y="50" width="240" height="160" rx="4"></rect>
+          <text x="450" y="75" text-anchor="middle" font-size="14" font-weight="600" data-ja="ゲートウェイ" data-en="Gateway">ゲートウェイ</text>
+          <rect class="box" x="350" y="90" width="90" height="34" rx="3"></rect>
+          <text x="395" y="112" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="ルーター" data-en="router">ルーター</text>
+          <rect class="box" x="450" y="90" width="100" height="34" rx="3"></rect>
+          <text x="500" y="112" text-anchor="middle" font-size="10" class="lbl-muted" data-ja="予算執行" data-en="enforcement">予算執行</text>
+          <text x="450" y="150" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="reserve / settle はここ" data-en="reserve / settle happen here">reserve / settle はここ</text>
+          <text x="450" y="190" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="唯一の通過点" data-en="the single passage point">唯一の通過点</text>
+
+          <path class="line" d="M570,110 L710,51"></path>
+          <path class="line" d="M570,130 L710,130"></path>
+          <path class="line" d="M570,150 L710,209"></path>
+
+          <!-- right: bedrock models -->
+          <rect class="box" x="710" y="30" width="170" height="42" rx="4"></rect>
+          <text x="795" y="55" text-anchor="middle" font-size="13">Claude</text>
+          <rect class="box" x="710" y="109" width="170" height="42" rx="4"></rect>
+          <text x="795" y="134" text-anchor="middle" font-size="13">GPT</text>
+          <rect class="box" x="710" y="188" width="170" height="42" rx="4"></rect>
+          <text x="795" y="213" text-anchor="middle" font-size="13" data-ja="その他" data-en="Others">その他</text>
+          <text x="795" y="245" text-anchor="middle" font-size="10.5" class="lbl-muted">Amazon Bedrock</text>
+
+          <!-- refusal branch: leaves the enforcement box, never reaches the backend -->
+          <!-- Drops out of the enforcement block at x=540, clear of the two labels
+               centred on x=450, and stops above the box instead of running through it. -->
+          <path class="line-accent" d="M540,124 L540,204" marker-end="url(#arrowredtopo)"></path>
+          <rect x="330" y="212" width="240" height="40" rx="4" fill="none" stroke="hsl(355 60% 48%)" stroke-width="1.5"></rect>
+          <text x="450" y="235" text-anchor="middle" font-size="11" font-weight="600" class="lbl-accent" data-ja="拒否 (402) — バックエンド未到達" data-en="Refused (402) — backend not touched">拒否 (402) — バックエンド未到達</text>
+          <defs>
+            <marker id="arrowredtopo" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="hsl(355 60% 48%)"></path>
+            </marker>
+          </defs>
+
+          <!-- moving request dot: happy path. A few passes establish the
+               direction, then it settles rather than looping forever as
+               ambient decoration. -->
+          <circle class="dot-primary" r="5">
+            <animateMotion dur="3.6s" repeatCount="3" fill="freeze"
+              path="M10,171 L150,171 L330,140 L450,120 L570,130 L710,130 L880,130"></animateMotion>
+          </circle>
+        </svg>
+        <div class="fig-label" data-ja="ゲートウェイの内側で確保と確定が起こる。拒否はそこで止まり、Bedrock には届かない" data-en="Reserve and settle happen inside the gateway. A refusal stops there and never reaches Bedrock">ゲートウェイの内側で確保と確定が起こる。拒否はそこで止まり、Bedrock には届かない</div>
+      </div>
+
+      <div class="diagram-shell">
+        <svg viewBox="0 0 900 230" role="img" aria-labelledby="seq-title seq-desc" style="width:100%; height:auto;">
+          <title id="seq-title" data-ja="reserve, invoke, settle のシーケンス図" data-en="Sequence diagram of reserve, invoke, settle">reserve, invoke, settle のシーケンス図</title>
+          <desc id="seq-desc" data-ja="予算を確保し呼び出し、完了後に確定する。確保できない場合はその場で拒否される" data-en="Reserve budget, invoke the model, settle afterward; a request that cannot be covered is refused immediately">予算を確保し呼び出し、完了後に確定する。確保できない場合はその場で拒否される</desc>
+
+          <rect class="box-primary" x="40" y="30" width="180" height="60" rx="4"></rect>
+          <text x="130" y="55" text-anchor="middle" font-size="13" font-weight="600" data-ja="予算を確保" data-en="Reserve">予算を確保</text>
+          <text x="130" y="74" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="予算執行にて判定" data-en="in enforcement, before Bedrock">予算執行にて判定</text>
+
+          <rect class="box-primary" x="360" y="30" width="180" height="60" rx="4"></rect>
+          <text x="450" y="55" text-anchor="middle" font-size="13" font-weight="600" data-ja="呼び出し" data-en="Invoke">呼び出し</text>
+          <text x="450" y="74" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="ゲートウェイが Bedrock を呼ぶ" data-en="gateway calls Bedrock">ゲートウェイが Bedrock を呼ぶ</text>
+
+          <rect class="box-primary" x="680" y="30" width="180" height="60" rx="4"></rect>
+          <text x="770" y="55" text-anchor="middle" font-size="13" font-weight="600" data-ja="確定" data-en="Settle">確定</text>
+          <text x="770" y="74" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="予算執行にて実費に合わせる" data-en="in enforcement, after the response">予算執行にて実費に合わせる</text>
+
+          <path class="line-primary" d="M220,60 L360,60" marker-end="url(#arrow)"></path>
+          <path class="line-primary" d="M540,60 L680,60" marker-end="url(#arrow)"></path>
+
+          <text x="290" y="45" text-anchor="middle" font-size="10" class="lbl-muted" data-ja="確保は上界" data-en="reserve is an upper bound">確保は上界</text>
+          <text x="610" y="45" text-anchor="middle" font-size="10" class="lbl-muted" data-ja="確定 ≤ 確保" data-en="settled ≤ reserved">確定 ≤ 確保</text>
+
+          <!-- refusal branch -->
+          <path class="line-accent" d="M130,90 L130,150 L360,150" marker-end="url(#arrowred)"></path>
+          <rect x="360" y="120" width="220" height="60" rx="4" fill="none" stroke="hsl(355 60% 48%)" stroke-width="1.5"></rect>
+          <text x="470" y="145" text-anchor="middle" font-size="13" font-weight="600" class="lbl-accent" data-ja="拒否" data-en="Refused">拒否</text>
+          <text x="470" y="164" text-anchor="middle" font-size="10.5" class="lbl-accent" data-ja="上限を超えるため" data-en="would exceed the ceiling">上限を超えるため</text>
+
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="hsl(200 85% 62%)"></path>
+            </marker>
+            <marker id="arrowred" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="hsl(355 60% 48%)"></path>
+            </marker>
+          </defs>
+
+          <!-- happy path dot -->
+          <circle class="dot-primary" r="5">
+            <animateMotion dur="4s" repeatCount="indefinite" keyTimes="0;0.45;0.5;0.95;1" keyPoints="0;0.5;0.5;1;1" calcMode="linear"
+              path="M60,60 L860,60"></animateMotion>
+          </circle>
+
+          <!-- refused path dot, offset timing so both cases are visible over the loop -->
+          <circle class="dot-accent" r="5">
+            <animateMotion dur="4s" begin="2s" repeatCount="indefinite"
+              path="M130,60 L130,90 L130,150 L470,150"></animateMotion>
+          </circle>
+        </svg>
+        <div class="fig-label" data-ja="確保は上限であり、確定はそれ以下。超える要求はモデルの手前で拒否される" data-en="The reservation is an upper bound; the settlement is usually smaller. A request that would exceed it is refused before the model runs">確保は上限であり、確定はそれ以下。超える要求はモデルの手前で拒否される</div>
+      </div>
+    </section>
+
+    <section id="governance">
+      <div class="eyebrow-row"><span class="step-chip">03</span><span class="eyebrow" style="margin:0" data-ja="2 段階の統治" data-en="Two-level governance">2 段階の統治</span></div>
+      <h2 class="section-title" data-ja="テナントの pool と、ユーザーの quota" data-en="A tenant pool, and a per-user quota">テナントの pool と、ユーザーの quota</h2>
+      <p class="problem-line" data-ja="経理責任者は、あるチームが上限を守っていると思っている。だが実際の上限はアプリごとに違う数え方のトークン数として管理され、ドルに換算されるのは月末になってから。" data-en="A finance owner believes a team is within budget. But the real limit lives inside each app as a token count, counted differently by every app, and only becomes a dollar figure at month end.">経理責任者は、あるチームが上限を守っていると思っている。だが実際の上限はアプリごとに違う数え方のトークン数として管理され、ドルに換算されるのは月末になってから。</p>
+
+      <div class="contrast">
+        <div class="contrast-panel bad">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="アプリ内トークン計数 (自前実装)" data-en="Token counters inside each app (self-rolled)">アプリ内トークン計数 (自前実装)</h3></div>
+          <p class="sub" data-ja="3 つのアプリが、それぞれ自分のトークン数を数えている。共有の総額はどこにもない。" data-en="Three apps each count their own tokens. There is no shared total anywhere.">3 つのアプリが、それぞれ自分のトークン数を数えている。共有の総額はどこにもない。</p>
+          <div class="leak-row" aria-hidden="true">
+            <div class="leak-app"><span class="name">app-a</span><div class="leak-bar"><div class="fill"></div></div></div>
+            <div class="leak-app"><span class="name">app-b</span><div class="leak-bar b2"><div class="fill"></div></div></div>
+            <div class="leak-app"><span class="name">app-c</span><div class="leak-bar b3"><div class="fill"></div></div></div>
+          </div>
+          <div class="contrast-result mono"><span class="over" data-ja="app-c が誰にも気づかれず上限を超えている" data-en="app-c overshoots, unnoticed by anyone">app-c が誰にも気づかれず上限を超えている</span></div>
+        </div>
+
+        <div class="contrast-panel good">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="テナント pool + ユーザー quota (Stratoclave)" data-en="Tenant pool + per-user quota (Stratoclave)">テナント pool + ユーザー quota (Stratoclave)</h3></div>
+          <p class="sub" data-ja="1 件の呼び出しは、テナントの残高とその人の quota を同時に減らす。どちらかが尽きれば拒否される。" data-en="Every call drains the tenant's pool and that person's quota at the same time. Either one running out refuses the call.">1 件の呼び出しは、テナントの残高とその人の quota を同時に減らす。どちらかが尽きれば拒否される。</p>
+          <div class="pool-diagram" aria-hidden="true">
+            <div class="pool-outer-label"><span data-ja="テナント pool" data-en="tenant pool">テナント pool</span><span class="mono">$</span></div>
+            <div class="pool-outer"><div class="fill"></div></div>
+            <div class="pool-users">
+              <div class="pool-user"><div class="lbl">user-1</div><div class="pool-user-bar u1"><div class="fill"></div></div></div>
+              <div class="pool-user"><div class="lbl">user-2</div><div class="pool-user-bar u2"><div class="fill"></div></div></div>
+              <div class="pool-user"><div class="lbl">user-3</div><div class="pool-user-bar"><div class="fill"></div></div></div>
+            </div>
+          </div>
+          <div class="contrast-result mono"><span class="ok" data-ja="両方のレベルが呼び出し前に確保される" data-en="Both levels are reserved before the call">両方のレベルが呼び出し前に確保される</span></div>
+        </div>
+      </div>
+      <div class="fig-label" data-ja="バーはこのふるまいのイメージ図で、実際の残高ではありません" data-en="The bars illustrate this behavior; they are not a live balance">バーはこのふるまいのイメージ図で、実際の残高ではありません</div>
+
+      <p class="section-intro" style="margin-top:1.6rem" data-ja="消費はドルで測る。モデルごとに単価が違い、確保はその単価で行われる。" data-en="Spend is measured in dollars, not tokens. Each model has its own price, and the reservation is made at that price.">消費はドルで測る。モデルごとに単価が違い、確保はその単価で行われる。</p>
+      <div class="chiprow" aria-hidden="true">
+        <span class="chip on mono">us.anthropic.claude-sonnet-4-6 → $/token</span>
+        <span class="chip on mono">openai.gpt-5.6-sol → $/token</span>
+        <span class="chip mono" data-ja="+ 設定ファイルで追加" data-en="+ add more via config">+ 設定ファイルで追加</span>
+      </div>
+    </section>
+
+    <section id="demo">
+      <div class="eyebrow-row"><span class="step-chip">04</span><span class="eyebrow" style="margin:0" data-ja="自分で動かす" data-en="Operate it yourself">自分で動かす</span></div>
+      <h2 class="section-title" data-ja="1 件ずつ、reserve → invoke → settle を見る" data-en="Watch reserve, invoke, settle happen to one request">1 件ずつ、reserve → invoke → settle を見る</h2>
+      <p class="section-intro" data-ja="上のトポロジー図の予算執行を、1 件ずつ動かせます。ネットワークには繋がらず、ブラウザの中だけで動きます。" data-en="Drive the budget-enforcement step from the topology diagram above, one request at a time. This runs entirely in your browser, no network calls.">上のトポロジー図の予算執行を、1 件ずつ動かせます。ネットワークには繋がらず、ブラウザの中だけで動きます。</p>
+
+      <div class="demo-shell">
+        <div class="demo-grid">
+          <div>
+            <div class="control-row">
+              <label for="ceilingRange" data-ja="1 人あたりの月次上限" data-en="Per-person monthly ceiling">1 人あたりの月次上限</label>
+              <input type="range" id="ceilingRange" min="0.05" max="1.00" step="0.01" value="0.15">
+              <div class="ceiling-readout" id="ceilingReadout">$0.15 / mo</div>
+            </div>
+            <div class="control-row">
+              <label for="tagInput" data-ja="タスクタグ (任意)" data-en="Task tag (optional)">タスクタグ (任意)</label>
+              <input type="text" id="tagInput" placeholder="e.g. onboarding-bot" class="mono">
+            </div>
+            <div class="control-row" style="display:flex; gap:0.6rem; flex-wrap:wrap;">
+              <button type="button" class="btn" id="sendBtn" data-ja="リクエストを送信" data-en="Send request">リクエストを送信</button>
+              <button type="button" class="btn secondary" id="resetBtn" data-ja="リセット" data-en="Reset">リセット</button>
+            </div>
+
+            <div class="flow-track" id="flowTrack" aria-hidden="true">
+              <span class="stagelbl" style="left:4%" data-ja="確保" data-en="reserve">確保</span>
+              <span class="stagelbl" style="left:46%" data-ja="呼び出し" data-en="invoke">呼び出し</span>
+              <span class="stagelbl" style="left:82%" data-ja="確定" data-en="settle">確定</span>
+              <div class="puck" id="puck"></div>
+            </div>
+
+            <div class="refusal-note" id="refusalNote" role="status">
+              <div><strong data-ja="拒否されました。" data-en="Refused.">拒否されました。</strong>
+                <span data-ja="この上限が拒否しました:" data-en="This ceiling refused it:">この上限が拒否しました:</span>
+                <span class="mono" id="refusalCeilingValue">$0.15 / mo</span>
+              </div>
+              <div class="raise-row">
+                <button type="button" class="btn raise" id="requestRaiseBtn" data-ja="上限アップを申請" data-en="Request a raise">上限アップを申請</button>
+                <span id="raiseApproveRow" style="display:none; align-items:center; gap:0.5rem;">
+                  <span class="mono" id="raiseSuggestion"></span>
+                  <button type="button" class="btn" id="approveRaiseBtn" data-ja="承認" data-en="Approve">承認</button>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="fig-label" style="text-align:left; margin-top:0" data-ja="台帳 (直近が上)" data-en="Ledger (most recent first)">台帳 (直近が上)</div>
+            <div class="scrollbox">
+              <table class="ledger">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th data-ja="タグ" data-en="tag">タグ</th>
+                    <th data-ja="確保" data-en="reserved">確保</th>
+                    <th data-ja="確定" data-en="settled">確定</th>
+                    <th data-ja="状態" data-en="status">状態</th>
+                  </tr>
+                </thead>
+                <tbody id="ledgerBody"></tbody>
+              </table>
+            </div>
+
+            <div class="tagbox">
+              <div class="fig-label" style="text-align:left; margin-top:0" data-ja="タグ別の支出" data-en="Spend by tag">タグ別の支出</div>
+              <table class="tagtable">
+                <thead>
+                  <tr>
+                    <th data-ja="タグ" data-en="tag">タグ</th>
+                    <th data-ja="件数" data-en="count">件数</th>
+                    <th data-ja="合計 (確定)" data-en="total settled">合計 (確定)</th>
+                  </tr>
+                </thead>
+                <tbody id="tagBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="callshapes">
+      <div class="eyebrow-row"><span class="step-chip">05</span><span class="eyebrow" style="margin:0" data-ja="呼び方は 3 つ、会計は 1 つ" data-en="Three shapes, one ledger">呼び方は 3 つ、会計は 1 つ</span></div>
+      <h2 class="section-title" data-ja="1 つのゲートウェイ、3 つの話し方" data-en="One gateway, three ways to call it">1 つのゲートウェイ、3 つの話し方</h2>
+      <p class="problem-line" data-ja="オンコールのエンジニアは、Anthropic 用と OpenAI 用に別々の呼び出しコードを持ちたくない。既存の SDK も Claude Code も Claude Desktop も、そのまま動いてほしい。" data-en="An engineer on call doesn't want separate integration code for Anthropic and OpenAI. Existing SDKs, Claude Code and Claude Desktop should just keep working.">オンコールのエンジニアは、Anthropic 用と OpenAI 用に別々の呼び出しコードを持ちたくない。既存の SDK も Claude Code も Claude Desktop も、そのまま動いてほしい。</p>
+
+      <div class="feature-block">
+        <div>
+          <div class="chiprow" style="margin-top:0">
+            <span class="chip on mono">POST /v1/messages</span>
+          </div>
+          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 1rem" data-ja="Anthropic 互換。ストリーミング・tool calling・vision・prompt caching。" data-en="Anthropic-compatible: streaming, tool calling, vision, prompt caching.">Anthropic 互換。ストリーミング・tool calling・vision・prompt caching。</p>
+          <div class="chiprow" style="margin-top:0">
+            <span class="chip on mono">POST /v1/chat/completions</span>
+          </div>
+          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 1rem" data-ja="OpenAI Chat Completions 互換。ストリーミングと tool calling に対応。未対応パラメータを黙って握りつぶさず、400 で大きく落とす。" data-en="OpenAI Chat Completions-compatible: streaming and tool calls. Unsupported parameters are rejected with a loud 400, not silently dropped.">OpenAI Chat Completions 互換。ストリーミングと tool calling に対応。未対応パラメータを黙って握りつぶさず、400 で大きく落とす。</p>
+          <div class="chiprow" style="margin-top:0">
+            <span class="chip on mono">POST /openai/v1/responses</span>
+          </div>
+          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 0" data-ja="OpenAI Responses API 互換。Bedrock 上の GPT-5.6 や Grok 向け。" data-en="OpenAI Responses API-compatible, for GPT-5.6 and Grok on Bedrock.">OpenAI Responses API 互換。Bedrock 上の GPT-5.6 や Grok 向け。</p>
+        </div>
+
+        <div class="visual">
+          <svg viewBox="0 0 320 220" style="width:100%; height:auto;" role="img" aria-labelledby="cs-title">
+            <title id="cs-title" data-ja="3 つの API 形状が 1 つのゲートウェイに集まる図" data-en="Diagram of three API shapes converging on one gateway">3 つの API 形状が 1 つのゲートウェイに集まる図</title>
+            <rect class="box" x="10" y="10" width="150" height="30" rx="4"></rect>
+            <text x="85" y="30" text-anchor="middle" font-size="10.5" class="mono">/v1/messages</text>
+            <rect class="box" x="10" y="55" width="150" height="30" rx="4"></rect>
+            <text x="85" y="75" text-anchor="middle" font-size="10" class="mono">/v1/chat/completions</text>
+            <rect class="box" x="10" y="100" width="150" height="30" rx="4"></rect>
+            <text x="85" y="120" text-anchor="middle" font-size="10" class="mono">/openai/v1/responses</text>
+
+            <path class="line" d="M160,25 L215,60"></path>
+            <path class="line" d="M160,70 L215,70"></path>
+            <path class="line" d="M160,115 L215,80"></path>
+
+            <rect class="box-primary" x="215" y="40" width="95" height="60" rx="4"></rect>
+            <text x="262" y="65" text-anchor="middle" font-size="10.5" font-weight="600" data-ja="同じ会計" data-en="same ledger">同じ会計</text>
+            <text x="262" y="82" text-anchor="middle" font-size="9" class="lbl-muted" data-ja="どの形でも" data-en="whichever shape">どの形でも</text>
+
+            <circle class="dot-primary" r="4">
+              <animateMotion dur="3s" repeatCount="indefinite" path="M20,70 L160,70 L262,70"></animateMotion>
+            </circle>
+          </svg>
+        </div>
+      </div>
+
+      <div class="terminal" style="margin-top:1.4rem;">
+        <div class="c" data-ja="# デプロイ先に向けるだけで、既存の SDK / Claude Code / Claude Desktop がそのまま動く" data-en="# point existing SDKs, Claude Code and Claude Desktop at your deployment"># デプロイ先に向けるだけで、既存の SDK / Claude Code / Claude Desktop がそのまま動く</div>
+        export ANTHROPIC_BASE_URL=https://your-deployment<br>export OPENAI_BASE_URL=https://your-deployment/openai/v1
+      </div>
+      <div class="chiprow">
+        <span class="chip mono">stratoclave claude</span>
+        <span class="chip mono">stratoclave codex</span>
+        <span class="chip mono" data-ja="Web コンソール" data-en="web console">Web コンソール</span>
+        <span class="chip mono" data-ja="Claude Desktop Cowork 対応" data-en="Claude Desktop Cowork ready">Claude Desktop Cowork 対応</span>
+      </div>
+      <p class="muted" style="font-size:0.92rem; margin-top:0.6rem" data-ja="CLI サブコマンドは、実際の claude / codex バイナリを一時的なキーでラップして実行します。" data-en="The CLI subcommands wrap the real claude / codex binaries with an ephemeral key.">CLI サブコマンドは、実際の claude / codex バイナリを一時的なキーでラップして実行します。</p>
+    </section>
+
+    <section id="resilience">
+      <div class="eyebrow-row"><span class="step-chip">06</span><span class="eyebrow" style="margin:0" data-ja="止まらない・詰まらない" data-en="Does not stop, does not stall">止まらない・詰まらない</span></div>
+      <h2 class="section-title" data-ja="詰まっても、尽きても、止まらない" data-en="Whether it stalls or runs out, it doesn't stop">詰まっても、尽きても、止まらない</h2>
+      <p class="problem-line" data-ja="オンコールのエンジニアは、深夜に 1 つのリージョンが詰まっただけで、あるいは 1 つのモデルの予算を使い切っただけで、呼び出し元全体を止めたくない。この 2 つは別の仕組みで、それぞれ別に効く。" data-en="An on-call engineer doesn't want a single region stalling, or a single model's budget running out, to take down every caller at 3am. These are two separate mechanisms, and each kicks in on its own.">オンコールのエンジニアは、深夜に 1 つのリージョンが詰まっただけで、あるいは 1 つのモデルの予算を使い切っただけで、呼び出し元全体を止めたくない。この 2 つは別の仕組みで、それぞれ別に効く。</p>
+
+      <div class="feature-block">
+        <div>
+          <h3 style="font-size:1.05rem" data-ja="詰まったら: 同じモデルで別リージョン" data-en="Stalled: same model, another region">詰まったら: 同じモデルで別リージョン</h3>
+          <p class="muted" style="font-size:0.95rem" data-ja="ストリーミング経路でも、失敗はリトライされ、必要なら同じモデルのまま別リージョンに切り替えます。" data-en="Even on the streaming path, failures are retried and can fail over to the same model in another region.">ストリーミング経路でも、失敗はリトライされ、必要なら同じモデルのまま別リージョンに切り替えます。</p>
+          <h3 style="font-size:1.05rem; margin-top:1.2rem" data-ja="尽きたら: 別のモデルへ" data-en="Exhausted: to another model">尽きたら: 別のモデルへ</h3>
+          <p class="muted" style="font-size:0.95rem" data-ja="モデルごとに quota があり、Opus の quota が尽きたら Sonnet へ、次に Haiku へと自動で落ちます。" data-en="Each model has its own quota. Opus exhausted falls to Sonnet, then to Haiku, automatically.">モデルごとに quota があり、Opus の quota が尽きたら Sonnet へ、次に Haiku へと自動で落ちます。</p>
+        </div>
+        <div class="visual">
+          <div class="cascade" aria-hidden="true">
+            <span class="node exhausted" id="casNode1">Opus</span>
+            <span class="arrow">&#8594;</span>
+            <span class="node exhausted" id="casNode2">Sonnet</span>
+            <span class="arrow">&#8594;</span>
+            <span class="node active" id="casNode3">Haiku</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="breaker">
+      <div class="eyebrow-row"><span class="step-chip">07</span><span class="eyebrow" style="margin:0" data-ja="拒否の前に、既に効いている" data-en="Working before the hard refusal">拒否の前に、既に効いている</span></div>
+      <h2 class="section-title" data-ja="段階的な予算ブレーカー" data-en="A staged budget breaker">段階的な予算ブレーカー</h2>
+      <p class="problem-line" data-ja="上限は 0 か 100 かではない。近づいてきた時点で、ルーティング自体を少しずつ変えたい。拒否は最後の手段であるべき。" data-en="A ceiling isn't a binary. As spend approaches it, routing itself should start to shift — the hard refusal should be the last resort.">上限は 0 か 100 かではない。近づいてきた時点で、ルーティング自体を少しずつ変えたい。拒否は最後の手段であるべき。</p>
+
+      <div class="contrast">
+        <div class="contrast-panel bad">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="0 か 100 かの遮断" data-en="An all-or-nothing cutoff">0 か 100 かの遮断</h3></div>
+          <p class="sub" data-ja="上限に達するまで何も変わらず、達した瞬間にすべてが止まる。" data-en="Nothing changes until the ceiling, then everything stops at once.">上限に達するまで何も変わらず、達した瞬間にすべてが止まる。</p>
+          <div class="gauge" id="gaugeBad" aria-hidden="true"><div class="gauge-fill" id="gaugeBadFill"></div></div>
+        </div>
+        <div class="contrast-panel good">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="段階的なブレーカー (Stratoclave)" data-en="A staged breaker (Stratoclave)">段階的なブレーカー (Stratoclave)</h3></div>
+          <p class="sub" data-ja="残り ≤25% でモデルの階層を落とし、残り ≤5% で Bedrock を呼ぶ前に拒否する。" data-en="At ≤25% remaining it caps the model tier; at ≤5% it refuses before Bedrock is ever called.">残り ≤25% でモデルの階層を落とし、残り ≤5% で Bedrock を呼ぶ前に拒否する。</p>
+          <div class="gauge" id="gaugeGood" aria-hidden="true"><div class="gauge-fill" id="gaugeGoodFill"></div><div class="gauge-stage" id="gaugeStage"></div></div>
+        </div>
+      </div>
+      <div class="fig-label" data-ja="ゲージはこのふるまいのイメージ図で、実際の残高ではありません" data-en="The gauges illustrate this behavior; they are not a live balance">ゲージはこのふるまいのイメージ図で、実際の残高ではありません</div>
+    </section>
+
+    <section id="crashsafe">
+      <div class="eyebrow-row"><span class="step-chip">08</span><span class="eyebrow" style="margin:0" data-ja="プロセスが死んでも、予算は死なない" data-en="A dead process doesn't kill the budget">プロセスが死んでも、予算は死なない</span></div>
+      <h2 class="section-title" data-ja="クラッシュに強い会計" data-en="Crash-resilient accounting">クラッシュに強い会計</h2>
+      <p class="problem-line" data-ja="確保してから確定するまでの間にプロセスが落ちたら、その分の予算は永遠に確保されたまま、誰にも使えなくなる。" data-en="If a process dies between reserving and settling, that slice of budget can be stuck reserved forever, unusable by anyone.">確保してから確定するまでの間にプロセスが落ちたら、その分の予算は永遠に確保されたまま、誰にも使えなくなる。</p>
+
+      <div class="contrast">
+        <div class="contrast-panel bad">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="確保したまま孤立" data-en="Reserved and orphaned">確保したまま孤立</h3></div>
+          <p class="sub" data-ja="プロセスが確定の前に落ちる。確保した分はどこにも記録が残らず、予算は漏れたまま。" data-en="The process dies before settling. There is no record of the reservation anywhere, and the budget just leaks.">プロセスが確定の前に落ちる。確保した分はどこにも記録が残らず、予算は漏れたまま。</p>
+        </div>
+        <div class="contrast-panel good">
+          <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="hold 行から回収 (Stratoclave)" data-en="Reclaimed from a hold row (Stratoclave)">hold 行から回収 (Stratoclave)</h3></div>
+          <p class="sub" data-ja="pool からの確保は、対になる hold 行を書く。プロセスが死んでも、この行から回収される。" data-en="A pooled reservation writes a sibling hold row. If the process dies, it is reclaimed from that row.">pool からの確保は、対になる hold 行を書く。プロセスが死んでも、この行から回収される。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="identity">
+      <div class="eyebrow-row"><span class="step-chip">09</span><span class="eyebrow" style="margin:0" data-ja="役割と本人確認" data-en="Roles and identity">役割と本人確認</span></div>
+      <h2 class="section-title" data-ja="3 つの役割、3 つの入り口" data-en="Three roles, three ways in">3 つの役割、3 つの入り口</h2>
+      <p class="problem-line" data-ja="セキュリティ責任者は、バックエンドが乗っ取られたときに、それが顧客の Identity Center や SAML IdP へ踏み台にされないかを気にする。" data-en="A security owner worries whether a backend compromise could pivot into the customer's Identity Center or SAML IdP.">セキュリティ責任者は、バックエンドが乗っ取られたときに、それが顧客の Identity Center や SAML IdP へ踏み台にされないかを気にする。</p>
+
+      <div class="chiprow" style="margin-top:0">
+        <span class="chip on mono" data-ja="admin" data-en="admin">admin</span>
+        <span class="chip on mono" data-ja="team_lead" data-en="team_lead">team_lead</span>
+        <span class="chip on mono" data-ja="user" data-en="user">user</span>
+        <span class="chip mono" data-ja="すべてテナント内に限定" data-en="all scoped to one tenant">すべてテナント内に限定</span>
+      </div>
+
+      <div class="feature-block" style="margin-top:1.8rem">
+        <div>
+          <h3 style="font-size:1.05rem" data-ja="Vouch-by-STS (パスワードレス SSO)" data-en="Vouch-by-STS (passwordless SSO)">Vouch-by-STS (パスワードレス SSO)</h3>
+          <p class="muted" style="font-size:0.95rem" data-ja="クライアントは sts:GetCallerIdentity に署名する。バックエンドはその署名済みリクエストを STS へそのまま転送し、STS が返す Arn / UserId / Account だけを信用する。AWS の認証情報そのものは一度も解釈しない。" data-en="The client signs sts:GetCallerIdentity. The backend replays that signed request to STS as-is, and trusts only the Arn, UserId and Account that STS returns. It never parses the AWS credentials themselves.">クライアントは sts:GetCallerIdentity に署名する。バックエンドはその署名済みリクエストを STS へそのまま転送し、STS が返す Arn / UserId / Account だけを信用する。AWS の認証情報そのものは一度も解釈しない。</p>
+          <p class="muted" style="font-size:0.95rem" data-ja="IdP のリフレッシュトークンも一度も保持しない。IdP を問わない: aws sso login、saml2aws login、Entra ID / Okta / ADFS の SAML が同じ経路で動く。長期の IAM ユーザー鍵は既定で拒否され、信頼済みアカウントごとに明示許可が必要。EC2 インスタンスプロファイルは既定で拒否される。1 人の人間に紐づけられないため。" data-en="It never holds an IdP refresh token either. Identity-provider agnostic: aws sso login, saml2aws login, and Entra ID / Okta / ADFS SAML all work the same way. Long-lived IAM-user keys are denied by default and need explicit per-trusted-account allowlisting. EC2 instance profiles are rejected by default, because they cannot be attributed to one human.">IdP のリフレッシュトークンも一度も保持しない。IdP を問わない: aws sso login、saml2aws login、Entra ID / Okta / ADFS の SAML が同じ経路で動く。長期の IAM ユーザー鍵は既定で拒否され、信頼済みアカウントごとに明示許可が必要。EC2 インスタンスプロファイルは既定で拒否される。1 人の人間に紐づけられないため。</p>
+        </div>
+        <div class="visual">
+          <div class="idseq" id="idseq" aria-hidden="true">
+            <div class="step" data-step="0"><span class="n">1</span><span data-ja="クライアントが sts:GetCallerIdentity に署名する" data-en="Client signs sts:GetCallerIdentity">クライアントが sts:GetCallerIdentity に署名する</span></div>
+            <div class="step" data-step="1"><span class="n">2</span><span data-ja="署名済みリクエストをそのままバックエンドへ" data-en="The signed request is forwarded as-is">署名済みリクエストをそのままバックエンドへ</span></div>
+            <div class="step" data-step="2"><span class="n">3</span><span data-ja="バックエンドが STS へ転送する。認証情報は解釈しない" data-en="Backend replays it to STS. Never parses the credentials">バックエンドが STS へ転送する。認証情報は解釈しない</span></div>
+            <div class="step" data-step="3"><span class="n">4</span><span data-ja="STS が Arn / UserId / Account を返す" data-en="STS returns Arn / UserId / Account">STS が Arn / UserId / Account を返す</span></div>
+            <div class="step" data-step="4"><span class="n">5</span><span data-ja="その 3 つだけが信頼される" data-en="Only those three are trusted">その 3 つだけが信頼される</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chiprow">
+        <span class="chip mono" data-ja="Cognito メール+パスワード" data-en="Cognito email + password">Cognito メール+パスワード</span>
+        <span class="chip mono" data-ja="Vouch-by-STS" data-en="Vouch-by-STS">Vouch-by-STS</span>
+        <span class="chip mono">sk-stratoclave-*</span>
+      </div>
+      <p class="muted" style="font-size:0.92rem; margin-top:0.6rem" data-ja="API キーはスコープを絞れて、ユーザーごとに有効なキー数の上限があります。" data-en="API keys can have their scope narrowed, and each user has a cap on active keys.">API キーはスコープを絞れて、ユーザーごとに有効なキー数の上限があります。</p>
+    </section>
+
+    <section id="edge">
+      <div class="eyebrow-row"><span class="step-chip">10</span><span class="eyebrow" style="margin:0" data-ja="VPN は要らない" data-en="No VPN required">VPN は要らない</span></div>
+      <h2 class="section-title" data-ja="公開インターネット越しでも、境界が硬い" data-en="Public internet, hardened edge">公開インターネット越しでも、境界が硬い</h2>
+      <p class="problem-line" data-ja="VPN が要らないのは、公開されているからではなく、境界が硬いから。" data-en="No VPN is needed not because it is exposed, but because the edge is hardened.">VPN が要らないのは、公開されているからではなく、境界が硬いから。</p>
+
+      <div class="chiprow" style="margin-top:0">
+        <span class="chip on mono" data-ja="CloudFront: TLS 1.2_2021+ / HSTS" data-en="CloudFront: TLS 1.2_2021+ / HSTS">CloudFront: TLS 1.2_2021+ / HSTS</span>
+        <span class="chip on mono" data-ja="厳格な CSP" data-en="strict CSP">厳格な CSP</span>
+        <span class="chip on mono" data-ja="WAFv2: 4 つの管理ルール既定" data-en="WAFv2: four managed rules by default">WAFv2: 4 つの管理ルール既定</span>
+        <span class="chip on mono" data-ja="S3 は Origin Access Control で施錠" data-en="S3 locked to Origin Access Control">S3 は Origin Access Control で施錠</span>
+      </div>
+      <p class="muted" style="font-size:0.92rem; margin-top:0.8rem" data-ja="既定の WAF ルールは CommonRuleSet・KnownBadInputs・IpReputation・IP 単位のレート制限の 4 つです。" data-en="The four default WAF managed rules are CommonRuleSet, KnownBadInputs, IpReputation, and a per-IP rate limit.">既定の WAF ルールは CommonRuleSet・KnownBadInputs・IpReputation・IP 単位のレート制限の 4 つです。</p>
+    </section>
+
+    <section id="shipit">
+      <div class="eyebrow-row"><span class="step-chip">11</span><span class="eyebrow" style="margin:0" data-ja="出荷と証跡" data-en="Shipping and the audit trail">出荷と証跡</span></div>
+      <h2 class="section-title" data-ja="1 コマンドで立ち、構造として検証できる" data-en="Stands up in one command, auditable by construction">1 コマンドで立ち、構造として検証できる</h2>
+      <p class="problem-line" data-ja="立ち上げが手作業だらけだと再現できず、誰が何をしたかが後から追えないと監査に答えられない。" data-en="A hand-built deployment can't be reproduced, and if privileged actions leave no trail, an audit has nothing to answer with.">立ち上げが手作業だらけだと再現できず、誰が何をしたかが後から追えないと監査に答えられない。</p>
+
+      <div class="feature-block">
+        <div>
+          <h3 style="font-size:1.05rem" data-ja="1 コマンドデプロイ" data-en="One-command deploy">1 コマンドデプロイ</h3>
+          <p class="muted" style="font-size:0.95rem" data-ja="CDK v2。VPC・DynamoDB・ALB・WAF・CloudFront+S3・Cognito・Fargate を 1 本のスクリプトで構築し、synth ごとに cdk-nag が走ります。" data-en="CDK v2. One script provisions VPC, DynamoDB, ALB, WAF, CloudFront + S3, Cognito and Fargate, and cdk-nag runs at every synth.">CDK v2。VPC・DynamoDB・ALB・WAF・CloudFront+S3・Cognito・Fargate を 1 本のスクリプトで構築し、synth ごとに cdk-nag が走ります。</p>
+          <div class="terminal" style="margin-top:0.8rem">
+            <span class="p">$</span> ./scripts/deploy-all.sh<br><span class="c" data-ja="# VPC・DB・ゲートウェイ・エッジ・認証まで一括" data-en="# VPC, database, gateway, edge and auth, all at once"># VPC・DB・ゲートウェイ・エッジ・認証まで一括</span>
+          </div>
+        </div>
+        <div class="visual">
+          <ul class="audit-list" aria-hidden="true">
+            <li><span class="who">team_lead</span><span data-ja="上限を引き上げ承認" data-en="approved a raise">上限を引き上げ承認</span></li>
+            <li><span class="who">admin</span><span data-ja="モデルを設定に追加" data-en="added a model to config">モデルを設定に追加</span></li>
+            <li><span class="who">user</span><span data-ja="API キーを発行" data-en="issued an API key">API キーを発行</span></li>
+            <li><span class="who">admin</span><span data-ja="quota を変更" data-en="changed a quota">quota を変更</span></li>
+          </ul>
+        </div>
+      </div>
+      <p class="muted" style="font-size:0.92rem; margin-top:1rem" data-ja="権限のある操作は audit event として記録されます。" data-en="Privileged actions are recorded as audit events.">権限のある操作は audit event として記録されます。</p>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="muted" data-ja="オープンソース。リポジトリ:" data-en="Open source. Repository:">オープンソース。リポジトリ:</span>
+    <a href="#" class="mono" onclick="return false;">littlemex/stratoclave</a>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var LANG_KEY = "stratoclave-lang";
+  var saved = null;
+  try { saved = localStorage.getItem(LANG_KEY); } catch(e){}
+  var lang = saved === "en" ? "en" : "ja";
+
+  function applyLang(l){
+    lang = l;
+    document.documentElement.setAttribute("lang", l === "en" ? "en" : "ja");
+    var nodes = document.querySelectorAll("[data-ja][data-en]");
+    for (var i=0; i<nodes.length; i++){
+      var n = nodes[i];
+      var val = l === "en" ? n.getAttribute("data-en") : n.getAttribute("data-ja");
+      if (val !== null) { n.textContent = val; }
+    }
+    var ja = document.getElementById("btn-ja");
+    var en = document.getElementById("btn-en");
+    ja.setAttribute("aria-pressed", String(l === "ja"));
+    en.setAttribute("aria-pressed", String(l === "en"));
+    try { localStorage.setItem(LANG_KEY, l); } catch(e){}
+    if (window.__stratoclaveRerenderTables) { window.__stratoclaveRerenderTables(); }
+    if (window.__stratoclaveRerenderSwarm) { window.__stratoclaveRerenderSwarm(); }
+  }
+
+  document.getElementById("btn-ja").addEventListener("click", function(){ applyLang("ja"); });
+  document.getElementById("btn-en").addEventListener("click", function(){ applyLang("en"); });
+
+  document.addEventListener("DOMContentLoaded", function(){
+    applyLang(lang);
+
+    var reduceMotion = false;
+    try { reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch(e){}
+    window.__stratoclaveReduceMotion = reduceMotion;
+
+    if (window.__stratoclaveInitDemo) { window.__stratoclaveInitDemo(); }
+    if (window.__stratoclaveInitSwarm) { window.__stratoclaveInitSwarm(); }
+    if (window.__stratoclaveInitIdSeq) { window.__stratoclaveInitIdSeq(); }
+
+    if (reduceMotion) {
+      var svgs = document.querySelectorAll("svg");
+      for (var i=0; i<svgs.length; i++){
+        if (typeof svgs[i].pauseAnimations === "function") { svgs[i].pauseAnimations(); }
+      }
+    }
+  });
+})();
+</script>
+<script>
+window.__stratoclaveInitDemo = function(){
+  var ceilingRange = document.getElementById("ceilingRange");
+  var ceilingReadout = document.getElementById("ceilingReadout");
+  var tagInput = document.getElementById("tagInput");
+  var sendBtn = document.getElementById("sendBtn");
+  var resetBtn = document.getElementById("resetBtn");
+  var puck = document.getElementById("puck");
+  var refusalNote = document.getElementById("refusalNote");
+  var refusalCeilingValue = document.getElementById("refusalCeilingValue");
+  var requestRaiseBtn = document.getElementById("requestRaiseBtn");
+  var raiseApproveRow = document.getElementById("raiseApproveRow");
+  var raiseSuggestion = document.getElementById("raiseSuggestion");
+  var approveRaiseBtn = document.getElementById("approveRaiseBtn");
+  var ledgerBody = document.getElementById("ledgerBody");
+  var tagBody = document.getElementById("tagBody");
+
+  if (!sendBtn) { return; }
+
+  var ceiling = parseFloat(ceilingRange.value);
+  var spent = 0;
+  var counter = 0;
+  var pending = null;
+  var UNTAGGED = " untagged";
+  var tagTotals = {};
+  var ledgerRows = [];
+  var busy = false;
+
+  function lang(){ return document.documentElement.lang === "en" ? "en" : "ja"; }
+
+  function fmt(v){
+    if (v <= 0) { return "$0.00"; }
+    if (v < 0.005) { return "$" + v.toFixed(4); }
+    return "$" + v.toFixed(2);
+  }
+
+  function tagLabel(tagKey){
+    if (tagKey === UNTAGGED) { return lang() === "en" ? "untagged" : "無タグ"; }
+    return tagKey;
+  }
+
+  function statusLabel(status){
+    if (status === "refused") { return lang() === "en" ? "REFUSED" : "拒否"; }
+    return lang() === "en" ? "settled" : "確定";
+  }
+
+  function updateCeilingReadout(){
+    ceilingReadout.textContent = fmt(ceiling) + " / mo";
+  }
+
+  function rand(min, max){ return min + Math.random() * (max - min); }
+
+  ceilingRange.addEventListener("input", function(){
+    ceiling = parseFloat(ceilingRange.value);
+    updateCeilingReadout();
+  });
+
+  function renderLedger(){
+    ledgerBody.innerHTML = "";
+    for (var i=0; i<ledgerRows.length; i++){
+      var row = ledgerRows[i];
+      var tr = document.createElement("tr");
+      if (row.status === "refused") { tr.className = "refused"; }
+      tr.innerHTML =
+        "<td>#" + row.n + "</td>" +
+        "<td>" + tagLabel(row.tag) + "</td>" +
+        "<td>" + fmt(row.reserved) + "</td>" +
+        "<td>" + (row.settled === null ? "-" : fmt(row.settled)) + "</td>" +
+        "<td>" + statusLabel(row.status) + "</td>";
+      ledgerBody.appendChild(tr);
+    }
+  }
+
+  function addLedgerRow(row){
+    ledgerRows.unshift(row);
+    renderLedger();
+  }
+
+  function renderTagTable(){
+    tagBody.innerHTML = "";
+    var tags = Object.keys(tagTotals);
+    tags.sort(function(a,b){ return tagTotals[b].total - tagTotals[a].total; });
+    for (var i=0; i<tags.length; i++){
+      var t = tagTotals[tags[i]];
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + tagLabel(tags[i]) + "</td><td>" + t.count + "</td><td>" + fmt(t.total) + "</td>";
+      tagBody.appendChild(tr);
+    }
+  }
+
+  window.__stratoclaveRerenderTables = function(){
+    renderLedger();
+    renderTagTable();
+  };
+
+  function movePuck(pct, refused){
+    puck.style.left = pct + "%";
+    if (refused) { puck.classList.add("refused"); } else { puck.classList.remove("refused"); }
+  }
+
+  function currentTag(){
+    var v = tagInput.value.trim();
+    return v.length ? v : UNTAGGED;
+  }
+
+  function runRequest(){
+    if (busy) { return; }
+    busy = true;
+    sendBtn.disabled = true;
+
+    var tag = currentTag();
+    var reserved = rand(0.006, 0.035);
+    counter++;
+    var n = counter;
+
+    movePuck(4);
+    window.setTimeout(function(){
+      if (spent + reserved > ceiling) {
+        movePuck(46, true);
+        window.setTimeout(function(){
+          movePuck(4, true);
+          busy = false;
+          sendBtn.disabled = false;
+          addLedgerRow({ n: n, tag: tag, reserved: reserved, settled: null, status: "refused" });
+          pending = { tag: tag };
+          refusalCeilingValue.textContent = fmt(ceiling) + " / mo";
+          refusalNote.classList.add("show");
+          raiseApproveRow.style.display = "none";
+        }, 550);
+        return;
+      }
+
+      movePuck(46);
+      window.setTimeout(function(){
+        movePuck(82);
+        window.setTimeout(function(){
+          var settled = reserved * rand(0.55, 0.95);
+          spent += settled;
+          addLedgerRow({ n: n, tag: tag, reserved: reserved, settled: settled, status: "settled" });
+
+          if (!tagTotals[tag]) { tagTotals[tag] = { count: 0, total: 0 }; }
+          tagTotals[tag].count++;
+          tagTotals[tag].total += settled;
+          renderTagTable();
+
+          window.setTimeout(function(){
+            movePuck(4);
+            busy = false;
+            sendBtn.disabled = false;
+          }, 400);
+        }, 550);
+      }, 550);
+    }, 250);
+  }
+
+  sendBtn.addEventListener("click", runRequest);
+
+  requestRaiseBtn.addEventListener("click", function(){
+    var suggested = Math.round((ceiling + 0.20) * 100) / 100;
+    if (suggested > parseFloat(ceilingRange.max)) {
+      ceilingRange.max = String(suggested);
+    }
+    raiseSuggestion.textContent = fmt(ceiling) + " -> " + fmt(suggested) + " / mo";
+    raiseApproveRow.style.display = "inline-flex";
+    approveRaiseBtn.onclick = function(){
+      ceiling = suggested;
+      ceilingRange.value = String(suggested);
+      updateCeilingReadout();
+      refusalNote.classList.remove("show");
+      raiseApproveRow.style.display = "none";
+      pending = null;
+      runRequest();
+    };
+  });
+
+  resetBtn.addEventListener("click", function(){
+    ceiling = parseFloat(ceilingRange.value);
+    spent = 0;
+    counter = 0;
+    tagTotals = {};
+    ledgerRows = [];
+    pending = null;
+    busy = false;
+    sendBtn.disabled = false;
+    ledgerBody.innerHTML = "";
+    tagBody.innerHTML = "";
+    refusalNote.classList.remove("show");
+    movePuck(4);
+  });
+
+  updateCeilingReadout();
+  movePuck(4);
+};
+</script>
+<script>
+window.__stratoclaveInitSwarm = function(){
+  var ceilingRange = document.getElementById("swarmCeiling");
+  var ceilingReadout = document.getElementById("swarmCeilingReadout");
+  var concRange = document.getElementById("swarmConcurrency");
+  var concReadout = document.getElementById("swarmConcurrencyReadout");
+  var runBtn = document.getElementById("swarmRunBtn");
+  var naiveField = document.getElementById("naiveField");
+  var scField = document.getElementById("scField");
+  var naiveFill = document.getElementById("naiveFill");
+  var scFill = document.getElementById("scFill");
+  var naiveTick = document.getElementById("naiveTick");
+  var scTick = document.getElementById("scTick");
+  var naiveResult = document.getElementById("naiveResult");
+  var scResult = document.getElementById("scResult");
+
+  if (!runBtn) { return; }
+
+  var lastState = null;
+  var running = false;
+
+  function lang(){ return document.documentElement.lang === "en" ? "en" : "ja"; }
+
+  function fmt(v){
+    if (v <= 0) { return "$0.00"; }
+    if (v < 0.005) { return "$" + v.toFixed(4); }
+    return "$" + v.toFixed(2);
+  }
+
+  function rand(min, max){ return min + Math.random() * (max - min); }
+
+  function updateReadouts(){
+    ceilingReadout.textContent = fmt(parseFloat(ceilingRange.value));
+    concReadout.textContent = concRange.value;
+  }
+  ceilingRange.addEventListener("input", updateReadouts);
+  concRange.addEventListener("input", updateReadouts);
+
+  function shuffledIndices(n){
+    var arr = [];
+    for (var i=0;i<n;i++){ arr.push(i); }
+    for (var i=arr.length-1; i>0; i--){
+      var j = Math.floor(Math.random() * (i+1));
+      var t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+    }
+    return arr;
+  }
+
+  function renderResults(){
+    if (!lastState) { return; }
+    var s = lastState;
+    var l = lang();
+    if (s.naiveOver > 0.0000001) {
+      naiveResult.innerHTML = l === "en"
+        ? "Total spent " + fmt(s.naiveTotal) + " &mdash; <span class=\"over\">" + fmt(s.naiveOver) + " over</span> the " + fmt(s.ceiling) + " ceiling"
+        : "総支出 " + fmt(s.naiveTotal) + " &mdash; 上限 " + fmt(s.ceiling) + " に対して <span class=\"over\">+" + fmt(s.naiveOver) + " 超過</span>";
+    } else {
+      naiveResult.innerHTML = l === "en"
+        ? "This run stayed under the ceiling &mdash; raise concurrency to make the race more likely."
+        : "この回は上限内に収まった。同時実行数を増やすと再現しやすくなります。";
+    }
+    scResult.innerHTML = l === "en"
+      ? "Total spent " + fmt(s.scTotal) + " &mdash; <span class=\"ok\">stopped at the ceiling</span>. " + s.refused + " requests refused (402), " + s.settled + " settled."
+      : "総支出 " + fmt(s.scTotal) + " &mdash; <span class=\"ok\">上限で停止</span>。" + s.refused + " 件を 402 で拒否、" + s.settled + " 件が確定。";
+  }
+  window.__stratoclaveRerenderSwarm = renderResults;
+
+  function clearField(field){
+    field.innerHTML = "";
+  }
+
+  function spawnDots(field, n, outcomes, scale, reduceMotion){
+    var frag = [];
+    for (var i=0; i<n; i++){
+      var dot = document.createElement("div");
+      dot.className = "swarm-dot";
+      dot.style.top = (8 + Math.random() * 78) + "%";
+      field.appendChild(dot);
+      frag.push(dot);
+    }
+    var spawnWindow = Math.min(650, 12 * n);
+    var gap = n > 0 ? spawnWindow / n : 0;
+    for (var i=0; i<n; i++){
+      (function(i){
+        var dot = frag[i];
+        var accepted = outcomes[i];
+        var travel = 900 + Math.random() * 500;
+        var delay = reduceMotion ? 0 : i * gap;
+        window.setTimeout(function(){
+          dot.classList.add(accepted ? "settled" : "refused");
+          if (accepted) {
+            dot.style.left = "96%";
+            window.setTimeout(function(){
+              dot.classList.add("landed");
+            }, reduceMotion ? 0 : travel + 900);
+          } else {
+            dot.style.left = "55%";
+            window.setTimeout(function(){
+              dot.classList.add("deflected");
+            }, reduceMotion ? 0 : travel * 0.7);
+          }
+        }, delay);
+      })(i);
+    }
+  }
+
+  function run(instant){
+    if (running) { return; }
+    running = true;
+    runBtn.disabled = true;
+
+    var ceiling = parseFloat(ceilingRange.value);
+    var n = parseInt(concRange.value, 10);
+    // instant: paints a finished example on first page load, so a visitor
+    // who never presses the button still sees the payoff. Subsequent clicks
+    // always animate (unless the OS itself asks for reduced motion).
+    var reduceMotion = instant ? true : !!window.__stratoclaveReduceMotion;
+
+    var costs = [];
+    for (var i=0; i<n; i++){ costs.push(rand(0.01, 0.05)); }
+
+    // naive: check-then-act against a stale balance -> everyone who individually
+    // fits under the *whole* ceiling passes their own check and spends regardless
+    // of everyone else in flight.
+    var naiveTotal = 0;
+    for (var i=0; i<n; i++){ naiveTotal += costs[i]; }
+    var naiveOver = Math.max(0, naiveTotal - ceiling);
+    var naiveOutcomes = [];
+    for (var i=0; i<n; i++){ naiveOutcomes.push(true); }
+
+    // stratoclave: a single authoritative running total, serialized in some
+    // (arbitrary, since arrival was concurrent) order; accept while there is
+    // room, refuse the rest.
+    var order = shuffledIndices(n);
+    var scOutcomes = [];
+    for (var i=0; i<n; i++){ scOutcomes.push(false); }
+    var running_total = 0;
+    var settledCount = 0;
+    for (var k=0; k<order.length; k++){
+      var idx = order[k];
+      if (running_total + costs[idx] <= ceiling) {
+        running_total += costs[idx];
+        scOutcomes[idx] = true;
+        settledCount++;
+      }
+    }
+    var refusedCount = n - settledCount;
+
+    lastState = {
+      ceiling: ceiling, n: n,
+      naiveTotal: naiveTotal, naiveOver: naiveOver,
+      scTotal: running_total, refused: refusedCount, settled: settledCount
+    };
+
+    var scale = Math.max(naiveTotal, ceiling) * 1.08;
+    if (scale <= 0) { scale = ceiling * 1.08; }
+    var tickPct = Math.min(97, (ceiling / scale) * 100);
+    naiveTick.style.left = tickPct + "%";
+    scTick.style.left = tickPct + "%";
+
+    clearField(naiveField);
+    clearField(scField);
+    naiveFill.style.width = "0%";
+    scFill.style.width = "0%";
+    naiveFill.classList.remove("over");
+    naiveResult.textContent = "";
+    scResult.textContent = "";
+
+    spawnDots(naiveField, n, naiveOutcomes, scale, reduceMotion);
+    spawnDots(scField, n, scOutcomes, scale, reduceMotion);
+
+    var fillDelay = reduceMotion ? 0 : 120;
+    window.setTimeout(function(){
+      var naivePct = Math.min(100, (naiveTotal / scale) * 100);
+      naiveFill.style.width = naivePct + "%";
+      if (naiveOver > 0.0000001) { naiveFill.classList.add("over"); }
+      scFill.style.width = Math.min(100, (running_total / scale) * 100) + "%";
+    }, fillDelay);
+
+    var totalDuration = instant ? 900 : (reduceMotion ? 250 : (650 + 1900));
+    window.setTimeout(function(){
+      renderResults();
+      running = false;
+      runBtn.disabled = false;
+    }, totalDuration);
+  }
+
+  runBtn.addEventListener("click", function(){ run(false); });
+  updateReadouts();
+  // Paint one illustrative example immediately, so a visitor who never
+  // presses the button still sees which side overspends and which stops.
+  run(true);
+};
+</script>
+<script>
+window.__stratoclaveInitIdSeq = function(){
+  var steps = document.querySelectorAll("#idseq .step");
+  if (!steps.length) { return; }
+  var reduceMotion = !!window.__stratoclaveReduceMotion;
+  if (reduceMotion) {
+    for (var i=0; i<steps.length; i++){ steps[i].classList.add("on"); }
+    return;
+  }
+  var idx = 0;
+  function tick(){
+    var atStart = (idx === 0);
+    for (var i=0; i<steps.length; i++){
+      steps[i].classList.toggle("on", i === idx);
+      // On the wrap-around back to step 1, clear the "done" trail so the
+      // sequence restarts legibly rather than leaving every step lit.
+      steps[i].classList.toggle("done", !atStart && i < idx);
+    }
+    idx = (idx + 1) % steps.length;
+  }
+  tick();
+  window.setInterval(tick, 2250);
+};
+</script>
+</body>
+</html>
