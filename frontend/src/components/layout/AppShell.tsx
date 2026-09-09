@@ -19,6 +19,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: '/', labelKey: 'nav.dashboard' },
   { to: '/me/usage', labelKey: 'nav.my_usage' },
+  { to: '/me/usage/by-tag', labelKey: 'nav.my_usage_by_tag' },
   { to: '/me/billing', labelKey: 'nav.my_billing' },
   { to: '/me/api-keys', labelKey: 'nav.my_api_keys' },
   { to: '/me/limit-raises', labelKey: 'nav.my_limit_raises' },

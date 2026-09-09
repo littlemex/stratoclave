@@ -24,7 +24,8 @@
     "language_switch_aria": "表示言語を切り替える",
     "language_en": "English",
     "language_ja": "日本語",
-    "admin_pricing": "料金"
+    "admin_pricing": "料金",
+    "my_usage_by_tag": "タグ別利用量"
   },
   "login": {
     "title": "Stratoclave",
@@ -554,7 +555,27 @@
     "status_approved": "{{amount}} を承認、{{expires}} に失効",
     "approved_by_label": "承認者:",
     "status_rejected": "却下",
-    "status_pending": "テナントの承認者による確認待ちです — まだ使える金額は変わっていません。"
+    "status_pending": "テナントの承認者による確認待ちです — まだ使える金額は変わっていません。",
+    "wall_pool_title": "テナントプール",
+    "wall_user_dollar_title": "あなた個人の上限",
+    "user_dollar_unknown": "この環境はまだ個人の上限を返しません。",
+    "user_dollar_absent": "このテナントは 1 人あたりの支出上限を設定していないので、個人として上げるものがありません。",
+    "user_dollar_remaining_label": "あなたの残り",
+    "user_dollar_ceiling_label": "あなたの上限",
+    "user_dollar_granted": "基準 {{base}} に、今期あなたへ承認済みの {{granted}} を加えた額です。",
+    "wall_label": "どの上限で止まったか",
+    "wall_option_pool": "テナントプール",
+    "wall_option_user_dollar": "自分個人の上限",
+    "wall_slot_note": "申請は上限ごとに 1 日 1 回 (UTC) までなので、実際に拒否した方を選んでください。",
+    "wall_user_dollar_unconfigured": "このテナントには個人の上限が無いため、それに対する申請は承認できません。",
+    "task_tag_label": "タスクタグ (任意)",
+    "task_tag_note": "作業に付けるラベルで、後からこの支出をタグ単位で合算できます。このテナントの請求データを読める人には見えるので、個人情報や秘密を入れないでください。",
+    "task_tag_invalid": "英数字と . _ : - のみ、64 文字までです。",
+    "task_tag_none": "なし",
+    "col_wall": "上限",
+    "col_task_tag": "タグ",
+    "slot_occupied": "この上限に対しては本日すでに申請済みです。その申請がこちらです。",
+    "slot_resets_at": "{{at}} 以降に再度申請できます。"
   },
   "limit_raise_approval": {
     "label": "上限申請の承認",
@@ -577,7 +598,16 @@
     "decision_comment_label": "判断コメント",
     "approve": "承認",
     "reject": "却下",
-    "decide_error_fallback": "判断を記録できませんでした"
+    "decide_error_fallback": "判断を記録できませんでした",
+    "refusal_pool_short_title": "テナントプールがまだこの額を賄えません",
+    "refusal_pool_short_body": "いまこの人の上限を上げても、支出はテナントプールも通らなければならないため、使えない余裕を渡すことになります。先にプールを上げてから、この同じ申請を承認してください。",
+    "refusal_pool_short_figures": "プールの余裕 {{headroom}} に対し、この承認には {{needed}} が必要です。",
+    "refusal_pool_short_cta": "テナントプールへ移動",
+    "refusal_pool_short_still_pending": "何も決定していません。申請は保留のままで、プールを上げれば承認できます。申請者が出し直す必要はありません。",
+    "refusal_elapsed_title": "この申請は終了しました",
+    "refusal_elapsed_body": "{{filed}} に提出された申請で、現在の期間は {{current}} です。過ぎた期間への付与は、誰も読まない場所に着地します。",
+    "refusal_elapsed_terminal": "これを再開することはできません。まだ余裕が必要なら、現在の期間として出し直してもらってください。",
+    "refusal_unknown": "このコンソールが解釈できない理由でサーバが決定を拒否しました。何も決定していません。"
   },
   "grants_inventory": {
     "label": "付与額の一覧",
@@ -753,5 +783,33 @@
     "col_source": "種別",
     "source_default": "デフォルト",
     "source_override": "オーバーライド"
+  },
+  "me_usage_by_tag": {
+    "label": "自分の利用量",
+    "title": "タグ別利用量",
+    "intro": "ある期間に自分が使った額を、作業に付けたタグ単位で示します。ここの数字を承認額と比べる前に、期間指定の下にある注意を読んでください。",
+    "period_title": "期間",
+    "period_label": "請求期間 (UTC)",
+    "period_invalid": "YYYY-MM の形式で入力してください。例: 2026-09",
+    "load": "読み込む",
+    "load_error": "レポートを読み込めませんでした。",
+    "reading_title": "この数字の読み方",
+    "lower_bound": "タグの合計は下限であって、その作業の費用ではありません。同じ作業でタグを付けなかったリクエスト、タグが破棄されたリクエストは「unlabelled」に入り、元のタグへ結び付ける手がかりがありません。実際の費用はこの行より高くなり得ます。",
+    "caller_asserted": "タグは作業を走らせた人が入力した文字列です。何かと突き合わせて検証はしていないので、合計が答えるのは「何にこのラベルが付いたか」であって「この作業が何だったか」ではありません。",
+    "retention": "行は {{days}} 日後に削除対象になります。",
+    "retention_async": "削除は非同期に走るため、それより古い行がしばらく表示され続けることがあります。",
+    "retention_boundary": "その境目にかかる期間は、一部の行が削除済みで一部が未削除のまま集計され得ます。",
+    "table_title": "タグ",
+    "truncated": "この期間は大きすぎて集計しきれなかったので、以下の合計はすべて部分的です。",
+    "not_truncated": "期間全体を集計しました。",
+    "legacy_rows": "タグ情報を一切持たない古い行が {{count}} 件あり、行として並べずここで数えています。",
+    "malformed_title": "壊れて見える行があります",
+    "malformed_body": "タグ情報が片方しか無い行が {{count}} 件あります。記録側はそうした行の書き込みを拒否するので、別の何かがこのテーブルに書いたことになります。読み飛ばさず報告してください。",
+    "empty": "この期間の記録はありません。",
+    "col_tag": "タグ",
+    "col_requests": "リクエスト数",
+    "col_cost": "費用",
+    "col_tokens": "トークン",
+    "unlabelled_split": "{{absent}} 件はタグ無し、{{dropped}} 件はタグが破棄されました。"
   }
 }
