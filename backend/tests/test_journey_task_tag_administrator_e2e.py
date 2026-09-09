@@ -178,7 +178,16 @@ def _journey_client(seat: _Seat) -> TestClient:
 
 _ROW_FIELDS = {
     "user_id", "task_tag", "requests", "absent_count", "dropped_grammar_count",
-    "cost_microusd", "input_tokens", "output_tokens",
+    "cost_microusd",
+    # How many of `requests` carried no cost at all, so `cost_microusd` is missing
+    # them. Declared here deliberately rather than by loosening the assertion below:
+    # that assertion exists so a row cannot silently gain a field, and it did its job --
+    # this addition had to be decided, not absorbed. It is part of the SAME question
+    # this journey asks ("is this figure the spend?"), because a total that is missing
+    # requests is a different kind of floor from one that is merely missing the
+    # untagged ones.
+    "requests_without_cost",
+    "input_tokens", "output_tokens",
 }
 
 

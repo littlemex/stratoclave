@@ -810,6 +810,7 @@
     "col_requests": "リクエスト数",
     "col_cost": "費用",
     "col_tokens": "トークン",
-    "unlabelled_split": "{{absent}} 件はタグ無し、{{dropped}} 件はタグが破棄されました。"
+    "unlabelled_split": "{{absent}} 件はタグ無し、{{dropped}} 件はタグが破棄されました。",
+    "missing_cost": "{{total}} 件のうち {{missing}} 件は費用が記録されていないため、このタグの金額はその分を含みません。その分は $0.00 ではなく不明です。"
   }
 }

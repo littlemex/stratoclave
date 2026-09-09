@@ -132,6 +132,11 @@ class UsageByTagRow(BaseModel):
     absent_count: int
     dropped_grammar_count: int
     cost_microusd: int
+    # How many of `requests` carried no cost at all, so `cost_microusd` is missing
+    # them. An absent cost and a zero cost are different facts, and a reader with only
+    # the sum cannot tell "this was free" from "we could not price this" -- which is
+    # how a tenant enforced in dollars came to be reported as having spent nothing.
+    requests_without_cost: int
     input_tokens: int
     output_tokens: int
 
@@ -889,6 +894,7 @@ def usage_by_tag_response(
                 absent_count=r.absent_count,
                 dropped_grammar_count=r.dropped_grammar_count,
                 cost_microusd=r.cost_microusd,
+                requests_without_cost=r.requests_without_cost,
                 input_tokens=r.input_tokens,
                 output_tokens=r.output_tokens,
             )
