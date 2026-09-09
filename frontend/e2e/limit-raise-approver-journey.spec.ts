@@ -382,3 +382,175 @@ test.describe('the tenant administrator deciding a raise', () => {
     await expect(page.getByTestId('lr-approve-button')).toBeEnabled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// The approver who is refused, and has to know which kind of refusal it was
+// ---------------------------------------------------------------------------
+//
+// PR 4 made "there is money" a PRECONDITION of approving a per-user raise rather
+// than a side effect of it, on the explicit grounds that a UI filing both raises is
+// the composition being asked for. These are the two steps that composition has to
+// survive, and they are steps only a browser can walk: what the approver is told
+// when the pool is short, and what he is told when the period has gone.
+//
+// The two refusals are both HTTP 409 and both arrive with a sentence. If they render
+// the same way, he makes one of two opposite mistakes: telling the requester to
+// refile a request that is still alive and re-approvable (burning her one filing for
+// the day), or waiting for a closed request to become approvable, which it never
+// will. Every endpoint involved can be individually correct while he does either.
+
+test.describe('the approver told the pool cannot cover it', () => {
+  test('learns the request SURVIVES, sees the gap as money, and is routed to the prerequisite', async ({
+    page,
+  }) => {
+    let poolWasRaised = false
+
+    await seedAdminSession(page)
+    await mockCommonRoutes(page)
+    await page.route('**/api/mvp/admin/limit-raises?**', (route) =>
+      route.fulfill({ json: { requests: [pendingRequest()], reason_codes: [] } }),
+    )
+    await page.route(`**/api/mvp/admin/tenants/${TENANT_ID}/pool-budget**`, (route) => {
+      // A PUT here would mean the console raised the tenant's budget on his behalf,
+      // which is precisely the automatic pool leg PR 4 removed.
+      if (route.request().method() !== 'GET') {
+        poolWasRaised = true
+        return route.fulfill({ json: tenantPoolNow() })
+      }
+      return route.fulfill({ json: tenantPoolNow({ remaining_grant_cap_microusd: 200_000_000 }) })
+    })
+    await page.route('**/api/mvp/admin/limit-raises/*/approve', (route) =>
+      route.fulfill({
+        status: 409,
+        json: {
+          detail: {
+            type: 'pool_headroom_short',
+            message:
+              "Tenant acme-eng's pool has 500000 micro-USD of headroom, short of the "
+              + '5000000 micro-USD this approval would grant.',
+            wall: 'tenant_dollar_pool',
+            tenant_id: TENANT_ID,
+            observed_headroom_microusd: 500_000,
+            approved_amount_microusd: 5_000_000,
+          },
+        },
+      }),
+    )
+
+    await page.goto(`/admin/tenants/${TENANT_ID}/limit-raises`)
+    await page.getByTestId('lr-approve-amount').fill('5')
+    await page.getByTestId('lr-decision-comment').fill('partial, pending the pool')
+    await page.getByTestId('lr-approve-button').click()
+
+    const notice = page.getByTestId('refusal-pool-headroom-short')
+    await expect(notice).toBeVisible()
+
+    // Both figures, as money. Without the gap he cannot tell how much to ask the
+    // pool for, and the useful next act becomes guesswork.
+    const figures = page.getByTestId('refusal-pool-headroom-figures')
+    await expect(figures).toContainText('$0.50')
+    await expect(figures).toContainText('$5.00')
+
+    // The fact that stops the wrong next act: nothing was decided and the request is
+    // still waiting, so the requester must NOT be told to file again.
+    await expect(notice).toContainText(/still waiting|does not need to file again/i)
+
+    // The route to the prerequisite exists...
+    await expect(page.getByTestId('refusal-pool-raise-link')).toBeVisible()
+    // ...and nothing was filed for him. An approval that raised the pool by itself
+    // would let a personal-raise approver manufacture tenant-wide capacity that any
+    // other member could then spend, which is the leak PR 4's reviewers rejected.
+    expect(poolWasRaised).toBe(false)
+
+    // The shortfall must not be in the URL. A tenant balance in a query string lands
+    // in browser history, copied links and proxy logs.
+    const href = await page.getByTestId('refusal-pool-raise-link').getAttribute('href')
+    expect(href ?? '').not.toMatch(/\d{4,}/)
+  })
+
+  test('an elapsed period reads as CLOSED, and offers no waiting and no link', async ({
+    page,
+  }) => {
+    await seedAdminSession(page)
+    await mockCommonRoutes(page)
+    await page.route('**/api/mvp/admin/limit-raises?**', (route) =>
+      route.fulfill({ json: { requests: [pendingRequest()], reason_codes: [] } }),
+    )
+    await page.route(`**/api/mvp/admin/tenants/${TENANT_ID}/pool-budget**`, (route) =>
+      route.fulfill({ json: tenantPoolNow({ remaining_grant_cap_microusd: 200_000_000 }) }),
+    )
+    await page.route('**/api/mvp/admin/limit-raises/*/approve', (route) =>
+      route.fulfill({
+        status: 409,
+        json: {
+          detail: {
+            type: 'limit_raise_period_elapsed',
+            message:
+              'This request was filed in 2026-07, and that period is no longer current '
+              + '(2026-08 is).',
+            tenant_id: TENANT_ID,
+            filed_period: '2026-07',
+            current_period: '2026-08',
+          },
+        },
+      }),
+    )
+
+    await page.goto(`/admin/tenants/${TENANT_ID}/limit-raises`)
+    await page.getByTestId('lr-approve-amount').fill('5')
+    await page.getByTestId('lr-decision-comment').fill('late')
+    await page.getByTestId('lr-approve-button').click()
+
+    const notice = page.getByTestId('refusal-period-elapsed')
+    await expect(notice).toBeVisible()
+    // Both periods, so he can see WHY rather than only that something is wrong.
+    await expect(notice).toContainText('2026-07')
+    await expect(notice).toContainText('2026-08')
+    // And that waiting is pointless: nothing makes a pinned period current again.
+    await expect(notice).toContainText(/cannot be reopened/i)
+
+    // The asymmetry is the entire point of splitting these, so it is asserted from
+    // both sides rather than left to the eye.
+    await expect(page.getByTestId('refusal-pool-headroom-short')).toBeHidden()
+    await expect(page.getByTestId('refusal-pool-raise-link')).toBeHidden()
+  })
+
+  test('a refusal this build has never seen renders its code and withholds its prose', async ({
+    page,
+  }) => {
+    // Two rules meet here. The wire requires that an unknown code render rather than
+    // fail closed. But a future refusal's sentence may be written for an operator --
+    // this one names a fraud review -- and this surface cannot know. So the machine
+    // token is shown, because that is what makes the refusal reportable, and the
+    // sentence is not.
+    await seedAdminSession(page)
+    await mockCommonRoutes(page)
+    await page.route('**/api/mvp/admin/limit-raises?**', (route) =>
+      route.fulfill({ json: { requests: [pendingRequest()], reason_codes: [] } }),
+    )
+    await page.route(`**/api/mvp/admin/tenants/${TENANT_ID}/pool-budget**`, (route) =>
+      route.fulfill({ json: tenantPoolNow({ remaining_grant_cap_microusd: 200_000_000 }) }),
+    )
+    await page.route('**/api/mvp/admin/limit-raises/*/approve', (route) =>
+      route.fulfill({
+        status: 409,
+        json: {
+          detail: {
+            type: 'some_future_refusal',
+            message: 'internal: tenant acme-eng is under fraud review, shard 7 quarantined',
+          },
+        },
+      }),
+    )
+
+    await page.goto(`/admin/tenants/${TENANT_ID}/limit-raises`)
+    await page.getByTestId('lr-approve-amount').fill('5')
+    await page.getByTestId('lr-decision-comment').fill('trying')
+    await page.getByTestId('lr-approve-button').click()
+
+    await expect(page.getByTestId('refusal-unknown')).toBeVisible()
+    await expect(page.getByTestId('refusal-unknown-code')).toContainText('some_future_refusal')
+    await expect(page.getByText(/fraud review/)).toBeHidden()
+    await expect(page.getByText(/shard 7/)).toBeHidden()
+  })
+})

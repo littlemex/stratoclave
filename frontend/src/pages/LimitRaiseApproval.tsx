@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { Gavel } from 'lucide-react'
@@ -165,6 +165,10 @@ function DecisionRow({
   )
   const [decisionComment, setDecisionComment] = useState('')
   const [error, setError] = useState<string | null>(null)
+  // Held apart from `error` because these two refusals are not "the decision
+  // failed" -- one says somebody else has to act first and this request survives,
+  // the other says the request is over. A shared red line makes them identical.
+  const [refusal, setRefusal] = useState<DecisionRefusal | null>(null)
 
   const cents = parseUsdToCents(amountUsd)
   const approvedMicro = cents !== null ? cents * 10_000 : null
@@ -199,7 +203,13 @@ function DecisionRow({
       // as 422 grant_cap_exceeded -- rendered legibly, not reimplemented
       // (the Interface section's "render an unknown code rather than
       // failing closed" rule applies just as much to a known one).
-      setError(e?.detail ?? e?.message ?? t('limit_raise_approval.decide_error_fallback'))
+      const structured = readDecisionRefusal(e?.detailBody)
+      setRefusal(structured)
+      setError(
+        structured != null
+          ? null
+          : (e?.detail ?? e?.message ?? t('limit_raise_approval.decide_error_fallback')),
+      )
     },
   })
 
@@ -329,6 +339,7 @@ function DecisionRow({
         </div>
       </div>
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      {refusal ? <DecisionRefusalNotice refusal={refusal} request={request} /> : null}
       <div className="flex gap-2">
         <Button
           size="sm"
@@ -378,4 +389,146 @@ function formatDate(iso: string): string {
   } catch {
     return iso
   }
+}
+
+/**
+ * A structured refusal from a decision, narrowed from `detailBody`.
+ *
+ * `extra` is deliberately NOT spread into named fields for the unknown case: an
+ * unknown code's own fields were not written for this audience, so the renderer
+ * below shows the code and a generic sentence rather than whatever prose or
+ * figures arrived. Known codes get their fields read explicitly, by name.
+ */
+interface DecisionRefusal {
+  type: string
+  /** Only read for KNOWN codes. Never rendered for an unknown one. */
+  message: string
+  observedHeadroomMicrousd: number | null
+  approvedAmountMicrousd: number | null
+  filedPeriod: string
+  currentPeriod: string
+}
+
+function readDecisionRefusal(detailBody: unknown): DecisionRefusal | null {
+  if (typeof detailBody !== 'object' || detailBody === null) return null
+  const d = detailBody as Record<string, unknown>
+  if (typeof d.type !== 'string' || d.type === '') return null
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null)
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+  return {
+    type: d.type,
+    message: str(d.message),
+    observedHeadroomMicrousd: num(d.observed_headroom_microusd),
+    approvedAmountMicrousd: num(d.approved_amount_microusd),
+    filedPeriod: str(d.filed_period),
+    currentPeriod: str(d.current_period),
+  }
+}
+
+/**
+ * The two 409s the per-user wall introduced, told apart — plus a default arm.
+ *
+ * The distinction is the whole component. `pool_headroom_short` leaves the request
+ * PENDING and re-approvable once somebody raises the tenant pool; an approver who
+ * reads it as a generic failure tells the requester to refile, which burns her
+ * once-a-day slot and produces a second request that will be refused identically.
+ * `limit_raise_period_elapsed` is terminal — nothing can make a pinned period
+ * current again — so waiting for it to clear is waiting for a state that cannot
+ * arrive. Two mistakes in opposite directions from one indistinguishable red line.
+ *
+ * The default arm satisfies `api.ts`'s rule that an unknown code must render
+ * rather than fail closed, WITHOUT rendering the refusal's own `message`: a future
+ * refusal's sentence may be written for an operator, and this surface has no way to
+ * know. The code itself is shown, because a short machine token is what makes the
+ * refusal reportable, and a caller can read the body if they need more.
+ */
+function DecisionRefusalNotice({
+  refusal,
+  request,
+}: {
+  refusal: DecisionRefusal
+  request: LimitRaiseRequest
+}) {
+  const { t } = useTranslation()
+
+  if (refusal.type === 'pool_headroom_short') {
+    const shortfall =
+      refusal.approvedAmountMicrousd != null && refusal.observedHeadroomMicrousd != null
+        ? refusal.approvedAmountMicrousd - refusal.observedHeadroomMicrousd
+        : null
+    return (
+      <div
+        className="space-y-2 rounded-md border border-border bg-muted/40 p-3 text-sm"
+        data-testid="refusal-pool-headroom-short"
+      >
+        <p className="font-medium">{t('limit_raise_approval.refusal_pool_short_title')}</p>
+        <p>{t('limit_raise_approval.refusal_pool_short_body')}</p>
+        {refusal.observedHeadroomMicrousd != null ? (
+          <p className="font-mono text-xs" data-testid="refusal-pool-headroom-figures">
+            {t('limit_raise_approval.refusal_pool_short_figures', {
+              headroom: fmtMicroUsd(refusal.observedHeadroomMicrousd),
+              needed:
+                refusal.approvedAmountMicrousd != null
+                  ? fmtMicroUsd(refusal.approvedAmountMicrousd)
+                  : '?',
+            })}
+          </p>
+        ) : null}
+        {/* The composition PR 4's design leaned on, as a ROUTE and not a
+            transaction: the approver is taken to the pool-raise surface with the
+            shortfall in hand, and nothing is filed for them. An approval that
+            raised the pool by itself is the leg PR 4 deliberately removed — it
+            would let a personal-raise approver create tenant-wide capacity that
+            any other member could then spend.
+
+            The shortfall travels in in-memory router state, never a query param: a
+            tenant balance in a URL lands in browser history, copied links and proxy
+            logs. The destination re-derives its own numbers; this is a hint. */}
+        {shortfall != null && shortfall > 0 ? (
+          <Link
+            to="/team-lead"
+            state={{ poolRaisePrefill: { shortfall_microusd: shortfall, tenant_id: request.tenant_id } }}
+            className="inline-block text-sm underline underline-offset-4"
+            data-testid="refusal-pool-raise-link"
+          >
+            {t('limit_raise_approval.refusal_pool_short_cta')}
+          </Link>
+        ) : null}
+        <p className="text-xs text-muted-foreground">
+          {t('limit_raise_approval.refusal_pool_short_still_pending')}
+        </p>
+      </div>
+    )
+  }
+
+  if (refusal.type === 'limit_raise_period_elapsed') {
+    return (
+      <div
+        className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm"
+        data-testid="refusal-period-elapsed"
+      >
+        <p className="font-medium">{t('limit_raise_approval.refusal_elapsed_title')}</p>
+        <p>
+          {t('limit_raise_approval.refusal_elapsed_body', {
+            filed: refusal.filedPeriod || '?',
+            current: refusal.currentPeriod || '?',
+          })}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {t('limit_raise_approval.refusal_elapsed_terminal')}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm"
+      data-testid="refusal-unknown"
+    >
+      <p>{t('limit_raise_approval.refusal_unknown')}</p>
+      <p className="font-mono text-xs text-muted-foreground" data-testid="refusal-unknown-code">
+        {refusal.type}
+      </p>
+    </div>
+  )
 }

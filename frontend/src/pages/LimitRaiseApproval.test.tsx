@@ -45,7 +45,7 @@
 //      honestly ("not recorded") in their absence today.
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { ReactNode } from 'react'
@@ -392,5 +392,126 @@ describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume a
     // so a component built on it would ship against a mechanism that no
     // longer exists.
     expect(bodyArg).not.toHaveProperty('sizing')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The two refusals the per-user wall introduced
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the approve button into a pressable state and press it.
+ *
+ * The decision comment is required here, not incidental: approving LESS than was
+ * asked (this fixture asks $200) is gated on the approver explaining why, so
+ * without it the button stays disabled and every assertion below fails as "the
+ * refusal did not render" rather than "the form was never submitted".
+ */
+async function attemptApproval() {
+  await waitFor(() =>
+    expect(screen.getByTestId('lr-approve-button')).toBeInTheDocument(),
+  )
+  fireEvent.change(screen.getByTestId('lr-approve-amount'), { target: { value: '5' } })
+  fireEvent.change(screen.getByTestId('lr-decision-comment'), {
+    target: { value: 'partial for now' },
+  })
+  await waitFor(() =>
+    expect(screen.getByTestId('lr-approve-button')).not.toBeDisabled(),
+  )
+  fireEvent.click(screen.getByTestId('lr-approve-button'))
+}
+
+function refusal(detailBody: Record<string, unknown>) {
+  return Object.assign(new Error(String(detailBody.message ?? 'refused')), {
+    status: 409,
+    detailBody,
+  })
+}
+
+describe('LimitRaiseApproval — a short pool and an elapsed period are not the same event', () => {
+  it('a short pool says the request SURVIVES and names who has to act', async () => {
+    // The mistake this prevents: reading it as a generic failure and telling the
+    // requester to refile. That burns her once-a-day slot and produces a second
+    // request that will be refused identically.
+    mockApproveLimitRaise.mockRejectedValue(
+      refusal({
+        type: 'pool_headroom_short',
+        message: "Tenant acme-eng's pool has 500000 micro-USD of headroom...",
+        wall: 'tenant_dollar_pool',
+        tenant_id: 'acme-eng',
+        observed_headroom_microusd: 500_000,
+        approved_amount_microusd: 5_000_000,
+      }),
+    )
+    render(withRouting(<LimitRaiseApproval />))
+    await attemptApproval()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('refusal-pool-headroom-short')).toBeInTheDocument(),
+    )
+    // Both figures, as money: an approver who cannot see the gap cannot tell how
+    // much to ask the pool for.
+    expect(screen.getByTestId('refusal-pool-headroom-figures')).toHaveTextContent(/\$0\.50/)
+    expect(screen.getByTestId('refusal-pool-headroom-figures')).toHaveTextContent(/\$5\.00/)
+    // And a route to the prerequisite, which files NOTHING on the approver's behalf.
+    expect(screen.getByTestId('refusal-pool-raise-link')).toBeInTheDocument()
+    expect(mockSetPoolBudget).not.toHaveBeenCalled()
+  })
+
+  it('an elapsed period says the request is OVER', async () => {
+    // The opposite mistake: waiting for a state that cannot arrive. Nothing can make
+    // a pinned period current again.
+    mockApproveLimitRaise.mockRejectedValue(
+      refusal({
+        type: 'limit_raise_period_elapsed',
+        message: 'This request was filed in 2026-07, and that period is no longer current',
+        tenant_id: 'acme-eng',
+        filed_period: '2026-07',
+        current_period: '2026-08',
+      }),
+    )
+    render(withRouting(<LimitRaiseApproval />))
+    await attemptApproval()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('refusal-period-elapsed')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('refusal-period-elapsed')).toHaveTextContent(/2026-07/)
+    expect(screen.getByTestId('refusal-period-elapsed')).toHaveTextContent(/2026-08/)
+    // The two must not be interchangeable on screen. This is the whole point of
+    // splitting them, so it is asserted rather than left to the eye.
+    expect(screen.queryByTestId('refusal-pool-headroom-short')).toBeNull()
+    expect(screen.queryByTestId('refusal-pool-raise-link')).toBeNull()
+  })
+
+  it('an unknown code renders, and renders its CODE rather than its prose', async () => {
+    // `api.ts` requires an unknown code to render rather than fail closed. But a
+    // future refusal's `message` may be written for an operator, not for an
+    // approver, so the sentence is not passed through -- the machine token is,
+    // because that is what makes the refusal reportable.
+    mockApproveLimitRaise.mockRejectedValue(
+      refusal({
+        type: 'some_future_refusal',
+        message: 'internal: shard 7 quarantined pending fraud review of tenant acme-eng',
+      }),
+    )
+    render(withRouting(<LimitRaiseApproval />))
+    await attemptApproval()
+
+    await waitFor(() => expect(screen.getByTestId('refusal-unknown')).toBeInTheDocument())
+    expect(screen.getByTestId('refusal-unknown-code')).toHaveTextContent('some_future_refusal')
+    expect(screen.queryByText(/shard 7 quarantined/)).toBeNull()
+    expect(screen.queryByText(/fraud review/)).toBeNull()
+  })
+
+  it('a refusal with no structured body still tells the approver something', async () => {
+    // Degrading to the old flat-string path rather than rendering nothing.
+    mockApproveLimitRaise.mockRejectedValue(
+      Object.assign(new Error('Gateway timeout'), { status: 504 }),
+    )
+    render(withRouting(<LimitRaiseApproval />))
+    await attemptApproval()
+    await waitFor(() => expect(screen.getByText(/Gateway timeout/)).toBeInTheDocument())
+    expect(screen.queryByTestId('refusal-unknown')).toBeNull()
   })
 })
