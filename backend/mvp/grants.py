@@ -63,6 +63,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from botocore.exceptions import ClientError
 
 from dynamo import TenantsRepository
+from dynamo.tenants import resolve_user_dollar_default, sealed_user_dollar_base
 from dynamo.quota_events import (
     GRANT_ACTIVE,
     GRANT_EXPIRED,
@@ -2241,9 +2242,11 @@ def own_tenant_wall_status(
     to special-case.
     """
     period = current_period()
+    user_dollar = _own_user_dollar_wall_status(actor, period)
     row = TenantBudgetsRepository().get(actor.org_id, period, consistent_read=True)
     if row is None:
-        return {"tenant_id": actor.org_id, "period": period, "pool": None}
+        return {"tenant_id": actor.org_id, "period": period, "pool": None,
+                "user_dollar": user_dollar}
     limit = int(row.get("pool_limit_microusd", 0))
     reserved = int(row.get("pool_reserved_microusd", 0))
     settled = int(row.get("pool_settled_microusd", 0))
@@ -2258,6 +2261,67 @@ def own_tenant_wall_status(
             "remaining_microusd": limit - reserved - settled,
             "remaining_grant_cap_microusd": max(0, cap - granted),
         },
+        "user_dollar": user_dollar,
+    }
+
+
+def _own_user_dollar_wall_status(
+    actor: AuthenticatedUser, period: str
+) -> Optional[dict[str, Any]]:
+    """The caller's own per-user money ceiling, or `None` when the wall does not
+    apply to them.
+
+    Added because with two grantable walls this endpoint's own stated purpose --
+    "just enough for a requester to see whether asking makes sense before she
+    asks" -- was only half met: it reported the tenant pool and said nothing
+    about the ceiling that is personal to the caller. A requester choosing which
+    wall to file against consumes that wall's once-per-UTC-day slot, so choosing
+    blind costs a day.
+
+    `None`, not a 404 and not zeros, when `user_dollar_defaults` has no entry
+    effective by `period`: the wall is CONFIGURED PER TENANT and a tenant that
+    never set a default has no personal ceiling to raise. This is the same
+    reading `pool` already gives (`None` when the tenant has not opted into pool
+    budgeting) and the same reading the admission path gives -- `configured_when`
+    is exactly `base is not None`, so a tenant without a default emits no
+    admission item at all.
+
+    **This read must never SEAL.** `seal_user_dollar_base` is a WRITE: it fixes
+    the period's base permanently on first use. If this endpoint called it, a
+    requester merely opening the page would decide the base for their whole
+    tenant for the month, and would do it earlier than the first admission --
+    turning a page view into a policy act. So it reads the already-sealed value
+    when one exists and otherwise reports the value that WOULD be sealed, both
+    through pure functions over one fetched row.
+
+    The reduced-read principle this endpoint already states still governs what is
+    in here: the caller's own ceiling and their own usage against it. Not another
+    member's figures, not the tenant's default as a policy object, not the seal.
+    """
+    from .routing import user_dollar_quota as _uq
+
+    tenant_item = TenantsRepository().get(actor.org_id)
+    sealed = sealed_user_dollar_base(tenant_item, period)
+    # Prefer the sealed value: once a period is sealed THAT is the base every
+    # admission in it uses, so reporting the resolved default instead could show
+    # a ceiling nobody is enforced against.
+    base = sealed if sealed is not None else resolve_user_dollar_default(
+        tenant_item, period)
+    if not _uq.configured_when(base):
+        return None
+    granted, used = _uq.read_row_figures(actor.org_id, actor.user_id, period)
+    ceiling = int(base or 0) + granted
+    return {
+        "base_microusd": int(base or 0),
+        "granted_microusd": granted,
+        "ceiling_microusd": ceiling,
+        "used_microusd": used,
+        "remaining_microusd": ceiling - used,
+        # Whether the period's base is already fixed. A requester filing against
+        # an unsealed period is asking about a number that is still the tenant's
+        # default rather than a sealed fact; the two agree today, and saying which
+        # one this is costs one boolean.
+        "base_is_sealed": sealed is not None,
     }
 
 
