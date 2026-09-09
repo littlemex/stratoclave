@@ -217,7 +217,8 @@
       "entitlement_outgrew_figure": "The seats now entitle this tenant to {{entitlement}}, which is more than the figure it is held at. The figure is the smaller of the two.",
       "follow_seats_button": "Follow the seat count again",
       "latch_warning": "Saving a figure stops this ceiling following the tenant's seat count. Zero is a figure and means every request is refused; to go back to the seat count, use “Follow the seat count again” rather than typing a number."
-    }
+    },
+    "usage_by_tag_link": "Usage by tag"
   },
   "error_toast": {
     "server": "Server error",
@@ -784,33 +785,45 @@
     "source_default": "default",
     "source_override": "override"
   },
-  "me_usage_by_tag": {
-    "label": "My usage",
-    "title": "Usage by tag",
-    "intro": "What you spent in a period, grouped by the tag you attached to the work. Read the notes below the period picker before comparing any of these figures to an approval.",
-    "period_title": "Period",
-    "period_label": "Billing period (UTC)",
-    "period_invalid": "Use the form YYYY-MM, for example 2026-09.",
+  "usage_by_tag": {
+    "caller_asserted": "Tags are what the person running the work typed. Nothing checks a tag against anything, so a total answers “what was labelled this” and never “what this work was”.",
+    "col_cost": "Cost",
+    "col_member": "Member",
+    "col_requests": "Requests",
+    "col_tag": "Tag",
+    "col_tokens": "Tokens",
+    "empty": "Nothing recorded for this period.",
+    "empty_for_member": "Nothing recorded for {{member}} in this period. That is an empty result, not an error — an id matching nobody returns no rows.",
+    "filtered_to_member": "Filtered to {{member}}.",
+    "legacy_rows": "{{count}} older rows carry no tag information at all and are counted here rather than placed in a row.",
     "load": "Load",
     "load_error": "Could not load the report.",
-    "reading_title": "Reading these numbers",
     "lower_bound": "A tag's total is a floor, not the cost of the work. A request for the same work that carried no tag, or whose tag was discarded, is counted under “unlabelled” with nothing linking it back — so the real cost of the work can only be higher than the row shows.",
-    "caller_asserted": "Tags are what the person running the work typed. Nothing checks a tag against anything, so a total answers “what was labelled this” and never “what this work was”.",
+    "malformed_body": "{{count}} rows carry only half of their tag information. The recorder refuses to write such a row, so something else wrote to this table. Worth reporting rather than reading past.",
+    "malformed_title": "Some rows look corrupted",
+    "member_label": "Member (optional)",
+    "member_placeholder": "a member id — blank means everyone",
+    "missing_cost": "{{missing}} of {{total}} requests have no cost recorded, so the figure beside this tag is missing them. It is not $0.00 for those requests — it is unknown.",
+    "not_truncated": "The whole period was folded.",
+    "period_invalid": "Use the form YYYY-MM, for example 2026-09.",
+    "period_label": "Billing period (UTC)",
+    "query_title": "Period",
+    "reading_title": "Reading these numbers",
     "retention": "Rows become eligible for deletion after {{days}} days.",
     "retention_async": "Deletion runs in the background, so older rows may still appear here for a while.",
     "retention_boundary": "A period at that edge can total incompletely, with some of its rows already deleted and some not.",
     "table_title": "Tags",
     "truncated": "This period was too large to fold completely, so every total below is partial.",
-    "not_truncated": "The whole period was folded.",
-    "legacy_rows": "{{count}} older rows carry no tag information at all and are counted here rather than placed in a row.",
-    "malformed_title": "Some rows look corrupted",
-    "malformed_body": "{{count}} rows carry only half of their tag information. The recorder refuses to write such a row, so something else wrote to this table. Worth reporting rather than reading past.",
-    "empty": "Nothing recorded for this period.",
-    "col_tag": "Tag",
-    "col_requests": "Requests",
-    "col_cost": "Cost",
-    "col_tokens": "Tokens",
-    "unlabelled_split": "{{absent}} carried no tag; {{dropped}} had a tag that was discarded.",
-    "missing_cost": "{{missing}} of {{total}} requests have no cost recorded, so the figure beside this tag is missing them. It is not $0.00 for those requests — it is unknown."
+    "unlabelled_split": "{{absent}} carried no tag; {{dropped}} had a tag that was discarded."
+  },
+  "admin_tenant_usage_by_tag": {
+    "label": "Tenant usage",
+    "title": "Usage by tag",
+    "intro": "What {{tenant}} spent in a period, grouped by the tag each person attached to the work. Read the notes below the period before comparing any of these figures to an approval."
+  },
+  "me_usage_by_tag": {
+    "label": "My usage",
+    "title": "Usage by tag",
+    "intro": "What you spent in a period, grouped by the tag you attached to the work. Read the notes below the period picker before comparing any of these figures to an approval."
   }
 }

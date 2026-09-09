@@ -29,6 +29,7 @@ import AdminUsers from '@/pages/admin/AdminUsers'
 import AdminUserNew from '@/pages/admin/AdminUserNew'
 import AdminUserDetail from '@/pages/admin/AdminUserDetail'
 import AdminTenants from '@/pages/admin/AdminTenants'
+import AdminTenantUsageByTag from '@/pages/admin/AdminTenantUsageByTag'
 import AdminTenantDetail from '@/pages/admin/AdminTenantDetail'
 import AdminUsageLogs from '@/pages/admin/AdminUsageLogs'
 import AdminPricing from '@/pages/admin/AdminPricing'
@@ -85,6 +86,10 @@ export default function App() {
                 <Route path="/admin/users/:userId" element={<AdminUserDetail />} />
                 <Route path="/admin/tenants" element={<AdminTenants />} />
                 <Route path="/admin/tenants/:tenantId" element={<AdminTenantDetail />} />
+                <Route
+                  path="/admin/tenants/:tenantId/usage-by-tag"
+                  element={<AdminTenantUsageByTag />}
+                />
                 <Route
                   path="/admin/tenants/:tenantId/limit-raises"
                   element={<LimitRaiseApproval />}

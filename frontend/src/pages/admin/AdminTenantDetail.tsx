@@ -210,6 +210,14 @@ export default function AdminTenantDetail() {
             {t('admin_tenant_detail.limit_grants_link')}
           </Button>
         </Link>
+        {/* A standalone page for the same reason the two above are: the report has its own
+            period and member controls and a table, and burying it in a page people open to
+            edit a budget hides it. */}
+        <Link to={`/admin/tenants/${tenant.tenant_id}/usage-by-tag`}>
+          <Button variant="outline" size="sm">
+            {t('admin_tenant_detail.usage_by_tag_link')}
+          </Button>
+        </Link>
       </div>
 
       <RoutingConfigCard
