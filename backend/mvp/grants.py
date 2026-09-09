@@ -270,7 +270,23 @@ class PoolHeadroomShort(GrantError):
     `PENDING` (G4's own words: "re-approvable once the pool is raised"), so
     this is the one refusal in this module that leaves the caller nothing to
     retry-with-different-input: the fix is somebody else raising the pool,
-    named as the prerequisite rather than left implicit."""
+    named as the prerequisite rather than left implicit.
+
+    **Why this one carries a tenant BALANCE figure, and why that is not a
+    precedent.** `observed_headroom_microusd` is the tenant's remaining pool
+    at the moment of refusal -- an amount of money, not a limit. It is here
+    because an approver who cannot see the gap cannot tell how much to ask the
+    pool for, which would make the prerequisite above unactionable. It is
+    ACCEPTABLE because every path that can raise it is an approval, gated on
+    `limits:approve` or `limits:approve-own`, so the reader is already
+    entitled to their own tenant's position.
+
+    Neither of those is true of this module's other refusals, and both are
+    invisible from `GrantError.as_detail`, which renders every subclass's
+    `extra` the same way. A future refusal reachable by a REQUESTER (who holds
+    neither permission) must not copy this shape by reading the pattern off
+    this class: the authority is what makes it legal, and it lives in the
+    route rather than here."""
 
     status_code = 409
     code = "pool_headroom_short"
