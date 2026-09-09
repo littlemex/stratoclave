@@ -515,13 +515,21 @@ class TenantsRepository:
             if removes:
                 update_expr += " REMOVE " + ", ".join(removes)
             try:
-                self._table.update_item(
-                    Key={"tenant_id": tenant_id},
-                    UpdateExpression=update_expr,
-                    ConditionExpression=" AND ".join(cond),
-                    ExpressionAttributeNames=names,
-                    ExpressionAttributeValues=values,
-                )
+                # `ExpressionAttributeNames` is passed ONLY when it has entries.
+                # Real DynamoDB rejects an empty map with a ValidationException while
+                # moto accepts it, so the first write for any tenant -- no nested path
+                # to alias, nothing to prune -- passed every unit test and failed
+                # against the service. Found in the real-machine phase, which is the
+                # only place it was visible.
+                kwargs: dict[str, Any] = {
+                    "Key": {"tenant_id": tenant_id},
+                    "UpdateExpression": update_expr,
+                    "ConditionExpression": " AND ".join(cond),
+                    "ExpressionAttributeValues": values,
+                }
+                if names:
+                    kwargs["ExpressionAttributeNames"] = names
+                self._table.update_item(**kwargs)
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") \
                         != "ConditionalCheckFailedException":
@@ -595,13 +603,21 @@ class TenantsRepository:
             if removes:
                 update_expr += " REMOVE " + ", ".join(removes)
             try:
-                self._table.update_item(
-                    Key={"tenant_id": tenant_id},
-                    UpdateExpression=update_expr,
-                    ConditionExpression=" AND ".join(cond),
-                    ExpressionAttributeNames=names,
-                    ExpressionAttributeValues=values,
-                )
+                # `ExpressionAttributeNames` is passed ONLY when it has entries.
+                # Real DynamoDB rejects an empty map with a ValidationException while
+                # moto accepts it, so the first write for any tenant -- no nested path
+                # to alias, nothing to prune -- passed every unit test and failed
+                # against the service. Found in the real-machine phase, which is the
+                # only place it was visible.
+                kwargs: dict[str, Any] = {
+                    "Key": {"tenant_id": tenant_id},
+                    "UpdateExpression": update_expr,
+                    "ConditionExpression": " AND ".join(cond),
+                    "ExpressionAttributeValues": values,
+                }
+                if names:
+                    kwargs["ExpressionAttributeNames"] = names
+                self._table.update_item(**kwargs)
                 return resolved
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") \

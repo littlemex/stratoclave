@@ -422,3 +422,71 @@ def test_setter_refuses_an_effective_period_at_or_before_its_own_current_period(
 
     row = _read_row(tenants_table, tenant_id)
     assert this_period not in row.get("user_dollar_defaults", {})
+
+
+# --------------------------------------------------- what moto let through
+class TestNoEmptyExpressionAttributeNames:
+    """Real DynamoDB rejects `ExpressionAttributeNames={}`; moto accepts it.
+
+    This is not a hypothetical, and it was the SEAL path specifically. Both writes on
+    the tenant row build their alias map conditionally — an alias exists only for a
+    nested path or a pruned period — and on the seal's first write for a tenant there is
+    neither, so the map came out empty. Every unit test here passed and the service
+    answered `ValidationException: ExpressionAttributeNames must not be empty`, which
+    meant the wall never engaged for any tenant at all: the first seal is the one every
+    tenant hits. Found in the real-machine phase, which is the only place it was visible.
+
+    The setter is checked the same way and did NOT have the defect — in the scenario
+    below it always carries an alias. Its test is kept because the two paths build that
+    map the same way and the next edit to either could introduce it; a check that only
+    covers the path that broke is a check that has to be rewritten to catch the sibling.
+    """
+
+    def _capture(self, monkeypatch, repo):
+        seen = []
+        real = repo._table.update_item
+
+        def _spy(**kwargs):
+            seen.append(kwargs)
+            return real(**kwargs)
+
+        monkeypatch.setattr(repo._table, "update_item", _spy)
+        return seen
+
+    def test_the_first_default_for_a_tenant_passes_no_empty_alias_map(
+        self, tenants_table, monkeypatch,
+    ):
+        from dynamo.tenants import TenantsRepository
+        repo = TenantsRepository()
+        _seed_tenant_row(tenants_table, "empty-names-setter")
+        seen = self._capture(monkeypatch, repo)
+        repo.set_user_dollar_default(tenant_id="empty-names-setter",
+                                     effective_period="2099-03",
+                                     amount_microusd=5_000_000)
+        assert seen, "the setter issued no update at all"
+        for kwargs in seen:
+            assert kwargs.get("ExpressionAttributeNames", {"x": "y"}) != {}, (
+                "ExpressionAttributeNames was passed as an empty map. moto accepts "
+                "that and real DynamoDB refuses it with a ValidationException, so this "
+                "would pass here and fail in production on the first write for every "
+                f"tenant. kwargs={kwargs!r}"
+            )
+
+    def test_the_first_seal_for_a_tenant_passes_no_empty_alias_map(
+        self, tenants_table, monkeypatch,
+    ):
+        from dynamo.tenants import TenantsRepository
+        repo = TenantsRepository()
+        _seed_tenant_row(tenants_table, "empty-names-seal",
+                         user_dollar_defaults={"2026-01": Decimal(9_000_000)},
+                         user_dollar_defaults_version=1)
+        seen = self._capture(monkeypatch, repo)
+        sealed = repo.seal_user_dollar_base("empty-names-seal", "2026-09")
+        assert sealed == 9_000_000, f"the seal did not return the resolved base: {sealed}"
+        assert seen, "the seal issued no update at all"
+        for kwargs in seen:
+            assert kwargs.get("ExpressionAttributeNames", {"x": "y"}) != {}, (
+                "the defect this class exists for: an empty alias map on the path "
+                "every tenant takes exactly once. "
+                f"every tenant hits exactly once. kwargs={kwargs!r}"
+            )
