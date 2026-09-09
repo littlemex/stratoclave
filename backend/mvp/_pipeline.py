@@ -3358,6 +3358,7 @@ def reserve_credit(
         return _reserve_quota_without_pool(
             user, reservation_tokens, repo=repo, period=period,
             pricing_key=pricing_key, quota_lines=quota_lines,
+            rate_snapshot=_rate_snap,
             quota_model=quota_model, selected_model=selected_model,
             quota_reserved_amount=int(cost_microusd or 0),
             bound_microusd=bound_microusd,
@@ -3793,6 +3794,7 @@ def reserve_credit(
             return _reserve_quota_without_pool(
                 user, reservation_tokens, repo=repo, period=period,
                 pricing_key=pricing_key, quota_lines=quota_lines,
+                rate_snapshot=_rate_snap,
                 quota_model=quota_model, selected_model=selected_model,
                 quota_reserved_amount=int(cost_microusd or 0),
                 bound_microusd=bound_microusd,
@@ -4896,6 +4898,15 @@ def _reserve_quota_without_pool(
     repo,
     period: str,
     pricing_key: Optional[str],
+    # The rate frozen at admission. This function used to take the pricing KEY and drop
+    # the SNAPSHOT, which meant a tenant enforcing the per-user money ceiling with no
+    # pool admitted a request at a known rate and then could not price it at settle --
+    # `settle_reservation_and_log` found `rate_snapshot is None` and recorded no cost,
+    # so the by-tag report showed the work as free while the ceiling had been charged.
+    # Found on real infrastructure (phase 5, J7); a moto test missed it because it
+    # handed the reserve's own context straight to settle, and the sibling pooled path
+    # passes the snapshot, so nothing here looked asymmetric until the two were compared.
+    rate_snapshot: Optional["RateSnapshot"] = None,
     quota_lines: Optional[list],
     quota_model: Optional[str],
     selected_model: Optional[str],
@@ -5013,6 +5024,7 @@ def _reserve_quota_without_pool(
             task_tag_source=_TaskTagSource.ABSENT.value,
             period=period,
             pricing_key=pricing_key,
+            rate_snapshot=rate_snapshot,
             tenant_id=user.org_id,
             pool_active=False,
             quota_lines=quota_lines or None,
@@ -5596,19 +5608,32 @@ def settle_reservation_and_log(
                 uncovered=uncovered,
             )
 
-    # ----- pool side (only when the reservation was pooled) -----
+    # ----- what this request cost (pooled or not) -----
     # When the caller didn't pass an explicit actual cost, derive it from the
     # real usage. Layer 5: rate against the rate FROZEN at reserve time (a pure
     # function, no live-table read) so a rate flip between reserve and settle
     # cannot change the price. `_rating` is the frozen breakdown embedded on the
     # ledger terminal; its total IS the settled amount (single source of truth).
+    #
+    # NOT gated on a dollar pool, and it used to be. A pool was once the only thing
+    # that priced a request in dollars, so "no pool" and "no dollar cost" were the
+    # same statement and gating here was correct. The per-user money ceiling reads
+    # only `user_dollar_defaults` and never the pool, so a tenant can now be
+    # enforced in dollars with no pool at all -- and while this gate stood, such a
+    # tenant had every request recorded with NO cost attribute, which
+    # `aggregate_by_tag` sums as zero. Enforcement charged 1542 micro-USD and the
+    # usage report said the work was free (phase 5, observation J7). The gate did
+    # not break; the new wall made it insufficient.
+    #
+    # Nothing extra is needed to do this: `_price` calls `_freeze(pk)` on the
+    # accounting path too and says so in its own comment, so the frozen rate is on
+    # the context whether or not a pool exists.
     from .pricing import UNVERSIONED_SENTINEL
 
     _rating = None
     if (
         actual_cost_microusd is None
         and context is not None
-        and context.pool_active
         and context.pricing_key
     ):
         if context.rate_snapshot is not None:
@@ -5622,7 +5647,7 @@ def settle_reservation_and_log(
                 cache_write_tokens=_reported_count(actual_cache_write_tokens),
             )
             actual_cost_microusd = _rating.total_cost_microusd
-        else:
+        elif context.pool_active:
             # A reservation admitted by THIS version always carries the rate it was
             # admitted at, because pricing fails closed. Reaching here means the
             # reservation predates that: a RESERVE event written by the previous
@@ -5643,7 +5668,23 @@ def settle_reservation_and_log(
                 reserved_microusd=int(context.pool_reserved_microusd or 0),
             )
             actual_cost_microusd = int(context.pool_reserved_microusd or 0)
+        else:
+            # No frozen rate AND no pool: `pool_reserved_microusd` is 0 here, so the
+            # branch above would record a cost of ZERO. That is worse than recording
+            # nothing. An absent attribute means "no cost was recorded"; a stored 0
+            # asserts the request was free, and a reader cannot tell those apart --
+            # which is the entire defect this change exists to fix. So the cost stays
+            # None, the attribute is not written, and `aggregate_by_tag` counts the
+            # row as one whose cost is unknown rather than as one that was free.
+            logger.warning(
+                "settle_without_frozen_rate_or_pool_cost_unknown",
+                pricing_key=context.pricing_key,
+            )
 
+    # ----- pool side (only when the reservation was pooled) -----
+    # Unchanged: this moves pool counters and deletes the hold, and a tenant without a
+    # pool has neither. Only whether the COST above is computed stopped depending on a
+    # pool; every ledger, overrun and hold-finalisation rule here is as it was.
     if (
         context is not None
         and context.pool_active

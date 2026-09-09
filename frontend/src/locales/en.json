@@ -810,6 +810,7 @@
     "col_requests": "Requests",
     "col_cost": "Cost",
     "col_tokens": "Tokens",
-    "unlabelled_split": "{{absent}} carried no tag; {{dropped}} had a tag that was discarded."
+    "unlabelled_split": "{{absent}} carried no tag; {{dropped}} had a tag that was discarded.",
+    "missing_cost": "{{missing}} of {{total}} requests have no cost recorded, so the figure beside this tag is missing them. It is not $0.00 for those requests — it is unknown."
   }
 }

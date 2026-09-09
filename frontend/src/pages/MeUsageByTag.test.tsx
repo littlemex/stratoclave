@@ -44,6 +44,7 @@ function response(over: Record<string, unknown> = {}) {
         absent_count: 0,
         dropped_grammar_count: 0,
         cost_microusd: 4_500_000,
+        requests_without_cost: 0,
         input_tokens: 1000,
         output_tokens: 250,
       },
@@ -168,6 +169,7 @@ describe('MeUsageByTag — the unlabelled bucket', () => {
             absent_count: 120,
             dropped_grammar_count: 20,
             cost_microusd: 9_000_000,
+            requests_without_cost: 0,
             input_tokens: 10,
             output_tokens: 10,
           },
@@ -223,6 +225,7 @@ describe('MeUsageByTag — a stored tag is text, whatever it contains', () => {
             absent_count: 0,
             dropped_grammar_count: 0,
             cost_microusd: 1,
+            requests_without_cost: 0,
             input_tokens: 0,
             output_tokens: 0,
           },
@@ -233,5 +236,46 @@ describe('MeUsageByTag — a stored tag is text, whatever it contains', () => {
     await waitFor(() => expect(screen.getByTestId('bt-row-tag')).toHaveTextContent(hostile))
     // The literal string is on screen and no element was created from it.
     expect(document.querySelector('img')).toBeNull()
+  })
+})
+
+
+describe('MeUsageByTag — a cost that is unknown rather than zero', () => {
+  it('says which requests have no cost recorded, and that the gap is not $0.00', async () => {
+    // The disclosure this page was missing. Eight others were built to stop a reader
+    // believing something false about these numbers, and none covered the cost column
+    // being EMPTY. A tenant enforced in dollars with no pool had every row read $0.00,
+    // and a reader concludes the work was free.
+    mockByTag.mockResolvedValue(
+      response({
+        rows: [
+          {
+            user_id: 'me',
+            task_tag: 'migration-42',
+            requests: 88,
+            absent_count: 0,
+            dropped_grammar_count: 0,
+            cost_microusd: 45_000_000,
+            requests_without_cost: 3,
+            input_tokens: 10,
+            output_tokens: 10,
+          },
+        ],
+      }),
+    )
+    render(withClient(<MeUsageByTag />))
+    const notice = await screen.findByTestId('bt-row-missing-cost')
+    // Both numbers: "3 of 88" tells a reader the total is nearly right, where "some
+    // requests" or a bare flag would not.
+    expect(notice).toHaveTextContent(/3/)
+    expect(notice).toHaveTextContent(/88/)
+    // And the distinction itself, in words, because that is the whole point.
+    expect(notice.textContent ?? '').toMatch(/unknown/i)
+  })
+
+  it('shows nothing when every request was priced', async () => {
+    render(withClient(<MeUsageByTag />))
+    await waitFor(() => expect(screen.getByTestId('bt-row-tag')).toBeInTheDocument())
+    expect(screen.queryByTestId('bt-row-missing-cost')).toBeNull()
   })
 })

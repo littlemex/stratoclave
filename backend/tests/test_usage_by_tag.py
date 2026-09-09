@@ -343,3 +343,65 @@ class TestAdminAndTeamLeadCannotDrift:
             "which is exactly the drift a shared implementation is meant "
             "to prevent"
         )
+
+
+class TestCostAbsentVersusCostZero:
+    """A request nobody could price and a request that was free are different facts.
+
+    The fold reads a missing `cost_microusd` as 0, so without a count of the rows that
+    carried none, the two are the same number. Phase 5 found a whole tenant in that
+    state: a per-user dollar ceiling with no tenant pool was enforced in dollars --
+    1542 micro-USD on the quota row -- while every by-tag row read $0.00 and the
+    report had no way to say so.
+    """
+
+    def test_rows_with_no_cost_are_counted_separately_from_free_ones(self, dynamodb_mock):
+        from dynamo.usage_logs import UsageLogsRepository
+
+        repo = UsageLogsRepository()
+        tenant, user, tag = "acme", "user-1", "migration"
+        # Two priced requests.
+        repo.record(tenant_id=tenant, user_id=user, user_email="u@x", model_id="m",
+                    input_tokens=10, output_tokens=5, cost_microusd=100,
+                    task_tag=tag, task_tag_source="asserted")
+        repo.record(tenant_id=tenant, user_id=user, user_email="u@x", model_id="m",
+                    input_tokens=10, output_tokens=5, cost_microusd=250,
+                    task_tag=tag, task_tag_source="asserted")
+        # One the gateway could not price at all: `cost_microusd` omitted, which is what
+        # an unpooled reservation with no frozen rate produces.
+        repo.record(tenant_id=tenant, user_id=user, user_email="u@x", model_id="m",
+                    input_tokens=10, output_tokens=5,
+                    task_tag=tag, task_tag_source="asserted")
+        # And one priced at genuinely zero -- a real charge that rounded to nothing.
+        # It must NOT be counted as unpriced: that is why the count tests `is None`
+        # rather than falsiness.
+        repo.record(tenant_id=tenant, user_id=user, user_email="u@x", model_id="m",
+                    input_tokens=1, output_tokens=1, cost_microusd=0,
+                    task_tag=tag, task_tag_source="asserted")
+
+        from dynamo.tenant_budgets import current_period
+
+        rows = {r.task_tag: r for r in repo.aggregate_by_tag(
+            tenant_id=tenant, period=current_period()).rows}
+        row = rows[tag]
+        assert row.requests == 4
+        assert row.cost_microusd == 350
+        # Exactly the one row with no attribute. Not two: the zero-cost request was
+        # priced, and folding it in here would tell a reader the report is missing a
+        # figure it actually has.
+        assert row.requests_without_cost == 1
+
+    def test_a_fully_priced_row_reports_no_missing_costs(self, dynamodb_mock):
+        from dynamo.usage_logs import UsageLogsRepository
+
+        repo = UsageLogsRepository()
+        repo.record(tenant_id="acme", user_id="u", user_email="u@x", model_id="m",
+                    input_tokens=1, output_tokens=1, cost_microusd=5,
+                    task_tag="t", task_tag_source="asserted")
+        from dynamo.tenant_budgets import current_period
+
+        rows = {r.task_tag: r for r in repo.aggregate_by_tag(
+            tenant_id="acme", period=current_period()).rows}
+        # Zero, so a consumer can render the disclosure only when it applies rather
+        # than warning on every report.
+        assert rows["t"].requests_without_cost == 0

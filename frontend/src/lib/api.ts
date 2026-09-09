@@ -455,6 +455,10 @@ export interface UsageByTagRow {
   /** Nonzero only on the `unlabelled` row: requests whose tag was discarded. */
   dropped_grammar_count: number
   cost_microusd: number
+  /** How many of `requests` carried no cost at all, so `cost_microusd` is missing them.
+   *  An absent cost and a zero cost are different facts, and the sum alone cannot tell
+   *  "this was free" from "we could not price this". */
+  requests_without_cost: number
   input_tokens: number
   output_tokens: number
 }

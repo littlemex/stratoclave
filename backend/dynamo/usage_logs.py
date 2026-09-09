@@ -97,6 +97,20 @@ class TagAggregateRow:
     absent_count: int
     dropped_grammar_count: int
     cost_microusd: int
+    #: How many of `requests` carried NO `cost_microusd` attribute at all, so
+    #: `cost_microusd` above is missing them.
+    #:
+    #: An absent attribute and a stored zero are different facts and this is the only
+    #: thing that keeps them apart: the fold reads a missing cost as 0, so without
+    #: this count a request the gateway could not price is indistinguishable from one
+    #: that was free. Phase 5 found a whole tenant in that state -- enforced in
+    #: dollars, every row reported at zero -- and the report had no way to say so.
+    #:
+    #: Nonzero for rows written before the settle path priced unpooled requests, and
+    #: for any request admitted with no frozen rate and no pool. Never backfilled: the
+    #: rate a past reservation froze is not recoverable, and charging old usage at
+    #: today's rate is exactly what freezing exists to prevent.
+    requests_without_cost: int
     input_tokens: int
     output_tokens: int
 
@@ -344,13 +358,20 @@ class UsageLogsRepository:
                 row = totals.setdefault(
                     key,
                     {"requests": 0, "absent_count": 0, "dropped_grammar_count": 0,
-                     "cost_microusd": 0, "input_tokens": 0, "output_tokens": 0},
+                     "cost_microusd": 0, "requests_without_cost": 0,
+                     "input_tokens": 0, "output_tokens": 0},
                 )
                 row["requests"] += 1
                 if source == "absent":
                     row["absent_count"] += 1
                 elif source in ("dropped_grammar", "dropped_reserved"):
                     row["dropped_grammar_count"] += 1
+                # Counted from the SAME item, at the same place absence becomes zero,
+                # so the sum and the count cannot disagree about which rows they saw.
+                # `is None` rather than a falsy test: a genuine zero cost is a priced
+                # request that happened to round to nothing, not an unpriced one.
+                if it.get("cost_microusd") is None:
+                    row["requests_without_cost"] += 1
                 row["cost_microusd"] += int(it.get("cost_microusd", 0) or 0)
                 row["input_tokens"] += int(it.get("input_tokens", 0) or 0)
                 row["output_tokens"] += int(it.get("output_tokens", 0) or 0)
@@ -370,6 +391,7 @@ class UsageLogsRepository:
                 absent_count=v["absent_count"],
                 dropped_grammar_count=v["dropped_grammar_count"],
                 cost_microusd=v["cost_microusd"],
+                requests_without_cost=v["requests_without_cost"],
                 input_tokens=v["input_tokens"],
                 output_tokens=v["output_tokens"],
             )

@@ -237,6 +237,22 @@ function TagRow({ row }: { row: UsageByTagRow }) {
         <span className="font-mono" data-testid="bt-row-tag">
           {row.task_tag}
         </span>
+        {row.requests_without_cost > 0 ? (
+          /* The disclosure this page was missing, and the reason it was missing is worth
+             stating: eight disclosures were built to stop a reader believing something
+             false about these numbers, and none of them covered the cost column being
+             EMPTY rather than zero. A tenant enforced in dollars with no pool had every
+             row here read $0.00, and a person reading that concludes the work was free.
+             Rendered per row rather than per report, because "3 of 88 requests have no
+             cost" tells a reader whether the total is nearly right or nearly meaningless,
+             and a single report-wide flag does not. */
+          <div className="mt-1 text-destructive" data-testid="bt-row-missing-cost">
+            {t('me_usage_by_tag.missing_cost', {
+              missing: row.requests_without_cost,
+              total: row.requests,
+            })}
+          </div>
+        ) : null}
         {isSentinelBucket ? (
           /* The split is the whole reason these two counters exist. Folded into one
              "untagged" number, a month of somebody's mistyped tag is invisible
