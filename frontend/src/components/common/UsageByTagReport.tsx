@@ -22,7 +22,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { type UsageByTagResponse, type UsageByTagRow } from '@/lib/api'
-import { fmtMicroUsd } from '@/lib/money'
+import { fmtMicroUsdCharge } from '@/lib/money'
 
 /**
  * Spend grouped by the task tag the caller attached to the work.
@@ -339,7 +339,10 @@ function TagRow({ row, memberColumn }: { row: UsageByTagRow; memberColumn: boole
       </TableCell>
       <TableCell className="text-right font-mono text-xs">{row.requests}</TableCell>
       <TableCell className="text-right font-mono text-xs">
-        {fmtMicroUsd(row.cost_microusd)}
+        {/* A CHARGE, not a budget: a real request can cost less than a cent, and the cent
+            formatter renders that as $0.00 beside a nonzero request count. Found in a real
+            browser against a real gateway. */}
+        {fmtMicroUsdCharge(row.cost_microusd)}
       </TableCell>
       <TableCell className="text-right font-mono text-xs">
         {row.input_tokens + row.output_tokens}
