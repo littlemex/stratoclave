@@ -1,4 +1,4 @@
-"""F4 / R39c — the harness gains ONE fixture, and all five scripts use it.
+"""F4 / R39c — the harness gains ONE fixture, and every pool-seeding script uses it.
 
 WHAT DEFECT THIS CLOSES
 
@@ -30,7 +30,7 @@ returning:
     pool_headroom_microusd == pool_limit_microusd - pool_reserved_microusd
                                - pool_settled_microusd
 
-and that all five scripts call it instead of handing `set_pool_limit` a bare
+and that every pool-seeding script calls it instead of handing `set_pool_limit` a bare
 `pool_limit_microusd`. `SEAMS (the integration owner's seam-review document)` B5 confirms this design unchanged: the
 fixture must satisfy BOTH identities at once, which needs F1's
 (`seat_count`/`manual_limit`, and the stored seat rate B2 adds) and F2's
@@ -71,6 +71,11 @@ DIRECT_SEED_SCRIPTS = [
     "bench_micro.py",
     "bench_pending_spike.py",
     "bench_itemcount_spike.py",
+    # Added with the admission item-count benchmark. This list is enumerated by name
+    # rather than globbed, so a new bench that seeds a pool row is outside the
+    # invariant until it is named here — which is why it is named here in the same
+    # change that adds it, not later.
+    "bench_admission_itemcount.py",
 ]
 
 #: The call this epic invalidates: a bare `pool_limit_microusd=` kwarg to
@@ -84,7 +89,7 @@ BARE_SET_POOL_LIMIT = re.compile(
 def test_the_fixture_module_exists():
     assert FIXTURE_MODULE.exists(), (
         f"{FIXTURE_MODULE} does not exist. R39c requires one fixture "
-        f"(the F4 design note section 4: seed_verified_pool) that all five scripts "
+        f"(the F4 design note section 4: seed_verified_pool) that every pool-seeding script "
         f"call instead of seeding pool_limit_microusd directly."
     )
 
@@ -96,7 +101,7 @@ def test_each_direct_seed_script_uses_the_fixture_not_a_bare_limit(script_name):
     seeding call site, not e.g. bench_marker_shard_spike's n=1 fallback which
     is a different script)."""
     path = BENCH_DIR / script_name
-    assert path.exists(), f"{path} is one of the five named scripts and is missing"
+    assert path.exists(), f"{path} is one of the named scripts and is missing"
     text = path.read_text()
     assert "seed_verified_pool" in text, (
         f"{script_name} does not call seed_verified_pool (R39c's fixture) — "

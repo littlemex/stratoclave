@@ -47,7 +47,7 @@ pk/sk/period string construction and TTL expiry arithmetic (example tests);
 which finalizer runs exactly once (pooled suite Section 2 + Hypothesis);
 soft_check_exhausted staleness (optimization only — it can only BLOCK, never
 admit, so safety never rests on it); ClientError code filtering in
-_adjust_used; retry/backoff liveness.
+_adjust_item; retry/backoff liveness.
 """
 
 import pytest

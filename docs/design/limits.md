@@ -12,13 +12,32 @@ exist and, for each, the callable that turns its configured value into an item i
 admission transaction. A ceiling that is configured and contributes no item is a bypass, so that
 declaration is the list this document is written against.
 
-## 1. The three ceilings
+## 1. The four ceilings
 
 | Ceiling | Unit | Scope | On by default | What it protects |
 |---|---|---|---|---|
 | `tenant_dollar_pool` | integer micro-USD | one tenant, one calendar month | **Yes** — written at tenant creation and maintained at `seats x STRATOCLAVE_SEAT_MONTHLY_USD` (default `200`) | The bill. This is the ceiling that can be stated as a number an invoice can be compared against |
 | `user_token_quota` | tokens | one user within one tenant | Yes, at a deliberately loose figure: `DEFAULT_TENANT_CREDIT`, default `10000000` | Fairness between the tenant's users — that one person does not consume the whole pool |
 | `per_model_quota` | integer micro-USD | one tenant, or one user within it, per model, per month | No — opt-in per tenant | Spend on a specific model, e.g. "Opus, $50 a month" |
+| `user_dollar_quota` | integer micro-USD | one user within one tenant, one calendar month | No — opt-in per tenant | What ONE member may spend, in the tenant's own money unit, across every model at once |
+
+`user_dollar_quota` (`backend/mvp/routing/user_dollar_quota.py`) is section 2's
+"today the answer is the per-model quota's user scope" answer, superseded: a
+tenant can now bound a member's spend directly in dollars without pinning it
+to one model. It is not raisable (a money ceiling being denominated in
+micro-USD does not make it grantable — see `mvp.reserve_limits`), and it is
+never a substitute for the tenant pool: the pool still binds first for the
+same reason section 3 gives — a per-user ceiling sized to fit inside the pool
+can never itself become the binding constraint for the tenant as a whole.
+
+The base a tenant sets for this ceiling is **period-keyed** on the tenant row
+(`dynamo.tenants`: `user_dollar_defaults`) and **sealed** the first time any
+admission in a period needs it (`sealed_user_dollar_base`), which is what
+makes the base uniform across every member and every host of that tenant
+without requiring any two hosts to agree on the wall clock. A sealed period's
+base cannot change — the mid-period lever for an individual member, same as
+for the tenant pool, is a raise (not shipped for this wall yet) rather than
+an edit to the base already in force.
 
 ## 2. Why the units differ, and why only one of them is a ceiling
 
@@ -198,7 +217,8 @@ that boundary is stated in [CONTRACTS.md](CONTRACTS.md) under C1 and measured in
 
 The token quota bounds nothing in money, by construction of section 2. It is documented here so that
 nobody reads its number as a budget, and so that an operator who wants a money ceiling per user knows
-that today the answer is the per-model quota's user scope, one model at a time.
+the answer is `user_dollar_quota` (across every model at once) or the per-model quota's user scope
+(one model at a time), not the token quota.
 
 ## 6. Future work: operator-editable defaults
 

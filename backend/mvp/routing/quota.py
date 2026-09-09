@@ -16,12 +16,20 @@ Design note (why ONE `used` counter, not reserved+settled):
   where `:headroom = limit - amount` is computed client-side.
 
   reserve : ADD used += amount   (cond: used <= limit - amount)  → cancels if over
-  settle  : ADD used += (actual - reserved)   (unconditional; actual<=reserved so
-            this is <= 0 — releases the over-reservation, leaves settled recorded)
+  settle  : ADD used += (actual - reserved)   (unconditional; releases the
+            over-reservation when actual < reserved, leaves settled recorded)
   release : ADD used += (-reserved)           (unconditional; invoke failed, no spend)
 
   Net: after settle, `used` == sum of settled actuals; after release, the
   reservation is fully removed. `used` never needs a separate reserved field.
+
+  P3.7's correction: `settle`'s delta is NOT bounded `<= 0`. `actual <= reserved`
+  is not a property this code has -- an overrun (`actual > reserved`) is a real,
+  accepted outcome (`mvp._pipeline.py`'s admission-checked-vs-actual accounting
+  computes `overrun = max(0, actual - reserved)` and records it), so the delta
+  can be POSITIVE. This module's own admission gate bounds RESERVED-in-flight
+  plus already-settled `used` at reserve time; it says nothing about what a
+  later settle discovers the actual spend to be.
 """
 from __future__ import annotations
 
@@ -205,15 +213,16 @@ def reserved_scopes(
     }
 
 
-def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
-    """One TransactWriteItems Update that gives back `amount` from a quota
-    row's `used` counter, for a reservation whose owning request cannot give
-    it back itself (a reaper reclaim, or a retained hold an operator later
-    releases). Gated on `attribute_exists(used)`, the SAME no-phantom-row
-    guard `_adjust_used` uses for settle/release: a scope this reservation
-    never actually reserved against has no `used` attribute to exist, so
-    the condition fails closed rather than creating a negative-`used` row
-    for a scope this specific reservation never touched.
+def _adjust_item(pk: str, sk: str, delta: int) -> dict[str, Any]:
+    """One TransactWriteItems Update that moves a quota row's `used` counter
+    by a SIGNED `delta`. Gated on `attribute_exists(used)`, the same
+    no-phantom-row guard `_reverse_item` uses: a scope this reservation never
+    actually reserved against has no `used` attribute to exist, so the condition
+    fails closed rather than creating a negative-`used` row for a scope this
+    specific reservation never touched.
+    Carries no wall-clock value (P3.4/I6): the settle transaction this is
+    composed into reuses one idempotency token across retries, which requires
+    every item in it to be byte-identical on each retry.
     """
     return {
         "Update": {
@@ -221,9 +230,56 @@ def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
             "Key": {"pk": {"S": pk}, "sk": {"S": sk}},
             "UpdateExpression": "ADD used :d",
             "ConditionExpression": "attribute_exists(used)",
-            "ExpressionAttributeValues": {":d": {"N": str(-int(amount))}},
+            "ExpressionAttributeValues": {":d": {"N": str(int(delta))}},
         }
     }
+
+
+def _reverse_item(pk: str, sk: str, amount: int) -> dict[str, Any]:
+    """`_adjust_item` specialised to a give-back: always negative, `amount`
+    given as the positive magnitude to return (the reaper's/a retained hold's
+    own convention -- see `build_reverse_txn_items` below)."""
+    return _adjust_item(pk, sk, -int(amount))
+
+
+def build_adjust_txn_items(
+    tenant_id: str,
+    user_id: Optional[str],
+    model: str,
+    period: str,
+    delta: int,
+    *,
+    tenant_scope: bool,
+    user_scope: bool,
+) -> list[dict[str, Any]]:
+    """Build the TransactWriteItems items that move `used` by `delta` (settle's
+    signed overrun-or-refund, or release's `-reserved`) on EXACTLY the scopes
+    THIS reservation actually reserved against (P3.4/I6).
+
+    This REPLACED a pair of functions that tried both the tenant and the user pk
+    unconditionally, via bare independent `update_item` calls, relying on
+    `attribute_exists(used)` to no-op whichever one the reservation never
+    touched. That shape cannot be composed, which is the whole reason this
+    exists: it is meant to go into ONE
+    `TransactWriteItems` together with another wall's item (the new
+    `user_dollar_quota` counter). A `TransactWriteItems` is all-or-nothing, so
+    bundling an UNCONDITIONAL attempt at both pks would make a
+    single-scope-configured tenant fail this call on EVERY settle/release
+    (the untouched pk's guaranteed `ConditionalCheckFailed` would cancel the
+    whole transaction, including the scope that WAS legitimately reserved).
+    `tenant_scope`/`user_scope` are therefore REQUIRED -- exactly the same
+    requirement `build_reverse_txn_items` states for the reaper's reclaim, and
+    for the identical reason: only the caller's own reservation record
+    (`quota_lines`, read back through `reserved_scopes`) knows which scopes
+    this specific reservation actually wrote to.
+    """
+    sk = _sk(model, period)
+    items: list[dict[str, Any]] = []
+    if tenant_scope:
+        items.append(_adjust_item(_pk_tenant(tenant_id), sk, delta))
+    if user_scope and user_id:
+        items.append(_adjust_item(_pk_user(tenant_id, user_id), sk, delta))
+    return items
 
 
 def build_reverse_txn_items(
@@ -239,11 +295,10 @@ def build_reverse_txn_items(
     """Build the TransactWriteItems entries that reverse a leaked per-model
     quota reservation of `amount` on (`model`, `period`).
 
-    Unlike `release_quota`/`settle_quota` (which the owning request's own
-    context drives, and which may safely touch both scopes unconditionally
-    because `_adjust_used`'s `attribute_exists(used)` guard is enough there —
-    the context's OWN `quota_lines` already say which scopes it reserved),
-    a caller reversing someone else's leaked reservation has no such context:
+    Unlike `build_adjust_txn_items`, which the owning request's own context
+    drives and which reads the scopes back from the `quota_lines` that reservation
+    actually committed, a caller reversing someone ELSE's leaked reservation has
+    no such context:
     `attribute_exists(used)` alone cannot tell "this reservation touched this
     scope" apart from "some OTHER reservation touched this scope, and this one
     never did" whenever a config change means only some requests for this
@@ -262,65 +317,3 @@ def build_reverse_txn_items(
     if user_scope and user_id:
         items.append(_reverse_item(_pk_user(tenant_id, user_id), sk, amount))
     return items
-
-
-def settle_quota(
-    tenant_id: str,
-    user_id: Optional[str],
-    model: str,
-    period: str,
-    reserved_amount: int,
-    actual_amount: int,
-) -> None:
-    """Settle: adjust `used` from the reserved estimate to the actual spend.
-
-    `used` already includes `reserved_amount` from the reserve. actual<=reserved
-    by construction, so we ADD (actual - reserved) (<= 0), leaving `used` equal
-    to settled actuals. Unconditional; never fails on quota grounds.
-    """
-    delta = int(actual_amount) - int(reserved_amount)
-    if delta == 0:
-        return
-    _adjust_used(tenant_id, user_id, model, period, delta)
-
-
-def release_quota(
-    tenant_id: str,
-    user_id: Optional[str],
-    model: str,
-    period: str,
-    reserved_amount: int,
-) -> None:
-    """Release a reservation without settling (invoke-time failure): used -= reserved."""
-    _adjust_used(tenant_id, user_id, model, period, -int(reserved_amount))
-
-
-def _adjust_used(tenant_id, user_id, model, period, delta: int) -> None:
-    """Adjust `used` on the reserved rows only (settle/release).
-
-    Gated on `attribute_exists(used)`: a scope is only ever reserved when it had
-    a configured limit (see `build_reserve_txn_items`), so its row already
-    carries `used`. A scope that was NOT reserved (e.g. tenant limit set but no
-    per-user limit) has no row — adjusting it unconditionally would CREATE a
-    phantom row with a negative `used`, which later (if a limit is added) would
-    let that scope over-spend by |delta|. The condition makes the missing-row
-    case a clean no-op instead. `ConditionalCheckFailed` is that no-op, so it is
-    swallowed; any other error propagates to the caller's guard.
-    """
-    from botocore.exceptions import ClientError
-
-    tbl = _table()
-    sk = _sk(model, period)
-    for pk in (_pk_tenant(tenant_id), _pk_user(tenant_id, user_id) if user_id else None):
-        if pk is None:
-            continue
-        try:
-            tbl.update_item(
-                Key={"pk": pk, "sk": sk},
-                UpdateExpression="ADD used :d",
-                ConditionExpression="attribute_exists(used)",
-                ExpressionAttributeValues={":d": delta},
-            )
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                raise

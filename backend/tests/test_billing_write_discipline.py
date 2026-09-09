@@ -68,6 +68,13 @@ ALLOWED_SITES = {
         # attempt, cancelled transaction writes nothing. No pool counter touched
         # (quota counters only) — A2/A5 reviewed OK.
         ("backend/mvp/_pipeline.py", "_reserve_quota_without_pool", "transact_write_items"),
+        # The per-model quota and the per-user money ceiling move together, in ONE
+        # transaction (contract I6): two bare updates would let a crash land between
+        # them, which is the drift the third reversal path exists to prevent. Both
+        # items are unconditional `ADD used :d`, so unlike the CAS sites above a retry
+        # here MUST dedupe rather than re-read — hence a reservation-derived (stable)
+        # token, checked below.
+        ("backend/mvp/_pipeline.py", "_release_or_settle_quota_and_uq", "transact_write_items"),
         ("backend/mvp/_pipeline.py", "_settle_pool_side", "transact_write_items"),        # settle (stable token)
         ("backend/mvp/_pipeline.py", "ReservationContext.release_pool", "transact_write_items"),  # release
         # The same release, re-attempted after a cancellation whose reason was
@@ -458,6 +465,13 @@ EXPECTED_TOKEN_KIND = {
         # correct and a lost-ack retry re-reads the pool and re-CASes.
         "reserve_external_authorization": "fresh",
         "_reserve_quota_without_pool": "fresh",
+        # STABLE, not fresh: the two items are unconditional `ADD used :d`, so a
+        # lost-ack retry with a fresh token would apply both deltas twice. The sites
+        # above are CAS writes where a cancelled transaction writes nothing, so a
+        # fresh token per attempt is right for them and wrong here. "stable" is this
+        # file's word for a token derived from the reservation — the classifier reports
+        # a derived token as stable, which is the same shape settle already uses.
+        "_release_or_settle_quota_and_uq": "stable",
         "ReservationContext.release_pool": "fresh",
         "ReservationContext._retry_release": "fresh",
         "_sweep_one_period": "fresh",

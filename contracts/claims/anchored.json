@@ -2150,6 +2150,30 @@
    "claim": "**No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), and `STRATOCLAVE_UNOBSERVED_HOLDS` **defaults on**, so such an outcome KEEPS its reservation rather than handing the budget back as though the call were free. An operator can set that flag falsy to get the weaker behaviour back. See the crash-safe row below.",
    "anchor": "contract:C1.5@9cd99058",
    "note": "the admission-bound clause the comparison row is about; the row now states the money gates' real default"
+  },
+  {
+   "id": "cl-0f4c6b989451",
+   "claim": "It is not raisable (a money ceiling being denominated in micro-USD does not make it grantable — see `mvp.reserve_limits`), and it is never a substitute for the tenant pool: the pool still binds first for the same reason section 3 gives — a per-user ceiling sized to fit inside the pool can never itself become the binding constraint for the tenant as a whole.",
+   "anchor": "contract:C14.33,C14.1",
+   "note": "C14.33 for the non-grantable declaration; C14.1 for the same pool-binds-first sizing reason cl-f539a741d035 already cites for the three-ceiling design, extended to a fourth wall"
+  },
+  {
+   "id": "cl-5aa49a566d0a",
+   "claim": "The base a tenant sets for this ceiling is **period-keyed** on the tenant row (`dynamo.tenants`: `user_dollar_defaults`) and **sealed** the first time any admission in a period needs it (`sealed_user_dollar_base`), which is what makes the base uniform across every member and every host of that tenant without requiring any two hosts to agree on the wall clock.",
+   "anchor": "contract:C14.34",
+   "note": "the clause states the period-keyed default, the seal, and the version CAS that makes the seal a compare-and-set rather than a bare attribute-absence check"
+  },
+  {
+   "id": "cl-998398b6a4d3",
+   "claim": "A sealed period's base cannot change — the mid-period lever for an individual member, same as for the tenant pool, is a raise (not shipped for this wall yet) rather than an edit to the base already in force.",
+   "anchor": "contract:C14.34",
+   "note": "the clause states the seal forbids the change by construction; the parenthetical is the sentence stating its own boundary (no raise path for this wall, O3.1/C14.24-style reasoning), not an unbuilt claim"
+  },
+  {
+   "id": "cl-84ecabc2bbb7",
+   "claim": "It is documented here so that nobody reads its number as a budget, and so that an operator who wants a money ceiling per user knows the answer is `user_dollar_quota` (across every model at once) or the per-model quota's user scope (one model at a time), not the token quota.",
+   "anchor": "contract:C14.33",
+   "note": "the clause is what makes 'across every model at once' true of user_dollar_quota (no model in its key), as an alternative to the per-model quota's user scope"
   }
  ]
 }

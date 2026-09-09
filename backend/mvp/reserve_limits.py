@@ -1,7 +1,8 @@
 """Declares which admission limits exist, and which callable enforces each.
 
-The gateway enforces up to three limits at admission: the tenant dollar pool, the
-per-user token quota, and the per-model quota. The admission decision is ONE
+The gateway enforces up to four limits at admission: the tenant dollar pool,
+the per-user token quota, the per-model quota, and the per-user money ceiling
+(P3.1). The admission decision is ONE
 atomic `TransactWriteItems` (assembled in `mvp._pipeline`), and every configured
 limit MUST contribute an item to it — a limit that is configured but contributes
 no item is a silent bypass: the operator believes it is enforced and it is not.
@@ -19,17 +20,38 @@ the code drifting apart in a way `tests/test_reserve_limits_registry.py` can see
 `builder` is resolved eagerly from `module_name` + `builder_qualname` so a typo in
 either fails at import time rather than silently returning the wrong callable.
 
-This module is additive only: nothing here is imported by `mvp._pipeline` (or any
-other assembly point) yet. Wiring it in — routing the three existing call sites
-through `RESERVE_LIMITS` instead of naming `reserve_txn_item` / `hold_put_txn_item`
-/ `build_reserve_txn_items` directly — is a follow-up change to files this module
-does not own.
+This module IS imported: `mvp/grants.py:92` reads `RESERVE_LIMITS` and
+`is_grantable_wall` from here (P3.7) — the four RESERVE call sites in
+`mvp._pipeline` (including P3.1's new one) still name their builders directly
+rather than routing through this registry, and wiring that in remains a
+follow-up change to files this module does not own, but the registry itself
+is no longer inert.
 """
 from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
 from typing import Any, Callable
+
+#: What a wall's `configured_when` predicate is handed. Each wall defines what
+#: its own snapshot means (a raw DynamoDB item, a resolved value, a tuple —
+#: whatever that ONE read produced); this registry never inspects it, so `Any`
+#: rather than a shared shape every wall would have to agree on for a thing
+#: only two functions (the predicate and the builder) ever look at (I5).
+ConfigSnapshot = Any
+
+
+def _always_configured(_snapshot: ConfigSnapshot) -> bool:
+    """The default `configured_when`: this wall always contributes when its
+    caller decides to ask it to. The three walls PR 3 did not touch
+    (`tenant_dollar_pool`, `user_token_quota`, `per_model_quota`) each decide
+    whether to build an item from their OWN config lookup already, at their
+    OWN call sites, before this registry enters the picture — so giving them a
+    real predicate here would be a SECOND, redundant decision point, exactly
+    the failure I5 exists to prevent. Only a wall whose "configured or not"
+    question the admission path itself must answer through this registry
+    (`user_dollar_quota`, P3.6) needs a non-trivial one."""
+    return True
 
 
 def _resolve(module_name: str, qualname: str) -> Callable[..., Any]:
@@ -65,11 +87,23 @@ class LimitKind:
     #: raisable, and that is precisely the mistake this field exists to stop
     #: somebody making at the call site.
     grantable: bool = False
+    #: Is this wall configured for the (tenant, period, ...) the admission
+    #: path is about to check, given the ONE snapshot it already read? (P3.6)
+    #:
+    #: Defaults to "always" (`_always_configured`) because the three existing
+    #: walls each already gate their own builder call on their own config
+    #: lookup, at their own call site, before this registry is consulted --
+    #: a second predicate here would be a second decision point for the exact
+    #: race I5 exists to prevent. A wall whose builder needs to be handed the
+    #: caller's own resolved snapshot (`user_dollar_quota`, whose base can be
+    #: absent) declares a real one instead.
+    configured_when: Callable[[ConfigSnapshot], bool] = _always_configured
 
 
 def _limit(
     name: str, config_source: str, module_name: str, builder_qualname: str,
     *, grantable: bool = False,
+    configured_when: Callable[[ConfigSnapshot], bool] = _always_configured,
 ) -> LimitKind:
     return LimitKind(
         name=name,
@@ -77,6 +111,7 @@ def _limit(
         module_name=module_name,
         builder_qualname=builder_qualname,
         builder=_resolve(module_name, builder_qualname),
+        configured_when=configured_when,
         grantable=grantable,
     )
 
@@ -118,6 +153,25 @@ RESERVE_LIMITS: tuple[LimitKind, ...] = (
         module_name="mvp.routing.quota",
         builder_qualname="build_reserve_txn_items",
     ),
+    _limit(
+        name="user_dollar_quota",
+        config_source=(
+            "dynamo.tenants: the tenant row's user_dollar_defaults (period-keyed) "
+            "resolved and SEALED per period by "
+            "TenantsRepository.seal_user_dollar_base, set via "
+            "TenantsRepository.set_user_dollar_default (P3.2/P3.3)"
+        ),
+        module_name="mvp.routing.user_dollar_quota",
+        builder_qualname="build_reserve_txn_items",
+        # Money-denominated but NOT raisable (P3.6): being micro-USD does not
+        # make a limit grantable, and PR 3 ships no raise path, flip, or slot
+        # for this wall at all (O3.1) -- grantable=True here would be a
+        # promise the raise endpoint (`mvp.grants.submit_limit_raise`) cannot
+        # keep, since it accepts only `POOL_WALL`.
+        grantable=False,
+        configured_when=_resolve(
+            "mvp.routing.user_dollar_quota", "configured_when"),
+    ),
 )
 
 
@@ -126,14 +180,18 @@ RESERVE_LIMITS: tuple[LimitKind, ...] = (
 #: module a declared kind names"), then deleting a kind's declaration would also
 #: delete its module from the swept set, and the closure test's strong direction
 #: would stop checking that module entirely instead of flagging the now-orphaned
-#: builder still sitting there. Kept in sync with "WHERE THE THREE LIMITS LIVE"
-#: by hand — this is the one place in the design that IS a hand-list, and it is
-#: a list of modules to look in, not of the builders to find, which is the
-#: distinction `tests/test_reserve_limits_registry.py`'s docstring draws.
+#: builder still sitting there. Kept in sync with the four limits' own
+#: modules by hand — this is the one place in the design that IS a hand-list,
+#: and it is a list of modules to look in, not of the builders to find, which
+#: is the distinction `tests/test_reserve_limits_registry.py`'s docstring draws.
+#: (A count beside this list is the stale-number defect this change has
+#: already fixed twice, so the prose says "these four" rather than restating
+#: a number a fifth entry would make wrong again.)
 KNOWN_LIMIT_MODULES: tuple[str, ...] = (
     "dynamo.tenant_budgets",
     "dynamo.user_tenants",
     "mvp.routing.quota",
+    "mvp.routing.user_dollar_quota",
 )
 
 

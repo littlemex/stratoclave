@@ -1474,6 +1474,8 @@ class TenantBudgetsRepository:
         quota_amount: Optional[int] = None,
         quota_tenant_scope: Optional[bool] = None,
         quota_user_scope: Optional[bool] = None,
+        uq_period: Optional[str] = None,
+        uq_amount: Optional[int] = None,
     ) -> dict[str, Any]:
         """Transaction item that records a per-reservation hold.
 
@@ -1526,6 +1528,18 @@ class TenantBudgetsRepository:
             scope was ever configured). `quota_tenant_scope`/`quota_user_scope`
             are only meaningful together with `quota_amount`; a caller with no
             quota reservation to record leaves all four unset.
+          * `uq_period` / `uq_amount` (P3.1/I6) -- the per-user MONEY ceiling
+            reservation this hold's reserve committed, if that wall was
+            configured. A SEPARATE pair from `quota_period`/`quota_amount`
+            above rather than a reuse of them: `_quota_period(context)` names
+            the midnight-crossing hazard once already for the per-model wall,
+            and a request that reserves both walls in periods that end up
+            differing (the same hazard, independently, on two different rows)
+            needs two fields to say which amount belongs to which -- one
+            field recording both would silently attribute one wall's
+            reservation to the other wall's period. This wall has no scope
+            split (keyed on the user alone, never the tenant), so there is no
+            `uq_*_scope` pair.
 
         Inline holds pass `source="inline"` plus `payload_hash`/`payload_bytes`;
         external authorize passes the full legacy set. Absent args are simply
@@ -1573,6 +1587,10 @@ class TenantBudgetsRepository:
             item["quota_tenant_scope"] = {"BOOL": bool(quota_tenant_scope)}
         if quota_user_scope is not None:
             item["quota_user_scope"] = {"BOOL": bool(quota_user_scope)}
+        if uq_period:
+            item["uq_period"] = {"S": str(uq_period)}
+        if uq_amount is not None:
+            item["uq_amount"] = {"N": str(int(uq_amount))}
         return {
             "Put": {
                 "TableName": self._name,

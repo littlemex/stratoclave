@@ -318,6 +318,11 @@ def is_capacity_bearing(status: str) -> bool:
 _BLOCKER_BY_WALL: dict[str, str] = {
     "tenant_dollar_pool": "tenant_pool",
     "user_token_quota": "personal_budget",
+    # P3.1's money ceiling. Deliberately NOT "personal_budget" -- that name is
+    # already taken by the TOKEN wall above, and reusing it would make a money
+    # refusal indistinguishable from a token refusal to a client reading the
+    # 402 body (I4).
+    "user_dollar_quota": "personal_spend",
 }
 
 #: The per-model wall's two public names, chosen by which scope actually refused.
@@ -516,6 +521,24 @@ class RaiseHint(BaseModel):
     pricing_version: Optional[str] = None
     #: Wall-clock at hint construction. No existing field carried this.
     priced_at: Optional[str] = None
+    #: Whether clearing the named wall is enough to admit the request. It is NOT,
+    #: and this field says so rather than leaving a client to infer it from a
+    #: `shortfall_microusd` that looks like a price.
+    #:
+    #: Admission refuses at the FIRST wall that says no, and some walls refuse
+    #: before the transaction runs at all -- `_pipeline.py`'s pool check is
+    #: arithmetic on a row it just read, so when it refuses, no other wall has been
+    #: evaluated. A hint that carried a shortfall and said nothing else was read as
+    #: "raise this much and you are through", which is how an approved raise can
+    #: buy nothing: the member raises the pool, the raise lands, and the identical
+    #: request is refused by a wall nobody mentioned.
+    #:
+    #: Always true today, deliberately, and that is not a placeholder: it is the
+    #: same shape as the usage aggregation's `tag_total_is_a_lower_bound`, a
+    #: statement about what the number is not. A later change that enumerates every
+    #: refusing wall from the transaction's cancellation reasons may set it false
+    #: for those refusals, because there it will be knowable.
+    raising_this_may_not_be_sufficient: bool = True
 
 
 # ---------------------------------------------------------------------------

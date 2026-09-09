@@ -10,8 +10,7 @@ from mvp.routing.quota import (
     _pk_user,
     _sk,
     build_reserve_txn_items,
-    release_quota,
-    settle_quota,
+    build_adjust_txn_items,
     soft_check_exhausted,
 )
 
@@ -99,17 +98,38 @@ class TestReserveEnforcement:
 
 
 class TestSettleRelease:
+    """The settle and release adjustments, driven through the BUILDER production uses.
+
+    These two tests previously drove `settle_quota` / `release_quota`, a pair of
+    functions that issued a bare `update_item` per scope. Those are gone: the money
+    path now composes the per-model adjustment into ONE `TransactWriteItems` with the
+    per-user money ceiling's, because two independent writes let a crash land between
+    them. A test that kept calling the old pair would have gone on passing while
+    testing nothing the gateway runs — which is the failure mode of replacing a path
+    and leaving it standing.
+
+    Driven through a real transaction rather than by inspecting the returned dicts, so
+    the assertion is about the effect on the row and not about the shape of an item.
+    """
+
+    def _apply(self, items):
+        import boto3
+        boto3.client("dynamodb", region_name="us-east-1").transact_write_items(
+            TransactItems=items)
+
     def test_settle_adjusts_used_to_actual(self, quota_table):
         pk, sk = _pk_tenant("acme"), _sk("m", "2026-07")
-        quota_table.put_item(Item={"pk": pk, "sk": sk, "used": 15000})  # 5000 reserved + 10000 prior
-        settle_quota(tenant_id="acme", user_id=None, model="m", period="2026-07",
-                     reserved_amount=5000, actual_amount=4200)
+        quota_table.put_item(Item={"pk": pk, "sk": sk, "used": 15000})
+        self._apply(build_adjust_txn_items(
+            "acme", None, "m", "2026-07", 4200 - 5000,
+            tenant_scope=True, user_scope=False))
         # used += (4200 - 5000) = -800 → 14200
         assert int(quota_table.get_item(Key={"pk": pk, "sk": sk})["Item"]["used"]) == 14200
 
     def test_release_removes_reservation(self, quota_table):
         pk, sk = _pk_tenant("acme"), _sk("m", "2026-07")
         quota_table.put_item(Item={"pk": pk, "sk": sk, "used": 5000})
-        release_quota(tenant_id="acme", user_id=None, model="m", period="2026-07",
-                      reserved_amount=5000)
+        self._apply(build_adjust_txn_items(
+            "acme", None, "m", "2026-07", -5000,
+            tenant_scope=True, user_scope=False))
         assert int(quota_table.get_item(Key={"pk": pk, "sk": sk})["Item"]["used"]) == 0

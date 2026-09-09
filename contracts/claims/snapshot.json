@@ -1233,6 +1233,18 @@
   },
   "cl-ee049bfef5db": {
    "first_seen": "added by the C3.2b/C3.2c level correction: the reclaim covers all three counters the admission transaction debits, so the sentence that said otherwise was reworded"
+  },
+  "cl-0f4c6b989451": {
+   "first_seen": "added by PR 3 (the per-user dollar quota): docs/design/limits.md gained guarantee sentences describing the new user_dollar_quota wall"
+  },
+  "cl-5aa49a566d0a": {
+   "first_seen": "added by PR 3 (the per-user dollar quota): docs/design/limits.md gained guarantee sentences describing the new user_dollar_quota wall"
+  },
+  "cl-998398b6a4d3": {
+   "first_seen": "added by PR 3 (the per-user dollar quota): docs/design/limits.md gained guarantee sentences describing the new user_dollar_quota wall"
+  },
+  "cl-84ecabc2bbb7": {
+   "first_seen": "added by PR 3 (the per-user dollar quota): docs/design/limits.md gained guarantee sentences describing the new user_dollar_quota wall"
   }
  },
  "retired": {
@@ -1529,7 +1541,10 @@
     "C8.6": "N",
     "C8.7": "N",
     "C12.6": "E",
-    "C13.4": "E"
+    "C13.4": "E",
+    "C14.33": "B",
+    "C14.34": "E",
+    "C14.35": "B"
    }
   },
   "retired": {},
