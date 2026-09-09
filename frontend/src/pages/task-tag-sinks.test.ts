@@ -42,7 +42,24 @@ function stripComments(src: string): string {
 }
 
 /** Files that read or write a tag / comment value. */
-const FILES = ['MeLimitRaises.tsx', 'MeUsageByTag.tsx', 'LimitRaiseApproval.tsx'] as const
+/**
+ * Files that read or write a tag / comment value, relative to this one.
+ *
+ * The list follows the VALUE, not the feature. `UsageByTagReport.tsx` is here because the tag
+ * rendering moved there when three surfaces started sharing it; the pages that call it are not,
+ * because they became thin callers that hold no tag at all -- there is nothing in them that
+ * could reach a sink.
+ *
+ * The not-vacuous assertion below is what established that, twice: it failed when the self page
+ * was left on the list and again when the new admin page was added to it. Without that
+ * assertion the scan would have gone on passing while watching files that no longer draw a tag,
+ * which is the shape of a guard that has quietly stopped guarding anything.
+ */
+const FILES = [
+  'MeLimitRaises.tsx',
+  'LimitRaiseApproval.tsx',
+  '../components/common/UsageByTagReport.tsx',
+] as const
 
 const FORBIDDEN: { name: string; re: RegExp; why: string }[] = [
   {

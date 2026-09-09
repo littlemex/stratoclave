@@ -1187,6 +1187,25 @@ export const api = {
         `/api/mvp/admin/limit-raises?${params.toString()}`,
       )
     },
+    /**
+     * One tenant's usage grouped by task tag, for an administrator (`usage:read-all`).
+     *
+     * Built with `URLSearchParams` rather than string concatenation: `user_id` is free text a
+     * person types, and a value containing `&`, `#`, `%` or a space must land in one parameter
+     * rather than inventing another. A blank member is OMITTED, never sent as `user_id=`, which
+     * the route would read as a filter for the empty string.
+     */
+    tenantUsageByTag: (
+      tenantId: string,
+      query: { period: string; userId?: string },
+    ) => {
+      const params = new URLSearchParams({ period: query.period })
+      if (query.userId) params.set('user_id', query.userId)
+      return jsonRequest<UsageByTagResponse>(
+        `/api/mvp/admin/tenants/${encodeURIComponent(tenantId)}/usage/by-tag?${params}`,
+      )
+    },
+
     approveLimitRaise: (
       request_id: string,
       body: { approved_amount_microusd: number; expires_at: number; decision_comment?: string },
