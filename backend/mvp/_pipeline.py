@@ -3192,9 +3192,13 @@ def reserve_credit(
     still uses `cost_microusd` exactly as always (that is what actually gates
     admission), but `ReservationContext.measured_bound_microusd` records
     `bound_microusd` instead, because recording the bound is the entire point
-    of shadow mode. Omitted (every other caller, and every state but
-    `shadow`), `measured_bound_microusd` defaults to `cost_microusd` — bound
-    and reserved coincide, unchanged from before this parameter existed.
+    of shadow mode. Omitted, `measured_bound_microusd` is `None`: an absent
+    bound is recorded as absent rather than as `cost_microusd`, because the
+    only state that omits it is `accounting`, where `cost_microusd` is the
+    legacy heuristic and not a bound at all. This used to default to
+    `cost_microusd` on the reasoning that "bound and reserved coincide" --
+    true of `enforced`, which passes the bound explicitly and so never took
+    that branch.
 
     Returns a `ReservationContext` for the settle step. Raises HTTP 402 with a
     `reason` of `personal_budget_exhausted` or `tenant_pool_exhausted`.
@@ -3204,9 +3208,27 @@ def reserve_credit(
     purely so a client can label the refusal `cascade`/`pin`/`fallback_disabled`
     without this function knowing anything about candidate chains.
     """
+    # A bound, or nothing. NOT a fallback to `cost_microusd`, and it used to be.
+    #
+    # The fallback's stated reason was that "bound and reserved coincide" when no explicit
+    # bound is passed. That is true of the `enforced` state -- and `enforced` never reached
+    # the fallback, because both production call sites pass `bound_microusd=bound` whenever
+    # `_price` computed one. The ONLY state that reached it was `accounting`, where no bound
+    # was computed at all and `cost_microusd` is the legacy heuristic estimate. So the
+    # fallback fired exactly where its own justification does not hold, and wrote a
+    # heuristic estimate into an attribute named for a measured bound.
+    #
+    # Why that matters rather than being cosmetic: this attribute's purpose, per
+    # `UsageLogsRepository.record`, is a shadow-run ratio analysis -- comparing the bound to
+    # the actual charge to decide whether the bound is tight enough to ENFORCE. A mixture of
+    # bounds and heuristic estimates under one name makes that comparison, and the decision
+    # drawn from it, quietly wrong. The row carries no `bound_mode`, so a reader cannot
+    # filter the mixture back apart.
+    #
+    # `record`'s own docstring already promised this: "Absent when the bound was never
+    # computed for this request (the `accounting` state)." The code now agrees with it.
     _measured_bound_microusd = (
-        int(bound_microusd) if bound_microusd is not None
-        else (int(cost_microusd) if cost_microusd is not None else None)
+        int(bound_microusd) if bound_microusd is not None else None
     )
     repo = UserTenantsRepository()
     # Admission READS authority; it does not create it. This used to call
