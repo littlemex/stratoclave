@@ -45,6 +45,10 @@ pub async fn run(
 
             eprintln!("[INFO] Sending message...");
             let response = api_client.converse(&message).await?;
+            crate::mvp::sc_headers::warn_if_task_tag_dropped(
+                api_client.sc_headers(),
+                response.task_tag_dropped.as_deref(),
+            );
 
             // Pipe stdout is data a downstream consumer trusts: a partial /
             // truncated response must NOT be emitted as if complete. Print the

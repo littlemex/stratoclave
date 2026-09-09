@@ -55,6 +55,18 @@ pub struct ConverseResponse {
     pub message: String,
     pub complete: bool,
     pub reason: Option<String>,
+    /// The gateway's reason for discarding the `x-sc-task-tag` we sent, if it did.
+    ///
+    /// Present only on an actual drop — the gateway omits the header for both an absent
+    /// tag and an accepted one. Surfaced because this is the ONE path that can see it:
+    /// `pipe` and `chat` make the request themselves, whereas the `claude`/`codex`
+    /// wrappers hand the connection to a child and never observe a response.
+    ///
+    /// From this client only `"reserved"` is reachable. `"grammar"` is not, because
+    /// `sc_headers` refuses a malformed tag before the request is built — so a
+    /// `"grammar"` value arriving here means the two grammars have drifted apart and is
+    /// worth reading as that, not as a user error.
+    pub task_tag_dropped: Option<String>,
 }
 
 /// How the SSE read loop terminated — drives the completeness check so a
@@ -105,6 +117,12 @@ impl ApiClient {
                 CliError::General(format!("Failed to build HTTP client: {}", e))
             })?;
         Ok(Self { config, http, bearer_token, model_id, sc_headers })
+    }
+
+    /// The validated attribution headers this client sends. Read by `pipe`/`chat` to name the
+    /// tag they asked for when the gateway reports having dropped it.
+    pub fn sc_headers(&self) -> &crate::mvp::sc_headers::ScHeaders {
+        &self.sc_headers
     }
 
     /// SINGLE choke point that assembles a `/v1/messages` POST. Every inference
@@ -360,6 +378,13 @@ impl ApiClient {
             return Err(Self::map_status_error(status, &body));
         }
 
+        // Read off the response BEFORE the body is consumed by the stream loop below.
+        let task_tag_dropped = response
+            .headers()
+            .get(crate::mvp::sc_headers::H_TASK_TAG_DROPPED)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
         // Read the SSE stream chunk by chunk with a per-chunk timeout. We buffer
         // RAW BYTES (not lossy-decoded strings): a multi-byte UTF-8 codepoint
         // split across TCP chunk boundaries must not be corrupted into U+FFFD.
@@ -457,9 +482,16 @@ impl ApiClient {
                             stop_reason.as_deref().unwrap_or("unknown")
                         ))
                     },
+                    task_tag_dropped,
                 })
             }
             StreamEnd::Errored(msg) => {
+                // A drop reported alongside an empty errored/truncated response is lost with
+                // the Err: those arms carry no ConverseResponse. Stated rather than worked
+                // around — the request was still billed and still mislabelled, but the caller
+                // is already being told the larger thing, and threading a second channel
+                // through the error type to report a label on a response that does not exist
+                // costs more than it tells anyone.
                 if content.is_empty() {
                     Err(CliError::ServerError(format!(
                         "Backend streamed an error: {}",
@@ -470,6 +502,7 @@ impl ApiClient {
                         message: content,
                         complete: false,
                         reason: Some(format!("backend error: {}", msg)),
+                        task_tag_dropped,
                     })
                 }
             }
@@ -484,6 +517,7 @@ impl ApiClient {
                         message: content,
                         complete: false,
                         reason: Some(format!("truncated: {}", why)),
+                        task_tag_dropped,
                     })
                 }
             }
@@ -654,17 +688,26 @@ mod tests {
             Some("team-a".into()),
             Some("wr-1".into()),
             Some("claude-sonnet-4-6".into()),
+            Some("migration-42".into()),
         )
         .unwrap();
         let h = built_sc_headers(sc);
         assert_eq!(h.get("x-sc-group-id").unwrap(), "team-a");
         assert_eq!(h.get("x-sc-workflow-run-id").unwrap(), "wr-1");
         assert_eq!(h.get("x-sc-model-pin").unwrap(), "claude-sonnet-4-6");
+        assert_eq!(h.get("x-sc-task-tag").unwrap(), "migration-42");
+        // "full set" has to mean the whole set, or the next header added is silently outside
+        // the only test whose name promises to cover it. Counted over the `x-sc-` prefix
+        // rather than the whole map, which also carries auth and content-type.
+        assert_eq!(
+            h.keys().filter(|k| k.as_str().starts_with("x-sc-")).count(),
+            4
+        );
     }
 
     #[test]
     fn attaches_only_present_sc_headers() {
-        let sc = ScHeaders::validated(Some("team-a".into()), None, None).unwrap();
+        let sc = ScHeaders::validated(Some("team-a".into()), None, None, None).unwrap();
         let h = built_sc_headers(sc);
         assert!(h.contains_key("x-sc-group-id"));
         assert!(!h.contains_key("x-sc-workflow-run-id"));

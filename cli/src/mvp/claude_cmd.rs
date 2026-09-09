@@ -225,13 +225,15 @@ mod tests {
             Some("team-a".into()),
             None,
             Some("openai.gpt-5.4/pin:1".into()),
+            Some("migration-42".into()),
         )
         .unwrap();
         let v = set(&h, None);
         let lines: Vec<&str> = v.split('\n').collect();
-        assert_eq!(lines.len(), 2); // exactly one line per present header
+        assert_eq!(lines.len(), 3); // exactly one line per present header
         assert_eq!(lines[0], "x-sc-group-id: team-a");
         assert_eq!(lines[1], "x-sc-model-pin: openai.gpt-5.4/pin:1");
+        assert_eq!(lines[2], "x-sc-task-tag: migration-42");
         // ": " split round-trips the value even though values contain ':'
         assert_eq!(lines[1].split_once(": ").unwrap().1, "openai.gpt-5.4/pin:1");
     }
@@ -246,7 +248,7 @@ mod tests {
 
     #[test]
     fn merge_preserves_user_headers_and_appends_ours() {
-        let h = ScHeaders::validated(Some("team-a".into()), None, None).unwrap();
+        let h = ScHeaders::validated(Some("team-a".into()), None, None, None).unwrap();
         let v = set(&h, Some("anthropic-beta: feature-x\nx-custom: keepme"));
         let lines: Vec<&str> = v.split('\n').collect();
         assert_eq!(
@@ -269,7 +271,7 @@ mod tests {
 
     #[test]
     fn merge_strips_inherited_xsc_and_control_lines() {
-        let h = ScHeaders::validated(Some("real-group".into()), None, None).unwrap();
+        let h = ScHeaders::validated(Some("real-group".into()), None, None, None).unwrap();
         // Inherited tries to sneak an x-sc-group-id AND a CR-splitting line.
         let v = set(
             &h,
@@ -306,12 +308,48 @@ mod tests {
         );
     }
 
+    /// The inherited-header filter is written as a **prefix** rule, and that is the only
+    /// reason a header this file has never heard of is protected from forgery. Pinned here
+    /// because the natural "tightening" — matching the three, now four, names we know — reads
+    /// as stricter and is strictly weaker: it would let the next `x-sc-*` header be inherited
+    /// from the environment and forge its own attribution, silently, until someone noticed a
+    /// billing report that did not add up.
+    ///
+    /// The value used is deliberately NOT one of the real header names. A test that used
+    /// `x-sc-task-tag` would keep passing under a name-list filter and prove nothing.
+    #[test]
+    fn merge_drops_an_inherited_sc_header_this_code_does_not_know() {
+        let inherited = "x-sc-not-a-real-header-yet: forged";
+        let v = set(
+            &ScHeaders::validated(Some("g".into()), None, None, Some("migration-42".into()))
+                .unwrap(),
+            Some(inherited),
+        );
+        assert!(!v.contains("forged"), "unknown x-sc-* survived: {v}");
+        assert!(!v.contains("x-sc-not-a-real-header-yet"), "{v}");
+        assert_eq!(v, "x-sc-group-id: g\nx-sc-task-tag: migration-42");
+    }
+
+    /// The same forgery attempt aimed at the tag itself: an inherited `x-sc-task-tag` must
+    /// not survive, and must not win over the one this invocation validated.
+    #[test]
+    fn merge_drops_inherited_task_tag_and_keeps_ours() {
+        let v = set(
+            &ScHeaders::validated(None, None, None, Some("ours".into())).unwrap(),
+            Some("x-sc-task-tag: theirs"),
+        );
+        assert_eq!(v, "x-sc-task-tag: ours");
+    }
+
     // NEW-L1 (rev2): exotic line-break code points inside an inherited line
     // cause that line to be dropped, not passed through.
     #[test]
     fn merge_drops_lines_with_exotic_linebreaks() {
         let inherited = "anthropic-beta: x\u{2028}x-sc-model-pin: evil";
-        let v = set(&ScHeaders::validated(Some("g".into()), None, None).unwrap(), Some(inherited));
+        let v = set(
+            &ScHeaders::validated(Some("g".into()), None, None, None).unwrap(),
+            Some(inherited),
+        );
         // The whole U+2028-bearing line is dropped; only our flag remains.
         assert_eq!(v, "x-sc-group-id: g");
         assert!(!v.contains("evil"));
