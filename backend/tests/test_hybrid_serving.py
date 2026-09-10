@@ -217,8 +217,16 @@ def test_vllm_pin_rejected_400_when_flag_off(monkeypatch):
     from mvp import _pipeline
     from mvp.routing.model_resolver import RoutingConfig
 
+    # C6: `_validate_model_pin` grew a `user_cfg` positional (between
+    # `tenant_cfg` and `wire_protocol`) and a keyword-only `tenant_id`, so
+    # eligibility can be consulted at this call site too. Servability is
+    # checked BEFORE eligibility (this test's own 400 fires there), so
+    # neither new parameter's VALUE matters here -- only that both are
+    # supplied in the new shape.
     with pytest.raises(HTTPException) as ei:
-        _pipeline._validate_model_pin("vllm-llama-3", RoutingConfig(), "messages")
+        _pipeline._validate_model_pin(
+            "vllm-llama-3", RoutingConfig(), None, "messages", tenant_id="hybrid-serving-test-tenant",
+        )
     assert ei.value.status_code == 400
     assert ei.value.detail["reason"] == "invalid_model_pin"
 

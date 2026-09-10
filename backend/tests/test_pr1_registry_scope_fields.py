@@ -315,13 +315,31 @@ class TestAccess:
             _entry(access="entitlement_required"))))
         assert entry.access == "entitlement_required"
 
-    def test_every_shipped_entry_is_general(self):
-        non_general = [
-            e.bedrock_model_id for e in registry_entries() if e.access != "general"
+    def test_every_shipped_entry_is_general_or_explicitly_entitlement_gated(self):
+        """This used to assert 'every shipped entry is `general`' -- true at
+        PR1's base commit, false the moment C12 files the first shipped
+        `entitlement_required` entry. That FACT changed; the invariant it was
+        protecting did not: `access` is an intentional, binary choice an
+        operator made per entry (the loader already rejects any third
+        value), never something that drifted to a value nobody chose.
+
+        Asserted as 'both buckets are populated' rather than as a growing
+        list of named exceptions -- a list of ids would need editing again
+        on every future entry in either bucket; this does not."""
+        entries = registry_entries()
+        general = [e.bedrock_model_id for e in entries if e.access == "general"]
+        gated = [e.bedrock_model_id for e in entries if e.access == "entitlement_required"]
+        other = [
+            e.bedrock_model_id for e in entries
+            if e.access not in ("general", "entitlement_required")
         ]
-        assert not non_general, (
-            f"the handoff's Measured facts say every shipped entry is `general`; "
-            f"these are not: {non_general}"
+        assert not other, f"access value outside the two-member enum: {other}"
+        assert general, "expected at least one general-access entry (the grandfathered baseline)"
+        assert gated, (
+            "expected at least one entitlement_required entry (C12 files the "
+            "first); if none exists yet in this worktree, that is this test "
+            "correctly failing until the registry entry lands, not a bug in "
+            "the test"
         )
 
 

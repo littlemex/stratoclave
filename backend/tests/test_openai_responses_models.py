@@ -168,10 +168,18 @@ def test_openai_models_endpoint_scope_gating(monkeypatch):
     assert resp.status_code == 403
 
 
-def test_openai_models_lists_only_openai_provider(monkeypatch):
+def test_openai_models_lists_only_openai_provider(monkeypatch, dynamodb_mock):
+    """C8: the listing now reads the caller's tenant/user routing config and
+    entitlement grants to filter per caller, so it needs a real (mocked)
+    DynamoDB behind it -- `dynamodb_mock` (`tests/conftest.py`) creates the
+    tables `test_vsr_pin.py`'s `api_client` fixture already relies on for the
+    same reason. Not stubbed away: patching the read out would stop this
+    test from exercising the read C8 requires, and this test's whole point
+    is that the listing still returns 200 with the right shape once that
+    read actually happens."""
     client = _make_app(monkeypatch, scope_holder=["responses:send"], codex_enabled=True)
     resp = client.get("/openai/v1/models")
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["object"] == "list"
     ids = {row["id"] for row in body["data"]}

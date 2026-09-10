@@ -2199,6 +2199,86 @@ def _err_503(reason: str) -> HTTPException:
     )
 
 
+def _entitlement_grants_for(tenant_id: str, entry) -> list:
+    """The `grants` `mvp.eligibility.refusal_for`'s entitlement axis reads,
+    for ONE candidate `entry` — fetched ONLY when that entry's `access`
+    actually needs it, so a request no candidate of which is
+    `entitlement_required` never touches the entitlement store at all (the
+    same reason `admin_entitlements.EntitlementStoreUnavailable`'s own
+    docstring gives: an unreadable store is never evidence of absence, so its
+    failure must not become the total outage of an unrelated, `general`-
+    access request).
+
+    Returns exactly what `admin_entitlements.list_entitlements(tenant_id)`
+    returns — a `list[Entitlement]` — UNMODIFIED: `refusal_for` reads the
+    grant's own `model_family`/`profile_scope` fields itself, so reshaping the
+    result into some other shape here would be a second, private idea of what
+    a grant looks like.
+
+    Raises the SAME retryable 503 this module already raises for an
+    unreadable routing config (`_err_503`, via `RoutingConfigUnavailable`
+    above) when the entitlement store cannot be read — not a 403: the caller
+    may well hold the grant, and refusing would tell them to request access
+    they already have.
+    """
+    if entry.access != "entitlement_required":
+        return []
+    from .admin_entitlements import EntitlementStoreUnavailable, list_entitlements
+
+    try:
+        return list_entitlements(tenant_id)
+    except EntitlementStoreUnavailable:
+        raise _err_503("entitlement_store_unavailable") from None
+
+
+def eligibility_listing_context(user) -> tuple:
+    """`(tenant_cfg, user_cfg, entitlement_grants)` for a model-listing route
+    (C8) — `mvp.anthropic.list_models` and `mvp.openai_responses
+    .list_openai_models` both call this rather than each reading the tenant,
+    user and entitlement state on its own terms.
+
+    Unlike the reserve chokepoint, a listing has no `general`-only path to
+    spare: it must answer, for EVERY registry entry, whether THIS caller may
+    use it, so the entitlement store is read unconditionally rather than
+    gated on any one entry's `access` — there's no candidate list to gate on
+    here, only the whole registry.
+
+    Raises `HTTPException(503)` if ANY of the three reads fails. A listing
+    that degraded to an empty or partial `data` array on a read fault would
+    be indistinguishable from "the caller may use nothing" — a policy
+    decision this gateway never actually made — so every fault maps to the
+    SAME retryable 503 the reserve chokepoint already uses for an unreadable
+    routing config, rather than either route choosing its own degraded
+    shape.
+    """
+    from .admin_entitlements import EntitlementStoreUnavailable, list_entitlements
+    from .routing.config import (
+        RoutingConfigUnavailable,
+        get_tenant_routing_config,
+        get_user_routing_config,
+    )
+
+    try:
+        tenant_cfg = get_tenant_routing_config(user.org_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed", tenant_id=user.org_id)
+        raise _err_503("routing_config_unavailable") from None
+    try:
+        user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed",
+                       tenant_id=user.org_id, user_id=user.user_id)
+        raise _err_503("routing_config_unavailable") from None
+    try:
+        # Passed straight to `refusal_for` as-is (an `Iterable[Entitlement]`,
+        # unmodified) — see `_entitlement_grants_for`'s own docstring for why
+        # this module never reshapes a grant into a private tuple form.
+        ent_grants = list_entitlements(user.org_id)
+    except EntitlementStoreUnavailable:
+        raise _err_503("entitlement_store_unavailable") from None
+    return tenant_cfg, user_cfg, ent_grants
+
+
 class QuotaExhausted(Exception):
     """A per-model quota condition failed during reserve — the caller's
     cascading fallback should try the next model. Carries which model's quota
@@ -2558,6 +2638,23 @@ def reserve_credit_for_model(
         logger.warning("routing_config_unavailable_fail_closed", tenant_id=user.org_id)
         raise _err_503("routing_config_unavailable") from None
 
+    # C9's user-narrowing axis and C4's entitlement grant are their own config
+    # keys, independent of chain/allowlist/quotas, so ANY request — including
+    # a pin and the no-config passthrough below, neither of which used to read
+    # this at all — can be scope- or entitlement-restricted regardless of
+    # whether the tenant has configured a chain or an allowlist. Read once,
+    # here, before every branch that follows, rather than once per branch:
+    # same discipline as the tenant read immediately above, and it is what
+    # lets the pin path (previously the one branch that never fetched a user
+    # config at all) see a user's `profile_scopes` narrowing for the first
+    # time.
+    try:
+        user_cfg = get_user_routing_config(user.org_id, user.user_id)
+    except RoutingConfigUnavailable:
+        logger.warning("routing_config_unavailable_fail_closed",
+                       tenant_id=user.org_id, user_id=user.user_id)
+        raise _err_503("routing_config_unavailable") from None
+
     # VSR hard pin (P0-15): validate, then force the candidate list to exactly
     # [pin] and fall through to the same reserve loop (pricing + quota + atomic
     # reserve) — so pinning reuses all the money machinery, only the candidate
@@ -2644,10 +2741,11 @@ def reserve_credit_for_model(
         return ctx
 
     if vsr_hard_model:
-        _validate_model_pin(vsr_hard_model, tenant_cfg, wire_protocol)
+        _validate_model_pin(vsr_hard_model, tenant_cfg, user_cfg, wire_protocol,
+                             tenant_id=user.org_id)
         ctx = _reserve_over_candidates(
             user, reservation_tokens, candidates=[vsr_hard_model],
-            tenant_cfg=tenant_cfg, price=_price,
+            tenant_cfg=tenant_cfg, user_cfg=user_cfg, price=_price,
             payload_hash=payload_hash, payload_bytes=input_bytes,
             router_mode="pin",
         )
@@ -2678,7 +2776,33 @@ def reserve_credit_for_model(
         return ctx
     # No routing config at all → passthrough on the requested model (fully
     # backward compatible: same reservation as before, no quota lines).
+    #
+    # C6's "direct path": eligibility still gates here even though nothing
+    # else does, because `profile_scopes` and an entitlement grant are their
+    # OWN config keys — a tenant that has set only one of those (no allowlist
+    # at all) must not reach an unconfigured passthrough unchecked. That would
+    # be exactly the bug this PR closes, one layer up: `us`-only holding "by
+    # omission" only works if the omission is itself checked.
     if not tenant_cfg.chain and not tenant_cfg.allowlist and not tenant_cfg.quotas:
+        from .eligibility import refusal_for
+
+        entry = _resolve_pricing(model_name)
+        ent_grants = _entitlement_grants_for(user.org_id, entry)
+        refusal = refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,
+                               grants=ent_grants)
+        if refusal is not None:
+            raise _err_403(refusal)
+        # GUARD, NOT DECORATION: this `reserve_credit` call is the one place in
+        # this branch that spends money. No text scan catches an OMITTED
+        # check the way C5 catches a DUPLICATED one, so the only thing that
+        # will fail loudly if a future edit adds another early return here
+        # (or moves this one below a new branch) that reaches `reserve_credit`
+        # without the `refusal_for` call above it is a test that builds a
+        # tenant with `chain`/`allowlist`/`quotas` all empty but
+        # `profile_scopes` restricted (or the default model `entitlement_
+        # required` and ungranted), hits this exact passthrough, and asserts
+        # 403. If you delete or bypass the check above, that test is what
+        # must turn red.
         pk, cost, snap, bound = _price(model_name)
         return _stamp_requested(reserve_credit(
             user, reservation_tokens,
@@ -2696,14 +2820,6 @@ def reserve_credit_for_model(
             router_mode="fallback_disabled",
         ))
 
-    # Same discipline as the tenant config: a user chain NARROWS the candidate
-    # set, so serving the request without it would widen what this user may reach.
-    try:
-        user_cfg = get_user_routing_config(user.org_id, user.user_id)
-    except RoutingConfigUnavailable:
-        logger.warning("routing_config_unavailable_fail_closed",
-                       tenant_id=user.org_id, user_id=user.user_id)
-        raise _err_503("routing_config_unavailable") from None
     candidates = _resolve_candidate_chain(
         requested_model=model_name,
         tenant_cfg=tenant_cfg,
@@ -2732,14 +2848,14 @@ def reserve_credit_for_model(
         _fallback_allowed = (user_cfg.fallback == "on")
     return _stamp_requested(_reserve_over_candidates(
         user, reservation_tokens, candidates=candidates,
-        tenant_cfg=tenant_cfg, price=_price,
+        tenant_cfg=tenant_cfg, user_cfg=user_cfg, price=_price,
         payload_hash=payload_hash, payload_bytes=input_bytes,
         router_mode="cascade" if _fallback_allowed else "fallback_disabled",
     ))
 
 
 def _reserve_over_candidates(
-    user, reservation_tokens, *, candidates, tenant_cfg, price,
+    user, reservation_tokens, *, candidates, tenant_cfg, user_cfg, price,
     payload_hash=None, payload_bytes=None, router_mode=None,
 ):
     """Walk an ordered candidate list, pricing + quota-reserving each atomically.
@@ -2750,11 +2866,29 @@ def _reserve_over_candidates(
     single-element pin list that means: the pinned model's quota is gone, no
     fallback — the hard-pin contract).
 
+    **C6 — this is the enforcement boundary, not `_validate_model_pin`.** Every
+    candidate this loop is about to try — the head of an ordinary cascade, any
+    later fallback candidate, and the sole entry of a pin's one-element list
+    alike — is resolved and run through `mvp.eligibility.refusal_for`
+    IMMEDIATELY BEFORE pricing/reserving it, never once on the requested name
+    up front. That is the whole point: a candidate list built for OTHER
+    reasons (allowlist ∩ chain ∩ breaker tier) can still contain an entry this
+    tenant/user may not use on the entitlement or scope axis — that is
+    precisely how a `us`-restricted request could otherwise fall through to a
+    configured `global` candidate on ordinary quota-cascade fallback. A
+    refusal here raises `_err_403` immediately (it does NOT advance to the
+    next candidate the way `QuotaExhausted` does): eligibility is a policy
+    boundary, not a transient resource limit, so treating it as skippable
+    would silently keep trying candidates this predicate has already told the
+    caller it may not reach.
+
     `router_mode` (F3, contract R36) is display-only, forwarded to whichever
     402 this call ultimately raises; it is opaque to every routing decision
     made in this function.
     """
+    from .eligibility import refusal_for
     from .models import canonical_model_id as _canonical_model_id
+    from .models import resolve_model as _resolve_registry
     from .routing import quota as _quota
     from mvp import grants as _grants
 
@@ -2783,6 +2917,19 @@ def _reserve_over_candidates(
     # scope line is the refusal body, not that shape.
     pricing_version_by_model: dict[str, Optional[str]] = {}
     for idx, model in enumerate(candidates):
+        # C6 — per candidate, immediately before its reservation is attempted
+        # (see this function's own docstring). `_resolve_registry` should
+        # never raise here: every candidate reaching this loop already
+        # resolved once, either through `_resolve_candidate_chain`'s own
+        # `_servable()` filter or (the requested model, exempt from that
+        # filter) through the route that validated it before calling into
+        # this module at all.
+        entry = _resolve_registry(model)
+        ent_grants = _entitlement_grants_for(user.org_id, entry)
+        refusal = refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,
+                               grants=ent_grants)
+        if refusal is not None:
+            raise _err_403(refusal)
         pk, cost, snap, bound = price(model)
         priced_tried.append((model, pk, cost))
         pricing_version_by_model[model] = (
@@ -2976,7 +3123,9 @@ def _tier_or_zero(pricing_key: str) -> int:
         return 0
 
 
-def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> None:
+def _validate_model_pin(
+    pin: str, tenant_cfg, user_cfg, wire_protocol: Optional[str], *, tenant_id: str,
+) -> None:
     """Validate a VSR hard pin (P0-15). Servability first (400), then policy (403).
 
     A pin is NOT exempt from these checks — it's a model the route never
@@ -2996,7 +3145,17 @@ def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> N
     chain-only tenant (no allowlist) the `chain` IS the model policy, so the pin
     must be one of the chain's models — otherwise a client header could escape
     the tenant's routing policy entirely. Only a tenant with neither allowlist
-    nor chain (pure passthrough) accepts an arbitrary servable pin."""
+    nor chain (pure passthrough) accepts an arbitrary servable pin.
+
+    **C6 — eligibility joins the policy stage here, but this is DEFENCE IN
+    DEPTH, not the boundary.** `mvp._pipeline._reserve_over_candidates` is the
+    actual enforcement point: it re-checks `mvp.eligibility.refusal_for` on
+    this SAME entry immediately before the pin's reservation is attempted,
+    because the pin enters that same loop as a one-element candidate list. The
+    check below exists so a pin that the model/entitlement/scope axis would
+    refuse anyway is rejected here, at the cheap end, before pricing runs —
+    not because reaching the reserve loop without it would be unsafe."""
+    from .eligibility import refusal_for
     from .models import resolve_model as _resolve_registry
 
     try:
@@ -3031,6 +3190,12 @@ def _validate_model_pin(pin: str, tenant_cfg, wire_protocol: Optional[str]) -> N
                     break
         if not allowed:
             raise _err_403("model_pin_not_allowed")
+
+    ent_grants = _entitlement_grants_for(tenant_id, entry)
+    refusal = refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,
+                           grants=ent_grants)
+    if refusal is not None:
+        raise _err_403(refusal)
 
 
 def _resolve_candidate_chain(
@@ -3073,6 +3238,7 @@ def _resolve_candidate_chain(
     write path stores canonical ids, so a client naming the same model by another
     alias is naming an allowed model.
     """
+    from .eligibility import MODEL_NOT_ALLOWED
     from .models import canonical_model_id as _canonical_model_id
     from .models import resolve_model as _resolve_registry
     from .routing.model_resolver import _resolve_chain
@@ -3096,9 +3262,9 @@ def _resolve_candidate_chain(
             # policy. Refusing is the whole point of an allowlist; substituting a
             # model the client did not ask for, or serving the one it did ask for,
             # both answer a question the operator already answered with "no".
-            logger.info("model_not_allowed", tenant_id=_tenant_id,
+            logger.info(MODEL_NOT_ALLOWED, tenant_id=_tenant_id,
                         requested_model=requested_model)
-            raise _err_403("model_not_allowed")
+            raise _err_403(MODEL_NOT_ALLOWED)
     if breaker_max_tier is not None:
         # Candidates are model NAMES here, not pricing keys — use the name-aware
         # tier lookup so an alias is resolved through the registry rather than
@@ -3111,9 +3277,9 @@ def _resolve_candidate_chain(
     if not fallback_allowed:
         candidates = candidates[:1]
     if not candidates:
-        logger.info("model_not_allowed", tenant_id=_tenant_id,
+        logger.info(MODEL_NOT_ALLOWED, tenant_id=_tenant_id,
                     requested_model=requested_model)
-        raise _err_403("model_not_allowed")
+        raise _err_403(MODEL_NOT_ALLOWED)
 
     def _servable(model: str) -> bool:
         # The requested model is exempt: the route already validated it.
@@ -3150,7 +3316,7 @@ def _resolve_candidate_chain(
         # and then re-admitted here as a fallback.
         logger.info("no_servable_candidate", tenant_id=_tenant_id,
                     requested_model=requested_model, wire_protocol=wire_protocol)
-        raise _err_403("model_not_allowed")
+        raise _err_403(MODEL_NOT_ALLOWED)
     return servable
 
 
