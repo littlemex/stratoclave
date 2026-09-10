@@ -179,6 +179,12 @@ ALL_SCOPES: tuple[str, ...] = (
     "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
     "apikeys:revoke", "apikeys:revoke-self",
     "billing:read", "billing:write",
+    # C17: the entitlement store's own authority, separate from `tenants:*`.
+    # `entitlements:grant` creates/revokes a tenant's per-model-family grant;
+    # `entitlements:read` only sees what a tenant may use. Split for the same
+    # reason `limits:approve`/`limits:raise-self` are split below: seeing a
+    # tenant's entitlements is not the authority to change them.
+    "entitlements:grant", "entitlements:read",
     # Money-ceiling raises. Three scopes, and the split is the point rather than
     # granularity for its own sake: filing a raise is something every end user
     # does for their own tenant, deciding one is an authority, and deciding one

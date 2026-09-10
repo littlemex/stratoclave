@@ -24,6 +24,11 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     'billing:*',
     // Money-ceiling raises: filing one, and deciding one for any tenant.
     'limits:*',
+    // The entitlement store (C4/C17): granting/revoking a tenant's per-model-
+    // family access, and reading what a tenant may use. Split into two scopes
+    // upstream for the same reason as `limits:*` above; the admin role holds
+    // both via this wildcard.
+    'entitlements:*',
     'messages:send',
     'responses:send',
   ],
