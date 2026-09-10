@@ -27,6 +27,12 @@ CONCRETE = [
     "apikeys:create", "apikeys:create-self", "apikeys:read", "apikeys:read-self",
     "apikeys:revoke", "apikeys:revoke-self",
     "billing:read", "billing:write",
+    # C17 (model-onboarding PR2): granting/reading a tenant's model
+    # entitlements. Split into two scopes for the same reason as the
+    # `limits:*` split below -- seeing what a tenant may use is not the same
+    # authority as changing it. No implication edge: read-breadth only, and
+    # neither of these is a read of something the other also reads.
+    "entitlements:grant", "entitlements:read",
     # Money-ceiling raises (mvp/authz.py::ALL_SCOPES carries the full review
     # comment). Three scopes: filing a raise for one's own tenant, deciding
     # one for a tenant an actor owns, and deciding one for ANY tenant --
