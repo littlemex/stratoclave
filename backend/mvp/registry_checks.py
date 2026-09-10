@@ -289,3 +289,83 @@ def check_tenant_jurisdiction_against_failover(
             f"{jurisdiction!r}, but failover_regions() would route it through "
             f"{offending}, which leaves that jurisdiction"
         )
+
+
+# ---------------------------------------------------------------------------
+# C5 — one eligibility predicate: no call site outside mvp/eligibility.py may
+# spell one of its three refusal codes as a string literal.
+# ---------------------------------------------------------------------------
+
+# `mvp/eligibility.py` itself, resolved relative to this module (siblings in
+# the same package) — the one file this check must never flag, since that is
+# where the three codes are DEFINED, not reimplemented.
+_ELIGIBILITY_MODULE_PATH = Path(__file__).resolve().parent / "eligibility.py"
+# A refusal code written as a Python string literal (quote character,
+# then the code, then the SAME quote character) is what it looks like for a
+# call site to reimplement a refusal: raising it, logging it as an event
+# name, or hand-building the dict `_err_403` already builds all require
+# writing the code down that way. A bare, unquoted occurrence of the same
+# word in a comment or docstring is prose, not code, and is deliberately not
+# what this scans for — see the function docstring below for why that line
+# is drawn at the quote character rather than at the word.
+_REFUSAL_LITERAL_RE = re.compile(
+    r"""(["'])(model_not_allowed|model_not_entitled|scope_not_allowed)\1"""
+)
+
+
+def check_eligibility_has_one_implementation(mvp_dir: Optional[str] = None) -> None:
+    """Raise if any of `mvp.eligibility`'s three refusal codes — `model_not_
+    allowed`, `model_not_entitled`, `scope_not_allowed` — appears as a quoted
+    string literal in any `.py` file under `backend/mvp/` OTHER than `mvp/
+    eligibility.py` itself.
+
+    A truth-table test on `mvp.eligibility.refusal_for` passes even when
+    reserve, pin validation, or either listing route each carry their OWN copy
+    of a refusal — the helper being correct proves nothing about whether
+    anything actually calls it. This is the check that closes that gap: any
+    call site that independently decides to 403 with one of these codes has
+    to spell the code out as a string to do it, so the literal's presence
+    outside this one module IS the reimplementation, whatever raises it — an
+    `_err_403(...)` call, a log event name sharing the same word (both were
+    real, in `_pipeline.py`, before this check existed), or a hand-rolled
+    dict a new call site might reach for instead of importing the constant.
+
+    A plain text scan, not an AST walk, and deliberately so: an AST visitor
+    would have to know which node shapes count as "deciding a refusal" and
+    would miss the next shape a future call site invents; a text scan only
+    has to know that this repository's convention is to import the constant
+    (`from .eligibility import MODEL_NOT_ALLOWED`, etc.) rather than retype
+    the string, and a retyped string is exactly what it is built to see
+    regardless of what surrounds it.
+
+    `mvp_dir` is a test-only override — a fixture tree standing in for
+    `backend/mvp/`, so a test can prove this check fails on a planted
+    reimplementation without needing one to exist in the real tree. The
+    ordinary call (no argument) scans the real one.
+
+    Raises `ValueError` naming every offending file and which code(s) it
+    spells; returns `None` on success — the same contract every check in this
+    module already uses.
+    """
+    root = Path(mvp_dir) if mvp_dir is not None else Path(__file__).resolve().parent
+    eligibility_path = (
+        _ELIGIBILITY_MODULE_PATH if mvp_dir is None else root / "eligibility.py"
+    )
+    offenders: dict[str, set[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        if path.resolve() == eligibility_path.resolve():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        codes = {m.group(2) for m in _REFUSAL_LITERAL_RE.finditer(text)}
+        if codes:
+            offenders[str(path.relative_to(root))] = codes
+    if offenders:
+        detail = "; ".join(
+            f"{name}: {sorted(codes)}" for name, codes in sorted(offenders.items())
+        )
+        raise ValueError(
+            f"refusal code(s) found as string literals outside eligibility.py: {detail}"
+        )
