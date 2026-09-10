@@ -1,9 +1,17 @@
-"""Two offline registry checks (C10, C13). No AWS credentials, no network.
+"""Three offline checks (C10, C13, C15). No AWS credentials, no network.
 
-Both are plain functions over the in-memory registry (or an explicitly-passed
-one), so a test can call them directly instead of only observing them through
-`load_registry`'s side effects. Each raises `ValueError` naming the offending
-entries on failure and returns `None` on success — there is no partial result.
+C10 and C13 are plain functions over the in-memory registry (or an
+explicitly-passed one), so a test can call them directly instead of only
+observing them through `load_registry`'s side effects. C15 (PR2) is the same
+shape over a different default: a tenant's jurisdiction restriction lives in
+DynamoDB (nothing here reads it), but `failover_regions=None` resolves to the
+real `mvp.routing.chains.failover_regions()` — the same "None means the real
+thing" convention `check_profile_scopes_granted_by_iam`'s `entries=None`
+already uses for the registry — so an operator-facing caller can drive this
+from the deployment's own environment while a test drives it purely, with no
+second function needed for either. Every check here raises `ValueError`
+naming the offending entries/values on failure and returns `None` on success
+— there is no partial result.
 """
 from __future__ import annotations
 
@@ -13,6 +21,10 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .models import ModelEntry, NO_PROFILE_SCOPE, registry_entries
+from .routing.chains import _jurisdiction
+# Aliased so the check's own `failover_regions` PARAMETER (which shadows this
+# name inside the function body) can still be defaulted from the real thing.
+from .routing.chains import failover_regions as _real_failover_regions
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +230,62 @@ def check_profile_scopes_granted_by_iam(
                 f"not grant an inference-profile ARN for; granted scopes for "
                 f"{vendor!r}: {sorted(granted_scopes)}"
             )
+
+
+# ---------------------------------------------------------------------------
+# C15 — the two residency controls must not contradict: a jurisdiction-
+# restricted tenant must not be served by a deployment whose
+# `failover_regions()` leaves that jurisdiction.
+# ---------------------------------------------------------------------------
+
+def check_tenant_jurisdiction_against_failover(
+    *, tenant_id: str, jurisdiction: str, failover_regions: Optional[Iterable[str]] = None,
+) -> None:
+    """Raise if any region in `failover_regions` is outside `jurisdiction`.
+
+    `failover_regions=None` resolves to the real, live
+    `mvp.routing.chains.failover_regions()` — the same convention this
+    module's own `check_profile_scopes_granted_by_iam` already uses for its
+    `entries=None` (-> `registry_entries()`). An operator-facing caller (a
+    reconciler script) can therefore drive this straight from the
+    deployment's configured environment, while a test drives it with a
+    fabricated list, and neither needs a second function to do it.
+
+    Reconciles PR2's two independent residency controls, which otherwise say
+    nothing to each other: C9's tenant `profile_scopes` axis restricts which
+    `profile_scope` a REQUEST may route through, while
+    `mvp.routing.chains.failover_regions()` is a deployment-wide operational
+    setting for where a request retries once admitted. A tenant confined to
+    one bounded jurisdiction is not actually confined if the deployment's
+    failover list can still send its traffic somewhere else — that
+    contradiction is what this check catches, offline, with no AWS
+    credentials and no network, exactly like C10 and C13 above.
+
+    `jurisdiction` is a single BOUNDED `profile_scope` value — one member of a
+    tenant's `profile_scopes` set that is not the unbounded `"global"` (a
+    tenant's set can never mix the two: see
+    `mvp.models.check_scope_set_not_mixed_bounded_unbounded`, C14's own write-
+    time guarantee). This check does not read a tenant's stored scope set
+    itself — it has no DynamoDB access, by design — so a caller (an offline
+    reconciler script, or a test) supplies each bounded member of that set as
+    `jurisdiction` and calls this once per member.
+
+    `_jurisdiction` (imported from `mvp.routing.chains`, the module that
+    already defines it) is the geographic prefix of a region id — the SAME
+    coarse residency proxy `failover_regions()` itself is filtered by when the
+    deployment leaves `STRATOCLAVE_FAILOVER_REGIONS` unset, so this check
+    reads the identical notion of "jurisdiction" that module already uses
+    rather than a second one that could disagree with it.
+
+    Raises `ValueError` naming the tenant, the jurisdiction, and the
+    offending regions; returns `None` on success — the same contract every
+    check in this module already uses.
+    """
+    regions = tuple(failover_regions) if failover_regions is not None else _real_failover_regions()
+    offending = sorted({r for r in regions if _jurisdiction(r) != jurisdiction})
+    if offending:
+        raise ValueError(
+            f"tenant {tenant_id!r} is restricted to jurisdiction "
+            f"{jurisdiction!r}, but failover_regions() would route it through "
+            f"{offending}, which leaves that jurisdiction"
+        )
