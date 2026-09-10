@@ -85,6 +85,21 @@
     },
     {
       "provider": "anthropic",
+      "bedrock_model_id": "global.anthropic.claude-fable-5",
+      "bedrock_region": "us-east-1",
+      "aliases": [
+        "claude-fable-5-global"
+      ],
+      "wire_protocol": "messages",
+      "profile_scope": "global",
+      "model_family": "claude-fable-5",
+      "access": "entitlement_required",
+      "jurisdiction_bounded": false,
+      "pricing_key": "fable-global",
+      "notes": "C12: the second, global profile scope of Claude Fable 5, a model already served — provider, wire_protocol and bedrock_region are therefore the same as the in-region \"us.anthropic.claude-fable-5\" entry above by definition, not independently chosen. Routes globally across every supported AWS Region rather than being pinned to one geography, and is priced 10% below that in-region row ($10/$50 vs $11/$55 per MTok, measured 2026-08-31). access is entitlement_required, not general: at this base commit every entry was us-only, so residency held only by omission, and a general global entry would be immediately requestable by every tenant with an empty allowlist the moment it lands, with IAM already granting global.anthropic.*. Its own alias (claude-fable-5-global) is distinct from the in-region entry's (claude-fable-5), so the two never collide."
+    },
+    {
+      "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-opus-4-7",
       "bedrock_region": "us-east-1",
       "aliases": [
