@@ -158,6 +158,7 @@ class UsageLogsRepository:
         requested_model_id: Optional[str] = None,
         measured_bound_microusd: Optional[int] = None,
         fallback_reason: Optional[str] = None,
+        metering_fault: Optional[str] = None,
         task_tag: Optional[str] = None,
         task_tag_source: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -199,6 +200,15 @@ class UsageLogsRepository:
         this write touches nothing another concurrent request also writes).
         Absent on every row this deployment has produced before this field
         existed, and on any row where no fallback occurred.
+
+        `metering_fault` (E10, contract R for the metering fault) is the reason
+        `mvp._money.claim_settle` named when a SUCCESSFUL response never
+        reported final usage and settled at the reserved bound instead of the
+        snapshotted (and, in that case, meaningless) token counts -- see
+        `mvp._money.METERING_FAULT_NO_FINAL_USAGE`. The same "absent is a
+        legacy/non-occurring fact, never a sentinel" reading `fallback_reason`
+        already rests on: a row with no fault does not carry this attribute
+        at all, rather than carrying it as `None` or `""`.
 
         `task_tag` / `task_tag_source` (see `mvp.task_tag`) are the resolved
         caller-asserted tag and how it was resolved, carried in from the
@@ -257,6 +267,8 @@ class UsageLogsRepository:
             item["measured_bound_microusd"] = Decimal(int(measured_bound_microusd))
         if fallback_reason is not None:
             item["fallback_reason"] = fallback_reason
+        if metering_fault is not None:
+            item["metering_fault"] = metering_fault
         # Both-or-neither, enforced rather than merely followed: task_tag and
         # task_tag_source are one resolved fact (a value and its provenance),
         # not two independent optional legs like the cache tokens above, so a

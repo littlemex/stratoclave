@@ -5784,6 +5784,14 @@ def settle_reservation_and_log(
     actual_cache_write_tokens: Optional[int] = None,
     requested_model: Optional[str] = None,
     request_id: Optional[str] = None,
+    # E10: named by `mvp._money.claim_settle`, which is the only caller that
+    # ever passes it — a successful response that never reported final usage
+    # (see `_money.METERING_FAULT_NO_FINAL_USAGE`). `actual_input_tokens` /
+    # `actual_output_tokens` are ALREADY the reserved-bound substitution
+    # `claim_settle` charges in that case; this parameter carries only the
+    # WHY onto the UsageLogs row, exactly as `fallback_reason` carries the WHY
+    # for a model cascade rather than re-deriving it from the two model ids.
+    metering_fault_reason: Optional[str] = None,
 ) -> None:
     """Settle the reservation against actual usage and write a UsageLogs row.
 
@@ -5873,8 +5881,32 @@ def settle_reservation_and_log(
     from .pricing import UNVERSIONED_SENTINEL
 
     _rating = None
+    if metering_fault_reason is not None and actual_cost_microusd is None:
+        # E10: no usage was ever reported, so there is nothing to rate. Charge what the
+        # admission already debited, for exactly the reason the `settle_without_frozen_
+        # rate_charging_reserved` branch below charges it: the pool was gated on that
+        # amount, so it is an upper bound on any charge this request could have had, and
+        # it needs no rate read at all.
+        #
+        # When there is no pool the reserved amount is 0, and charging a zero would
+        # assert the request was FREE — the distinction the `else` branch below already
+        # names, where an absent attribute means "no cost was recorded" and a stored 0
+        # means "this cost nothing". So the amount is left absent and the row carries
+        # `metering_fault` instead: unknown is not the same fact as free.
+        # Plain attribute access, like the neighbouring branches, NOT `getattr` with the
+        # name as a string: the write-discipline guard hunts for a counter attribute
+        # named in a STRING literal, because that is how a DynamoDB UpdateExpression
+        # names one and how a helper can build an expression a different function
+        # writes. Spelling an in-memory read that way trips a guard that exists to
+        # catch money writes, and registering this function to silence it would put a
+        # non-writing function into the registry of writers and cost the guard its
+        # meaning.
+        _reserved = int(context.pool_reserved_microusd or 0) if context is not None else 0
+        if _reserved > 0:
+            actual_cost_microusd = _reserved
     if (
         actual_cost_microusd is None
+        and metering_fault_reason is None
         and context is not None
         and context.pricing_key
     ):
@@ -6264,6 +6296,7 @@ def settle_reservation_and_log(
             context.measured_bound_microusd if context is not None else None
         ),
         fallback_reason=_fallback_reason,
+        metering_fault=metering_fault_reason,
         # Read from the context the reserve chokepoint stamped, never
         # re-resolved from a header here. A `None` context (no reservation
         # at all) writes neither attribute; any real context's pair is
