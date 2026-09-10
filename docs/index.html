@@ -456,6 +456,11 @@
     margin-top: 1.6rem;
   }
   @media (max-width: 820px){ .feature-block{ grid-template-columns: 1fr; } }
+  /* A grid item defaults to `min-width: auto`, so it refuses to shrink below its
+     min-content width. Under `word-break: keep-all` a Japanese clause has few
+     break opportunities, which made these columns wider than the single track on
+     a small phone and put the whole page into horizontal scrolling. */
+  .feature-block > *{ min-width: 0; }
   .feature-block .visual{
     background: hsl(var(--card)); border:1px solid hsl(var(--border));
     border-radius: calc(var(--radius) * 2); padding:1.2rem;
@@ -495,6 +500,88 @@
   .cascade .node.exhausted{ color: hsl(var(--accent)); text-decoration: line-through; opacity:0.7; }
   .cascade .arrow{ color: hsl(var(--muted-foreground)); }
 
+  /* raw-data blocks (usage rows, aggregates) */
+  .datablock{
+    background: hsl(220 20% 6%);
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: 0.9rem 1rem;
+    margin-top: 0.9rem;
+    overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    line-height: 1.85;
+    white-space: pre;
+    color: hsl(var(--foreground));
+  }
+  .datablock .hdr{ color: hsl(var(--primary)); }
+  .datablock .dim{ color: hsl(var(--muted-foreground)); }
+  .absent-list{ list-style:none; padding:0; margin:0.9rem 0 0; }
+  .absent-list li{
+    display:flex; gap:0.7rem; align-items:flex-start; flex-wrap:wrap;
+    font-size:0.92rem; margin:0.55rem 0; color: hsl(var(--muted-foreground));
+  }
+  /* A flex item will not shrink below its min-content width, and under
+     `word-break: keep-all` a run like "user_email_hash として" has no break
+     opportunity inside it -- so without this the row pushed the whole page into
+     horizontal scrolling on a phone. */
+  .absent-list li > span:last-child{ flex:1 1 16ch; min-width:0; }
+  /* Fixed width so the three explanations start on one column: the badges have
+     different label lengths and a shrink-to-fit chip left the text ragged. */
+  .absent-list li .no{
+    flex:0 0 7rem; text-align:center;
+    font-family:"JetBrains Mono", ui-monospace, monospace;
+    font-size:0.7rem; color: hsl(var(--accent));
+    border:1px solid hsl(var(--accent) / 0.45); border-radius:99px;
+    padding:0.05rem 0.5rem; margin-top:0.15rem;
+  }
+  .absent-list li b{ color: hsl(var(--foreground)); font-weight:600; }
+
+  /* token-vs-money spread */
+  .tok-panel{
+    background: hsl(var(--card)); border:1px solid hsl(var(--border));
+    border-radius: var(--radius); padding:1.3rem 1.4rem; margin-top:1.6rem;
+  }
+  .tokrow{ display:flex; align-items:center; gap:0.8rem; margin:0.5rem 0; }
+  .tokname{
+    flex:0 0 210px; font-size:0.8rem; color: hsl(var(--muted-foreground));
+    display:flex; gap:0.45rem; align-items:baseline;
+  }
+  .tokname .m{
+    font-family:"JetBrains Mono", ui-monospace, monospace;
+    color: hsl(var(--foreground)); font-size:0.78rem;
+  }
+  .tokbar{
+    flex:1 1 auto; height:15px; border-radius:3px;
+    background: hsl(var(--secondary)); border:1px solid hsl(var(--border));
+    overflow:hidden; min-width:60px;
+  }
+  .tokbar > i{
+    display:block; height:100%; width:0;
+    background: hsl(var(--primary)); transition: width 0.45s ease;
+  }
+  .tokrow.dear .tokbar > i{ background: hsl(var(--accent)); }
+  .tokval{
+    flex:0 0 84px; text-align:right; font-size:0.82rem;
+    font-family:"JetBrains Mono", ui-monospace, monospace;
+  }
+  .tok-verdict{
+    margin-top:1.1rem; padding-top:0.9rem; border-top:1px solid hsl(var(--border));
+    font-size:0.95rem;
+  }
+  .tok-verdict .big{ color: hsl(var(--accent)); font-weight:600; }
+  @media (max-width: 620px){
+    .tokname{ flex-basis:150px; font-size:0.74rem; }
+    .tokval{ flex-basis:70px; font-size:0.76rem; }
+  }
+  /* Below this the name, the bar and the figure cannot share a line without the
+     bar collapsing to nothing, so the name takes its own line and the bar keeps
+     enough width to still be a comparison. */
+  @media (max-width: 430px){
+    .tokrow{ flex-wrap: wrap; row-gap: 0.15rem; }
+    .tokname{ flex-basis:100%; }
+  }
+
   /* identity sequence */
   .idseq{ display:flex; flex-direction:column; gap:0.55rem; width:100%; }
   .idseq .step{
@@ -503,6 +590,10 @@
     color: hsl(var(--muted-foreground));
     opacity:0.35; transition: opacity 0.4s ease;
   }
+  /* Same min-content trap as `.feature-block`: the step's label is a Japanese
+     clause with no interior break opportunity, so without this it widened the
+     card past the viewport on the narrowest phones. */
+  .idseq .step > span:last-child{ min-width: 0; }
   .idseq .step.done{ opacity:0.65; color: hsl(var(--foreground)); }
   .idseq .step.on{ opacity:1; color: hsl(var(--foreground)); }
   .idseq .step .n{ color: hsl(var(--primary)); flex:0 0 1.4em; }
@@ -631,7 +722,7 @@
 
         <div class="contrast-panel good">
           <div class="contrast-head"><span class="contrast-dot" aria-hidden="true"></span><h3 data-ja="1 つのトランザクションで確保 (Stratoclave)" data-en="One transaction, before the call (Stratoclave)">1 つのトランザクションで確保 (Stratoclave)</h3></div>
-          <p class="sub" data-ja="呼び出し前に、テナントの残高へ単一の DynamoDB TransactWriteItems で確保する。競合した分は 402 で拒否される。" data-en="Before the model is invoked, a single DynamoDB TransactWriteItems reserves against the tenant balance. Whatever loses the race gets a 402.">呼び出し前に、テナントの残高へ単一の DynamoDB TransactWriteItems で確保する。競合した分は 402 で拒否される。</p>
+          <p class="sub" data-ja="呼び出し前に、テナントの残高へ単一の DynamoDB TransactWriteItems で確保する。競合した分は 402 で拒否される。" data-en="Before the model is invoked, a single DynamoDB TransactWriteItems reserves against the tenant balance. Whatever loses the race gets a 402.">呼び出し前に、テナントの残高へ単一の DynamoDB TransactWriteItems で確保する。競合した分は 402 で拒否される。</p>
           <div class="swarm-field" id="scField" aria-hidden="true"></div>
           <div class="budget-bar-wrap">
             <div class="budget-bar"><div class="fill" id="scFill"></div><div class="ceiling-tick" id="scTick"></div></div>
@@ -803,8 +894,63 @@
       </div>
     </section>
 
+    <section id="whymoney">
+      <div class="eyebrow-row"><span class="step-chip">04</span><span class="eyebrow" style="margin:0" data-ja="トークン数では足りない" data-en="Token counts are not enough">トークン数では足りない</span></div>
+      <h2 class="section-title" data-ja="トークン数は、予算にはならない" data-en="A token count is not a budget">トークン数は、予算にはならない</h2>
+      <p class="problem-line" data-ja="トークン数に上限を付けても、支出の上限にはならない。同じトークン数の値段が、どのモデルのどの種類のトークンかで 900 倍以上動くから。だから確保も上限もドルで持つ。" data-en="Capping tokens does not cap spend. The same token count is worth over 900x more or less depending on which model and which kind of token it is. That is why both the reservation and the ceiling are held in dollars.">トークン数に上限を付けても、支出の上限にはならない。同じトークン数の値段が、どのモデルのどの種類のトークンかで 900 倍以上動くから。だから確保も上限もドルで持つ。</p>
+
+      <div class="diagram-shell">
+        <svg viewBox="0 0 900 250" role="img" aria-labelledby="tokax-title tokax-desc" style="width:100%; height:auto;">
+          <title id="tokax-title" data-ja="トークン数から金額までに必要な 4 つを示す図" data-en="Diagram of the four things needed to turn a token count into an amount">トークン数から金額までに必要な 4 つを示す図</title>
+          <desc id="tokax-desc" data-ja="トークン数だけでは金額にならず、モデル・トークンの種類・階層・スコープの 4 つが揃って初めて金額が決まる" data-en="A token count alone is not an amount: the model, the kind of token, the tier and the scope must all be known before an amount exists">トークン数だけでは金額にならず、モデル・トークンの種類・階層・スコープの 4 つが揃って初めて金額が決まる</desc>
+
+          <rect class="box" x="14" y="98" width="176" height="54" rx="4"></rect>
+          <text x="102" y="120" text-anchor="middle" font-size="12.5" data-ja="トークン数" data-en="A token count">トークン数</text>
+          <text x="102" y="138" text-anchor="middle" font-size="10.5" class="lbl-muted mono">total_tokens</text>
+
+          <path class="line" d="M190,125 L246,125"></path>
+
+          <rect x="250" y="18" width="382" height="214" rx="6" fill="none" stroke="hsl(var(--border))" stroke-width="1" stroke-dasharray="4 4"></rect>
+          <text x="441" y="38" text-anchor="middle" font-size="11" font-weight="600" class="lbl-muted" data-ja="この 4 つが揃って初めて金額になる" data-en="only with all four does an amount exist">この 4 つが揃って初めて金額になる</text>
+
+          <rect class="box" x="266" y="50" width="350" height="38" rx="3"></rect>
+          <text x="282" y="74" font-size="11.5" data-ja="どのモデルか" data-en="which model">どのモデルか</text>
+          <text x="600" y="74" text-anchor="end" font-size="10.5" class="lbl-muted mono">18x</text>
+
+          <rect class="box" x="266" y="94" width="350" height="38" rx="3"></rect>
+          <text x="282" y="118" font-size="11.5" data-ja="入力・出力・キャッシュのどれか" data-en="input, output or cache">入力・出力・キャッシュのどれか</text>
+          <text x="600" y="118" text-anchor="end" font-size="10.5" class="lbl-muted mono">50x</text>
+
+          <rect class="box" x="266" y="138" width="350" height="38" rx="3"></rect>
+          <text x="282" y="162" font-size="11.5" data-ja="標準か、長文脈か" data-en="standard tier or long context">標準か、長文脈か</text>
+          <text x="600" y="162" text-anchor="end" font-size="10.5" class="lbl-muted mono">2x</text>
+
+          <rect class="box" x="266" y="182" width="350" height="38" rx="3"></rect>
+          <text x="282" y="206" font-size="11.5" data-ja="リージョン内か、global か" data-en="in-region or global">リージョン内か、global か</text>
+          <text x="600" y="206" text-anchor="end" font-size="10.5" class="lbl-muted mono">1.1x</text>
+
+          <path class="line-primary" d="M632,125 L692,125"></path>
+          <rect class="box-primary" x="696" y="98" width="190" height="54" rx="4"></rect>
+          <text x="791" y="120" text-anchor="middle" font-size="12.5" font-weight="600" data-ja="金額" data-en="An amount">金額</text>
+          <text x="791" y="138" text-anchor="middle" font-size="10.5" class="lbl-muted mono">cost_microusd</text>
+        </svg>
+      </div>
+      <div class="fig-label" data-ja="右の倍率は掛け合わさる。だから 4 つのうち 1 つ欠けただけで、金額は決まらない" data-en="The multipliers on the right compound, so missing any one of the four leaves the amount undetermined">右の倍率は掛け合わさる。だから 4 つのうち 1 つ欠けただけで、金額は決まらない</div>
+
+      <div class="tok-panel">
+        <div class="control-row">
+          <label for="tokRange" data-ja="トークン数" data-en="Token count">トークン数</label>
+          <input type="range" id="tokRange" min="10000" max="1000000" step="10000" value="100000">
+          <div id="tokReadout" class="mono" style="color:hsl(var(--primary)); margin-top:0.3rem"></div>
+        </div>
+        <div id="tokRows" style="margin-top:1.1rem"></div>
+        <div class="tok-verdict" id="tokVerdict"></div>
+      </div>
+      <div class="fig-label" data-ja="単価は同梱の既定価格表そのもの。横棒は対数目盛で、数字が実際の金額" data-en="The unit prices are the bundled default price table as shipped. Bars are on a log scale; the figures are the actual amounts">単価は同梱の既定価格表そのもの。横棒は対数目盛で、数字が実際の金額</div>
+    </section>
+
     <section id="demo">
-      <div class="eyebrow-row"><span class="step-chip">04</span><span class="eyebrow" style="margin:0" data-ja="自分で動かす" data-en="Operate it yourself">自分で動かす</span></div>
+      <div class="eyebrow-row"><span class="step-chip">05</span><span class="eyebrow" style="margin:0" data-ja="自分で動かす" data-en="Operate it yourself">自分で動かす</span></div>
       <h2 class="section-title" data-ja="1 件ずつ、reserve → invoke → settle を見る" data-en="Watch reserve, invoke, settle happen to one request">1 件ずつ、reserve → invoke → settle を見る</h2>
       <p class="section-intro" data-ja="上のトポロジー図の予算執行を、1 件ずつ動かせます。ネットワークには繋がらず、ブラウザの中だけで動きます。" data-en="Drive the budget-enforcement step from the topology diagram above, one request at a time. This runs entirely in your browser, no network calls.">上のトポロジー図の予算執行を、1 件ずつ動かせます。ネットワークには繋がらず、ブラウザの中だけで動きます。</p>
 
@@ -882,7 +1028,7 @@
       </div>
     </section>
     <section id="callshapes">
-      <div class="eyebrow-row"><span class="step-chip">05</span><span class="eyebrow" style="margin:0" data-ja="呼び方は 3 つ、会計は 1 つ" data-en="Three shapes, one ledger">呼び方は 3 つ、会計は 1 つ</span></div>
+      <div class="eyebrow-row"><span class="step-chip">06</span><span class="eyebrow" style="margin:0" data-ja="呼び方は 3 つ、会計は 1 つ" data-en="Three shapes, one ledger">呼び方は 3 つ、会計は 1 つ</span></div>
       <h2 class="section-title" data-ja="1 つのゲートウェイ、3 つの話し方" data-en="One gateway, three ways to call it">1 つのゲートウェイ、3 つの話し方</h2>
       <p class="problem-line" data-ja="オンコールのエンジニアは、Anthropic 用と OpenAI 用に別々の呼び出しコードを持ちたくない。既存の SDK も Claude Code も Claude Desktop も、そのまま動いてほしい。" data-en="An engineer on call doesn't want separate integration code for Anthropic and OpenAI. Existing SDKs, Claude Code and Claude Desktop should just keep working.">オンコールのエンジニアは、Anthropic 用と OpenAI 用に別々の呼び出しコードを持ちたくない。既存の SDK も Claude Code も Claude Desktop も、そのまま動いてほしい。</p>
 
@@ -895,11 +1041,11 @@
           <div class="chiprow" style="margin-top:0">
             <span class="chip on mono">POST /v1/chat/completions</span>
           </div>
-          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 1rem" data-ja="OpenAI Chat Completions 互換。ストリーミングと tool calling に対応。未対応パラメータを黙って握りつぶさず、400 で大きく落とす。" data-en="OpenAI Chat Completions-compatible: streaming and tool calls. Unsupported parameters are rejected with a loud 400, not silently dropped.">OpenAI Chat Completions 互換。ストリーミングと tool calling に対応。未対応パラメータを黙って握りつぶさず、400 で大きく落とす。</p>
+          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 1rem" data-ja="OpenAI Chat Completions 互換。ストリーミングと tool calling に対応。未対応パラメータを黙って握りつぶさず、400 で大きく落とす。" data-en="OpenAI Chat Completions-compatible: streaming and tool calls. Unsupported parameters are rejected with a loud 400, not silently dropped.">OpenAI Chat Completions 互換。ストリーミングと tool calling に対応。未対応パラメータを黙って握りつぶさず、400 で大きく落とす。</p>
           <div class="chiprow" style="margin-top:0">
             <span class="chip on mono">POST /openai/v1/responses</span>
           </div>
-          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 0" data-ja="OpenAI Responses API 互換。Bedrock 上の GPT-5.6 や Grok 向け。" data-en="OpenAI Responses API-compatible, for GPT-5.6 and Grok on Bedrock.">OpenAI Responses API 互換。Bedrock 上の GPT-5.6 や Grok 向け。</p>
+          <p class="muted" style="font-size:0.92rem; margin:0.4rem 0 0" data-ja="OpenAI Responses API 互換。Bedrock 上の GPT-5.6 や Grok 向け。" data-en="OpenAI Responses API-compatible, for GPT-5.6 and Grok on Bedrock.">OpenAI Responses API 互換。Bedrock 上の GPT-5.6 や Grok 向け。</p>
         </div>
 
         <div class="visual">
@@ -941,7 +1087,7 @@
     </section>
 
     <section id="resilience">
-      <div class="eyebrow-row"><span class="step-chip">06</span><span class="eyebrow" style="margin:0" data-ja="止まらない・詰まらない" data-en="Does not stop, does not stall">止まらない・詰まらない</span></div>
+      <div class="eyebrow-row"><span class="step-chip">07</span><span class="eyebrow" style="margin:0" data-ja="止まらない・詰まらない" data-en="Does not stop, does not stall">止まらない・詰まらない</span></div>
       <h2 class="section-title" data-ja="詰まっても、尽きても、止まらない" data-en="Whether it stalls or runs out, it doesn't stop">詰まっても、尽きても、止まらない</h2>
       <p class="problem-line" data-ja="オンコールのエンジニアは、深夜に 1 つのリージョンが詰まっただけで、あるいは 1 つのモデルの予算を使い切っただけで、呼び出し元全体を止めたくない。この 2 つは別の仕組みで、それぞれ別に効く。" data-en="An on-call engineer doesn't want a single region stalling, or a single model's budget running out, to take down every caller at 3am. These are two separate mechanisms, and each kicks in on its own.">オンコールのエンジニアは、深夜に 1 つのリージョンが詰まっただけで、あるいは 1 つのモデルの予算を使い切っただけで、呼び出し元全体を止めたくない。この 2 つは別の仕組みで、それぞれ別に効く。</p>
 
@@ -965,7 +1111,7 @@
     </section>
 
     <section id="breaker">
-      <div class="eyebrow-row"><span class="step-chip">07</span><span class="eyebrow" style="margin:0" data-ja="拒否の前に、既に効いている" data-en="Working before the hard refusal">拒否の前に、既に効いている</span></div>
+      <div class="eyebrow-row"><span class="step-chip">08</span><span class="eyebrow" style="margin:0" data-ja="拒否の前に、既に効いている" data-en="Working before the hard refusal">拒否の前に、既に効いている</span></div>
       <h2 class="section-title" data-ja="段階的な予算ブレーカー" data-en="A staged budget breaker">段階的な予算ブレーカー</h2>
       <p class="problem-line" data-ja="上限は 0 か 100 かではない。近づいてきた時点で、ルーティング自体を少しずつ変えたい。拒否は最後の手段であるべき。" data-en="A ceiling isn't a binary. As spend approaches it, routing itself should start to shift — the hard refusal should be the last resort.">上限は 0 か 100 かではない。近づいてきた時点で、ルーティング自体を少しずつ変えたい。拒否は最後の手段であるべき。</p>
 
@@ -985,7 +1131,7 @@
     </section>
 
     <section id="crashsafe">
-      <div class="eyebrow-row"><span class="step-chip">08</span><span class="eyebrow" style="margin:0" data-ja="プロセスが死んでも、予算は死なない" data-en="A dead process doesn't kill the budget">プロセスが死んでも、予算は死なない</span></div>
+      <div class="eyebrow-row"><span class="step-chip">09</span><span class="eyebrow" style="margin:0" data-ja="プロセスが死んでも、予算は死なない" data-en="A dead process doesn't kill the budget">プロセスが死んでも、予算は死なない</span></div>
       <h2 class="section-title" data-ja="クラッシュに強い会計" data-en="Crash-resilient accounting">クラッシュに強い会計</h2>
       <p class="problem-line" data-ja="確保してから確定するまでの間にプロセスが落ちたら、その分の予算は永遠に確保されたまま、誰にも使えなくなる。" data-en="If a process dies between reserving and settling, that slice of budget can be stuck reserved forever, unusable by anyone.">確保してから確定するまでの間にプロセスが落ちたら、その分の予算は永遠に確保されたまま、誰にも使えなくなる。</p>
 
@@ -1002,14 +1148,14 @@
     </section>
 
     <section id="identity">
-      <div class="eyebrow-row"><span class="step-chip">09</span><span class="eyebrow" style="margin:0" data-ja="役割と本人確認" data-en="Roles and identity">役割と本人確認</span></div>
+      <div class="eyebrow-row"><span class="step-chip">10</span><span class="eyebrow" style="margin:0" data-ja="役割と本人確認" data-en="Roles and identity">役割と本人確認</span></div>
       <h2 class="section-title" data-ja="3 つの役割、3 つの入り口" data-en="Three roles, three ways in">3 つの役割、3 つの入り口</h2>
       <p class="problem-line" data-ja="セキュリティ責任者は、バックエンドが乗っ取られたときに、それが顧客の Identity Center や SAML IdP へ踏み台にされないかを気にする。" data-en="A security owner worries whether a backend compromise could pivot into the customer's Identity Center or SAML IdP.">セキュリティ責任者は、バックエンドが乗っ取られたときに、それが顧客の Identity Center や SAML IdP へ踏み台にされないかを気にする。</p>
 
       <div class="diagram-shell">
         <svg viewBox="0 0 900 300" role="img" aria-labelledby="idax-title idax-desc" style="width:100%; height:auto;">
           <title id="idax-title" data-ja="入り口と役割が独立していることを示す図" data-en="Diagram showing that the way in and the role are independent">入り口と役割が独立していることを示す図</title>
-          <desc id="idax-desc" data-ja="3 つの入り口はいずれも同じ本人確認に収束し、そこから 3 つの役割へ分岐する。入り口が役割を決めることはない" data-en="All three ways in converge on the same verified identity, which then fans out to three roles. The way in never determines the role">3 つの入り口はいずれも同じ本人確認に収束し、そこから 3 つの役割へ分岐する。入り口が役割を決めることはない</desc>
+          <desc id="idax-desc" data-ja="3 つの入り口はいずれも同じ本人確認に収束し、そこから 3 つの役割へ分岐する。入り口が役割を決めることはない" data-en="All three ways in converge on the same verified identity, which then fans out to three roles. The way in never determines the role">3 つの入り口はいずれも同じ本人確認に収束し、そこから 3 つの役割へ分岐する。入り口が役割を決めることはない</desc>
 
           <text x="20" y="26" font-size="11.5" font-weight="600" class="lbl-muted" data-ja="入り口 — どう証明するか" data-en="Way in — how you prove it">入り口 — どう証明するか</text>
           <text x="880" y="26" text-anchor="end" font-size="11.5" font-weight="600" class="lbl-muted" data-ja="役割 — 何ができるか" data-en="Role — what you may do">役割 — 何ができるか</text>
@@ -1055,16 +1201,16 @@
           <text x="664" y="204" font-size="12.5" class="mono">user</text>
           <text x="664" y="221" font-size="10.5" class="lbl-muted" data-ja="自分だけ" data-en="only themselves">自分だけ</text>
 
-          <text x="760" y="262" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="どの役割も 1 つのテナントの外へは出られない" data-en="no role reaches outside its one tenant">どの役割も 1 つのテナントの外へは出られない</text>
+          <text x="760" y="262" text-anchor="middle" font-size="10.5" class="lbl-muted" data-ja="どの役割も 1 つのテナントの外へは出られない" data-en="no role reaches outside its one tenant">どの役割も 1 つのテナントの外へは出られない</text>
         </svg>
       </div>
-      <div class="fig-label" data-ja="入り口が役割を決めることはない。3 x 3 のどの組み合わせも成り立つ" data-en="The way in never determines the role: any of the nine combinations is valid">入り口が役割を決めることはない。3 x 3 のどの組み合わせも成り立つ</div>
+      <div class="fig-label" data-ja="入り口が役割を決めることはない。3 x 3 のどの組み合わせも成り立つ" data-en="The way in never determines the role: any of the nine combinations is valid">入り口が役割を決めることはない。3 x 3 のどの組み合わせも成り立つ</div>
 
       <div class="feature-block" style="margin-top:1.8rem">
         <div>
           <h3 style="font-size:1.05rem" data-ja="Vouch-by-STS (パスワードレス SSO)" data-en="Vouch-by-STS (passwordless SSO)">Vouch-by-STS (パスワードレス SSO)</h3>
           <p class="muted" style="font-size:0.95rem" data-ja="クライアントは sts:GetCallerIdentity に署名する。バックエンドはその署名済みリクエストを STS へそのまま転送し、STS が返す Arn / UserId / Account だけを信用する。AWS の認証情報そのものは一度も解釈しない。" data-en="The client signs sts:GetCallerIdentity. The backend replays that signed request to STS as-is, and trusts only the Arn, UserId and Account that STS returns. It never parses the AWS credentials themselves.">クライアントは sts:GetCallerIdentity に署名する。バックエンドはその署名済みリクエストを STS へそのまま転送し、STS が返す Arn / UserId / Account だけを信用する。AWS の認証情報そのものは一度も解釈しない。</p>
-          <p class="muted" style="font-size:0.95rem" data-ja="IdP のリフレッシュトークンも一度も保持しない。IdP を問わない: aws sso login、saml2aws login、Entra ID / Okta / ADFS の SAML が同じ経路で動く。長期の IAM ユーザー鍵は既定で拒否され、信頼済みアカウントごとに明示許可が必要。EC2 インスタンスプロファイルは既定で拒否される。1 人の人間に紐づけられないため。" data-en="It never holds an IdP refresh token either. Identity-provider agnostic: aws sso login, saml2aws login, and Entra ID / Okta / ADFS SAML all work the same way. Long-lived IAM-user keys are denied by default and need explicit per-trusted-account allowlisting. EC2 instance profiles are rejected by default, because they cannot be attributed to one human.">IdP のリフレッシュトークンも一度も保持しない。IdP を問わない: aws sso login、saml2aws login、Entra ID / Okta / ADFS の SAML が同じ経路で動く。長期の IAM ユーザー鍵は既定で拒否され、信頼済みアカウントごとに明示許可が必要。EC2 インスタンスプロファイルは既定で拒否される。1 人の人間に紐づけられないため。</p>
+          <p class="muted" style="font-size:0.95rem" data-ja="IdP のリフレッシュトークンも一度も保持しない。IdP を問わない: aws sso login、saml2aws login、Entra ID / Okta / ADFS の SAML が同じ経路で動く。長期の IAM ユーザー鍵は既定で拒否され、信頼済みアカウントごとに明示許可が必要。EC2 インスタンスプロファイルは既定で拒否される。1 人の人間に紐づけられないため。" data-en="It never holds an IdP refresh token either. Identity-provider agnostic: aws sso login, saml2aws login, and Entra ID / Okta / ADFS SAML all work the same way. Long-lived IAM-user keys are denied by default and need explicit per-trusted-account allowlisting. EC2 instance profiles are rejected by default, because they cannot be attributed to one human.">IdP のリフレッシュトークンも一度も保持しない。IdP を問わない: aws sso login、saml2aws login、Entra ID / Okta / ADFS の SAML が同じ経路で動く。長期の IAM ユーザー鍵は既定で拒否され、信頼済みアカウントごとに明示許可が必要。EC2 インスタンスプロファイルは既定で拒否される。1 人の人間に紐づけられないため。</p>
         </div>
         <div class="visual">
           <div class="idseq" id="idseq" aria-hidden="true">
@@ -1077,11 +1223,11 @@
         </div>
       </div>
 
-      <p class="muted" style="font-size:0.92rem; margin-top:1.4rem" data-ja="3 つ目の入り口である API キーは、さらにスコープを絞れます。ユーザーごとに有効なキー数の上限もあります。" data-en="The third way in, the API key, can have its scope narrowed further, and each user has a cap on how many keys are active at once.">3 つ目の入り口である API キーは、さらにスコープを絞れます。ユーザーごとに有効なキー数の上限もあります。</p>
+      <p class="muted" style="font-size:0.92rem; margin-top:1.4rem" data-ja="3 つ目の入り口である API キーは、さらにスコープを絞れます。ユーザーごとに有効なキー数の上限もあります。" data-en="The third way in, the API key, can have its scope narrowed further, and each user has a cap on how many keys are active at once.">3 つ目の入り口である API キーは、さらにスコープを絞れます。ユーザーごとに有効なキー数の上限もあります。</p>
     </section>
 
     <section id="edge">
-      <div class="eyebrow-row"><span class="step-chip">10</span><span class="eyebrow" style="margin:0" data-ja="VPN は要らない" data-en="No VPN required">VPN は要らない</span></div>
+      <div class="eyebrow-row"><span class="step-chip">11</span><span class="eyebrow" style="margin:0" data-ja="VPN は要らない" data-en="No VPN required">VPN は要らない</span></div>
       <h2 class="section-title" data-ja="公開インターネット越しでも、境界が硬い" data-en="Public internet, hardened edge">公開インターネット越しでも、境界が硬い</h2>
       <p class="problem-line" data-ja="VPN が要らないのは、公開されているからではなく、境界が硬いから。" data-en="No VPN is needed not because it is exposed, but because the edge is hardened.">VPN が要らないのは、公開されているからではなく、境界が硬いから。</p>
 
@@ -1089,13 +1235,13 @@
         <span class="chip on mono" data-ja="CloudFront: TLS 1.2_2021+ / HSTS" data-en="CloudFront: TLS 1.2_2021+ / HSTS">CloudFront: TLS 1.2_2021+ / HSTS</span>
         <span class="chip on mono" data-ja="厳格な CSP" data-en="strict CSP">厳格な CSP</span>
         <span class="chip on mono" data-ja="WAFv2: 4 つの管理ルール既定" data-en="WAFv2: four managed rules by default">WAFv2: 4 つの管理ルール既定</span>
-        <span class="chip on mono" data-ja="S3 は Origin Access Control で施錠" data-en="S3 locked to Origin Access Control">S3 は Origin Access Control で施錠</span>
+        <span class="chip on mono" data-ja="S3 は Origin Access Control で施錠" data-en="S3 locked to Origin Access Control">S3 は Origin Access Control で施錠</span>
       </div>
       <p class="muted" style="font-size:0.92rem; margin-top:0.8rem" data-ja="既定の WAF ルールは CommonRuleSet・KnownBadInputs・IpReputation・IP 単位のレート制限の 4 つです。" data-en="The four default WAF managed rules are CommonRuleSet, KnownBadInputs, IpReputation, and a per-IP rate limit.">既定の WAF ルールは CommonRuleSet・KnownBadInputs・IpReputation・IP 単位のレート制限の 4 つです。</p>
     </section>
 
     <section id="shipit">
-      <div class="eyebrow-row"><span class="step-chip">11</span><span class="eyebrow" style="margin:0" data-ja="出荷と証跡" data-en="Shipping and the audit trail">出荷と証跡</span></div>
+      <div class="eyebrow-row"><span class="step-chip">12</span><span class="eyebrow" style="margin:0" data-ja="出荷と証跡" data-en="Shipping and the audit trail">出荷と証跡</span></div>
       <h2 class="section-title" data-ja="1 コマンドで立ち、構造として検証できる" data-en="Stands up in one command, auditable by construction">1 コマンドで立ち、構造として検証できる</h2>
       <p class="problem-line" data-ja="立ち上げが手作業だらけだと再現できず、誰が何をしたかが後から追えないと監査に答えられない。" data-en="A hand-built deployment can't be reproduced, and if privileged actions leave no trail, an audit has nothing to answer with.">立ち上げが手作業だらけだと再現できず、誰が何をしたかが後から追えないと監査に答えられない。</p>
 
@@ -1117,6 +1263,31 @@
         </div>
       </div>
       <p class="muted" style="font-size:0.92rem; margin-top:1rem" data-ja="権限のある操作は audit event として記録されます。" data-en="Privileged actions are recorded as audit events.">権限のある操作は audit event として記録されます。</p>
+      <h3 style="font-size:1.05rem; margin-top:2.4rem" data-ja="実際に取り出せるもの" data-en="What you can actually pull out">実際に取り出せるもの</h3>
+      <p class="muted" style="font-size:0.95rem; max-width:58ch" data-ja="使用ログは 1 リクエスト 1 行です。列名は実装そのままで、金額は行の中のトークン数と単価から再計算できます。下は 1 テナントの 4 行です。" data-en="Usage logs are one row per request. The column names are the implementation's own, and the amount can be recomputed from the token counts in the row. Below are four rows from one tenant.">使用ログは 1 リクエスト 1 行です。列名は実装そのままで、金額は行の中のトークン数と単価から再計算できます。下は 1 テナントの 4 行です。</p>
+      <div class="datablock"><span class="hdr">recorded_at,user_id,model_id,requested_model_id,input_tokens,output_tokens,cache_read_tokens,cost_microusd,task_tag,task_tag_source,fallback_reason</span>
+2026-09-08T02:14:07Z,u_41c9,us.anthropic.claude-sonnet-5,us.anthropic.claude-opus-5,18422,1163,4096,54223,billing-import,asserted,model_quota_exhausted
+2026-09-08T02:14:31Z,u_41c9,us.anthropic.claude-sonnet-5,us.anthropic.claude-sonnet-5,2210,388,0,9130,billing-import,asserted,
+2026-09-08T02:15:02Z,u_8ba0,us.openai.gpt-5.6-sol,us.openai.gpt-5.6-sol,64180,2947,0,450241,nightly-eval,asserted,
+2026-09-08T02:15:44Z,u_8ba0,us.anthropic.claude-haiku-4-5,us.anthropic.claude-haiku-4-5,900,210,0,2145,unlabelled,absent,</div>
+      <div class="fig-label" data-ja="タグを付けなかったリクエストも消えません。unlabelled と absent として残るので、タグ無しの支出が行方不明になりません" data-en="An untagged request does not vanish: it is kept as unlabelled with source absent, so untagged spend is never missing">タグを付けなかったリクエストも消えません。unlabelled と absent として残るので、タグ無しの支出が行方不明になりません</div>
+
+      <p class="muted" style="font-size:0.95rem; max-width:58ch; margin-top:1.6rem" data-ja="タグで畳むと、そのまま内訳になります。1 行目のリクエストは Opus を要求して Sonnet で処理されているので、要求したモデルと課金されたモデルが別の列に残ります。" data-en="Folded by tag, the same rows are the breakdown. The first request asked for Opus and was served by Sonnet, so the model requested and the model charged for stay in separate columns.">タグで畳むと、そのまま内訳になります。1 行目のリクエストは Opus を要求して Sonnet で処理されているので、要求したモデルと課金されたモデルが別の列に残ります。</p>
+      <div class="datablock"><span class="hdr">task_tag        requests  input_tokens  output_tokens  cost_microusd   cost_usd</span>
+billing-import         2         20,632          1,551          63,353  $0.063353
+nightly-eval           1         64,180          2,947         450,241  $0.450241
+unlabelled             1            900            210           2,145  $0.002145
+<span class="dim">                       4         85,712          4,708         515,739  $0.515739</span></div>
+      <div class="fig-label" data-ja="金額はマイクロドルの整数で持ち、表示のときだけドルにします。丸めを足し合わせて請求がずれることがないように" data-en="Amounts are held as integer micro-dollars and converted to dollars only for display, so accumulated rounding cannot move a bill">金額はマイクロドルの整数で持ち、表示のときだけドルにします。丸めを足し合わせて請求がずれることがないように</div>
+
+      <h3 style="font-size:1.05rem; margin-top:2.4rem" data-ja="取っていないもの" data-en="What is deliberately not captured">取っていないもの</h3>
+      <p class="muted" style="font-size:0.95rem; max-width:58ch" data-ja="この行に、やり取りの中身は一切ありません。会計に必要なのは何トークン使ったかであって、何を書いたかではないからです。" data-en="Nothing in that row is the content of the exchange. Accounting needs how many tokens were used, not what was written.">この行に、やり取りの中身は一切ありません。会計に必要なのは何トークン使ったかであって、何を書いたかではないからです。</p>
+      <ul class="absent-list">
+        <li><span class="no" data-ja="保存しない" data-en="not stored">保存しない</span><span data-ja="送ったプロンプト。確保のときに使うのは payload 全体のハッシュだけで、そのハッシュも使用ログには残りません。" data-en="The prompt that was sent. The reservation uses only a hash of the whole payload, and even that hash is not kept on the usage row.">送ったプロンプト。確保のときに使うのは payload 全体のハッシュだけで、そのハッシュも使用ログには残りません。</span></li>
+        <li><span class="no" data-ja="保存しない" data-en="not stored">保存しない</span><span data-ja="返ってきた応答。行に残るのはトークン数と金額だけです。" data-en="The completion that came back. The row keeps token counts and an amount, nothing else.">返ってきた応答。行に残るのはトークン数と金額だけです。</span></li>
+        <li><span class="no" data-ja="平文で持たない" data-en="never in the clear">平文で持たない</span><span data-ja="メールアドレス。user_email_hash として pii: 付きの一方向ハッシュだけを持ちます。同じ人が同じ印になるので突き合わせはできて、アドレスは戻せません。" data-en="The email address. Only a one-way pii:-prefixed hash is kept as user_email_hash, so the same person hashes to the same marker and correlation still works, while the address cannot be recovered.">メールアドレス。user_email_hash として pii: 付きの一方向ハッシュだけを持ちます。同じ人が同じ印になるので突き合わせはできて、アドレスは戻せません。</span></li>
+      </ul>
+      <p class="muted" style="font-size:0.92rem; max-width:58ch; margin-top:1rem" data-ja="つまり、誰がどのモデルにいくら使ったかには答えられて、誰が何を書いたかには答えられません。監査に出せるものと、出すべきでないものが、最初から分かれています。" data-en="So it can answer who spent how much on which model, and it cannot answer what anyone wrote. What an audit may be shown and what it may not are separated by construction.">つまり、誰がどのモデルにいくら使ったかには答えられて、誰が何を書いたかには答えられません。監査に出せるものと、出すべきでないものが、最初から分かれています。</p>
     </section>
   </div>
 </main>
@@ -1151,6 +1322,7 @@
     try { localStorage.setItem(LANG_KEY, l); } catch(e){}
     if (window.__stratoclaveRerenderTables) { window.__stratoclaveRerenderTables(); }
     if (window.__stratoclaveRerenderSwarm) { window.__stratoclaveRerenderSwarm(); }
+    if (window.__stratoclaveRerenderTokens) { window.__stratoclaveRerenderTokens(); }
   }
 
   document.getElementById("btn-ja").addEventListener("click", function(){ applyLang("ja"); });
@@ -1433,7 +1605,7 @@ window.__stratoclaveInitSwarm = function(){
     }
     scResult.innerHTML = l === "en"
       ? "Total spent " + fmt(s.scTotal) + " &mdash; <span class=\"ok\">stopped at the ceiling</span>. " + s.refused + " requests refused (402), " + s.settled + " settled."
-      : "総支出 " + fmt(s.scTotal) + " &mdash; <span class=\"ok\">上限で停止</span>。" + s.refused + " 件を 402 で拒否、" + s.settled + " 件が確定。";
+      : "総支出 " + fmt(s.scTotal) + " &mdash; <span class=\"ok\">上限で停止</span>。" + s.refused + " 件を 402 で拒否、" + s.settled + " 件が確定。";
   }
   window.__stratoclaveRerenderSwarm = renderResults;
 
@@ -1587,6 +1759,120 @@ window.__stratoclaveInitIdSeq = function(){
   tick();
   window.setInterval(tick, 2250);
 };
+</script>
+<script>
+(function(){
+  // Unit prices per million tokens, taken verbatim from the bundled default
+  // price table (backend/mvp/defaults/pricing.json). `default` is excluded: it
+  // is the fallback for a key that exists nowhere, i.e. a typo, not a model a
+  // reader could choose.
+  var LEGS = [
+    { key: "haiku-3-5",   rate: 0.08,  ja: "キャッシュ読み",   en: "cache read" },
+    { key: "gemma",       rate: 0.14,  ja: "入力",             en: "input" },
+    { key: "sonnet-5",    rate: 2.20,  ja: "入力",             en: "input" },
+    { key: "opus",        rate: 27.50, ja: "出力",             en: "output" },
+    { key: "fable",       rate: 55.00, ja: "出力",             en: "output" },
+    { key: "opus-legacy", rate: 75.00, ja: "出力",             en: "output" }
+  ];
+
+  var range = document.getElementById("tokRange");
+  var readout = document.getElementById("tokReadout");
+  var rowsEl = document.getElementById("tokRows");
+  var verdictEl = document.getElementById("tokVerdict");
+  if (!range || !rowsEl) { return; }
+
+  function isEn(){ return document.documentElement.getAttribute("lang") === "en"; }
+
+  // Sub-dollar amounts all carry four places, so the cheap rows stay comparable
+  // with each other rather than one reading $0.0080 and the next $0.01. Two
+  // places would also round a real 1.4-cent charge down to a cent, which is the
+  // habit this page exists to argue against.
+  function money(v){
+    if (v >= 1) { return "$" + v.toFixed(2); }
+    return "$" + v.toFixed(4);
+  }
+
+  function groupTokens(n){
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  var built = false;
+  function build(){
+    rowsEl.innerHTML = "";
+    for (var i=0; i<LEGS.length; i++){
+      var leg = LEGS[i];
+      var row = document.createElement("div");
+      row.className = "tokrow" + (i === LEGS.length - 1 ? " dear" : "");
+      var name = document.createElement("span");
+      name.className = "tokname";
+      var m = document.createElement("span");
+      m.className = "m";
+      m.textContent = leg.key;
+      var l = document.createElement("span");
+      l.setAttribute("data-leg", String(i));
+      name.appendChild(m);
+      name.appendChild(l);
+      var bar = document.createElement("div");
+      bar.className = "tokbar";
+      bar.appendChild(document.createElement("i"));
+      var val = document.createElement("span");
+      val.className = "tokval";
+      row.appendChild(name); row.appendChild(bar); row.appendChild(val);
+      rowsEl.appendChild(row);
+    }
+    built = true;
+  }
+
+  function render(){
+    if (!built) { build(); }
+    var n = parseInt(range.value, 10);
+    var en = isEn();
+    readout.textContent = groupTokens(n) + (en ? " tokens" : " トークン");
+
+    // Log scale, because a linear axis makes four of the six bars invisible --
+    // which is the point being made, but not a chart anyone can read. The
+    // printed figures are the evidence; the bars only order them.
+    var lo = LEGS[0].rate, hi = LEGS[LEGS.length-1].rate;
+    var lgLo = Math.log10(lo), lgHi = Math.log10(hi);
+    var rows = rowsEl.children;
+    for (var i=0; i<LEGS.length; i++){
+      var leg = LEGS[i];
+      var cost = n * leg.rate / 1e6;
+      var frac = (Math.log10(leg.rate) - lgLo) / (lgHi - lgLo);
+      var pct = 6 + frac * 94;
+      rows[i].querySelector(".tokbar > i").style.width = pct.toFixed(1) + "%";
+      rows[i].querySelector(".tokval").textContent = money(cost);
+      rows[i].querySelector("[data-leg]").textContent = en ? leg.en : leg.ja;
+    }
+
+    var cheap = n * lo / 1e6, dear = n * hi / 1e6;
+    var ratio = Math.round(hi / lo);
+    verdictEl.innerHTML = "";
+    var span = document.createElement("span");
+    if (en) {
+      span.textContent = "The same " + groupTokens(n) + " tokens is worth "
+        + money(cheap) + " or " + money(dear) + ".";
+    } else {
+      span.textContent = "同じ " + groupTokens(n) + " トークンが、" + money(cheap)
+        + " にも " + money(dear) + " にもなる。";
+    }
+    var strong = document.createElement("span");
+    strong.className = "big";
+    strong.textContent = en ? " A " + ratio + "x spread." : " 幅は " + ratio + " 倍。";
+    var tail = document.createElement("span");
+    tail.textContent = en
+      ? " A token ceiling cannot bound that; a dollar ceiling can."
+      : " トークン数の上限ではこれを抑えられず、ドルの上限なら抑えられる。";
+    verdictEl.appendChild(span);
+    verdictEl.appendChild(strong);
+    verdictEl.appendChild(tail);
+  }
+
+  range.addEventListener("input", render);
+  window.__stratoclaveRerenderTokens = render;
+  document.addEventListener("DOMContentLoaded", render);
+  if (document.readyState !== "loading") { render(); }
+})();
 </script>
 </body>
 </html>
