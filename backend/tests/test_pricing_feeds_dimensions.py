@@ -444,6 +444,14 @@ def test_a_registry_entry_with_an_unknown_profile_prefix_is_refused_at_load(tmp_
             "aliases": ["claude-opus-5-mx"],
             "wire_protocol": "messages",
             "pricing_key": "opus",
+            # Required at load alongside the fields above. "mx." is not one of
+            # the six geography tokens the registry cross-checks against
+            # profile_scope, so any valid value is safe here — this test is
+            # about price_model_id, not about that check.
+            "profile_scope": "us",
+            "model_family": "opus",
+            "access": "general",
+            "jurisdiction_bounded": False,
         }],
     }
     path = tmp_path / "models.json"

@@ -30,6 +30,16 @@ def _entry(**over):
         "aliases": ["claude-opus-5"],
         "wire_protocol": "messages",
         "pricing_key": "opus",
+        # The registry grew four more required-at-load fields; every test in
+        # this file builds entries through this one helper, so a value has to
+        # go here or every test below starts failing on "missing required
+        # field" for a field it is not testing. `jurisdiction_bounded=False`
+        # is used specifically so this default entry does not also need a
+        # `jurisdiction` value, which is required only when bounded is true.
+        "profile_scope": "us",
+        "model_family": "opus",
+        "access": "general",
+        "jurisdiction_bounded": False,
     }
     base.update(over)
     return base
