@@ -2792,6 +2792,17 @@ def reserve_credit_for_model(
                                grants=ent_grants)
         if refusal is not None:
             raise _err_403(refusal)
+        # GUARD, NOT DECORATION: this `reserve_credit` call is the one place in
+        # this branch that spends money. No text scan catches an OMITTED
+        # check the way C5 catches a DUPLICATED one, so the only thing that
+        # will fail loudly if a future edit adds another early return here
+        # (or moves this one below a new branch) that reaches `reserve_credit`
+        # without the `refusal_for` call above it is a test that builds a
+        # tenant with `chain`/`allowlist`/`quotas` all empty but
+        # `profile_scopes` restricted (or the default model `entitlement_
+        # required` and ungranted), hits this exact passthrough, and asserts
+        # 403. If you delete or bypass the check above, that test is what
+        # must turn red.
         pk, cost, snap, bound = _price(model_name)
         return _stamp_requested(reserve_credit(
             user, reservation_tokens,
