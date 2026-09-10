@@ -682,6 +682,11 @@ class TestMigrationEquivalence:
         "claude-3-opus": "us.anthropic.claude-3-opus-20240229-v1:0",
         "claude-3-sonnet": "us.anthropic.claude-3-sonnet-20240229-v1:0",
         "claude-fable-5": "us.anthropic.claude-fable-5",
+        # C12: the second, global-profile-scope entry of the same model family --
+        # verified against the actual pair the shipped `us.` entry above already
+        # carries (alias -> bedrock_model_id, and the bedrock_model_id reflexively
+        # to itself), not invented.
+        "claude-fable-5-global": "global.anthropic.claude-fable-5",
         "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "claude-opus-4": "us.anthropic.claude-opus-4-20250514-v1:0",
@@ -697,6 +702,7 @@ class TestMigrationEquivalence:
         "claude-sonnet-4-5-20250929": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
         "claude-sonnet-5": "us.anthropic.claude-sonnet-5",
+        "global.anthropic.claude-fable-5": "global.anthropic.claude-fable-5",
         "gpt-5.6-sol": "us.openai.gpt-5.6-sol",
         "gpt-5.6-terra": "us.openai.gpt-5.6-terra",
         "grok-4.6": "us.xai.grok-4.6",

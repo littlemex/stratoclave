@@ -44,6 +44,12 @@ MEASURED = {
     "opus": (5_500_000, 27_500_000, 550_000, 6_875_000),
     "opus-legacy": (15_000_000, 75_000_000, 1_500_000, 18_750_000),
     "fable": (11_000_000, 55_000_000, 1_100_000, 13_750_000),
+    # C12/C16: Claude Fable 5's global-profile-scope price point, 10% below the
+    # in-region "fable" row. Verified against defaults/pricing.json's own
+    # "fable-global" row directly (not copied from a report on trust): that row
+    # already exists (added by C16, ahead of any registry entry referencing it)
+    # and this tuple matches it leg for leg.
+    "fable-global": (10_000_000, 50_000_000, 1_000_000, 12_500_000),
     "sonnet": (3_300_000, 16_500_000, 330_000, 4_125_000),
     "sonnet-5": (2_200_000, 11_000_000, 220_000, 2_750_000),
     "sonnet-3": (3_000_000, 15_000_000, 300_000, 3_750_000),
