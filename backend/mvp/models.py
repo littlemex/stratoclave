@@ -27,7 +27,7 @@ from .pricing_feeds.dimensions import (
     _GLOBAL_PROFILE_PREFIX as _RECOGNISED_GLOBAL_ID_PREFIX,
 )
 from dataclasses import dataclass
-from typing import Literal, NoReturn, Optional
+from typing import Iterable, Literal, NoReturn, Optional
 
 
 # MVP default for the Anthropic Messages route. OpenAI route uses its own
@@ -69,6 +69,11 @@ _PROFILE_SCOPE_ID_PREFIXES["global"] = _RECOGNISED_GLOBAL_ID_PREFIX
 # plus "global" (UNBOUNDED — routes to every supported region, `us` is three
 # regions and never one), plus `NO_PROFILE_SCOPE` for the no-profile case above.
 _PROFILE_SCOPES = frozenset(_PROFILE_SCOPE_ID_PREFIXES) | {NO_PROFILE_SCOPE}
+# PR2's own read of the vocabulary above: a tenant/user `profile_scopes` axis
+# (C9) accepts exactly the values a registry entry's `profile_scope` may
+# declare, and it is exposed here rather than restated in `admin_routing.py`
+# so the two can never enumerate a different set of "known" scopes.
+PROFILE_SCOPES: frozenset[str] = _PROFILE_SCOPES
 # Geographies a jurisdiction-bounded entry may declare in `jurisdiction`: every
 # profile_scope value that IS a bounded geography. Excludes "global" (unbounded by
 # definition — never a jurisdiction, which is the whole point of C14) and
@@ -77,6 +82,44 @@ _PROFILE_SCOPES = frozenset(_PROFILE_SCOPE_ID_PREFIXES) | {NO_PROFILE_SCOPE}
 # out of the other.
 _JURISDICTIONS = _PROFILE_SCOPES - {"global", NO_PROFILE_SCOPE}
 _ACCESS_LEVELS = frozenset({"general", "entitlement_required"})
+# The one `profile_scope` value that is NOT bounded to a geography: `global`
+# routes to every supported region, where every other declared value (including
+# `NO_PROFILE_SCOPE` — bound to a single declared region, still not "everywhere")
+# is bounded to something narrower. Named here, once, so C14's mixing check and
+# anything else that needs "is this scope unbounded" read the same literal.
+GLOBAL_PROFILE_SCOPE = "global"
+
+
+def check_scope_set_not_mixed_bounded_unbounded(scopes: Iterable[str]) -> None:
+    """C9/C14 — refuse a `profile_scopes` set that names both the unbounded
+    `global` scope and a bounded one.
+
+    `global` routes to every supported region; every other `profile_scope`
+    value is bounded (to a geography, or — `NO_PROFILE_SCOPE` — to one declared
+    region). A set naming both reads like "Japan, or cheap" and MEANS "Japan, or
+    anywhere on earth": the control fails open through its cheapest member.
+    `{us}` alone and `{global}` alone are both fine; only the mix is refused.
+
+    Raises `ValueError` naming every bounded member found alongside `global`;
+    returns `None` on success. Called from `admin_routing.py`'s write-time
+    validator for both the tenant and the user axis — the SAME function, so a
+    tenant's set and a user's set can never be checked by two different ideas
+    of "bounded".
+    """
+    scope_set = set(scopes)
+    if GLOBAL_PROFILE_SCOPE not in scope_set:
+        return
+    bounded = sorted(scope_set - {GLOBAL_PROFILE_SCOPE})
+    if bounded:
+        raise ValueError(
+            f"a scope set may not name both {GLOBAL_PROFILE_SCOPE!r} and a "
+            f"bounded scope ({', '.join(bounded)}); "
+            f"{{{', '.join(bounded)}, {GLOBAL_PROFILE_SCOPE}}} reads as a "
+            f"geography restriction but MEANS 'that geography, or anywhere on "
+            f"earth' — the control would fail open through its cheapest member"
+        )
+
+
 # `model_family` syntax: lowercase ascii letters/digits in segments joined by a single
 # '.' or '-', matching the same alphabet the registry's own aliases already use
 # (`claude-opus-5`, `gpt-5.6-sol`, `grok-4.6`). Rejected rather than folded into this

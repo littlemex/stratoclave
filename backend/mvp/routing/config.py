@@ -202,16 +202,64 @@ def _parse_tenant_config(item: dict) -> RoutingConfig:
         sr_mode=(str(item["sr_mode"])
                  if item.get("sr_mode") in ("off", "canary", "active")
                  else None),
+        # C9: absent key -> None (unrestricted), the same convention every
+        # other optional axis on this item already uses. `admin_routing.py`
+        # only ever writes this key when the tenant's set is non-empty (an
+        # empty set is a rejected write, never persisted), so a present key
+        # here is always a valid, non-empty tuple.
+        profile_scopes=(
+            tuple(item["profile_scopes"])
+            if item.get("profile_scopes") is not None else None
+        ),
     )
 
 
 def _parse_user_config(item: dict) -> UserRoutingConfig:
     chain = item.get("chain")
+    profile_scopes = item.get("profile_scopes")
     return UserRoutingConfig(
         preferred_model=item.get("preferred_model"),
         chain=tuple(chain) if chain else None,
         fallback=item.get("fallback"),
+        # C9: same absent/empty convention as the tenant parse above.
+        profile_scopes=tuple(profile_scopes) if profile_scopes is not None else None,
     )
+
+
+def effective_profile_scopes(
+    tenant: RoutingConfig, user: Optional[UserRoutingConfig],
+) -> Optional[frozenset[str]]:
+    """C9's read-time half: the intersection of the tenant's and the user's
+    `profile_scopes`, with `None` on either side standing for "unrestricted"
+    (the identity element of the intersection) rather than for "empty" (a
+    state neither field can ever persist — see the module-level rejected-write
+    contract in `admin_routing.py`).
+
+    Recomputed from BOTH documents on every call rather than trusting the
+    user's stored set alone: a tenant that narrows its own set AFTER a user's
+    set was written must not leave that user's now-stale, wider document
+    authoritative. That is this module's own reason a read-time check exists
+    alongside the write-time one (see this file's module docstring) — a
+    write-time check alone leaves exactly that stale document in force until
+    somebody edits it again.
+
+    Not called from the reserve/chat path in this change: PR2 stores and
+    validates this axis; PR3 wires the eligibility predicate that would read
+    this. This is the accessor PR3 reads from, so both callers -- this module
+    at read time and PR3's eligibility check -- compute the same intersection
+    rather than each rolling their own.
+    """
+    tenant_set = frozenset(tenant.profile_scopes) if tenant.profile_scopes is not None else None
+    user_set = (
+        frozenset(user.profile_scopes)
+        if user is not None and user.profile_scopes is not None else None
+    )
+    if tenant_set is None:
+        return user_set
+    if user_set is None:
+        return tenant_set
+    return tenant_set & user_set
+
 
 # Rate-limit the fail-open warn so a persistent config-read fault logs once a
 # minute per process instead of once a request (Fable per-tenant review Medium:
