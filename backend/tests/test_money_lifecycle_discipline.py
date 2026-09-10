@@ -187,10 +187,16 @@ def test_a_settle_charges_the_four_token_legs_it_was_given():
 
 
 def test_an_accumulator_is_accepted_wherever_a_usage_is():
+    """Duck-typing, not the E10 fault path: the accumulator must absorb a real
+    terminal `Usage` event (as any real stream does) rather than have its
+    token fields poked directly. Poking the fields bypasses `absorb()`, so
+    `saw_final_usage` stays False and the settle would (correctly, post-E10)
+    read this as a metering fault instead of the duck-typed pass-through this
+    test is actually about."""
     from mvp import _converse_types as t
 
     acc = t.UsageAccumulator()
-    acc.input_tokens, acc.output_tokens = 5, 6
+    acc.absorb(t.Usage(input=5, output=6))
     hold, _repo, settled, _released = _hold()
     run_ending(hold.claim_settle(acc))
     assert (settled[0]["actual_input_tokens"], settled[0]["actual_output_tokens"]) == (5, 6)
