@@ -23,7 +23,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser
 from dynamo.client import get_dynamodb_resource
-from .models import resolve_model
+from .models import (
+    PROFILE_SCOPES,
+    check_scope_set_not_mixed_bounded_unbounded,
+    resolve_model,
+)
 from dynamo.tenants import TenantsRepository
 from .routing import config as routing_config
 from .routing.config import RoutingConfig
@@ -65,6 +69,12 @@ class TenantRoutingConfigRequest(BaseModel):
     # advisory on the decision log (for the Savings Certificate). Tri-state:
     # true/false = explicit per-tenant, null = follow the global default.
     shadow_vsr: Optional[bool] = None
+    # C9: the tenant's jurisdiction/residency restriction — which
+    # `mvp.models.PROFILE_SCOPES` values this tenant's requests may route
+    # through. `None` (omitted) = unrestricted; `[]` is a rejected write (see
+    # `_validate_scope_set`); a non-empty list narrows. Full-replace like every
+    # other field here: a PUT that omits it resets the axis to unrestricted.
+    profile_scopes: Optional[list[str]] = None
 
 
 class UserRoutingConfigRequest(BaseModel):
@@ -72,6 +82,10 @@ class UserRoutingConfigRequest(BaseModel):
     preferred_model: Optional[str] = None
     chain: Optional[list[str]] = None  # None = inherit tenant chain
     fallback: Optional[Literal["on", "off"]] = None  # None = inherit
+    # C9: this user's own narrowing of the tenant's `profile_scopes`. Same
+    # absent/empty contract; validated as a subset of the tenant's CURRENT set
+    # (see `validate_user_routing`).
+    profile_scopes: Optional[list[str]] = None
 
 
 class TenantRoutingConfigResponse(BaseModel):
@@ -85,6 +99,8 @@ class TenantRoutingConfigResponse(BaseModel):
     free_tier_model: Optional[str] = None
     # advisory-only shadow toggle (see request). Tri-state; null = global default.
     shadow_vsr: Optional[bool] = None
+    # C9: null = unrestricted.
+    profile_scopes: Optional[list[str]] = None
 
 
 class UserRoutingConfigResponse(BaseModel):
@@ -94,6 +110,8 @@ class UserRoutingConfigResponse(BaseModel):
     preferred_model: Optional[str] = None
     chain: Optional[list[str]] = None
     fallback: Optional[str] = None
+    # C9: null = inherits the tenant's set unmodified.
+    profile_scopes: Optional[list[str]] = None
 
 
 # =============================================================================
@@ -158,10 +176,41 @@ def _is_subsequence(sub: list, full: list) -> bool:
     return all(any(s == f for f in it) for s in sub)
 
 
+def _validate_scope_set(scopes: Optional[list[str]], field: str) -> None:
+    """C9's shared absent/empty/vocabulary/mixing checks for both the tenant
+    and the user `profile_scopes` axis, so the two can never diverge on what
+    counts as a valid scope set.
+
+    `None` never restricts and is always accepted. `[]` is refused outright:
+    neither "everything" nor "nothing" is a defensible reading of an empty
+    set here, and defaulting it to "everything" would inherit the model
+    allowlist's empty-means-unrestricted convention onto a residency control
+    — exactly the fail-open this axis exists to not repeat.
+    """
+    if scopes is None:
+        return
+    if len(scopes) == 0:
+        raise RoutingValidationError(
+            f"{field}: an empty scope set is neither 'every scope' nor 'no "
+            f"scope'; omit {field} (null) to leave this axis unrestricted"
+        )
+    unknown = sorted({s for s in scopes if s not in PROFILE_SCOPES})
+    if unknown:
+        raise RoutingValidationError(
+            f"{field}: {unknown} is not a recognised profile_scope; the "
+            f"accepted values are {sorted(PROFILE_SCOPES)}"
+        )
+    try:
+        check_scope_set_not_mixed_bounded_unbounded(scopes)
+    except ValueError as exc:
+        raise RoutingValidationError(f"{field}: {exc}")
+
+
 def validate_tenant_routing(body: TenantRoutingConfigRequest) -> None:
     chain_keys = _validate_model_list(body.chain, "chain")
     allow_keys = _validate_model_list(body.allowlist, "allowlist")
     _validate_model_list(list(body.quotas.keys()), "quotas")
+    _validate_scope_set(body.profile_scopes, "profile_scopes")
 
     free_key = None
     if body.free_tier_model is not None:
@@ -204,6 +253,23 @@ def validate_user_routing(body: UserRoutingConfigRequest, tenant: RoutingConfig)
             raise RoutingValidationError(
                 "chain: user chain must be an order-preserving subsequence of "
                 f"the tenant chain {list(tenant.chain)}"
+            )
+    _validate_scope_set(body.profile_scopes, "profile_scopes")
+    # C9: narrowing only. A tenant with no `profile_scopes` restriction (None)
+    # is "everything", so any valid user set is a narrowing of it and nothing
+    # further is checked here. A tenant WITH a restriction bounds the user's
+    # set from above; a user value outside it is a widening write and is
+    # refused, naming the offending value(s) — never silently intersected
+    # (that is the READ-time behaviour, `routing.config.effective_profile_scopes`,
+    # not this write-time gate).
+    if body.profile_scopes is not None and tenant.profile_scopes is not None:
+        tenant_set = set(tenant.profile_scopes)
+        widened = sorted(s for s in body.profile_scopes if s not in tenant_set)
+        if widened:
+            raise RoutingValidationError(
+                f"profile_scopes: {widened} is not in the tenant's own scope "
+                f"set {sorted(tenant_set)}; a user's scope set may only "
+                f"narrow the tenant's, never widen it"
             )
 
 
@@ -249,6 +315,15 @@ def tenant_config_to_item(
     # tri-state honest through the store round-trip.
     if body.shadow_vsr is not None:
         item["shadow_vsr"] = bool(body.shadow_vsr)
+    # C9: full-replace like every other field here — a PUT that omits
+    # `profile_scopes` writes no key, which `_parse_tenant_config` reads back
+    # as `None` (unrestricted). De-duplicated, order-preserving (a scope SET
+    # has no duplicates by definition; preserving input order keeps a
+    # round-tripped GET->PUT byte-stable for an operator who did not reorder
+    # it). Validation has already rejected `[]` and any unknown value by the
+    # time this runs.
+    if body.profile_scopes is not None:
+        item["profile_scopes"] = list(dict.fromkeys(body.profile_scopes))
     if updated_by is not None:
         item["updated_by"] = updated_by
         item["updated_at"] = _now_iso()
@@ -266,6 +341,9 @@ def user_config_to_item(
         item["chain"] = [_canon_or_self(m) for m in body.chain]
     if body.fallback is not None:
         item["fallback"] = body.fallback
+    # C9: same full-replace / never-[] contract as the tenant item above.
+    if body.profile_scopes is not None:
+        item["profile_scopes"] = list(dict.fromkeys(body.profile_scopes))
     if updated_by is not None:
         item["updated_by"] = updated_by
         item["updated_at"] = _now_iso()
@@ -368,16 +446,21 @@ def _tenant_view(cfg: RoutingConfig) -> dict:
         "fallback_default": cfg.fallback_default,
         "free_tier_model": cfg.free_tier_model,
         "shadow_vsr": cfg.shadow_vsr,
+        "profile_scopes": list(cfg.profile_scopes) if cfg.profile_scopes is not None else None,
     }
 
 
 def _user_view(cfg: Optional[routing_config.UserRoutingConfig]) -> dict:
     if cfg is None:
-        return {"preferred_model": None, "chain": None, "fallback": None}
+        return {
+            "preferred_model": None, "chain": None, "fallback": None,
+            "profile_scopes": None,
+        }
     return {
         "preferred_model": cfg.preferred_model,
         "chain": list(cfg.chain) if cfg.chain else None,
         "fallback": cfg.fallback,
+        "profile_scopes": list(cfg.profile_scopes) if cfg.profile_scopes is not None else None,
     }
 
 

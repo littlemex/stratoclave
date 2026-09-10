@@ -66,6 +66,15 @@ class RoutingConfig:
     # Money is fail-closed in every mode (reserve precedes any SR forward); only
     # whether/how much traffic is routed through SR differs.
     sr_mode: Optional[str] = None
+    # C9: the tenant's own jurisdiction/residency restriction — which
+    # `mvp.models.PROFILE_SCOPES` values this tenant's requests may route
+    # through at all, independent of the per-family entitlement axis (C4).
+    # `None` = unrestricted (every tenant that predates this axis, unchanged).
+    # Present-and-non-empty narrows; present-and-empty is never persisted (a
+    # rejected write — see `admin_routing.py`'s validator). NOT read by the
+    # reserve/chat path in this change — PR3 wires the eligibility predicate;
+    # this field only stores and validates the policy.
+    profile_scopes: Optional[tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,13 @@ class UserRoutingConfig:
     preferred_model: Optional[str] = None
     chain: Optional[tuple[str, ...]] = None
     fallback: Optional[str] = None  # "on" | "off" | None (inherit)
+    # C9: this user's OWN narrowing of the tenant's `profile_scopes`. Same
+    # absent/empty contract as the tenant field above. Checked at write time
+    # against the tenant's CURRENT set (`admin_routing.validate_user_routing`)
+    # and re-intersected at read time (`routing.config.effective_profile_scopes`)
+    # so a later tenant narrowing is never defeated by a stale, wider user
+    # document — the reason both a write-time and a read-time check exist.
+    profile_scopes: Optional[tuple[str, ...]] = None
 
 
 @dataclass

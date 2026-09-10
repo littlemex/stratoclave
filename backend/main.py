@@ -43,6 +43,11 @@ from mvp.admin_tenants import router as mvp_admin_tenants_router
 from mvp.admin_pricing import router as mvp_admin_pricing_router
 from mvp.admin_routing import router as mvp_admin_routing_router
 from mvp.admin_usage import router as mvp_admin_usage_router
+# C4: the entitlement store's own admin route (grant/revoke/list), separate
+# from admin_routing.py's routing-config writer -- see
+# mvp/admin_entitlements.py's module docstring for why the two must never
+# touch each other's item.
+from mvp.admin_entitlements import router as mvp_admin_entitlements_router
 from mvp.team_lead import router as mvp_team_lead_router
 # Money-ceiling raises: the request, the approval, and the grant that expires.
 from mvp.grants import router as mvp_grants_router
@@ -468,6 +473,7 @@ app.include_router(mvp_billing_authorize_router)  # POST /api/mvp/billing/author
 app.include_router(mvp_admin_users_router)       # /api/mvp/admin/users[*]
 app.include_router(mvp_admin_tenants_router)     # /api/mvp/admin/tenants[*]
 app.include_router(mvp_admin_routing_router)     # /api/mvp/admin/tenants/{id}[/users/{uid}]/routing-config
+app.include_router(mvp_admin_entitlements_router)  # /api/mvp/admin/tenants/{id}/entitlements[*]
 app.include_router(mvp_admin_usage_router)       # /api/mvp/admin/usage-logs
 app.include_router(mvp_admin_pricing_router)     # /api/mvp/admin/pricing-config (read-only)
 app.include_router(mvp_team_lead_router)         # /api/mvp/team-lead/tenants[*]
