@@ -11,6 +11,20 @@
     "  bedrock_region    the region this model is invoked in",
     "  aliases           client-facing names that resolve to this entry; must be globally unique",
     "  wire_protocol     messages = Bedrock Converse, responses = bedrock-mantle OpenAI surface",
+    "  profile_scope     jp|us|global|eu|apac|gov, or \"no_profile\" for a bare foundation-model id",
+    "                    with no inference profile at all (nvidia, qwen today). Declared, never",
+    "                    parsed from bedrock_model_id — checked against a recognised id prefix as",
+    "                    a CROSS-CHECK only, because two entries have no prefix to parse.",
+    "  model_family      the model identity a profile_scope varies WITHOUT varying (two entries",
+    "                    of one family are the same model at different scopes); lowercase,",
+    "                    '.'/'-' separated segments, must be globally unique per profile_scope",
+    "  access            general|entitlement_required; every entry here is \"general\"",
+    "                    (grandfathered) — entitlement is a later change, not read yet",
+    "  jurisdiction_bounded  whether profile_scope bounds this entry to a geography; never",
+    "                        assumed true, because assuming it is what makes \"global\" look",
+    "                        like a jurisdiction",
+    "  jurisdiction      the geography profile_scope bounds this entry to; present iff",
+    "                    jurisdiction_bounded is true",
     "  pricing_key       row in the pricing table; a key is ONE price point, so models",
     "                    at different published prices do not share one",
     "  price_model_id    the id the price APIs know this model by, when the billed",
@@ -28,7 +42,13 @@
     "\"messages\" — the Converse chain is built from the deployment's BEDROCK_REGION plus",
     "STRATOCLAVE_FAILOVER_REGIONS, so a Converse model must be offered in those regions",
     "or it should not be registered at all. That is why the Qwen entry is",
-    "qwen3-next-80b-a3b and not qwen3-235b-a22b-2507, which Bedrock offers only in us-west-2."
+    "qwen3-next-80b-a3b and not qwen3-235b-a22b-2507, which Bedrock offers only in us-west-2.",
+    "",
+    "Every entry here is profile_scope \"us\" (or \"no_profile\" for the two bare foundation-model",
+    "ids) and jurisdiction \"us\" — the registry is US-only by omission today, even though an",
+    "ACTIVE \"global.\" inference profile exists for nearly every Anthropic entry. A \"global\"",
+    "profile_scope is UNBOUNDED (it is not a jurisdiction), so jurisdiction_bounded must stay",
+    "false for it — see mvp/models.py for why that is never inferred."
   ],
   "models": [
     {
@@ -39,6 +59,11 @@
         "claude-opus-5"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-opus-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus",
       "notes": "Shares pricing_key \"opus\" with Opus 4.5 through 4.8, whose in-region rate is the same $5.50/$27.50 per MTok (measured 2026-08-31 against bedrock:ListFoundationModelAgreementOffers). Opus 4 and 4.1 are NOT in this tier — they list at $15/$75 — and carry \"opus-legacy\"."
     },
@@ -50,6 +75,11 @@
         "claude-fable-5"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-fable-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "fable",
       "notes": "Priced above the Opus tier: $11/$55 per MTok in-region, $10/$50 global (measured 2026-08-31). It carries its own pricing_key rather than sharing \"opus\". The Bedrock offering requires the account to opt into provider_data_share and has a higher refusal rate than prior Claude models."
     },
@@ -61,6 +91,11 @@
         "claude-opus-4-7"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-opus-4-7",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus"
     },
     {
@@ -71,6 +106,11 @@
         "claude-opus-4-6"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-opus-4-6",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus"
     },
     {
@@ -82,6 +122,11 @@
         "claude-opus-4-5-20251101"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-opus-4-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus"
     },
     {
@@ -93,6 +138,11 @@
         "claude-opus-4-1-20250805"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-opus-4-1",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus-legacy",
       "notes": "Priced at $15/$75 per MTok, three times the Opus 4.5+ rate, so it cannot share \"opus\": a key is charged at its dearest member, and sharing would charge every Opus 5 request at this rate. Measured 2026-08-31 from the Price List's AmazonBedrockFoundationModels offer."
     },
@@ -105,6 +155,11 @@
         "claude-opus-4-20250514"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-opus-4",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus-legacy"
     },
     {
@@ -115,6 +170,11 @@
         "claude-sonnet-5"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-sonnet-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "sonnet-5",
       "notes": "Lists BELOW the Sonnet 4.x tier — $2.20/$11.00 per MTok in-region against $3.30/$16.50 — so it carries its own key. It shared \"sonnet\" until the live feed's key-spread check measured the difference (2026-08-31)."
     },
@@ -126,6 +186,11 @@
         "claude-sonnet-4-6"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-sonnet-4-6",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "sonnet"
     },
     {
@@ -137,6 +202,11 @@
         "claude-sonnet-4-5-20250929"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-sonnet-4-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "sonnet"
     },
     {
@@ -148,6 +218,11 @@
         "claude-haiku-4-5-20251001"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-haiku-4-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "haiku"
     },
     {
@@ -159,6 +234,11 @@
         "claude-3-7-sonnet-20250219"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-3-7-sonnet",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "sonnet-3",
       "notes": "Priced at $3/$15 per MTok — the Sonnet 4.x tier's in-region rate is $3.30/$16.50, so this shares a key with Claude 3 Sonnet instead of with the current tier."
     },
@@ -171,6 +251,11 @@
         "claude-3-5-haiku-20241022"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-3-5-haiku",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "haiku-3-5",
       "notes": "Priced at $0.80/$4.00 per MTok against Haiku 4.5's $1.10/$5.50, so it carries its own key. The Latency Optimized variant is a different product at $1.00/$5.00 and is not served here."
     },
@@ -182,6 +267,11 @@
         "claude-3-haiku"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-3-haiku",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "haiku-3",
       "notes": "Priced at $0.25/$1.25 per MTok. Bedrock publishes no prompt-cache rate for it because it does not support prompt caching; the key's cache legs are therefore an upper bound, not a published price."
     },
@@ -193,6 +283,11 @@
         "claude-3-opus"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-3-opus",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "opus-legacy"
     },
     {
@@ -203,6 +298,11 @@
         "claude-3-sonnet"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "us",
+      "model_family": "claude-3-sonnet",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "sonnet-3"
     },
     {
@@ -215,6 +315,11 @@
         "us.openai.gpt-5.6-sol"
       ],
       "wire_protocol": "responses",
+      "profile_scope": "us",
+      "model_family": "gpt-5.6-sol",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "gpt-5.6-sol",
       "notes": "Flagship GPT-5.6 tier on bedrock-runtime OpenAI-compatible endpoint; its own pricing_key because each tier is a distinct model card with its own price. Region is PINNED to us-east-2 to reuse the region already proven by the earlier gpt-5.5 entry, even though the model is also offered elsewhere. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix because that endpoint refuses the bare id with \"Invocation ... with on-demand throughput isn't supported\", and because every Anthropic entry already stores its profile id the same way."
     },
@@ -228,6 +333,11 @@
         "us.openai.gpt-5.6-terra"
       ],
       "wire_protocol": "responses",
+      "profile_scope": "us",
+      "model_family": "gpt-5.6-terra",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "gpt-5.6-terra",
       "notes": "Balanced GPT-5.6 tier on bedrock-runtime OpenAI-compatible endpoint; its own pricing_key for the same reason as sol. Region is PINNED to us-east-2 for the same reason as sol. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix because that endpoint refuses the bare id with \"Invocation ... with on-demand throughput isn't supported\", and because every Anthropic entry already stores its profile id the same way."
     },
@@ -241,6 +351,11 @@
         "us.xai.grok-4.6"
       ],
       "wire_protocol": "responses",
+      "profile_scope": "us",
+      "model_family": "grok-4.6",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "grok",
       "notes": "Served on bedrock-runtime OpenAI-compatible endpoint's OpenAI-compatible surface, so it rides the same transport as the OpenAI family — no new transport, just an entry. Offered in us-west-2. Invoked through the `bedrock-runtime` OpenAI-compatible endpoint, which is the one AWS recommends; `bedrock_model_id` carries the `us.` inference-profile prefix because that endpoint refuses the bare id with \"Invocation ... with on-demand throughput isn't supported\", and because every Anthropic entry already stores its profile id the same way."
     },
@@ -253,8 +368,13 @@
         "nvidia.nemotron-super-3-120b"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "no_profile",
+      "model_family": "nemotron-super-3-120b",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "nemotron",
-      "notes": "Served by Converse, so it rides the same transport as the Claude family. Not Claude, so resolve_bedrock_model() keeps it out of /v1/messages; reachable only via /v1/chat/completions. Priced at $0.15/$0.65 per MTok in the Price List's AmazonBedrock offer (measured 2026-08-31); no prompt-cache rate is published, so the key's cache legs are an upper bound."
+      "notes": "Served by Converse, so it rides the same transport as the Claude family. Not Claude, so resolve_bedrock_model() keeps it out of /v1/messages; reachable only via /v1/chat/completions. Priced at $0.15/$0.65 per MTok in the Price List's AmazonBedrock offer (measured 2026-08-31); no prompt-cache rate is published, so the key's cache legs are an upper bound. profile_scope is \"no_profile\": this id names a bare foundation model, not an inference profile, and IAM grants its exact ARN rather than a profile ARN (iac/lib/ecs-stack.ts). It is still jurisdiction_bounded \"us\" because bedrock_region pins invocation to us-east-1, a single region within that geography."
     },
     {
       "provider": "qwen",
@@ -265,9 +385,14 @@
         "qwen.qwen3-next-80b-a3b"
       ],
       "wire_protocol": "messages",
+      "profile_scope": "no_profile",
+      "model_family": "qwen3-next-80b",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "us",
       "pricing_key": "qwen",
       "price_model_id": "qwen.qwen3-next-80b-a3b-instruct",
-      "notes": "Chosen over qwen3-235b-a22b-2507 because Bedrock offers that one only in us-west-2, outside a us-east-1 residency policy. Converse transport; same /v1/messages exclusion and same unpriced-defaults-high rule as nemotron."
+      "notes": "Chosen over qwen3-235b-a22b-2507 because Bedrock offers that one only in us-west-2, outside a us-east-1 residency policy. Converse transport; same /v1/messages exclusion and same unpriced-defaults-high rule as nemotron. profile_scope is \"no_profile\" for the same reason as nemotron: a bare foundation-model id, granted by exact ARN in iac/lib/ecs-stack.ts rather than by inference profile."
     }
   ]
 }

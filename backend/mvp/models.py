@@ -19,8 +19,13 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 
 from .rates import no_duplicate_keys as _no_duplicate_keys
+from .pricing_feeds.dimensions import (
+    _GEO_PROFILE_PREFIXES as _RECOGNISED_GEO_ID_PREFIXES,
+    _GLOBAL_PROFILE_PREFIX as _RECOGNISED_GLOBAL_ID_PREFIX,
+)
 from dataclasses import dataclass
 from typing import Literal, NoReturn, Optional
 
@@ -31,6 +36,54 @@ DEFAULT_MODEL = os.getenv(
     "DEFAULT_BEDROCK_MODEL",
     "us.anthropic.claude-opus-4-7",
 )
+
+
+# The distinct `profile_scope` value for an entry with no inference profile at all
+# (nvidia, qwen: IAM grants their exact foundation-model ARN, not a profile ARN).
+# A DISTINCT sentinel rather than reusing "us" — labelling a profile-less entry "us"
+# would quietly redefine `profile_scope` from "which inference profile" to
+# "jurisdiction of execution", which is a different field wearing the same name.
+NO_PROFILE_SCOPE = "no_profile"
+# GovCloud's real ARN prefix is "us-gov." (confirmed against
+# `pricing_feeds.dimensions.unknown_profile_prefix`: it recognises "us-gov." and
+# refuses bare "gov."), but the registry's own scope vocabulary spells the value
+# "gov" — there is no "us-gov" scope, and "us"/GovCloud are different geographies
+# that happen to share two letters. This is the one name that does not fall out of
+# stripping a recognised prefix's trailing dot, so it is named explicitly instead of
+# guessed at.
+_GOV_ID_PREFIX = "us-gov."
+# The (profile_scope token -> id prefix) mapping, DERIVED from
+# `pricing_feeds.dimensions`'s own recognised prefixes rather than retyping them: a
+# second, hand-written vocabulary is exactly the drift this registry's fields exist
+# to prevent (C2's rationale for `model_family`, applied to scope tokens). If
+# `dimensions.py` starts recognising a new prefix, it becomes a valid `profile_scope`
+# value here with no further edit; if it drops one, this dict silently shrinks with
+# it — both properties a hand-copied tuple would not have.
+_PROFILE_SCOPE_ID_PREFIXES: dict[str, str] = {
+    ("gov" if prefix == _GOV_ID_PREFIX else prefix[:-1]): prefix
+    for prefix in _RECOGNISED_GEO_ID_PREFIXES
+}
+_PROFILE_SCOPE_ID_PREFIXES["global"] = _RECOGNISED_GLOBAL_ID_PREFIX
+# Every value `profile_scope` may declare: every geography `dimensions.py`
+# recognises an inference-profile prefix for (today: jp, us, eu, apac, gov, au, ca),
+# plus "global" (UNBOUNDED — routes to every supported region, `us` is three
+# regions and never one), plus `NO_PROFILE_SCOPE` for the no-profile case above.
+_PROFILE_SCOPES = frozenset(_PROFILE_SCOPE_ID_PREFIXES) | {NO_PROFILE_SCOPE}
+# Geographies a jurisdiction-bounded entry may declare in `jurisdiction`: every
+# profile_scope value that IS a bounded geography. Excludes "global" (unbounded by
+# definition — never a jurisdiction, which is the whole point of C14) and
+# `NO_PROFILE_SCOPE` (not a geography at all). Derived from `_PROFILE_SCOPES` rather
+# than listed a third time, so adding a geography to one cannot silently leave it
+# out of the other.
+_JURISDICTIONS = _PROFILE_SCOPES - {"global", NO_PROFILE_SCOPE}
+_ACCESS_LEVELS = frozenset({"general", "entitlement_required"})
+# `model_family` syntax: lowercase ascii letters/digits in segments joined by a single
+# '.' or '-', matching the same alphabet the registry's own aliases already use
+# (`claude-opus-5`, `gpt-5.6-sol`, `grok-4.6`). Rejected rather than folded into this
+# shape on load — coercing a mixed-case or malformed value would let "the same family,
+# spelled differently" through as two families, which is exactly the ambiguity C2/C10
+# depend on `model_family` not having.
+_MODEL_FAMILY_RE = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 
 
 @dataclass(frozen=True)
@@ -89,6 +142,30 @@ class ModelEntry:
     # the seam types the SR adapter fills in a later substep.
     virtual: bool = False
     sr_pool_ref: Optional[str] = None
+    # Which geography a request to this entry is pinned to at the inference-profile
+    # layer — see `NO_PROFILE_SCOPE` above for the full contract. Declared, never
+    # parsed from `bedrock_model_id`. Defaults to "us" only for direct construction
+    # by callers that predate this field (every current test fixture); the JSON
+    # loader treats it as required and never falls back to this default.
+    profile_scope: str = "us"
+    # The model identity a `profile_scope` varies WITHOUT varying: two entries
+    # sharing a `model_family` are the same model reachable through different
+    # scopes. See `_MODEL_FAMILY_RE` for its syntax. `None` here only for the same
+    # backward-compatibility reason as `profile_scope`'s default — the loader
+    # requires it.
+    model_family: Optional[str] = None
+    # "general" (every entry shipped before entitlement existed — grandfathered) or
+    # "entitlement_required" (PR2 gates it on a tenant grant). PR1 validates this
+    # value but does not read it on any request path.
+    access: str = "general"
+    # Whether `profile_scope` bounds this entry to a geography. Never defaulted to
+    # True by the loader — assuming it is what makes `global` look like a
+    # jurisdiction — but defaults to False here so a direct-construction caller
+    # that never mentions it gets the unbounded reading rather than an invented one.
+    jurisdiction_bounded: bool = False
+    # The geography `profile_scope` bounds this entry to. Present iff
+    # `jurisdiction_bounded` is True; PR2's policy reads this, PR1 only validates it.
+    jurisdiction: Optional[str] = None
 
 
 # Source of truth: an external JSON document, not a Python literal. Operators add
@@ -109,7 +186,8 @@ _SERVED_BY = frozenset({"bedrock", "vllm", "semantic-router"})
 _ENTRY_FIELDS = frozenset({
     "provider", "bedrock_model_id", "bedrock_region", "aliases", "wire_protocol",
     "pricing_key", "served_by", "endpoint_key", "virtual", "sr_pool_ref", "notes",
-    "price_model_id",
+    "price_model_id", "profile_scope", "model_family", "access",
+    "jurisdiction_bounded", "jurisdiction",
 })
 # `pricing_key` is required rather than defaulted. Defaulting a typo to "default"
 # charges the model at the `default` rate, and `default` is NOT an upper bound — the
@@ -117,10 +195,12 @@ _ENTRY_FIELDS = frozenset({
 # `$comment` is the document's own prose; the rest is structure.
 _DOC_FIELDS = frozenset({"schema_version", "models", "$comment"})
 _REQUIRED_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "aliases",
-                    "wire_protocol", "pricing_key")
+                    "wire_protocol", "pricing_key", "profile_scope", "model_family",
+                    "access", "jurisdiction_bounded")
 _STRING_FIELDS = ("provider", "bedrock_model_id", "bedrock_region", "wire_protocol",
                   "pricing_key", "endpoint_key", "sr_pool_ref", "notes",
-                  "price_model_id")
+                  "price_model_id", "profile_scope", "model_family", "access",
+                  "jurisdiction")
 # Regions where the OpenAI-compatible surface serves these models. `bedrock_region` is AUTHORITATIVE
 # for a responses entry — that is where the prompt goes — so a typo'd region must not
 # reach the transport, which would fail with a confusing connection error at best.
@@ -193,6 +273,56 @@ def _parse_entry(path: str, index: int, raw: object) -> ModelEntry:
     # that keeps an entry from ever being a charge-of-record model.
     if not isinstance(virtual, bool):
         _fail(path, f"{where}.virtual must be a JSON boolean, got {virtual!r}")
+    profile_scope = raw["profile_scope"]
+    if profile_scope not in _PROFILE_SCOPES:
+        _fail(path, f"{where}.profile_scope {profile_scope!r} not in {sorted(_PROFILE_SCOPES)}")
+    model_family = raw["model_family"]
+    if not _MODEL_FAMILY_RE.match(model_family):
+        _fail(path, f"{where}.model_family {model_family!r} must match "
+                    f"{_MODEL_FAMILY_RE.pattern!r} (lowercase letters/digits, "
+                    f"'.'/'-' separated)")
+    access = raw["access"]
+    if access not in _ACCESS_LEVELS:
+        _fail(path, f"{where}.access {access!r} not in {sorted(_ACCESS_LEVELS)}")
+    jurisdiction_bounded = raw["jurisdiction_bounded"]
+    # Same reasoning as `virtual` above: a truthy non-bool ("false" as a JSON
+    # string) must not silently become True.
+    if not isinstance(jurisdiction_bounded, bool):
+        _fail(path, f"{where}.jurisdiction_bounded must be a JSON boolean, got "
+                    f"{jurisdiction_bounded!r}")
+    jurisdiction = raw.get("jurisdiction")
+    if jurisdiction_bounded:
+        if not jurisdiction:
+            _fail(path, f"{where} is jurisdiction_bounded, so it must name its "
+                        f"jurisdiction")
+        if jurisdiction not in _JURISDICTIONS:
+            _fail(path, f"{where}.jurisdiction {jurisdiction!r} not in {sorted(_JURISDICTIONS)}")
+    elif jurisdiction is not None:
+        # Not silently ignored: a jurisdiction alongside jurisdiction_bounded=false
+        # is a contradiction, not a harmless extra fact, and the strict loader's
+        # whole point is to catch exactly this shape of typo.
+        _fail(path, f"{where} sets jurisdiction {jurisdiction!r} but "
+                    f"jurisdiction_bounded is false")
+    # Cross-check ONLY (see `_PROFILE_SCOPE_ID_PREFIXES`): the id prefix is never
+    # the source of truth for profile_scope, but where bedrock_model_id STARTS WITH
+    # a RECOGNISED inference-profile prefix, the scope that prefix names must agree
+    # with what was declared. Matched through the MAPPING, not by comparing the id's
+    # first dot-segment to the scope token directly — "gov"'s real ARN prefix is
+    # "us-gov.", not "gov.", so segment-equality can never match a real GovCloud id
+    # and would wrongly accept a fabricated "gov.___" one. This is the cheapest
+    # defect detector available for e.g. a `global.`-prefixed id declared "us".
+    id_prefix_token = next(
+        (token for token, prefix in _PROFILE_SCOPE_ID_PREFIXES.items()
+         if raw["bedrock_model_id"].startswith(prefix)),
+        None,
+    )
+    if id_prefix_token is not None and id_prefix_token != profile_scope:
+        _fail(path, f"{where}.profile_scope is {profile_scope!r} but "
+                    f"bedrock_model_id {raw['bedrock_model_id']!r} starts with "
+                    f"{_PROFILE_SCOPE_ID_PREFIXES[id_prefix_token]!r}, which names "
+                    f"scope {id_prefix_token!r}; the prefix is not the source of "
+                    f"truth but a recognised one must still agree with the "
+                    f"declared scope")
     if raw["provider"] not in _PROVIDERS:
         _fail(path, f"{where}.provider {raw['provider']!r} not in {sorted(_PROVIDERS)}")
     if raw["wire_protocol"] not in _WIRE_PROTOCOLS:
@@ -252,6 +382,11 @@ def _parse_entry(path: str, index: int, raw: object) -> ModelEntry:
         endpoint_key=raw.get("endpoint_key"),
         virtual=virtual,
         sr_pool_ref=raw.get("sr_pool_ref"),
+        profile_scope=profile_scope,
+        model_family=model_family,
+        access=access,
+        jurisdiction_bounded=jurisdiction_bounded,
+        jurisdiction=jurisdiction,
     )
 
 
@@ -304,6 +439,21 @@ def load_registry(path: Optional[str] = None) -> tuple[ModelEntry, ...]:
                             f"({entries[previous].bedrock_model_id!r}) and models[{index}] "
                             f"({entry.bedrock_model_id!r})")
             seen[name] = index
+
+    # A (model_family, profile_scope) pair identifies at most one entry. Without
+    # this, two rows could claim to be the SAME model at the SAME scope — which
+    # `pricing_key` wins is then document-order, and an entitlement grant keyed
+    # `(tenant_id, model_family, profile_scope)` (PR2) would be ambiguous about
+    # which entry it grants access to.
+    seen_family_scope: dict[tuple[str, str], int] = {}
+    for index, entry in enumerate(entries):
+        fam_scope = (entry.model_family, entry.profile_scope)
+        previous = seen_family_scope.get(fam_scope)
+        if previous is not None:
+            _fail(path, f"model_family {entry.model_family!r} at profile_scope "
+                        f"{entry.profile_scope!r} is claimed by both models[{previous}] "
+                        f"and models[{index}]")
+        seen_family_scope[fam_scope] = index
 
     # Every pricing_key must name a real rate row in the BUNDLED document. A key that
     # only a live source supplies is deliberately not enough: the floor is the layer

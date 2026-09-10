@@ -46,6 +46,13 @@
       "cache_write_per_mtok_microusd": 13750000,
       "notes": "Claude Fable 5 — $11/$55 per MTok in-region ($10/$50 global), above the Opus tier. Measured 2026-08-31."
     },
+    "fable-global": {
+      "input_per_mtok_microusd": 10000000,
+      "output_per_mtok_microusd": 50000000,
+      "cache_read_per_mtok_microusd": 1000000,
+      "cache_write_per_mtok_microusd": 12500000,
+      "notes": "Claude Fable 5, global profile scope — $10/$50 per MTok, 10% below the in-region \"fable\" row (measured 2026-08-31). Its own key rather than a share of \"fable\": scope is a price point (C10), and an absent key would resolve to \"default\" ($15/$75) and overcharge a global-scope request by 50%. Cache legs follow the same ratios every other row uses: read = 1/10 of input, write = 1.25x input. No registry entry references this key yet — it is the rate a future global-scope Claude Fable 5 entry will carry."
+    },
     "sonnet": {
       "input_per_mtok_microusd": 3300000,
       "output_per_mtok_microusd": 16500000,
