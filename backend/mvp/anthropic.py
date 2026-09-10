@@ -60,6 +60,7 @@ from ._converse_types import additional_model_request_fields as _additional_mode
 from . import _money
 from . import provider_outcome as _provider_outcome
 from ._pipeline import (
+    eligibility_listing_context,
     release_pool as _release_pool,
     reserve_credit,
     reserve_credit_for_model,
@@ -67,6 +68,7 @@ from ._pipeline import (
 )
 from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_current_user, get_request_context
+from .eligibility import refusal_for
 from .reservation_bound import (
     assess_boundability,
     dollar_pool_bound_should_compute,
@@ -74,7 +76,7 @@ from .reservation_bound import (
     survey_and_hash_converse_kwargs,
 )
 from .observability.context import RequestContext, response_headers as _corr_headers
-from .models import _MAPPING as _ANTHROPIC_TO_BEDROCK, resolve_bedrock_model
+from .models import _REGISTRY, resolve_bedrock_model
 
 # Backward-compatible aliases for tests that import the underscore-prefixed
 # functions from this module. New code should import directly from
@@ -207,7 +209,9 @@ router = APIRouter(tags=["mvp-anthropic"])
 # Anthropic's `/v1/models` returns the shape:
 #   {"data": [{"id":"claude-opus-4-7","display_name":"Claude Opus 4.7","type":"model",
 #              "created_at":"2026-..."}], "has_more": false, "first_id":..., "last_id":...}
-# The MVP returns the minimum viable shape (id + type only).
+# The MVP returns the minimum viable shape (id + type only), plus `model_family`
+# and `profile_scope` (C8) as ADDITIONAL fields — the array stays flat and every
+# existing key survives, so an existing consumer keeps working unchanged.
 # Claude Desktop cowork probes with `Authorization: Bearer ...`, so the
 # endpoint requires auth — otherwise unauthenticated callers could
 # enumerate the deployment's model list.
@@ -224,16 +228,32 @@ def list_models(
     # against `user.roles` AND `user.key_scopes` for API-key auth.
     _user: AuthenticatedUser = Depends(require_permission("messages:send")),
 ) -> dict:
+    # C8: iterate `_REGISTRY` filtered to this provider, not `_MAPPING` — the
+    # alias→bedrock_id map loses the entry a filter needs to consult
+    # (`model_family`, `profile_scope`, `access`), and it collapses two
+    # entries that share an alias-less lookup into "whichever wrote last".
+    # One row per alias, exactly as `openai_responses.list_openai_models`
+    # already does, so an SDK probing either a short or fully-qualified id
+    # gets the same answer either route would give it.
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    data = [
-        {
-            "id": anthropic_id,
-            "type": "model",
-            "display_name": anthropic_id,
-            "created_at": now,
-        }
-        for anthropic_id in _ANTHROPIC_TO_BEDROCK.keys()
-    ]
+    tenant_cfg, user_cfg, ent_grants = eligibility_listing_context(_user)
+    data = []
+    for entry in _REGISTRY:
+        if entry.provider != "anthropic":
+            continue
+        # An entry the caller cannot use is ABSENT, not present-and-marked.
+        if refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,
+                        grants=ent_grants) is not None:
+            continue
+        for alias in entry.aliases:
+            data.append({
+                "id": alias,
+                "type": "model",
+                "display_name": alias,
+                "created_at": now,
+                "model_family": entry.model_family,
+                "profile_scope": entry.profile_scope,
+            })
     return {
         "data": data,
         "has_more": False,

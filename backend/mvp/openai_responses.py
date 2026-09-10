@@ -46,6 +46,7 @@ from dynamo import UserTenantsRepository
 from . import _money, _openai_transport
 from . import provider_outcome as _provider_outcome
 from ._pipeline import (
+    eligibility_listing_context,
     release_pool as _release_pool,
     reserve_credit,
     reserve_credit_for_model,
@@ -53,6 +54,7 @@ from ._pipeline import (
 )
 from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_request_context
+from .eligibility import refusal_for
 from .models import ModelEntry, _REGISTRY, resolve_model
 from .observability.context import RequestContext, response_headers as _corr_headers
 from .reservation_bound import (
@@ -444,16 +446,23 @@ def _sanitize_sse_error_line(line: str) -> str:
 def list_openai_models(
     _user: AuthenticatedUser = Depends(require_permission("responses:send")),
 ) -> dict[str, Any]:
-    """Return the OpenAI-family entries from the model registry."""
+    """Return the OpenAI-family entries from the model registry the caller is
+    eligible for (C8) — additive `model_family`/`profile_scope` fields per
+    element, same flat `data` array, an entry the caller cannot use simply
+    absent rather than present-and-marked."""
     if not _codex_enabled():
         raise HTTPException(
             status_code=503,
             detail="OpenAI Responses API is not enabled on this deployment",
         )
+    tenant_cfg, user_cfg, ent_grants = eligibility_listing_context(_user)
     now = int(time.time())
     data = []
     for entry in _REGISTRY:
         if entry.provider != "openai":
+            continue
+        if refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,
+                        grants=ent_grants) is not None:
             continue
         # Surface every alias as its own row so SDK clients that probe
         # for either short or fully-qualified IDs both succeed.
@@ -464,6 +473,8 @@ def list_openai_models(
                     "object": "model",
                     "created": now,
                     "owned_by": "stratoclave",
+                    "model_family": entry.model_family,
+                    "profile_scope": entry.profile_scope,
                 }
             )
     return {"object": "list", "data": data}
