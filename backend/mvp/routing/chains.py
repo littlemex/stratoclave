@@ -12,6 +12,8 @@ import os
 from functools import lru_cache
 from typing import Optional
 
+from mvp.models import registry_entries
+
 from .clients import default_region
 from .types import BreakerDecision, BreakerStage, Chain, Target
 
@@ -84,8 +86,6 @@ def failover_regions() -> list[str]:
 
 def _build_catalog() -> dict[str, list[Target]]:
     """Build the static target catalog from the model registry."""
-    from mvp.models import _REGISTRY
-
     catalog: dict[str, list[Target]] = {}
     region = default_region()
     alt_regions = failover_regions()
@@ -101,7 +101,7 @@ def _build_catalog() -> dict[str, list[Target]]:
         failover_enabled=bool(alt_regions),
     )
 
-    for entry in _REGISTRY:
+    for entry in registry_entries():
         served_by = getattr(entry, "served_by", "bedrock")
         # Bedrock catalog covers the Anthropic (Messages) family as before.
         # vLLM entries are ALSO catalogued (any provider) so hybrid serving can

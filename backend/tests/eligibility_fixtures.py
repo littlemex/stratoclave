@@ -18,13 +18,15 @@ are frozen module globals computed once at import from the registry document
 so patching `mvp.models.<name>` via `monkeypatch.setattr` reaches every one of
 them regardless of which module calls in -- but a module that did
 `from .models import _REGISTRY` (a NAME, not a function) at ITS OWN top level
-holds a separate, un-patched copy. `mvp.openai_responses` does exactly this
-(`from .models import ModelEntry, _REGISTRY, resolve_model`) at this base
-commit. `install_registry` patches the canonical `mvp.models` globals AND
-defensively re-patches that same known local copy so a test is not silently
-vacuous merely because PR3's implementation keeps that import style;
-`raising=False` makes the defensive half a no-op if the implementation
-refactors away from it.
+would hold a separate, un-patched copy. `mvp.openai_responses` and
+`mvp.anthropic` did exactly this at the PR3 base commit; G1 (the
+one-registry-accessor refactor) converted every consumer, including both of
+those, to call `registry_entries()` instead, and added its own fail-closed
+guard (`tests/test_registry_single_accessor.py`) so a local `_REGISTRY`
+import cannot silently return. `_KNOWN_LOCAL_REGISTRY_IMPORTS` is therefore
+empty post-G1; `install_registry` still defensively re-patches whatever it
+lists, `raising=False`, so this fixture stays correct without a hand-edit if
+a future module ever needs the same crutch again.
 """
 from __future__ import annotations
 
@@ -36,13 +38,12 @@ from fastapi.testclient import TestClient
 
 from mvp.deps import AuthenticatedUser, get_current_user
 
-# Modules known, AT THIS BASE COMMIT, to import `_REGISTRY` as a local name
-# rather than calling `mvp.models.registry_entries()` fresh. Patched
-# defensively (raising=False) alongside the canonical `mvp.models` globals.
-_KNOWN_LOCAL_REGISTRY_IMPORTS: tuple[str, ...] = (
-    "mvp.openai_responses",
-    "mvp.anthropic",
-)
+# Modules known to import `_REGISTRY` as a local name rather than calling
+# `mvp.models.registry_entries()` fresh. Patched defensively (raising=False)
+# alongside the canonical `mvp.models` globals. Empty post-G1 (both former
+# members converted to `registry_entries()`); kept as a list, not deleted,
+# because the defensive re-patch is cheap insurance if one ever comes back.
+_KNOWN_LOCAL_REGISTRY_IMPORTS: tuple[str, ...] = ()
 
 
 def install_registry(monkeypatch, extra_entries: tuple, *, keep_real: bool = True) -> tuple:

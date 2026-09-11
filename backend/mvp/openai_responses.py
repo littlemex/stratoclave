@@ -55,7 +55,7 @@ from ._pipeline import (
 from .authz import require_permission
 from .deps import AuthenticatedUser, extract_model_pin, get_request_context
 from .eligibility import refusal_for
-from .models import ModelEntry, _REGISTRY, resolve_model
+from .models import ModelEntry, registry_entries, resolve_model
 from .observability.context import RequestContext, response_headers as _corr_headers
 from .reservation_bound import (
     assess_boundability,
@@ -458,7 +458,7 @@ def list_openai_models(
     tenant_cfg, user_cfg, ent_grants = eligibility_listing_context(_user)
     now = int(time.time())
     data = []
-    for entry in _REGISTRY:
+    for entry in registry_entries():
         if entry.provider != "openai":
             continue
         if refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,

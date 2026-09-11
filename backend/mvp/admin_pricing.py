@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from .authz import require_permission
 from .deps import AuthenticatedUser
-from .models import _REGISTRY
+from .models import registry_entries
 from .pricing import effective_rates
 
 router = APIRouter(prefix="/api/mvp/admin", tags=["mvp-admin-pricing"])
@@ -46,7 +46,7 @@ def get_pricing_config(
 ) -> PricingConfigResponse:
     version, rates, override_keys = effective_rates()
     models_by_key: dict[str, list[str]] = {}
-    for entry in _REGISTRY:
+    for entry in registry_entries():
         models_by_key.setdefault(entry.pricing_key, []).extend(entry.aliases)
     return PricingConfigResponse(
         version=version,

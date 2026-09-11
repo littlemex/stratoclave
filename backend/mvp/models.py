@@ -665,10 +665,12 @@ def registry_entries() -> tuple[ModelEntry, ...]:
 # ---------------------------------------------------------------------------
 # Backward-compatibility shims
 # ---------------------------------------------------------------------------
-# `mvp.anthropic` (line 50) imports `_MAPPING` and `resolve_bedrock_model`
-# at module top-level. Keep both working unchanged so that the model-registry
-# refactor lands as a pure additive change. New code should not import
-# `_MAPPING`; use `_REGISTRY` filtered by `provider == "anthropic"` instead.
+# `mvp.anthropic` imports `resolve_bedrock_model` at module top-level (it does
+# NOT import `_MAPPING` directly -- only `resolve_bedrock_model`, below, reads
+# it). Kept working unchanged so that the model-registry refactor lands as a
+# pure additive change. New code should not import `_MAPPING`; call
+# `registry_entries()` and filter by `provider == "anthropic"` instead (G1:
+# `_REGISTRY` itself has exactly one importer, this module).
 
 _MAPPING: dict[str, str] = {
     alias: entry.bedrock_model_id
