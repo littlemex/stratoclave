@@ -43,6 +43,24 @@ The settled per-gate mapping, five blocker types, three gates:
                                    is never the fix for the first case). Both
                                    are answers the SAME call already gives
                                    distinctly; neither needs a probe.
+                                   `no_agreement_offer`/`method_unavailable` is
+                                   a THIRD, earlier-checked case: the installed
+                                   botocore client has no
+                                   `list_foundation_model_agreement_offers`
+                                   method at all (measured on `botocore
+                                   1.35.99`; the method first ships later).
+                                   That is one fact about the ENVIRONMENT, true
+                                   of every model this account has, not a fact
+                                   about any one model's rate card — so it is
+                                   detected before the call is even attempted,
+                                   never left to fall through the generic
+                                   exception classifier below as `call_failed`
+                                   (an `AttributeError` whose message names
+                                   neither of the two matched substrings).
+                                   `mvp.discovery.reconcile.run_pass` checks
+                                   this itself, ONCE per pass, and skips
+                                   calling this gate for every model once it
+                                   knows the answer — see that module for why.
   - `gate_card_prices_tokens`  -> `no_token_pricing`
   - an unparseable rate-card dimension -> `price_dimensions_unknown`, minted
                                    by `mvp.discovery.reconcile`, never here (a
@@ -61,6 +79,29 @@ from ..pricing_feeds.base import STRATOCLAVE_REGION_ENV
 from ..pricing_feeds.dimensions import EXCLUDED, parse_agreement_dimension, per_mtok
 
 _DEFAULT_REGION = "us-east-1"
+
+# The one method every branch below depends on. Named once so
+# `agreement_offers_method_missing` and the blocker's own evidence string
+# never drift apart from a hand-typed second copy.
+_AGREEMENT_OFFERS_METHOD = "list_foundation_model_agreement_offers"
+
+
+def agreement_offers_method_missing(client: Any) -> bool:
+    """True when `client` (an already-constructed `bedrock` client) has no
+    `list_foundation_model_agreement_offers` method at all — an old
+    botocore, not a call that failed. Measured on this machine: botocore
+    1.35.99's `Bedrock` client raises `AttributeError` for this name;
+    botocore 1.43.92's does not.
+
+    Exposed (not private) so `mvp.discovery.reconcile.run_pass` can ask this
+    ONCE, right after building its one shared `bedrock` client and before
+    looking at a single profile, instead of learning the same fact
+    separately from N calls into `fetch_rate_card` below — a missing method
+    is one fact about the environment, not one fact per model. See that
+    module's `PassResult.rate_card_api_unavailable` for what it does with the
+    answer.
+    """
+    return not hasattr(client, _AGREEMENT_OFFERS_METHOD)
 
 
 def gate_output_is_text(model_details: Mapping[str, Any]) -> Optional[Blocker]:
@@ -109,24 +150,43 @@ def fetch_rate_card(
     observed call — asks the API once rather than twice: `gate_agreement_exists`
     below is a thin wrapper over this that keeps the rows.
 
-    Four outcomes, matching `pricing_feeds.agreement`'s own reading of this
-    API, and the first two are DIFFERENT blocker types on purpose (see the
-    module docstring's settled mapping): the call fails with "agreement not
-    supported" — `no_agreement_offer`, `_NOT_MARKETPLACE`; this model is not
-    Marketplace-metered, a fact about the model, not evidence it has no price
-    anywhere — or the call fails with "not authorized" — `no_model_access`,
-    `_NOT_AUTHORIZED`; an account permission this account has not been
-    granted, reusing `pricing_feeds.agreement`'s own constant rather than
-    respelling AWS's error text a second time. A client that could not even be
-    built, or a call that fails some other way, or one that succeeds with no
-    `rateCard` row anywhere, all still read as `no_agreement_offer`: none of
-    them is evidence that access is the problem.
+    Five outcomes now, matching `pricing_feeds.agreement`'s own reading of
+    this API plus the one environmental case that call was never measured
+    against (see below), and the first two are DIFFERENT blocker types on
+    purpose (see the module docstring's settled mapping): the call fails with
+    "agreement not supported" — `no_agreement_offer`, `_NOT_MARKETPLACE`;
+    this model is not Marketplace-metered, a fact about the model, not
+    evidence it has no price anywhere — or the call fails with "not
+    authorized" — `no_model_access`, `_NOT_AUTHORIZED`; an account permission
+    this account has not been granted, reusing `pricing_feeds.agreement`'s
+    own constant rather than respelling AWS's error text a second time. A
+    client that could not even be built, or a call that fails some other way,
+    or one that succeeds with no `rateCard` row anywhere, all still read as
+    `no_agreement_offer`: none of them is evidence that access is the
+    problem.
+
+    The fifth, checked BEFORE any of the above and before the call is even
+    attempted: the constructed client has no
+    `list_foundation_model_agreement_offers` method at all
+    (`agreement_offers_method_missing`, above) — an old botocore, not a
+    failing call. Left unchecked, that AttributeError's message matches
+    neither `_NOT_MARKETPLACE` nor `_NOT_AUTHORIZED` and falls through to the
+    generic `call_failed` classifier below, which is ACTIONABLE — every
+    model in the account would then fail `--strict` forever on an
+    environment fact no per-model fix can clear. `no_agreement_offer`/
+    `method_unavailable` names that fact directly instead.
     """
     try:
         bedrock = _bedrock_client(client, region=region)
     except Exception as exc:  # noqa: BLE001 — no client, no card; not fatal.
         return None, Blocker(type="no_agreement_offer", subtype="client_unavailable",
                              evidence=str(exc))
+    if agreement_offers_method_missing(bedrock):
+        return None, Blocker(
+            type="no_agreement_offer", subtype="method_unavailable",
+            evidence=f"this client has no {_AGREEMENT_OFFERS_METHOD} method — "
+            "the installed botocore predates this API",
+        )
     try:
         response = bedrock.list_foundation_model_agreement_offers(modelId=model_id)
     except Exception as exc:  # noqa: BLE001 — see the module contract.

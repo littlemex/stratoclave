@@ -518,6 +518,114 @@ def test_sts_construction_failure_does_not_block_the_pass(dynamodb_mock):
     )
 
 
+# --- rate_card_api_unavailable: one fact about the environment, not N ----------
+class _ClientMissingAgreementOffersMethod:
+    """The multi-profile hazard this PR fixes, reproduced without needing the
+    actual old botocore installed: `list_inference_profiles` and
+    `get_foundation_model` work normally for TWO text-output, otherwise
+    clean profiles (Fable 5 and Llama 3 70B — both pass gate 1 outright, so
+    nothing about their own data blocks either of them), and
+    `list_foundation_model_agreement_offers` simply does not exist on this
+    object at all — measured for real on `/usr/bin/python3`'s botocore
+    1.35.99, whose `Bedrock` client raises `AttributeError` for this exact
+    name; `backend/.venv`'s botocore 1.43.92 has it. Two profiles, not one,
+    because "reported once, not once per model" is meaningless to assert
+    against a fixture that only has one model to begin with."""
+
+    def __init__(self):
+        self._model_details = {
+            "anthropic.claude-fable-5": json.loads(
+                (_FIXTURES / "model_details_fable5.json").read_text()),
+            "meta.llama3-70b-instruct-v1:0": json.loads(
+                (_FIXTURES / "model_details_llama3_70b.json").read_text()),
+        }
+
+    def list_inference_profiles(self, **kwargs):
+        return {"inferenceProfileSummaries": [
+            {"inferenceProfileId": "us.anthropic.claude-fable-5",
+             "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/"
+                                    "anthropic.claude-fable-5"}]},
+            {"inferenceProfileId": "us.meta.llama3-70b-instruct-v1:0",
+             "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/"
+                                    "meta.llama3-70b-instruct-v1:0"}]},
+        ]}
+
+    def get_foundation_model(self, modelIdentifier):  # noqa: N803 — boto3 name
+        return {"modelDetails": self._model_details[modelIdentifier]}
+
+    # Deliberately no `list_foundation_model_agreement_offers` — this is the
+    # entire point of the fixture, not an omission to fill in later.
+
+
+def test_rate_card_api_unavailable_is_reported_once_not_per_model(
+    dynamodb_mock, fake_sts, capsys,
+):
+    """The consequence this PR closes, stated as a test: with the old-
+    botocore fixture above and TWO discovered profiles, the pass must name
+    the missing method exactly ONCE (`PassResult.rate_card_api_unavailable`,
+    surfaced in the JSON report's own top-level field of that name) — not
+    twice, and not as a `no_agreement_offer`/`method_unavailable` blocker
+    attached to either record. A version of this fix that only added the
+    new subtype to `gates.fetch_rate_card` without `reconcile.py` also
+    deduplicating it at the pass level would still call that gate once per
+    profile and attach the SAME blocker to both records — which is exactly
+    the "dozens of broken models" presentation this fix exists to prevent —
+    so this asserts on BOTH halves: the pass-level fact is present, and
+    neither record carries a per-record copy of it."""
+    client = _ClientMissingAgreementOffersMethod()
+    main(["--apply", "--json"], bedrock=client, sts=fake_sts)
+    # `run_pass` also logs a `discovery_agreement_offers_method_missing`
+    # warning line to the SAME stdout `--json` prints its report to (the
+    # module's structlog is configured with `stream=sys.stdout`); the report
+    # itself is the one well-formed JSON object in the captured output, so
+    # slicing from its opening brace is enough to isolate it.
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{"):])
+
+    assert len(payload["records"]) == 2, (
+        f"expected both profiles to still be discovered and recorded even "
+        f"though neither could be priced; got {len(payload['records'])}"
+    )
+    assert payload["rate_card_api_unavailable"] is not None, (
+        "the pass-level fact was not reported at all"
+    )
+    assert payload["rate_card_api_unavailable"]["type"] == "no_agreement_offer"
+    assert payload["rate_card_api_unavailable"]["subtype"] == "method_unavailable"
+
+    for record in payload["records"]:
+        assert not any(
+            b["subtype"] == "method_unavailable" for b in record["blockers"]
+        ), (
+            f"profile {record['profile_id']!r} carries its own "
+            f"method_unavailable blocker — the fact was reported once at "
+            f"the pass level AND once per model, recreating the exact "
+            f"'dozens of broken models' presentation this fix exists to "
+            f"prevent"
+        )
+        assert record["pricing_key"] is None, (
+            f"profile {record['profile_id']!r} got a pricing key despite "
+            f"the rate-card API being unavailable for this whole pass"
+        )
+
+
+def test_rate_card_api_unavailable_fails_strict(dynamodb_mock, fake_sts):
+    """Whatever else this fix changes, the one thing an unattended deploy
+    step reads is the exit code, so it is asserted directly here: an
+    account whose botocore has no `list_foundation_model_agreement_offers`
+    method can price NOTHING for ANY model, which is exactly the kind of
+    fact an operator can act on (upgrade boto3/botocore) — ACTIONABLE, not
+    PERMANENT — so `--strict` must exit non-zero on it, the same as it
+    already does for `client_unavailable` and every other actionable
+    `no_agreement_offer` subtype in this file."""
+    client = _ClientMissingAgreementOffersMethod()
+    code = main(["--strict"], bedrock=client, sts=fake_sts)
+    assert code != 0, (
+        "no_agreement_offer/method_unavailable passed --strict — an "
+        "operator can upgrade boto3/botocore to clear this, so it must keep "
+        "failing an unattended deploy gate until they do"
+    )
+
+
 # --- the gate is keyed on (type, subtype), never on first-seen ----------------
 def test_an_old_actionable_blocker_still_fails_strict(dynamodb_mock, fake_sts):
     """The gate reads `(type, subtype)` alone, never whether the blocker is

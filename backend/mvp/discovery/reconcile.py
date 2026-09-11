@@ -43,7 +43,20 @@ checked in the order this docstring lists them.
                           unreadable rate card, reused rather than renamed —
                           see `PassResult.observation_blocker`), and it is
                           checked exactly as unconditionally as every
-                          profile's blockers below.
+                          profile's blockers below. The narrower sibling case
+                          — the client WAS built and every profile IS listed,
+                          but that client has no
+                          `list_foundation_model_agreement_offers` method at
+                          all (an old botocore) — is the pass's own
+                          `no_agreement_offer`/`method_unavailable`
+                          (`PassResult.rate_card_api_unavailable`), checked
+                          exactly as unconditionally, and reported exactly
+                          ONCE for the whole pass rather than once per
+                          profile: it is one fact about the interpreter
+                          running this pass, not N facts about N models, and
+                          reporting it N times would present an ordinary
+                          "boto3 needs a bump" as dozens of unrelated broken
+                          models.
   - `profiles_truncated`— `ListInferenceProfiles` did not finish (a page
                           request failed); the discovered set is a subset of
                           the account's actual catalogue this pass.
@@ -70,8 +83,12 @@ name sounds:
     account does not hold, fixable by a console click; `no_agreement_offer`
     EXCEPT its `not_marketplace_metered` subtype (below) — a call that should
     have answered something and did not (`client_unavailable`, `call_failed`,
-    `empty_rate_card`) is an anomaly worth a person's attention, not a fact
-    about the model.
+    `empty_rate_card`, `method_unavailable` — the installed botocore has no
+    `list_foundation_model_agreement_offers` method at all, fixable by an
+    operator upgrading boto3/botocore, which is what keeps it out of the
+    PERMANENT list below despite being detected once for the whole pass
+    rather than per model) is an anomaly worth a person's attention, not a
+    fact about the model.
   - PERMANENT (never fails `--strict`, on any pass): `unsupported_output_
     modality` — a model whose output is not `TEXT` will never become one;
     `no_token_pricing` — a rate card that prices nothing per token is a fact
@@ -107,7 +124,13 @@ from typing import Any, Mapping, Optional
 
 from core.logging import get_logger
 
-from .gates import fetch_rate_card, gate_agreement_exists, gate_card_prices_tokens, gate_output_is_text
+from .gates import (
+    agreement_offers_method_missing,
+    fetch_rate_card,
+    gate_agreement_exists,
+    gate_card_prices_tokens,
+    gate_output_is_text,
+)
 from .pricing_key import key_for_selection
 from .records import (
     Blocker,
@@ -176,13 +199,34 @@ class PassResult:
     it cannot be pinned to any `DiscoveredRecord.blockers` — there are none
     yet. `_actionable_blocker_findings` below reads this field unconditionally,
     the same way it reads every record's blockers, so `--strict` fails on it
-    every pass it recurs, exactly like any other actionable blocker."""
+    every pass it recurs, exactly like any other actionable blocker.
+
+    `rate_card_api_unavailable` is the sibling case one level narrower: the
+    Bedrock client WAS built, and every profile IS listed and described —
+    this pass can observe the account — but the one client method every rate
+    card needs, `list_foundation_model_agreement_offers`, does not exist on
+    it (an old botocore; see `gates.agreement_offers_method_missing`).
+    `run_pass` checks that ONCE, right after building the client, and stores
+    the answer here rather than letting each of the account's N profiles
+    independently discover the same fact and mint N copies of `gates.
+    fetch_rate_card`'s own `no_agreement_offer`/`method_unavailable` blocker
+    — which is what would otherwise happen, since `build_record` calls that
+    function once per profile. A pass that reported this N times would look
+    exactly like N unrelated broken models, which is the opposite of what it
+    is: a single fact about the interpreter running it. `build_record` is
+    handed this field and skips calling `fetch_rate_card` at all once it is
+    set — no per-record blocker, no per-record note; the ONE explanation
+    lives here. `_actionable_blocker_findings` reads it unconditionally, the
+    same way it reads `observation_blocker`, so `--strict` still fails on it
+    every pass — an operator CAN clear it (upgrade boto3/botocore), which is
+    exactly what separates it from a PERMANENT blocker type."""
 
     records: list[DiscoveredRecord] = field(default_factory=list)
     pricing_keys: dict[str, Optional[str]] = field(default_factory=dict)
     profiles_truncated: bool = False
     discovery_errors: list[str] = field(default_factory=list)
     observation_blocker: Optional[Blocker] = None
+    rate_card_api_unavailable: Optional[Blocker] = None
 
 
 def _model_details(
@@ -270,6 +314,7 @@ def build_record(
     summary: Mapping[str, Any], *, bedrock, invocation_region: str,
     observation_scope: ObservationScope,
     model_cache: dict[str, tuple[Optional[Mapping[str, Any]], Optional[str]]],
+    rate_card_api_unavailable: Optional[Blocker] = None,
 ) -> tuple[DiscoveredRecord, Optional[str], Optional[str]]:
     """One profile summary -> `(record, pricing_key_or_None, note_or_None)`.
 
@@ -290,6 +335,19 @@ def build_record(
     model. When it happens, `gate_output_is_text` is simply not run for this
     profile — no modality blocker, because there is no modality fact to
     report — rather than minting a guess.
+
+    `rate_card_api_unavailable`, when the caller passes it (see `run_pass`,
+    which checks this once for the whole pass), is the SAME kind of "this
+    pass's ability to look" fact as a failed `GetFoundationModel` above, one
+    level narrower: not "the describe call failed for this one model" but
+    "the rate-card call cannot succeed for ANY model, because the installed
+    botocore has no such method." When it is set, `fetch_rate_card` is not
+    called at all for this profile — it would just answer the identical
+    `no_agreement_offer`/`method_unavailable` blocker again — so this profile
+    gets neither a per-record blocker nor a per-record note for it: the ONE
+    explanation already lives on `PassResult.rate_card_api_unavailable`, and
+    repeating it once per profile is exactly the "N broken models" framing
+    this field exists to avoid.
     """
     raw_id = str(summary.get("inferenceProfileId") or "")
     profile_scope, jurisdiction_bounded = profile_scope_from_id(raw_id)
@@ -311,34 +369,42 @@ def build_record(
         if modality_blocker is not None:
             blockers.append(modality_blocker)
 
-    rate_card, agreement_blocker = fetch_rate_card(base_id, client=bedrock)
     pricing_key: Optional[str] = None
-    if agreement_blocker is not None:
-        blockers.append(agreement_blocker)
+    if rate_card_api_unavailable is not None:
+        # Already reported once, at the pass level (see this function's own
+        # docstring and `PassResult.rate_card_api_unavailable`): calling
+        # `fetch_rate_card` here would only relearn the same fact and mint a
+        # duplicate blocker for this one profile, so this profile's rate
+        # card is left unresolved without a per-record blocker or note.
+        pass
     else:
-        tokens_blocker = gate_card_prices_tokens(rate_card or [])
-        if tokens_blocker is not None:
-            blockers.append(tokens_blocker)
+        rate_card, agreement_blocker = fetch_rate_card(base_id, client=bedrock)
+        if agreement_blocker is not None:
+            blockers.append(agreement_blocker)
         else:
-            card, unknown_dimensions = _build_card(rate_card or [])
-            if unknown_dimensions:
-                blockers.append(Blocker(
-                    type="price_dimensions_unknown", subtype="unparseable_rate_card_row",
-                    evidence=f"{len(unknown_dimensions)} row(s) did not parse: "
-                    f"{sorted(unknown_dimensions)[:5]!r}",
-                ))
+            tokens_blocker = gate_card_prices_tokens(rate_card or [])
+            if tokens_blocker is not None:
+                blockers.append(tokens_blocker)
             else:
-                scope = scope_for_model_id(raw_id)
-                candidate_regions = destination_regions or (invocation_region,)
-                selection = select(card, regions=candidate_regions, scope=scope)
-                if selection is None:
+                card, unknown_dimensions = _build_card(rate_card or [])
+                if unknown_dimensions:
                     blockers.append(Blocker(
-                        type="no_token_pricing", subtype="selector_refused",
-                        evidence="dimensions.select() found no usable input/output "
-                        "price among this card's resolved rows",
+                        type="price_dimensions_unknown", subtype="unparseable_rate_card_row",
+                        evidence=f"{len(unknown_dimensions)} row(s) did not parse: "
+                        f"{sorted(unknown_dimensions)[:5]!r}",
                     ))
                 else:
-                    pricing_key = key_for_selection(selection, enabled_modes=ENABLED_MODES)
+                    scope = scope_for_model_id(raw_id)
+                    candidate_regions = destination_regions or (invocation_region,)
+                    selection = select(card, regions=candidate_regions, scope=scope)
+                    if selection is None:
+                        blockers.append(Blocker(
+                            type="no_token_pricing", subtype="selector_refused",
+                            evidence="dimensions.select() found no usable input/output "
+                            "price among this card's resolved rows",
+                        ))
+                    else:
+                        pricing_key = key_for_selection(selection, enabled_modes=ENABLED_MODES)
 
     record = DiscoveredRecord(
         profile_id=raw_id,
@@ -376,7 +442,23 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
     (construction or the call itself, the same try below covers both) must
     not stop it: only the account/arn fields degrade to `""`, exactly as they
     already did before this fix, for exactly the reason the existing comment
-    below already gave."""
+    below already gave.
+
+    Right after the Bedrock client IS built, this checks one more thing
+    exactly once: whether that client even has
+    `list_foundation_model_agreement_offers`
+    (`gates.agreement_offers_method_missing`). An old botocore's client is
+    still a perfectly usable client for everything ELSE this pass does
+    (`ListInferenceProfiles`, `GetFoundationModel`) — it is not
+    `observation_blocker`'s case, the pass is not blind — but every one of
+    this pass's N profiles would otherwise independently discover, via its
+    own call into `build_record` -> `fetch_rate_card`, the exact same
+    environment fact and mint an identical
+    `no_agreement_offer`/`method_unavailable` blocker N times. Checked once
+    here and threaded into every `build_record` call as
+    `rate_card_api_unavailable`, so the fact is asserted once
+    (`PassResult.rate_card_api_unavailable`) no matter how many profiles this
+    account has."""
     endpoint_region = region or os.getenv(STRATOCLAVE_REGION_ENV) or _DEFAULT_REGION
     try:
         bedrock = _client("bedrock", region=endpoint_region, injected=bedrock)
@@ -385,6 +467,17 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
         return PassResult(observation_blocker=Blocker(
             type="no_agreement_offer", subtype="client_unavailable", evidence=str(exc),
         ))
+
+    rate_card_api_unavailable: Optional[Blocker] = None
+    if agreement_offers_method_missing(bedrock):
+        logger.warning("discovery_agreement_offers_method_missing")
+        rate_card_api_unavailable = Blocker(
+            type="no_agreement_offer", subtype="method_unavailable",
+            evidence="this pass's bedrock client has no "
+            "list_foundation_model_agreement_offers method — the installed "
+            "botocore predates this API; upgrade boto3/botocore to restore "
+            "rate-card discovery",
+        )
 
     try:
         sts = _client("sts", region=endpoint_region, injected=sts)
@@ -404,7 +497,9 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
     )
 
     summaries, truncated = _list_inference_profiles(bedrock)
-    result = PassResult(profiles_truncated=truncated)
+    result = PassResult(
+        profiles_truncated=truncated, rate_card_api_unavailable=rate_card_api_unavailable,
+    )
     model_cache: dict[str, tuple[Optional[Mapping[str, Any]], Optional[str]]] = {}
 
     for summary in summaries:
@@ -412,6 +507,7 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
             record, pricing_key, note = build_record(
                 summary, bedrock=bedrock, invocation_region=endpoint_region,
                 observation_scope=observation_scope, model_cache=model_cache,
+                rate_card_api_unavailable=rate_card_api_unavailable,
             )
         except Exception as exc:  # noqa: BLE001 — one bad profile must not fail the pass.
             profile_id = str(summary.get("inferenceProfileId") or "<unknown>")
@@ -473,10 +569,26 @@ def _actionable_blocker_findings(result: PassResult) -> list[str]:
     `no_agreement_offer`/`client_unavailable` — already ACTIONABLE under
     `_is_actionable` — so it is read here rather than given its own strict
     reason. A total failure to observe is not a lesser fact than one
-    profile's blocker; it does not get a quieter check."""
+    profile's blocker; it does not get a quieter check.
+
+    `result.rate_card_api_unavailable` is read the same unconditional way,
+    contributing at most ONE finding no matter how many profiles this pass
+    discovered — that single-finding property is the entire point of
+    `PassResult` carrying it as its own field instead of `build_record`
+    attaching an identical blocker to every record (see that field's
+    docstring): an operator can upgrade boto3/botocore, so it is ACTIONABLE
+    under `_is_actionable` (its subtype, `method_unavailable`, is not in
+    `_PERMANENT_NO_AGREEMENT_OFFER_SUBTYPES` below) and must keep failing
+    `--strict` until they do — but it must fail it as ONE reported fact, not
+    as a wall of identically-worded per-model findings that hides whatever
+    else this pass found."""
     findings = []
     if result.observation_blocker is not None and _is_actionable(result.observation_blocker):
         b = result.observation_blocker
+        findings.append(f"<pass>: {b.type}/{b.subtype}")
+    if (result.rate_card_api_unavailable is not None
+            and _is_actionable(result.rate_card_api_unavailable)):
+        b = result.rate_card_api_unavailable
         findings.append(f"<pass>: {b.type}/{b.subtype}")
     for record in result.records:
         for blocker in record.blockers:
@@ -580,6 +692,12 @@ def main(argv: Optional[list[str]] = None, *,
                  "evidence": result.observation_blocker.evidence}
                 if result.observation_blocker is not None else None
             ),
+            "rate_card_api_unavailable": (
+                {"type": result.rate_card_api_unavailable.type,
+                 "subtype": result.rate_card_api_unavailable.subtype,
+                 "evidence": result.rate_card_api_unavailable.evidence}
+                if result.rate_card_api_unavailable is not None else None
+            ),
             "applied": bool(args.apply and not apply_errors),
             "apply_errors": apply_errors,
             "strict_reasons": reasons,
@@ -592,6 +710,11 @@ def main(argv: Optional[list[str]] = None, *,
     if result.observation_blocker is not None:
         b = result.observation_blocker
         print(f"\n[BLOCKED] this pass could not observe the account at all: "
+             f"{b.type}/{b.subtype} — {b.evidence}")
+    if result.rate_card_api_unavailable is not None:
+        b = result.rate_card_api_unavailable
+        print(f"\n[BLOCKED] this pass cannot discover any model's rate card "
+             f"(reported once for the whole pass, not once per model): "
              f"{b.type}/{b.subtype} — {b.evidence}")
     for record in result.records:
         key = result.pricing_keys.get(record.profile_id)

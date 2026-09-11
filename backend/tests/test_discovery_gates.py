@@ -22,7 +22,14 @@ four across three as an earlier reading of the handoff had it:
 - `gate_output_is_text` -> `unsupported_output_modality`
 - `gate_agreement_exists` -> `no_agreement_offer` for "Agreement not
   supported for this model", `no_model_access` for the not-authorized text
-  (`agreement.py`'s own `_NOT_AUTHORIZED` constant)
+  (`agreement.py`'s own `_NOT_AUTHORIZED` constant), and `no_agreement_offer`/
+  `method_unavailable` when the client has no
+  `list_foundation_model_agreement_offers` method at all — an old botocore,
+  never a call that failed, checked BEFORE the call is attempted so it is
+  never confused with the generic `call_failed` catch-all (see
+  `test_missing_agreement_offers_method_is_not_call_failed` below, and
+  `mvp.discovery.reconcile`'s own tests for why this fact is reported once
+  per PASS rather than once per model)
 - `gate_card_prices_tokens` -> `no_token_pricing`
 - an unparseable rate-card dimension -> `price_dimensions_unknown`, minted in
   `reconcile.py` rather than by any of the three gates (see
@@ -298,6 +305,60 @@ def test_an_unrelated_agreement_failure_classifies_as_call_failed_not_client_una
         "some.model",
         client=_AgreementClient(
             error_message="EndpointConnectionError: could not connect to the endpoint URL"))
+    assert blocker is not None
+    assert blocker.type == "no_agreement_offer"
+    assert blocker.subtype == "call_failed"
+
+
+class _ClientWithoutAgreementOffersMethod:
+    """A fake that measures the actual hazard this PR fixes: a `bedrock`
+    client from a botocore old enough that
+    `list_foundation_model_agreement_offers` does not exist on it at all —
+    not a client that has the method and fails when it is called (that is
+    `_AgreementClient(error_message=...)` above), a client that never had
+    it. Constructed as a fake object rather than by touching real botocore,
+    per this file's own no-network, no-real-SDK convention — the fact this
+    fake stands in for is measured on this machine instead: `/usr/bin/
+    python3`'s botocore 1.35.99 raises `AttributeError: 'Bedrock' object has
+    no attribute 'list_foundation_model_agreement_offers'` for the exact
+    call `fetch_rate_card` makes; `backend/.venv`'s botocore 1.43.92 does
+    not. This class simply has no such attribute, which is the same fact
+    without needing that exact botocore installed to prove it."""
+
+
+def test_missing_agreement_offers_method_is_not_call_failed():
+    """The defect this PR fixes: an old botocore's client raises
+    `AttributeError` for `list_foundation_model_agreement_offers`, a message
+    that matches neither `_NOT_MARKETPLACE` nor `_NOT_AUTHORIZED` — left
+    unchecked, that falls through to the generic classifier and comes back
+    `no_agreement_offer`/`call_failed`, which is ACTIONABLE. Every model in
+    an account whose botocore predates this API would then fail `--strict`
+    forever for a reason no per-model fix can clear. The method's ABSENCE
+    must be detected as its own condition, before the call is even
+    attempted, and named `no_agreement_offer`/`method_unavailable` instead —
+    checked here directly against `gate_agreement_exists`, not against a
+    private helper, so this pins the gate's own observable behaviour."""
+    blocker = gate_agreement_exists(
+        "amazon.nova-pro-v1:0", client=_ClientWithoutAgreementOffersMethod())
+    assert blocker is not None
+    assert blocker.type == "no_agreement_offer"
+    assert blocker.subtype == "method_unavailable"
+    assert blocker.subtype != "call_failed"
+
+
+def test_a_genuine_call_failure_on_a_client_that_has_the_method_stays_call_failed():
+    """The non-vacuity pair for the test above: without it, a fix that
+    classified EVERY exception from this call as `method_unavailable` — not
+    just the one raised by a client missing the method — would pass the test
+    above for the wrong reason. `_AgreementClient` here DOES define
+    `list_foundation_model_agreement_offers` (it is called and raises
+    inside), so `agreement_offers_method_missing` must find the method
+    present and this must still classify as the ordinary `call_failed`
+    this file already pins elsewhere."""
+    blocker = gate_agreement_exists(
+        "vendor.some-model-v1",
+        client=_AgreementClient(
+            error_message="ServiceUnavailableException: internal error, try again"))
     assert blocker is not None
     assert blocker.type == "no_agreement_offer"
     assert blocker.subtype == "call_failed"
