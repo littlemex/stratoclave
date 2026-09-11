@@ -78,6 +78,40 @@ def string_constants(node: ast.AST) -> list[str]:
             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
+_DOCSTRING_OWNERS = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def source_without_docstrings(source: str) -> str:
+    """`source`, re-rendered with every module/class/function docstring
+    blanked, so a substring search over the result matches CODE rather than
+    PROSE. Comments need no separate handling: `ast.parse` never captures
+    them, so re-rendering via `ast.unparse` drops them for free.
+
+    Deliberately narrower than "strip every string literal": only a
+    docstring -- the first statement of a module/class/def body, when that
+    statement is a bare string expression, per the same rule
+    `ast.get_docstring` uses -- is blanked. A string literal used as a VALUE
+    (a table name argument to a write call, a dict value, an f-string
+    fragment) is left exactly as it was. A guard whose job is to notice a
+    real write must still be able to see the string a real write carries;
+    only prose ABOUT a table, not a reference small enough to be one, is
+    what this is for.
+
+    Raises `SyntaxError` on unparsable input, same as `ast.parse` -- callers
+    that need a fallback (a repo scan that must not go fail-open on one bad
+    file) are responsible for catching it.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, _DOCSTRING_OWNERS) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                first.value.value = ""
+    return ast.unparse(tree)
+
+
 def _callee_name(fn: ast.AST):
     if isinstance(fn, ast.Attribute):
         return fn.attr
