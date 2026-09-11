@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["ON_DEMAND"],
+  "inputModalities": ["TEXT"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/vendor.empty-agreement-v1",
+  "modelId": "vendor.empty-agreement-v1",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Vendor Empty Agreement Model",
+  "outputModalities": ["TEXT"],
+  "providerName": "Vendor",
+  "responseStreamingSupported": false
+}

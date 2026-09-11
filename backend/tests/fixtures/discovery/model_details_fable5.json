@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["INFERENCE_PROFILE"],
+  "inputModalities": ["TEXT", "IMAGE"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-fable-5",
+  "modelId": "anthropic.claude-fable-5",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Claude Fable 5",
+  "outputModalities": ["TEXT"],
+  "providerName": "Anthropic",
+  "responseStreamingSupported": true
+}

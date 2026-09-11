@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["ON_DEMAND"],
+  "inputModalities": ["TEXT"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/meta.llama3-70b-instruct-v1:0",
+  "modelId": "meta.llama3-70b-instruct-v1:0",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Llama 3 70B Instruct",
+  "outputModalities": ["TEXT"],
+  "providerName": "Meta",
+  "responseStreamingSupported": true
+}

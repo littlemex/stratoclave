@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["ON_DEMAND"],
+  "inputModalities": ["VIDEO", "TEXT"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/twelvelabs.marengo-embed-2-7-v1:0",
+  "modelId": "twelvelabs.marengo-embed-2-7-v1:0",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Marengo Embed 2.7",
+  "outputModalities": ["EMBEDDING"],
+  "providerName": "TwelveLabs",
+  "responseStreamingSupported": false
+}
