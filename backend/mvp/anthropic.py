@@ -76,7 +76,7 @@ from .reservation_bound import (
     survey_and_hash_converse_kwargs,
 )
 from .observability.context import RequestContext, response_headers as _corr_headers
-from .models import _REGISTRY, resolve_bedrock_model
+from .models import registry_entries, resolve_bedrock_model
 
 # Backward-compatible aliases for tests that import the underscore-prefixed
 # functions from this module. New code should import directly from
@@ -228,7 +228,7 @@ def list_models(
     # against `user.roles` AND `user.key_scopes` for API-key auth.
     _user: AuthenticatedUser = Depends(require_permission("messages:send")),
 ) -> dict:
-    # C8: iterate `_REGISTRY` filtered to this provider, not `_MAPPING` — the
+    # C8: iterate `registry_entries()` filtered to this provider, not `_MAPPING` — the
     # alias→bedrock_id map loses the entry a filter needs to consult
     # (`model_family`, `profile_scope`, `access`), and it collapses two
     # entries that share an alias-less lookup into "whichever wrote last".
@@ -238,7 +238,7 @@ def list_models(
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     tenant_cfg, user_cfg, ent_grants = eligibility_listing_context(_user)
     data = []
-    for entry in _REGISTRY:
+    for entry in registry_entries():
         if entry.provider != "anthropic":
             continue
         # An entry the caller cannot use is ABSENT, not present-and-marked.
