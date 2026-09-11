@@ -526,7 +526,23 @@ class _RateCache:
     def get(self, pricing_key: str, repo: Optional[PricingConfigRepository] = None) -> Rate:
         self._ensure_fresh(repo)
         rates = self._rates
-        return rates.get(pricing_key) or rates.get("default") or _DEFAULT_RATES["default"]
+        resolved = rates.get(pricing_key)
+        if not resolved:
+            # E11: `default` is deliberately dearer than every provider row
+            # (`_floored_default` only ever moves it up), so falling back to
+            # it over-charges rather than under-charges -- the safe
+            # direction. But "safe" and "seen" are different guarantees: a
+            # key charged at `default` for three weeks with nobody told is a
+            # trust failure even though nobody was ever under-charged by it.
+            # This fallback used to be silent; every call that takes it now
+            # names the key, on purpose -- suppressing repeats (as the other
+            # warnings in this class do for a standing condition) would let
+            # exactly that silence come back the moment the first request
+            # logged it.
+            logger.warning("pricing_key_unresolved_default_fallback", pricing_key=pricing_key)
+        if not resolved:
+            _warn_unresolved_key(pricing_key, at="rate_cache")
+        return resolved or rates.get("default") or _DEFAULT_RATES["default"]
 
     def effective_rates(
         self, repo: Optional[PricingConfigRepository] = None
@@ -834,6 +850,26 @@ _version_rate_cache: dict[tuple, RateSnapshot] = {}
 _version_cache_lock = threading.Lock()
 
 
+def _warn_unresolved_key(pricing_key: str, *, at: str) -> None:
+    """Say out loud that `pricing_key` resolved nowhere and `default` is being charged.
+
+    `default` is deliberately dearer than every provider row, so this over-charges,
+    which is the safe direction — and that is exactly why it must not be quiet. A model
+    billing at the dear rate for three weeks is a trust failure even when it is not a
+    revenue failure, and in a ledger this line is the only thing distinguishing "priced
+    correctly" from "priced at the fallback".
+
+    Every fallback site calls this, not just the one a reader finds first. There are two
+    — the TTL cache's `get`, and `snapshot_rates`'s reserve-time freeze — and a warning
+    on one reads identically to no warning at all for traffic that took the other. `at`
+    names which. The first attempt at this warned only in `get`, which `snapshot_rates`
+    never calls, so the path a reservation actually takes stayed silent.
+    """
+    logger.warning(
+        "pricing_key_unresolved_default_fallback", pricing_key=pricing_key, at=at
+    )
+
+
 def snapshot_rates(
     pricing_key: str, repo: Optional[PricingConfigRepository] = None
 ) -> RateSnapshot:
@@ -927,6 +963,7 @@ def snapshot_rates(
     # "charged at the shipped defaults" while actually charging a feed's rate.
     label_key = pricing_key if rate is not None else "default"
     if rate is None:
+        _warn_unresolved_key(pricing_key, at="snapshot_rates")
         rate = merged["default"]
     return _snapshot_from_rate(_cache._tag_for(label_key, source_keys), pricing_key, rate)
 

@@ -115,6 +115,14 @@ class Usage:
     # zero has to be stated by the code that measured it.
     cache_read_tokens: Optional[int] = None
     cache_write_tokens: Optional[int] = None
+    # E10: `True` by construction, never inferred from the counts above. A `Usage`
+    # only ever exists because `usage_from_bedrock` validated a real usage block (or
+    # a caller built one directly with real numbers) — unlike `UsageAccumulator`,
+    # there is no "not yet observed" state this type can be in, so it carries none.
+    # Named identically to `UsageAccumulator.saw_final_usage` so `claim_settle`'s
+    # fault predicate reads one attribute regardless of which shape called it, with
+    # no token value ever standing in for the fact on either side.
+    saw_final_usage: bool = True
 
 
 #: The four tokens a settle prices. Read off the observation by name so an
@@ -150,6 +158,36 @@ def _snapshot_tokens(observation: Any) -> dict:
             continue
         out[name] = int(raw or 0)
     return out
+
+
+#: The reason `claim_settle` names on the UsageLogs row when it detects a
+#: metering fault. One name, not a bare string repeated at both the detector
+#: and the write site, so the two cannot drift on what they call the same
+#: condition.
+METERING_FAULT_NO_FINAL_USAGE = "no_final_usage"
+
+
+def _is_metering_fault(observation: Any) -> bool:
+    """Whether a successful, non-interrupted settle reported no final usage.
+
+    The state fact alone, never a token value: `saw_final_usage` is `True` by
+    construction on `Usage` (a `Usage` only ever exists because
+    `usage_from_bedrock` validated a real block — see that dataclass) and set
+    by `UsageAccumulator.absorb` on the streaming type once its terminal
+    `Usage` event lands, so both shapes answer this the same attribute, with
+    no fallback value test needed on either side. `getattr(..., True)` covers
+    a third shape — any other duck-typed object a test builds that never
+    mentions this attribute at all — the same permissive way `_snapshot_tokens`
+    already treats an object that only carries the four token fields.
+
+    Testing a token count here (e.g. `output_tokens == 0`) would make a
+    genuine zero output — a measurement — indistinguishable from a response
+    that never reported one at all, which is the exact confusion this
+    function exists to end. See `Hold.claim_settle` for why this is never
+    consulted for an interrupted stream: this predicate governs the CLEAN
+    completion only.
+    """
+    return not getattr(observation, "saw_final_usage", True)
 
 
 class Ending:
@@ -403,7 +441,8 @@ class Hold:
     # ------------------------------------------------- claim, then write later
 
     def claim_settle(
-        self, observation: Any = None, *, status: str = "completed"
+        self, observation: Any = None, *, status: str = "completed",
+        _clean_completion: bool = True,
     ) -> Optional[Ending]:
         """Claim the ending for a settle. Returns the ending, or None if we lost.
 
@@ -411,10 +450,62 @@ class Hold:
         observability hook receives the live accumulator and a hook that mutated it
         must not be able to change what is charged, and a malformed observation
         must fail before it can consume the one ending this hold has.
+
+        E10 — the metering fault: a **successful** response is not the same claim
+        as "the provider told us what it cost". `_is_metering_fault` is consulted
+        on the snapshot taken here, before the claim, for the same reason the
+        snapshot itself is taken before the claim — a route cannot decide this for
+        itself any more than it decides liability on the unobserved path. When it
+        fires, the zeros `usage_from_bedrock` correctly refused to invent are not
+        what gets charged: the reservation already holds an upper bound
+        (`self.reservation`), so `_commit` charges THAT instead of the snapshot,
+        the response is still delivered (this is the success path; nothing here
+        withholds it or raises), and the UsageLogs row records why.
+
+        `_clean_completion` is `False` ONLY on the two calls `claim_stream_
+        interrupted` makes into this method. E10 is scoped to a clean
+        completion that never reported usage — an unqualified defect with no
+        gate governing it. A stream `claim_stream_interrupted` routes here
+        instead of to `claim_unobserved` is a DIFFERENT thing: either it
+        genuinely observed something, or `STRATOCLAVE_UNOBSERVED_HOLDS` is off
+        and an operator has deliberately opted out of treating an unobserved
+        outcome as expensive — see that method's own docstring for why leaving
+        the gate off must settle a cut stream's zero exactly as it always did.
+        Applying E10 there would change billing on a path operators left off
+        on purpose, which is a bigger behaviour change than the defect E10
+        fixes and not this fix's to make. The caller states this explicitly;
+        `claim_settle` does not infer it from the token values or from the
+        gate's own state.
         """
         if observation is None:
-            observation = Usage()
+            # NOT a plain `Usage()`. That carries `saw_final_usage=True` by construction,
+            # which is right for a Usage built from a validated block and wrong here:
+            # substituting one would assert an observation nobody made, and the fault
+            # below could then never fire for the one caller that passed nothing at all.
+            observation = Usage(saw_final_usage=False)
         tokens = _snapshot_tokens(observation)
+        metering_fault = _clean_completion and _is_metering_fault(observation)
+        if metering_fault:
+            # Charge the reserved bound, not the snapshotted zeros: the two-phase
+            # reserve/settle split exists precisely so there is an honest amount
+            # to fall back to when the actual cost cannot be computed. The whole
+            # bound is attributed to the output leg — the dearer of the two token
+            # rates on every rate card this gateway ships — for the same reason
+            # `default` is dearer than every provider row (see `pricing.py`): an
+            # unmeasured quantity must round toward the caller's provider having
+            # cost more, never less, or the "bounded whatever the counters say"
+            # claim is false the first time it is tested. The cache legs are left
+            # `None` rather than zeroed for the same reason `usage_from_bedrock`
+            # never invents them: this settle does not know whether the call hit
+            # cache, only that it cannot say.
+            charged = {
+                "input_tokens": 0,
+                "output_tokens": self.reservation,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
+            }
+        else:
+            charged = tokens
         if not self._claim(_outcome.SETTLED_FINAL):
             return None
         self._notify(status, observation)
@@ -424,16 +515,19 @@ class Hold:
                 user=self.user,
                 tenants_repo=self.tenants_repo,
                 reservation=self.reservation,
-                actual_input_tokens=tokens["input_tokens"],
-                actual_output_tokens=tokens["output_tokens"],
+                actual_input_tokens=charged["input_tokens"],
+                actual_output_tokens=charged["output_tokens"],
                 model_id=self.model_id,
                 context=self.tenants_repo,
-                actual_cache_read_tokens=tokens["cache_read_tokens"],
-                actual_cache_write_tokens=tokens["cache_write_tokens"],
+                actual_cache_read_tokens=charged["cache_read_tokens"],
+                actual_cache_write_tokens=charged["cache_write_tokens"],
                 requested_model=self.requested_model,
                 # Keys the UsageLogs row on the request id so the offline VSR
                 # reconciliation can join it to the reserve-time decision record.
                 request_id=self.request_id,
+                metering_fault_reason=(
+                    METERING_FAULT_NO_FINAL_USAGE if metering_fault else None
+                ),
             )
 
         return self._remember(Ending(self, _commit, _outcome.SETTLED_FINAL))
@@ -561,9 +655,16 @@ class Hold:
             int(v or 0) > 0 for v in _snapshot_tokens(observation).values()
         )
         if observed:
-            return self.claim_settle(observation, status=status)
+            # E10 does not apply here (see `claim_settle`'s `_clean_completion`):
+            # this is a settle reached because the stream was cut, not because
+            # it completed cleanly, even though what arrived happens to be
+            # chargeable.
+            return self.claim_settle(observation, status=status, _clean_completion=False)
         if not _outcome.unobserved_holds_enforced():
-            return self.claim_settle(observation, status=status)
+            # Same exclusion: the gate being off is a deliberate operator
+            # opt-out from treating this as expensive, and settling the zero
+            # exactly as before is what that opt-out promises.
+            return self.claim_settle(observation, status=status, _clean_completion=False)
         if provider_responded:
             # The attempt reached the model service — we watched it answer. The
             # amount is what is unknown, so the ceiling is held rather than a zero
