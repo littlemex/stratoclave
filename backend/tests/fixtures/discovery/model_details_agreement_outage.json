@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["ON_DEMAND"],
+  "inputModalities": ["TEXT"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/vendor.agreement-outage-v1",
+  "modelId": "vendor.agreement-outage-v1",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Vendor Agreement Outage Model",
+  "outputModalities": ["TEXT"],
+  "providerName": "Vendor",
+  "responseStreamingSupported": false
+}

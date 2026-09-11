@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["ON_DEMAND"],
+  "inputModalities": ["TEXT"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/vendor.custom-model-v1",
+  "modelId": "vendor.custom-model-v1",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Vendor Custom Model",
+  "outputModalities": ["TEXT"],
+  "providerName": "Vendor",
+  "responseStreamingSupported": false
+}

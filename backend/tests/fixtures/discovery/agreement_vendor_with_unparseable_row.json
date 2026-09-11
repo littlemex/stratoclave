@@ -1,0 +1,32 @@
+{
+  "modelId": "vendor.custom-model-v1",
+  "offers": [
+    {
+      "offerId": "offer-vendor-custom",
+      "termDetails": {
+        "usageBasedPricingTerm": {
+          "rateCard": [
+            {
+              "description": "Input Tokens - Standard",
+              "dimension": "USE1_input_tokens_standard",
+              "price": "1",
+              "unit": "Units"
+            },
+            {
+              "description": "Output Tokens - Standard",
+              "dimension": "USE1_output_tokens_standard",
+              "price": "2",
+              "unit": "Units"
+            },
+            {
+              "description": "A field this build has never met",
+              "dimension": "USE1_totally_unknown_marker_field_v2",
+              "price": "0.01",
+              "unit": "Units"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

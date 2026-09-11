@@ -581,6 +581,35 @@ def test_write_discipline(module):
         pytest.fail(msg)
 
 
+WRITE_API_RE = re.compile(
+    r"\.(put_item|update_item|delete_item|transact_write_items|"
+    r"batch_write_item|batch_writer|execute_statement|execute_transaction)\b"
+)
+
+
+def _touches_budgets_table_as_a_raw_writer(source: str) -> bool:
+    """The predicate behind `test_no_unscanned_module_touches_budgets_table`,
+    factored out so a synthetic source string can be checked directly --
+    the same `source`-overrides-the-real-file shape `_run` already uses
+    above, not a second mechanism.
+
+    Matches BUDGET_TABLE_MARKERS and WRITE_API_RE against code with
+    docstrings blanked (`billing_guards.source_without_docstrings`), not
+    against the raw file text: a module that only MENTIONS the table's name
+    in prose -- to disclaim it, typically -- must not trip this; only a
+    mention that survives with the prose stripped out can. On a file that
+    fails to parse, falls back to the raw text rather than silently treating
+    it as clean -- this guard is fail-closed, so a file the parser cannot
+    even look at is the LAST place to go quiet.
+    """
+    try:
+        code_only = billing_guards.source_without_docstrings(source)
+    except SyntaxError:
+        code_only = source
+    return (any(m in code_only for m in BUDGET_TABLE_MARKERS)
+            and bool(WRITE_API_RE.search(code_only)))
+
+
 def test_no_unscanned_module_touches_budgets_table():
     """FAIL-CLOSED: any NON-TEST module under backend/ that references the
     budgets table AND makes a raw DynamoDB write-API call must be in
@@ -595,10 +624,6 @@ def test_no_unscanned_module_touches_budgets_table():
         "backend/tests/test_billing_write_discipline.py",
         "backend/tests/billing_guards.py",
     }
-    write_api_re = re.compile(
-        r"\.(put_item|update_item|delete_item|transact_write_items|"
-        r"batch_write_item|batch_writer|execute_statement|execute_transaction)\b"
-    )
     offenders = []
     for path in (REPO_ROOT / "backend").rglob("*.py"):
         rel = str(path.relative_to(REPO_ROOT))
@@ -608,13 +633,93 @@ def test_no_unscanned_module_touches_budgets_table():
         # not to define production write paths).
         if "/tests/" in rel or Path(rel).name.startswith("test_"):
             continue
-        text = path.read_text()
-        if any(m in text for m in BUDGET_TABLE_MARKERS) and write_api_re.search(text):
+        if _touches_budgets_table_as_a_raw_writer(path.read_text()):
             offenders.append(rel)
     assert not offenders, (
         "Non-test modules make raw DynamoDB writes AND reference the budgets "
         f"table but are not scanned (add to SCANNED_FILES + registries): {offenders}"
     )
+
+
+# ------------------------------------- a mention in prose is not a write --
+# This guard fired once already on a docstring naming the budgets table only
+# to disclaim it (see backend/mvp/discovery/records.py, which writes its own,
+# unrelated table). The synthetic sources below pin the fix without touching
+# that file, or any other real one, directly.
+
+PLANTED_DOCSTRING_ONLY_BUDGET_MENTION = '''
+"""This module writes the users/tenants table, never the money counters --
+those live on a DIFFERENT table (see dynamo.tenant_budgets, the TenantBudgets
+repository, and TENANT_BUDGETS_TABLE / tenant_budgets_table_name(), which this
+module does not touch)."""
+
+def put_user_row(table, user_id, value):
+    table.put_item(Item={"user_id": user_id, "value": value})
+'''
+
+
+def test_a_docstring_mention_of_the_budgets_table_does_not_trip_the_guard():
+    """The false positive this fix exists to close, reproduced synthetically
+    rather than by pointing at records.py: every BUDGET_TABLE_MARKERS token
+    appears in this module, but only inside its docstring, disclaiming the
+    table rather than touching it. The module DOES make a raw write
+    (`.put_item`, so WRITE_API_RE matches) -- to an unrelated row -- which is
+    what makes this a real test of the docstring-stripping rather than a
+    trivial "no write at all" case."""
+    assert _touches_budgets_table_as_a_raw_writer(
+        PLANTED_DOCSTRING_ONLY_BUDGET_MENTION) is False, (
+        "a docstring-only mention of the budgets table tripped the guard"
+    )
+    # Non-vacuity: the OLD, pre-fix check (raw text, no docstring-stripping)
+    # must actually have flagged this, or the test above would be trivially
+    # true for a reason that has nothing to do with the fix.
+    old_check = (any(m in PLANTED_DOCSTRING_ONLY_BUDGET_MENTION for m in BUDGET_TABLE_MARKERS)
+                 and bool(WRITE_API_RE.search(PLANTED_DOCSTRING_ONLY_BUDGET_MENTION)))
+    assert old_check is True, (
+        "the planted source does not even exercise the false positive this "
+        "test is supposed to guard against -- fix the fixture, not the guard"
+    )
+
+
+@pytest.mark.parametrize("api", [
+    "put_item", "update_item", "delete_item", "transact_write_items",
+    "batch_write_item", "batch_writer", "execute_statement", "execute_transaction",
+])
+def test_a_real_write_to_the_budgets_table_still_trips_the_guard_for_every_write_api(api):
+    """The other half of the same fix, and the one that matters more: a
+    module with NO docstring at all, whose ONLY mention of the table's name
+    is a string literal passed AS A WRITE CALL'S OWN ARGUMENT
+    (`TableName="TenantBudgets"`) -- exactly the shape flagged as the risk
+    of stripping too much (a table name passed as a string to a write call).
+    Docstring-stripping does not touch this string, because it is a call
+    argument, not a docstring, so it must still trip the guard -- for EVERY
+    write API the regex lists, confirming the fix narrowed WHAT counts as
+    prose, not WHICH write calls the guard can see."""
+    source = f'''
+def touch(client, key):
+    client.{api}(TableName="TenantBudgets", Key=key)
+'''
+    assert _touches_budgets_table_as_a_raw_writer(source) is True, (
+        f"a raw {api} naming the budgets table by string literal, with no "
+        f"docstring in the module at all, was not flagged"
+    )
+
+
+def test_source_without_docstrings_leaves_a_write_calls_own_string_argument_alone():
+    """Direct, unit-level check on the helper itself (not just on the guard's
+    combined predicate above): a string used as a write call's argument
+    survives `source_without_docstrings` byte for byte in content, which is
+    the property the parametrized write-API test above depends on. Checked
+    separately so a future change to the helper that broke this would fail
+    here, naming the helper, rather than only in the guard-level test naming
+    a write API."""
+    source = '''
+def touch(client, key):
+    client.put_item(TableName="TenantBudgets", Key=key)
+'''
+    rendered = billing_guards.source_without_docstrings(source)
+    assert "TenantBudgets" in rendered
+    assert ".put_item(" in rendered
 
 
 # ------------------------------------------------- planted-violation self-tests

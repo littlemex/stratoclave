@@ -1,0 +1,13 @@
+{
+  "modelId": "vendor.empty-agreement-v1",
+  "offers": [
+    {
+      "offerId": "offer-empty",
+      "termDetails": {
+        "usageBasedPricingTerm": {
+          "rateCard": []
+        }
+      }
+    }
+  ]
+}

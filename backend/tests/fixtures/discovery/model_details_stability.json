@@ -1,0 +1,12 @@
+{
+  "customizationsSupported": [],
+  "inferenceTypesSupported": ["ON_DEMAND"],
+  "inputModalities": ["IMAGE"],
+  "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/stability.sd3-5-large-v1:0",
+  "modelId": "stability.sd3-5-large-v1:0",
+  "modelLifecycle": {"status": "ACTIVE"},
+  "modelName": "Stable Diffusion 3.5 Large",
+  "outputModalities": ["IMAGE"],
+  "providerName": "Stability AI",
+  "responseStreamingSupported": false
+}

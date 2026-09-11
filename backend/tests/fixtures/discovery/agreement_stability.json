@@ -1,0 +1,38 @@
+{
+  "modelId": "stability.sd3-5-large-v1:0",
+  "offers": [
+    {
+      "offerId": "offer-stability-images",
+      "termDetails": {
+        "usageBasedPricingTerm": {
+          "rateCard": [
+            {
+              "description": "SD3.5 Large - Standard, 1MP",
+              "dimension": "USE1_sd3_5_large_1mp_standard_images",
+              "price": "0.065",
+              "unit": "Units"
+            },
+            {
+              "description": "SD3.5 Large - Standard, 2MP",
+              "dimension": "USE1_sd3_5_large_2mp_standard_images",
+              "price": "0.13",
+              "unit": "Units"
+            },
+            {
+              "description": "SD Ultra - Standard, 1MP",
+              "dimension": "USE1_sd_ultra_1mp_standard_images",
+              "price": "0.08",
+              "unit": "Units"
+            },
+            {
+              "description": "SD Ultra - Standard, 2MP",
+              "dimension": "USE1_sd_ultra_2mp_standard_images",
+              "price": "0.16",
+              "unit": "Units"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
