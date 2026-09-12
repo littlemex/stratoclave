@@ -212,7 +212,15 @@ def _seed_and_activate(dynamodb_mock, monkeypatch, *, candidate=None, verdict=No
     if actor is None:
         _grant_only(monkeypatch, "promoter", frozenset({_PROMOTE_SCOPE}))
         actor = _actor(["promoter"])
-    activate_candidate(_PROFILE_ID, _INVOCATION, actor=actor)
+    # Activation is a compare-and-set against a SPECIFIC verified moment, so the
+    # caller names the identity it saw. This helper saw the verdict it just
+    # seeded, and when there is no verdict it names the empty identity -- which
+    # is the honest thing for a caller that saw nothing, and still reaches the
+    # refusal these tests are about rather than a TypeError before the call.
+    activate_candidate(
+        _PROFILE_ID, _INVOCATION, actor=actor,
+        expected_verified_at=(verdict.verified_at if verdict is not None else ""),
+    )
     return actor
 
 
