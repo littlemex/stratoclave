@@ -14,5 +14,13 @@ grants, or probes a model.
 PR3 adds the probe (`protocol_unverified`) and the machinery that makes a
 discovered record loadable and grantable. Nothing in this package reaches
 the reserve path, a route, or `permissions.json`.
+
+- `promotion` — the promotion candidate store: its own table, its access
+  constraint enforced on read, and the write-time half of its identifier
+  check; deriving the fields a discovered record and a verified probe
+  observation already answer and requiring the three only a human can;
+  reporting which identifiers a promotion is about to make reachable; and
+  re-validating the composed namespace -- the code-resident registry plus
+  every stored candidate -- at every process start. Activation is not here.
 """
 from __future__ import annotations
