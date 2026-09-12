@@ -483,6 +483,9 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     DYNAMODB_SAAR_MEMORY_TABLE: dynamoDBStack.saarMemoryTable.tableName,
     // Ledger P0-1: event-sourced credit ledger (money source of truth).
     DYNAMODB_CREDIT_LEDGER_TABLE: dynamoDBStack.creditLedgerTable.tableName,
+    // Promotion candidates -- a discovered record becomes a servable
+    // candidate. Read/written by mvp.discovery.promotion.
+    DYNAMODB_PROMOTION_CANDIDATES_TABLE: dynamoDBStack.promotionCandidatesTable.tableName,
 
     // CORS
     CORS_ORIGINS: `https://${frontendStack.cfnDistribution.attrDomainName}`,

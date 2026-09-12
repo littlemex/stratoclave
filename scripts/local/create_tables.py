@@ -83,6 +83,13 @@ TABLES: list[dict[str, Any]] = [
         ],
     },
     {
+        # Candidate rows, one identifier-reservation row per public name a
+        # candidate claims, and the probe verdict it is activated against, told
+        # apart by sort key. No index: read in full, never queried by attribute.
+        "name": "stratoclave-promotion-candidates",
+        "pk": ("pk", S), "sk": ("sk", S),
+    },
+    {
         "name": "stratoclave-usage-logs",
         "pk": ("tenant_id", S), "sk": ("timestamp_log_id", S), "ttl": "ttl",
         "gsis": [
