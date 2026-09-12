@@ -412,7 +412,13 @@ class CreateCandidateRequest(BaseModel):
     # probe run against the resulting candidate (`POST .../probe`, below)
     # verifies THIS exact value, and activation refuses if what the probe
     # actually verified disagrees with what the candidate still declares.
-    wire_protocol: str
+    # Optional at the wire, required by the domain -- the same reason the three
+    # human decisions above are Optional. Measured against a running gateway:
+    # omitting this field returned the framework's own error list, so a caller
+    # got `[{"type": "missing", "loc": [...]}]` where every other refusal on
+    # this surface returns `{"type", "field", "message"}`. The closed-set check
+    # below already refuses `None`, and it names the field.
+    wire_protocol: Optional[str] = None
 
 
 class CreateCandidateResponse(BaseModel):
@@ -515,7 +521,13 @@ def create_promotion_candidate(
 # Probe a promotion candidate
 # =============================================================================
 class ProbeRequest(BaseModel):
-    invocation: str
+    # Optional at the wire, required by the domain -- the same reason the three
+    # human decisions above are Optional. Measured against a running gateway:
+    # omitting this field returned the framework's own error list, so a caller
+    # got `[{"type": "missing", "loc": [...]}]` where every other refusal on
+    # this surface returns `{"type", "field", "message"}`. The closed-set check
+    # below already refuses `None`, and it names the field.
+    invocation: Optional[str] = None
 
 
 class ProbeResponseBody(BaseModel):
@@ -635,7 +647,13 @@ def probe_promotion_candidate(
 # Activate a promotion candidate
 # =============================================================================
 class ActivateRequest(BaseModel):
-    invocation: str
+    # Optional at the wire, required by the domain -- the same reason the three
+    # human decisions above are Optional. Measured against a running gateway:
+    # omitting this field returned the framework's own error list, so a caller
+    # got `[{"type": "missing", "loc": [...]}]` where every other refusal on
+    # this surface returns `{"type", "field", "message"}`. The closed-set check
+    # below already refuses `None`, and it names the field.
+    invocation: Optional[str] = None
     # The verdict identity the operator saw (`VerdictView.verified_at` from
     # `GET /candidates/{profile_id}`) -- the compare-and-set. Required, no
     # default: activation binds to the SPECIFIC verified moment the operator
@@ -643,7 +661,13 @@ class ActivateRequest(BaseModel):
     # racing an invalidation or a fresher re-probe refuses rather than
     # silently activating something never verified in the form the operator
     # saw.
-    verified_at: str
+    # Optional at the wire, required by the domain -- the same reason the three
+    # human decisions above are Optional. Measured against a running gateway:
+    # omitting this field returned the framework's own error list, so a caller
+    # got `[{"type": "missing", "loc": [...]}]` where every other refusal on
+    # this surface returns `{"type", "field", "message"}`. The closed-set check
+    # below already refuses `None`, and it names the field.
+    verified_at: Optional[str] = None
 
 
 class ActivateResponse(BaseModel):
@@ -711,6 +735,21 @@ def activate_promotion_candidate(
             detail={
                 "type": "invalid_invocation", "field": "invocation",
                 "message": f"invocation must be one of {sorted(INVOCATION_VALUES)}",
+            },
+        )
+    if not body.verified_at:
+        # The identity is what makes this a compare-and-set rather than "activate
+        # whatever is currently verified", so an absent one is refused here in
+        # this surface's own vocabulary rather than passed down as an empty
+        # string that would refuse further in with a less specific reason.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "type": "verdict_identity_required", "field": "verified_at",
+                "message": (
+                    "the verdict identity the operator saw is required; read "
+                    "VerdictView.verified_at from GET /candidates/{profile_id}"
+                ),
             },
         )
     try:

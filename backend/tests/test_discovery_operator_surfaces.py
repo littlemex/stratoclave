@@ -817,3 +817,84 @@ def test_activation_is_gated_on_the_promote_scope(dynamodb_mock):
         "the model became reachable despite the actor lacking the promotion "
         "permission"
     )
+
+
+# --- a refusal has to name the FACT, not just its reason token ----------------
+#
+# Measured against a running gateway: seven of the eight promotion refusals came
+# back with `message` equal to their own reason string, so a caller was told
+# `provider_unsupported` and nothing they could act on. Only `identifier_taken`
+# named the conflicting fact. The contract's status clause says every 409 names
+# it, and nothing here checked that.
+@pytest.mark.parametrize(
+    "overrides, expected_type, must_appear",
+    [
+        # The value the caller supplied, so they can see what was read.
+        ({"pricing_key": "default"}, "pricing_key_is_default", "default"),
+        # The closed set, so they can pick from it rather than guess.
+        ({"wire_protocol": "telepathy"}, "protocol_mismatch", "messages"),
+    ],
+)
+def test_a_refusal_names_the_conflicting_fact_not_only_its_reason(
+    dynamodb_mock, overrides, expected_type, must_appear,
+):
+    profile_id = "us.acme.names-the-fact-v1"
+    put_discovered_record(_record(profile_id))
+    client = _client_as(dynamodb_mock, ["admin"])
+    revision = client.get(f"/api/mvp/admin/discovery/records/{profile_id}").json()["revision"]
+
+    body = _create_body(revision=revision)
+    body["profile_id"] = profile_id
+    body.update(overrides)
+
+    resp = client.post("/api/mvp/admin/discovery/candidates", json=body)
+
+    assert resp.status_code in (409, 422), resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, dict), "a refusal returned a bare string or a list"
+    assert detail["type"] == expected_type, detail
+    message = str(detail.get("message", ""))
+    assert message != detail["type"], (
+        f"the message for {expected_type} is just the reason token again, so it "
+        "tells the caller nothing they can act on"
+    )
+    assert must_appear in message, f"the refusal does not name {must_appear!r}: {message!r}"
+
+
+@pytest.mark.parametrize(
+    "path_suffix, body, missing_field",
+    [
+        ("/probe", {}, "invocation"),
+        ("/activate", {"verified_at": "2026-01-01T00:00:00+00:00"}, "invocation"),
+        ("/activate", {"invocation": "sync"}, "verified_at"),
+    ],
+)
+def test_an_omitted_field_on_probe_or_activate_refuses_in_this_surfaces_vocabulary(
+    dynamodb_mock, path_suffix, body, missing_field,
+):
+    """These fields were required at the wire, so an OMITTED one was rejected by
+    the framework in its own error shape -- a list of
+    `{"type": "missing", "loc": [...]}` -- where every other refusal here returns
+    `{"type", "field", "message"}`. Found on a real gateway, because the tests
+    only ever sent the fields."""
+    profile_id = "us.acme.omitted-on-write-v1"
+    put_discovered_record(_record(profile_id))
+    client = _client_as(dynamodb_mock, ["admin"])
+    revision = client.get(f"/api/mvp/admin/discovery/records/{profile_id}").json()["revision"]
+    created = client.post(
+        "/api/mvp/admin/discovery/candidates",
+        json={**_create_body(revision=revision), "profile_id": profile_id},
+    )
+    assert created.status_code == 201, created.text
+
+    resp = client.post(
+        f"/api/mvp/admin/discovery/candidates/{profile_id}{path_suffix}", json=body,
+    )
+
+    assert resp.status_code in (409, 422), resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, dict), (
+        f"omitting {missing_field} was refused in the framework's shape, not this "
+        f"surface's: {resp.text[:200]}"
+    )
+    assert detail.get("field") == missing_field, detail
