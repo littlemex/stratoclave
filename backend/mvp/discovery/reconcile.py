@@ -548,7 +548,16 @@ _PERMANENT_NO_AGREEMENT_OFFER_SUBTYPES = frozenset({"not_marketplace_metered"})
 _PERMANENT_BLOCKER_TYPES = frozenset({"unsupported_output_modality", "no_token_pricing"})
 
 
-def _is_actionable(blocker: Blocker) -> bool:
+def is_actionable_blocker(blocker: Blocker) -> bool:
+    """Whether `blocker` is the kind `--strict` fails on (see the module
+    docstring's actionable/permanent split).
+
+    Named without a leading underscore, and this is the only change made to
+    promote it: an operator surface outside this module (the discovery admin
+    queue) needs to classify a blocker exactly the way this deploy gate does,
+    and a second, hand-copied classifier would let a queue and an exit code
+    disagree about the same fact. Nothing about what this function decides
+    has changed — every call site below is the same call, renamed."""
     if blocker.type in _PERMANENT_BLOCKER_TYPES:
         return False
     if blocker.type == "no_agreement_offer":
@@ -567,7 +576,7 @@ def _actionable_blocker_findings(result: PassResult) -> list[str]:
     `result.observation_blocker` is set exactly when this pass could not
     build its Bedrock client (see `PassResult`'s docstring), which is
     `no_agreement_offer`/`client_unavailable` — already ACTIONABLE under
-    `_is_actionable` — so it is read here rather than given its own strict
+    `is_actionable_blocker` — so it is read here rather than given its own strict
     reason. A total failure to observe is not a lesser fact than one
     profile's blocker; it does not get a quieter check.
 
@@ -577,22 +586,22 @@ def _actionable_blocker_findings(result: PassResult) -> list[str]:
     `PassResult` carrying it as its own field instead of `build_record`
     attaching an identical blocker to every record (see that field's
     docstring): an operator can upgrade boto3/botocore, so it is ACTIONABLE
-    under `_is_actionable` (its subtype, `method_unavailable`, is not in
+    under `is_actionable_blocker` (its subtype, `method_unavailable`, is not in
     `_PERMANENT_NO_AGREEMENT_OFFER_SUBTYPES` below) and must keep failing
     `--strict` until they do — but it must fail it as ONE reported fact, not
     as a wall of identically-worded per-model findings that hides whatever
     else this pass found."""
     findings = []
-    if result.observation_blocker is not None and _is_actionable(result.observation_blocker):
+    if result.observation_blocker is not None and is_actionable_blocker(result.observation_blocker):
         b = result.observation_blocker
         findings.append(f"<pass>: {b.type}/{b.subtype}")
     if (result.rate_card_api_unavailable is not None
-            and _is_actionable(result.rate_card_api_unavailable)):
+            and is_actionable_blocker(result.rate_card_api_unavailable)):
         b = result.rate_card_api_unavailable
         findings.append(f"<pass>: {b.type}/{b.subtype}")
     for record in result.records:
         for blocker in record.blockers:
-            if _is_actionable(blocker):
+            if is_actionable_blocker(blocker):
                 findings.append(f"{record.profile_id}: {blocker.type}/{blocker.subtype}")
     return findings
 
