@@ -20,6 +20,10 @@ import difflib
 import json
 import os
 import re
+import threading
+import time
+
+from core.logging import get_logger
 
 from .rates import no_duplicate_keys as _no_duplicate_keys
 from .pricing_feeds.dimensions import (
@@ -28,6 +32,8 @@ from .pricing_feeds.dimensions import (
 )
 from dataclasses import dataclass
 from typing import Iterable, Literal, NoReturn, Optional
+
+logger = get_logger(__name__)
 
 
 # MVP default for the Anthropic Messages route. OpenAI route uses its own
@@ -522,15 +528,222 @@ def load_registry(path: Optional[str] = None) -> tuple[ModelEntry, ...]:
 _REGISTRY: tuple[ModelEntry, ...] = load_registry()
 
 
-_ALIAS_MAP: dict[str, ModelEntry] = {
+# Every index below that depends ONLY on the bundled document — never on an
+# activated entry — computed once, at import, exactly as before. Kept as
+# their own names (rather than folding straight into the cache class below)
+# so the cache's `_refresh_locked` always has a known-good, activation-free
+# starting point to layer onto, the same role `_DEFAULT_RATES` plays for
+# `mvp.pricing._RateCache._baseline`.
+_STATIC_ALIAS_MAP: dict[str, ModelEntry] = {
     alias: entry for entry in _REGISTRY for alias in entry.aliases
 }
 # Bedrock IDs are themselves valid client-facing identifiers (clients that
 # already speak Bedrock-native names). Allow them to round-trip through
 # resolve_model() but only for entries that exist in the registry.
-_BEDROCK_ID_MAP: dict[str, ModelEntry] = {
+_STATIC_BEDROCK_ID_MAP: dict[str, ModelEntry] = {
     entry.bedrock_model_id: entry for entry in _REGISTRY
 }
+_STATIC_MAPPING: dict[str, str] = {
+    alias: entry.bedrock_model_id
+    for entry in _REGISTRY
+    if entry.provider == "anthropic"
+    for alias in entry.aliases
+}
+_STATIC_ALLOWED_BEDROCK_MODELS: frozenset[str] = frozenset(
+    list(_STATIC_MAPPING.values()) + [DEFAULT_MODEL]
+)
+_STATIC_MESSAGES_ROUTE_ALIASES: frozenset[str] = frozenset(
+    a for a, e in _STATIC_ALIAS_MAP.items()
+    if (_STATIC_MAPPING.get(a) is not None) or (e.bedrock_model_id in _STATIC_ALLOWED_BEDROCK_MODELS)
+)
+
+# How long a promotion that just got activated may take to become routable
+# in THIS process, and in every other replica — never instant, never longer
+# than this plus however long one refresh takes. Matches the interval
+# `mvp.pricing`'s own store-backed cache already uses for exactly this shape
+# (a small, DynamoDB-backed table the hot path reads).
+_COMPOSED_REGISTRY_TTL_SECONDS = 60.0
+
+
+class _ComposedRegistry:
+    """Process-local cache of the composed registry: the bundled document
+    (`_REGISTRY`, fixed for the life of the process) folded with every
+    activated promotion candidate, refreshed on a TTL rather than
+    invalidated on write — the same shape `mvp.pricing._RateCache` already
+    uses for a store-backed table the hot path reads.
+
+    TTL, not invalidate-on-write, because an invalidation fan-out's
+    reliability across replicas is one of the measurements this change still
+    owes (see `mvp.discovery.activation`'s own module docstring on what is
+    still unmeasured). A mechanism whose correctness depends on an
+    unmeasured fan-out looks correct and is not; a bounded staleness window
+    needs no measurement to be sound. Window: `_COMPOSED_REGISTRY_TTL_SECONDS`
+    (60s, matching `mvp.pricing`'s own interval) — an activation becomes
+    routable, in the SAME process that accepted it and in every other
+    replica, within at most that many seconds plus one refresh.
+
+    Every derived index — the alias map, the Bedrock-id map, and the legacy
+    Anthropic-only shims (`_MAPPING`/`_ALLOWED_BEDROCK_MODELS`/
+    `_MESSAGES_ROUTE_ALIASES`) — is rebuilt TOGETHER on each refresh, from
+    the SAME activated set, and swapped in one shot (each is its own
+    attribute, but nothing reads a partially-updated one: `_refresh_locked`
+    computes all of them before assigning any). A reader never sees an
+    activated entry indexed by alias without also seeing it in
+    `entries()`, or vice versa.
+
+    On a refresh that cannot read the activated-entry store
+    (`mvp.discovery.activation.ActivationStoreUnavailable`), the LAST GOOD
+    composed set is kept — never emptied by a later failure — logged loudly,
+    and `_loaded_at` is deliberately NOT advanced, so the very next access
+    retries rather than waiting out a full window on a table that may
+    already have recovered. This mirrors `_RateCache._refresh_locked`'s own
+    fail-static posture for a transient read failure, for the same reason:
+    the harm a TTL cache exists to bound is staleness, not correctness, and
+    reverting to "no activations" on every transient blip would make a
+    healthy process serve a WORSE answer than the stale one it already had.
+
+    Only the very FIRST refresh in a process has no last-good set to fall
+    back to; `__init__` seeds that starting state as the static,
+    activation-free maps above, which is exactly the fail-OPEN "serve
+    code-resident entries only" decision `mvp.discovery.activation`'s
+    module docstring makes and explains — this class does not re-decide it,
+    it inherits it as its own initial state.
+    """
+
+    def __init__(self) -> None:
+        self._entries: tuple[ModelEntry, ...] = _REGISTRY
+        self._alias_map: dict[str, ModelEntry] = _STATIC_ALIAS_MAP
+        self._bedrock_id_map: dict[str, ModelEntry] = _STATIC_BEDROCK_ID_MAP
+        self._mapping: dict[str, str] = _STATIC_MAPPING
+        self._allowed_bedrock_models: frozenset[str] = _STATIC_ALLOWED_BEDROCK_MODELS
+        self._messages_route_aliases: frozenset[str] = _STATIC_MESSAGES_ROUTE_ALIASES
+        self._activated: tuple[ModelEntry, ...] = ()
+        self._loaded_at: float = 0.0
+        self._lock = threading.Lock()
+
+    def invalidate(self) -> None:
+        """Force the next read to rebuild. Used by a writer in this process."""
+        with self._lock:
+            self._loaded_at = 0.0
+
+    def _refresh_locked(self) -> None:
+        # Imported inside the method, not at module top level: this module
+        # (`mvp.models`) is imported very early by nearly everything, and
+        # `mvp.discovery.activation` imports `ModelEntry` FROM this module,
+        # so a top-level import here would be circular the moment this class
+        # is defined partway through this module's own initialisation. Every
+        # other lazily-avoided cycle in this file (`price_sources`,
+        # `pricing_feeds.dimensions.unknown_profile_prefix`) uses the same
+        # construction.
+        from .discovery.activation import ActivationStoreUnavailable, list_activated_entries
+
+        try:
+            activated = tuple(a.entry for a in list_activated_entries())
+        except ActivationStoreUnavailable as exc:
+            # Fail static on the ACTIVATED half only. An unreadable store is not
+            # evidence that a previously activated model went away, so the last
+            # known-good activated set stays in force -- but the code-resident
+            # half is in this process's own memory and was never in doubt, so it
+            # is still recomposed. Returning early here would have made an
+            # unreachable store also freeze the bundled entries, which is how a
+            # store outage turned into "the registry is whatever it was last
+            # time" rather than "the registry minus what we could not read".
+            activated = self._activated
+            logger.error(
+                "composed_registry_activated_half_unreadable",
+                note=(
+                    "keeping the last known-good activated set (fail-static); the "
+                    "code-resident entries are recomposed either way, so a newly "
+                    "activated model -- and only that -- waits for the next "
+                    "successful refresh"
+                ),
+                error=str(exc),
+            )
+        # Derive every map from `_REGISTRY` in this refresh rather than from the
+        # static copies taken at import. The two disagree the moment anything
+        # replaces `_REGISTRY` -- which a test does routinely and an operator
+        # never does -- and a refresh that read the entries from one source and
+        # the maps from another would resolve a name to an entry the composed
+        # set does not contain. One source per refresh.
+        base = _REGISTRY
+        alias_map = {alias: e for e in base for alias in e.aliases}
+        alias_map.update({alias: e for e in activated for alias in e.aliases})
+        bedrock_id_map = {e.bedrock_model_id: e for e in base}
+        bedrock_id_map.update({e.bedrock_model_id: e for e in activated})
+        mapping = {
+            alias: e.bedrock_model_id
+            for e in base if e.provider == "anthropic"
+            for alias in e.aliases
+        }
+        mapping.update({
+            alias: e.bedrock_model_id
+            for e in activated if e.provider == "anthropic"
+            for alias in e.aliases
+        })
+        allowed_bedrock_models = frozenset(list(mapping.values()) + [DEFAULT_MODEL])
+        messages_route_aliases = frozenset(
+            a for a, e in alias_map.items()
+            if (mapping.get(a) is not None) or (e.bedrock_model_id in allowed_bedrock_models)
+        )
+        self._activated = activated
+        self._entries = _REGISTRY + activated
+        self._alias_map = alias_map
+        self._bedrock_id_map = bedrock_id_map
+        self._mapping = mapping
+        self._allowed_bedrock_models = allowed_bedrock_models
+        self._messages_route_aliases = messages_route_aliases
+        self._loaded_at = time.time()
+
+    def _ensure_fresh(self) -> None:
+        # Double-checked under the lock: only one thread refreshes; the rest
+        # either wait briefly and see the fresh maps, or skip if a refresh
+        # was just completed. A refresh failure keeps the previous maps
+        # (fail-static) rather than raising through to a reader.
+        if time.time() - self._loaded_at >= _COMPOSED_REGISTRY_TTL_SECONDS:
+            with self._lock:
+                if time.time() - self._loaded_at >= _COMPOSED_REGISTRY_TTL_SECONDS:
+                    self._refresh_locked()
+
+    def entries(self) -> tuple[ModelEntry, ...]:
+        self._ensure_fresh()
+        return self._entries
+
+    def alias_map(self) -> dict[str, ModelEntry]:
+        self._ensure_fresh()
+        return self._alias_map
+
+    def bedrock_id_map(self) -> dict[str, ModelEntry]:
+        self._ensure_fresh()
+        return self._bedrock_id_map
+
+    def mapping(self) -> dict[str, str]:
+        self._ensure_fresh()
+        return self._mapping
+
+    def allowed_bedrock_models(self) -> frozenset[str]:
+        self._ensure_fresh()
+        return self._allowed_bedrock_models
+
+    def messages_route_aliases(self) -> frozenset[str]:
+        self._ensure_fresh()
+        return self._messages_route_aliases
+
+
+_composed_registry = _ComposedRegistry()
+
+
+def invalidate_composed_registry() -> None:
+    """Drop this process's composed-registry cache so the next read rebuilds it.
+
+    The TTL bounds how long ANOTHER replica keeps serving without a newly
+    activated entry. It should not bound the process that performed the
+    activation: a caller who just activated a model and immediately asks the
+    registry about it would otherwise be told it does not exist, for up to a
+    full window, by the very process that wrote it. So the writer invalidates
+    locally and the TTL carries the fleet -- the two answer different halves of
+    one question, and neither is a substitute for the other.
+    """
+    _composed_registry.invalidate()
 
 
 def assert_vllm_cache_rates_zero() -> None:
@@ -587,7 +800,8 @@ def _did_you_mean(name: Optional[str], *, limit: int = 3,
         return ""
     name = name[:_MAX_ECHOED_NAME]
     lowered = name.casefold()
-    candidates = sorted(_ALIAS_MAP if only is None else (a for a in _ALIAS_MAP if a in only))
+    alias_map = _composed_registry.alias_map()
+    candidates = sorted(alias_map if only is None else (a for a in alias_map if a in only))
     # Containment first, and deliberately so. A caller who sent something close
     # to a full Bedrock id ("us.anthropic.claude-haiku-4-5") wants the short
     # alias it contains ("claude-haiku-4-5"); pure lexical distance would answer
@@ -617,7 +831,7 @@ def resolve_model(name: Optional[str]) -> ModelEntry:
     """
     if not name:
         name = DEFAULT_MODEL
-    entry = _ALIAS_MAP.get(name) or _BEDROCK_ID_MAP.get(name)
+    entry = _composed_registry.alias_map().get(name) or _composed_registry.bedrock_id_map().get(name)
     if entry is None:
         raise ValueError(
             f"model '{name[:_MAX_ECHOED_NAME]}' is not in the allowlist."
@@ -656,10 +870,13 @@ def canonical_model_id(name: str) -> str:
 
 
 def registry_entries() -> tuple[ModelEntry, ...]:
-    """Read-only view of the model registry (the code-resident allowlist). Used by
-    the shadow VSR to find the cheapest model in a price tier; a plain accessor so
-    callers never import the private `_REGISTRY`."""
-    return _REGISTRY
+    """Read-only view of the model registry: the code-resident allowlist
+    composed with every activated promotion candidate, refreshed on a TTL
+    (see `_ComposedRegistry`). Used by the shadow VSR to find the cheapest
+    model in a price tier, by pricing, by the OpenAI listing surface, and by
+    routing-chain construction; a plain accessor so callers never import the
+    private `_REGISTRY` directly."""
+    return _composed_registry.entries()
 
 
 # ---------------------------------------------------------------------------
@@ -667,29 +884,11 @@ def registry_entries() -> tuple[ModelEntry, ...]:
 # ---------------------------------------------------------------------------
 # `mvp.anthropic` imports `resolve_bedrock_model` at module top-level (it does
 # NOT import `_MAPPING` directly -- only `resolve_bedrock_model`, below, reads
-# it). Kept working unchanged so that the model-registry refactor lands as a
-# pure additive change. New code should not import `_MAPPING`; call
-# `registry_entries()` and filter by `provider == "anthropic"` instead (G1:
-# `_REGISTRY` itself has exactly one importer, this module).
-
-_MAPPING: dict[str, str] = {
-    alias: entry.bedrock_model_id
-    for entry in _REGISTRY
-    if entry.provider == "anthropic"
-    for alias in entry.aliases
-}
-
-_ALLOWED_BEDROCK_MODELS: frozenset[str] = frozenset(
-    list(_MAPPING.values()) + [DEFAULT_MODEL]
-)
-
-
-# Aliases the Anthropic Messages route can actually serve. Derived from the
-# registry so it cannot drift; used to keep suggestions on that route followable.
-_MESSAGES_ROUTE_ALIASES: frozenset[str] = frozenset(
-    a for a, e in _ALIAS_MAP.items()
-    if (_MAPPING.get(a) is not None) or (e.bedrock_model_id in _ALLOWED_BEDROCK_MODELS)
-)
+# it, through `_composed_registry`). Kept working unchanged so that the
+# model-registry refactor lands as a pure additive change. New code should
+# not import `_MAPPING`; call `registry_entries()` and filter by
+# `provider == "anthropic"` instead (`_REGISTRY` itself has exactly one
+# importer, this module).
 
 
 def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
@@ -703,11 +902,11 @@ def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
     if not anthropic_model:
         return DEFAULT_MODEL
 
-    mapped = _MAPPING.get(anthropic_model)
+    mapped = _composed_registry.mapping().get(anthropic_model)
     if mapped is not None:
         return mapped
 
-    if anthropic_model in _ALLOWED_BEDROCK_MODELS:
+    if anthropic_model in _composed_registry.allowed_bedrock_models():
         return anthropic_model
 
     # Distinguish "known model, wrong route" from "unknown model". The old
@@ -715,7 +914,10 @@ def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
     # reads as a contradiction when the rejected name IS a Claude model whose
     # only problem is that it is not a registered alias (found in live
     # verification, 2026-08-27).
-    known = _ALIAS_MAP.get(anthropic_model) or _BEDROCK_ID_MAP.get(anthropic_model)
+    known = (
+        _composed_registry.alias_map().get(anthropic_model)
+        or _composed_registry.bedrock_id_map().get(anthropic_model)
+    )
     shown = anthropic_model[:_MAX_ECHOED_NAME]
     if known is not None:
         raise ValueError(
@@ -725,7 +927,7 @@ def resolve_bedrock_model(anthropic_model: Optional[str]) -> str:
         )
     raise ValueError(
         f"model '{shown}' is not a recognised model name."
-        f"{_did_you_mean(anthropic_model, only=_MESSAGES_ROUTE_ALIASES)} "
+        f"{_did_you_mean(anthropic_model, only=_composed_registry.messages_route_aliases())} "
         "The Anthropic Messages route accepts Claude family names; the full list "
         "of accepted names is served by GET /v1/models."
     )

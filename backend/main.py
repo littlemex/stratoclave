@@ -48,6 +48,11 @@ from mvp.admin_usage import router as mvp_admin_usage_router
 # mvp/admin_entitlements.py's module docstring for why the two must never
 # touch each other's item.
 from mvp.admin_entitlements import router as mvp_admin_entitlements_router
+# The discovery operator queue (task blockers only) -- see
+# mvp/admin_discovery.py's module docstring for why it shares its
+# actionable/permanent classification with mvp.discovery.reconcile instead of
+# repeating it.
+from mvp.admin_discovery import router as mvp_admin_discovery_router
 from mvp.team_lead import router as mvp_team_lead_router
 # Money-ceiling raises: the request, the approval, and the grant that expires.
 from mvp.grants import router as mvp_grants_router
@@ -474,6 +479,7 @@ app.include_router(mvp_admin_users_router)       # /api/mvp/admin/users[*]
 app.include_router(mvp_admin_tenants_router)     # /api/mvp/admin/tenants[*]
 app.include_router(mvp_admin_routing_router)     # /api/mvp/admin/tenants/{id}[/users/{uid}]/routing-config
 app.include_router(mvp_admin_entitlements_router)  # /api/mvp/admin/tenants/{id}/entitlements[*]
+app.include_router(mvp_admin_discovery_router)   # GET  /api/mvp/admin/discovery/queue
 app.include_router(mvp_admin_usage_router)       # /api/mvp/admin/usage-logs
 app.include_router(mvp_admin_pricing_router)     # /api/mvp/admin/pricing-config (read-only)
 app.include_router(mvp_team_lead_router)         # /api/mvp/team-lead/tenants[*]

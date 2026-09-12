@@ -65,11 +65,16 @@ def install_registry(monkeypatch, extra_entries: tuple, *, keep_real: bool = Tru
     base = tuple(_models._REGISTRY) if keep_real else ()
     new_registry = base + tuple(extra_entries)
     monkeypatch.setattr(_models, "_REGISTRY", new_registry)
+    # The derived maps below are the cache's *seed*, not what a resolver reads
+    # directly: `registry_entries` and the alias maps are served from a composed
+    # cache that copies them on refresh. Patching the seeds without dropping the
+    # cache leaves the previous test's registry in force for a full TTL window.
+    _models.invalidate_composed_registry()
 
     alias_map = {alias: entry for entry in new_registry for alias in entry.aliases}
     bedrock_id_map = {entry.bedrock_model_id: entry for entry in new_registry}
-    monkeypatch.setattr(_models, "_ALIAS_MAP", alias_map)
-    monkeypatch.setattr(_models, "_BEDROCK_ID_MAP", bedrock_id_map)
+    monkeypatch.setattr(_models, "_STATIC_ALIAS_MAP", alias_map)
+    monkeypatch.setattr(_models, "_STATIC_BEDROCK_ID_MAP", bedrock_id_map)
 
     mapping = {
         alias: entry.bedrock_model_id
@@ -77,16 +82,16 @@ def install_registry(monkeypatch, extra_entries: tuple, *, keep_real: bool = Tru
         if entry.provider == "anthropic"
         for alias in entry.aliases
     }
-    monkeypatch.setattr(_models, "_MAPPING", mapping)
+    monkeypatch.setattr(_models, "_STATIC_MAPPING", mapping)
 
     allowed_bedrock = frozenset(list(mapping.values()) + [_models.DEFAULT_MODEL])
-    monkeypatch.setattr(_models, "_ALLOWED_BEDROCK_MODELS", allowed_bedrock)
+    monkeypatch.setattr(_models, "_STATIC_ALLOWED_BEDROCK_MODELS", allowed_bedrock)
 
     messages_route_aliases = frozenset(
         a for a, e in alias_map.items()
         if (mapping.get(a) is not None) or (e.bedrock_model_id in allowed_bedrock)
     )
-    monkeypatch.setattr(_models, "_MESSAGES_ROUTE_ALIASES", messages_route_aliases)
+    monkeypatch.setattr(_models, "_STATIC_MESSAGES_ROUTE_ALIASES", messages_route_aliases)
 
     for mod_name in _KNOWN_LOCAL_REGISTRY_IMPORTS:
         monkeypatch.setattr(f"{mod_name}._REGISTRY", new_registry, raising=False)

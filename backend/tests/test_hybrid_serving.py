@@ -120,6 +120,11 @@ def test_vllm_entry_expands_to_single_self_hosted_target(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
     monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
+    # The alias and id maps a resolver reads are served from a composed cache
+    # seeded from the registry, so patching the registry alone leaves the cache
+    # holding the bundled entries. Drop it so this test's registry is the one in
+    # force.
+    __import__("mvp.models", fromlist=["x"]).invalidate_composed_registry()
     vllm.reset_for_test()
     chains.reset_catalog()
     cat = chains.get_catalog()
@@ -185,6 +190,11 @@ def test_vllm_entry_not_catalogued_when_flag_off(monkeypatch):
     # simply resolves as an unknown model.
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "false")
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
+    # The alias and id maps a resolver reads are served from a composed cache
+    # seeded from the registry, so patching the registry alone leaves the cache
+    # holding the bundled entries. Drop it so this test's registry is the one in
+    # force.
+    __import__("mvp.models", fromlist=["x"]).invalidate_composed_registry()
     vllm.reset_for_test()
     chains.reset_catalog()
     cat = chains.get_catalog()
@@ -198,6 +208,11 @@ def test_vllm_entry_not_catalogued_when_key_not_allowlisted(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
     monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"other-key": "http://h:8000"}))
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
+    # The alias and id maps a resolver reads are served from a composed cache
+    # seeded from the registry, so patching the registry alone leaves the cache
+    # holding the bundled entries. Drop it so this test's registry is the one in
+    # force.
+    __import__("mvp.models", fromlist=["x"]).invalidate_composed_registry()
     vllm.reset_for_test()
     chains.reset_catalog()
     cat = chains.get_catalog()
@@ -211,6 +226,11 @@ def test_vllm_pin_rejected_400_when_flag_off(monkeypatch):
     # region. _validate_model_pin is the pre-reserve gate.
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "false")
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
+    # The alias and id maps a resolver reads are served from a composed cache
+    # seeded from the registry, so patching the registry alone leaves the cache
+    # holding the bundled entries. Drop it so this test's registry is the one in
+    # force.
+    __import__("mvp.models", fromlist=["x"]).invalidate_composed_registry()
     vllm.reset_for_test()
     from fastapi import HTTPException
 
@@ -397,6 +417,11 @@ def test_vllm_dead_endpoint_exhausts_chain_and_raises(monkeypatch):
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
     monkeypatch.setenv("STRATOCLAVE_VLLM_ENDPOINTS", json.dumps({"vllm-primary": "http://vsr:8000"}))
     monkeypatch.setattr("mvp.models._REGISTRY", _vllm_registry())
+    # The alias and id maps a resolver reads are served from a composed cache
+    # seeded from the registry, so patching the registry alone leaves the cache
+    # holding the bundled entries. Drop it so this test's registry is the one in
+    # force.
+    __import__("mvp.models", fromlist=["x"]).invalidate_composed_registry()
     vllm.reset_for_test()
     chains.reset_catalog()
 

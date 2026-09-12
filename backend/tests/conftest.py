@@ -74,6 +74,13 @@ _TABLE_ENVS = {
     "DYNAMODB_SAAR_MEMORY_TABLE": "stratoclave-saar-memory",
     "DYNAMODB_CREDIT_LEDGER_TABLE": "stratoclave-credit-ledger",
     "DYNAMODB_QUOTA_EVENTS_TABLE": "stratoclave-quota-events",
+    # The promotion-candidate store. Three row kinds share this table, told apart
+    # by sort key: a candidate row, one identifier-reservation row per public name
+    # the candidate claims, and the probe verdict a candidate is activated
+    # against. Wired up here rather than privately in one test file because
+    # several need to seed rows into it -- the same reasoning the quota-events
+    # table above already gives for itself.
+    "DYNAMODB_PROMOTION_CANDIDATES_TABLE": "stratoclave-promotion-candidates",
 }
 for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
@@ -111,6 +118,18 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
         _pricing.reset_cache()
         _pricing.reset_version_cache()
     except Exception:  # noqa: BLE001 — pricing import optional in some minimal test envs
+        pass
+    # The composed registry -- the bundled entries plus any activated promotion
+    # candidate -- is cached process-globally on a TTL for the same reason the
+    # pricing rates above are. A test that monkeypatches `mvp.models._REGISTRY`
+    # is invisible to it until the window expires, so a warmed cache from an
+    # earlier test makes the patch silently ineffective and the model under test
+    # resolve to whatever the previous one installed. Reset with the same
+    # per-test discipline.
+    try:
+        from mvp.models import invalidate_composed_registry as _invalidate_registry
+        _invalidate_registry()
+    except Exception:  # noqa: BLE001 — absent before the composed registry exists
         pass
     # Hybrid-serving (vLLM) caches the parsed endpoint allowlist + pooled httpx
     # clients as module globals; reset so a test varying
@@ -433,6 +452,28 @@ def dynamodb_mock() -> Iterator[boto3.resource]:
         # TTL ttl. One small item per (tenant, session). No GSI.
         dynamodb.create_table(
             TableName=_TABLE_ENVS["DYNAMODB_SAAR_MEMORY_TABLE"],
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # PromotionCandidates: PK pk, SK sk, no GSI. Candidate rows are
+        # `pk="CANDIDATE#<profile_id>"`, reservations `pk="IDENTIFIER#<name>"`,
+        # verdicts `pk="VERDICT#<profile_id>"`. A reservation is written in the
+        # same transaction as its candidate, so two concurrent promotions of one
+        # alias cannot both succeed. No secondary index: the table is small (one
+        # row per model ever promoted) and is read in full, not queried by
+        # attribute. A separate table from user-tenants deliberately -- these rows
+        # decide which models are servable and must not share a lifecycle with
+        # tenant data.
+        dynamodb.create_table(
+            TableName=_TABLE_ENVS["DYNAMODB_PROMOTION_CANDIDATES_TABLE"],
             KeySchema=[
                 {"AttributeName": "pk", "KeyType": "HASH"},
                 {"AttributeName": "sk", "KeyType": "RANGE"},

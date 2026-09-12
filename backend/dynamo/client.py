@@ -104,6 +104,31 @@ def pricing_config_table_name() -> str:
     return table_name("DYNAMODB_PRICING_CONFIG_TABLE", "stratoclave-pricing-config")
 
 
+def promotion_candidates_table_name() -> str:
+    """The promotion candidate store (`mvp.discovery.promotion`) — where a
+    discovered record becomes a candidate for serving.
+
+    PK `pk`, SK `sk`. A candidate row is `pk="CANDIDATE#<profile_id>"`,
+    `sk="CANDIDATE"`; an identifier-reservation row is
+    `pk="IDENTIFIER#<identifier>"`, `sk="RESERVATION"`, one per public
+    identifier (an alias, or the Bedrock model id). The candidate and its
+    reservations are written together in a single `TransactWriteItems`, each
+    reservation guarded by `ConditionExpression="attribute_not_exists(pk)"`
+    because DynamoDB has no unique constraint on a non-key attribute, and a
+    check against a listing followed by a separate write would be the exact
+    race this shape exists to close — so two concurrent promotions of one
+    identifier cannot both succeed.
+
+    Its own table rather than an overlay on `stratoclave-user-tenants` (where
+    `mvp.discovery.records` and `mvp.admin_entitlements` already live):
+    these rows define which models are servable at all, and must not share
+    a lifecycle with tenant data — a retention job, a migration or a restore
+    scoped to the tenant table must not be able to delete or resurrect a
+    public model name as a side effect.
+    """
+    return table_name("DYNAMODB_PROMOTION_CANDIDATES_TABLE", "stratoclave-promotion-candidates")
+
+
 def credit_ledger_table_name() -> str:
     """Append-only, event-sourced credit ledger — the money source of truth.
 

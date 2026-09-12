@@ -41,6 +41,13 @@ CONCRETE = [
     # the same precedent) and neither of these is a read.
     "limits:approve", "limits:approve-own", "limits:raise-self",
     "messages:send", "responses:send",
+    # Discovered-model operator surfaces: seeing a discovered record, its
+    # blockers and its evidence is one authority; creating a promotion
+    # candidate and activating it is a separate, wider one (it grows the
+    # servable catalogue, not just what one tenant may reach). No
+    # implication edge between them, and none to any other scope: this is
+    # a new resource, not a breadth variant of an existing one.
+    "models:discover", "models:promote",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
     # A write on an owned tenant. Reviewed as a new scope rather than a reuse of
     # `tenants:read-own`, and given NO implication edge: the ladder is

@@ -29,6 +29,12 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     // upstream for the same reason as `limits:*` above; the admin role holds
     // both via this wildcard.
     'entitlements:*',
+    // Discovery's own authority (see `backend/mvp/authz.py`'s `ALL_SCOPES`
+    // comment for the fuller account): seeing a discovered record and its
+    // blockers is `models:discover`; creating/activating a promotion
+    // candidate is the separate, `admin`-only `models:promote`. The admin
+    // role holds both via `models:*`.
+    'models:*',
     'messages:send',
     'responses:send',
   ],
@@ -54,6 +60,9 @@ export const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     // `limits:approve` reaches do not.
     'limits:raise-self',
     'limits:approve-own',
+    // See discovered records, their blockers and their evidence -- not the
+    // authority to act on one (`models:promote`, admin-only).
+    'models:discover',
     'messages:send',
     'responses:send',
   ],

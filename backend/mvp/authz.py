@@ -196,6 +196,18 @@ ALL_SCOPES: tuple[str, ...] = (
     # the ladder here is read breadth, and neither of these is a read.
     "limits:approve", "limits:approve-own", "limits:raise-self",
     "messages:send", "responses:send",
+    # Discovery's own authority, separate from `entitlements:*` above for the
+    # same reason `entitlements:grant`/`entitlements:read` are split from each
+    # other: `models:discover` only lets a caller SEE a discovered record, its
+    # blockers and its evidence -- it grants no tenant anything and activates
+    # nothing. `models:promote` is the authority to create a promotion
+    # candidate and activate one, which is a DIFFERENT act from seeing what
+    # discovery found, and is deliberately `admin`-only (see
+    # `permissions.json`): promotion widens the public API surface -- a new
+    # model becomes servable fleet-wide -- and that is not a team-lead act,
+    # unlike `models:discover`, which team_lead also holds. Seeing is not the
+    # authority to change.
+    "models:discover", "models:promote",
     "tenants:create", "tenants:delete", "tenants:read-all", "tenants:read-own",
     # `tenants:update-own` is a WRITE on a tenant the actor owns, deliberately
     # separate from `tenants:update` (any tenant) and deliberately NOT a reuse of

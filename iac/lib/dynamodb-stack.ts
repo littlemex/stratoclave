@@ -60,6 +60,12 @@ export class DynamoDBStack extends cdk.Stack {
   public readonly creditLedgerTable: dynamodb.Table;
   /** Limit-raise requests, the grants approvals produce, and the daily slot. */
   public readonly quotaEventsTable: dynamodb.Table;
+  /** Promotion candidates -- a discovered record becomes a servable
+   * candidate. Its own table, not an overlay on UserTenants: the rows that
+   * decide which models are servable must not share a lifecycle with
+   * tenant data, so a retention job or restore scoped to that table can
+   * never delete or resurrect a public model name as a side effect. */
+  public readonly promotionCandidatesTable: dynamodb.Table;
 
   public readonly allTableArns: string[];
 
@@ -534,6 +540,26 @@ export class DynamoDBStack extends cdk.Stack {
       timeToLiveAttribute: 'ttl',
     });
 
+    // Promotion candidates. PK `pk`, SK `sk` -- a
+    // candidate row (`pk="CANDIDATE#<profile_id>"`, `sk="CANDIDATE"`) and
+    // one identifier-reservation row per public identifier
+    // (`pk="IDENTIFIER#<identifier>"`, `sk="RESERVATION"`, guarded by
+    // `attribute_not_exists(pk)`), written together in a single
+    // TransactWriteItems so two concurrent promotions of one identifier
+    // cannot both succeed. No GSI: `mvp.discovery.promotion.
+    // list_promotion_candidates` scans, the same low-volume-admin-table
+    // assumption `PricingConfigTable` above already makes. Follows
+    // `baseTableProps` unmodified, like the majority of the tables above --
+    // PAY_PER_REQUEST, encryption and removal policy are unanimous across
+    // every table in this stack, so there is no disagreement to resolve
+    // here by picking a majority.
+    this.promotionCandidatesTable = new dynamodb.Table(this, 'PromotionCandidatesTable', {
+      ...baseTableProps,
+      tableName: `${prefix}-promotion-candidates`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
+
     this.allTableArns = [
       this.sessionsTable.tableArn,
       this.messagesTable.tableArn,
@@ -562,6 +588,7 @@ export class DynamoDBStack extends cdk.Stack {
       `${this.creditLedgerTable.tableArn}/index/*`,
       this.quotaEventsTable.tableArn,
       `${this.quotaEventsTable.tableArn}/index/*`,
+      this.promotionCandidatesTable.tableArn,
     ];
 
     // Parameter Store exports
@@ -589,6 +616,7 @@ export class DynamoDBStack extends cdk.Stack {
       ['TableRoutingSignalsParam', 'dynamodb/table-routing-signals', this.routingSignalsTable],
       ['TableSaarMemoryParam', 'dynamodb/table-saar-memory', this.saarMemoryTable],
       ['TableQuotaEventsParam', 'dynamodb/table-quota-events', this.quotaEventsTable],
+      ['TablePromotionCandidatesParam', 'dynamodb/table-promotion-candidates', this.promotionCandidatesTable],
     ];
     for (const [id, rel, table] of tableParams) {
       putStringParameter(this, id, {
