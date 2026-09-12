@@ -547,6 +547,170 @@ export interface LimitGrantsResponse {
   reconciliation: GrantReconciliation
 }
 
+// --- Model discovery (backend/mvp/admin_discovery.py is the wire contract) ---
+//
+// `type`/`subtype`/`evidence` are discovery's own closed vocabulary
+// (`mvp.discovery.records.Blocker`), rendered verbatim rather than mapped
+// through a second client-side classifier -- the backend's own module
+// docstring is explicit that an operator and `--strict`'s exit code must
+// never be able to disagree about a blocker, which only holds if nothing
+// here re-derives what "actionable" or "permanent" means.
+export interface DiscoveryBlocker {
+  type: string
+  subtype: string
+  evidence: string
+  first_seen: string
+  last_seen: string
+}
+
+// UNFILTERED blockers -- unlike the pre-existing `/queue`, a record whose
+// only blocker is permanent still appears here, and still lists that
+// blocker, because "why can I not promote this" is exactly the question a
+// permanent blocker answers and the queue was never designed to.
+export interface DiscoveryRecord {
+  profile_id: string
+  provider: string
+  profile_scope: string
+  model_family: string
+  jurisdiction_bounded: boolean
+  invocation_region: string
+  // The record's own revision -- read before creating a candidate, and sent
+  // back unchanged as the create request's compare-and-set. Opaque: never
+  // parsed, only round-tripped.
+  revision: string
+  blockers: DiscoveryBlocker[]
+}
+
+export interface DiscoveryRecordListResponse {
+  records: DiscoveryRecord[]
+}
+
+export interface DiscoveryVerdict {
+  invocation: string
+  // "unverified" when no probe has ever recorded a verdict for this
+  // (profile_id, invocation) pair -- never an absent key.
+  state: string
+  verified_at?: string | null
+  verified_by?: string | null
+  pricing_key_at_verification?: string | null
+  wire_protocol_verified?: string | null
+}
+
+export interface DiscoveryCandidate {
+  profile_id: string
+  state: string
+  aliases: string[]
+  bedrock_model_id: string
+  bedrock_region: string
+  pricing_key: string
+  jurisdiction?: string | null
+  provider: string
+  wire_protocol: string
+  model_family: string
+  profile_scope: string
+  created_at: string
+  created_by: string
+  // Aliases plus the Bedrock id, deduplicated -- every identifier this
+  // candidate would make reachable once activated. The Bedrock id is
+  // included here deliberately: it becomes a client-facing name for any
+  // registry entry, not just an internal routing detail.
+  identifiers: string[]
+  // Keyed by invocation ("sync" | "stream"), never a list -- every
+  // invocation the gateway knows is always present, verified or not.
+  verdicts: Record<string, DiscoveryVerdict>
+}
+
+export interface DiscoveryCandidateListResponse {
+  candidates: DiscoveryCandidate[]
+}
+
+export interface CreateDiscoveryCandidateRequest {
+  profile_id: string
+  revision: string
+  aliases?: string[]
+  pricing_key?: string
+  jurisdiction?: string
+  wire_protocol: string
+}
+
+export interface CreateDiscoveryCandidateResponse {
+  candidate: DiscoveryCandidate
+  // The identifiers this candidate WOULD make live, before activation ever
+  // writes anything -- the alias(es) the human chose, and the Bedrock model
+  // id, which becomes a client-facing name too. Read this, not
+  // `candidate.identifiers`, when the point is "show this before it's live":
+  // both carry the same values today, but this field is the response's own
+  // named answer to that question.
+  newly_live_identifiers: string[]
+  default_model_collision_warning?: string | null
+}
+
+export interface ProbeDiscoveryCandidateResponse {
+  // A completed check, not an error -- `passed: false` is a normal 200
+  // response, never thrown. Only an attempt that could not even run (a
+  // permanent blocker, a stale ledger, an indeterminate provider timeout)
+  // throws.
+  passed: boolean
+  invocation: string
+  charged_microusd?: number | null
+  verdict?: DiscoveryVerdict | null
+  blocker?: DiscoveryBlocker | null
+}
+
+export interface ActivateDiscoveryCandidateResponse {
+  profile_id: string
+  invocation: string
+  verified_at: string
+  provider: string
+  bedrock_model_id: string
+  bedrock_region: string
+  aliases: string[]
+  wire_protocol: string
+  pricing_key: string
+  profile_scope: string
+  model_family: string
+  access: string
+  jurisdiction_bounded: boolean
+  jurisdiction?: string | null
+  identifiers: string[]
+}
+
+/**
+ * Every refusal from the discovery routes shares one vocabulary:
+ * `{"detail": {"type": ..., "field"?: ..., "message": ..., "blocker"?: ...}}`.
+ * `field` names which INPUT to fix (present only for a malformed human
+ * field, e.g. `wire_protocol`); `blocker` carries discovery's own blocker
+ * shape when the refusal is about one (`permanent_blocker`,
+ * `probe_indeterminate`). Reads `err.detailBody` (the parsed object
+ * `jsonRequest` already captured) rather than re-parsing the response, and
+ * never throws itself -- a caller rendering an error must not itself be
+ * able to fail on a differently-shaped one.
+ */
+export interface DiscoveryErrorDetail {
+  type?: string
+  field?: string
+  message: string
+  blocker?: DiscoveryBlocker
+}
+
+export function discoveryErrorDetail(err: unknown, fallback: string): DiscoveryErrorDetail {
+  const e = err as ApiError | null
+  const body = e?.detailBody
+  if (body && typeof body === 'object') {
+    const b = body as Record<string, unknown>
+    return {
+      type: typeof b.type === 'string' ? b.type : undefined,
+      field: typeof b.field === 'string' ? b.field : undefined,
+      message: typeof b.message === 'string' ? b.message : e?.message ?? fallback,
+      blocker:
+        b.blocker && typeof b.blocker === 'object'
+          ? (b.blocker as DiscoveryBlocker)
+          : undefined,
+    }
+  }
+  return { message: e?.message ?? fallback }
+}
+
 // #66: read-only effective pricing table (built-in defaults <- overrides).
 export interface PricingRateEntry {
   pricing_key: string
@@ -864,6 +1028,32 @@ export const api = {
     )
     assertNoCostLeak(body)
     return body
+  },
+
+  // Model discovery reads. `models:discover` gates every route below on the
+  // backend, and BOTH `admin` and `team_lead` hold it (`permissions.json`) --
+  // unlike limit-raises/limit-grants further down, which mirror an
+  // `/admin/...`/`/team-lead/...` pair of routes gated by a `*-own` split
+  // permission, discovery has exactly ONE route per read, because the
+  // backend's own module docstring reasons about "a discover-only
+  // principal" reaching these exact paths. Kept top-level (not nested under
+  // `admin` or `teamLead`) so which namespace a caller reaches through is
+  // never mistaken for the authorization decision -- that decision is the
+  // backend's alone, via `require_permission`. The three WRITES
+  // (create/probe/activate) are `models:promote`-gated, admin-only, and
+  // live under `admin` below.
+  discovery: {
+    records: () => jsonRequest<DiscoveryRecordListResponse>('/api/mvp/admin/discovery/records'),
+    record: (profileId: string) =>
+      jsonRequest<DiscoveryRecord>(
+        `/api/mvp/admin/discovery/records/${encodeURIComponent(profileId)}`,
+      ),
+    candidates: () =>
+      jsonRequest<DiscoveryCandidateListResponse>('/api/mvp/admin/discovery/candidates'),
+    candidate: (profileId: string) =>
+      jsonRequest<DiscoveryCandidate>(
+        `/api/mvp/admin/discovery/candidates/${encodeURIComponent(profileId)}`,
+      ),
   },
 
   admin: {
@@ -1241,6 +1431,28 @@ export const api = {
         `/api/mvp/admin/limit-raises/latest-permissible-expiry${q}`,
       )
     },
+
+    // Model discovery WRITES -- `models:promote`-gated, admin-only. See
+    // `api.discovery` above for the shared reads.
+    createDiscoveryCandidate: (body: CreateDiscoveryCandidateRequest) =>
+      jsonRequest<CreateDiscoveryCandidateResponse>('/api/mvp/admin/discovery/candidates', {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify(body),
+      }),
+    probeDiscoveryCandidate: (profileId: string, body: { invocation: string }) =>
+      jsonRequest<ProbeDiscoveryCandidateResponse>(
+        `/api/mvp/admin/discovery/candidates/${encodeURIComponent(profileId)}/probe`,
+        { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
+    activateDiscoveryCandidate: (
+      profileId: string,
+      body: { invocation: string; verified_at: string },
+    ) =>
+      jsonRequest<ActivateDiscoveryCandidateResponse>(
+        `/api/mvp/admin/discovery/candidates/${encodeURIComponent(profileId)}/activate`,
+        { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) },
+      ),
   },
 
   apiKeys: {
