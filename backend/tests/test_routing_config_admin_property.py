@@ -20,7 +20,7 @@ import pytest
 from hypothesis import assume, given, settings, strategies as st
 from pydantic import ValidationError
 
-from mvp.models import _ALIAS_MAP, resolve_model
+from mvp.models import _STATIC_ALIAS_MAP, resolve_model
 from mvp.routing import config as routing_config
 from mvp.routing.config import ModelQuotaConfig, RoutingConfig, UserRoutingConfig
 from mvp.admin_routing import (
@@ -35,7 +35,7 @@ from mvp.admin_routing import (
     validate_user_routing,
 )
 
-KNOWN_MODELS = sorted(_ALIAS_MAP.keys())
+KNOWN_MODELS = sorted(_STATIC_ALIAS_MAP.keys())
 BOGUS_MODEL = "model-that-does-not-exist-zz9"
 
 
