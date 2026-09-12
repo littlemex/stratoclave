@@ -80,6 +80,63 @@ from . import provider_outcome as _outcome
 logger = logging.getLogger(__name__)
 
 
+def _invocation_for_route(route: Optional[str]) -> str:
+    """`stream` for every route module's own `"..._stream"` naming
+    (`mvp.anthropic`'s `"messages_stream"`, `mvp.chat_completions`'s
+    `"chat_completions_stream"`, `mvp.openai_responses`'s `"responses_
+    stream"`), `sync` for everything else including `None`. This is the same
+    two-value vocabulary `mvp.discovery.verdict.INVOCATION_VALUES` closes
+    over; duplicated as a plain string here rather than imported, because
+    this function must not import discovery at module load time (see
+    `_maybe_invalidate_probe_verdict`'s own docstring for why the import is
+    deferred and best-effort instead)."""
+    return "stream" if route and route.endswith("_stream") else "sync"
+
+
+def _maybe_invalidate_probe_verdict(
+    model_id: Optional[str], route: Optional[str], *,
+    exc: Optional[BaseException] = None, metering_fault: bool = False,
+) -> None:
+    """E9's seam into production traffic: call `mvp.discovery.verdict.
+    on_served_traffic_outcome` for the model this ending just settled or
+    abandoned, and swallow anything it raises.
+
+    Best-effort BY DESIGN, and only here — `verdict.on_served_traffic_
+    outcome` itself still raises on a genuine store fault (see its own
+    docstring), because a caller with no context could not otherwise tell
+    "nothing to invalidate" from "the store is unreachable". This module IS
+    that context: money correctness must never depend on discovery
+    machinery being reachable, so a broken or absent verdict store degrades
+    to "this ending does not affect any verdict" rather than to a failed
+    settle. Mirrors `mvp.anthropic`'s own advisory-hook convention (VSR
+    consult, shadow VSR: `except Exception: ... never break a request`).
+
+    `model_id` is the literal Bedrock `modelId` this ending was opened
+    against — the SAME string space `mvp.discovery.records.DiscoveredRecord.
+    profile_id` lives in for any entry that went through discovery/promotion
+    (see `mvp.models.py`'s own `bedrock_model_id` field comment: "the id sent
+    upstream"). An entry that did not — every model configured by hand before
+    this change, and every one after it that a human still adds directly to
+    `models.json` — simply has no verdict row at this key, so the lookup
+    inside `on_served_traffic_outcome` misses harmlessly.
+    """
+    if not model_id:
+        return
+    try:
+        from .discovery import verdict as _verdict
+
+        _verdict.on_served_traffic_outcome(
+            model_id, _invocation_for_route(route),
+            exc=exc, metering_fault=metering_fault,
+        )
+    except Exception:  # noqa: BLE001 — advisory; must never break a settle.
+        logger.warning(
+            "probe_verdict_invalidation_check_failed",
+            extra={"model_id": model_id, "route": route},
+            exc_info=True,
+        )
+
+
 def run_ending(ending: Optional["Ending"]) -> Optional[str]:
     """Write a claimed ending here, on this thread, if this caller won the claim.
 
@@ -529,6 +586,15 @@ class Hold:
                     METERING_FAULT_NO_FINAL_USAGE if metering_fault else None
                 ),
             )
+            if metering_fault:
+                # E9/D8: a metering fault is a typed signal that the probe's
+                # own binding may no longer hold — a clean completion that
+                # never reported usage is one of D6's two invalidating
+                # exception-and-response shapes, and E10 already detected it
+                # above; this is the missing half that also invalidates.
+                _maybe_invalidate_probe_verdict(
+                    self.model_id, self.route, metering_fault=True,
+                )
 
         return self._remember(Ending(self, _commit, _outcome.SETTLED_FINAL))
 
@@ -590,6 +656,18 @@ class Hold:
                 self._return_reservation()
             else:
                 self._keep_reservation(resolved)
+            if not never_left and exc is not None:
+                # E9/S2: only an attempt that actually reached the provider
+                # transport is "served traffic" — `never_left` is exactly the
+                # fact `provider_call_starting()` exists to record, and a
+                # refusal that never left this process (a policy/eligibility
+                # refusal, a 402/403 before `Hold` even existed) never reaches
+                # `claim_unobserved` at all, so this branch cannot fire for
+                # one. `is_typed_protocol_failure` (in `mvp.discovery.
+                # verdict`) does the actual classification; everything not a
+                # recognised typed protocol failure — a throttle, a 5xx,
+                # anything unclassified — is a safe no-op there.
+                _maybe_invalidate_probe_verdict(self.model_id, self.route, exc=exc)
             logger.info(
                 "provider_attempt_failed",
                 extra={
