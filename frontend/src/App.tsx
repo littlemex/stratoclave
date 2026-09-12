@@ -42,6 +42,7 @@ import AdminDiscoveryCandidateDetail from '@/pages/admin/AdminDiscoveryCandidate
 import TeamLeadTenants from '@/pages/team-lead/TeamLeadTenants'
 import TeamLeadTenantNew from '@/pages/team-lead/TeamLeadTenantNew'
 import TeamLeadTenantDetail from '@/pages/team-lead/TeamLeadTenantDetail'
+import ModelDiscovery from '@/pages/team-lead/ModelDiscovery'
 
 export default function App() {
   const { state } = useAuth()
@@ -140,6 +141,7 @@ export default function App() {
                   path="/team-lead/tenants/:tenantId/limit-grants"
                   element={<GrantsInventory />}
                 />
+                <Route path="/team-lead/discovery" element={<ModelDiscovery />} />
               </Route>
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
