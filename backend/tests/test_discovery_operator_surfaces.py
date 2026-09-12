@@ -742,10 +742,12 @@ def test_probe_is_gated_on_the_promote_scope_not_the_discover_scope_alone(dynamo
 # already-active candidate is idempotent, per the merged activation
 # function's own stated design.
 # ===========================================================================
-def _seed_for_activation(profile_id: str, *, alias: str, verdict_overrides: dict) -> None:
+def _seed_for_activation(profile_id: str, *, alias: str, verdict_overrides: dict):
     put_discovered_record(_record(profile_id))
     put_promotion_candidate(_candidate(profile_id, alias=alias))
-    put_probe_verdict(_verdict(profile_id, **verdict_overrides))
+    seeded = _verdict(profile_id, **verdict_overrides)
+    put_probe_verdict(seeded)
+    return seeded
 
 
 def test_activation_with_a_mismatched_verdict_identity_refuses(dynamodb_mock):
@@ -753,13 +755,13 @@ def test_activation_with_a_mismatched_verdict_identity_refuses(dynamodb_mock):
     # The verdict is current and speaks the declared protocol, but it was
     # earned against a DIFFERENT pricing key than the candidate now names --
     # the compare-and-set this route exists to enforce.
-    _seed_for_activation(
+    seeded = _seed_for_activation(
         profile_id, alias="acme-mismatched-v1",
         verdict_overrides={"pricing_key_at_verification": "sonnet"},
     )
     client = _client_as(dynamodb_mock, ["admin"])
     resp = client.post(
-        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC},
+        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC, "verified_at": seeded.verified_at},
     )
     assert resp.status_code == 409, (
         f"activation succeeded against a verdict that verified a DIFFERENT "
@@ -778,16 +780,16 @@ def test_reactivating_an_already_active_candidate_is_idempotent(dynamodb_mock):
     re-writes the same entry rather than treating 'already active' as a
     distinct, refusable state."""
     profile_id = "us.acme.reactivate-v1"
-    _seed_for_activation(profile_id, alias="acme-reactivate-v1", verdict_overrides={})
+    seeded = _seed_for_activation(profile_id, alias="acme-reactivate-v1", verdict_overrides={})
     client = _client_as(dynamodb_mock, ["admin"])
 
     first = client.post(
-        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC},
+        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC, "verified_at": seeded.verified_at},
     )
     assert first.status_code == 200, first.text
 
     second = client.post(
-        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC},
+        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC, "verified_at": seeded.verified_at},
     )
     assert second.status_code == 200, (
         f"re-activating an already-active candidate did not behave "
@@ -800,11 +802,11 @@ def test_reactivating_an_already_active_candidate_is_idempotent(dynamodb_mock):
 
 def test_activation_is_gated_on_the_promote_scope(dynamodb_mock):
     profile_id = "us.acme.gate-activate-v1"
-    _seed_for_activation(profile_id, alias="acme-gate-activate-v1", verdict_overrides={})
+    seeded = _seed_for_activation(profile_id, alias="acme-gate-activate-v1", verdict_overrides={})
 
     client = _client_as(dynamodb_mock, ["team_lead"])  # discover only
     resp = client.post(
-        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC},
+        f"/api/mvp/admin/discovery/candidates/{profile_id}/activate", json={"invocation": SYNC, "verified_at": seeded.verified_at},
     )
     assert resp.status_code == 403, (
         f"a discover-only caller was able to activate: {resp.status_code} {resp.text}"

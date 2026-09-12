@@ -308,7 +308,11 @@ class CandidateResponse(BaseModel):
     # identifiers()`'s own answer to "every public identifier this candidate
     # would make reachable".
     identifiers: list[str]
-    verdicts: list[VerdictView]
+    # Keyed by invocation, not a list: a caller asks "is the sync path
+    # verified", and a list makes them search for the answer they already
+    # named. Every invocation the gateway knows is present, so a candidate
+    # never probed reads as unverified rather than as missing.
+    verdicts: dict[str, VerdictView]
 
 
 class CandidateListResponse(BaseModel):
@@ -316,7 +320,7 @@ class CandidateListResponse(BaseModel):
 
 
 def _candidate_response(candidate: PromotionCandidate) -> CandidateResponse:
-    verdicts: list[VerdictView] = []
+    verdicts: dict[str, VerdictView] = {}
     for invocation in sorted(INVOCATION_VALUES):
         try:
             verdict = get_probe_verdict(candidate.profile_id, invocation)
@@ -325,7 +329,7 @@ def _candidate_response(candidate: PromotionCandidate) -> CandidateResponse:
                 "probe_verdict_store_unavailable",
                 "The probe verdict store is temporarily unavailable. Retry shortly.",
             )
-        verdicts.append(_verdict_view(invocation, verdict))
+        verdicts[invocation] = _verdict_view(invocation, verdict)
     return CandidateResponse(
         profile_id=candidate.profile_id, state=candidate.state,
         aliases=list(candidate.aliases), bedrock_model_id=candidate.bedrock_model_id,
