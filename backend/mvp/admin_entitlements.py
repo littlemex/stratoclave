@@ -44,7 +44,8 @@ from dynamo.client import get_dynamodb_resource, user_tenants_table_name
 
 from .authz import log_audit_event, require_permission
 from .deps import AuthenticatedUser
-from .discovery.records import list_discovered_records
+from .discovery.reconcile import is_actionable_blocker
+from .discovery.records import Blocker, list_discovered_records
 from .models import registry_entries
 from .pricing import BILLABLE_LEGS, rate_for
 from .pricing_feeds.composite import _floor_rates
@@ -187,6 +188,55 @@ class GrantFloorRefusal(EntitlementError):
         self.notes = notes
 
 
+class GrantBlockedRefusal(EntitlementError):
+    """A grant refused because discovery's last reconciliation pass left the
+    target's `(model_family, profile_scope)` carrying an actionable blocker
+    -- the grant refusal is the highest-value place a blocker can surface,
+    because the human is already there. `mvp.discovery.records` owns the
+    blocker vocabulary (`BLOCKER_TYPES`) and this module never invents a
+    category above it: `blocker_type`/`blocker_subtype`/`evidence` below are
+    exactly the strings the discovered record carries, unmodified.
+
+    Scoped to ACTIONABLE blockers only (`mvp.discovery.reconcile
+    .is_actionable_blocker`, the same predicate the deploy gate and the
+    operator queue both use), never to every blocker on the record. The
+    permanent shape `no_agreement_offer`/`not_marketplace_metered` is the
+    normal state of every AWS-billed family this account can see -- Nova,
+    Titan, Llama, Mistral and Anthropic Claude among them -- so refusing on
+    it would refuse a grant for most of the fleet the gateway actually
+    serves, for a fact no operator action clears. Only a fact that can
+    still change is worth putting in the caller's way.
+
+    `actionable=True` always, kept on the instance rather than inferred by
+    the reader, so a client does not have to re-import the predicate just to
+    render what this refusal already decided.
+    """
+
+    def __init__(self, *, model_family: str, profile_scope: str, blocker: Blocker) -> None:
+        super().__init__(_blocked_refusal_message(
+            model_family=model_family, profile_scope=profile_scope, blocker=blocker,
+        ))
+        self.model_family = model_family
+        self.profile_scope = profile_scope
+        self.blocker_type = blocker.type
+        self.blocker_subtype = blocker.subtype
+        self.evidence = blocker.evidence
+        self.actionable = True
+
+
+def _blocked_refusal_message(*, model_family: str, profile_scope: str, blocker: Blocker) -> str:
+    """The human-readable half of a `GrantBlockedRefusal` -- echoes the
+    blocker discovery recorded and that it is actionable (as opposed to a
+    permanent fact this refusal would never have been raised for), so the
+    400 body tells the caller more than "blocked"."""
+    return (
+        f"model_family={model_family!r} profile_scope={profile_scope!r} is blocked by "
+        f"discovery: type={blocker.type!r} subtype={blocker.subtype!r} "
+        f"evidence={blocker.evidence!r}. This is an actionable blocker -- it can clear on "
+        f"a future reconciliation pass without a registry change."
+    )
+
+
 def _floor_row_notes(pricing_key: str) -> Optional[str]:
     """The floor row's own reviewed prose for `pricing_key` -- the only
     mitigation for a floor row keyed by a shared name that nothing binds
@@ -322,10 +372,56 @@ def _has_discovered_record(model_family: str, profile_scope: str) -> bool:
     records found zero (`--apply` has never run), so this function
     exists to be correct the day that changes, not because it fires yet.
     """
-    return any(
-        record.model_family == model_family and record.profile_scope == profile_scope
-        for record in list_discovered_records()
-    )
+    return _find_discovered_record(model_family, profile_scope) is not None
+
+
+def _find_discovered_record(model_family: str, profile_scope: str):
+    """The one discovered record naming this `(model_family, profile_scope)`
+    pair, or `None` -- the same match `_has_discovered_record` above already
+    performs, generalised to return the record itself rather than a bool, so
+    `_check_blockers` below can read its blockers instead of re-scanning.
+    `_find_entry`'s registry document has a uniqueness check that refuses a
+    document where a family/scope pair names more than one entry; discovered
+    records carry no analogous guarantee, since they are keyed by
+    `profile_id`, not by this pair. So unlike `_find_entry`, this returns the
+    FIRST match rather than asserting there is at most one -- today there is
+    always at most one profile per `(model_family, profile_scope)` pair in
+    practice, but nothing here depends on that holding.
+    """
+    for record in list_discovered_records():
+        if record.model_family == model_family and record.profile_scope == profile_scope:
+            return record
+    return None
+
+
+def _check_blockers(
+    model_family: str, profile_scope: str
+) -> Optional[GrantBlockedRefusal]:
+    """A pure lookup: the refusal granting `(model_family, profile_scope)`
+    should earn from discovery's actionable blockers, or `None` when there
+    is nothing to refuse.
+
+    Scoped to an entry `_find_discovered_record` actually observed, exactly
+    like `_check_floor` above and for the same reason: an entry with no
+    discovered record was put in the registry by a human, by pull request,
+    and this check has nothing of discovery's to compare it against.
+
+    Of the record's blockers, only the ACTIONABLE ones can refuse a grant
+    (see `GrantBlockedRefusal`'s own docstring for why the permanent ones
+    must not) -- checked via `mvp.discovery.reconcile.is_actionable_blocker`,
+    not a second classifier. The first actionable blocker found is the one
+    echoed; a record with more than one is the rare case, and this refusal
+    exists to get a human to look, not to enumerate every finding at once.
+    """
+    record = _find_discovered_record(model_family, profile_scope)
+    if record is None:
+        return None
+    for blocker in record.blockers:
+        if is_actionable_blocker(blocker):
+            return GrantBlockedRefusal(
+                model_family=model_family, profile_scope=profile_scope, blocker=blocker,
+            )
+    return None
 
 
 def _check_floor(entry) -> Optional[GrantFloorRefusal]:
@@ -533,10 +629,12 @@ def grant_entitlement(
     or rolled back for either reason — see `_emit_audit_after_commit` and
     `_existing_grant_response`.
 
-    For a FRESH grant (the triple does not exist yet), a floor disagreement
-    raises `GrantFloorRefusal` before anything commits — the last moment a
-    human is present before a wrong number becomes a wrong charge. For a
-    triple that already exists, `_existing_grant_response` governs instead:
+    For a FRESH grant (the triple does not exist yet), an actionable
+    discovery blocker raises `GrantBlockedRefusal` and a floor disagreement
+    raises `GrantFloorRefusal`, both before anything commits — the last
+    moment a human is present before a grant that cannot actually be served,
+    or a wrong number, becomes either. For a triple that already exists,
+    `_existing_grant_response` governs instead:
     checked BEFORE the conditional write below, via an up-front read,
     precisely so that case never reaches the raise — reversing this
     ordering, so the raise fired for an already-granted triple instead of
@@ -548,6 +646,17 @@ def grant_entitlement(
     already = get_entitlement(tenant_id, model_family, profile_scope)
     if already is not None:
         return _existing_grant_response(entry, already)
+
+    # A fresh grant is refused before anything commits when discovery's
+    # last pass left the target with an actionable blocker -- checked ahead
+    # of the floor comparison below, since "is this account's Bedrock
+    # catalogue entry even usable" is prior to "is its price right". Scoped
+    # to fresh grants only, the same boundary `GrantFloorRefusal` draws
+    # above: an already-granted triple is `_existing_grant_response`'s case,
+    # not this one.
+    blocked = _check_blockers(model_family, profile_scope)
+    if blocked is not None:
+        raise blocked
 
     refusal = _check_floor(entry)
     if refusal is not None:
