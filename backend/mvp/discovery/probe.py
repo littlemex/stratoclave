@@ -72,6 +72,20 @@ from .verdict import (
 #: than silently accepted.
 _SUPPORTED_WIRE_PROTOCOL = "messages"
 
+#: The blocker subtype for assertion 1 failing on a call whose OUTCOME is
+#: unknown rather than definitely negative -- a read timeout or a closed
+#: connection after bytes were already sent (`mvp.provider_outcome.
+#: classify_exception` returning `SUBMITTED_UNSETTLED`; see that module's own
+#: measured example: a call abandoned on a 2s client read timeout was still
+#: executed and billed). Named separately from `converse_call_failed`
+#: (assertion 1 failing on a call the provider is known to have REJECTED, or
+#: one that never left this process) because an operator surface reading this
+#: subtype has to answer a different question than every other failure here:
+#: not "did the model reject this", but "did this even run", and the honest
+#: answer is that nobody watching from here can say. Exported (not
+#: underscore-prefixed) so a caller does not have to duplicate the literal.
+INDETERMINATE_SUBTYPE = "converse_call_indeterminate"
+
 #: The probe's own prompt. Minimal on purpose — assertion 4's whole point is
 #: that the charge is non-zero and attributable, not that it is large; a
 #: single short user turn with `maxTokens=1` is the cheapest input that still
@@ -271,6 +285,20 @@ def probe(
             usage_block = resp.get("usage")
     except Exception as exc:  # noqa: BLE001 — assertion 1 failed; reported, not raised.
         _money.run_ending(hold.claim_unobserved(exc=exc))
+        # Classify with the SAME, already-measured classifier the money path
+        # itself uses (`mvp.provider_outcome.classify_exception`) rather than
+        # a second, probe-local guess at which exceptions are ambiguous — a
+        # `SUBMITTED_UNSETTLED` reading here is exactly "the request left,
+        # the model may have run to completion, and the client simply
+        # stopped waiting", which is a different claim than "the model
+        # rejected this" or "this never left the process". A caller that
+        # would otherwise report this probe as a definite failure needs to
+        # tell the two apart.
+        from ..provider_outcome import SUBMITTED_UNSETTLED as _SUBMITTED_UNSETTLED
+        from ..provider_outcome import classify_exception
+
+        if classify_exception(exc) == _SUBMITTED_UNSETTLED:
+            return _failure(invocation, INDETERMINATE_SUBTYPE, str(exc))
         return _failure(invocation, "converse_call_failed", str(exc))
 
     usage_event = usage_from_bedrock(usage_block)
