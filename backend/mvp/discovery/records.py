@@ -450,13 +450,28 @@ def get_discovered_record(profile_id: str) -> Optional[DiscoveredRecord]:
     return _from_item(item) if item else None
 
 
-def list_discovered_records() -> list[DiscoveredRecord]:
-    """Every discovered record, via the table's existing `tenant-id-index`
-    GSI (no new table, no new index) — the same pattern
-    `admin_entitlements.list_entitlements` already uses for its own reserved
-    prefix on this table."""
+def list_discovered_records_and_unreadable() -> tuple[list[DiscoveredRecord], list[str]]:
+    """Every discovered record, split into the rows this build can parse and the
+    keys of the rows it cannot.
+
+    Both halves, because the two callers want opposite things. An ordinary
+    reader wants only rows it can trust, and skipping an unknown schema rather
+    than guessing at it is the right posture. But an operator surface owes the
+    opposite: a row this build cannot re-parse is durable state nobody is
+    looking for, and dropping it silently means the store can hold something no
+    screen will ever mention.
+
+    Measured on a real store: 76 rows, 75 parsed, and the difference was a row
+    with an empty `profile_id` written by the malformed-summary defect before
+    that defect was guarded. Nothing anywhere reported its existence.
+
+    Via the table's existing `tenant-id-index` GSI (no new table, no new
+    index) — the same pattern `admin_entitlements.list_entitlements` already
+    uses for its own reserved prefix on this table.
+    """
     try:
         records: list[DiscoveredRecord] = []
+        unreadable: list[str] = []
         kwargs: dict[str, Any] = {
             "IndexName": "tenant-id-index",
             "KeyConditionExpression": (
@@ -470,6 +485,8 @@ def list_discovered_records() -> list[DiscoveredRecord]:
                 parsed = _from_item(item)
                 if parsed is not None:
                     records.append(parsed)
+                else:
+                    unreadable.append(str(item.get("user_id") or "<no key>"))
             last_key = resp.get("LastEvaluatedKey")
             if not last_key:
                 break
@@ -478,6 +495,19 @@ def list_discovered_records() -> list[DiscoveredRecord]:
         raise DiscoveredRecordStoreUnavailable(
             f"discovered-record store unreachable listing records: {exc}"
         ) from exc
+    return records, unreadable
+
+
+def list_discovered_records() -> list[DiscoveredRecord]:
+    """Only the rows this build can parse.
+
+    The reader every existing caller wants: the actionable queue, the
+    reconciliation merge, and anything else that reasons about records rather
+    than about the store's health. A caller that needs to know the store holds
+    something it cannot read asks
+    `list_discovered_records_and_unreadable` instead.
+    """
+    records, _ = list_discovered_records_and_unreadable()
     return records
 
 

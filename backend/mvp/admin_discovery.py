@@ -85,6 +85,7 @@ from .discovery.records import (
     DiscoveredRecordStoreUnavailable,
     get_discovered_record,
     list_discovered_records,
+    list_discovered_records_and_unreadable,
 )
 from .discovery.verdict import (
     INVOCATION_VALUES,
@@ -214,6 +215,14 @@ class RecordResponse(BaseModel):
 
 class RecordListResponse(BaseModel):
     records: list[RecordResponse]
+    #: Store keys this build could not parse into a record. Reported rather
+    #: than dropped, because a row no screen mentions is durable state nobody
+    #: is looking for -- and one already existed on a real store, written by
+    #: the malformed-summary defect before that defect was guarded. An empty
+    #: list is the normal answer and says so positively; a non-empty one is an
+    #: operator's cue that the store holds something this build cannot read,
+    #: usually a schema written by a newer or older deploy.
+    unreadable_rows: list[str] = []
 
 
 def _record_response(record: DiscoveredRecord) -> RecordResponse:
@@ -237,10 +246,13 @@ def list_discovery_records(
     permanent blocker is listed here rather than omitted: it is not a task,
     but it is the answer to "why can this not be promoted"."""
     try:
-        records = list_discovered_records()
+        records, unreadable = list_discovered_records_and_unreadable()
     except DiscoveredRecordStoreUnavailable:
         raise _err_503_store_unavailable()
-    return RecordListResponse(records=[_record_response(r) for r in records])
+    return RecordListResponse(
+        records=[_record_response(r) for r in records],
+        unreadable_rows=unreadable,
+    )
 
 
 @router.get("/records/{profile_id}", response_model=RecordResponse)

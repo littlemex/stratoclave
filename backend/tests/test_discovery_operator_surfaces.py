@@ -898,3 +898,52 @@ def test_an_omitted_field_on_probe_or_activate_refuses_in_this_surfaces_vocabula
         f"surface's: {resp.text[:200]}"
     )
     assert detail.get("field") == missing_field, detail
+
+
+def test_a_row_this_build_cannot_parse_is_named_rather_than_dropped(dynamodb_mock):
+    """A row whose schema this build does not know is correctly skipped by every
+    reader that reasons about records. But the operator surface owes the
+    opposite: a row no screen mentions is durable state nobody is looking for.
+
+    Measured on a real store before this: 76 rows, 75 listed, and the one
+    difference was an empty-`profile_id` row written by the malformed-summary
+    defect. Nothing anywhere reported that it existed.
+    """
+    from dynamo.client import user_tenants_table_name
+
+    put_discovered_record(_record("us.acme.readable-v1"))
+
+    # A row under the same reserved prefix with a schema version from a
+    # different deploy -- the realistic shape, not a corrupt blob.
+    table = dynamodb_mock.Table(user_tenants_table_name())
+    table.put_item(Item={
+        "user_id": "DISCOVERED#us.acme.from-another-deploy-v1",
+        "sk": "PROFILE",
+        "tenant_id": "SYSTEM",
+        "profile_id": "us.acme.from-another-deploy-v1",
+        "schema_version": 999,
+    })
+
+    client = _client_as(dynamodb_mock, ["admin"])
+    body = client.get("/api/mvp/admin/discovery/records").json()
+
+    listed = {r["profile_id"] for r in body["records"]}
+    assert "us.acme.readable-v1" in listed
+    assert "us.acme.from-another-deploy-v1" not in listed, (
+        "a row this build cannot parse was returned as if it were understood"
+    )
+    assert any("from-another-deploy" in key for key in body["unreadable_rows"]), (
+        "the unparseable row was dropped silently: "
+        f"unreadable_rows={body['unreadable_rows']}"
+    )
+
+
+def test_the_unreadable_list_is_empty_when_every_row_parses(dynamodb_mock):
+    """The positive half, so an empty list is a statement rather than the
+    absence of one -- and so the test above cannot pass by the field simply
+    always being populated."""
+    put_discovered_record(_record("us.acme.all-readable-v1"))
+    client = _client_as(dynamodb_mock, ["admin"])
+    body = client.get("/api/mvp/admin/discovery/records").json()
+    assert body["unreadable_rows"] == []
+    assert len(body["records"]) == 1
