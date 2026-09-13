@@ -278,6 +278,30 @@
     box-shadow: 0 0 0 4px hsl(var(--accent) / 0.18);
   }
 
+  /* section 12: the catalogue race and the price chain */
+  .cat-lane{ margin-bottom: 1.1rem; }
+  /* No `text-transform: uppercase` here, unlike `.eyebrow`: this label sometimes
+     holds the product name, and the rest of the page writes it in normal case. */
+  .cat-lane-name{
+    font-size:0.74rem; letter-spacing:0.02em;
+    color: hsl(var(--muted-foreground)); margin-bottom:0.4rem;
+  }
+  .cat-note{ font-size:0.8rem; color: hsl(var(--muted-foreground)); min-height:1.4em; }
+  .cat-note strong{ color: hsl(var(--foreground)); }
+  .cat-split{ display:grid; grid-template-columns: 1fr 1fr; gap:1.6rem; margin-top:1.4rem; }
+  @media (max-width: 820px){ .cat-split{ grid-template-columns: 1fr; } }
+  .cat-split > *{ min-width: 0; }
+  .cat-chain{ display:flex; align-items:center; gap:0.45rem; flex-wrap:wrap; }
+  .cat-cell{
+    font-family:"JetBrains Mono", monospace; font-size:0.76rem;
+    border:1px solid hsl(var(--border)); border-radius: var(--radius);
+    padding:0.3rem 0.55rem; background: hsl(var(--background));
+    color: hsl(var(--muted-foreground)); transition: color 0.3s ease, border-color 0.3s ease;
+  }
+  .cat-cell.strong{ color: hsl(var(--foreground)); }
+  .cat-cell.moved{ color: hsl(var(--primary)); border-color: hsl(var(--primary) / 0.55); }
+  .cat-arrow{ color: hsl(var(--muted-foreground)); font-size:0.8rem; }
+
   table.ledger{ width:100%; border-collapse: collapse; font-size: 0.78rem; }
   table.ledger th, table.ledger td{
     text-align:left; padding: 0.4rem 0.5rem;
@@ -1240,8 +1264,79 @@
       <p class="muted" style="font-size:0.92rem; margin-top:0.8rem" data-ja="既定の WAF ルールは CommonRuleSet・KnownBadInputs・IpReputation・IP 単位のレート制限の 4 つです。" data-en="The four default WAF managed rules are CommonRuleSet, KnownBadInputs, IpReputation, and a per-IP rate limit.">既定の WAF ルールは CommonRuleSet・KnownBadInputs・IpReputation・IP 単位のレート制限の 4 つです。</p>
     </section>
 
+    <section id="catalogue">
+      <div class="eyebrow-row"><span class="step-chip">12</span><span class="eyebrow" style="margin:0" data-ja="リリースを待たない" data-en="No release to wait for">リリースを待たない</span></div>
+      <h2 class="section-title" data-ja="Bedrock に増えた日に、そのまま使える" data-en="Use it the day it lands in Bedrock">Bedrock に増えた日に、そのまま使える</h2>
+      <p class="section-intro" data-ja="どのモデルが使えるかは、あなたの AWS アカウントが決めます。いくらかかるかは、AWS の価格 API から読みます。どちらもこのリポジトリのファイルを 1 つも変えずに追いつきます。" data-en="Your AWS account decides which models are available. What they cost is read from AWS's own pricing APIs. Both keep up without one file in this repository changing.">どのモデルが使えるかは、あなたの AWS アカウントが決めます。いくらかかるかは、AWS の価格 API から読みます。どちらもこのリポジトリのファイルを 1 つも変えずに追いつきます。</p>
+
+      <div class="demo-shell">
+        <div class="control-row" style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;">
+          <button type="button" class="btn" id="catNewModelBtn" data-ja="新しいモデルが Bedrock に増える" data-en="A new model lands in Bedrock">新しいモデルが Bedrock に増える</button>
+          <button type="button" class="btn secondary" id="catResetBtn" data-ja="リセット" data-en="Reset">リセット</button>
+          <span class="mono" id="catFilesReadout" style="font-size:0.78rem; color:hsl(var(--muted-foreground))"></span>
+        </div>
+
+        <div class="cat-lane">
+          <div class="cat-lane-name" data-ja="一覧をコードに持つ場合" data-en="When the list lives in code">一覧をコードに持つ場合</div>
+          <div class="flow-track">
+            <span class="stagelbl" style="left:4%" data-ja="追加を依頼" data-en="ask upstream">追加を依頼</span>
+            <span class="stagelbl" style="left:31%" data-ja="レビュー" data-en="review">レビュー</span>
+            <span class="stagelbl" style="left:57%" data-ja="リリース" data-en="release">リリース</span>
+            <span class="stagelbl" style="left:82%" data-ja="更新して再起動" data-en="upgrade, restart">更新して再起動</span>
+            <div class="puck" id="catPuckSlow"></div>
+          </div>
+        </div>
+
+        <div class="cat-lane">
+          <div class="cat-lane-name" data-ja="Stratoclave" data-en="Stratoclave">Stratoclave</div>
+          <div class="flow-track">
+            <span class="stagelbl" style="left:4%" data-ja="見つかる" data-en="discovered">見つかる</span>
+            <span class="stagelbl" style="left:31%" data-ja="候補にする" data-en="candidate">候補にする</span>
+            <span class="stagelbl" style="left:55%" data-ja="実際に呼んで確認" data-en="probe it">実際に呼んで確認</span>
+            <span class="stagelbl" style="left:82%" data-ja="提供開始" data-en="serving">提供開始</span>
+            <div class="puck" id="catPuckFast"></div>
+          </div>
+          <div class="cat-note" id="catFastNote" role="status"></div>
+        </div>
+
+        <div class="cat-split">
+          <div>
+            <div class="cat-lane-name" data-ja="値段が変わったとき" data-en="When a price changes">値段が変わったとき</div>
+            <div class="cat-chain">
+              <span class="cat-cell" data-ja="AWS の価格 API" data-en="AWS pricing API">AWS の価格 API</span>
+              <span class="cat-arrow" aria-hidden="true">&rarr;</span>
+              <span class="cat-cell" id="catRefreshCell">60s</span>
+              <span class="cat-arrow" aria-hidden="true">&rarr;</span>
+              <span class="cat-cell" id="catRateCell">$3.00</span>
+              <span class="cat-arrow" aria-hidden="true">&rarr;</span>
+              <span class="cat-cell strong" id="catBillCell">$0.0300</span>
+            </div>
+            <div class="control-row" style="margin-top:0.9rem">
+              <button type="button" class="btn" id="catPriceBtn" data-ja="モデルプロバイダが値下げする" data-en="A provider cuts its price">モデルプロバイダが値下げする</button>
+            </div>
+            <div class="cat-note" id="catPriceNote" role="status"></div>
+          </div>
+          <div>
+            <div class="cat-lane-name" data-ja="請求の内訳は、そのまま残る" data-en="The breakdown stays on the record">請求の内訳は、そのまま残る</div>
+            <table class="ledger">
+              <thead><tr>
+                <th data-ja="項目" data-en="item">項目</th>
+                <th data-ja="トークン" data-en="tokens">トークン</th>
+                <th data-ja="単価" data-en="rate">単価</th>
+                <th data-ja="金額" data-en="cost">金額</th>
+              </tr></thead>
+              <tbody id="catLedgerBody"></tbody>
+            </table>
+            <div class="cat-note" id="catLedgerNote"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fig-label" data-ja="ブラウザの中だけで動くデモです。実測は 75 モデルを検出、確認の 1 回で 150 マイクロドル、レート更新は 60 秒間隔。価格フィードは既定で無効で、設定で選びます。これまで扱ったことのない価格帯のモデルだけは、最初の 1 回に初期値のレビューが必要で、そこは PR になります。" data-en="This demo runs entirely in your browser. Measured on a real account: 75 models discovered, 150 micro-USD for one verification call, rates refreshed every 60 seconds. The price feed is off by default and selected by configuration. Only a model in a rate tier nobody has priced yet needs a reviewed starting value, once, and that part is a pull request.">ブラウザの中だけで動くデモです。実測は 75 モデルを検出、確認の 1 回で 150 マイクロドル、レート更新は 60 秒間隔。価格フィードは既定で無効で、設定で選びます。これまで扱ったことのない価格帯のモデルだけは、最初の 1 回に初期値のレビューが必要で、そこは PR になります。</div>
+    </section>
+
     <section id="shipit">
-      <div class="eyebrow-row"><span class="step-chip">12</span><span class="eyebrow" style="margin:0" data-ja="出荷と証跡" data-en="Shipping and the audit trail">出荷と証跡</span></div>
+      <div class="eyebrow-row"><span class="step-chip">13</span><span class="eyebrow" style="margin:0" data-ja="出荷と証跡" data-en="Shipping and the audit trail">出荷と証跡</span></div>
       <h2 class="section-title" data-ja="1 コマンドで立ち、構造として検証できる" data-en="Stands up in one command, auditable by construction">1 コマンドで立ち、構造として検証できる</h2>
       <p class="problem-line" data-ja="立ち上げが手作業だらけだと再現できず、誰が何をしたかが後から追えないと監査に答えられない。" data-en="A hand-built deployment can't be reproduced, and if privileged actions leave no trail, an audit has nothing to answer with.">立ち上げが手作業だらけだと再現できず、誰が何をしたかが後から追えないと監査に答えられない。</p>
 
@@ -1322,6 +1417,7 @@ unlabelled             1            900            210           2,145  $0.00214
     try { localStorage.setItem(LANG_KEY, l); } catch(e){}
     if (window.__stratoclaveRerenderTables) { window.__stratoclaveRerenderTables(); }
     if (window.__stratoclaveRerenderSwarm) { window.__stratoclaveRerenderSwarm(); }
+    if (window.__stratoclaveRerenderCatalogue) { window.__stratoclaveRerenderCatalogue(); }
     if (window.__stratoclaveRerenderTokens) { window.__stratoclaveRerenderTokens(); }
   }
 
@@ -1872,6 +1968,131 @@ window.__stratoclaveInitIdSeq = function(){
   window.__stratoclaveRerenderTokens = render;
   document.addEventListener("DOMContentLoaded", render);
   if (document.readyState !== "loading") { render(); }
+})();
+</script>
+<script>
+/* Section 12. Two lanes race so the difference is watched rather than argued, and
+   a price change is followed from the API to the amount billed. Everything here
+   is local: no network, no timers longer than the animation. */
+(function(){
+  var lang = function(){ return document.documentElement.getAttribute("lang") === "en" ? "en" : "ja"; };
+  var T = {
+    files:   { ja: "変更したリポジトリのファイル: 0", en: "repository files changed: 0" },
+    waiting: { ja: "まだ待っている", en: "still waiting" },
+    serving: { ja: "提供中。alias / 単価 / 管轄 の 3 つは人が決めます。", en: "Serving. Aliases, the rate and the jurisdiction stay three human decisions." },
+    probing: { ja: "実際に 1 回呼んで、請求まで通ることを確認します。", en: "It calls the model once and checks the charge lands." },
+    priceIdle: { ja: "提供元が値段を動かすと、次の更新で請求も動きます。", en: "When a provider moves a price, the billed amount moves at the next refresh." },
+    priceMoved: { ja: "次の更新で値下げが請求に届きました。デプロイはしていません。", en: "The cut reached the billed amount at the next refresh. Nothing was deployed." },
+    ledgerNote: { ja: "この行は書き換わりません。だから値下げ後に、過去の期間を新しい単価で計算し直せます。", en: "These rows are never rewritten, so after a cut a past period can be recomputed at the new rate." },
+    items: {
+      ja: ["入力", "出力", "キャッシュ読み込み", "キャッシュ書き込み"],
+      en: ["input", "output", "cache read", "cache write"]
+    }
+  };
+  var slow = document.getElementById("catPuckSlow");
+  var fast = document.getElementById("catPuckFast");
+  if (!slow || !fast) { return; }
+  var filesOut = document.getElementById("catFilesReadout");
+  var fastNote = document.getElementById("catFastNote");
+  var priceNote = document.getElementById("catPriceNote");
+  var rateCell = document.getElementById("catRateCell");
+  var billCell = document.getElementById("catBillCell");
+  var refreshCell = document.getElementById("catRefreshCell");
+  var ledgerBody = document.getElementById("catLedgerBody");
+  var ledgerNote = document.getElementById("catLedgerNote");
+
+  /* Chosen so the three amounts differ. With the obvious round numbers the input
+     and output rows both came to $0.0360, which reads as a copy-paste bug rather
+     than as arithmetic. */
+  var TOKENS = [12000, 2500, 40000, 0];
+  /* A cut, not a rise: provider prices come down far more often than they go up,
+     so the direction the demo shows is the one an operator actually meets. */
+  var RATE_BEFORE = 3.00, RATE_AFTER = 2.40;
+  var rate = RATE_BEFORE, priceMoved = false, timers = [];
+
+  function t(key){ return T[key][lang()]; }
+  function clearTimers(){ for (var i=0;i<timers.length;i++){ clearTimeout(timers[i]); } timers = []; }
+  function at(el, pct){ el.style.left = pct + "%"; }
+
+  /* The charge is arithmetic over the same tokens, so the demo computes it rather
+     than printing a number someone typed. Input-side items bill at the rate; the
+     output item at four times it, which is the shape of every provider row. */
+  function billed(r){
+    return (TOKENS[0] * r + TOKENS[1] * r * 4 + TOKENS[2] * r * 0.1) / 1000000;
+  }
+  function money(v, digits){ return "$" + v.toFixed(digits); }
+
+  function renderLedger(){
+    var items = T.items[lang()];
+    var rows = "";
+    for (var i=0;i<items.length;i++){
+      if (TOKENS[i] === 0) { continue; }
+      var mult = i === 1 ? 4 : (i === 0 ? 1 : 0.1);
+      var cost = TOKENS[i] * RATE_BEFORE * mult / 1000000;
+      rows += "<tr><td>" + items[i] + "</td><td class=\"mono\">" + TOKENS[i].toLocaleString() +
+              "</td><td class=\"mono\">" + money(RATE_BEFORE * mult, 2) + "</td><td class=\"mono\">" +
+              money(cost, 4) + "</td></tr>";
+    }
+    ledgerBody.innerHTML = rows;
+    ledgerNote.textContent = t("ledgerNote");
+  }
+
+  function renderPrice(){
+    rateCell.textContent = money(rate, 2);
+    billCell.textContent = money(billed(rate), 4);
+    if (priceMoved) {
+      rateCell.classList.add("moved"); billCell.classList.add("moved");
+      priceNote.textContent = t("priceMoved");
+    } else {
+      rateCell.classList.remove("moved"); billCell.classList.remove("moved");
+      priceNote.textContent = t("priceIdle");
+    }
+  }
+
+  function reset(){
+    clearTimers();
+    at(slow, 4); at(fast, 4);
+    fastNote.textContent = "";
+    filesOut.textContent = "";
+    rate = RATE_BEFORE; priceMoved = false;
+    refreshCell.textContent = "60s";
+    renderPrice(); renderLedger();
+  }
+
+  function run(){
+    clearTimers();
+    at(slow, 4); at(fast, 4);
+    fastNote.textContent = "";
+    filesOut.textContent = "";
+    /* The fast lane finishes while the slow one is still on review. That gap is
+       the whole claim, so it is shown at a watchable speed rather than stated. */
+    timers.push(setTimeout(function(){ at(fast, 31); }, 350));
+    timers.push(setTimeout(function(){ at(fast, 55); fastNote.textContent = t("probing"); }, 900));
+    timers.push(setTimeout(function(){
+      at(fast, 82);
+      fastNote.innerHTML = "<strong>" + t("serving") + "</strong>";
+      filesOut.textContent = t("files");
+    }, 1600));
+    timers.push(setTimeout(function(){ at(slow, 31); }, 1200));
+    timers.push(setTimeout(function(){ at(slow, 57); }, 3200));
+  }
+
+  document.getElementById("catNewModelBtn").addEventListener("click", run);
+  document.getElementById("catResetBtn").addEventListener("click", reset);
+  document.getElementById("catPriceBtn").addEventListener("click", function(){
+    rate = RATE_AFTER; priceMoved = true;
+    refreshCell.textContent = "…";
+    renderPrice();
+    clearTimers();
+    timers.push(setTimeout(function(){ refreshCell.textContent = "60s"; renderPrice(); }, 900));
+  });
+
+  window.__stratoclaveRerenderCatalogue = function(){
+    renderPrice(); renderLedger();
+    if (filesOut.textContent) { filesOut.textContent = t("files"); }
+    if (fastNote.textContent) { fastNote.innerHTML = "<strong>" + t("serving") + "</strong>"; }
+  };
+  reset();
 })();
 </script>
 </body>
