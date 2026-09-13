@@ -279,6 +279,21 @@ def test_a_pricing_reader_sees_the_activated_model_under_its_declared_rate_key(
     read path would produce.
     """
     _seed_and_activate(dynamodb_mock, monkeypatch, verdict=_verdict())
+
+    # KNOWN ORDER-DEPENDENT FAILURE, not yet root-caused, recorded here rather
+    # than papered over. This assertion passes on its own and in three separate
+    # large subsets of the suite, and fails when files 1..171 of the collection
+    # run together. What has been ruled out, each by measurement rather than by
+    # reasoning: the composed registry does hold the activated entry with the
+    # right alias and the right pricing key at the end of the test; the
+    # fail-static branch never fires; and forcing an explicit
+    # `invalidate_composed_registry()` here does NOT fix it -- so it is not a
+    # stale-cache problem, and that explicit invalidation was removed again
+    # rather than left in as a weakening that bought nothing.
+    #
+    # The behaviour this asserts IS verified on real infrastructure: on a running
+    # gateway, activating a model and immediately reading `/pricing-config` in
+    # the same process lists the new alias. See `05-verify/RESULTS.md`.
     config = _pricing_config_via_the_real_route(monkeypatch, dynamodb_mock)
     assert _ALIAS in _models_for_pricing_key(config, _PRICING_KEY), (
         f"{_ALIAS!r} did not appear among the models the pricing reader lists "
@@ -528,3 +543,39 @@ def test_registry_composition_behaviour_when_the_candidate_store_is_unreachable_
             BillingMode="PAY_PER_REQUEST",
         )
         importlib.reload(models)
+
+
+def test_activation_drops_this_process_composed_registry_cache(
+    dynamodb_mock, monkeypatch,
+):
+    """The other half, separated from the composition assertion above so that
+    neither depends on the cache's timing.
+
+    The guarantee: a caller who just activated a model and immediately asks the
+    registry about it must not be told it does not exist by the very process
+    that wrote it. The TTL bounds how long ANOTHER replica may lag; it must not
+    bound the writer.
+
+    Checked by warming the cache deliberately BEFORE activating, so that a
+    missing invalidation is the only thing that could leave the entry unseen --
+    which is exactly the state the full-suite failure of the test above turned
+    out to be reading.
+    """
+    from mvp.models import registry_entries
+
+    # Warm it, and assert the warm state does NOT yet contain the alias, so the
+    # check below cannot pass vacuously.
+    before = {alias for e in registry_entries() for alias in e.aliases}
+    assert _ALIAS not in before, (
+        "the alias was already in the registry before activation, so this test "
+        "would pass without activation doing anything"
+    )
+
+    _seed_and_activate(dynamodb_mock, monkeypatch, verdict=_verdict())
+
+    after = {alias for e in registry_entries() for alias in e.aliases}
+    assert _ALIAS in after, (
+        f"{_ALIAS!r} is absent from the registry immediately after activation, "
+        "in the process that performed it -- the writer is being made to wait "
+        "for the fleet's staleness window"
+    )
