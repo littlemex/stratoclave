@@ -719,3 +719,93 @@ def test_the_unparseable_row_is_not_confused_with_no_token_pricing(dynamodb_mock
     assert record is not None
     assert not any(b.type == "no_token_pricing" for b in record.blockers)
     assert not any(b.type == "unsupported_output_modality" for b in record.blockers)
+
+# --- what `--strict` NAMES, not merely that it fails -------------------------
+#
+# Measured on a real pass before these existed: six `GetFoundationModel`
+# failures were reported as `store_unavailable`, because all three failure
+# sources fed one list and one token. An operator reading that token goes to
+# look at DynamoDB, which was answering every call. Nothing in the suite
+# asserted any reason token at all, so the whole vocabulary -- the CLI's
+# contract with an unattended job -- was undefended.
+#
+# `main` returns only an exit code, so these read the reasons the way an
+# operator does: off `--json`'s stdout.
+def _strict_reasons_via_the_json_report(capsys, bedrock, sts) -> list[str]:
+    code = main(["--strict", "--json"], bedrock=bedrock, sts=sts)
+    out = capsys.readouterr().out
+    report = json.loads(out)
+    return code, report["strict_reasons"], report
+
+
+def test_a_failed_model_details_read_is_named_as_such_not_as_a_store_failure(
+    dynamodb_mock, fake_client, fake_sts, capsys,
+):
+    """`GetFoundationModel` failing means the modality gate never ran on that
+    profile, so an absent modality blocker there means "not checked". That is
+    worth stopping an unattended job for -- and it is not the record store
+    being down, which is where the old single token sent the reader."""
+    class _DetailsUnreadable(_FakeBedrock):
+        def get_foundation_model(self, modelIdentifier):  # noqa: N803
+            raise RuntimeError("ResourceNotFoundException: no such model")
+
+    code, reasons, report = _strict_reasons_via_the_json_report(
+        capsys, _DetailsUnreadable(), fake_sts)
+
+    assert code == 2
+    assert "model_details_unreadable" in reasons
+    assert "store_unavailable" not in reasons, (
+        "a Bedrock read failure was reported as the record store being "
+        "unavailable — the token names the wrong subsystem and sends an "
+        "operator to the wrong place"
+    )
+    # The human-readable list still carries every error, so separating the
+    # tokens did not cost the report any detail.
+    assert len(report["discovery_errors"]) >= 1
+
+
+def test_a_store_read_failure_is_the_only_thing_that_names_the_store(
+    dynamodb_mock, fake_client, fake_sts, capsys, monkeypatch,
+):
+    """The other direction: when the store really is the thing that failed,
+    the token says so, and it does not also claim Bedrock was unreadable."""
+    from mvp.discovery import reconcile as reconcile_module
+    from mvp.discovery.records import DiscoveredRecordStoreUnavailable
+
+    def _refuse(profile_id):
+        raise DiscoveredRecordStoreUnavailable("ProvisionedThroughputExceeded")
+
+    monkeypatch.setattr(reconcile_module, "get_discovered_record", _refuse)
+
+    code, reasons, _ = _strict_reasons_via_the_json_report(
+        capsys, fake_client, fake_sts)
+
+    assert code == 2
+    assert "store_unavailable" in reasons
+    assert "model_details_unreadable" not in reasons
+    assert "profile_unreadable" not in reasons
+
+
+def test_a_profile_whose_record_cannot_be_built_is_named_separately(
+    dynamodb_mock, fake_sts, capsys,
+):
+    """A profile that raises while its record is being built is ABSENT from the
+    pass's records, so the pass under-reports the catalogue. That is a different
+    fact from "the details read failed", where the record exists but is
+    incompletely gated, and an operator needs to tell them apart."""
+    class _ProfileUnbuildable(_FakeBedrock):
+        def list_inference_profiles(self, **kwargs):
+            # A summary with no profile id. Measured before the guard existed:
+            # this became a record with `profile_id=""` and two blockers, which
+            # `--apply` would have written as durable garbage that every
+            # downstream surface treats as a real model.
+            return {"inferenceProfileSummaries": [{"models": []}]}
+
+    code, reasons, report = _strict_reasons_via_the_json_report(
+        capsys, _ProfileUnbuildable(), fake_sts)
+
+    assert code == 2
+    assert "profile_unreadable" in reasons
+    assert report["profiles"] == 0, (
+        "the profile was reported as built as well as failed"
+    )

@@ -35,9 +35,14 @@ import AdminUsageLogs from '@/pages/admin/AdminUsageLogs'
 import AdminPricing from '@/pages/admin/AdminPricing'
 import AdminTrustedAccounts from '@/pages/admin/AdminTrustedAccounts'
 import AdminTrustedAccountDetail from '@/pages/admin/AdminTrustedAccountDetail'
+import AdminDiscoveryRecords from '@/pages/admin/AdminDiscoveryRecords'
+import AdminDiscoveryCandidates from '@/pages/admin/AdminDiscoveryCandidates'
+import AdminDiscoveryCandidateNew from '@/pages/admin/AdminDiscoveryCandidateNew'
+import AdminDiscoveryCandidateDetail from '@/pages/admin/AdminDiscoveryCandidateDetail'
 import TeamLeadTenants from '@/pages/team-lead/TeamLeadTenants'
 import TeamLeadTenantNew from '@/pages/team-lead/TeamLeadTenantNew'
 import TeamLeadTenantDetail from '@/pages/team-lead/TeamLeadTenantDetail'
+import ModelDiscovery from '@/pages/team-lead/ModelDiscovery'
 
 export default function App() {
   const { state } = useAuth()
@@ -105,6 +110,21 @@ export default function App() {
                   path="/admin/trusted-accounts/:accountId"
                   element={<AdminTrustedAccountDetail />}
                 />
+                {/* models:discover (records/candidates) and models:promote
+                    (create/probe/activate) both live behind the admin-only
+                    route guard here -- team_lead reaches the read-only
+                    ModelDiscovery page below instead, never this one, even
+                    though team_lead also holds models:discover. */}
+                <Route path="/admin/discovery/records" element={<AdminDiscoveryRecords />} />
+                <Route path="/admin/discovery/candidates" element={<AdminDiscoveryCandidates />} />
+                <Route
+                  path="/admin/discovery/candidates/new"
+                  element={<AdminDiscoveryCandidateNew />}
+                />
+                <Route
+                  path="/admin/discovery/candidates/:profileId"
+                  element={<AdminDiscoveryCandidateDetail />}
+                />
               </Route>
               <Route element={<ProtectedRoute requiredRoles={['team_lead', 'admin']} />}>
                 <Route path="/team-lead/tenants" element={<TeamLeadTenants />} />
@@ -121,6 +141,7 @@ export default function App() {
                   path="/team-lead/tenants/:tenantId/limit-grants"
                   element={<GrantsInventory />}
                 />
+                <Route path="/team-lead/discovery" element={<ModelDiscovery />} />
               </Route>
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

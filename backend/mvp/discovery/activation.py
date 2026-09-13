@@ -48,22 +48,30 @@ a parallel copy.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional
 
+import boto3
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
+from core.aws_pool import boto_config
 from core.logging import get_logger
-from dynamo.client import get_dynamodb_resource, promotion_candidates_table_name
+from dynamo.client import (
+    DYNAMODB_POOL_ENV,
+    get_dynamodb_resource,
+    promotion_candidates_table_name,
+)
 
 from ..authz import user_has_permission
 from ..deps import AuthenticatedUser
 from ..models import ModelEntry
 from .promotion import PromotionCandidate, get_promotion_candidate
 from .records import get_discovered_record
-from .verdict import ProbeVerdict, get_probe_verdict
+from .verdict import STATE_VERIFIED, ProbeVerdict, get_probe_verdict
 
 logger = get_logger(__name__)
 
@@ -71,6 +79,35 @@ SCHEMA_VERSION = 1
 
 _ACTIVE_PREFIX = "ACTIVE#"
 _ACTIVE_SK = "ACTIVE"
+
+# One claim row per public identifier a LIVE activation holds -- disjoint from
+# both `_ACTIVE_PREFIX` above (a different string: `list_activated_entries`'s
+# own `pk.startswith("ACTIVE#")` filter does not match this prefix) and from
+# `mvp.discovery.promotion`'s own `IDENTIFIER#`/`RESERVATION` row (a
+# candidate's pre-activation reservation, checked at candidate-creation time
+# against every OTHER candidate; this is the activation-time analogue,
+# checked at activation time against every OTHER activation — see
+# `_commit_activation`'s own docstring for why candidate-time reservation
+# alone is not enough).
+_ACTIVE_IDENTIFIER_PREFIX = "ACTIVE_IDENTIFIER#"
+_ACTIVE_IDENTIFIER_SK = "CLAIM"
+
+# The probe verdict's own key scheme, mirrored here rather than imported: it
+# is documented, stable, cross-unit surface (`mvp.discovery.verdict`'s own
+# module docstring states it plainly: "VERDICT#{profile_id}" /
+# "INVOCATION#{invocation}"), not a private implementation detail of that
+# module, and every store in this package already keeps its OWN copy of the
+# key-building helpers it needs rather than importing another module's
+# private `_pk`/`_sk` (see `_json_safe`'s own docstring, above, for the same
+# convention applied to a different helper). Needed here, independent of
+# `verdict.get_probe_verdict`, because the compare-and-set below has to name
+# this exact item as a `ConditionCheck` INSIDE the same transaction as the
+# activation write — a read followed by a write is exactly the race this
+# guards against (see `_commit_activation`).
+_VERDICT_PK_PREFIX = "VERDICT#"
+_VERDICT_SK_PREFIX = "INVOCATION#"
+
+_serializer = TypeSerializer()
 
 # The permission that gates activation. Declared and seeded elsewhere
 # (permissions.json, mvp.authz.ALL_SCOPES, the frontend mirror) by the unit
@@ -97,10 +134,26 @@ class ActivationRefused(ValueError):
     enumeration. Kept apart here rather than folding activation's reasons
     into that vocabulary uninvited.
 
-    Seven reasons, not six: `RECORD_NOT_FOUND` was added alongside the
-    `jurisdiction_bounded` fix below, once building a correct entry started
-    depending on the discovered record too, not just the candidate and the
-    verdict. The other six are unchanged.
+    Seven reasons became nine once the operator surface's compare-and-set
+    (an activation names the verdict identity it saw, and the write must
+    honour exactly that identity or refuse) and the transactional identifier
+    claim (below) both needed their own vocabulary rather than borrowing an
+    existing reason for a different fact:
+
+    - `VERDICT_IDENTITY_MISMATCH` -- the verdict for `(profile_id,
+      invocation)` no longer carries the `verified_at` the caller named,
+      whether because a fresher probe re-verified it or an invalidation
+      raced the activation. Distinct from `VERDICT_NOT_VERIFIED`: that
+      reason means "not currently verified at all"; this one means "verified,
+      but not verified AS THE THING THE OPERATOR REVIEWED".
+    - `IDENTIFIER_TAKEN` -- an alias or Bedrock id this activation would make
+      live is already claimed, live, by a DIFFERENT profile's activation.
+      Mirrors `mvp.discovery.promotion.PromotionRefused.IDENTIFIER_TAKEN`'s
+      spelling deliberately (same fact, one layer later: candidate creation
+      already reserved these names against every OTHER candidate, and this
+      is the analogous guard against two candidates that each cleared that
+      check separately both going live for a name they never actually
+      shared until now — see `_commit_activation`'s own docstring).
     """
 
     NOT_PERMITTED = "not_permitted"
@@ -108,11 +161,14 @@ class ActivationRefused(ValueError):
     RECORD_NOT_FOUND = "record_not_found"
     VERDICT_NOT_FOUND = "verdict_not_found"
     VERDICT_NOT_VERIFIED = "verdict_not_verified"
+    VERDICT_IDENTITY_MISMATCH = "verdict_identity_mismatch"
     PRICING_KEY_MISMATCH = "pricing_key_mismatch"
     WIRE_PROTOCOL_MISMATCH = "wire_protocol_mismatch"
+    IDENTIFIER_TAKEN = "identifier_taken"
     REASONS = frozenset({
         NOT_PERMITTED, CANDIDATE_NOT_FOUND, RECORD_NOT_FOUND, VERDICT_NOT_FOUND,
-        VERDICT_NOT_VERIFIED, PRICING_KEY_MISMATCH, WIRE_PROTOCOL_MISMATCH,
+        VERDICT_NOT_VERIFIED, VERDICT_IDENTITY_MISMATCH, PRICING_KEY_MISMATCH,
+        WIRE_PROTOCOL_MISMATCH, IDENTIFIER_TAKEN,
     })
 
     def __init__(self, reason: str, message: str) -> None:
@@ -318,12 +374,216 @@ def put_activated_entry(activated: ActivatedEntry) -> None:
     to replace the previous snapshot with a fresh one derived from the
     candidate, the record and the verdict as they stand right now, not to be
     blocked by the fact that a snapshot already exists.
+
+    This single-item write is NOT what `activate_candidate` calls to commit a
+    real activation — see `_commit_activation`, below, for why a lone `put_
+    item` on this row is not enough by itself (it claims no identifier and
+    checks no verdict identity). Kept as its own function, and still exported,
+    because it is the direct write a fixture wants when seeding an existing
+    activation without going through the full gate — the same role `records.
+    put_discovered_record` plays for that store's own tests.
     """
     try:
         _table().put_item(Item=_to_item(activated))
     except ClientError as exc:
         raise ActivationStoreUnavailable(
             f"activated-entry store unreachable writing profile_id={activated.profile_id!r}: {exc}"
+        ) from exc
+
+
+def _low_level_client():
+    """A low-level DynamoDB client, built fresh rather than taken from the
+    shared resource's `.meta.client` — the SAME fix, for the SAME measured
+    reason, as `mvp.discovery.promotion._low_level_client` (see that
+    function's own docstring): the resource's client still carries a
+    `before-parameter-build.dynamodb` handler that double-serialises an item
+    this module has already run through `TypeSerializer` itself, and that
+    raises deep inside botocore only once a real `transact_write_items` call
+    is made — invisible to any in-memory check of the serialised item alone.
+    """
+    region = os.getenv("AWS_REGION", "us-east-1")
+    return boto3.client("dynamodb", region_name=region, config=boto_config(DYNAMODB_POOL_ENV))
+
+
+def _verdict_key(profile_id: str, invocation: str) -> dict[str, Any]:
+    return {
+        "pk": f"{_VERDICT_PK_PREFIX}{profile_id}",
+        "sk": f"{_VERDICT_SK_PREFIX}{invocation}",
+    }
+
+
+def _active_identifier_pk(identifier: str) -> str:
+    return f"{_ACTIVE_IDENTIFIER_PREFIX}{identifier}"
+
+
+def _active_identifier_item(identifier: str, *, profile_id: str, activated_at: str) -> dict[str, Any]:
+    """One claim row: `identifier` is live, and `profile_id` is who claims
+    it. Carries `activated_at` for the same attributability reason `mvp.
+    discovery.promotion._reservation_item` gives for its own extra fields —
+    an orphaned claim (the debt a candidate REWRITE leaves behind: the old
+    aliases' claim rows are not released when a candidate is re-promoted
+    with new ones, exactly mirroring that module's own named, not-built-here
+    reservation debt) is at least attributable when someone eventually looks.
+    """
+    return _json_safe({
+        "pk": _active_identifier_pk(identifier),
+        "sk": _ACTIVE_IDENTIFIER_SK,
+        "schema_version": SCHEMA_VERSION,
+        "identifier": identifier,
+        "profile_id": profile_id,
+        "activated_at": activated_at,
+    })
+
+
+def _public_identifiers(entry: ModelEntry) -> tuple[str, ...]:
+    """Every public identifier `entry` would make reachable: its aliases,
+    plus its Bedrock model id — the SAME two-kind identifier space
+    `mvp.discovery.promotion.PromotionCandidate.identifiers()` computes for
+    the candidate this entry was built from, recomputed here rather than
+    imported because `entry` (a `ModelEntry`) has no `identifiers()` method
+    of its own and this module must not reach back into the candidate for a
+    fact the ACTIVATED entry itself already carries. Order-preserving,
+    deduplicated, for the same reason that method gives: a Bedrock id that is
+    also listed as one of its own aliases must not be claimed twice in one
+    transaction, which DynamoDB rejects outright as a duplicate key within a
+    single `TransactWriteItems`.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for identifier in (*entry.aliases, entry.bedrock_model_id):
+        if identifier not in seen:
+            seen.add(identifier)
+            ordered.append(identifier)
+    return tuple(ordered)
+
+
+def _commit_activation(
+    activated: ActivatedEntry, *, expected_verified_at: str,
+) -> None:
+    """Commit one activation atomically: the verdict identity the caller
+    named is still the current one, the `ACTIVE#{profile_id}` row is written,
+    and every public identifier `activated.entry` makes reachable is claimed
+    — all in ONE `TransactWriteItems`, or none of it.
+
+    **Why a lone `put_item` (what this replaced) is not enough.** Two records
+    can each produce a candidate, each obtain its own valid verdict, and each
+    call `activate_candidate` — every check `_verify` runs passes for BOTH,
+    independently, because each is checking its OWN candidate against its OWN
+    verdict; neither observes the other's claim before committing. If the two
+    candidates' derived `ModelEntry`s ever name an identifier or a
+    `(model_family, profile_scope)` pair in common — a fact `mvp.discovery.
+    promotion.put_promotion_candidate`'s own reservation transaction cannot
+    see, because it only ever compares a NEW candidate against OTHER
+    candidates and the code-resident registry, never against what has
+    already gone LIVE — a plain `put_item` here would let both activations
+    succeed, and only the NEXT process restart's `check_registry_at_start`
+    would ever notice, by refusing to boot. This function moves that
+    detection from boot time, where it is a deploy-wide outage, to activation
+    time, where it is one refused write.
+
+    **The verdict identity check is IN this transaction, not before it.** A
+    read of the verdict followed by this write would leave exactly the gap
+    the compare-and-set exists to close: between the read and the write, a
+    concurrent probe could re-verify (a fresh `verified_at`, still `state=
+    "verified"`) or an invalidation could land. A `ConditionCheck` item names
+    the exact row and the exact fields — `verified_at` AND `state`, both;
+    `invalidate_verdict` preserves `verified_at` across an invalidation on
+    purpose (see that function's own docstring: "a reader asking what this
+    verdict's evidence was before it stopped being trusted needs the
+    original values still there"), so `verified_at` equality ALONE would not
+    catch a verdict that was invalidated without ever being re-verified. Both
+    conditions, in the SAME transaction as the write they gate, is what makes
+    this a true compare-and-set rather than a check with a gap after it.
+
+    **The identifier claim is idempotent for the SAME profile, exclusive
+    against every other one.** `attribute_not_exists(pk) OR profile_id = :pid`
+    admits a fresh claim and a re-claim by the profile that already holds it
+    (re-activation, explicitly required to be idempotent) while refusing a
+    claim already held by a DIFFERENT profile — the identifier-collision half
+    of the race described above.
+
+    Raises `ActivationRefused(VERDICT_IDENTITY_MISMATCH, ...)` when the
+    verdict `ConditionCheck` item is the one that failed, `ActivationRefused
+    (IDENTIFIER_TAKEN, ...)` naming every colliding identifier when one or
+    more claim items failed instead, and `ActivationStoreUnavailable` for any
+    other transaction failure (the store could not even attempt the write).
+    """
+    table_name = promotion_candidates_table_name()
+    identifiers = _public_identifiers(activated.entry)
+    verdict_key = _verdict_key(activated.profile_id, activated.invocation)
+
+    transact_items: list[dict[str, Any]] = [
+        {
+            "ConditionCheck": {
+                "TableName": table_name,
+                "Key": {k: _serializer.serialize(v) for k, v in verdict_key.items()},
+                "ConditionExpression": "verified_at = :vat AND #st = :verified",
+                "ExpressionAttributeNames": {"#st": "state"},
+                "ExpressionAttributeValues": {
+                    ":vat": _serializer.serialize(expected_verified_at),
+                    ":verified": _serializer.serialize(STATE_VERIFIED),
+                },
+            }
+        },
+        {
+            "Put": {
+                "TableName": table_name,
+                "Item": {k: _serializer.serialize(v) for k, v in _to_item(activated).items()},
+            }
+        },
+    ]
+    for identifier in identifiers:
+        transact_items.append({
+            "Put": {
+                "TableName": table_name,
+                "Item": {
+                    k: _serializer.serialize(v)
+                    for k, v in _active_identifier_item(
+                        identifier, profile_id=activated.profile_id,
+                        activated_at=activated.activated_at,
+                    ).items()
+                },
+                "ConditionExpression": "attribute_not_exists(pk) OR profile_id = :pid",
+                "ExpressionAttributeValues": {":pid": _serializer.serialize(activated.profile_id)},
+            }
+        })
+
+    client = _low_level_client()
+    try:
+        client.transact_write_items(TransactItems=transact_items)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "TransactionCanceledException":
+            reasons = exc.response.get("CancellationReasons") or []
+            # Index 0 is the verdict `ConditionCheck`; index 1 is the
+            # unconditioned `ACTIVE#` put (never itself the failing item);
+            # index i+2 of `identifiers` is `transact_items[i + 2]`, in the
+            # same order — mirrors `mvp.discovery.promotion.
+            # put_promotion_candidate`'s own reason-to-identifier mapping,
+            # offset by one extra leading item.
+            if reasons and (reasons[0] or {}).get("Code") == "ConditionalCheckFailed":
+                raise ActivationRefused(
+                    ActivationRefused.VERDICT_IDENTITY_MISMATCH,
+                    f"verdict for profile_id={activated.profile_id!r} "
+                    f"invocation={activated.invocation!r} no longer matches "
+                    f"verified_at={expected_verified_at!r} in state={STATE_VERIFIED!r} "
+                    f"— it was re-verified or invalidated since this activation was read",
+                ) from exc
+            collided = [
+                identifiers[i]
+                for i, reason in enumerate(reasons[2:])
+                if (reason or {}).get("Code") == "ConditionalCheckFailed"
+            ]
+            if collided:
+                raise ActivationRefused(
+                    ActivationRefused.IDENTIFIER_TAKEN,
+                    f"identifier(s) {sorted(collided)} are already live under a "
+                    f"different profile_id; profile_id={activated.profile_id!r} "
+                    f"cannot claim them",
+                ) from exc
+        raise ActivationStoreUnavailable(
+            f"activated-entry store unreachable committing profile_id="
+            f"{activated.profile_id!r}: {exc}"
         ) from exc
 
 
@@ -401,13 +661,28 @@ def _verify(candidate: PromotionCandidate, verdict: Optional[ProbeVerdict], invo
         )
 
 
-def activate_candidate(profile_id: str, invocation: str, *, actor: AuthenticatedUser) -> ModelEntry:
+def activate_candidate(
+    profile_id: str, invocation: str, *, actor: AuthenticatedUser, expected_verified_at: str,
+) -> ModelEntry:
     """Activate the promotion candidate named `profile_id`, against the
     probe verdict recorded for `invocation` ("sync" or "stream" — the closed
     set the verdict's own sort key is keyed on; an `invocation` outside that
     set simply finds no verdict and refuses `VERDICT_NOT_FOUND`, since this
     module does not own that vocabulary and re-validating it here would be a
     second, possibly-diverging opinion).
+
+    `expected_verified_at` is the verdict identity the CALLER saw — the
+    `verified_at` an operator surface read off the same verdict before
+    presenting it for activation. Required, no default: activation is a
+    compare-and-set against a SPECIFIC verified moment, not against
+    "whatever is currently verified", so there is no reading of "the caller
+    didn't say" that is safe to guess at. `_verify` below still checks that a
+    verdict exists and is `state="verified"` at all (a cheap, early rejection
+    for the common case); the identity match against `expected_verified_at`
+    is re-checked, authoritatively, INSIDE the same transaction that commits
+    the activation (`_commit_activation`) — a read-then-compare here alone
+    would leave exactly the gap between the read and the write that a
+    concurrent re-probe or invalidation could land in.
 
     Gated on `PROMOTE_SCOPE` ("models:promote") checked here, inside the
     domain function, rather than at a FastAPI route dependency: nothing this
@@ -419,9 +694,12 @@ def activate_candidate(profile_id: str, invocation: str, *, actor: Authenticated
     of how many callers there end up being.
 
     Raises `ActivationRefused` (see its reason vocabulary) on any refusal.
-    On success, persists the derived `ModelEntry` and returns it; the caller
-    does not need to also call `put_activated_entry` — this function is the
-    one place that does the whole thing.
+    On success, persists the derived `ModelEntry` and returns it. The commit
+    (`_commit_activation`) also claims every public identifier this entry
+    makes reachable, in the SAME transaction, so two candidates that each
+    independently pass every check above cannot both go live for a name they
+    only turn out to share once activated — see that function's own
+    docstring for the race this closes.
     """
     if not user_has_permission(actor, PROMOTE_SCOPE):
         raise ActivationRefused(
@@ -436,6 +714,13 @@ def activate_candidate(profile_id: str, invocation: str, *, actor: Authenticated
         )
     verdict = get_probe_verdict(profile_id, invocation)
     _verify(candidate, verdict, invocation)
+    if verdict.verified_at != expected_verified_at:
+        raise ActivationRefused(
+            ActivationRefused.VERDICT_IDENTITY_MISMATCH,
+            f"verdict for profile_id={profile_id!r} invocation={invocation!r} "
+            f"was verified at {verdict.verified_at!r}, not the "
+            f"expected_verified_at={expected_verified_at!r} the caller named",
+        )
 
     record = get_discovered_record(profile_id)
     if record is None:
@@ -449,13 +734,14 @@ def activate_candidate(profile_id: str, invocation: str, *, actor: Authenticated
         )
 
     entry = _build_entry(candidate, jurisdiction_bounded=record.jurisdiction_bounded)
-    put_activated_entry(ActivatedEntry(
+    activated = ActivatedEntry(
         profile_id=profile_id,
         invocation=invocation,
         entry=entry,
         activated_at=_now_iso(),
         activated_by=actor.user_id,
-    ))
+    )
+    _commit_activation(activated, expected_verified_at=expected_verified_at)
     # The TTL carries other replicas. It must not carry this one: a caller who
     # just activated a model and immediately asks the registry about it would
     # otherwise be told it does not exist, for up to a full window, by the very

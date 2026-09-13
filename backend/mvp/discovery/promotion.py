@@ -688,15 +688,42 @@ def validate_human_inputs(
     unrestricted is a real, nameable posture and a promotion that means it
     must say so rather than leave the field empty.
     """
+    # Every refusal below names the conflicting fact, not just its reason token.
+    # Measured against a running gateway: `provider_unsupported` came back with
+    # `message` equal to the reason string, so an operator was told a token and
+    # nothing they could act on -- not which provider, not what the accepted set
+    # is. `identifier_taken` already did this properly and the others did not.
     cleaned_aliases = tuple(a for a in (aliases or ()) if a and a.strip())
     if not cleaned_aliases:
-        raise PromotionRefused(PromotionRefused.ALIAS_REQUIRED)
+        raise PromotionRefused(
+            PromotionRefused.ALIAS_REQUIRED,
+            detail=(
+                "at least one non-blank alias is required; "
+                f"received {list(aliases or ())!r}"
+            ),
+        )
     if not pricing_key or not pricing_key.strip():
-        raise PromotionRefused(PromotionRefused.PRICING_KEY_REQUIRED)
+        raise PromotionRefused(
+            PromotionRefused.PRICING_KEY_REQUIRED,
+            detail=f"a pricing key is required; received {pricing_key!r}",
+        )
     if pricing_key == _DEFAULT_PRICING_KEY:
-        raise PromotionRefused(PromotionRefused.PRICING_KEY_IS_DEFAULT)
+        raise PromotionRefused(
+            PromotionRefused.PRICING_KEY_IS_DEFAULT,
+            detail=(
+                f"{_DEFAULT_PRICING_KEY!r} is the fallback tier and would make an "
+                "unpriced model look priced; name the reviewed tier this model "
+                "bills at"
+            ),
+        )
     if not jurisdiction or not jurisdiction.strip():
-        raise PromotionRefused(PromotionRefused.JURISDICTION_REQUIRED)
+        raise PromotionRefused(
+            PromotionRefused.JURISDICTION_REQUIRED,
+            detail=(
+                "a jurisdiction is required; an absent one is refused rather than "
+                f"read as unrestricted. received {jurisdiction!r}"
+            ),
+        )
 
 
 def derive_candidate(
@@ -735,11 +762,26 @@ def derive_candidate(
     record".
     """
     if not record.profile_id:
-        raise PromotionRefused(PromotionRefused.RECORD_NOT_FOUND)
+        raise PromotionRefused(
+            PromotionRefused.RECORD_NOT_FOUND,
+            detail="this promotion names no record: the record has no profile_id",
+        )
     if record.provider not in _supported_providers():
-        raise PromotionRefused(PromotionRefused.PROVIDER_UNSUPPORTED)
+        raise PromotionRefused(
+            PromotionRefused.PROVIDER_UNSUPPORTED,
+            detail=(
+                f"provider {record.provider!r} is not one this gateway serves; "
+                f"accepted: {sorted(_supported_providers())}"
+            ),
+        )
     if probe_wire_protocol not in _supported_wire_protocols():
-        raise PromotionRefused(PromotionRefused.PROTOCOL_MISMATCH)
+        raise PromotionRefused(
+            PromotionRefused.PROTOCOL_MISMATCH,
+            detail=(
+                f"wire protocol {probe_wire_protocol!r} is not one this gateway "
+                f"speaks; accepted: {sorted(_supported_wire_protocols())}"
+            ),
+        )
 
     validate_human_inputs(
         aliases=aliases, pricing_key=pricing_key, jurisdiction=jurisdiction

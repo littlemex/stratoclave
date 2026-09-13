@@ -60,6 +60,12 @@ checked in the order this docstring lists them.
   - `profiles_truncated`— `ListInferenceProfiles` did not finish (a page
                           request failed); the discovered set is a subset of
                           the account's actual catalogue this pass.
+  - `profile_unreadable` — a profile's record could not be built at all, so
+                          this pass under-reports the account's catalogue.
+  - `model_details_unreadable`
+                        — `GetFoundationModel` failed for at least one profile,
+                          so the modality gate did not run on it and an absent
+                          modality blocker there means "not checked".
   - `store_unavailable` — a read or write of the discovered-record store
                           failed for at least one profile.
   - `apply_incomplete`  — `--apply` was requested and at least one record that
@@ -114,7 +120,9 @@ gated.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -224,9 +232,34 @@ class PassResult:
     records: list[DiscoveredRecord] = field(default_factory=list)
     pricing_keys: dict[str, Optional[str]] = field(default_factory=dict)
     profiles_truncated: bool = False
-    discovery_errors: list[str] = field(default_factory=list)
+    # Three DIFFERENT failures, kept apart because `--strict` names a reason and
+    # a reason that names the wrong subsystem sends an operator to the wrong
+    # place. Measured on a real pass: six `GetFoundationModel` failures were
+    # reported as `store_unavailable`, so the token said the record store was
+    # down when DynamoDB was answering every call.
+    #
+    #: A profile whose record could not be BUILT at all; it is absent from
+    #: `records`, so the pass under-reports the catalogue.
+    profile_build_failures: list[str] = field(default_factory=list)
+    #: A profile whose `GetFoundationModel` read failed. The record exists, but
+    #: the modality gate never ran on it, so an absent modality blocker on this
+    #: record means "not checked" rather than "checked and fine".
+    profile_details_unreadable: list[str] = field(default_factory=list)
+    #: A read or write of the discovered-record store itself failed.
+    store_errors: list[str] = field(default_factory=list)
     observation_blocker: Optional[Blocker] = None
     rate_card_api_unavailable: Optional[Blocker] = None
+
+    @property
+    def discovery_errors(self) -> list[str]:
+        """Every error above, in one list, for the human-readable report and the
+        JSON payload. A derived view rather than a fourth stored list: two lists
+        that must agree are two lists that will not."""
+        return [
+            *self.profile_build_failures,
+            *self.profile_details_unreadable,
+            *self.store_errors,
+        ]
 
 
 def _model_details(
@@ -350,6 +383,22 @@ def build_record(
     this field exists to avoid.
     """
     raw_id = str(summary.get("inferenceProfileId") or "")
+    if not raw_id:
+        # A summary with no profile id cannot become a record, and the tempting
+        # alternative -- build one anyway with an empty id -- is worse than
+        # skipping it. Measured: it produced `profile_id=""` and `provider=""`
+        # carrying two blockers, which `--apply` would have written as a durable
+        # row indistinguishable from a real record in the operator's listing, in
+        # the actionable queue, and in `--strict`'s finding count.
+        #
+        # Raising here reaches the caller's existing per-profile guard, so the
+        # pass still completes and the fault is counted as what it is: a profile
+        # this pass could not read, which is exactly the fact an operator needs
+        # in order to know the catalogue is under-reported.
+        raise ValueError(
+            "inference profile summary has no inferenceProfileId; "
+            f"keys present: {sorted(summary)}"
+        )
     profile_scope, jurisdiction_bounded = profile_scope_from_id(raw_id)
     provider = provider_from_id(raw_id)
     model_family = model_family_from_id(raw_id)
@@ -511,15 +560,15 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
             )
         except Exception as exc:  # noqa: BLE001 — one bad profile must not fail the pass.
             profile_id = str(summary.get("inferenceProfileId") or "<unknown>")
-            result.discovery_errors.append(f"{profile_id}: {exc}")
+            result.profile_build_failures.append(f"{profile_id}: {exc}")
             logger.warning("discovery_build_record_failed", profile_id=profile_id, error=str(exc))
             continue
         if note is not None:
-            result.discovery_errors.append(f"{record.profile_id}: {note}")
+            result.profile_details_unreadable.append(f"{record.profile_id}: {note}")
         try:
             previous = get_discovered_record(record.profile_id)
         except DiscoveredRecordStoreUnavailable as exc:
-            result.discovery_errors.append(f"{record.profile_id}: store read failed: {exc}")
+            result.store_errors.append(f"{record.profile_id}: store read failed: {exc}")
             previous = None
         if previous is not None:
             record = DiscoveredRecord(
@@ -612,7 +661,11 @@ def _strict_reasons(result: PassResult, *, apply_errors: list[str]) -> list[str]
         reasons.append("actionable_blocker")
     if result.profiles_truncated:
         reasons.append("profiles_truncated")
-    if result.discovery_errors:
+    if result.profile_build_failures:
+        reasons.append("profile_unreadable")
+    if result.profile_details_unreadable:
+        reasons.append("model_details_unreadable")
+    if result.store_errors:
         reasons.append("store_unavailable")
     if apply_errors:
         reasons.append("apply_incomplete")
@@ -630,6 +683,29 @@ def _apply(result: PassResult) -> list[str]:
             errors.append(f"{record.profile_id}: {exc}")
             logger.warning("discovery_apply_failed", profile_id=record.profile_id, error=str(exc))
     return errors
+
+
+def _keep_stdout_for_the_report_only(enabled: bool):
+    """Keep log output off stdout while the pass runs, for `--json` only.
+
+    The service configures logging to stdout, which is right for a container
+    whose log collector reads stdout. It is wrong for a flag that promises a
+    machine-readable report on the same stream: measured on a real pass, stdout
+    carried a `discovery_agreement_offers_method_missing` warning and then the
+    JSON, so `--json | jq` fails with "Extra data" and an unattended job reading
+    the report gets a parse error instead of the report.
+
+    MEASURED, because the first fix here did nothing: at the time `main` runs,
+    the root logger has NO handlers and structlog is not configured yet -- both
+    are built lazily, during the pass. So moving an existing handler's stream
+    moved nothing. Rebinding `sys.stdout` for the duration of the pass is what
+    reaches a handler that does not exist yet, because a lazily-created handler
+    captures whatever `sys.stdout` is when it is finally built.
+
+    Nothing is silenced: the warnings still go to stderr, the stream reserved
+    for exactly that. The report is written afterwards to the real stdout.
+    """
+    return contextlib.redirect_stdout(sys.stderr) if enabled else contextlib.nullcontext()
 
 
 def main(argv: Optional[list[str]] = None, *,
@@ -661,15 +737,24 @@ def main(argv: Optional[list[str]] = None, *,
                              "level; fires every pass it is present, not only the "
                              "first), profiles_truncated "
                              "(ListInferenceProfiles did not finish), "
+                             "profile_unreadable (a profile's record could not be "
+                             "built), model_details_unreadable "
+                             "(GetFoundationModel failed, so the modality gate "
+                             "did not run on that profile), "
                              "store_unavailable (a record read or write failed), "
                              "apply_incomplete (--apply was given and a built record "
                              "was not written)")
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     args = parser.parse_args(argv)
 
-    result = run_pass(bedrock=bedrock, sts=sts)
-    apply_errors = _apply(result) if args.apply else []
-    reasons = _strict_reasons(result, apply_errors=apply_errors)
+    # Held before the pass can rebind it, so the report goes to the caller's
+    # real stdout even while the pass's logs are being sent elsewhere.
+    report_stream = sys.stdout
+
+    with _keep_stdout_for_the_report_only(args.json):
+        result = run_pass(bedrock=bedrock, sts=sts)
+        apply_errors = _apply(result) if args.apply else []
+        reasons = _strict_reasons(result, apply_errors=apply_errors)
     exit_code = 2 if (args.strict and reasons) else (1 if not result.records else 0)
 
     if args.json:
@@ -711,7 +796,7 @@ def main(argv: Optional[list[str]] = None, *,
             "apply_errors": apply_errors,
             "strict_reasons": reasons,
         }
-        print(json.dumps(payload, indent=1, sort_keys=True))
+        print(json.dumps(payload, indent=1, sort_keys=True), file=report_stream)
         return exit_code
 
     print(f"discovered {len(result.records)} profile(s)"
