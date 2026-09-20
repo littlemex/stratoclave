@@ -124,6 +124,13 @@ const allowAdminCreation = process.env.ALLOW_ADMIN_CREATION || 'false';
 // Accepting the value here and passing it to the ECS environment lets
 // operators control it via the CDK deploy path without touching SSM directly.
 const allowAdminCreationUntil = process.env.ALLOW_ADMIN_CREATION_UNTIL || '';
+// First admin. `backend/bootstrap/seed.py::seed_bootstrap_admin` reads this at
+// container STARTUP and mints the initial admin while no admin-role user
+// exists, which is how a deployment gets its first administrator without an
+// un-authenticated endpoint. Passed unconditionally, like the two above: the
+// container's env key set must not depend on which shell ran `cdk deploy`, and
+// an empty value is already what the backend treats as "not set".
+const bootstrapAdminEmail = (process.env.STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL || '').trim();
 
 // Environment flag drives production-only knobs (deletion protection,
 // retain-on-delete tables, stricter cdk-nag rules).
@@ -546,6 +553,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // An empty string is treated as unset and the backend will reject the request.
     ALLOW_ADMIN_CREATION: allowAdminCreation,
     ALLOW_ADMIN_CREATION_UNTIL: allowAdminCreationUntil,
+    STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL: bootstrapAdminEmail,
 
     // Tenant. The per-user token quota is a loose fairness backstop, not the
     // binding ceiling — that is the seat-scaled dollar pool a tenant now gets at
