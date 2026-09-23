@@ -164,3 +164,52 @@ def test_request_metadata_carries_ids_and_nothing_else():
         "Bedrock bounds requestMetadata values; an over-long id must not turn a "
         "billable call into a validation error"
     )
+
+
+# ---------------------------------------------------------------------------
+# The other transport. Every route that reaches the Bedrock OpenAI-compatible
+# endpoint raises `httpx` exceptions, and none of them was recognised here: they
+# all fell through to the catch-all and held a full ceiling. That is the right
+# default for something unrecognised and the wrong answer for a TLS handshake that
+# failed -- a reservation retained for a request that provably never left.
+# ---------------------------------------------------------------------------
+class TestHttpxExceptionsAreClassified:
+    def test_a_connection_that_was_never_established_retains_nothing(self):
+        import httpx
+
+        from mvp.provider_outcome import (
+            NOT_SUBMITTED, classify_exception, refunds_immediately,
+        )
+
+        for exc in (httpx.ConnectError("no route"), httpx.ConnectTimeout("slow"),
+                    httpx.PoolTimeout("pool full"), httpx.InvalidURL("bad")):
+            assert classify_exception(exc) == NOT_SUBMITTED, type(exc).__name__
+        # The reading only matters because of what it implies for the money: this is
+        # the row that returns the reservation immediately.
+        assert refunds_immediately(NOT_SUBMITTED) is True
+
+    def test_a_request_that_left_keeps_the_ceiling(self):
+        import httpx
+
+        from mvp.provider_outcome import SUBMITTED_UNSETTLED, classify_exception
+
+        for exc in (httpx.ReadTimeout("silent"), httpx.ReadError("cut"),
+                    httpx.RemoteProtocolError("bad frame")):
+            assert classify_exception(exc) == SUBMITTED_UNSETTLED, type(exc).__name__
+
+    def test_a_partial_send_stays_expensive(self):
+        """`WriteError`/`WriteTimeout` are deliberately NOT named as never-submitted:
+        a partial send may have delivered a complete request."""
+        import httpx
+
+        from mvp.provider_outcome import SUBMITTED_UNSETTLED, classify_exception
+
+        assert classify_exception(httpx.WriteTimeout("half")) == SUBMITTED_UNSETTLED
+        assert classify_exception(httpx.WriteError("half")) == SUBMITTED_UNSETTLED
+
+    def test_the_unknown_is_still_expensive(self):
+        """The non-vacuous companion: naming some classes must not turn the
+        catch-all into a cheap answer."""
+        from mvp.provider_outcome import SUBMITTED_UNSETTLED, classify_exception
+
+        assert classify_exception(RuntimeError("who knows")) == SUBMITTED_UNSETTLED

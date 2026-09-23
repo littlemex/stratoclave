@@ -205,6 +205,32 @@ def refunds_immediately(state: str) -> bool:
     return liability_for(state) == LIABILITY_NONE
 
 
+def _classify_httpx(exc: BaseException) -> Optional[str]:
+    """`exc` as an outcome state when it is an httpx transport error, else `None`.
+
+    Only the classes whose reading is unambiguous are named. `WriteError` and
+    `WriteTimeout` are deliberately NOT here: a partial send may have delivered a
+    complete request, so they keep the expensive default. Neither is the base
+    `TransportError`, which would swallow the read errors below into whichever
+    branch came first.
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover — optional dependency.
+        return None
+    # Nothing was written: the connection was never obtained, or the URL never
+    # resolved to one. Same reading as botocore's `EndpointConnectionError`.
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+                        httpx.UnsupportedProtocol, httpx.InvalidURL)):
+        return NOT_SUBMITTED
+    # The request left and the answer did not arrive, or arrived broken. This is the
+    # measured expensive case, and it is the same one `ReadTimeoutError` names for
+    # botocore: the model may have run to completion and been billed for it.
+    if isinstance(exc, (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError)):
+        return SUBMITTED_UNSETTLED
+    return None
+
+
 def classify_exception(exc: BaseException) -> str:
     """Which state an exception from a provider call leaves the attempt in.
 
@@ -217,6 +243,20 @@ def classify_exception(exc: BaseException) -> str:
     # Never connected: no socket to the service was established.
     if isinstance(exc, (ConnectTimeoutError, EndpointConnectionError)):
         return NOT_SUBMITTED
+
+    # The same two readings for the OTHER transport. Every route that reaches the
+    # Bedrock OpenAI-compatible endpoint raises `httpx` exceptions, and none of them
+    # was recognised here: they all fell through to the catch-all and held a full
+    # ceiling, including the ones that provably never reached the provider. The
+    # catch-all is the right default for something unrecognised and the wrong answer
+    # for a TLS handshake that failed, so the recognisable ones are named.
+    #
+    # Imported lazily and guarded: this module is imported by the Converse paths in
+    # environments that do not install `httpx`, and a money classifier must not fail
+    # to load because an optional dependency is absent.
+    _httpx_state = _classify_httpx(exc)
+    if _httpx_state is not None:
+        return _httpx_state
 
     if isinstance(exc, ClientError):
         code = str(exc.response.get("Error", {}).get("Code", ""))
