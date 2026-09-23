@@ -32,6 +32,13 @@
       "cache_write_per_mtok_microusd": 6875000,
       "notes": "Claude Opus 4.5 / 4.6 / 4.7 / 4.8 / 5 — $5.50/$27.50 per MTok in-region ($5.00/$25.00 global). Measured 2026-08-31."
     },
+    "opus-5-5": {
+      "input_per_mtok_microusd": 4400000,
+      "output_per_mtok_microusd": 22000000,
+      "cache_read_per_mtok_microusd": 220000,
+      "cache_write_per_mtok_microusd": 5500000,
+      "notes": "Claude Opus 5.5 — $4.40/$22.00 per MTok in-region, cache read $0.22, cache write $5.50. Measured 2026-09-23 against bedrock:ListFoundationModelAgreementOffers. Its own key rather than \"opus\": every leg is below that tier, and a key is charged at its dearest member, so folding it in would over-charge it while leaving Opus 5 priced correctly."
+    },
     "opus-legacy": {
       "input_per_mtok_microusd": 15000000,
       "output_per_mtok_microusd": 75000000,
@@ -45,6 +52,13 @@
       "cache_read_per_mtok_microusd": 1100000,
       "cache_write_per_mtok_microusd": 13750000,
       "notes": "Claude Fable 5 — $11/$55 per MTok in-region ($10/$50 global), above the Opus tier. Measured 2026-08-31."
+    },
+    "fable-5-1": {
+      "input_per_mtok_microusd": 11000000,
+      "output_per_mtok_microusd": 55000000,
+      "cache_read_per_mtok_microusd": 275000,
+      "cache_write_per_mtok_microusd": 13750000,
+      "notes": "Claude Fable 5.1 — $11/$55 per MTok in-region, same as Fable 5 on input and output, but cache read is $0.275 rather than $1.10. Measured 2026-09-23. Its own key because \"fable\" would charge four times the real cache-read rate."
     },
     "fable-global": {
       "input_per_mtok_microusd": 10000000,
@@ -115,6 +129,20 @@
       "cache_read_per_mtok_microusd": 275000,
       "cache_write_per_mtok_microusd": 3437500,
       "notes": "$2.20/$13.20 per MTok in-region, cache read $0.275, cache write $3.4375. Measured 2026-08-31."
+    },
+    "gpt-6-sol": {
+      "input_per_mtok_microusd": 2200000,
+      "output_per_mtok_microusd": 11000000,
+      "cache_read_per_mtok_microusd": 220000,
+      "cache_write_per_mtok_microusd": 2200000,
+      "notes": "GPT-6 Sol — $2.20/$11.00 per MTok in-region, cache read $0.22. Measured 2026-09-23. The rate card publishes NO cache-write leg for this family, so cache write is the reviewed starting value rather than a measurement: a written cache token on this path is billed as an ordinary input token, which is the input rate. A zero there would make a real charge free."
+    },
+    "gpt-6-astra": {
+      "input_per_mtok_microusd": 11000000,
+      "output_per_mtok_microusd": 55000000,
+      "cache_read_per_mtok_microusd": 1100000,
+      "cache_write_per_mtok_microusd": 11000000,
+      "notes": "GPT-6 Astra — $11/$55 per MTok in-region, cache read $1.10. Measured 2026-09-23. Cache write carries the same reviewed starting value as gpt-6-sol, and for the same reason: this family's rate card publishes no cache-write leg."
     },
     "grok": {
       "input_per_mtok_microusd": 2200000,
