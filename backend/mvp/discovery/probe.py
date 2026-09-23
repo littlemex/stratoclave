@@ -33,22 +33,34 @@ therefore takes `pricing_key` and `wire_protocol` as required keyword
 arguments; `mode` is `invocation` per the ratified correction (see
 `mvp.discovery.verdict`'s module docstring for why "mode" was already taken).
 
-**Wire protocol scope.** Only `wire_protocol == "messages"` (Bedrock Converse)
-is implemented. A record's own wire protocol is not derivable pre-activation
-(that is unit 2's G3, and it is verified against THIS module's own output, not
-the other way around) — `wire_protocol` here is supplied by whoever calls
-`probe()` (unit 1's promotion flow, or a future operator surface), and
-`"responses"` (the bedrock-mantle OpenAI-compatible surface) is refused with
-its own `protocol_unverified` subtype rather than implemented, because that
-transport has its own request/response shape this unit did not have grounds
-to build blind. Reported as a boundary, not silently narrowed.
+**Wire protocol scope.** Both members of `mvp.models._WIRE_PROTOCOLS` are
+implemented: `"messages"` over Bedrock Converse, and `"responses"` over the
+Bedrock OpenAI-compatible endpoint. A record's own wire protocol is not
+derivable pre-activation (that is unit 2's G3, and it is verified against THIS
+module's own output, not the other way around) — `wire_protocol` here is
+supplied by whoever calls `probe()` (unit 1's promotion flow, or an operator
+surface), and one outside that set is refused before any ledger call.
+
+`"responses"` was previously refused rather than implemented, on the grounds
+that its request/response shape could not be built blind. It is built here from
+measurements against the live endpoint rather than from a specification, and it
+drives the SAME helpers the serving route drives — one SSE framer
+(`mvp.openai_responses._drain_events`), one terminal-event detector
+(`sse_event_type`) and one usage parser (`mvp._converse_core.
+usage_from_responses`). That sharing is the point: a probe that reimplemented any
+of them would certify a sibling of the code that bills instead of the code
+itself, and the two would drift apart silently. The `Usage` that parser returns
+is mapped to the money type in `probe` itself, once, for both transports, so
+there is one mapping there too.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Protocol
 
+from .. import _converse_types as t
+from .. import _responses_wire as _wire
 from . import ledger
 from .ledger import ProbeAttemptRefused  # re-exported: a caller of `probe` should not
 # have to know which layer refused.
@@ -67,10 +79,6 @@ from .verdict import (
     put_probe_verdict,
 )
 
-#: The one wire protocol this probe speaks. `mvp.models._WIRE_PROTOCOLS`'s
-#: other member, `"responses"`, is refused (see the module docstring) rather
-#: than silently accepted.
-_SUPPORTED_WIRE_PROTOCOL = "messages"
 
 #: The blocker subtype for assertion 1 failing on a call whose OUTCOME is
 #: unknown rather than definitely negative -- a read timeout or a closed
@@ -95,6 +103,13 @@ INDETERMINATE_SUBTYPE = "converse_call_indeterminate"
 #: computes the charge from the OBSERVED usage rather than from an estimate.
 _PROBE_MESSAGE = {"role": "user", "content": [{"text": "ping"}]}
 _PROBE_MAX_OUTPUT_TOKENS = 1
+#: The `/responses` cap. NOT 1: the Bedrock OpenAI-compatible endpoint refuses it
+#: outright -- "Invalid 'max_output_tokens': integer below minimum value. Expected a
+#: value >= 16, but got 1 instead." (measured 2026-09-24). 16 is that minimum, and a
+#: reasoning model can spend all sixteen on reasoning and end `status: "incomplete"`
+#: with `incomplete_details.reason == "max_output_tokens"` -- also measured, which is
+#: why the terminal-event set this probe reads includes `response.incomplete`.
+_RESPONSES_MAX_OUTPUT_TOKENS = 16
 #: A conservative reservation estimate for the tiny prompt above — sized to
 #: never under-reserve it (a probe reservation failing to cover its own
 #: request would itself be a `probe_unmetered` refusal), not a measurement of
@@ -206,9 +221,235 @@ def _drain_converse_stream(resp: dict) -> Optional[dict]:
     return usage
 
 
+@dataclass(frozen=True)
+class _Attempt:
+    """What one provider call produced, when it returned at all.
+
+    Exceptions are NOT caught by a transport; they propagate to `probe`'s single
+    handler so the exception-to-ledger-state mapping lives in one place. The three
+    states a returning call can be in:
+
+    * `usage` set        -- a trusted measurement, so `claim_settle`.
+    * `status_code` set  -- the provider answered non-2xx, so
+                            `claim_unobserved(status_code=...)`, which routes the
+                            status through the SAME table serving uses.
+    * neither            -- a 2xx whose usage could not be trusted, so
+                            `claim_unobserved(state=SUBMITTED_UNSETTLED)`: the model
+                            ran and what it did is unreadable, which is the one case
+                            that must never settle at zero.
+    """
+
+    #: A `mvp._converse_types.Usage` -- the SAME shape `usage_from_bedrock` returns,
+    #: so `probe`'s assertions read one set of field names regardless of which
+    #: transport ran. The money type is built from it at the settle, once.
+    usage: Optional[t.Usage] = None
+    status_code: Optional[int] = None
+    evidence: str = ""
+
+
+class _TransportCall(Protocol):
+    """The call contract every transport satisfies.
+
+    Written out rather than left as `Any` because the keywords and the return type are
+    the entire agreement between `probe` and a transport: one that returned a bare
+    `Usage`, or forgot `on_wire`, would otherwise type-check and then break the ledger
+    at runtime.
+    """
+
+    def __call__(
+        self, *, record: DiscoveredRecord, region: str, invocation: str,
+        max_output_tokens: int, on_wire: Callable[[], None], client: Optional[Any],
+    ) -> "_Attempt":
+        ...
+
+
+#: Which injection seam a transport's client comes from. Named so `probe` can REFUSE a
+#: client belonging to the other transport instead of silently dropping it -- a test
+#: that passed `bedrock=stub, wire_protocol="responses"` used to have its stub ignored,
+#: build a real pooled client, mint a real bearer, and bill a real call.
+_SEAM_BEDROCK = "bedrock"
+_SEAM_HTTP = "http"
+
+
+@dataclass(frozen=True)
+class _Transport:
+    """One wire protocol's half of a probe: how to call, what the call costs, and which
+    client seam it reads.
+
+    `max_output_tokens` is per protocol because the caps are not negotiable in the same
+    way: Converse accepts 1, and the Bedrock OpenAI-compatible endpoint refuses anything
+    below 16 ("Invalid 'max_output_tokens': integer below minimum value. Expected a
+    value >= 16, but got 1 instead.", measured 2026-09-24). The hold is opened against
+    this number, so it has to be known before any money moves -- and `probe` hands the
+    same attribute to the call, so the reservation and the wire cannot disagree.
+    """
+
+    wire_protocol: str
+    seam: str
+    max_output_tokens: int
+    input_tokens_est: int
+    call: _TransportCall
+
+
+def _call_messages(
+    *, record: DiscoveredRecord, region: str, invocation: str, max_output_tokens: int,
+    on_wire: Any, client: Optional[Any],
+) -> _Attempt:
+    """Bedrock Converse. The original probe transport, unchanged in behaviour."""
+    from .._converse_core import usage_from_bedrock
+
+    bedrock = client or _default_bedrock_client(region)
+    kwargs = {
+        "modelId": record.raw_id,
+        "messages": [_PROBE_MESSAGE],
+        "inferenceConfig": {"maxTokens": max_output_tokens},
+    }
+    on_wire()
+    if invocation == INVOCATION_STREAM:
+        usage_block = _drain_converse_stream(bedrock.converse_stream(**kwargs))
+    else:
+        usage_block = bedrock.converse(**kwargs).get("usage")
+    usage = usage_from_bedrock(usage_block)
+    if usage is None:
+        return _Attempt(evidence="Converse response carried no readable usage block")
+    return _Attempt(usage=usage)
+
+
+#: The probe's `/responses` body. `input` carries the same single short user turn the
+#: Converse probe sends. Three fields are deliberately absent: `temperature`, which
+#: this family rejects outright ("This model doesn't support the temperature field",
+#: measured); `reasoning`, whose accepted effort values differ across the GPT tiers so
+#: an unsupported one would fail the probe for a reason that says nothing about the
+#: binding; and `stream_options`, which is a Chat Completions concept -- this endpoint
+#: puts usage on the terminal event without being asked.
+def _responses_payload(model_id: str, *, max_output_tokens: int, stream: bool) -> dict:
+    return {
+        "model": model_id,
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "ping"}]}],
+        "max_output_tokens": max_output_tokens,
+        "stream": stream,
+    }
+
+
+def _call_responses(
+    *, record: DiscoveredRecord, region: str, invocation: str, max_output_tokens: int,
+    on_wire: Any, client: Optional[Any],
+) -> _Attempt:
+    """The Bedrock OpenAI-compatible `/responses` endpoint.
+
+    Drives the SAME helpers the serving route drives -- `_openai_transport.
+    sync_client`, `auth_headers`, `format_error`, and (through
+    `mvp.openai_responses`) the one terminal-event detector and the one usage
+    decomposition. A probe that reimplemented any of them would certify a sibling of
+    the code that bills rather than the code itself.
+
+    `auth_headers` is called BEFORE `on_wire()`: it can mint a token, and a mint that
+    fails is an attempt that never reached the provider, which must not retain a
+    reservation.
+    """
+    import httpx
+
+    from .. import _openai_transport
+
+    http = client or _openai_transport.sync_client(region)
+    auth = _openai_transport.auth_headers(region)
+    payload = _responses_payload(
+        record.raw_id, max_output_tokens=max_output_tokens,
+        stream=invocation == INVOCATION_STREAM,
+    )
+
+    if invocation == INVOCATION_STREAM:
+        on_wire()
+        with http.stream(
+            "POST", "/responses", json=payload, headers=auth,
+            timeout=httpx.Timeout(
+                _openai_transport.STREAM_READ_TIMEOUT_SECONDS, connect=10.0, pool=10.0),
+        ) as resp:
+            if not 200 <= resp.status_code < 300:
+                resp.read()
+                if resp.status_code in (401, 403):
+                    _openai_transport.invalidate_token(region, auth)
+                return _Attempt(
+                    status_code=resp.status_code,
+                    evidence=_openai_transport.format_error(resp),
+                )
+            usage = None
+            # Serving's own framer, not a second one. It is the part of the stream
+            # path that could differ silently: two framers reading the same bytes
+            # into different frames make the verdict certify a cut this route does
+            # not make. `_drain_events` also already handles `\r\n\r\n`, which a
+            # split on a literal `"\n\n"` never finds -- such a stream would
+            # accumulate whole and then parse as one frame with every `data:` line
+            # joined, so no usage would be read from a perfectly good response.
+            buffer = bytearray()
+            for chunk in resp.iter_bytes():
+                if not chunk:
+                    continue
+                buffer.extend(chunk)
+                for frame in _wire.drain_events(buffer):
+                    usage = _wire.terminal_usage_from_frame(frame).usage or usage
+            # The trailing unterminated frame is parsed for the same reason serving
+            # parses it: this upstream is measured to close the body before the final
+            # blank line, and discarding it per the SSE spec would drop the usage
+            # block on exactly the streams that report one.
+            if buffer:
+                usage = (
+                    _wire.terminal_usage_from_frame(bytes(buffer)).usage or usage)
+        if usage is None:
+            return _Attempt(
+                evidence="the stream ended with no terminal event carrying a readable "
+                         f"usage block (terminals read: "
+                         f"{sorted(_wire.METERED_TERMINAL_TYPES)})",
+            )
+        return _Attempt(usage=usage)
+
+    on_wire()
+    resp = http.post(
+        "/responses", json=payload, headers=auth,
+        timeout=_openai_transport.nonstream_timeout(),
+    )
+    if not 200 <= resp.status_code < 300:
+        # Not `>= 400`: httpx does not follow redirects by default, so a 3xx would
+        # otherwise be read as a success carrying no usage and reported as an
+        # unreadable body. It is an answer with a status, and the status table is
+        # what should decide what it means.
+        if resp.status_code in (401, 403):
+            _openai_transport.invalidate_token(region, auth)
+        return _Attempt(
+            status_code=resp.status_code, evidence=_openai_transport.format_error(resp))
+    try:
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise ValueError(f"expected a JSON object, got {type(body).__name__}")
+        usage = _wire.usage_from_responses(body.get("usage"))
+    except ValueError as exc:
+        # `ResponsesUsageShapeError` IS a `ValueError`, and so is a JSON decode
+        # failure, and so is a body that is not an object. All three are one answer
+        # -- the model ran and we cannot read what it did -- and catching only the
+        # narrow type let a list body escape as an `AttributeError` that this
+        # module's caller would have classified through its catch-all instead.
+        return _Attempt(evidence=f"the 200 carried no readable usage block: {exc}")
+    return _Attempt(usage=usage)
+
+
+_TRANSPORTS: dict[str, _Transport] = {
+    "messages": _Transport(
+        wire_protocol="messages", seam=_SEAM_BEDROCK,
+        max_output_tokens=_PROBE_MAX_OUTPUT_TOKENS,
+        input_tokens_est=_PROBE_INPUT_TOKENS_EST, call=_call_messages,
+    ),
+    "responses": _Transport(
+        wire_protocol="responses", seam=_SEAM_HTTP,
+        max_output_tokens=_RESPONSES_MAX_OUTPUT_TOKENS,
+        input_tokens_est=_PROBE_INPUT_TOKENS_EST, call=_call_responses,
+    ),
+}
+
+
 def probe(
     record: DiscoveredRecord, *, invocation: str, pricing_key: str, wire_protocol: str,
     bedrock: Optional[Any] = None, sts: Optional[Any] = None,
+    http: Optional[Any] = None,
 ) -> ProbeResult:
     """Perform the four assertions against `record`'s underlying Bedrock
     identity, under `invocation`, priced at `pricing_key`. Raises `ledger.
@@ -222,18 +463,40 @@ def probe(
     a verdict that only exists in a `ProbeResult` a caller forgot to persist
     is indistinguishable, to them, from a probe that never ran.
 
-    `bedrock`/`sts` are injection seams for tests, exactly like `mvp.
+    `bedrock`/`sts`/`http` are injection seams for tests, exactly like `mvp.
     discovery.reconcile.run_pass`'s own `bedrock`/`sts` parameters — built
-    lazily from `boto3` only when not supplied, never at import time.
+    lazily from `boto3`/`httpx` only when not supplied, never at import time.
+    `http` is the `"responses"` transport's seam (an `httpx.Client`, which a test builds
+    over `httpx.MockTransport`); `bedrock` is the `"messages"` one. Supplying the seam
+    that belongs to the OTHER transport raises `TypeError` rather than being ignored --
+    dropping it silently is how a test suite ends up minting a real bearer and billing a
+    real call.
     """
     if invocation not in INVOCATION_VALUES:
         raise ValueError(f"unknown invocation {invocation!r}; must be one of {sorted(INVOCATION_VALUES)}")
 
-    if wire_protocol != _SUPPORTED_WIRE_PROTOCOL:
+    transport = _TRANSPORTS.get(wire_protocol)
+    if transport is None:
         return _failure(
             invocation, "wire_protocol_unsupported",
-            f"probe does not implement wire_protocol={wire_protocol!r}; only "
-            f"{_SUPPORTED_WIRE_PROTOCOL!r} is implemented",
+            f"probe does not implement wire_protocol={wire_protocol!r}; implemented: "
+            f"{sorted(_TRANSPORTS)}",
+        )
+
+    # A client for the OTHER transport is a programming error, and the silent version
+    # of it is the expensive one: a test that passed `bedrock=` while asking for
+    # `"responses"` had its stub dropped, built a real pooled client, minted a real
+    # bearer and billed a real call. Raised rather than reported as a probe failure,
+    # because it is this process's mistake and not the provider's.
+    seams: dict[str, Optional[Any]] = {_SEAM_BEDROCK: bedrock, _SEAM_HTTP: http}
+    supplied_for_others = sorted(
+        name for name, value in seams.items()
+        if value is not None and name != transport.seam)
+    if supplied_for_others:
+        raise TypeError(
+            f"wire_protocol={wire_protocol!r} reads the {transport.seam!r} client seam, "
+            f"but {supplied_for_others} was supplied; a client for another transport "
+            f"would be dropped and a real endpoint called instead"
         )
 
     region = record.invocation_region or "us-east-1"
@@ -242,14 +505,17 @@ def probe(
     ledger.check_probe_rate_limit()
     ledger.check_probe_scope_eligibility(record)
 
+    # Sized from the transport, not from a module constant: the two protocols have
+    # different output caps, and a reservation that does not cover the cap the call
+    # actually sends would refuse the probe as unmetered.
     hold = ledger.open_probe_hold(
         pricing_key=pricing_key, model_id=record.raw_id, invocation=invocation,
-        input_tokens_est=_PROBE_INPUT_TOKENS_EST, max_output_tokens=_PROBE_MAX_OUTPUT_TOKENS,
+        input_tokens_est=transport.input_tokens_est,
+        max_output_tokens=transport.max_output_tokens,
     )
 
     from .. import _money
     from ..pricing import effective_rates, rate_usage, snapshot_rates
-    from .._converse_core import usage_from_bedrock
 
     # Assertion 4's resolvability half, checked against the SAME merged map
     # `mvp.pricing.rate_for`/`snapshot_rates` themselves resolve `pricing_key`
@@ -266,23 +532,15 @@ def probe(
     _, _merged_rates, _ = effective_rates()
     _pricing_key_resolves = pricing_key in _merged_rates
 
-    client = bedrock or _default_bedrock_client(region)
     observation_scope = _build_observation_scope(region=region, sts=sts)
 
-    kwargs = {
-        "modelId": record.raw_id,
-        "messages": [_PROBE_MESSAGE],
-        "inferenceConfig": {"maxTokens": _PROBE_MAX_OUTPUT_TOKENS},
-    }
-
     try:
-        hold.provider_call_starting()
-        if invocation == INVOCATION_STREAM:
-            resp = client.converse_stream(**kwargs)
-            usage_block = _drain_converse_stream(resp)
-        else:
-            resp = client.converse(**kwargs)
-            usage_block = resp.get("usage")
+        attempt = transport.call(
+            record=record, region=region, invocation=invocation,
+            max_output_tokens=transport.max_output_tokens,
+            on_wire=hold.provider_call_starting,
+            client=seams[transport.seam],
+        )
     except Exception as exc:  # noqa: BLE001 — assertion 1 failed; reported, not raised.
         _money.run_ending(hold.claim_unobserved(exc=exc))
         # Classify with the SAME, already-measured classifier the money path
@@ -301,7 +559,18 @@ def probe(
             return _failure(invocation, INDETERMINATE_SUBTYPE, str(exc))
         return _failure(invocation, "converse_call_failed", str(exc))
 
-    usage_event = usage_from_bedrock(usage_block)
+    if attempt.status_code is not None:
+        # The provider answered, and said no. The status goes through the SAME table
+        # serving resolves a status against (`provider_outcome.classify_http_status`,
+        # reached via `claim_unobserved(status_code=)`) rather than a probe-local
+        # reading of which codes are rejections.
+        _money.run_ending(hold.claim_unobserved(status_code=attempt.status_code))
+        return _failure(
+            invocation, "converse_call_failed",
+            f"provider answered HTTP {attempt.status_code}: {attempt.evidence}",
+        )
+
+    usage_event = attempt.usage
     if usage_event is None:
         # Assertion 2. Mirrors `mvp.anthropic`'s own non-streaming handling of
         # this exact case: a 200 with no readable usage is SUBMITTED_UNSETTLED
@@ -311,7 +580,7 @@ def probe(
         _money.run_ending(hold.claim_unobserved(state=SUBMITTED_UNSETTLED))
         return _failure(
             invocation, "usage_counters_missing",
-            "Converse response carried no readable usage block",
+            attempt.evidence or "the response carried no readable usage block",
         )
 
     rate_snapshot = snapshot_rates(pricing_key)
