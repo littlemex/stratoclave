@@ -579,3 +579,149 @@ def test_activation_drops_this_process_composed_registry_cache(
         "in the process that performed it -- the writer is being made to wait "
         "for the fleet's staleness window"
     )
+
+
+# ---------------------------------------------------------------------------
+# A deployment that cannot observe its own activation must not report one.
+#
+# Both tests below are about the same defect, measured on a real deployment:
+# with the activated-entry store present but the task role's `dynamodb:Scan`
+# grant for it absent, every activation committed, answered 200 carrying the
+# entry it had just written, and stayed absent from `/v1/models`, from routing
+# and from the entitlement surface. The registry's refresh is fail-static by
+# design -- it keeps its last known-good activated set and logs, rather than
+# emptying, on a failed read -- which is correct, and which made the symptom
+# identical to never having promoted anything at all. The only evidence was a
+# log line.
+#
+# So there are two things to pin, and they are different claims: that a
+# deployment which cannot READ the store refuses BEFORE writing, and that a
+# commit whose readback fails anyway is reported to the caller instead of
+# being swallowed.
+# ---------------------------------------------------------------------------
+
+def test_activation_refuses_before_writing_when_the_store_cannot_be_read(
+    dynamodb_mock, monkeypatch,
+):
+    """A store this deployment cannot list is a store whose activations nobody
+    can see, so the attempt refuses with nothing committed.
+
+    Asserted on the store rather than only on the exception: "it raised" would
+    also be satisfied by an implementation that raised AFTER committing, which
+    is the strictly worse outcome -- a live row nobody asked to keep, plus an
+    error. The assertion is therefore that the ACTIVE# row is absent
+    afterwards.
+    """
+    from mvp.discovery import activation as activation_mod
+    from mvp.discovery.activation import (
+        ActivationStoreUnavailable, activate_candidate, get_activated_entry,
+    )
+    from mvp.discovery.promotion import put_promotion_candidate
+    from mvp.discovery.records import put_discovered_record
+    from mvp.discovery.verdict import put_probe_verdict
+    from mvp.models import invalidate_composed_registry
+
+    # Seed UNPATCHED and drop the composed registry first. The registry cache is
+    # process-local and outlives a test, and the patch below is exactly what stops
+    # it refreshing -- so a patch applied any earlier would leave a previous
+    # test's activation stale-cached and make candidate creation refuse
+    # `identifier_taken`, which is not what this test is about.
+    invalidate_composed_registry()
+    cand = _candidate()
+    verdict = _verdict()
+    put_discovered_record(_discovered_record(cand))
+    put_promotion_candidate(cand)
+    put_probe_verdict(verdict)
+    _grant_only(monkeypatch, "promoter", frozenset({_PROMOTE_SCOPE}))
+
+    def _unreadable():
+        raise ActivationStoreUnavailable(
+            "activated-entry store unreachable listing entries: AccessDeniedException"
+        )
+
+    monkeypatch.setattr(activation_mod, "list_activated_entries", _unreadable)
+
+    with pytest.raises(ActivationStoreUnavailable):
+        activate_candidate(
+            _PROFILE_ID, _INVOCATION, actor=_actor(["promoter"]),
+            expected_verified_at=verdict.verified_at,
+        )
+
+    assert get_activated_entry(_PROFILE_ID) is None, (
+        "the activation committed even though this deployment cannot list the "
+        "store it committed to -- the row is live and unobservable, which is "
+        "the outcome refusing early exists to prevent"
+    )
+
+
+def test_a_commit_the_registry_cannot_see_is_reported_to_the_caller(
+    dynamodb_mock, monkeypatch,
+):
+    """When the write lands but the readback does not find it, the caller is
+    told so, rather than handed a success indistinguishable from a no-op.
+
+    The readback is forced to fail here by emptying what the registry reports,
+    which stands in for every real cause (a revoked grant, a throttle, a
+    replica reading a table it cannot see). What is being pinned is not the
+    cause but that the caller's result carries the fact at all: before this,
+    the only way to learn it was to read the server's own log.
+    """
+    from mvp.discovery import activation as activation_mod
+    from mvp.discovery.activation import activate_candidate
+    from mvp.discovery.promotion import put_promotion_candidate
+    from mvp.discovery.records import put_discovered_record
+    from mvp.discovery.verdict import put_probe_verdict
+
+    cand = _candidate()
+    verdict = _verdict()
+    put_discovered_record(_discovered_record(cand))
+    put_promotion_candidate(cand)
+    put_probe_verdict(verdict)
+    _grant_only(monkeypatch, "promoter", frozenset({_PROMOTE_SCOPE}))
+    actor = _actor(["promoter"])
+
+    # The readback reads `mvp.models.registry_entries`, imported inside the
+    # helper, so the patch has to land on the module that owns it.
+    import mvp.models as models_mod
+
+    monkeypatch.setattr(models_mod, "registry_entries", lambda: ())
+
+    entry, unobservable_reason = activate_candidate(
+        _PROFILE_ID, _INVOCATION, actor=actor,
+        expected_verified_at=verdict.verified_at,
+    )
+
+    assert entry.bedrock_model_id == cand.bedrock_model_id
+    assert unobservable_reason is not None, (
+        "the commit landed and the registry could not see it, and the caller "
+        "was handed a bare success -- which is exactly the shape a missing "
+        "Scan grant produced on a real deployment"
+    )
+    assert cand.bedrock_model_id in unobservable_reason, (
+        "the reason must name the identity that is unreachable, or an operator "
+        "reading it cannot act on it"
+    )
+
+
+def test_a_healthy_activation_reports_no_unobservable_reason(dynamodb_mock, monkeypatch):
+    """The negative control. Without this, the two tests above are satisfied by
+    an implementation that always reports a problem, which would be useless in
+    the opposite direction."""
+    from mvp.discovery.activation import activate_candidate
+    from mvp.discovery.promotion import put_promotion_candidate
+    from mvp.discovery.records import put_discovered_record
+    from mvp.discovery.verdict import put_probe_verdict
+
+    cand = _candidate()
+    verdict = _verdict()
+    put_discovered_record(_discovered_record(cand))
+    put_promotion_candidate(cand)
+    put_probe_verdict(verdict)
+    _grant_only(monkeypatch, "promoter", frozenset({_PROMOTE_SCOPE}))
+
+    _, unobservable_reason = activate_candidate(
+        _PROFILE_ID, _INVOCATION, actor=_actor(["promoter"]),
+        expected_verified_at=verdict.verified_at,
+    )
+
+    assert unobservable_reason is None, unobservable_reason
