@@ -140,3 +140,49 @@ class TestTheHandlerHandsTheSettleNothingRatherThanAZero:
                 f"{frame['type']} handed the settle a usage value it must not have; "
                 "a zero here is a charge of nothing for a model that ran"
             )
+
+
+class TestAConflictedFrameStillReachesTheSanitiser:
+    """A frame whose `event:` line and payload `"type"` disagree resolves to NO event
+    type. Comparing that against a list of error types lets it through, and the frame is
+    forwarded to the client verbatim -- so an error payload carrying an ARN or an account
+    id escapes the redaction the route performs on every error frame it recognises.
+
+    Asserting `usage is None` does not catch this: metering and redaction are different
+    decisions about the same frame, and only one of them was being made.
+    """
+
+    def test_an_error_payload_under_a_conflicting_event_line_is_sanitised(self):
+        arn = "arn:aws:bedrock:us-east-1:776010787911:inference-profile/us.openai.gpt-5.6-sol"
+        raw = (
+            "event: response.completed\n"
+            f"data: {json.dumps({'type': 'error', 'error': {'message': f'denied for {arn}'}})}\n\n"
+        ).encode("utf-8")
+
+        out, usage, _id = _handle_sse_event(raw)
+
+        assert usage is None, "a contradicted frame must not be metered"
+        assert arn.encode() not in out, (
+            "the ARN reached the client: a conflicted frame bypassed the error "
+            f"sanitiser. forwarded bytes: {out!r}"
+        )
+
+    def test_a_plain_error_frame_is_still_sanitised(self):
+        """The non-vacuous companion, in the shape this endpoint actually sends: no
+        `event:` line at all."""
+        arn = "arn:aws:bedrock:us-east-1:776010787911:inference-profile/x"
+        raw = (
+            f"data: {json.dumps({'type': 'error', 'error': {'message': f'denied for {arn}'}})}\n\n"
+        ).encode("utf-8")
+
+        out, _usage, _id = _handle_sse_event(raw)
+        assert arn.encode() not in out, out
+
+    def test_a_normal_terminal_is_not_treated_as_an_error(self):
+        """And the control in the other direction: widening the error test must not
+        route a healthy terminal into the sanitiser, which would rewrite the frame the
+        client is parsing."""
+        raw = _frame("response.completed", with_event_line=False)
+        out, usage, _id = _handle_sse_event(raw)
+        assert usage is not None
+        assert out == raw, "a healthy terminal was rewritten"

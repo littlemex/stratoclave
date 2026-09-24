@@ -690,3 +690,57 @@ def test_a_stream_with_no_terminal_at_all_is_not_settled(
         b"".join(resp.iter_bytes())
 
     assert not _stub_credit_pipeline, _stub_credit_pipeline
+
+
+_MEASURED_CACHE_HIT = {
+    "input_tokens": 3527,
+    "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 3525},
+    "output_tokens": 16,
+    "output_tokens_details": {"reasoning_tokens": 16},
+    "total_tokens": 3543,
+}
+_MEASURED_COLD_WRITE = {
+    "input_tokens": 3527,
+    "input_tokens_details": {"cache_write_tokens": 3525, "cached_tokens": 0},
+    "output_tokens": 16,
+    "output_tokens_details": {"reasoning_tokens": 16},
+    "total_tokens": 3543,
+}
+
+
+@pytest.mark.parametrize(
+    "usage,expected",
+    [(_MEASURED_CACHE_HIT, (2, 3525, 0, 16)), (_MEASURED_COLD_WRITE, (2, 0, 3525, 16))],
+    ids=["cache-hit", "cold-write"],
+)
+def test_the_route_settles_the_decomposed_legs_not_the_raw_input(
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline, usage, expected
+):
+    """The cache fixtures at the ROUTE, which is where the double charge lived.
+
+    Every other route test here uses zero cache counts, so a settle that still passed the
+    raw `input_tokens` beside a cache leg stayed green. With the measured numbers the
+    difference is unmissable: 3,527 against 2 on the base leg.
+    """
+    sse = _data_only_frame({"type": "response.completed",
+                            "response": {"id": "r", "usage": usage}})
+    app = install_openai_stream(sse)
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app).stream(
+        "POST", "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
+    ) as resp:
+        assert resp.status_code == 200, resp.read()
+        b"".join(resp.iter_bytes())
+
+    assert _stub_credit_pipeline, "settle_reservation_and_log was never called"
+    last = _stub_credit_pipeline[-1]
+    base, read, write, out = expected
+    assert last["actual_input_tokens"] == base, (
+        f"the base leg was settled as {last['actual_input_tokens']}, not {base}; the "
+        f"cache count is still being billed at the full input rate as well"
+    )
+    assert last["actual_output_tokens"] == out, last

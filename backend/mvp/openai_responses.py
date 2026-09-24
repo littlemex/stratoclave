@@ -1151,21 +1151,14 @@ def _responses_settled_usage(usage_block: Any) -> _money.Usage:
     return _responses_settled_usage_from(_wire.usage_from_responses(usage_block))
 
 
-def _responses_settled_usage_from(parsed: Any) -> _money.Usage:
-    """The one mapping from the wire's `Usage` to the ledger's. Shared by the streaming
-    and the non-streaming settle so the two cannot decompose one block differently.
-
-    It exists because the cache counts on this endpoint are SUBSETS of `input_tokens`
-    (measured; see `_responses_wire.usage_from_responses`) while `mvp.pricing.rate_usage`
-    sums its four legs independently. Passing the raw `input_tokens` beside a cache
-    count therefore billed the cached portion twice -- which on a measured 9,927-token
-    prompt whose whole prefix was written to cache meant 9,925 tokens charged at the
-    full input rate on top of the correct cache-write leg.
-    """
-    return _money.Usage(
-        input_tokens=parsed.input, output_tokens=parsed.output,
-        cache_read_tokens=parsed.cache_read, cache_write_tokens=parsed.cache_write,
-    )
+#: The one mapping from the wire's `Usage` to the ledger's, shared with the discovery
+#: probe (`mvp._responses_wire.ledger_usage`). It exists because the cache counts on this
+#: endpoint are SUBSETS of `input_tokens` while `mvp.pricing.rate_usage` sums its four
+#: legs independently, so passing the raw `input_tokens` beside a cache count billed the
+#: cached portion twice -- 9,925 tokens at the full input rate on a measured 9,927-token
+#: prompt whose whole prefix went to cache. Aliased rather than re-implemented: a probe
+#: verdict is a claim about what THIS settle will bill.
+_responses_settled_usage_from = _wire.ledger_usage
 
 
 def _handle_sse_event(
@@ -1208,7 +1201,8 @@ def _handle_sse_event(
     # decision below must treat `None` as unobserved, never as zero.
     terminal = _wire.terminal_usage_from_frame(raw)
     usage: Optional[_money.Usage] = (
-        _responses_settled_usage_from(terminal.usage) if terminal.usage else None)
+        _responses_settled_usage_from(terminal.usage)
+        if terminal.usage is not None else None)
     minted_id: Optional[str] = terminal.response_id
 
     # The SAME effective type the usage branch above resolves, not the raw `event:`
@@ -1218,7 +1212,13 @@ def _handle_sse_event(
     # guarantee for ARNs and account ids held only for a frame shape this endpoint
     # does not produce. `error` and `response.failed` are both error-shaped terminals
     # a client must not receive unsanitised.
-    if terminal.event_type in ("error", "response.failed") or event_name == "error":
+    # `is_error_shaped()` rather than a type comparison: a frame whose `event:` line and
+    # payload `"type"` disagree resolves to NO type, and comparing against one would let
+    # such a frame through unsanitised -- an error payload carrying an ARN or an account
+    # id, forwarded to the client verbatim. The wire treats "I could not tell what this
+    # is, and one source said error" as error-shaped, which is the safe reading for
+    # redaction.
+    if terminal.is_error_shaped():
         # A-03-sse: when the upstream error payload does not match the
         # expected JSON shape (`{"error": {"message": "..."}}`) the
         # sanitizer returns None, and previously we forwarded the raw

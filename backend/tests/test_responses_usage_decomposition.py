@@ -177,3 +177,51 @@ class TestTheSubsetReadingIsNotAppliedWithoutEvidenceForIt:
             "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
         })
         assert (parsed.input, parsed.output) == (7, 5)
+
+
+class TestTheWriteLegIsActuallyPriced:
+    """Moving tokens off the input leg only helps if the leg they move TO has a rate.
+
+    The cache-hit test above asserts the total goes down, which a cache-write rate of
+    zero would also satisfy -- and a zero there is not a smaller bill, it is 9,925 tokens
+    billed at nothing on every cold or extended prompt, which fact 4 of the measurements
+    shows is every prefix extension.
+    """
+
+    def test_a_responses_tier_prices_both_cache_legs(self):
+        from mvp.pricing import snapshot_rates
+
+        snapshot = snapshot_rates("gpt-5.6-sol")
+        assert snapshot.cache_write_per_mtok_microusd > 0, (
+            "the write leg has no rate, so every token moved onto it is billed at "
+            "nothing"
+        )
+        assert snapshot.cache_read_per_mtok_microusd > 0
+
+    def test_a_cold_write_is_billed_more_than_it_was_not_less(self):
+        """The direction, stated because it is counter-intuitive and because getting it
+        wrong in a change description is a billing claim that is false.
+
+        A cache WRITE gets dearer: those tokens were previously inside `input_tokens` at
+        the base rate, and the rate card prices writes above it (5.50 against 6.875 per
+        MTok, both read from the card). So this change corrects an UNDER-charge on writes
+        at the same time as an over-charge on reads. Only the read case gets cheaper.
+        """
+        from mvp.pricing import rate_usage, snapshot_rates
+
+        snapshot = snapshot_rates("gpt-5.6-sol")
+        parsed = usage_from_responses(MEASURED_COLD_WRITE)
+        fixed = rate_usage(
+            snapshot, input_tokens=parsed.input, output_tokens=parsed.output,
+            cache_read_tokens=parsed.cache_read, cache_write_tokens=parsed.cache_write,
+        )
+        previous = rate_usage(
+            snapshot, input_tokens=MEASURED_COLD_WRITE["input_tokens"],
+            output_tokens=MEASURED_COLD_WRITE["output_tokens"],
+            cache_read_tokens=0, cache_write_tokens=None,
+        )
+        assert fixed.total_cost_microusd > previous.total_cost_microusd, (
+            "a cold write now costs no more than before, which means the write leg is "
+            "not being priced"
+        )
+        assert snapshot.cache_write_per_mtok_microusd > snapshot.input_per_mtok_microusd

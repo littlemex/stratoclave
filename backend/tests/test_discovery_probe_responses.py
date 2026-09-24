@@ -501,3 +501,57 @@ class TestTheLedgerEffect:
                        wire_protocol="responses", http=_client(handler))
         assert result.passed is False
         assert len(self._usage_rows()) == before, "a rejected attempt wrote a usage row"
+
+
+class TestAFaultWhileClosingTheStream:
+    """The half a mock raising from `__iter__` cannot reproduce, and the one five
+    independent reviewers named: the protective return used to sit AFTER the `with`, so
+    an exception raised while the context manager CLOSED a broken connection skipped it
+    and the validated measurement was discarded."""
+
+    def test_a_close_that_raises_after_the_terminal_keeps_the_charge(
+        self, _system_tenant_pool
+    ):
+        frame = (
+            f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'r', 'usage': MEASURED_USAGE}})}\n\n"
+        ).encode("utf-8")
+
+        class _RaisesOnClose(httpx.SyncByteStream):
+            def __iter__(self):
+                yield frame
+
+            def close(self) -> None:
+                raise httpx.ReadError("connection reset while closing")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_RaisesOnClose(),
+                                  headers={"content-type": "text/event-stream"})
+
+        from mvp.discovery.probe import probe
+
+        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
+                       wire_protocol="responses", http=_client(handler))
+        assert result.passed is True, result.blocker
+        assert result.charged_microusd and result.charged_microusd > 0
+
+    def test_a_close_that_raises_without_a_terminal_is_still_a_failure(
+        self, _system_tenant_pool
+    ):
+        """The negative control: tolerating a close fault after a terminal must not
+        tolerate one instead of a terminal."""
+        class _RaisesOnClose(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b'data: {"type": "response.created"}\n\n'
+
+            def close(self) -> None:
+                raise httpx.ReadError("connection reset while closing")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_RaisesOnClose(),
+                                  headers={"content-type": "text/event-stream"})
+
+        from mvp.discovery.probe import probe
+
+        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
+                       wire_protocol="responses", http=_client(handler))
+        assert result.passed is False

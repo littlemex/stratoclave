@@ -219,6 +219,26 @@ def usage_from_responses(usage: Any) -> t.Usage:
     )
 
 
+def ledger_usage(parsed: t.Usage) -> Any:
+    """`parsed` as the ledger's own `Usage`. The ONE mapping to the money type.
+
+    Here rather than in either caller because the probe's verdict is a claim about what
+    SERVING will bill, and that claim only holds if the two convert a parsed block to a
+    charge the same way. They shared the parser and then each built the money object
+    themselves, which left one edit -- dropping a cache leg on one side -- able to make a
+    passing verdict certify a charge nobody computes.
+
+    Imported lazily: `mvp._money` pulls in the ledger and its stores, and this module is
+    imported by an ops probe that must not depend on them to read a frame.
+    """
+    from . import _money
+
+    return _money.Usage(
+        input_tokens=parsed.input, output_tokens=parsed.output,
+        cache_read_tokens=parsed.cache_read, cache_write_tokens=parsed.cache_write,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The frames
 # ---------------------------------------------------------------------------
@@ -235,6 +255,12 @@ SSE_DEFAULT_EVENT = "message"
 METERED_TERMINAL_TYPES: frozenset[str] = frozenset({
     "response.completed", "response.incomplete",
 })
+
+
+#: The error-shaped events a client must never receive unsanitised. `response.failed` is
+#: here as well as `error` because it is the terminal a failed generation ends on and its
+#: payload carries provider text.
+ERROR_EVENT_TYPES: frozenset[str] = frozenset({"error", "response.failed"})
 
 
 class SSEFrameConflict(ValueError):
@@ -345,6 +371,30 @@ class TerminalFrame:
     payload: Optional[dict[str, Any]]
     usage: Optional[t.Usage] = None
     response_id: Optional[str] = None
+    #: True when the frame's two sources named different events. The type is then NOT
+    #: trusted for metering, but the frame still has to be treated as error-shaped if
+    #: either source said so: a conflicted frame carrying an error payload was otherwise
+    #: forwarded to the client raw, which defeats the ARN/account-id redaction the route
+    #: performs on every error frame it recognises.
+    conflicted: bool = False
+
+    def is_error_shaped(self) -> bool:
+        """Whether this frame must go through the route's error sanitiser.
+
+        Deliberately wider than `event_type in ERROR_TYPES`: a frame this module refused
+        to type still counts if EITHER source named an error. Redaction is the one
+        decision where the safe reading of "I could not tell what this is" is to assume
+        the worse of the two.
+        """
+        if self.event_type in ERROR_EVENT_TYPES:
+            return True
+        if not self.conflicted:
+            return False
+        return any(
+            name in ERROR_EVENT_TYPES for name in (self.line_type, self.body_type))
+
+    line_type: Optional[str] = None
+    body_type: Optional[str] = None
 
 
 def terminal_usage_from_frame(frame: bytes) -> TerminalFrame:
@@ -376,21 +426,30 @@ def terminal_usage_from_frame(frame: bytes) -> TerminalFrame:
         if isinstance(decoded, dict):
             payload = decoded
 
+    line_type = (
+        event_name if event_name and event_name != SSE_DEFAULT_EVENT else None)
+    body_type = None
+    if isinstance(payload, dict) and isinstance(payload.get("type"), str):
+        body_type = payload["type"] or None
     try:
         event_type = sse_event_type(event_name, payload)
     except SSEFrameConflict as conflict:
         logger.error("sse_frame_type_conflict", extra={"error": str(conflict)})
-        return TerminalFrame(event_type=None, payload=payload)
+        return TerminalFrame(
+            event_type=None, payload=payload, conflicted=True,
+            line_type=line_type, body_type=body_type)
 
     if event_type not in METERED_TERMINAL_TYPES or payload is None:
-        return TerminalFrame(event_type=event_type, payload=payload)
+        return TerminalFrame(event_type=event_type, payload=payload,
+                             line_type=line_type, body_type=body_type)
 
     response_block = payload.get("response")
     if not isinstance(response_block, dict):
         logger.error(
             "responses_terminal_frame_missing_response_object",
             extra={"event_type": event_type})
-        return TerminalFrame(event_type=event_type, payload=payload)
+        return TerminalFrame(event_type=event_type, payload=payload,
+                             line_type=line_type, body_type=body_type)
 
     response_id = response_block.get("id")
     try:
@@ -402,8 +461,10 @@ def terminal_usage_from_frame(frame: bytes) -> TerminalFrame:
         return TerminalFrame(
             event_type=event_type, payload=payload,
             response_id=response_id if isinstance(response_id, str) else None,
+            line_type=line_type, body_type=body_type,
         )
     return TerminalFrame(
         event_type=event_type, payload=payload, usage=usage,
         response_id=response_id if isinstance(response_id, str) else None,
+        line_type=line_type, body_type=body_type,
     )
