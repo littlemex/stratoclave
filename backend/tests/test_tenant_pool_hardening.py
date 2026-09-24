@@ -1005,17 +1005,17 @@ def test_settle_after_pool_row_deleted_is_noop(seed_tenant_with_pool):
 def test_hold_ttl_has_a_floor(monkeypatch):
     """A mis-set env var (e.g. a throwaway "60") must not shrink the TTL below
     the floor, or every in-flight hold would be falsely reaped."""
-    import importlib
+    from tests.module_isolation import fresh_copy
 
     monkeypatch.setenv("STRATOCLAVE_POOL_HOLD_TTL_SECONDS", "60")
-    reloaded = importlib.reload(_pipeline)
-    try:
-        assert reloaded._HOLD_TTL_SECONDS >= reloaded._HOLD_TTL_FLOOR_SECONDS
-        assert reloaded._HOLD_TTL_SECONDS == reloaded._HOLD_TTL_FLOOR_SECONDS
-    finally:
-        # Restore the module to the default env for the rest of the suite.
-        monkeypatch.delenv("STRATOCLAVE_POOL_HOLD_TTL_SECONDS", raising=False)
-        importlib.reload(_pipeline)
+    # A copy, not `importlib.reload(_pipeline)`: a reload replaces the pipeline's
+    # classes and exceptions in place, and every module that imported one by name keeps
+    # the old object -- so an `except` elsewhere in the run stops catching what the
+    # reloaded module raises. The copy runs the same import-time code and touches
+    # nothing else.
+    copy = fresh_copy(_pipeline)
+    assert copy._HOLD_TTL_SECONDS >= copy._HOLD_TTL_FLOOR_SECONDS
+    assert copy._HOLD_TTL_SECONDS == copy._HOLD_TTL_FLOOR_SECONDS
 
 
 # --- amount<=0 holds are cleaned, not skipped forever ----------------------
