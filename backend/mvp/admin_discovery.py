@@ -698,6 +698,13 @@ class ActivateResponse(BaseModel):
     jurisdiction_bounded: bool
     jurisdiction: Optional[str] = None
     identifiers: list[str]
+    # `None` in the normal case. Otherwise: the activation committed, and the
+    # registry this deployment serves from cannot see it. Present on a 200 rather
+    # than turned into an error because the write really did land -- the same
+    # reading `put_entitlement` applies to a committed grant whose audit event was
+    # dropped. Without this field a caller's only evidence is the entry it already
+    # held, which is why a missing Scan grant read, from here, exactly like success.
+    unobservable_reason: Optional[str] = None
 
 
 #: `ActivationRefused.reason` -> HTTP status. `NOT_PERMITTED` is 403 even
@@ -765,7 +772,7 @@ def activate_promotion_candidate(
             },
         )
     try:
-        entry = activate_candidate(
+        entry, unobservable_reason = activate_candidate(
             profile_id, body.invocation, actor=actor, expected_verified_at=body.verified_at,
         )
     except ActivationRefused as exc:
@@ -789,4 +796,5 @@ def activate_promotion_candidate(
         profile_scope=entry.profile_scope, model_family=entry.model_family,
         access=entry.access, jurisdiction_bounded=entry.jurisdiction_bounded,
         jurisdiction=entry.jurisdiction, identifiers=identifiers,
+        unobservable_reason=unobservable_reason,
     )

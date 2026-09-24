@@ -660,6 +660,19 @@ export class EcsStack extends cdk.Stack {
     //
     // DO NOT add `permissions` back here — the invariant is pinned by
     // iac/test/ecs-stack-scan-allowlist.test.ts.
+    //
+    // `promotion-candidates` is here because the composed model registry reads
+    // it with a Scan on every TTL refresh: `mvp.discovery.activation.
+    // list_activated_entries` is a documented `Scan` narrowed to `ACTIVE#` rows
+    // ("not a GSI query: the promotion-candidate table's own index layout is
+    // unit 1's to design"), and `mvp.models._ComposedRegistry` is its only
+    // caller. Without the grant, that refresh fails static: every activation
+    // commits, answers 200, and is then invisible to `/v1/models`, to the
+    // entitlement grant surface, and to routing — measured on a real
+    // deployment as `composed_registry_activated_half_unreadable` with
+    // AccessDeniedException on Scan, which is the one failure shape a promoted
+    // model cannot be told apart from "never promoted" by anything the
+    // operator can see.
     const scanTableSuffixes = [
       'users',
       'api-keys',
@@ -667,6 +680,7 @@ export class EcsStack extends cdk.Stack {
       'trusted-accounts',
       'sso-pre-registrations',
       'user-tenants',
+      'promotion-candidates',
     ];
     const scanResources: string[] = [];
     for (const suffix of scanTableSuffixes) {

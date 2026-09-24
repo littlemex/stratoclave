@@ -44,6 +44,15 @@ from core.logging import get_logger
 from dynamo import UserTenantsRepository
 
 from . import _money, _openai_transport
+from . import _responses_wire as _wire
+from ._responses_wire import (  # re-exported: this module's own tests name them
+    METERED_TERMINAL_TYPES as _METERED_TERMINAL_TYPES,
+    ResponsesUsageShapeError,
+    SSEFrameConflict,
+    drain_events as _drain_events,
+    parse_sse_frame as _parse_sse_frame,
+    sse_event_type,
+)
 from . import provider_outcome as _provider_outcome
 from ._pipeline import (
     eligibility_listing_context,
@@ -371,6 +380,12 @@ async def _openai_auth(region: str) -> dict[str, str]:
 
 def _extract_usage(usage: dict[str, Any]) -> tuple[int, int]:
     """Return `(input_tokens, output_tokens)` from a usage block.
+
+    NOT used by this route's settle any more, and must not be: it answers `(0, 0)` for
+    a missing block and 0 for a missing leg, which on a money path turns a counter
+    nobody read into a measured zero. The settle reads
+    `mvp._responses_wire.usage_from_responses`, which raises instead. Kept because it
+    is the lax reading the Chat spelling shares and its own tests name it.
 
     Delegates to `_openai_transport`, which accepts both the Responses and Chat
     Completions spellings — the two the OpenAI-compatible endpoint routes share one parser.
@@ -808,11 +823,13 @@ async def create_response(
     # A 200 whose body will not parse means the model RAN and we cannot read what
     # it did — neither a settle nor a free failure. Letting the exception escape
     # would strand the hold and the pool slot until the reaper.
+    # A 200 whose usage block will not parse is the same case as a body that will not
+    # parse: the model RAN and we cannot read what it did. `_responses_settled_usage`
+    # raises rather than reporting a zero for an unread counter, which is what puts this
+    # on the unobserved path instead of settling a charge nobody measured.
     try:
         data = resp.json()
-        _usage_block = data.get("usage", {})
-        input_tokens, output_tokens = _extract_usage(_usage_block)
-        _cache_read, _cache_write = _openai_transport.extract_cache_usage(_usage_block)
+        settled = _responses_settled_usage(data.get("usage"))
     except Exception as e:  # noqa: BLE001
         ending = hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED)
         if ending is not None:
@@ -821,13 +838,7 @@ async def create_response(
             status_code=502,
             detail=f"malformed upstream response: {sanitize_exception_message(str(e))}",
         )
-    ending = hold.claim_settle(
-        # `None` for a cache leg means this transport did not report it — stated
-        # rather than defaulted, so the ledger does not record a measured zero for a
-        # field nobody read (contract C8.1).
-        _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens,
-                     cache_read_tokens=_cache_read, cache_write_tokens=_cache_write)
-    )
+    ending = hold.claim_settle(settled)
     if ending is not None:
         await ending.awaited()
     # SAAR post-settle: persist the session's routing state. A minted response id
@@ -891,8 +902,18 @@ async def _stream_response(
         ``response.completed`` usage block (concatenating multi-line
         data per the SSE spec).
     """
-    input_tokens = 0
-    output_tokens = 0
+    # One value, not two ints: the cache legs have to reach every settle site below or
+    # the stream charges the cached portion of its prompt at the full input rate.
+    # Spelled out rather than `_money.Usage()` so this is visibly the same "nothing
+    # observed yet" state the three sites built from two zeroes before.
+    settled = _money.Usage(input_tokens=0, output_tokens=0)
+    # Whether a terminal event ever handed us a usage block we could READ. Separate from
+    # `settled` being all-zero, because a model that answered nothing and a model whose
+    # counters we could not parse are different facts and only one of them may be
+    # settled. Without this flag the post-loop `claim_settle` charges a measured zero
+    # for a stream whose terminal frame was unreadable, contradicted itself, or never
+    # arrived -- exactly what the parser refuses to do, undone one layer up.
+    terminal_usage_observed = False
     # `sent`: the upstream request was started, so a charge may exist.
     # `provider_responded`: at least one event came back (see claim_stream_interrupted).
     sent = False
@@ -972,7 +993,8 @@ async def _stream_response(
                         # loop had not yet updated — the usage was in our hands and
                         # we would have charged nothing for it.
                         if usage is not None:
-                            input_tokens, output_tokens = usage
+                            settled = usage
+                            terminal_usage_observed = True
                         if ev_id is not None:
                             minted_id = ev_id
                         if out_bytes:
@@ -998,7 +1020,8 @@ async def _stream_response(
                     if ev_id is not None:
                         minted_id = ev_id
                     if usage is not None:
-                        input_tokens, output_tokens = usage
+                        settled = usage
+                        terminal_usage_observed = True
                     if out_bytes:
                         provider_responded = True
                         if not (
@@ -1042,7 +1065,7 @@ async def _stream_response(
             # `provider_responded` is the caller's own fact — the usage block is the
             # last event, so the counts cannot answer whether the provider answered.
             ending = hold.claim_stream_interrupted(
-                _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+                settled,
                 provider_responded=provider_responded, sent=sent, exc=e,
             )
             yield _sse_event(
@@ -1062,9 +1085,20 @@ async def _stream_response(
                 await ending.awaited()
             return
 
-        ending = hold.claim_settle(_money.Usage(
-            input_tokens=input_tokens, output_tokens=output_tokens,
-        ))
+        if terminal_usage_observed:
+            ending = hold.claim_settle(settled)
+        else:
+            # The stream ran to a clean close and we cannot say what it did: no terminal
+            # event arrived, or its usage would not parse, or the frame contradicted
+            # itself. The model ran, so this is not a zero charge -- it is an unobserved
+            # outcome and the ceiling stays held. The same reading the discovery probe
+            # gives the identical condition, so the two cannot disagree about the case
+            # that matters most.
+            logger.error(
+                "responses_stream_closed_without_readable_usage",
+                extra={"model_id": entry.bedrock_model_id},
+            )
+            ending = hold.claim_unobserved(state=_provider_outcome.SUBMITTED_UNSETTLED)
         if ending is not None:
             await ending.awaited()
         # SAAR post-settle (stream): persist routing state, storing the ACTUAL
@@ -1092,7 +1126,7 @@ async def _stream_response(
         # ending that already ran makes this a no-op, and awaiting in a closing
         # async generator is unsafe, so the claimed write is detached.
         hold.close(
-            _money.Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+            settled,
             sent=sent, provider_responded=provider_responded,
         )
 
@@ -1108,31 +1142,30 @@ async def _stream_response(
 # JSON, and only triggers a usage read for `response.completed` events.
 
 
-def _drain_events(buffer: bytearray) -> list[bytes]:
-    """Pop every fully-terminated SSE event from `buffer` (in place).
+def _responses_settled_usage(usage_block: Any) -> _money.Usage:
+    """The billable legs of a `/responses` usage block, for `claim_settle`.
 
-    SSE event boundaries are blank lines: either `\\n\\n` or
-    `\\r\\n\\r\\n` per the spec. We search for whichever appears first
-    and slice up to and including it. Bytes that do not yet contain a
-    terminator stay in the buffer for the next chunk.
+    Raises `ResponsesUsageShapeError` for a block it cannot read. The caller must treat
+    that as an unobserved outcome, never as a zero charge.
     """
-    events: list[bytes] = []
-    while True:
-        # Find the earliest event terminator. `find` returns -1 if absent.
-        crlf = buffer.find(b"\r\n\r\n")
-        lf = buffer.find(b"\n\n")
-        if crlf == -1 and lf == -1:
-            break
-        if crlf == -1:
-            cut = lf + 2
-        elif lf == -1:
-            cut = crlf + 4
-        else:
-            # Take the boundary that ends earliest in the buffer.
-            cut = min(lf + 2, crlf + 4)
-        events.append(bytes(buffer[:cut]))
-        del buffer[:cut]
-    return events
+    return _responses_settled_usage_from(_wire.usage_from_responses(usage_block))
+
+
+def _responses_settled_usage_from(parsed: Any) -> _money.Usage:
+    """The one mapping from the wire's `Usage` to the ledger's. Shared by the streaming
+    and the non-streaming settle so the two cannot decompose one block differently.
+
+    It exists because the cache counts on this endpoint are SUBSETS of `input_tokens`
+    (measured; see `_responses_wire.usage_from_responses`) while `mvp.pricing.rate_usage`
+    sums its four legs independently. Passing the raw `input_tokens` beside a cache
+    count therefore billed the cached portion twice -- which on a measured 9,927-token
+    prompt whose whole prefix was written to cache meant 9,925 tokens charged at the
+    full input rate on top of the correct cache-write leg.
+    """
+    return _money.Usage(
+        input_tokens=parsed.input, output_tokens=parsed.output,
+        cache_read_tokens=parsed.cache_read, cache_write_tokens=parsed.cache_write,
+    )
 
 
 def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Optional[str]]:
@@ -1164,18 +1197,17 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Opt
 
     event_name, data_payload = _parse_sse_frame(text)
 
-    usage: Optional[tuple[int, int]] = None
-    minted_id: Optional[str] = None
-    if event_name == "response.completed" and data_payload is not None:
-        try:
-            obj = json.loads(data_payload)
-        except (json.JSONDecodeError, TypeError):
-            obj = None
-        if isinstance(obj, dict):
-            response_block = obj.get("response")
-            if isinstance(response_block, dict):
-                usage = _extract_usage(response_block.get("usage", {}))
-                minted_id = _response_id(response_block)
+    # One detector, shared with the discovery probe: see
+    # `_responses_wire.terminal_usage_from_frame`. It reads the event type from the
+    # payload as well as from the `event:` line, because this upstream sends no
+    # `event:` lines at all -- which is why this route read usage off no streamed
+    # response ever. `usage` is `None` for a non-terminal frame, a frame that
+    # contradicts itself, and a terminal whose counters will not parse; the settle
+    # decision below must treat `None` as unobserved, never as zero.
+    terminal = _wire.terminal_usage_from_frame(raw)
+    usage: Optional[_money.Usage] = (
+        _responses_settled_usage_from(terminal.usage) if terminal.usage else None)
+    minted_id: Optional[str] = terminal.response_id
 
     if event_name == "error":
         # A-03-sse: when the upstream error payload does not match the
@@ -1199,37 +1231,6 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Opt
         ).encode("utf-8"), usage, minted_id
 
     return raw, usage, minted_id
-
-
-def _parse_sse_frame(text: str) -> tuple[Optional[str], Optional[str]]:
-    """Return `(event_name, joined_data)` from an SSE event text.
-
-    Per the SSE spec, multiple `data:` lines in the same event are
-    joined with `"\\n"` before delivery to the client's parser. We
-    follow that rule so a multi-line `response.completed` payload still
-    JSON-decodes correctly. Lines starting with `:` are SSE comments
-    and are ignored.
-    """
-    event_name: Optional[str] = None
-    data_lines: list[str] = []
-    # SSE accepts \n, \r\n, and \r as line endings. splitlines handles all.
-    for raw_line in text.splitlines():
-        if not raw_line or raw_line.startswith(":"):
-            continue
-        if raw_line.startswith("event:"):
-            event_name = raw_line[len("event:") :].strip()
-            continue
-        if raw_line.startswith("data:"):
-            # Strip exactly one leading space if present (per SSE spec
-            # "field: value" — value is the bytes after the optional
-            # single space).
-            v = raw_line[len("data:") :]
-            if v.startswith(" "):
-                v = v[1:]
-            data_lines.append(v)
-    if not data_lines:
-        return event_name, None
-    return event_name, "\n".join(data_lines)
 
 
 def _sanitize_error_payload(data_payload: str) -> Optional[str]:

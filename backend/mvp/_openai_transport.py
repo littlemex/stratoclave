@@ -598,12 +598,25 @@ def extract_cache_usage(usage: Any) -> tuple[Optional[int], Optional[int]]:
 
     The Responses/Chat shapes carry a read count as
     `input_tokens_details.cached_tokens` (`prompt_tokens_details.cached_tokens` on
-    the Chat spelling) and report no cache-WRITE count at all. `None` is not a
-    formality here: this transport never parsed these fields, so the settle used
-    its caller's default of zero and the ledger recorded "the provider said nothing
-    was cached" for a field nobody had read. Absence is the honest answer, and it is
-    what a caller comparing models needs in order to tell a model that does not
-    cache from a request that did not.
+    the Chat spelling). `None` is not a formality here: this transport never parsed
+    these fields, so the settle used its caller's default of zero and the ledger
+    recorded "the provider said nothing was cached" for a field nobody had read.
+    Absence is the honest answer, and it is what a caller comparing models needs in
+    order to tell a model that does not cache from a request that did not.
+
+    **This function reports no cache-WRITE count, and that is now a gap rather than a
+    property of the wire.** It previously asserted that these shapes carry no such
+    count. Measured 2026-09-24 against `/responses` (`us.openai.gpt-5.6-sol`): the
+    block carries `input_tokens_details.cache_write_tokens`, and it reached 3,525 on a
+    cold ~3.5k-token prompt. The `/responses` route no longer uses this function --
+    it reads `mvp._responses_wire.usage_from_responses`, which parses that leg and
+    subtracts both cache counts from `input_tokens` because they are SUBSETS of it.
+    `mvp.chat_completions` still calls this function, and the Chat spelling's own
+    shape has NOT been measured, so its reading is left alone rather than generalised
+    from a different endpoint's capture. Two consequences for that route, both
+    unverified there and both worth measuring before changing anything: a cache-write
+    leg may be going unbilled, and if `prompt_tokens` includes cached tokens the way
+    `input_tokens` does, its settle bills the cached portion twice.
     """
     if not isinstance(usage, dict):
         return None, None

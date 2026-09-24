@@ -1,9 +1,10 @@
 /**
  * Regression guard for sweep-4 Critical (sweep-1 C-D regression).
  *
- * The ECS task role MUST grant `dynamodb:Scan` only on a strict five-table
- * allowlist. Any future squash that reintroduces `api-keys` or `permissions`
- * into the Scan list must fail CI immediately.
+ * The ECS task role MUST grant `dynamodb:Scan` only on a strict allowlist —
+ * every table on it has a named Scan caller in the backend. Any future squash
+ * that reintroduces `permissions` into the Scan list must fail CI immediately,
+ * and any squash that drops a table a live Scan caller needs must fail too.
  *
  * Rationale: `api-keys` Scan access lets a backend RCE dump every customer's
  * key hashes; `permissions` Scan access lets it lift the entire RBAC seed,
@@ -19,6 +20,11 @@ import { EcsStack } from '../lib/ecs-stack';
 // Sweep-4 intentionally does NOT drop `api-keys` yet (admin list page
 // still uses Scan-based list_all pending a GSI migration). `permissions`
 // however has no live Scan caller and MUST stay out of the allowlist.
+// `promotion-candidates` is required, not merely tolerated: the composed model
+// registry reads it with a Scan on every TTL refresh
+// (`mvp.discovery.activation.list_activated_entries`), and without the grant an
+// activation commits and answers 200 while staying invisible to `/v1/models`
+// and to the entitlement surface. Pinned here so dropping it cannot be silent.
 const ALLOWED_SUFFIXES = [
   'users',
   'api-keys',
@@ -26,6 +32,7 @@ const ALLOWED_SUFFIXES = [
   'user-tenants',
   'sso-pre-registrations',
   'trusted-accounts',
+  'promotion-candidates',
 ];
 const FORBIDDEN_SUFFIXES = ['permissions'];
 
@@ -104,7 +111,7 @@ describe('EcsStack DynamoDB Scan allowlist', () => {
     }
   });
 
-  test('Scan IS granted on the 5 admin-console tables', () => {
+  test('Scan IS granted on every table with a live Scan caller', () => {
     const policies = template.findResources('AWS::IAM::Policy');
     const scanArns: string[] = [];
     for (const [, res] of Object.entries(policies)) {

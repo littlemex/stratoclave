@@ -661,9 +661,42 @@ def _verify(candidate: PromotionCandidate, verdict: Optional[ProbeVerdict], invo
         )
 
 
+def _unobservable_reason(entry: ModelEntry) -> Optional[str]:
+    """`None` when the composed registry can see `entry`, else why it cannot.
+
+    Called AFTER the commit and after the local invalidation, so a `None` here
+    means the registry this process serves from really does hold what was just
+    written. The check exists because every other signal available to a caller
+    is indistinguishable between "activated" and "never activated": the commit
+    returns nothing, the entry object is what the caller passed in, and the
+    registry's own refresh is fail-static by design (it keeps its last good
+    activated set and logs, rather than emptying, on a failed read). That
+    posture is right and it is also exactly what made a missing
+    `dynamodb:Scan` grant produce a 200 nobody could tell from a no-op.
+
+    Matched on `bedrock_model_id` rather than on an alias: the alias map is one
+    of several derived indexes, and the identity a caller is owed an answer
+    about is the Bedrock model this activation bound, not the name it happened
+    to be given.
+    """
+    from ..models import registry_entries
+
+    try:
+        entries = registry_entries()
+    except Exception as exc:  # noqa: BLE001 — a readback fault is reported, never raised.
+        return f"the composed registry could not be read back: {exc}"
+    if any(e.bedrock_model_id == entry.bedrock_model_id for e in entries):
+        return None
+    return (
+        f"the commit succeeded but the composed registry does not list "
+        f"bedrock_model_id={entry.bedrock_model_id!r}; this deployment is serving "
+        f"from a registry that cannot see its own activation"
+    )
+
+
 def activate_candidate(
     profile_id: str, invocation: str, *, actor: AuthenticatedUser, expected_verified_at: str,
-) -> ModelEntry:
+) -> tuple[ModelEntry, Optional[str]]:
     """Activate the promotion candidate named `profile_id`, against the
     probe verdict recorded for `invocation` ("sync" or "stream" — the closed
     set the verdict's own sort key is keyed on; an `invocation` outside that
@@ -693,8 +726,23 @@ def activate_candidate(
     re-implementing the gate, so the check is made exactly once regardless
     of how many callers there end up being.
 
-    Raises `ActivationRefused` (see its reason vocabulary) on any refusal.
-    On success, persists the derived `ModelEntry` and returns it. The commit
+    Raises `ActivationRefused` (see its reason vocabulary) on any refusal, and
+    `ActivationStoreUnavailable` when this deployment cannot READ the activated-
+    entry store — checked before anything is written, because an activation this
+    deployment could never observe must refuse rather than report success. That
+    is not a hypothetical: with the store readable but the `dynamodb:Scan` grant
+    for it absent, every activation committed, answered 200 with the entry it had
+    just written, and stayed absent from the registry, from routing and from the
+    entitlement surface, with the only evidence in a log line.
+
+    On success, persists the derived `ModelEntry` and returns it together with an
+    `unobservable_reason`: `None` in the normal case, and otherwise prose saying
+    the commit landed but the registry cannot see it. A tuple rather than a
+    refusal because the write DID commit — the same reading
+    `mvp.admin_entitlements.grant_entitlement` applies to its own
+    `(grant, audit_dropped_reason)`, and for the same reason: reporting failure
+    over a committed write is the same lie in the other direction. The caller
+    decides how to surface it; what it must not do is stay silent. The commit
     (`_commit_activation`) also claims every public identifier this entry
     makes reachable, in the SAME transaction, so two candidates that each
     independently pass every check above cannot both go live for a name they
@@ -733,6 +781,13 @@ def activate_candidate(
             f"no discovered record for profile_id={profile_id!r}",
         )
 
+    # Read the store before writing to it. `list_activated_entries` is the exact
+    # read the composed registry performs on every refresh, so a deployment that
+    # cannot serve this activation fails here, by name, with nothing committed —
+    # instead of committing, answering 200, and leaving the model unreachable.
+    # Raises `ActivationStoreUnavailable`, which every caller already handles.
+    list_activated_entries()
+
     entry = _build_entry(candidate, jurisdiction_bounded=record.jurisdiction_bounded)
     activated = ActivatedEntry(
         profile_id=profile_id,
@@ -749,4 +804,4 @@ def activate_candidate(
     from ..models import invalidate_composed_registry
 
     invalidate_composed_registry()
-    return entry
+    return entry, _unobservable_reason(entry)
