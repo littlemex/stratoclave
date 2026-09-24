@@ -105,13 +105,14 @@ class TestUsageIsReadOffTheTerminalFrame:
         assert usage is None
 
 
-class TestAStreamWhoseUsageIsUnreadableIsNotSettledAtZero:
-    """The route's own comment says an unreadable terminal "lands the stream on the
-    unobserved path". These pin that it actually does, because the parser refusing to
-    report a zero buys nothing if the caller converts the refusal back into one.
+class TestTheHandlerHandsTheSettleNothingRatherThanAZero:
+    """What the settle decision READS, which is the handler's answer. Named for that and
+    not for the settle itself: these do not drive `_stream_response`, so they cannot by
+    themselves prove the route does the right thing with a `None`. The route-level
+    assertion lives in `test_openai_responses_stream_e2e.py`.
 
-    Driven at the route through a mocked upstream rather than at the handler, because
-    the defect is in what the CALLER does with `usage is None`, not in the handler.
+    They are still the half that matters most, because the parser refusing to report a
+    zero buys nothing if the handler hands one over anyway.
     """
 
     @pytest.mark.parametrize(

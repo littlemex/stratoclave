@@ -1168,13 +1168,15 @@ def _responses_settled_usage_from(parsed: Any) -> _money.Usage:
     )
 
 
-def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Optional[str]]:
+def _handle_sse_event(
+    raw: bytes,
+) -> tuple[bytes, Optional[_money.Usage], Optional[str]]:
     """Process one fully-buffered SSE event.
 
     Returns the bytes to forward to the client (usually `raw` itself —
-    we are byte-transparent by default), an optional `(input_tokens,
-    output_tokens)` extracted from `response.completed`, and the minted
-    `response_id` from that same completed event (or None). The id is
+    we are byte-transparent by default), the ledger-ready `Usage` of a metered
+    terminal event (or `None`, which the caller must read as unobserved and never
+    as a zero), and the minted `response_id` from that same event (or None). The id is
     captured ONLY from `response.completed` — never from an error/failed/
     partial event — so the provider-state lock is armed only when a real,
     referenceable continuation was actually produced (Fable review §2: no
@@ -1209,7 +1211,14 @@ def _handle_sse_event(raw: bytes) -> tuple[bytes, Optional[tuple[int, int]], Opt
         _responses_settled_usage_from(terminal.usage) if terminal.usage else None)
     minted_id: Optional[str] = terminal.response_id
 
-    if event_name == "error":
+    # The SAME effective type the usage branch above resolves, not the raw `event:`
+    # line. This upstream sends no `event:` lines, so keying the sanitiser on one left
+    # it dead for exactly the transport it was written for: a data-only
+    # `{"type": "error", ...}` frame was forwarded verbatim, and the redaction
+    # guarantee for ARNs and account ids held only for a frame shape this endpoint
+    # does not produce. `error` and `response.failed` are both error-shaped terminals
+    # a client must not receive unsanitised.
+    if terminal.event_type in ("error", "response.failed") or event_name == "error":
         # A-03-sse: when the upstream error payload does not match the
         # expected JSON shape (`{"error": {"message": "..."}}`) the
         # sanitizer returns None, and previously we forwarded the raw

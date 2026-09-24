@@ -279,19 +279,94 @@ class TestTheFramerIsSharedWithServing:
         assert result.passed is True, result.blocker
 
     def test_a_terminal_frame_split_across_chunks_is_framed(self, _system_tenant_pool):
-        """The frame boundary can land anywhere. A framer that only looked at whole
-        chunks would drop the usage on a stream that is otherwise fine."""
+        """The frame boundary can land anywhere, so the body is delivered as a byte
+        ITERATOR that cuts the terminal frame mid-JSON and puts the blank-line
+        terminator in a chunk of its own. A single `content=` fixture does not test
+        this: the whole body arrives in one piece and a framer that dropped every
+        frame spanning a chunk boundary would still pass.
+        """
+        terminal = (
+            f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'r', 'usage': MEASURED_USAGE}})}"
+        ).encode("utf-8")
+        # The terminal is cut inside its JSON, its blank line arrives in a chunk of its
+        # own, and ANOTHER frame follows it. The trailing frame is what makes this a real
+        # discriminator: without it the leftover-buffer parse at the end of the loop
+        # recovers the terminal whatever the framer did, so a framer that dropped every
+        # frame spanning a chunk boundary would still pass.
+        cut = len(terminal) // 2
+        chunks = [
+            terminal[:cut], terminal[cut:], b"\n", b"\n",
+            b'data: {"type": "response.output_text.done"}\n\n',
+        ]
+
+        class _InPieces(httpx.SyncByteStream):
+            """Yields the pieces SEPARATELY. `httpx.ByteStream(b"".join(chunks))`
+            does not test this: it hands the body over in one piece, so a framer that
+            dropped every frame spanning a chunk boundary would still pass."""
+
+            def __iter__(self):
+                yield from chunks
+
         def handler(request: httpx.Request) -> httpx.Response:
-            body = (
-                f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'r', 'usage': MEASURED_USAGE}})}\n\n"
-            ).encode("utf-8")
-            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+            return httpx.Response(200, stream=_InPieces(),
+                                  headers={"content-type": "text/event-stream"})
 
         from mvp.discovery.probe import probe
 
         result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
                        wire_protocol="responses", http=_client(handler))
         assert result.passed is True, result.blocker
+
+    def test_a_terminal_that_arrives_before_a_broken_connection_is_still_charged(
+        self, _system_tenant_pool
+    ):
+        """A transport fault AFTER a validated terminal does not unmake the
+        measurement. Reporting it as indeterminate would hold a ceiling in place of an
+        amount the provider already told us exactly."""
+        frame = (
+            f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'r', 'usage': MEASURED_USAGE}})}\n\n"
+        ).encode("utf-8")
+
+        class _BreaksAfterTheTerminal(httpx.SyncByteStream):
+            def __iter__(self):
+                yield frame
+                raise httpx.ReadError("connection reset after the terminal event")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_BreaksAfterTheTerminal(),
+                                  headers={"content-type": "text/event-stream"})
+
+        from mvp.discovery.probe import probe
+
+        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
+                       wire_protocol="responses", http=_client(handler))
+        assert result.passed is True, result.blocker
+        assert result.charged_microusd and result.charged_microusd > 0
+
+    def test_a_break_before_any_terminal_is_still_a_transport_failure(
+        self, _system_tenant_pool
+    ):
+        """The non-vacuous companion: tolerating a fault after a terminal must not
+        tolerate one instead of a terminal."""
+        class _BreaksImmediately(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b'data: {"type": "response.created"}\n\n'
+                raise httpx.ReadError("connection reset before any terminal")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_BreaksImmediately(),
+                                  headers={"content-type": "text/event-stream"})
+
+        from mvp.discovery.probe import probe
+
+        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
+                       wire_protocol="responses", http=_client(handler))
+        assert result.passed is False
+        assert result.blocker is not None
+        assert result.blocker.subtype != "usage_counters_missing", (
+            "a broken connection is a transport outcome, not a readable 200 with no "
+            "counters; conflating them loses which question an operator must answer"
+        )
 
 
 class TestWhatTheProbeDoesWithAnswersThatAreNotJsonObjects:
@@ -373,3 +448,56 @@ class TestTheClientSeamsCannotBeCrossed:
         result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
                        wire_protocol="responses", http=_client(handler))
         assert result.passed is True, result.blocker
+
+
+class TestTheLedgerEffect:
+    """Assertions on the LEDGER, not on the result object. A probe that reported a
+    charge without persisting one, or a rejection that settled a zero, satisfies every
+    other test in this file.
+    """
+
+    @staticmethod
+    def _usage_rows() -> list:
+        from boto3.dynamodb.conditions import Attr
+
+        from dynamo.client import get_dynamodb_resource, usage_logs_table_name
+        from mvp.discovery.records import SYSTEM_TENANT_ID
+
+        table = get_dynamodb_resource().Table(usage_logs_table_name())
+        return table.scan(
+            FilterExpression=Attr("tenant_id").eq(SYSTEM_TENANT_ID)).get("Items", [])
+
+    def test_a_passing_probe_writes_the_charge_it_reports(self, _system_tenant_pool):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"status": "completed", "usage": MEASURED_USAGE})
+
+        from mvp.discovery.probe import probe
+
+        before = len(self._usage_rows())
+        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
+                       wire_protocol="responses", http=_client(handler))
+        assert result.passed is True, result.blocker
+
+        rows = self._usage_rows()
+        assert len(rows) == before + 1, (
+            f"the probe reported {result.charged_microusd} micro-USD and wrote "
+            f"{len(rows) - before} ledger rows; a reported charge that is not persisted "
+            "is not a charge"
+        )
+        row = rows[-1]
+        assert int(row.get("input_tokens", 0)) == MEASURED_USAGE["input_tokens"], row
+        assert int(row.get("output_tokens", 0)) == MEASURED_USAGE["output_tokens"], row
+
+    def test_an_upstream_rejection_writes_no_charge(self, _system_tenant_pool):
+        """A 429 that settled a zero would record the probe as having been served for
+        nothing, which is the "free tokens" shape in refusal clothing."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, json={"message": "slow down"})
+
+        from mvp.discovery.probe import probe
+
+        before = len(self._usage_rows())
+        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
+                       wire_protocol="responses", http=_client(handler))
+        assert result.passed is False
+        assert len(self._usage_rows()) == before, "a rejected attempt wrote a usage row"

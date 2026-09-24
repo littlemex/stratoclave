@@ -135,7 +135,7 @@ class TestAnUnreadableBlockRefusesRatherThanReportingZero:
              "input_tokens_details": {"cached_tokens": 0, "mystery_tokens": 4}},
             {"input_tokens": 5, "output_tokens": 3,
              "output_tokens_details": {"reasoning_tokens": 9}},
-            {"input_tokens": 5, "output_tokens": 3,
+            {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8,
              "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 4}},
         ],
         ids=["absent", "not-an-object", "no-input", "no-output", "bool-output",

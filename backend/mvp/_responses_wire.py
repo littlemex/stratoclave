@@ -146,9 +146,13 @@ def usage_from_responses(usage: Any) -> t.Usage:
     subset reading above and logged, rather than refused: the subtraction stays correct
     if the two counts partition the input, and refusing a shape nobody has seen would
     stop settlement on traffic this gateway can meter correctly the day the provider
-    starts reporting partial hits. The one genuinely dangerous case -- counts that
-    OVERLAP, which would drive the base leg negative -- is refused below. Re-measure if
-    the log line ever fires.
+    starts reporting partial hits. The check below is NOT a general overlap detector and
+    must not be described as one: it refuses only counts whose SUM exceeds
+    `input_tokens`, which is the subset of overlap that would drive the base leg
+    negative. Two counts that overlap by less than that pass, and the base leg is then
+    larger than it should be -- an over-charge, which is the direction this codebase
+    already prefers when a measurement is missing. Re-measure if the log line ever
+    fires; it is the only signal that the shape has changed.
     """
     if not isinstance(usage, dict):
         raise ResponsesUsageShapeError(f"usage: expected an object, got {usage!r}")

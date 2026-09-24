@@ -59,6 +59,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Protocol
 
+from core.logging import get_logger
+
 from .. import _converse_types as t
 from .. import _responses_wire as _wire
 from . import ledger
@@ -79,6 +81,8 @@ from .verdict import (
     put_probe_verdict,
 )
 
+
+logger = get_logger(__name__)
 
 #: The blocker subtype for assertion 1 failing on a call whose OUTCOME is
 #: unknown rather than definitely negative -- a read timeout or a closed
@@ -366,13 +370,20 @@ def _call_responses(
                 _openai_transport.STREAM_READ_TIMEOUT_SECONDS, connect=10.0, pool=10.0),
         ) as resp:
             if not 200 <= resp.status_code < 300:
-                resp.read()
-                if resp.status_code in (401, 403):
+                # Drop the bearer and keep the status BEFORE reading the body. Reading a
+                # streamed error body can itself fail, and letting that escape would
+                # turn a definite rejection into an indeterminate transport failure --
+                # holding a ceiling, and leaving a credential the provider has already
+                # rejected in the process-wide cache.
+                status_code = resp.status_code
+                if status_code in (401, 403):
                     _openai_transport.invalidate_token(region, auth)
-                return _Attempt(
-                    status_code=resp.status_code,
-                    evidence=_openai_transport.format_error(resp),
-                )
+                try:
+                    resp.read()
+                    evidence = _openai_transport.format_error(resp)
+                except Exception as read_error:  # noqa: BLE001 — evidence is best-effort.
+                    evidence = f"error body unreadable: {read_error!r}"
+                return _Attempt(status_code=status_code, evidence=evidence)
             usage = None
             # Serving's own framer, not a second one. It is the part of the stream
             # path that could differ silently: two framers reading the same bytes
@@ -382,12 +393,26 @@ def _call_responses(
             # accumulate whole and then parse as one frame with every `data:` line
             # joined, so no usage would be read from a perfectly good response.
             buffer = bytearray()
-            for chunk in resp.iter_bytes():
-                if not chunk:
-                    continue
-                buffer.extend(chunk)
-                for frame in _wire.drain_events(buffer):
-                    usage = _wire.terminal_usage_from_frame(frame).usage or usage
+            try:
+                for chunk in resp.iter_bytes():
+                    if not chunk:
+                        continue
+                    buffer.extend(chunk)
+                    for frame in _wire.drain_events(buffer):
+                        usage = _wire.terminal_usage_from_frame(frame).usage or usage
+            except Exception:  # noqa: BLE001 — see below.
+                if usage is None:
+                    # Nothing was observed, so this is a transport failure and the
+                    # caller's classifier must see it.
+                    raise
+                # A terminal already arrived and validated. The stream breaking
+                # afterwards does not unmake that measurement, and reporting it as
+                # indeterminate would hold a ceiling instead of charging an amount we
+                # know exactly.
+                logger.warning(
+                    "responses_probe_stream_faulted_after_terminal",
+                    extra={"profile_id": record.profile_id, "invocation": invocation},
+                )
             # The trailing unterminated frame is parsed for the same reason serving
             # parses it: this upstream is measured to close the body before the final
             # blank line, and discarding it per the SSE spec would drop the usage
@@ -395,6 +420,13 @@ def _call_responses(
             if buffer:
                 usage = (
                     _wire.terminal_usage_from_frame(bytes(buffer)).usage or usage)
+        if usage is not None:
+            # Returned here, inside the `with`, so a failure while the context manager
+            # closes the connection cannot discard a terminal usage block that already
+            # arrived and was validated. A trailing transport fault says nothing about
+            # a measurement the provider already delivered, and letting it escape would
+            # hold a ceiling in place of a charge we can compute exactly.
+            return _Attempt(usage=usage)
         if usage is None:
             return _Attempt(
                 evidence="the stream ended with no terminal event carrying a readable "
@@ -505,6 +537,16 @@ def probe(
     ledger.check_probe_rate_limit()
     ledger.check_probe_scope_eligibility(record)
 
+    from .. import _money
+    from ..pricing import effective_rates, rate_usage, snapshot_rates
+
+    # Everything that can raise and does not need the hold runs BEFORE it. A rate-table
+    # read or an STS call failing after the reservation is open, but before the `try`
+    # that ends it, leaves the hold with no terminal at all -- the reservation is held
+    # until a reaper notices, for an attempt that was never made.
+    _, _merged_rates, _ = effective_rates()
+    observation_scope = _build_observation_scope(region=region, sts=sts)
+
     # Sized from the transport, not from a module constant: the two protocols have
     # different output caps, and a reservation that does not cover the cap the call
     # actually sends would refuse the probe as unmetered.
@@ -513,9 +555,6 @@ def probe(
         input_tokens_est=transport.input_tokens_est,
         max_output_tokens=transport.max_output_tokens,
     )
-
-    from .. import _money
-    from ..pricing import effective_rates, rate_usage, snapshot_rates
 
     # Assertion 4's resolvability half, checked against the SAME merged map
     # `mvp.pricing.rate_for`/`snapshot_rates` themselves resolve `pricing_key`
@@ -529,10 +568,7 @@ def probe(
     # Checked here, before the call, rather than only after: whether the key
     # resolves does not depend on what the model answers, and computing it
     # once keeps the post-call check (below) simple.
-    _, _merged_rates, _ = effective_rates()
     _pricing_key_resolves = pricing_key in _merged_rates
-
-    observation_scope = _build_observation_scope(region=region, sts=sts)
 
     try:
         attempt = transport.call(
