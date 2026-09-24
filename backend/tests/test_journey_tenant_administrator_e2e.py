@@ -181,13 +181,30 @@ def _file(client: TestClient, tenant_id: str, *, asked: int, token: str):
 def _approve(client: TestClient, request_id: str, *, approved: int,
              expires_in_minutes: int = 60 * 24 * 7, comment: str = "approved"):
     """`ApproveLimitRaiseRequest.expires_at` is `int` (epoch seconds,
-    `mvp/grants.py`), not an ISO string."""
+    `mvp/grants.py`), not an ISO string.
+
+    The expiry is capped at the bound the server PUBLISHES for it, read from
+    `/admin/limit-raises/latest-permissible-expiry` the way an approver is shown it
+    before typing (R28). A grant may not outlive the period it was granted in, so a
+    fixed "a week from now" is refused as `grant_window_too_short` in the last week of
+    every month -- measured on 2026-09-24, when a week out crossed into October. These
+    journeys end their grants by revoking them and never depend on the duration, so
+    capping it changes nothing they assert; it only stops them failing by calendar.
+
+    What the cap cannot fix is the product's own rule that an expiry must also lie at
+    least 300 seconds out: in the last five minutes of a period no permissible window
+    exists at all, for an approver or for these tests. That is the rule working, not the
+    test being wrong, and it is left visible rather than skipped.
+    """
+    bound = client.get("/api/mvp/admin/limit-raises/latest-permissible-expiry")
+    assert bound.status_code == 200, bound.text
+    latest = int(bound.json()["latest_permissible_expiry"])
+    wanted = int(datetime.fromisoformat(_in(expires_in_minutes)).timestamp())
     return client.post(
         f"/api/mvp/admin/limit-raises/{request_id}/approve",
         json={
             "approved_amount_microusd": approved,
-            "expires_at": int(
-                datetime.fromisoformat(_in(expires_in_minutes)).timestamp()),
+            "expires_at": min(wanted, latest),
             "decision_comment": comment,
         },
     )

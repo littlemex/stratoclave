@@ -68,22 +68,19 @@ def test_openai_region_is_not_driven_by_env_hint(monkeypatch):
     import sys
 
     monkeypatch.setenv("OPENAI_BEDROCK_REGIONS", "eu-west-1")
-    # Drop cached modules so the reload re-executes top-level registry code.
-    for name in list(sys.modules):
-        if name == "mvp.models" or name.startswith("mvp.models."):
-            del sys.modules[name]
-    reloaded = importlib.import_module("mvp.models")
-    try:
-        regions = {
-            e.bedrock_region for e in reloaded._REGISTRY if e.wire_protocol == "responses"
-        }
-        assert regions == EXPECTED_OPENAI_REGIONS, (
-            "OPENAI_BEDROCK_REGIONS moved the codex registry regions on reload — "
-            "the IaC residency analysis ignores that var and would now be wrong."
-        )
-    finally:
-        # Restore a clean import for the rest of the suite.
-        importlib.reload(reloaded)
+    # Re-execute the registry module's top-level code with the variable set, in a copy
+    # nothing else in the process can see. Deleting it from `sys.modules` and importing
+    # again used to do this, and split the process into two registries for the rest of
+    # the run -- see `tests/module_isolation.py` for what that broke.
+    import mvp.models as models
+    from tests.module_isolation import fresh_copy
+
+    copy = fresh_copy(models)
+    regions = {e.bedrock_region for e in copy._REGISTRY if e.wire_protocol == "responses"}
+    assert regions == EXPECTED_OPENAI_REGIONS, (
+        "OPENAI_BEDROCK_REGIONS moved the codex registry regions on re-execution — "
+        "the IaC residency analysis ignores that var and would now be wrong."
+    )
 
 
 def test_every_openai_region_is_a_valid_region_id():

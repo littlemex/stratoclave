@@ -38,8 +38,6 @@ own test data, built from the shapes both stores are specified to hold.
 """
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
 from mvp.deps import AuthenticatedUser
@@ -280,20 +278,14 @@ def test_a_pricing_reader_sees_the_activated_model_under_its_declared_rate_key(
     """
     _seed_and_activate(dynamodb_mock, monkeypatch, verdict=_verdict())
 
-    # KNOWN ORDER-DEPENDENT FAILURE, not yet root-caused, recorded here rather
-    # than papered over. This assertion passes on its own and in three separate
-    # large subsets of the suite, and fails when files 1..171 of the collection
-    # run together. What has been ruled out, each by measurement rather than by
-    # reasoning: the composed registry does hold the activated entry with the
-    # right alias and the right pricing key at the end of the test; the
-    # fail-static branch never fires; and forcing an explicit
-    # `invalidate_composed_registry()` here does NOT fix it -- so it is not a
-    # stale-cache problem, and that explicit invalidation was removed again
-    # rather than left in as a weakening that bought nothing.
-    #
-    # The behaviour this asserts IS verified on real infrastructure: on a running
-    # gateway, activating a model and immediately reading `/pricing-config` in
-    # the same process lists the new alias. See `05-verify/RESULTS.md`.
+    # This assertion used to fail only when a large slice of the suite ran first, and was
+    # recorded here as order-dependent and not root-caused -- with the observation that
+    # an explicit `invalidate_composed_registry()` did not fix it. The cause was another
+    # test deleting `mvp.models` from `sys.modules` and importing it again. That left two
+    # registry modules in one process: `mvp.admin_pricing` had bound `registry_entries`
+    # at import and kept reading the orphaned one, while activation's lazy import reached
+    # the new one -- so the invalidation cleared a cache the pricing reader never read.
+    # `tests/module_isolation.py` replaced every such swap with a copy nothing else sees.
     config = _pricing_config_via_the_real_route(monkeypatch, dynamodb_mock)
     assert _ALIAS in _models_for_pricing_key(config, _PRICING_KEY), (
         f"{_ALIAS!r} did not appear among the models the pricing reader lists "
@@ -496,9 +488,15 @@ def test_registry_composition_behaviour_when_the_candidate_store_is_unreachable_
 
     # `delete_table` is a client/Table operation, not a ServiceResource one.
     dynamodb_mock.meta.client.delete_table(TableName="stratoclave-promotion-candidates")
+    from tests.module_isolation import fresh_copy
+
     try:
         try:
-            importlib.reload(models)
+            # "This process, started now" -- a fresh copy of the registry module, not a
+            # reload of the one every other module holds. A reload replaces the
+            # module's classes in place, so every later `isinstance(e, ModelEntry)`
+            # elsewhere in the run compares against a class nobody builds any more.
+            models = fresh_copy(models)
         except Exception as exc:
             # Observed outcome: the process refuses to start. Recorded for
             # whoever reads this file's report -- the specification left
@@ -542,7 +540,6 @@ def test_registry_composition_behaviour_when_the_candidate_store_is_unreachable_
             ],
             BillingMode="PAY_PER_REQUEST",
         )
-        importlib.reload(models)
 
 
 def test_activation_drops_this_process_composed_registry_cache(

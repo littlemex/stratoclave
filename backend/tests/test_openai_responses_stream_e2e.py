@@ -587,3 +587,160 @@ def test_a_stream_cut_after_its_usage_is_charged_not_refunded(
     assert _stub_credit_pipeline, "the cut stream was refunded instead of charged"
     last = _stub_credit_pipeline[-1]
     assert (last["actual_input_tokens"], last["actual_output_tokens"]) == (31, 41), last
+
+
+# ---------------------------------------------------------------------------
+# The route's settle decision, driven at the route. The handler-level tests in
+# `test_responses_sse_terminal_event.py` assert what the settle READS; these assert
+# what the route DOES with it, which is the half that can undo the parser's refusal by
+# converting a `None` back into a zero.
+# ---------------------------------------------------------------------------
+def _data_only_frame(payload: dict) -> bytes:
+    """A frame in the shape this endpoint actually sends: `data:` only, no `event:`
+    line, the event name inside the JSON as `"type"`. Measured 2026-09-24: a streamed
+    response carried ten `data:` lines and zero `event:` lines."""
+    import json as _json
+
+    return f"data: {_json.dumps(_json.loads(_json.dumps(payload)))}\n\n".encode("utf-8")
+
+
+_MEASURED_USAGE = {
+    "input_tokens": 7,
+    "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0},
+    "output_tokens": 5,
+    "output_tokens_details": {"reasoning_tokens": 0},
+    "total_tokens": 12,
+}
+
+
+def test_a_data_only_terminal_is_metered(
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+):
+    """The regression the whole change exists for: with no `event:` line anywhere, this
+    route used to settle `0 / 0` for every streamed call."""
+    sse = _data_only_frame({"type": "response.created", "response": {"id": "r"}}) + \
+        _data_only_frame({"type": "response.completed",
+                          "response": {"id": "r", "usage": _MEASURED_USAGE}})
+    app = install_openai_stream(sse)
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app).stream(
+        "POST", "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
+    ) as resp:
+        assert resp.status_code == 200, resp.read()
+        b"".join(resp.iter_bytes())
+
+    assert _stub_credit_pipeline, "settle_reservation_and_log was never called"
+    last = _stub_credit_pipeline[-1]
+    assert (last["actual_input_tokens"], last["actual_output_tokens"]) == (7, 5), last
+
+
+def test_a_terminal_whose_usage_will_not_parse_is_not_settled_at_all(
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+):
+    """An unreadable terminal must reach the ledger as an unobserved outcome, not as a
+    settled zero. The parser refusing to report a zero buys nothing if the route
+    converts the refusal back into one, and a settle of `0 / 0` for a model that ran is
+    the "free tokens" defect this route already fixed once for Converse.
+
+    `input_tokens` alone is the shape that produces a FALSE settle rather than a false
+    failure: the lax reading turns it into `(5, 0)`, which settles and records itself as
+    fully observed.
+    """
+    sse = _data_only_frame({"type": "response.completed",
+                            "response": {"id": "r", "usage": {"input_tokens": 5}}})
+    app = install_openai_stream(sse)
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app).stream(
+        "POST", "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
+    ) as resp:
+        assert resp.status_code == 200, resp.read()
+        b"".join(resp.iter_bytes())
+
+    assert not _stub_credit_pipeline, (
+        "the route settled an unreadable terminal; the ledger now carries a measured "
+        f"zero for a model that ran: {_stub_credit_pipeline}"
+    )
+
+
+def test_a_stream_with_no_terminal_at_all_is_not_settled(
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+):
+    """The other half of the same condition, and the one a clean upstream close
+    produces."""
+    sse = _data_only_frame({"type": "response.created", "response": {"id": "r"}}) + \
+        _data_only_frame({"type": "response.output_text.delta", "delta": "hi"})
+    app = install_openai_stream(sse)
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app).stream(
+        "POST", "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
+    ) as resp:
+        assert resp.status_code == 200, resp.read()
+        b"".join(resp.iter_bytes())
+
+    assert not _stub_credit_pipeline, _stub_credit_pipeline
+
+
+_MEASURED_CACHE_HIT = {
+    "input_tokens": 3527,
+    "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 3525},
+    "output_tokens": 16,
+    "output_tokens_details": {"reasoning_tokens": 16},
+    "total_tokens": 3543,
+}
+_MEASURED_COLD_WRITE = {
+    "input_tokens": 3527,
+    "input_tokens_details": {"cache_write_tokens": 3525, "cached_tokens": 0},
+    "output_tokens": 16,
+    "output_tokens_details": {"reasoning_tokens": 16},
+    "total_tokens": 3543,
+}
+
+
+@pytest.mark.parametrize(
+    "usage,expected",
+    [(_MEASURED_CACHE_HIT, (2, 3525, 0, 16)), (_MEASURED_COLD_WRITE, (2, 0, 3525, 16))],
+    ids=["cache-hit", "cold-write"],
+)
+def test_the_route_settles_the_decomposed_legs_not_the_raw_input(
+    install_openai_stream, stub_auth_user, _stub_credit_pipeline, usage, expected
+):
+    """The cache fixtures at the ROUTE, which is where the double charge lived.
+
+    Every other route test here uses zero cache counts, so a settle that still passed the
+    raw `input_tokens` beside a cache leg stayed green. With the measured numbers the
+    difference is unmissable: 3,527 against 2 on the base leg.
+    """
+    sse = _data_only_frame({"type": "response.completed",
+                            "response": {"id": "r", "usage": usage}})
+    app = install_openai_stream(sse)
+    _override_auth(app, stub_auth_user)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app).stream(
+        "POST", "/openai/v1/responses",
+        json={"model": "openai.gpt-5.6-sol", "input": "hi", "stream": True},
+    ) as resp:
+        assert resp.status_code == 200, resp.read()
+        b"".join(resp.iter_bytes())
+
+    assert _stub_credit_pipeline, "settle_reservation_and_log was never called"
+    last = _stub_credit_pipeline[-1]
+    base, read, write, out = expected
+    assert last["actual_input_tokens"] == base, (
+        f"the base leg was settled as {last['actual_input_tokens']}, not {base}; the "
+        f"cache count is still being billed at the full input rate as well"
+    )
+    assert last["actual_output_tokens"] == out, last
