@@ -286,6 +286,14 @@ def _load_floor_rates() -> dict[str, Rate]:
 _DEFAULT_RATES: dict[str, Rate] = _load_floor_rates()
 
 
+def default_floor_violations(rate: Rate) -> list[str]:
+    """The legs of `rate` below the bundled floor's `default` row. `default` is what an
+    unregistered pricing key is charged at, so a candidate for it with any such leg
+    would under-charge every unpriced model."""
+    floor = _DEFAULT_RATES["default"]
+    return [field for field in RATE_FIELDS if getattr(rate, field) < getattr(floor, field)]
+
+
 def baseline_rates() -> dict[str, Rate]:
     """A copy of the built-in floor. Public so callers that need a price-derived
     fact (routing cost tiers, for one) do not reach for a private map."""
@@ -324,6 +332,8 @@ class _RateCache:
         self._source_keys: frozenset[str] = frozenset()
         # Events already logged, so a standing condition does not repeat every refresh.
         self._warned: set[str] = set()
+        # Which layer supplied the `default` row the floor last raised, if any.
+        self._default_floored_by: Optional[str] = None
         # Serializes refreshes so concurrent requests don't stampede the table
         # or interleave a half-swapped rate map. The method really is locked now
         # (the name previously lied).
@@ -346,37 +356,59 @@ class _RateCache:
           exist.
 
         The floor is merged underneath either way, so a source that omits keys
-        cannot make a model unpriceable. `default` is the one key a source may not
-        lower: it is the rate an unregistered pricing key is charged at, and the
-        standing rule is that an unpriced model over-charges rather than under.
+        cannot make a model unpriceable. Nothing here is clamped: the invariants on
+        what is charged hold for the table after every layer, so
+        `_enforce_charged_invariants` applies them once, last.
         """
         table = self._source_table if self._source_table is not None else {}
 
         merged = dict(_DEFAULT_RATES)
         merged.update(table)
         self._source_keys = frozenset(table)
-        merged["default"] = self._floored_default(merged["default"])
         return merged
 
-    def _floored_default(self, candidate: Rate) -> Rate:
-        """`default` is what an UNREGISTERED pricing key is charged at, so it may only
-        move up. Clamped per field, not judged on one of them: a source that matched
-        the floor's output rate while lowering input or cache rates would otherwise
-        slip past and under-charge every unpriced model.
+    def _enforce_charged_invariants(
+        self, merged: dict[str, Rate], *, override_keys: frozenset[str] = frozenset(),
+    ) -> dict[str, Rate]:
+        """The invariants on the table that is actually charged, applied after the
+        last layer that can write it.
+
+        Both are about what is charged, not about one layer: an admin override is
+        merged after the price source, so a clamp applied before that merge guards
+        the automatic path and leaves the hand-edited one open. The `default` floor
+        runs last because it is the one that may only raise a price.
         """
+        merged = self._with_vllm_cache_rates_zeroed(merged)
+        layer = "admin_override" if "default" in override_keys else "price_source"
+        merged["default"] = self._floored_default(merged["default"], layer=layer)
+        return merged
+
+    def _floored_default(self, candidate: Rate, *, layer: str) -> Rate:
+        """`default` is what an UNREGISTERED pricing key is charged at, so it may only
+        move up, whichever layer supplied it. Clamped per field, not judged on one of
+        them: a row that matched the floor's output rate while lowering input or cache
+        rates would otherwise slip past and under-charge every unpriced model.
+        """
+        lowered = default_floor_violations(candidate)
+        if not lowered:
+            self._clear_warning("default_rate_floored")
+            self._default_floored_by = None
+            return candidate
         floor = _DEFAULT_RATES["default"]
-        clamped = Rate(**{
+        # Logged once per standing condition, and again when the layer supplying the
+        # lowered row changes: an override arriving while a source already lowers it
+        # is a new inversion with a different owner.
+        if layer != self._default_floored_by:
+            self._clear_warning("default_rate_floored")
+            self._default_floored_by = layer
+        self._warn_once(
+            "default_rate_floored", layer=layer, lowered=lowered,
+            note="no layer may lower any field of the 'default' rate; the floor is charged",
+        )
+        return Rate(**{
             field: max(getattr(candidate, field), getattr(floor, field))
             for field in RATE_FIELDS
         })
-        if clamped != candidate:
-            self._warn_once(
-                "price_source_default_key_floored",
-                note="a source may not lower any field of the 'default' rate",
-            )
-        else:
-            self._clear_warning("price_source_default_key_floored")
-        return clamped
 
     def _with_vllm_cache_rates_zeroed(self, merged: dict[str, Rate]) -> dict[str, Rate]:
         """vLLM reports no Bedrock cache-token split, so a nonzero cache rate on a
@@ -442,7 +474,7 @@ class _RateCache:
             if version is None:
                 # Overrides removed (CURRENT pointer gone). Fall back to built-in
                 # defaults rather than keeping the last-loaded set alive forever.
-                self._rates = self._with_vllm_cache_rates_zeroed(self._baseline())
+                self._rates = self._enforce_charged_invariants(self._baseline())
                 self._version = None
                 self._overrides = {}
                 self._override_keys = frozenset()
@@ -457,11 +489,8 @@ class _RateCache:
                 )
                 merged = self._baseline()
                 merged.update(overrides)
-                # AFTER the overrides, not before: an admin row can reintroduce a
-                # nonzero cache rate that the source clamp already removed, and the
-                # invariant is about what is actually charged.
-                merged = self._with_vllm_cache_rates_zeroed(merged)
-                self._rates = merged
+                self._rates = self._enforce_charged_invariants(
+                    merged, override_keys=frozenset(overrides))
                 self._version = version
                 self._overrides = dict(overrides)
                 self._override_keys = frozenset(overrides)
@@ -593,6 +622,7 @@ class _RateCache:
         self._source_table = None
         self._source_keys = frozenset()
         self._warned = set()
+        self._default_floored_by = None
         self._loaded_at = 0.0
 
 

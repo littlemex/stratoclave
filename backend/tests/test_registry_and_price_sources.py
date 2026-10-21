@@ -1076,3 +1076,93 @@ class TestStartupValidation:
         from mvp.price_sources import DEFAULT_SOURCE_NAME, validate_configuration
 
         assert validate_configuration() == DEFAULT_SOURCE_NAME
+
+
+class TestDefaultFloorSurvivesAdminOverrides:
+    """The `default` clamp ran inside the baseline, and admin overrides were merged
+    after it, so the guarantee held against the automatic path and failed against the
+    one a human edits at runtime (#281)."""
+
+    @staticmethod
+    def _repo(rates):
+        class _Repo:
+            def current_version(self):
+                return "v1"
+
+            def load_rates(self, version):
+                return dict(rates)
+
+        return _Repo()
+
+    def test_an_admin_override_cannot_lower_the_default_key(self):
+        from mvp.pricing import _RateCache
+
+        rate = _RateCache().get("default", self._repo({"default": Rate(1, 1, 0, 0)}))
+        assert rate == baseline_rates()["default"]
+
+    def test_an_unregistered_key_is_charged_at_the_floored_default(self):
+        """The failure the issue names: every key not in the table is charged at
+        `default`, so a lowered override under-charges all of them at once."""
+        from mvp.pricing import _RateCache
+
+        rate = _RateCache().get("a-key-nobody-priced",
+                                self._repo({"default": Rate(1, 1, 0, 0)}))
+        assert rate == baseline_rates()["default"]
+
+    def test_lowering_one_field_by_override_is_still_floored(self):
+        from mvp.pricing import _RateCache
+
+        floor = baseline_rates()["default"]
+        sneaky = Rate(floor.input_per_mtok_microusd, floor.output_per_mtok_microusd,
+                      0, floor.cache_write_per_mtok_microusd)
+        assert sneaky != floor, "the floor prices cache reads, or this test proves nothing"
+        assert _RateCache().get("default", self._repo({"default": sneaky})) == floor
+
+    def test_the_warning_names_the_layer_that_lowered_it(self, monkeypatch):
+        """The issue's complaint was that nothing named the inversion. The warning
+        names the layer that supplied the lowered row, and is logged again when that
+        layer changes -- through the real once-per-condition deduplication."""
+        from mvp import pricing
+        from mvp.pricing import _RateCache
+
+        events = []
+        monkeypatch.setattr(pricing.logger, "warning",
+                            lambda event, **f: events.append((event, f.get("layer"))))
+        price_sources.register_price_source(_StubSource({"default": Rate(1, 1, 0, 0)}))
+        monkeypatch.setenv("STRATOCLAVE_PRICE_SOURCE", "stub")
+        cache = _RateCache()
+        cache.get("default", _NoOverrideRepo())
+        cache._loaded_at = 0.0
+        cache.get("default", _NoOverrideRepo())
+        cache._loaded_at = 0.0
+        cache.get("default", self._repo({"default": Rate(2, 2, 0, 0)}))
+        assert [e for e in events if e[0] == "default_rate_floored"] == [
+            ("default_rate_floored", "price_source"),
+            ("default_rate_floored", "admin_override"),
+        ]
+
+    def test_an_admin_override_may_raise_the_default_key(self):
+        from mvp.pricing import _RateCache
+        from mvp.rates import RATE_FIELDS
+
+        floor = baseline_rates()["default"]
+        dearer = Rate(*(getattr(floor, f) + 1 for f in RATE_FIELDS))
+        assert _RateCache().get("default", self._repo({"default": dearer})) == dearer
+
+
+def test_set_rates_refuses_a_default_below_the_floor(dynamodb_mock):
+    """Refused before any row is written, so the operator learns that the value they
+    wrote is not the value that would be charged."""
+    from dynamo.pricing_config import PricingConfigRepository
+
+    floor = baseline_rates()["default"]
+    repo = PricingConfigRepository()
+    with pytest.raises(ValueError, match="input_per_mtok_microusd"):
+        repo.set_rates(version="v-low", rates={
+            "opus": Rate(1, 2, 0, 0),
+            "default": Rate(floor.input_per_mtok_microusd - 1,
+                            floor.output_per_mtok_microusd,
+                            floor.cache_read_per_mtok_microusd,
+                            floor.cache_write_per_mtok_microusd),
+        })
+    assert repo.current_version() is None
