@@ -462,10 +462,15 @@ def hold_sk_expiry_ceiling(period: str, now_epoch: int) -> str:
     return f"{hold_sk_prefix(period)}{int(now_epoch):0{_EXPIRES_WIDTH}d}#￿"
 
 
+def period_at(epoch_seconds: int) -> str:
+    """The billing period key (calendar month, UTC) an instant falls in."""
+    at = datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
+    return f"{at.year:04d}-{at.month:02d}"
+
+
 def current_period() -> str:
     """Return the current billing period key (calendar month, UTC)."""
-    now = datetime.now(timezone.utc)
-    return f"{now.year:04d}-{now.month:02d}"
+    return period_at(int(datetime.now(timezone.utc).timestamp()))
 
 
 def previous_period(period: str) -> str:

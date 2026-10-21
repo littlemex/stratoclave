@@ -14,7 +14,7 @@ that was already in canonical form.
 """
 from __future__ import annotations
 
-from dynamo.tenant_budgets import TenantBudgetsRepository, current_period
+from dynamo.tenant_budgets import TenantBudgetsRepository
 from tests.quota_events_fixtures import (
     freeze_grants_clock,
     quota_events_table,
@@ -27,6 +27,8 @@ TENANT = "pr4-tag-org"
 MEMBER = "member-1"
 APPROVER = "admin-1"
 T0 = 1_788_307_200  # 2026-09-02T00:00:00Z
+# The period the frozen grants clock is in, which is the one an approval targets.
+T0_PERIOD = "2026-09"
 
 
 def _member():
@@ -68,7 +70,7 @@ def test_a_tag_that_changes_under_canonicalisation_lands_canonical_on_both_rows(
     from mvp import grants, task_tag
 
     seed_tenant(TENANT, team_lead_user_id="admin-owned")
-    _seed_pool(current_period())
+    _seed_pool(T0_PERIOD)
     freeze_grants_clock(monkeypatch, T0)
 
     raw = "Team-ROCKET"
@@ -119,7 +121,7 @@ def test_a_tag_that_canonicalises_onto_the_reserved_sentinel_is_dropped_on_both_
     from mvp import grants, task_tag
 
     seed_tenant(TENANT, team_lead_user_id="admin-owned")
-    _seed_pool(current_period())
+    _seed_pool(T0_PERIOD)
     freeze_grants_clock(monkeypatch, T0)
 
     raw = "UnLabelled"  # canonicalises onto task_tag.SENTINEL itself
@@ -164,7 +166,7 @@ def test_an_unspecified_tag_is_absent_not_dropped_reserved(
     from mvp import grants, task_tag
 
     seed_tenant(TENANT, team_lead_user_id="admin-owned")
-    _seed_pool(current_period())
+    _seed_pool(T0_PERIOD)
     freeze_grants_clock(monkeypatch, T0)
 
     filed = grants.submit_limit_raise(
