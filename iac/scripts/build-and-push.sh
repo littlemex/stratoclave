@@ -81,30 +81,39 @@ log_info "Building image with $CONTAINER_CLI for $PLATFORM..."
 cd "$(dirname "$0")/../../backend"
 "$CONTAINER_CLI" build --platform "$PLATFORM" -t stratoclave-backend:latest .
 
-# One timestamp for both the tag and the push: evaluating `date` twice can
-# straddle a second boundary and push a tag that was never created.
-BUILD_TAG="$(date +%Y%m%d-%H%M%S)"
+# The build tag is what a deploy names, so it has to identify the build: a
+# timestamp alone collides for two builds started in the same second, and the
+# repository is IMMUTABLE. The commit says what was built; `-dirty` says the
+# tree had uncommitted changes. Computed once, so the tag and the push agree.
+GIT_REV="$(git rev-parse --short=12 HEAD 2>/dev/null || echo nogit)"
+if [ "$GIT_REV" != "nogit" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    GIT_REV="${GIT_REV}-dirty"
+fi
+BUILD_TAG="${BUILD_TAG:-$(date +%Y%m%d-%H%M%S)-${GIT_REV}}"
 
 # Tag image
 log_info "Tagging image..."
-"$CONTAINER_CLI" tag stratoclave-backend:latest $ECR_URI:latest
-"$CONTAINER_CLI" tag stratoclave-backend:latest $ECR_URI:$BUILD_TAG
+"$CONTAINER_CLI" tag stratoclave-backend:latest "$ECR_URI:$BUILD_TAG"
+"$CONTAINER_CLI" tag stratoclave-backend:latest "$ECR_URI:latest"
 
-# The repository's imageTagMutability is IMMUTABLE, so re-pushing ":latest"
-# after it already exists is rejected outright ("400 Bad Request") rather
-# than overwriting it — the one AWS-documented way past that on an immutable
-# repository is to delete the existing tag first. Best-effort: a first-ever
-# push has no ":latest" to delete, so a failure here is not fatal.
-aws ecr batch-delete-image --repository-name "$ECR_REPO_NAME" \
-    --image-ids imageTag=latest --region "$AWS_REGION" >/dev/null 2>&1 || true
-
-# Push image to ECR
+# The build tag first. It is the record of this build and the tag a deploy
+# names; under `set -e`, pushing it second meant any failure on ":latest" left
+# no trace of the build in ECR at all.
 log_info "Pushing image to ECR..."
-"$CONTAINER_CLI" push $ECR_URI:latest
-"$CONTAINER_CLI" push $ECR_URI:$BUILD_TAG
+"$CONTAINER_CLI" push "$ECR_URI:$BUILD_TAG"
+log_info "Docker image pushed: $ECR_URI:$BUILD_TAG"
 
-log_info "Docker image pushed successfully!"
-log_info "ECR URI: $ECR_URI:latest"
+# ":latest" is only what a first deploy starts from (iac/bin/iac.ts defaults
+# IMAGE_TAG to it). The repository is IMMUTABLE, so moving it means deleting
+# the old tag first -- which removes only the tag, because the old image still
+# carries its own build tag. Best-effort: nothing a deploy needs depends on it.
+if aws ecr batch-delete-image --repository-name "$ECR_REPO_NAME" \
+        --image-ids imageTag=latest --region "$AWS_REGION" >/dev/null 2>&1 \
+    && "$CONTAINER_CLI" push "$ECR_URI:latest"; then
+    log_info "Moved :latest to this build."
+else
+    log_warn "Could not move :latest; the build tag above is unaffected."
+fi
 
 # --- Lambda image (backend/Dockerfile.lambda) --------------------------------
 # The scheduled jobs (ledger projector/reconciler, certificate issuer, quota
@@ -153,3 +162,10 @@ if [ "$BUILD_LAMBDA_IMAGE" = "true" ]; then
 else
     log_warn "Skipping Lambda image build (BUILD_LAMBDA_IMAGE=false)"
 fi
+
+# The task definition pins the tag it was synthesised with, so pushing an image
+# changes nothing that is running, and `aws ecs update-service
+# --force-new-deployment` restarts the image already pinned. A deploy that names
+# the tag is what moves it.
+log_info "To run this build, deploy the ECS stack with its tag:"
+log_info "  cd iac && IMAGE_TAG=$BUILD_TAG npx cdk deploy ${PREFIX}-ecs"

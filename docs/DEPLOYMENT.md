@@ -229,18 +229,20 @@ What it does:
 
 1. Looks up the ECR repository URI from the `<Prefix>EcrStack` outputs.
 2. Logs in to ECR (`aws ecr get-login-password`).
-3. `docker build -t stratoclave-backend:latest backend/`.
-4. Pushes `latest` plus a timestamped tag (`YYYYMMDD-HHMMSS`).
-5. Prints the full image URI.
+3. Builds `backend/` for `linux/amd64` (override with `PLATFORM`), so an arm64 build host still produces an image Fargate can run.
+4. Pushes a build tag, `YYYYMMDD-HHMMSS-<commit>` (with `-dirty` when the working tree has uncommitted changes; set `BUILD_TAG` to choose another), and then moves `latest` to it. The repository's tags are immutable, so the build tag is pushed first and `latest` is best-effort: a build whose `latest` could not move still leaves its build tag in ECR.
+5. Prints the deploy command for that build tag.
 
-Force the ECS service to pick up the new image:
+Deploy the build by its tag:
 
 ```bash
-aws ecs update-service \
-  --cluster <PREFIX>-cluster \
-  --service <PREFIX>-backend \
-  --force-new-deployment
+cd iac
+IMAGE_TAG=<build tag printed above> npx cdk deploy "${STRATOCLAVE_PREFIX:-stratoclave}-ecs"
 ```
+
+The ECS task definition pins the tag it was synthesised with. Pushing an image therefore changes nothing that is running, and `aws ecs update-service --force-new-deployment` only restarts the image already pinned. A `cdk deploy` of the ECS stack without `IMAGE_TAG` pins `latest`.
+
+The same deploy also re-applies every other setting the ECS stack reads from the environment, including the task size and scaling (`BACKEND_TASK_CPU`, `BACKEND_TASK_MEMORY`, `BACKEND_MIN_TASKS`, `BACKEND_MAX_TASKS`, `BACKEND_REQUESTS_PER_TARGET`, `BACKEND_CONCURRENCY_TARGET`), which fall back to their defaults when unset. Pass the values the running deployment was deployed with, and read `npx cdk diff "${STRATOCLAVE_PREFIX:-stratoclave}-ecs"` before deploying: the only change it should show is the image.
 
 ---
 
@@ -423,7 +425,7 @@ CDK stacks are designed to be re-applied freely. Typical update flows:
 | Change                                           | Command |
 | ------------------------------------------------ | ------- |
 | Frontend code only                               | `./iac/scripts/deploy-all.sh` (the frontend rebuild is part of the pipeline). |
-| Backend code only                                | `./iac/scripts/build-and-push.sh`, then `aws ecs update-service --force-new-deployment`. |
+| Backend code only                                | `./iac/scripts/build-and-push.sh`, then `IMAGE_TAG=<build tag> npx cdk deploy <Prefix>-ecs` (see [container image](#post-deploy-container-image)). |
 | IaC changes (new DynamoDB table, env var, ...)    | `cd iac && npx cdk diff --all`, then `./scripts/deploy-all.sh`. |
 | A specific stack                                 | `cd iac && npx cdk deploy <Prefix>EcsStack` (or another stack name). |
 
