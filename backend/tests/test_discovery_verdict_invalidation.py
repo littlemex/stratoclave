@@ -103,7 +103,8 @@ def _verified_verdict(profile_id: str, *, invocation: str = SYNC, pricing_key: s
         profile_id=profile_id, observation_scope=_scope(), invocation=invocation,
         verified_at="2026-09-10T00:00:00+00:00", verified_by="probe",
         pricing_key_at_verification=pricing_key, wire_protocol_verified="messages",
-        state="verified",
+        state="verified", candidate_digest="sha256:test-candidate",
+        record_digest="sha256:test-record",
     )
 
 

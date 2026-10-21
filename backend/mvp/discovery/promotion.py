@@ -60,6 +60,8 @@ nothing can set is a promise the code cannot keep.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -239,6 +241,25 @@ class PromotionCandidate:
                 seen.add(identifier)
                 ordered.append(identifier)
         return tuple(ordered)
+
+
+#: The fields a candidate's digest covers: everything activation reads off it.
+#: `state`, `created_at`, `created_by` and `observation_scope` are bookkeeping about
+#: the row, not about what would go live.
+_DIGEST_FIELDS = (
+    "profile_id", "aliases", "pricing_key", "jurisdiction", "provider",
+    "bedrock_model_id", "bedrock_region", "wire_protocol", "model_family",
+    "profile_scope",
+)
+
+
+def candidate_digest(candidate: PromotionCandidate) -> str:
+    """A digest of what this candidate would put live, so a probe verdict can name the
+    exact candidate it verified and activation can refuse a different one."""
+    body = {field: getattr(candidate, field) for field in _DIGEST_FIELDS}
+    body["aliases"] = list(candidate.aliases)
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _table():

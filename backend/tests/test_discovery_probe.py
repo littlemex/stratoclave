@@ -102,6 +102,23 @@ def _record(profile_id: str = "us.anthropic.claude-probe-target", **overrides) -
     return DiscoveredRecord(**base)
 
 
+def _candidate(record: Optional[DiscoveredRecord] = None, *, pricing_key: str,
+               wire_protocol: str):
+    """The candidate a probe is asked about: `record` mapped the way
+    `derive_candidate` maps one, with the two human inputs a probe exercises."""
+    from mvp.discovery.promotion import PromotionCandidate
+
+    record = record or _record()
+    return PromotionCandidate(
+        profile_id=record.profile_id, observation_scope=record.observation_scope,
+        state="candidate", aliases=(record.model_family,), pricing_key=pricing_key,
+        jurisdiction="us", provider=record.provider, bedrock_model_id=record.raw_id,
+        bedrock_region=record.invocation_region, wire_protocol=wire_protocol,
+        model_family=record.model_family, profile_scope=record.profile_scope,
+        created_at="2026-09-01T00:00:00+00:00", created_by="admin-1",
+    )
+
+
 class _FakeBedrockRuntime:
     """A `bedrock-runtime` client double whose only method a non-streaming
     probe needs: `converse`. Records every call so a test can confirm the
@@ -217,9 +234,8 @@ class TestPricingMustResolveThroughTheEntrysOwnKey:
         from mvp.discovery.verdict import get_probe_verdict
 
         record = _record()
-        result = probe(
-            record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"
-        )
+        candidate = _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages")
+        result = probe(record, candidate, invocation=SYNC)
 
         assert result.passed is True
         assert result.invocation == SYNC
@@ -236,6 +252,13 @@ class TestPricingMustResolveThroughTheEntrysOwnKey:
             "non-default key, is exactly the case this probe exists to verify"
         )
         assert verdict.pricing_key_at_verification == REAL_PRICING_KEY
+        # What it verified, so activation can refuse a different candidate or a
+        # record replaced after this probe (#281).
+        from mvp.discovery.promotion import candidate_digest
+        from mvp.discovery.records import record_digest
+
+        assert verdict.candidate_digest == candidate_digest(candidate)
+        assert verdict.record_digest == record_digest(record)
 
         rows = _usage_rows_for(SYSTEM_TENANT_ID)
         assert len(rows) >= 1, "the probe's own charge must be a real UsageLogs row"
@@ -260,8 +283,9 @@ class TestPricingMustResolveThroughTheEntrysOwnKey:
 
         record = _record()
         result = probe(
-            record, invocation=SYNC, pricing_key=UNRESOLVABLE_PRICING_KEY,
-            wire_protocol="messages",
+            record,
+            _candidate(record, pricing_key=UNRESOLVABLE_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
         )
 
         assert result.passed is False
@@ -294,7 +318,9 @@ class TestConverseCallFailure:
 
         record = _record()
         result = probe(
-            record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
         )
 
         assert result.passed is False
@@ -323,7 +349,9 @@ class TestWireProtocolIsRecordedNotMerelyPresent:
 
         record = _record()
         result = probe(
-            record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
         )
         assert result.passed is True
         assert result.verdict.wire_protocol_verified == "messages"
@@ -351,7 +379,9 @@ class TestWireProtocolIsRecordedNotMerelyPresent:
 
         record = _record()
         result = probe(
-            record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
         )
         assert result.passed is False
         assert result.verdict is None
@@ -378,7 +408,9 @@ class TestChargeLandsOnTheSystemTenantOnly:
 
         record = _record()
         result = probe(
-            record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
         )
 
         rows = _usage_rows_for(SYSTEM_TENANT_ID)
@@ -402,7 +434,11 @@ class TestChargeLandsOnTheSystemTenantOnly:
         from mvp.discovery.probe import probe
 
         record = _record()
-        probe(record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages")
+        probe(
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
+        )
 
         other_rows = _usage_rows_for(seed_tenant_with_pool["tenant_id"])
         assert other_rows == []
@@ -451,7 +487,11 @@ class TestSystemTenantEligibility:
         record = _record(profile_scope="global")
 
         with pytest.raises(ProbeAttemptRefused) as exc_info:
-            probe(record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages")
+            probe(
+                record,
+                _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+                invocation=SYNC,
+            )
         assert exc_info.value.reason == "probe_refused"
 
         verdict = get_probe_verdict(record.profile_id, SYNC)
@@ -484,7 +524,9 @@ class TestSystemTenantEligibility:
 
         record = _record(profile_scope="us")
         result = probe(
-            record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
         )
         assert result.passed is True
 
@@ -538,9 +580,44 @@ class TestProbeUnmetered:
         record = _record()
 
         with pytest.raises(ProbeAttemptRefused) as exc_info:
-            probe(record, invocation=SYNC, pricing_key=REAL_PRICING_KEY, wire_protocol="messages")
+            probe(
+                record,
+                _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+                invocation=SYNC,
+            )
         assert exc_info.value.reason == "probe_unmetered", (
             "a pool with no headroom at all is a failure to obtain a metered "
             "hold, not a deliberate scope/rate-limit refusal -- the two "
             "reasons must not collapse into one"
         )
+
+
+class TestTheCandidateMustDescribeTheRecord:
+    """The verdict names the candidate and the record it verified, so a probe that
+    called one model while holding a candidate for another would certify a binding it
+    never exercised (#281). A candidate derived from an earlier record that discovery
+    has since replaced is the way that happens."""
+
+    def test_a_candidate_for_another_region_is_refused_before_anything_is_spent(
+        self, _system_tenant_pool, monkeypatch
+    ):
+        from dataclasses import replace
+
+        fake = _FakeBedrockRuntime(response=_valid_converse_response())
+        _patch_bedrock_clients(monkeypatch, fake)
+
+        from mvp.discovery.probe import ProbeAttemptRefused, probe
+        from mvp.discovery.verdict import get_probe_verdict
+
+        record = _record()
+        stale = replace(
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            bedrock_region="us-west-2",
+        )
+        with pytest.raises(ProbeAttemptRefused) as exc_info:
+            probe(record, stale, invocation=SYNC)
+        assert exc_info.value.reason == "probe_refused"
+        assert "bedrock_region" in exc_info.value.detail
+        assert not fake.calls, "a refused probe must not reach the provider"
+        assert _usage_rows_for(SYSTEM_TENANT_ID) == []
+        assert get_probe_verdict(record.profile_id, SYNC) is None

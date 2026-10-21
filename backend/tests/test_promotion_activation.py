@@ -121,6 +121,8 @@ _INVOCATION = "sync"
 
 
 def _verdict(**overrides):
+    from mvp.discovery.promotion import candidate_digest
+    from mvp.discovery.records import record_digest
     from mvp.discovery.verdict import ProbeVerdict
 
     base = dict(
@@ -132,6 +134,8 @@ def _verdict(**overrides):
         pricing_key_at_verification=_PRICING_KEY,
         wire_protocol_verified="messages",
         state="verified",
+        candidate_digest=candidate_digest(_candidate()),
+        record_digest=record_digest(_discovered_record(_candidate())),
     )
     base.update(overrides)
     return ProbeVerdict(**base)
@@ -722,3 +726,176 @@ def test_a_healthy_activation_reports_no_unobservable_reason(dynamodb_mock, monk
     )
 
     assert unobservable_reason is None, unobservable_reason
+
+
+# ---------------------------------------------------------------------------
+# The verdict is bound to the candidate and the record revision it verified (#281)
+# ---------------------------------------------------------------------------
+
+
+def _no_commit(monkeypatch) -> list:
+    """Record any attempt to commit, so a refusal can be shown to come from the
+    pre-check rather than from the commit's own condition."""
+    from mvp.discovery import activation as activation_mod
+
+    attempts: list = []
+    real = activation_mod._commit_activation
+    monkeypatch.setattr(activation_mod, "_commit_activation",
+                        lambda *a, **k: (attempts.append(a), real(*a, **k)))
+    return attempts
+
+
+def _assert_not_live():
+    from mvp.models import invalidate_composed_registry, registry_entries
+
+    invalidate_composed_registry()
+    assert not any(_ALIAS in e.aliases for e in registry_entries())
+
+
+def test_a_verdict_for_a_different_candidate_refuses_activation(dynamodb_mock, monkeypatch):
+    """Same pricing key, same protocol, same verified moment -- but the candidate it
+    verified had other aliases, so the entry activation would build is not the one
+    the probe certified."""
+    from mvp.discovery.activation import ActivationRefused
+    from mvp.discovery.promotion import candidate_digest
+
+    other = candidate_digest(_candidate(aliases=("someone-elses-alias",)))
+    commits = _no_commit(monkeypatch)
+    with pytest.raises(ActivationRefused) as ei:
+        _seed_and_activate(dynamodb_mock, monkeypatch, verdict=_verdict(candidate_digest=other))
+    assert ei.value.reason == ActivationRefused.VERDICT_SUBJECT_CHANGED
+    assert "candidate" in str(ei.value)
+    assert commits == [], "refused by the commit, not by the pre-check"
+    _assert_not_live()
+
+
+def test_a_verdict_against_different_record_content_refuses_activation(dynamodb_mock, monkeypatch):
+    """Activation reads `jurisdiction_bounded` from the CURRENT record. A record whose
+    content changed after the probe could put a field live that no probe ran against."""
+    from dataclasses import replace
+
+    from mvp.discovery.activation import ActivationRefused
+    from mvp.discovery.records import record_digest
+
+    unbounded = replace(_discovered_record(_candidate()), jurisdiction_bounded=False)
+    commits = _no_commit(monkeypatch)
+    with pytest.raises(ActivationRefused) as ei:
+        _seed_and_activate(dynamodb_mock, monkeypatch,
+                           verdict=_verdict(record_digest=record_digest(unbounded)))
+    assert ei.value.reason == ActivationRefused.VERDICT_SUBJECT_CHANGED
+    assert "discovered record" in str(ei.value)
+    assert commits == [], "refused by the commit, not by the pre-check"
+    _assert_not_live()
+
+
+def test_a_rediscovery_that_finds_nothing_new_does_not_refuse_activation(
+    dynamodb_mock, monkeypatch,
+):
+    """The binding is to content, not to when it was observed: a discovery pass that
+    rewrites the record with a fresh observation and the same content between probe
+    and activation must not force a paid re-probe."""
+    from dataclasses import replace
+
+    from mvp.discovery.records import ObservationScope, put_discovered_record
+    from mvp.models import invalidate_composed_registry, registry_entries
+
+    verdict = _verdict()
+    real_put = put_discovered_record
+
+    def _seed_then_rediscover(record):
+        real_put(record)
+        real_put(replace(record, observation_scope=ObservationScope(
+            account="000000000000", region="us-east-1",
+            credentials_fingerprint="test", observed_at="2026-10-01T00:00:00+00:00")))
+
+    monkeypatch.setattr("mvp.discovery.records.put_discovered_record", _seed_then_rediscover)
+    _seed_and_activate(dynamodb_mock, monkeypatch, verdict=verdict)
+    from mvp.discovery.records import get_discovered_record
+
+    assert get_discovered_record(_PROFILE_ID).observation_scope.observed_at == (
+        "2026-10-01T00:00:00+00:00"), "the re-discovery did not happen"
+    invalidate_composed_registry()
+    assert any(_ALIAS in e.aliases for e in registry_entries())
+
+
+def test_a_verdict_that_predates_the_binding_refuses_activation(dynamodb_mock, monkeypatch):
+    """A version-1 verdict row carries no binding. It still reads, so an operator sees
+    it, and it never activates: the refusal asks for a fresh probe."""
+    from mvp.discovery.activation import ActivationRefused, activate_candidate
+    from mvp.discovery.promotion import put_promotion_candidate
+    from mvp.discovery.records import put_discovered_record
+    from mvp.discovery.verdict import _table, _to_item, get_probe_verdict
+
+    verdict = _verdict()
+    item = _to_item(verdict)
+    item["schema_version"] = 1
+    del item["candidate_digest"], item["record_digest"]
+
+    cand = _candidate()
+    put_discovered_record(_discovered_record(cand))
+    put_promotion_candidate(cand)
+    _table().put_item(Item=item)
+    stored = get_probe_verdict(_PROFILE_ID, _INVOCATION)
+    assert stored is not None and stored.state == "verified"
+    assert (stored.candidate_digest, stored.record_digest) == ("", "")
+
+    _grant_only(monkeypatch, "promoter", frozenset({_PROMOTE_SCOPE}))
+    commits = _no_commit(monkeypatch)
+    with pytest.raises(ActivationRefused) as ei:
+        activate_candidate(_PROFILE_ID, _INVOCATION, actor=_actor(["promoter"]),
+                           expected_verified_at=verdict.verified_at)
+    assert ei.value.reason == ActivationRefused.VERDICT_SUBJECT_CHANGED
+    assert "predates the binding" in str(ei.value)
+    assert commits == [], "refused by the commit, not by the pre-check"
+    _assert_not_live()
+
+
+@pytest.mark.parametrize("rebound", [
+    {"candidate_digest": "sha256:another-candidate"},
+    {"record_digest": "sha256:another-record"},
+    {"schema_version": 1},
+], ids=["candidate", "record", "downgraded-to-unbound"])
+def test_a_rebinding_between_the_check_and_the_commit_refuses(dynamodb_mock, monkeypatch, rebound):
+    """The pre-check is a courtesy; the guarantee is the commit's condition. A write
+    landing between the two keeps `verified_at` (here, by construction) and moves
+    only the binding -- either digest, or the row back to the unbound schema -- and
+    the commit must still refuse, under the same reason the pre-check would give."""
+    from mvp.discovery import activation as activation_mod
+    from mvp.discovery.activation import ActivationRefused
+    from mvp.discovery.verdict import _table, _to_item
+
+    verdict = _verdict()
+    real_build = activation_mod._build_entry
+
+    def _rebind_then_build(candidate, **kwargs):
+        _table().put_item(Item={**_to_item(verdict), **rebound})
+        return real_build(candidate, **kwargs)
+
+    monkeypatch.setattr(activation_mod, "_build_entry", _rebind_then_build)
+    with pytest.raises(ActivationRefused) as ei:
+        _seed_and_activate(dynamodb_mock, monkeypatch, verdict=verdict)
+    assert ei.value.reason == ActivationRefused.VERDICT_SUBJECT_CHANGED
+    _assert_not_live()
+
+
+def test_a_schema_1_row_carrying_matching_digests_is_still_unbound(dynamodb_mock, monkeypatch):
+    """Only a version-2 writer computed the binding. A version-1 row that happens to
+    carry the right attributes -- imported, or written back by an older build -- is
+    read as unbound, so it cannot activate on attributes nobody verified."""
+    from mvp.discovery.activation import ActivationRefused, activate_candidate
+    from mvp.discovery.promotion import put_promotion_candidate
+    from mvp.discovery.records import put_discovered_record
+    from mvp.discovery.verdict import _table, _to_item
+
+    verdict = _verdict()
+    cand = _candidate()
+    put_discovered_record(_discovered_record(cand))
+    put_promotion_candidate(cand)
+    _table().put_item(Item={**_to_item(verdict), "schema_version": 1})
+    _grant_only(monkeypatch, "promoter", frozenset({_PROMOTE_SCOPE}))
+    with pytest.raises(ActivationRefused) as ei:
+        activate_candidate(_PROFILE_ID, _INVOCATION, actor=_actor(["promoter"]),
+                           expected_verified_at=verdict.verified_at)
+    assert ei.value.reason == ActivationRefused.VERDICT_SUBJECT_CHANGED
+    assert "predates the binding" in str(ei.value)
+    _assert_not_live()

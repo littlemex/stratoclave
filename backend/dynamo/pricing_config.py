@@ -286,6 +286,18 @@ class PricingConfigRepository:
             orphan = set(costs) - set(rates)
             if orphan:
                 raise ValueError(f"costs for keys not in rates: {sorted(orphan)}")
+        # `default` is what an unregistered pricing key is charged at, and it may only
+        # move up. The rate cache clamps it either way; refusing here, before any row
+        # is written, tells the operator instead of charging something other than what
+        # they wrote.
+        if "default" in rates:
+            from mvp.pricing import default_floor_violations
+
+            lowered = default_floor_violations(rates["default"])
+            if lowered:
+                raise ValueError(
+                    f"the 'default' rate may not be lowered below the bundled floor; "
+                    f"lowered: {lowered}")
 
         from botocore.exceptions import ClientError
 

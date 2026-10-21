@@ -71,11 +71,13 @@ from .. import _responses_wire as _wire
 from . import ledger
 from .ledger import ProbeAttemptRefused  # re-exported: a caller of `probe` should not
 # have to know which layer refused.
+from .promotion import PromotionCandidate, candidate_digest
 from .records import (
     Blocker,
     DiscoveredRecord,
     ObservationScope,
     credentials_fingerprint,
+    record_digest,
 )
 from .verdict import (
     INVOCATION_STREAM,
@@ -484,15 +486,21 @@ _TRANSPORTS: dict[str, _Transport] = {
 
 
 def probe(
-    record: DiscoveredRecord, *, invocation: str, pricing_key: str, wire_protocol: str,
+    record: DiscoveredRecord, candidate: PromotionCandidate, *, invocation: str,
     bedrock: Optional[Any] = None, sts: Optional[Any] = None,
     http: Optional[Any] = None,
 ) -> ProbeResult:
-    """Perform the four assertions against `record`'s underlying Bedrock
-    identity, under `invocation`, priced at `pricing_key`. Raises `ledger.
-    ProbeAttemptRefused` when the attempt cannot even be made (see that
-    exception's docstring for the closed reasons); returns a `ProbeResult`
-    for every attempt that WAS made, pass or fail.
+    """Perform the four assertions for `candidate` against `record`'s underlying
+    Bedrock identity, under `invocation`, priced at the candidate's pricing key over
+    its wire protocol. Raises `ledger.ProbeAttemptRefused` when the attempt cannot
+    even be made (see that exception's docstring for the closed reasons); returns a
+    `ProbeResult` for every attempt that WAS made, pass or fail.
+
+    The candidate is passed whole, not as its pricing key and protocol, because the
+    verdict names what it verified: the candidate's digest and the record's. A
+    candidate whose model identity disagrees with the record -- derived from an
+    earlier record that discovery has since replaced -- is refused before anything
+    is spent, because the call would exercise one model and certify another.
 
     On a pass, writes the verdict (`put_probe_verdict`) before returning —
     unlike a failed assertion's `Blocker`, this is not left to a caller,
@@ -511,6 +519,27 @@ def probe(
     """
     if invocation not in INVOCATION_VALUES:
         raise ValueError(f"unknown invocation {invocation!r}; must be one of {sorted(INVOCATION_VALUES)}")
+
+    disagreeing = [
+        f"{name}: candidate {ours!r}, record {theirs!r}"
+        for name, ours, theirs in (
+            ("profile_id", candidate.profile_id, record.profile_id),
+            ("bedrock_model_id", candidate.bedrock_model_id, record.raw_id),
+            ("bedrock_region", candidate.bedrock_region, record.invocation_region),
+            ("provider", candidate.provider, record.provider),
+            ("profile_scope", candidate.profile_scope, record.profile_scope),
+            ("model_family", candidate.model_family, record.model_family),
+        )
+        if ours != theirs
+    ]
+    if disagreeing:
+        raise ProbeAttemptRefused(
+            "probe_refused",
+            f"the candidate does not describe the model this record names "
+            f"({'; '.join(disagreeing)}); derive the candidate again from the current record",
+        )
+    pricing_key = candidate.pricing_key
+    wire_protocol = candidate.wire_protocol
 
     transport = _TRANSPORTS.get(wire_protocol)
     if transport is None:
@@ -699,6 +728,8 @@ def probe(
         pricing_key_at_verification=pricing_key,
         wire_protocol_verified=wire_protocol,
         state=STATE_VERIFIED,
+        candidate_digest=candidate_digest(candidate),
+        record_digest=record_digest(record),
     )
     put_probe_verdict(verdict)
     return ProbeResult(

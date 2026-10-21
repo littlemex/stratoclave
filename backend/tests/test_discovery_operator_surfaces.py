@@ -203,7 +203,7 @@ def _verdict(profile_id: str, **overrides) -> ProbeVerdict:
         profile_id=profile_id, observation_scope=_scope(), invocation=SYNC,
         verified_at="2026-09-01T01:00:00+00:00", verified_by="probe",
         pricing_key_at_verification=_PRICING_KEY, wire_protocol_verified="messages",
-        state="verified",
+        state="verified", candidate_digest="", record_digest="",
     )
     base.update(overrides)
     return ProbeVerdict(**base)
@@ -743,9 +743,16 @@ def test_probe_is_gated_on_the_promote_scope_not_the_discover_scope_alone(dynamo
 # function's own stated design.
 # ===========================================================================
 def _seed_for_activation(profile_id: str, *, alias: str, verdict_overrides: dict):
-    put_discovered_record(_record(profile_id))
-    put_promotion_candidate(_candidate(profile_id, alias=alias))
-    seeded = _verdict(profile_id, **verdict_overrides)
+    from mvp.discovery.promotion import candidate_digest
+    from mvp.discovery.records import record_digest
+
+    record = _record(profile_id)
+    put_discovered_record(record)
+    candidate = _candidate(profile_id, alias=alias)
+    put_promotion_candidate(candidate)
+    seeded = _verdict(profile_id, **{
+        "candidate_digest": candidate_digest(candidate),
+        "record_digest": record_digest(record), **verdict_overrides})
     put_probe_verdict(seeded)
     return seeded
 

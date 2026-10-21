@@ -84,7 +84,10 @@ class TestFallbackCauseCapture:
             model_id="claude-haiku-4-5", input_tokens=10, output_tokens=5,
             requested_model_id="claude-opus-4-7",
         )
-        fields_that_could_carry_a_cause = set(item_a) - {"timestamp_log_id", "recorded_at"}
+        # Ids and the instant-derived fields differ between any two rows; `ttl` is
+        # whole epoch seconds, so two writes straddling a second boundary differ
+        # there too, and comparing it made this test fail at random.
+        fields_that_could_carry_a_cause = set(item_a) - {"timestamp_log_id", "recorded_at", "ttl"}
         for field in fields_that_could_carry_a_cause:
             assert item_a[field] == item_b[field], (
                 f"field {field!r} differs between the two fallback rows, but "
