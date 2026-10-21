@@ -2,7 +2,7 @@
   "name": "stratoclave-frontend",
   "private": true,
   "version": "0.2.0",
-  "description": "Stratoclave web console — tenant, user, credit and API key management for the Stratoclave Bedrock proxy gateway.",
+  "description": "Stratoclave web console \u2014 tenant, user, credit and API key management for the Stratoclave Bedrock proxy gateway.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/littlemex/stratoclave",
   "repository": {
@@ -81,6 +81,7 @@
     "vitest": "^3.2.6"
   },
   "overrides": {
-    "esbuild": ">=0.28.1"
+    "esbuild": ">=0.28.1",
+    "tinypool": ">=2.1.2"
   }
 }
