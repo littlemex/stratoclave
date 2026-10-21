@@ -626,8 +626,7 @@ def probe_promotion_candidate(
 
     try:
         result = probe(
-            record, invocation=body.invocation, pricing_key=candidate.pricing_key,
-            wire_protocol=candidate.wire_protocol,
+            record, candidate, invocation=body.invocation,
         )
     except ProbeAttemptRefused as exc:
         raise HTTPException(status_code=409, detail={"type": exc.reason, "message": exc.detail})
@@ -725,6 +724,7 @@ _ACTIVATION_REFUSED_STATUS: dict[str, int] = {
     ActivationRefused.VERDICT_IDENTITY_MISMATCH: 409,
     ActivationRefused.PRICING_KEY_MISMATCH: 409,
     ActivationRefused.WIRE_PROTOCOL_MISMATCH: 409,
+    ActivationRefused.VERDICT_SUBJECT_CHANGED: 409,
     ActivationRefused.IDENTIFIER_TAKEN: 409,
 }
 

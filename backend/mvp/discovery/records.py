@@ -43,6 +43,7 @@ a string literal here to accidentally name.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -327,6 +328,24 @@ class DiscoveredRecord:
     raw_payload: Mapping[str, Any]
     observation_scope: ObservationScope
     blockers: tuple[Blocker, ...] = field(default_factory=tuple)
+
+
+#: The fields a record's digest covers: what a probe calls and what activation reads.
+#: `raw_payload`, `blockers` and `observation_scope` describe the observation rather
+#: than the model, so a re-discovery that finds nothing new leaves the digest alone.
+_DIGEST_FIELDS = (
+    "profile_id", "provider", "profile_scope", "model_family", "jurisdiction_bounded",
+    "destination_regions", "invocation_region", "raw_id",
+)
+
+
+def record_digest(record: DiscoveredRecord) -> str:
+    """A digest of what this record says about the model, so a probe verdict can name
+    the record content it ran against and activation can refuse different content."""
+    body = {field: getattr(record, field) for field in _DIGEST_FIELDS}
+    body["destination_regions"] = sorted(record.destination_regions)
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 class DiscoveredRecordStoreUnavailable(Exception):

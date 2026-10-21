@@ -38,7 +38,11 @@ from dynamo.client import get_dynamodb_resource, promotion_candidates_table_name
 
 from .records import ObservationScope, _json_safe
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+#: A version-1 row predates the binding below. It is still read, so an operator
+#: surface keeps showing it, with both binding fields empty -- which no candidate
+#: matches, so activation refuses it and asks for a fresh probe.
+_UNBOUND_SCHEMA_VERSION = 1
 
 _VERDICT_PK_PREFIX = "VERDICT#"
 _VERDICT_SK_PREFIX = "INVOCATION#"
@@ -85,7 +89,16 @@ def _now_iso() -> str:
 @dataclass(frozen=True)
 class ProbeVerdict:
     """Exactly the fields the freeze names, in the order it names them
-    (`mode` renamed `invocation` per the ratified correction)."""
+    (`mode` renamed `invocation` per the ratified correction), followed by the two
+    that bind it to what it verified.
+
+    `candidate_digest` (`promotion.candidate_digest`) names the candidate the probe
+    exercised, and `record_digest` (`records.record_digest`) the discovered record
+    content it ran against. Activation builds the live entry from the current
+    candidate and the current record, so without these a verdict for one candidate
+    could activate another, and a field read from a changed record would go live
+    unverified. Both are content digests: a re-discovery that finds nothing new does
+    not move them."""
 
     profile_id: str
     observation_scope: ObservationScope
@@ -95,6 +108,8 @@ class ProbeVerdict:
     pricing_key_at_verification: str
     wire_protocol_verified: str
     state: str
+    candidate_digest: str
+    record_digest: str
 
     def __post_init__(self) -> None:
         if self.invocation not in INVOCATION_VALUES:
@@ -145,6 +160,8 @@ def _to_item(verdict: ProbeVerdict) -> dict[str, Any]:
         "pricing_key_at_verification": verdict.pricing_key_at_verification,
         "wire_protocol_verified": verdict.wire_protocol_verified,
         "state": verdict.state,
+        "candidate_digest": verdict.candidate_digest,
+        "record_digest": verdict.record_digest,
         "observation_scope": {
             "account": scope.account,
             "region": scope.region,
@@ -167,8 +184,11 @@ def _from_item(item: Mapping[str, Any]) -> Optional[ProbeVerdict]:
         schema = int(schema)
     except (TypeError, ValueError):
         schema = None
-    if schema != SCHEMA_VERSION:
+    if schema not in (SCHEMA_VERSION, _UNBOUND_SCHEMA_VERSION):
         return None
+    # A version-1 row is unbound by definition, whatever attributes it happens to
+    # carry: only a version-2 writer computed the binding.
+    bound = schema == SCHEMA_VERSION
     scope_raw = item.get("observation_scope") or {}
     if not isinstance(scope_raw, Mapping):
         return None
@@ -187,6 +207,8 @@ def _from_item(item: Mapping[str, Any]) -> Optional[ProbeVerdict]:
             pricing_key_at_verification=str(item.get("pricing_key_at_verification") or ""),
             wire_protocol_verified=str(item.get("wire_protocol_verified") or ""),
             state=str(item.get("state") or ""),
+            candidate_digest=str(item.get("candidate_digest") or "") if bound else "",
+            record_digest=str(item.get("record_digest") or "") if bound else "",
         )
     except ValueError:
         # An unrecognised `invocation`/`verified_by`/`state` is skipped rather
@@ -194,6 +216,13 @@ def _from_item(item: Mapping[str, Any]) -> Optional[ProbeVerdict]:
         # unrecognised blocker type: a row this build cannot parse is not
         # evidence of absence.
         return None
+
+
+def probe_verdict_from_item(item: Mapping[str, Any]) -> Optional[ProbeVerdict]:
+    """A stored verdict row read back, or `None` for a row this build cannot parse --
+    for a caller handed the row by DynamoDB itself, such as a failed condition's
+    `ALL_OLD` image."""
+    return _from_item(item)
 
 
 def get_probe_verdict(profile_id: str, invocation: str) -> Optional[ProbeVerdict]:

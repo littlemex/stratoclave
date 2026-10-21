@@ -55,7 +55,7 @@ from decimal import Decimal
 from typing import Any, Mapping, Optional
 
 import boto3
-from boto3.dynamodb.types import TypeSerializer
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
 
 from core.aws_pool import boto_config
@@ -69,9 +69,15 @@ from dynamo.client import (
 from ..authz import user_has_permission
 from ..deps import AuthenticatedUser
 from ..models import ModelEntry
-from .promotion import PromotionCandidate, get_promotion_candidate
-from .records import get_discovered_record
-from .verdict import STATE_VERIFIED, ProbeVerdict, get_probe_verdict
+from .promotion import PromotionCandidate, candidate_digest, get_promotion_candidate
+from .records import get_discovered_record, record_digest
+from .verdict import (
+    SCHEMA_VERSION as VERDICT_SCHEMA_VERSION,
+    STATE_VERIFIED,
+    ProbeVerdict,
+    get_probe_verdict,
+    probe_verdict_from_item,
+)
 
 logger = get_logger(__name__)
 
@@ -108,6 +114,7 @@ _VERDICT_PK_PREFIX = "VERDICT#"
 _VERDICT_SK_PREFIX = "INVOCATION#"
 
 _serializer = TypeSerializer()
+_deserializer = TypeDeserializer()
 
 # The permission that gates activation. Declared and seeded elsewhere
 # (permissions.json, mvp.authz.ALL_SCOPES, the frontend mirror) by the unit
@@ -154,6 +161,10 @@ class ActivationRefused(ValueError):
       is the analogous guard against two candidates that each cleared that
       check separately both going live for a name they never actually
       shared until now — see `_commit_activation`'s own docstring).
+    - `VERDICT_SUBJECT_CHANGED` -- the verdict is current, but it verified a
+      different candidate, or ran against different discovered-record
+      content, from the ones this activation would build the entry from. The entry is assembled from both, so activating would put live a
+      combination no probe verified.
     """
 
     NOT_PERMITTED = "not_permitted"
@@ -164,11 +175,12 @@ class ActivationRefused(ValueError):
     VERDICT_IDENTITY_MISMATCH = "verdict_identity_mismatch"
     PRICING_KEY_MISMATCH = "pricing_key_mismatch"
     WIRE_PROTOCOL_MISMATCH = "wire_protocol_mismatch"
+    VERDICT_SUBJECT_CHANGED = "verdict_subject_changed"
     IDENTIFIER_TAKEN = "identifier_taken"
     REASONS = frozenset({
         NOT_PERMITTED, CANDIDATE_NOT_FOUND, RECORD_NOT_FOUND, VERDICT_NOT_FOUND,
         VERDICT_NOT_VERIFIED, VERDICT_IDENTITY_MISMATCH, PRICING_KEY_MISMATCH,
-        WIRE_PROTOCOL_MISMATCH, IDENTIFIER_TAKEN,
+        WIRE_PROTOCOL_MISMATCH, VERDICT_SUBJECT_CHANGED, IDENTIFIER_TAKEN,
     })
 
     def __init__(self, reason: str, message: str) -> None:
@@ -459,6 +471,7 @@ def _public_identifiers(entry: ModelEntry) -> tuple[str, ...]:
 
 def _commit_activation(
     activated: ActivatedEntry, *, expected_verified_at: str,
+    expected_candidate_digest: str, expected_record_digest: str,
 ) -> None:
     """Commit one activation atomically: the verdict identity the caller
     named is still the current one, the `ACTIVE#{profile_id}` row is written,
@@ -517,12 +530,20 @@ def _commit_activation(
             "ConditionCheck": {
                 "TableName": table_name,
                 "Key": {k: _serializer.serialize(v) for k, v in verdict_key.items()},
-                "ConditionExpression": "verified_at = :vat AND #st = :verified",
+                "ConditionExpression": (
+                    "verified_at = :vat AND #st = :verified AND schema_version = :sv "
+                    "AND candidate_digest = :cd AND record_digest = :rd"),
                 "ExpressionAttributeNames": {"#st": "state"},
                 "ExpressionAttributeValues": {
                     ":vat": _serializer.serialize(expected_verified_at),
                     ":verified": _serializer.serialize(STATE_VERIFIED),
+                    ":sv": _serializer.serialize(VERDICT_SCHEMA_VERSION),
+                    ":cd": _serializer.serialize(expected_candidate_digest),
+                    ":rd": _serializer.serialize(expected_record_digest),
                 },
+                # The row as it was when the condition failed, so the refusal names
+                # the fact that failed it rather than whatever a later read finds.
+                "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
             }
         },
         {
@@ -562,6 +583,17 @@ def _commit_activation(
             # put_promotion_candidate`'s own reason-to-identifier mapping,
             # offset by one extra leading item.
             if reasons and (reasons[0] or {}).get("Code") == "ConditionalCheckFailed":
+                # The condition covers two facts with two reasons, so classify from
+                # the row that failed it: a verdict that is still the same verified
+                # moment but binds another subject is VERDICT_SUBJECT_CHANGED, as it
+                # is when the pre-check sees it.
+                old = (reasons[0] or {}).get("Item")
+                failed = probe_verdict_from_item(
+                    {k: _deserializer.deserialize(v) for k, v in old.items()}) if old else None
+                if (failed is not None and failed.state == STATE_VERIFIED
+                        and failed.verified_at == expected_verified_at):
+                    _check_subject(failed, candidate_digest=expected_candidate_digest,
+                                   record_digest=expected_record_digest)
                 raise ActivationRefused(
                     ActivationRefused.VERDICT_IDENTITY_MISMATCH,
                     f"verdict for profile_id={activated.profile_id!r} "
@@ -658,6 +690,28 @@ def _verify(candidate: PromotionCandidate, verdict: Optional[ProbeVerdict], invo
             f"verdict for profile_id={candidate.profile_id!r} invocation={invocation!r} "
             f"verified wire_protocol={verdict.wire_protocol_verified!r}, but the "
             f"candidate now names wire_protocol={candidate.wire_protocol!r}",
+        )
+
+
+def _check_subject(verdict: ProbeVerdict, *, candidate_digest: str, record_digest: str) -> None:
+    """Refuse unless `verdict` verified exactly this candidate and this record content."""
+    if not verdict.candidate_digest or not verdict.record_digest:
+        raise ActivationRefused(
+            ActivationRefused.VERDICT_SUBJECT_CHANGED,
+            f"verdict for profile_id={verdict.profile_id!r} invocation="
+            f"{verdict.invocation!r} predates the binding to what it verified; "
+            f"probe again before activating",
+        )
+    moved = [name for name, verified, now in (
+        ("candidate", verdict.candidate_digest, candidate_digest),
+        ("discovered record", verdict.record_digest, record_digest),
+    ) if verified != now]
+    if moved:
+        raise ActivationRefused(
+            ActivationRefused.VERDICT_SUBJECT_CHANGED,
+            f"verdict for profile_id={verdict.profile_id!r} invocation="
+            f"{verdict.invocation!r} did not verify the current "
+            f"{' or the current '.join(moved)}; probe again before activating",
         )
 
 
@@ -788,6 +842,14 @@ def activate_candidate(
     # Raises `ActivationStoreUnavailable`, which every caller already handles.
     list_activated_entries()
 
+    # The entry is built from the candidate and the record as read now, so the
+    # verdict must have verified exactly those. Checked here for a refusal that
+    # names which one moved, and again inside the commit's condition, where a
+    # re-probe landing in between is also caught.
+    verified_candidate = candidate_digest(candidate)
+    verified_record = record_digest(record)
+    _check_subject(verdict, candidate_digest=verified_candidate, record_digest=verified_record)
+
     entry = _build_entry(candidate, jurisdiction_bounded=record.jurisdiction_bounded)
     activated = ActivatedEntry(
         profile_id=profile_id,
@@ -796,7 +858,10 @@ def activate_candidate(
         activated_at=_now_iso(),
         activated_by=actor.user_id,
     )
-    _commit_activation(activated, expected_verified_at=expected_verified_at)
+    _commit_activation(
+        activated, expected_verified_at=expected_verified_at,
+        expected_candidate_digest=verified_candidate, expected_record_digest=verified_record,
+    )
     # The TTL carries other replicas. It must not carry this one: a caller who
     # just activated a model and immediately asks the registry about it would
     # otherwise be told it does not exist, for up to a full window, by the very

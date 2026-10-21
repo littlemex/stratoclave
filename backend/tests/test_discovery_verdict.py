@@ -67,6 +67,8 @@ def _verdict(profile_id: str = "us.anthropic.claude-fable-5", **overrides):
         pricing_key_at_verification="fable-global",
         wire_protocol_verified="messages",
         state="verified",
+        candidate_digest="sha256:test-candidate",
+        record_digest="sha256:test-record",
     )
     base.update(overrides)
     return ProbeVerdict(**base)

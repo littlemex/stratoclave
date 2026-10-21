@@ -53,6 +53,23 @@ def _record(profile_id: str = "us.openai.gpt-probe-target", **overrides) -> Disc
     return DiscoveredRecord(**base)
 
 
+def _candidate(record: Optional[DiscoveredRecord] = None, *, pricing_key: str,
+               wire_protocol: str):
+    """The candidate a probe is asked about: `record` mapped the way
+    `derive_candidate` maps one, with the two human inputs a probe exercises."""
+    from mvp.discovery.promotion import PromotionCandidate
+
+    record = record or _record()
+    return PromotionCandidate(
+        profile_id=record.profile_id, observation_scope=record.observation_scope,
+        state="candidate", aliases=(record.model_family,), pricing_key=pricing_key,
+        jurisdiction="us", provider=record.provider, bedrock_model_id=record.raw_id,
+        bedrock_region=record.invocation_region, wire_protocol=wire_protocol,
+        model_family=record.model_family, profile_scope=record.profile_scope,
+        created_at="2026-09-01T00:00:00+00:00", created_by="admin-1",
+    )
+
+
 def _sse(*frames: dict) -> bytes:
     """An SSE body in the shape the endpoint actually sends: `data:` only, no
     `event:` lines, the event name carried inside the JSON as `"type"`."""
@@ -104,8 +121,12 @@ class TestAVerifiedResponsesProbe:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
 
         assert result.passed is True, result.blocker
         assert result.verdict is not None
@@ -145,8 +166,12 @@ class TestAVerifiedResponsesProbe:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
 
 
@@ -173,8 +198,12 @@ class TestWhatMustNotBeSettled:
         from mvp.discovery.verdict import get_probe_verdict
 
         record = _record()
-        result = probe(record, invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            record,
+            _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
 
         assert result.passed is False
         assert result.blocker is not None
@@ -190,8 +219,12 @@ class TestWhatMustNotBeSettled:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert "429" in (result.blocker.evidence if result.blocker else "")
 
@@ -213,8 +246,12 @@ class TestWhatMustNotBeSettled:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert dropped == ["us-east-1"], dropped
 
@@ -229,8 +266,12 @@ class TestWhatMustNotBeSettled:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert result.blocker is not None
         assert result.blocker.subtype == "usage_counters_missing", result.blocker
@@ -249,8 +290,11 @@ class TestAnUnknownProtocolStillRefusesBeforeSpendingAnything:
 
         monkeypatch.setattr(ledger, "ensure_system_tenant", _must_not_run)
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="telepathy")
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="telepathy"),
+            invocation=SYNC,
+        )
         assert result.passed is False
         assert result.blocker is not None
         assert result.blocker.subtype == "wire_protocol_unsupported"
@@ -274,8 +318,12 @@ class TestTheFramerIsSharedWithServing:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
 
     def test_a_terminal_frame_split_across_chunks_is_framed(self, _system_tenant_pool):
@@ -313,8 +361,12 @@ class TestTheFramerIsSharedWithServing:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
 
     def test_a_terminal_that_arrives_before_a_broken_connection_is_still_charged(
@@ -338,8 +390,12 @@ class TestTheFramerIsSharedWithServing:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
         assert result.charged_microusd and result.charged_microusd > 0
 
@@ -359,8 +415,12 @@ class TestTheFramerIsSharedWithServing:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert result.blocker is not None
         assert result.blocker.subtype != "usage_counters_missing", (
@@ -386,8 +446,12 @@ class TestWhatTheProbeDoesWithAnswersThatAreNotJsonObjects:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert result.blocker is not None
         assert result.blocker.subtype == "usage_counters_missing", result.blocker
@@ -411,8 +475,12 @@ class TestAFailureBeforeTheWireRetainsNothing:
         def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
             raise AssertionError("the wire must not be reached when the mint failed")
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert result.verdict is None
 
@@ -426,16 +494,24 @@ class TestTheClientSeamsCannotBeCrossed:
         from mvp.discovery.probe import probe
 
         with pytest.raises(TypeError) as caught:
-            probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                  wire_protocol="responses", bedrock=object())
+            probe(
+                _record(),
+                _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+                invocation=SYNC,
+                bedrock=object(),
+            )
         assert "bedrock" in str(caught.value)
 
     def test_an_http_client_supplied_for_the_messages_protocol_is_refused(self):
         from mvp.discovery.probe import probe
 
         with pytest.raises(TypeError) as caught:
-            probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                  wire_protocol="messages", http=object())
+            probe(
+                _record(),
+                _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+                invocation=SYNC,
+                http=object(),
+            )
         assert "http" in str(caught.value)
 
     def test_the_right_seam_is_accepted(self, _system_tenant_pool):
@@ -445,8 +521,12 @@ class TestTheClientSeamsCannotBeCrossed:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
 
 
@@ -474,8 +554,12 @@ class TestTheLedgerEffect:
         from mvp.discovery.probe import probe
 
         before = len(self._usage_rows())
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
 
         rows = self._usage_rows()
@@ -497,8 +581,12 @@ class TestTheLedgerEffect:
         from mvp.discovery.probe import probe
 
         before = len(self._usage_rows())
-        result = probe(_record(), invocation=SYNC, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
         assert result.passed is False
         assert len(self._usage_rows()) == before, "a rejected attempt wrote a usage row"
 
@@ -529,8 +617,12 @@ class TestAFaultWhileClosingTheStream:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is True, result.blocker
         assert result.charged_microusd and result.charged_microusd > 0
 
@@ -552,6 +644,10 @@ class TestAFaultWhileClosingTheStream:
 
         from mvp.discovery.probe import probe
 
-        result = probe(_record(), invocation=STREAM, pricing_key=REAL_PRICING_KEY,
-                       wire_protocol="responses", http=_client(handler))
+        result = probe(
+            _record(),
+            _candidate(pricing_key=REAL_PRICING_KEY, wire_protocol="responses"),
+            invocation=STREAM,
+            http=_client(handler),
+        )
         assert result.passed is False
