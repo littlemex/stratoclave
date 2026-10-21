@@ -161,6 +161,25 @@ jobs:
       # `make up` starts the store, creates the tables, and only then builds and
       # starts the gateway. Running the documented command is also the only way
       # this job cannot drift from what a reader is told to type.
+      # The gateway's base image comes from ECR Public, whose anonymous pull
+      # quota is counted per source IP. Hosted runners share their IPs, so the
+      # build can be refused with `429 Too Many Requests` for reasons unrelated
+      # to this repository. Pulled here with retries, falling back to Docker
+      # Hub's copy of the same official image under the name the Dockerfile
+      # asks for, so `make up` below builds from the local image either way.
+      - name: Pull the gateway's base image
+        run: |
+          base=$(sed -n 's/^ARG PYTHON_BASE=//p' backend/Dockerfile)
+          test -n "$base"
+          for wait in 0 20 40 80; do
+            sleep "$wait"
+            docker pull "$base" && exit 0
+          done
+          mirror="docker.io/library/${base#public.ecr.aws/docker/library/}"
+          echo "ECR Public refused $base; using $mirror" >&2
+          docker pull "$mirror"
+          docker tag "$mirror" "$base"
+
       - name: make up (store, tables, gateway, seeded key)
         run: make up
 

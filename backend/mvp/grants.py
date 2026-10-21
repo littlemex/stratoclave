@@ -81,10 +81,10 @@ from dynamo.quota_events import (
 from dynamo.tenant_budgets import (
     TenantBudgetsRepository,
     budget_sk,
-    current_period,
     effective_grant_cap_for_row,
     granted_microusd,
     grant_cap_microusd,
+    period_at,
 )
 from limits import MAX_POOL_BUDGET_USD_CENTS
 
@@ -141,8 +141,12 @@ def _now_epoch() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
+def _iso_at(epoch_seconds: int) -> str:
+    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
+
+
 def _now_iso() -> str:
-    return datetime.fromtimestamp(_now_epoch(), tz=timezone.utc).isoformat()
+    return _iso_at(_now_epoch())
 
 
 def quota_raises_disabled() -> bool:
@@ -1032,7 +1036,7 @@ def submit_limit_raise(
     observed_limit_microusd: Optional[int] = None
     observed_remaining_microusd: Optional[int] = None
     try:
-        _pool_now = TenantBudgetsRepository().pool_summary(tenant_id, current_period())
+        _pool_now = TenantBudgetsRepository().pool_summary(tenant_id, period_at(now))
         if _pool_now is not None:
             observed_limit_microusd = int(_pool_now["pool_limit_microusd"])
             # SIGNED, never clamped (the deficit rendering rule this whole
@@ -1041,7 +1045,10 @@ def submit_limit_raise(
             observed_remaining_microusd = int(_pool_now["remaining_microusd"])
     except Exception:  # noqa: BLE001 -- the snapshot is never worth the refusal
         pass
-    observed_at = _now_iso()
+    # One instant for the whole filing: the slot's date, the observed pool's period
+    # and `created_at` -- which later decides the request's period -- all come from
+    # `now`, so a filing that straddles midnight cannot land in two months.
+    observed_at = _iso_at(now)
 
     # I3/P4.5: the ONE canonicalisation, done once, before the slot-contention
     # loop -- a second call inside the retry loop would be harmless (it is a
@@ -1096,7 +1103,7 @@ def submit_limit_raise(
         item = repo.put_request(
             request_id=request_id, tenant_id=tenant_id, user_id=actor.user_id,
             asked_amount_microusd=asked, reason_code=str(reason_code),
-            comment=comment, limit_kind=wall, created_at=_now_iso(),
+            comment=comment, limit_kind=wall, created_at=observed_at,
             observed_limit_microusd=observed_limit_microusd,
             observed_remaining_microusd=observed_remaining_microusd,
             observed_at=observed_at,
@@ -1206,6 +1213,11 @@ def approve_limit_raise(
             "keep their capacity until they expire.")
 
     repo = QuotaEventsRepository()
+    # One instant for the whole decision. The period-elapsed check, the period the
+    # grant targets, its window and the decision's timestamps all derive from it, so
+    # an approval straddling midnight cannot pass the check for one month and grant
+    # in the next.
+    now = _now_epoch()
     request = _pending_request_for_decision(
         repo, actor=actor, request_id=request_id)
     tenant_id = str(request.get("tenant_id") or "")
@@ -1220,10 +1232,10 @@ def approve_limit_raise(
     #
     # "The request's pinned period" is read off the request's OWN
     # `created_at` rather than a second stored attribute: every write in this
-    # module stamps `created_at` through `_now_iso()`, always a UTC ISO
-    # timestamp, so its first seven characters ARE the same `YYYY-MM`
-    # `current_period()` would have computed at that same instant -- deriving
-    # it costs no new writer and no new column.
+    # module stamps `created_at` as a UTC ISO timestamp of the instant the
+    # filing read (`_iso_at`), so its first seven characters ARE the `YYYY-MM`
+    # `period_at()` computes for that instant -- deriving it costs no new
+    # writer and no new column.
     #
     # TERMINAL, not left PENDING (RequestPeriodElapsed, not GrantWindowTooShort):
     # a request whose period has closed cannot be made current again by a
@@ -1231,9 +1243,9 @@ def approve_limit_raise(
     # on the next attempt, forever. This is what stops the request from being
     # decided against a period a grant to it would be a no-op in.
     _filed_period = str(request.get("created_at") or "")[:7]
-    _now_period = current_period()
+    _now_period = period_at(now)
     if _filed_period and _filed_period != _now_period:
-        _elapsed_now_iso = _now_iso()
+        _elapsed_now_iso = _iso_at(now)
         try:
             repo.transact_write([
                 _authority_condition_check_item(
@@ -1300,9 +1312,7 @@ def approve_limit_raise(
     # its window. Resolved before anything is read so R11's refusal does not depend
     # on the pool row existing: a caller who asked for an impossible expiry has the
     # same thing to fix whether or not the tenant is pooled.
-    period = current_period()
-
-    now = _now_epoch()
+    period = _now_period
     ceiling = latest_permissible_expiry_for_period(now, period)
     earliest = now + MIN_GRANT_WINDOW_SECONDS
     expires = int(expires_at)
@@ -1406,7 +1416,7 @@ def approve_limit_raise(
                 approved_amount_microusd=amount)
 
     grant_id = f"lg_{uuid.uuid4().hex}"
-    now_iso = _now_iso()
+    now_iso = _iso_at(now)
     # P4.3/I4 point 3: "the target". The pool wall's target is the SAME pool
     # row this function already read (unchanged); the per-user wall's target
     # is COMPUTED, never copied from a row, because the member may not have
@@ -2257,7 +2267,7 @@ def own_tenant_wall_status(
     which is a fact this endpoint states rather than an error a client has
     to special-case.
     """
-    period = current_period()
+    period = period_at(_now_epoch())
     user_dollar = _own_user_dollar_wall_status(actor, period)
     row = TenantBudgetsRepository().get(actor.org_id, period, consistent_read=True)
     if row is None:
@@ -2464,8 +2474,8 @@ def admin_latest_permissible_expiry(
     needs it is an approver about to type an expiry, not because the value
     itself is sensitive.
     """
-    p = period or current_period()
     now = _now_epoch()
+    p = period or period_at(now)
     return {"period": p, "latest_permissible_expiry": latest_permissible_expiry_for_period(now, p)}
 
 
@@ -2477,8 +2487,8 @@ def team_lead_latest_permissible_expiry(
     """Same bound, same reasoning, for the team-lead-scoped approver -- the
     value does not vary by tenant, so this mirror exists only because the
     route namespace does."""
-    p = period or current_period()
     now = _now_epoch()
+    p = period or period_at(now)
     return {"period": p, "latest_permissible_expiry": latest_permissible_expiry_for_period(now, p)}
 
 

@@ -78,17 +78,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
-        # See cli/audit.toml for the inline justification of each
-        # --ignore. Re-evaluate at every aws-sdk / aws-smithy bump;
-        # the goal is to delete these flags entirely once the
-        # AWS SDK chain drops the legacy-rustls path that pulls
-        # rustls 0.21 / rustls-webpki 0.101.
-        run: |
-          cargo audit --deny warnings \
-            --ignore RUSTSEC-2026-0098 \
-            --ignore RUSTSEC-2026-0099 \
-            --ignore RUSTSEC-2026-0104 \
-            --ignore RUSTSEC-2026-0258
+        # See cli/audit.toml: any --ignore here needs an inline justification
+        # there, and there is none today.
+        run: cargo audit --deny warnings
 
   npm-audit-iac:
     name: iac / npm audit
@@ -109,24 +101,37 @@ jobs:
         # `npm audit` exits non-zero on vulnerabilities at "moderate" or
         # higher; --audit-level=high keeps low-severity dev-only findings
         # out of the merge gate while still failing on anything serious.
+        run: npm audit --audit-level=high
+
+  npm-audit-frontend:
+    name: frontend / npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit
+        # Fails on any high or critical advisory not on the allowlist below. npm
+        # has no per-advisory --ignore, so the JSON report is filtered instead.
         #
-        # Deferral (npm has no native per-advisory --ignore, so we filter the
-        # JSON and re-fail on anything NOT on the allowlist — same triage policy
-        # as cli/audit.toml's cargo --ignore):
-        #   GHSA-3jxr-9vmj-r5cp / GHSA-rgw5-rvv9-x895  brace-expansion DoS (high).
-        #   Both advisories are against the brace-expansion BUNDLED inside
-        #   aws-cdk-lib (a bundledDependency under its own minimatch), so a root
-        #   `overrides` pin cannot reach it and even the latest aws-cdk-lib still
-        #   ships the vulnerable copy. It is reachable only via minimatch on
-        #   CDK-internal asset globs at SYNTH time (build tooling), never on
-        #   attacker-controlled input at runtime. Re-evaluate at every
-        #   aws-cdk-lib bump; delete these once CDK bundles a patched
-        #   brace-expansion.
+        #   GHSA-vfj7-8cjw-p6xm  braces stack-exhaustion DoS (high). No fixed
+        #   version exists: the latest braces (3.0.3) is affected. It is reached
+        #   only through tailwindcss 3 (chokidar / micromatch / fast-glob) while
+        #   it scans this repository's own content globs at build time, never on
+        #   input from a user. Delete it once braces publishes a fix, or when the
+        #   frontend moves to tailwindcss 4, which no longer depends on it.
         run: |
           python3 - <<'PY'
           import json, subprocess, sys
-          # bundled in aws-cdk-lib; synth-time only (see comment above).
-          ALLOW = {"GHSA-3jxr-9vmj-r5cp", "GHSA-rgw5-rvv9-x895"}
+          ALLOW = {"GHSA-vfj7-8cjw-p6xm"}
           out = subprocess.run(
               ["npm", "audit", "--audit-level=high", "--json"],
               capture_output=True, text=True).stdout
@@ -146,21 +151,3 @@ jobs:
               sys.exit(1)
           print(f"npm audit: only allowlisted advisories present ({sorted(ALLOW)}); OK.")
           PY
-
-  npm-audit-frontend:
-    name: frontend / npm audit
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Audit
-        run: npm audit --audit-level=high

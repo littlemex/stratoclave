@@ -56,8 +56,27 @@ pytest.importorskip("moto")
 TENANT_TABLE = "stratoclave-tenants"
 
 
+#: The instant `dynamo.tenants` is frozen at. Every period literal below is relative to
+#: it: the setter refuses an effective period at or before the current one, so read
+#: off the wall clock those literals turn into that refusal once their month
+#: arrives -- and a test pinning a different refusal then passes for the wrong reason.
+_FROZEN_NOW = "2026-09-15T12:00:00+00:00"
+
+
 @pytest.fixture
-def tenants_table(dynamodb_mock):
+def tenants_table(dynamodb_mock, monkeypatch):
+    import datetime as dt
+
+    from dynamo import tenants
+
+    fixed = dt.datetime.fromisoformat(_FROZEN_NOW)
+
+    class _FixedDt(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz or dt.timezone.utc)
+
+    monkeypatch.setattr(tenants, "datetime", _FixedDt)
     return boto3.resource("dynamodb", region_name="us-east-1").Table(TENANT_TABLE)
 
 
@@ -262,7 +281,7 @@ def test_seal_version_clause_makes_a_concurrent_setter_win_the_admissions_seal(
         to fire, built from `v_read=1`.
       - in that window, the REAL setter runs: `set_user_dollar_default`
         writes a NEW effective period "2026-10" (in the future relative to
-        real "now", so the setter's own cheap check does not refuse it) at
+        the frozen "now", so the setter's own cheap check does not refuse it) at
         $80, and bumps `user_dollar_defaults_version` to 2. Since "2026-10" is
         the new greatest key `<=` "2027-01", `resolve_base(tenant, "2027-01")`
         is now $80.
@@ -323,7 +342,7 @@ def test_setter_refuses_a_sealed_period_and_leaves_the_row_untouched(tenants_tab
     I3: 'The two directions are symmetric: a setter cannot change a sealed
     period, and a sealer cannot freeze a history that moved under it.' G6: 'A
     sealed period's base cannot change.' `effective_period="2026-10"` is
-    chosen strictly in the future relative to real "now" (2026-09), so a
+    chosen strictly in the future relative to the frozen "now" (2026-09), so a
     refusal here is UNAMBIGUOUSLY the seal guard
     (`attribute_not_exists(sealed_user_dollar_base.#p)`), not the setter's
     separate 'no past/current effective period' cheap check -- the two
@@ -352,6 +371,12 @@ def test_setter_refuses_a_sealed_period_and_leaves_the_row_untouched(tenants_tab
         f"set_user_dollar_default does not exist yet ({ei.value!r}) -- this "
         f"is the module not being implemented, not the sealed-period refusal "
         f"this test is pinning"
+    )
+    from dynamo.tenants import SealedPeriodError
+
+    assert isinstance(ei.value, SealedPeriodError), (
+        f"refused for another reason ({ei.value!r}) -- the cheap 'not after the "
+        f"current period' check, not the seal guard this test pins"
     )
 
     row = _read_row(tenants_table, tenant_id)
@@ -396,20 +421,17 @@ def test_setter_refuses_an_effective_period_at_or_before_its_own_current_period(
     tenants_table,
 ):
     """Secondary case (not the sealed-period guard): I3's 'cheap first check'
-    -- 'refuses an effective period at or before its own current period.' Real
-    'now' is used (this check is stated as reading the clock, unlike
-    `resolve_base`/the seal, which take an explicit period and touch no
-    clock), so this test seeds no fixture beyond an empty tenant row and
-    tries to set a default effective THIS period."""
-    import datetime
-
+    -- 'refuses an effective period at or before its own current period.' The
+    check reads the repository's clock (unlike `resolve_base`/the seal, which
+    take an explicit period and touch no clock), frozen here at `_FROZEN_NOW`,
+    so this test seeds no fixture beyond an empty tenant row and tries to set
+    a default effective THAT period."""
     from dynamo.tenants import TenantsRepository
 
     tenant_id = "setter-cheap-check-tenant"
     _seed_tenant_row(tenants_table, tenant_id)
     repo = TenantsRepository()
-    today = datetime.datetime.now(datetime.timezone.utc)
-    this_period = f"{today.year:04d}-{today.month:02d}"
+    this_period = _FROZEN_NOW[:7]
 
     with pytest.raises(Exception) as ei:  # noqa: PT011 -- exact type unspecified by I3
         repo.set_user_dollar_default(
@@ -419,6 +441,10 @@ def test_setter_refuses_an_effective_period_at_or_before_its_own_current_period(
         f"set_user_dollar_default does not exist yet ({ei.value!r}) -- not "
         f"the cheap-check refusal this test is pinning"
     )
+    from dynamo.tenants import SealedPeriodError
+
+    assert isinstance(ei.value, ValueError) and not isinstance(ei.value, SealedPeriodError), (
+        f"refused for another reason ({ei.value!r}), not the cheap check")
 
     row = _read_row(tenants_table, tenant_id)
     assert this_period not in row.get("user_dollar_defaults", {})

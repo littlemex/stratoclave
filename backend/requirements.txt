@@ -28,10 +28,11 @@ structlog==25.5.0
 python-json-logger==4.1.0
 
 # Authentication
-# PyJWT 2.13.0 closes 7 advisories (CVE-2026-32597 / CVE-2026-48522..48526
-# / PYSEC-2026-176/177/178/179) including a critical `crit` header
-# bypass and several HMAC / unrestricted URI / DoS issues in PyJWKClient.
-PyJWT[crypto]==2.13.0
+# PyJWT 2.15.x closes PYSEC-2026-4140..4152 and PYSEC-2026-4183, which affect
+# 2.13.0 (among them PYSEC-2026-4146, `decode()` mutating a reused options dict
+# and so silently skipping claim verification); 2.13.0 itself closed the earlier
+# CVE-2026-32597 / CVE-2026-48522..48526 set.
+PyJWT[crypto]==2.15.1
 # 50.0.0 closes PYSEC-2026-3552/3553/3554 (48.0.1 was affected); PyJWT[crypto]
 # has no upper bound on cryptography, and only its stable RSA/EC verify surface
 # is used here.

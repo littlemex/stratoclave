@@ -40,7 +40,10 @@ rustyline = "18"
 # since Rust 1.70.
 # Phase S: AWS SSO / STS login support
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-sts = "1"
+# Default features minus `rustls`, which is the SDK's legacy TLS stack (hyper 0.14,
+# rustls 0.21, rustls-webpki 0.101). `default-https-client` is the current stack
+# (rustls 0.23 over aws-lc) and is what every request already used.
+aws-sdk-sts = { version = "1", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
 aws-sigv4 = "1"
 aws-credential-types = "1"
 aws-smithy-runtime-api = "1"

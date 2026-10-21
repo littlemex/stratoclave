@@ -43,12 +43,9 @@ from tests.quota_events_fixtures import (
 assert quota_events_table  # imported for its pytest-fixture side effect
 
 PERIOD = "2026-09"
-# `approve_limit_raise` resolves its target period from `current_period()`
-# (real wall clock), never from the frozen `mvp.grants` clock -- so a
-# `now_epoch` outside the ACTUAL current month desyncs from the PERIOD these
-# tests seed pool rows at, and `latest_permissible_expiry_for_period` then
-# refuses every window because `now` already exceeds the (wrong) period's
-# end. Mid-month keeps every window comfortably inside R11's bounds.
+# `approve_limit_raise` resolves its target period from the `mvp.grants` clock,
+# so the frozen instant decides which PERIOD's pool row is read. Mid-month keeps
+# every window comfortably inside R11's bounds.
 _MID_PERIOD_EPOCH = int(datetime(2026, 9, 15, tzinfo=timezone.utc).timestamp())
 
 

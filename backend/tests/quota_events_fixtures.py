@@ -81,19 +81,13 @@ def freeze_grants_clock(monkeypatch: "pytest.MonkeyPatch", epoch_seconds: int) -
 
 def freeze_tenant_budgets_clock(monkeypatch: "pytest.MonkeyPatch", epoch_seconds: int) -> None:
     """Pin `dynamo.tenant_budgets`'s clock to an exact instant -- the SAME
-    convention `freeze_grants_clock` uses one module over, and a DIFFERENT
-    module than it: `current_period()` (what HANDOFF-PR4's period-currency
-    refusal compares "the request's pinned period" against) lives here, in
-    its OWN `datetime` name, not in `mvp.grants`'s. `freeze_grants_clock`
-    alone controls `mvp.grants._now_epoch()` (the slot's date, the 300-second
-    grant-window bound) but leaves `current_period()` reading the real wall
-    clock -- which is invisible on any day this suite happens to run inside
-    the calendar month a test's literals assume, and wrong the one day a
-    month boundary falls between a filing and a decision. A test that needs
-    two DIFFERENT periods to exist (one at filing time, a later one at
-    approval time) must call this alongside `freeze_grants_clock` at each
-    instant it moves the clock to, or the two functions disagree about "now"
-    in a way no real clock ever does.
+    convention `freeze_grants_clock` uses one module over, for a DIFFERENT
+    module: the repository reads its own `datetime` name (`current_period()`,
+    the default period of `ensure_current_period_row`, its timestamps).
+    `mvp.grants` derives the period it decides against from its own clock, so
+    `freeze_grants_clock` alone moves every decision that module makes; the
+    repositories it writes through still stamp their own times, so a test that
+    needs those in the frozen period calls this as well.
     """
     import datetime as dt
 
@@ -111,11 +105,8 @@ def freeze_tenant_budgets_clock(monkeypatch: "pytest.MonkeyPatch", epoch_seconds
 
 def freeze_all_quota_clocks(monkeypatch: "pytest.MonkeyPatch", epoch_seconds: int) -> None:
     """`freeze_grants_clock` + `freeze_tenant_budgets_clock` together, for a
-    test that needs `mvp.grants._now_epoch()` and
-    `dynamo.tenant_budgets.current_period()` to agree on "now" -- see the
-    latter's own docstring for why moving only one of the two is a bug in the
-    test, not merely an incomplete one.
-    """
+    test that needs the decision rules and the repository's own writes to agree
+    on "now"."""
     freeze_grants_clock(monkeypatch, epoch_seconds)
     freeze_tenant_budgets_clock(monkeypatch, epoch_seconds)
 
