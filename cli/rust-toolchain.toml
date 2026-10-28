@@ -2,9 +2,10 @@
 # Pin stable to avoid unexpected clippy/rustfmt rule changes between nightly/stable.
 [toolchain]
 # Use stable to satisfy transitive dependency MSRVs (aws-types >= 1.91,
-# icu_* >= 1.86, time >= 1.88). Edition 2024 is also required by clap_lex 1.1+.
+# icu_* >= 1.86, time >= 1.88, aws-sigv4 >= 1.94.1 since the release that moved
+# off the crypto-bigint RUSTSEC-2026-0387 affects). Edition 2024 is also required by clap_lex 1.1+.
 # Keep pinned to a specific stable version to avoid clippy rule drift across
 # CI and contributor workstations.
-channel = "1.92"
+channel = "1.94.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
