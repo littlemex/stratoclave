@@ -134,15 +134,15 @@
       "input_per_mtok_microusd": 2200000,
       "output_per_mtok_microusd": 11000000,
       "cache_read_per_mtok_microusd": 220000,
-      "cache_write_per_mtok_microusd": 2200000,
-      "notes": "GPT-6 Sol — $2.20/$11.00 per MTok in-region, cache read $0.22. Measured 2026-09-23. The rate card publishes NO cache-write leg for this family, so cache write is the reviewed starting value rather than a measurement: a written cache token on this path is billed as an ordinary input token, which is the input rate. A zero there would make a real charge free."
+      "cache_write_per_mtok_microusd": 2750000,
+      "notes": "GPT-6 Sol — $2.20/$11.00 per MTok in-region, cache read $0.22, cache write $2.75. Measured 2026-09-23; cache write measured 2026-10-28, when the rate card first published one. That leg is the 30-minute product, the card's only cache write, which the live feed excludes as a non-default TTL, so this row is what a written cache token is charged at. It replaces the input-rate starting value this row carried while no leg was published, which charged written tokens 20% under the card."
     },
     "gpt-6-astra": {
       "input_per_mtok_microusd": 11000000,
       "output_per_mtok_microusd": 55000000,
       "cache_read_per_mtok_microusd": 1100000,
-      "cache_write_per_mtok_microusd": 11000000,
-      "notes": "GPT-6 Astra — $11/$55 per MTok in-region, cache read $1.10. Measured 2026-09-23. Cache write carries the same reviewed starting value as gpt-6-sol, and for the same reason: this family's rate card publishes no cache-write leg."
+      "cache_write_per_mtok_microusd": 13750000,
+      "notes": "GPT-6 Astra — $11/$55 per MTok in-region, cache read $1.10, cache write $13.75. Measured 2026-09-23; cache write measured 2026-10-28, for the same reason and from the same 30-minute leg as gpt-6-sol."
     },
     "gpt-6.1-terra": {
       "input_per_mtok_microusd": 1100000,
