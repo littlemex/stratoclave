@@ -305,7 +305,14 @@ class UsersRepository:
         """Scan the Users table and return up to `limit` users that hold the admin role.
 
         Used for bootstrap-admin zero-state detection. Scans are expensive, but this
-        method is called only once at lifespan startup and exits early via `limit`.
+        method is called only once at lifespan startup and stops at the first page
+        that brings the count to `limit`.
+
+        `limit` is a count of MATCHES, so it is not passed to DynamoDB as `Limit`:
+        that bounds the items a page READS, and the filter runs afterwards. A
+        `Limit=1` scan reads one row and, unless that row is an admin, returns no
+        items and a `LastEvaluatedKey` — which read as "no admin exists" and re-ran
+        the bootstrap on every boot of a table with more than one user.
 
         Note: DynamoDB scans are eventually consistent. A concurrent admin creation
         during lifespan startup could be missed, but this is acceptable for the
@@ -316,11 +323,18 @@ class UsersRepository:
         """
         from boto3.dynamodb.conditions import Attr
 
-        resp = self._table.scan(
-            FilterExpression=Attr("sk").eq(self.SK_PROFILE)
+        wanted = max(limit, 1)
+        kwargs: dict[str, Any] = {
+            "FilterExpression": Attr("sk").eq(self.SK_PROFILE)
             & Attr("roles").contains("admin"),
-            Limit=max(limit, 1),
-            ProjectionExpression="user_id, email, #r",
-            ExpressionAttributeNames={"#r": "roles"},
-        )
-        return resp.get("Items", [])
+            "ProjectionExpression": "user_id, email, #r",
+            "ExpressionAttributeNames": {"#r": "roles"},
+        }
+        admins: list[dict[str, Any]] = []
+        while True:
+            resp = self._table.scan(**kwargs)
+            admins.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if len(admins) >= wanted or not last_key:
+                return admins[:wanted]
+            kwargs["ExclusiveStartKey"] = last_key

@@ -181,13 +181,15 @@ def seed_bootstrap_admin() -> dict[str, Any]:
       - No-op if at least one admin-role user already exists
       - When both conditions are met:
           1. Cognito AdminCreateUser (lower(email), custom:org_id=tenant_id)
-          2. Set a random permanent password (admin should change it afterward)
+          2. Set a random permanent password (admin should change it afterward),
+             only when step 1 created the user
           3. Put the user in the Users table with roles=[admin, user]
           4. Ensure a UserTenants row with role=admin
           5. Stash the temporary password in AWS Secrets Manager (not in logs)
 
-    If AdminCreateUser fails (e.g. UsernameExistsException), adopts the existing
-    Cognito user and reconciles only the Users/UserTenants side.
+    If AdminCreateUser fails with UsernameExistsException, adopts the existing
+    Cognito user and reconciles only the Users/UserTenants side: its password is
+    left alone and nothing is stashed.
     """
     import boto3
     from botocore.exceptions import ClientError
@@ -269,22 +271,28 @@ def seed_bootstrap_admin() -> dict[str, Any]:
         logger.error("bootstrap_admin_no_sub", email=email_env)
         return {"skipped": True, "reason": "no sub resolved"}
 
-    temp_password = _generate_temp_password()
-    try:
-        cognito.admin_set_user_password(
-            UserPoolId=pool_id,
-            Username=email_env,
-            Password=temp_password,
-            Permanent=True,
-        )
-    except ClientError as e:
-        logger.error(
-            "bootstrap_admin_set_password_failed",
-            error=str(e),
-            email=email_env,
-        )
-        # Even if password setting fails, write the Users row (can be reset later).
-        temp_password = ""
+    # Only the call that created the Cognito user sets its password. An adopted user
+    # already has one: it is the operator's, or the one another worker booting at the
+    # same moment just set and stashed. Setting a second one would overwrite the
+    # former and leave the stash holding a password that no longer works.
+    temp_password = ""
+    if created_new:
+        temp_password = _generate_temp_password()
+        try:
+            cognito.admin_set_user_password(
+                UserPoolId=pool_id,
+                Username=email_env,
+                Password=temp_password,
+                Permanent=True,
+            )
+        except ClientError as e:
+            logger.error(
+                "bootstrap_admin_set_password_failed",
+                error=str(e),
+                email=email_env,
+            )
+            # Even if password setting fails, write the Users row (can be reset later).
+            temp_password = ""
 
     # Users table
     users_repo.put_user(
@@ -367,6 +375,13 @@ def seed_bootstrap_admin() -> dict[str, Any]:
                 "Retrieve once and immediately rotate via "
                 "`aws cognito-idp admin-set-user-password`."
             ),
+        )
+    elif not created_new:
+        logger.info(
+            "bootstrap_admin_adopted",
+            user_id=sub,
+            tenant_id=tenant_id,
+            instruction="Existing Cognito user adopted; its password was not changed",
         )
     else:
         logger.warning(
