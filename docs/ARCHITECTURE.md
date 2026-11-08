@@ -841,7 +841,8 @@ legs. A leg the provider did not report is absent or `null`, never `0`, because 
 zero is a measurement and absence is not (C8.1).
 
 **Reasoning content.** On the Converse transport a model with extended thinking
-enabled returns reasoning blocks, and these are forwarded as `reasoning_content`,
+enabled returns reasoning blocks, and these are forwarded as the string `reasoning_content` (the thinking text)
+with `reasoning_details` (OpenRouter-style entries carrying the signature and any redacted content),
 separate from `content`, on both the streaming and non-streaming paths. This is a
 field that did not previously appear: an application that renders message fields
 generically, or concatenates every delta it receives, will start displaying a
