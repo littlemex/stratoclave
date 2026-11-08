@@ -12,9 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo import TenantsRepository, UsageLogsRepository, UsersRepository, UserTenantsRepository
 
+from ._pipeline import eligibility_listing_context
 from .admin_tenants import UsageByTagResponse, usage_by_tag_response
 from .authz import effective_permissions, log_audit_event, require_permission
 from .deps import AuthenticatedUser, get_current_user
+from .eligibility import refusal_for
+from .models import registry_entries
+from .pricing import effective_rates
 
 
 router = APIRouter(prefix="/api/mvp", tags=["mvp-me"])
@@ -196,6 +200,113 @@ def update_me(
 
 
 # ------------------------------------------------------------------
+# Own effective pricing: the rate (per-MTok, in micro-USD) THIS caller is
+# actually billed at, for every model its tenant/user may invoke right now.
+# ------------------------------------------------------------------
+class MyRateEntry(BaseModel):
+    """One pricing-key row, scoped to the aliases THIS caller may invoke.
+
+    Reuses the exact same merged (built-in defaults <- DynamoDB overrides)
+    rate table `mvp.pricing` charges from -- `effective_rates()`, the same
+    seam `admin_pricing.get_pricing_config` reads -- so there is no second
+    price computed for this view; a rate shown here is the rate a request
+    through this key is settled at right now. `models` is narrowed through
+    `mvp.eligibility.refusal_for` (C8), the same per-caller filter `GET
+    /v1/models` and `GET /openai/v1/models` already apply to their own
+    listings, so a pricing key with no eligible model for this caller is
+    simply absent rather than present-and-unusable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    pricing_key: str
+    models: list[str]  # client-facing aliases this caller may invoke, priced at this key
+    input_per_mtok_microusd: int
+    output_per_mtok_microusd: int
+    cache_read_per_mtok_microusd: int
+    cache_write_per_mtok_microusd: int
+
+
+class MyRatesResponse(BaseModel):
+    """The caller's own effective billing rates (read-only).
+
+    `version` is the active DynamoDB pricing-override version, or `None` when
+    every rate below is still a built-in default -- the same meaning
+    `admin_pricing.PricingConfigResponse.version` carries. `as_of` is when
+    THIS response was computed: rates refresh on a TTL
+    (`mvp.pricing._CACHE_TTL_SECONDS`) and are meant to be re-derived as
+    `current rate x token count` on every call, never cached by the client at
+    observation time -- a caller that wants a reproducible dollar figure for a
+    past request should multiply the token counts from `/me/usage-history`
+    by the rate that row's own `cost_microusd` already prices it at, not
+    assume a rate read here earlier still holds.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    version: Optional[str]
+    as_of: str
+    rates: list[MyRateEntry]
+
+
+@router.get("/me/rates", response_model=MyRatesResponse)
+def my_rates(
+    user: AuthenticatedUser = Depends(require_permission("usage:read-self")),
+) -> MyRatesResponse:
+    """The caller's current per-model billing rates, scoped to what THIS
+    caller's tenant/user may actually invoke right now.
+
+    Gated on `usage:read-self`, not a new scope: pricing is the multiplier
+    behind every cost figure `/me/usage-summary` and `/me/usage-history`
+    already show this same caller, so the permission that already unlocks
+    those views is the right fit here too -- mirroring
+    `admin_pricing.get_pricing_config`'s own `usage:read-all` argument on the
+    admin side. A dedicated `pricing:read-self` is deferred to arrive as a
+    matched pair with a future `pricing:write`, same as the admin view
+    defers one for its own `pricing:write`.
+
+    A new endpoint rather than an extra field on `GET /v1/models` /
+    `GET /openai/v1/models`: those two are each one PROVIDER's wire-format
+    model listing (Anthropic's and OpenAI's shapes respectively), gated on
+    `messages:send` / `responses:send`, and a model this caller may invoke on
+    either wire protocol can share one `pricing_key` -- forking the same rate
+    row across two provider-specific response shapes (or picking one of them
+    to own it) would be worse than one provider-agnostic view under the same
+    scope the caller already uses for its own cost history.
+    """
+    tenant_cfg, user_cfg, ent_grants = eligibility_listing_context(user)
+    models_by_key: dict[str, list[str]] = {}
+    for entry in registry_entries():
+        # An entry the caller cannot use is ABSENT, same convention `GET
+        # /v1/models` / `GET /openai/v1/models` already use for their own
+        # listings -- never present-and-marked-unusable.
+        if refusal_for(entry, tenant_cfg=tenant_cfg, user_cfg=user_cfg,
+                        grants=ent_grants) is not None:
+            continue
+        models_by_key.setdefault(entry.pricing_key, []).extend(entry.aliases)
+
+    version, rates, _override_keys = effective_rates()
+    return MyRatesResponse(
+        version=version,
+        as_of=datetime.now(timezone.utc).isoformat(),
+        rates=[
+            MyRateEntry(
+                pricing_key=key,
+                models=aliases,
+                # Every registered pricing_key names a real rate row
+                # (enforced at registry load/validation time, and the
+                # invariant `test_registry_pricing_keys_all_priced` holds for
+                # the FULL registry -- a strict superset of this caller's
+                # eligible subset), so `rates[key]` is never missing here.
+                input_per_mtok_microusd=rates[key].input_per_mtok_microusd,
+                output_per_mtok_microusd=rates[key].output_per_mtok_microusd,
+                cache_read_per_mtok_microusd=rates[key].cache_read_per_mtok_microusd,
+                cache_write_per_mtok_microusd=rates[key].cache_write_per_mtok_microusd,
+            )
+            for key, aliases in sorted(models_by_key.items())
+        ],
+    )
+
+
+# ------------------------------------------------------------------
 # Phase D: own usage history and aggregation
 # ------------------------------------------------------------------
 class UsageSummaryResponse(BaseModel):
@@ -233,6 +344,20 @@ class UsageHistoryEntry(BaseModel):
     #: second source to derive it from. `None` on every row written before
     #: this field existed, and on a row where no fallback occurred.
     fallback_reason: Optional[str] = None
+    #: The settled charge for this row, in micro-USD (1 USD = 1_000_000
+    #: micro-USD; `mvp.pricing.rate_usage`'s `RatingRecord.total_cost_microusd`,
+    #: persisted via `UsageLogsRepository.record`'s `cost_microusd`). `None`
+    #: means NOT PRICED -- no dollar pool was in play for this request, or the
+    #: row predates `cost_microusd` being written -- and is a different fact
+    #: from a priced request that happened to round to `0`, which reads back
+    #: as `0`. Same "absent is a different fact from zero" convention the
+    #: cache-token fields on this row already use.
+    cost_microusd: Optional[int] = None
+    #: This row's own correlation id (`== request_id == span_id`), echoed to
+    #: the caller at response time as the `x-sc-span-id` header (see
+    #: `mvp.observability.context`). `None` on a row written before
+    #: `UsageLogsRepository.record` persisted this attribute.
+    request_id: Optional[str] = None
 
 
 class UsageHistoryResponse(BaseModel):
@@ -393,6 +518,12 @@ def usage_history(
             fallback_reason=(
                 str(it["fallback_reason"]) if it.get("fallback_reason") else None
             ),
+            # `is not None`, not a truthy check: a priced request that rounded
+            # to 0 micro-USD must read back as 0, never as "not priced".
+            cost_microusd=(
+                int(it["cost_microusd"]) if it.get("cost_microusd") is not None else None
+            ),
+            request_id=(str(it["request_id"]) if it.get("request_id") else None),
         )
         for it in resp.get("Items", [])
     ]
