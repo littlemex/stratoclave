@@ -332,12 +332,38 @@ def _render_converse_usage_block(usage: Any) -> dict[str, Any]:
 
     `prompt_tokens`/`completion_tokens` keep today's meaning (uncached input /
     output) and `total_tokens` keeps today's formula, `prompt_tokens +
-    completion_tokens` — it EXCLUDES the cache legs, which is why the two new
-    keys below are reported separately rather than folded in.
+    completion_tokens` — it EXCLUDES the cache legs, which is why the two
+    cache fields are reported separately rather than folded in. NOTE this
+    diverges from the official OpenAI meaning, where `prompt_tokens_details
+    .cached_tokens` is a SUBSET of `prompt_tokens`, not additive — changing
+    that would change a number every existing client of this endpoint already
+    reads for cost math, which is out of scope for this interop-shape fix
+    (left as a documented divergence, not silently matched).
+
+    The two cache legs are nested under `prompt_tokens_details` —
+    `{"cached_tokens": ..., "cache_write_tokens": ...}` — the SAME shape
+    `mvp._openai_transport.extract_cache_usage` already reads off a GPT-family
+    response's native Chat Completions usage block (see that function's own
+    docstring: "`prompt_tokens_details.cached_tokens` on the Chat spelling"),
+    so a caller does not need a second parser depending on whether the
+    request was served by a GPT or a Claude model. Before this fix the two
+    legs were top-level, Anthropic-shaped keys (`cache_read_input_tokens` /
+    `cache_creation_input_tokens`) that do not exist in the OpenAI Chat
+    Completions `usage` schema at all. vLLM Semantic Router 0.4.0 decodes an
+    upstream response strictly and rejects an unknown field outright
+    (measured: `field "usage": unknown field "cache_read_input_tokens"`,
+    surfaced to its own caller as a 502 "The selected model returned an
+    invalid response") — so every Claude-family call routed through it over
+    this endpoint failed, while a GPT-family call (whose usage block already
+    matched this nesting) passed. A client that was reading the old top-level
+    keys off THIS endpoint (not `/v1/messages`, which is unaffected and keeps
+    its native Anthropic shape) must move to `usage.prompt_tokens_details
+    .cached_tokens` / `.cache_write_tokens`.
 
     A cache leg is present iff the provider reported it, and is OMITTED, never
-    `0`, when it did not: on `origin/main` this block had no cache keys at
-    all, so the measured defect (a call billed 3,538 tokens reporting
+    `0`, when it did not — including the whole `prompt_tokens_details` key
+    when NEITHER leg was reported: on `origin/main` this block had no cache
+    keys at all, so the measured defect (a call billed 3,538 tokens reporting
     `total_tokens: 14`) had no field to misreport in the first place. Reporting
     a `0` here would look like a fix while quietly reintroducing the same
     "plausible-looking wrong value" shape C8.1 closes for the input/output
@@ -349,10 +375,13 @@ def _render_converse_usage_block(usage: Any) -> dict[str, Any]:
         "completion_tokens": usage.output,
         "total_tokens": usage.input + usage.output,
     }
+    details: dict[str, Any] = {}
     if usage.cache_read is not None:
-        out["cache_read_input_tokens"] = usage.cache_read
+        details["cached_tokens"] = usage.cache_read
     if usage.cache_write is not None:
-        out["cache_creation_input_tokens"] = usage.cache_write
+        details["cache_write_tokens"] = usage.cache_write
+    if details:
+        out["prompt_tokens_details"] = details
     return out
 
 

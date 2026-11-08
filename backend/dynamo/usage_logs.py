@@ -230,6 +230,21 @@ class UsageLogsRepository:
         reaches the table by some OTHER route (a migration, a manual edit, a
         row from before this check existed) by counting it separately as
         `malformed_rows` rather than crashing or silently folding it.
+
+        `request_id` (when the caller supplies it, which every real request
+        path does -- see `_pipeline`'s settle call site) is also the gateway's
+        own correlation id for this request, equal to `span_id` and echoed to
+        the caller at response time as the `x-sc-span-id` header (see
+        `mvp.observability.context`). It is already embedded as the second
+        half of `timestamp_log_id` (`log_id = request_id or uuid4()`, used as
+        the SK), but only there -- a reader that wants it back (``GET
+        /me/usage-history``) would otherwise have to parse the SK's internal
+        `{iso}#{log_id}` shape, which makes a presentation-layer reader depend
+        on an internal key format. Stored again here, explicitly, as its own
+        attribute (`request_id`, below) so a reader never has to do that.
+        Always written going forward (`log_id` is always defined, whether
+        supplied or freshly minted); absent only on a row written before this
+        attribute existed.
         """
         now = _now_iso()
         log_id = request_id or str(uuid4())
@@ -248,6 +263,10 @@ class UsageLogsRepository:
             "total_tokens": Decimal(input_tokens + output_tokens),
             "recorded_at": now,
             "ttl": _ttl_epoch(),
+            # Explicit copy of the SK's own `log_id` half -- see the docstring
+            # above for why a reader must not recover this by parsing
+            # `timestamp_log_id` instead.
+            "request_id": log_id,
         }
         # The cache legs are written only when the provider reported them, and are
         # recorded because this row's stated purpose is that spend be re-derivable from

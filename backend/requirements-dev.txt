@@ -25,8 +25,9 @@ pytest-xdist==3.8.0
 moto[dynamodb,cognitoidp,sts]==5.2.2
 # moto[cognitoidp] uses joserfc to sign its fake JWTs.
 # joserfc 1.6.3 fixes CVE-2026-27932 (CPU exhaustion via unbounded
-# PBES2 p2c parameter).
-joserfc==1.7.1
+# PBES2 p2c parameter); 1.7.5 and 1.7.6 fix CVE-2026-119283 and
+# CVE-2026-119284, which pip-audit --strict reports against 1.7.1.
+joserfc==1.7.6
 
 # Linting / formatting
 ruff==0.8.4

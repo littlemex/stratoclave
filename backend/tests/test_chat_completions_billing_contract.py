@@ -199,12 +199,19 @@ def _reported_leg_sum(usage_block: dict) -> int:
     """Sum of the four legs the CALLER was told about, treating an omitted
     or null cache leg as 0 for the purpose of the sum (never treating a
     present 0 differently from an omitted key — that distinction is checked
-    separately)."""
+    separately).
+
+    Cache legs are read from `prompt_tokens_details` (`cached_tokens` /
+    `cache_write_tokens`) — the OpenAI-compatible nesting this block now uses,
+    the SAME shape `mvp._openai_transport.extract_cache_usage` reads for a
+    GPT-served response, not the old top-level `cache_read_input_tokens` /
+    `cache_creation_input_tokens` Anthropic-shaped keys."""
+    details = usage_block.get("prompt_tokens_details") or {}
     return (
         int(usage_block.get("prompt_tokens") or 0)
         + int(usage_block.get("completion_tokens") or 0)
-        + int(usage_block.get("cache_read_input_tokens") or 0)
-        + int(usage_block.get("cache_creation_input_tokens") or 0)
+        + int(details.get("cached_tokens") or 0)
+        + int(details.get("cache_write_tokens") or 0)
     )
 
 
@@ -226,8 +233,11 @@ def test_nonstreaming_reported_legs_sum_to_the_legs_handed_to_settle(api_client)
 
     # The reported zero: cacheReadInputTokens WAS explicitly sent as 0, so it
     # must appear as a reported 0 (this is a real measurement, not an absence).
-    assert usage.get("cache_read_input_tokens") == 0
-    assert usage.get("cache_creation_input_tokens") == 3524
+    # Nested under `prompt_tokens_details`, the OpenAI-compatible shape (not
+    # the old top-level Anthropic-shaped keys vLLM Semantic Router rejected).
+    details = usage.get("prompt_tokens_details") or {}
+    assert details.get("cached_tokens") == 0
+    assert details.get("cache_write_tokens") == 3524
 
     billed_sum = 10 + 4 + 0 + 3524  # what was handed to claim_settle
     assert _reported_leg_sum(usage) == billed_sum == 3538, (
@@ -263,7 +273,8 @@ def test_nonstreaming_absent_cache_leg_is_null_never_zero(api_client):
     """The trap: an implementation that reports zeros for an absent leg passes
     a weaker test. Here Bedrock's usage block carries NEITHER cache key at
     all (a model that never reports prompt-cache activity) — the response
-    must show null/omitted, never 0, for both cache fields."""
+    must omit `prompt_tokens_details` entirely, never report 0 for either
+    cache field."""
     client, mock_bedrock = api_client
     mock_bedrock.return_value.converse.return_value = {
         "output": {"message": {"content": [{"text": "hi"}]}},
@@ -273,13 +284,10 @@ def test_nonstreaming_absent_cache_leg_is_null_never_zero(api_client):
 
     resp = _post(client, stream=False)
     usage = resp.json()["usage"]
-    assert usage.get("cache_read_input_tokens") is None, (
-        f"expected null/omitted for an unreported leg, got {usage.get('cache_read_input_tokens')!r} "
-        "— an implementation reporting zeros here must FAIL this test"
-    )
-    assert usage.get("cache_creation_input_tokens") is None, (
-        f"expected null/omitted for an unreported leg, got {usage.get('cache_creation_input_tokens')!r} "
-        "— an implementation reporting zeros here must FAIL this test"
+    assert "prompt_tokens_details" not in usage, (
+        f"expected prompt_tokens_details omitted entirely when neither cache leg "
+        f"was reported, got {usage.get('prompt_tokens_details')!r} — an "
+        "implementation reporting zeros here must FAIL this test"
     )
 
 
@@ -297,10 +305,34 @@ def test_nonstreaming_cache_read_leg_reported_symmetrically_to_cache_write(api_c
 
     resp = _post(client, stream=False)
     usage = resp.json()["usage"]
-    assert usage.get("cache_read_input_tokens") == 3524
-    assert usage.get("cache_creation_input_tokens") == 0
+    details = usage.get("prompt_tokens_details") or {}
+    assert details.get("cached_tokens") == 3524
+    assert details.get("cache_write_tokens") == 0
     billed_sum = 10 + 4 + 3524 + 0
     assert _reported_leg_sum(usage) == billed_sum == 3538
+
+
+def test_nonstreaming_usage_block_never_carries_the_anthropic_shaped_top_level_keys(
+    api_client,
+):
+    """Regression pin for the vLLM Semantic Router interop defect: 0.4.0
+    decodes an upstream `usage` block strictly and 502s the whole response on
+    an unknown field (measured: `field "usage": unknown field
+    "cache_read_input_tokens"`). The two legs must appear ONLY nested under
+    `prompt_tokens_details`; the old top-level `cache_read_input_tokens` /
+    `cache_creation_input_tokens` keys must never reappear, with either leg
+    present or both absent."""
+    client, mock_bedrock = api_client
+    mock_bedrock.return_value.converse.return_value = {
+        "output": {"message": {"content": [{"text": "hi"}]}},
+        "stopReason": "end_turn",
+        "usage": _CACHE_WRITE_USAGE,
+    }
+
+    resp = _post(client, stream=False)
+    usage = resp.json()["usage"]
+    assert "cache_read_input_tokens" not in usage
+    assert "cache_creation_input_tokens" not in usage
 
 
 def test_streaming_reported_legs_sum_to_the_legs_handed_to_settle(api_client):
@@ -321,10 +353,32 @@ def test_streaming_reported_legs_sum_to_the_legs_handed_to_settle(api_client):
     assert len(usage_chunks) == 1, f"expected exactly one usage-bearing chunk, got {usage_chunks!r}"
     usage = usage_chunks[0]["usage"]
 
-    assert usage.get("cache_read_input_tokens") == 0
-    assert usage.get("cache_creation_input_tokens") == 3524
+    details = usage.get("prompt_tokens_details") or {}
+    assert details.get("cached_tokens") == 0
+    assert details.get("cache_write_tokens") == 3524
     billed_sum = 10 + 4 + 0 + 3524
     assert _reported_leg_sum(usage) == billed_sum == 3538
+
+
+def test_streaming_usage_chunk_never_carries_the_anthropic_shaped_top_level_keys(
+    api_client,
+):
+    """Streaming half of the vLLM Semantic Router interop regression pin
+    above: the terminal usage-only chunk must not carry the old top-level
+    keys either."""
+    client, mock_bedrock = api_client
+    mock_bedrock.return_value.converse_stream.return_value = {"stream": iter([
+        {"contentBlockDelta": {"delta": {"text": "hi"}}},
+        {"messageStop": {"stopReason": "end_turn"}},
+        {"metadata": {"usage": _CACHE_WRITE_USAGE}},
+    ])}
+
+    resp = _post(client, stream=True, extra={"stream_options": {"include_usage": True}})
+    chunks = _sse_chunks(resp)
+    usage_chunks = [c for c in chunks if isinstance(c, dict) and c.get("usage")]
+    usage = usage_chunks[0]["usage"]
+    assert "cache_read_input_tokens" not in usage
+    assert "cache_creation_input_tokens" not in usage
 
 
 # ---------------------------------------------------------------------------

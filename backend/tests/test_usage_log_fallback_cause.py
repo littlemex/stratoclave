@@ -86,8 +86,14 @@ class TestFallbackCauseCapture:
         )
         # Ids and the instant-derived fields differ between any two rows; `ttl` is
         # whole epoch seconds, so two writes straddling a second boundary differ
-        # there too, and comparing it made this test fail at random.
-        fields_that_could_carry_a_cause = set(item_a) - {"timestamp_log_id", "recorded_at", "ttl"}
+        # there too, and comparing it made this test fail at random. `request_id`
+        # is the same per-row id `timestamp_log_id` already folds in (a fresh
+        # uuid4 here, since neither call supplies one) -- now also stored as its
+        # own attribute, so it needs excluding for the same reason, not because
+        # it could carry a cause.
+        fields_that_could_carry_a_cause = set(item_a) - {
+            "timestamp_log_id", "recorded_at", "ttl", "request_id",
+        }
         for field in fields_that_could_carry_a_cause:
             assert item_a[field] == item_b[field], (
                 f"field {field!r} differs between the two fallback rows, but "
