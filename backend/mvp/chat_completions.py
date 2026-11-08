@@ -385,27 +385,48 @@ def _render_converse_usage_block(usage: Any) -> dict[str, Any]:
     return out
 
 
-def _render_reasoning_content(legs: dict[str, Any]) -> dict[str, Any]:
-    """The OpenAI-shaped `reasoning_content` object for a flat leg dict in the
+#: The `format` OpenRouter-style `reasoning_details` entries carry for a Claude
+#: reasoning block, so a client replaying them knows whose signature it holds.
+REASONING_DETAIL_FORMAT = "anthropic-claude-v1"
+
+
+def _render_reasoning(legs: dict[str, Any]) -> dict[str, Any]:
+    """The message (or stream-delta) fields for a flat leg dict in the
     `_converse_core.REASONING_LEGS` vocabulary (`text`/`signature`/
     `redactedContent`).
 
-    `text` renders under its own name; `redactedContent` renders as `redacted`
-    to match the wire name `_converse_types.ContentReasoningDelta.kind` already
-    uses for that leg. Only legs actually present are added — an absent leg
-    is omitted, not a `null` placeholder, matching the "absence is not zero"
-    rule this route applies everywhere else. This is the SAME rendering used
-    for the streaming per-delta chunk and the non-streaming aggregated
-    message field, so the two transports cannot drift on what a leg is
-    called.
+    Two fields, because the two conventions OpenAI-compatible clients read
+    split the legs this way: `reasoning_content` is a STRING (the thinking
+    text, as vLLM and DeepSeek emit it), and `reasoning_details` is the
+    OpenRouter list that carries what a string cannot -- the signature and
+    redacted content -- as `reasoning.text` / `reasoning.encrypted` entries
+    with a `format`. This route used to emit `reasoning_content` as an object
+    of legs, which no such client reads, and which a strict decoder (vLLM
+    Semantic Router) refuses outright: `cannot unmarshal object into ...
+    reasoning_content of type string`, surfaced to its caller as a 502.
+
+    Only legs actually present are emitted -- an absent leg is omitted, not a
+    `null` placeholder, matching the "absence is not zero" rule this route
+    applies everywhere else. The SAME rendering serves the streaming
+    per-delta chunk and the non-streaming aggregated message, so the two
+    transports cannot drift on what a leg is called.
     """
     out: dict[str, Any] = {}
+    details: list[dict[str, Any]] = []
     if legs.get("text"):
-        out["text"] = legs["text"]
-    if legs.get("signature"):
-        out["signature"] = legs["signature"]
+        out["reasoning_content"] = legs["text"]
+    if legs.get("text") or legs.get("signature"):
+        entry: dict[str, Any] = {"type": "reasoning.text", "format": REASONING_DETAIL_FORMAT, "index": 0}
+        if legs.get("text"):
+            entry["text"] = legs["text"]
+        if legs.get("signature"):
+            entry["signature"] = legs["signature"]
+        details.append(entry)
     if legs.get("redactedContent"):
-        out["redacted"] = legs["redactedContent"]
+        details.append({"type": "reasoning.encrypted", "format": REASONING_DETAIL_FORMAT,
+                        "index": len(details), "data": legs["redactedContent"]})
+    if details:
+        out["reasoning_details"] = details
     return out
 
 
@@ -892,11 +913,11 @@ def chat_completions(
         # Separate from `content`, on the message — not accepted back on a
         # subsequent request: multi-turn thinking with tools remains
         # unsupported and is named as a debt (interface note).
-        message_out["reasoning_content"] = _render_reasoning_content({
+        message_out.update(_render_reasoning({
             "text": "".join(reasoning_text_parts),
             "signature": reasoning_signature,
             "redactedContent": reasoning_redacted,
-        })
+        }))
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -1327,16 +1348,18 @@ async def _stream_chat(
                     **self._usage_field(),
                 })
             elif isinstance(event, t.ContentReasoningDelta):
-                # `event.kind` is already "text" | "signature" | "redacted" —
-                # the exact wire names `reasoning_content` uses, so no second
-                # name mapping is spelled here.
+                # `event.kind` is "text" | "signature" | "redacted"; the same
+                # renderer as the non-streaming message maps each to its
+                # field, so the two transports cannot disagree.
                 self._block_types_seen.add("reasoning")
                 if event.kind == "text":
                     self._reasoning_text_present = True
                 yield _sse({
                     "id": chat_id, "object": "chat.completion.chunk",
                     "created": created, "model": body.model,
-                    "choices": [{"index": 0, "delta": {"reasoning_content": {event.kind: event.value}}, "finish_reason": None}],
+                    "choices": [{"index": 0, "delta": _render_reasoning(
+                        {{"redacted": "redactedContent"}.get(event.kind, event.kind): event.value}),
+                        "finish_reason": None}],
                     **self._usage_field(),
                 })
             elif isinstance(event, t.ContentToolUseStart):

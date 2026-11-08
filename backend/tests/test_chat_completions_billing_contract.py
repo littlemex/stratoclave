@@ -410,7 +410,9 @@ def test_reasoning_content_parity_across_streaming_and_nonstreaming(api_client):
     nonstream_resp = _post(client, stream=False)
     assert nonstream_resp.status_code == 200
     nonstream_message = nonstream_resp.json()["choices"][0]["message"]
-    nonstream_reasoning = nonstream_message.get("reasoning_content") or {}
+    nonstream_text = nonstream_message.get("reasoning_content")
+    nonstream_signatures = [d.get("signature") for d in nonstream_message.get("reasoning_details") or []
+                            if d.get("signature")]
 
     mock_bedrock.return_value.converse_stream.return_value = {"stream": iter([
         {"contentBlockDelta": {"delta": {"reasoningContent": {"text": "the reasoning"}}}},
@@ -422,21 +424,43 @@ def test_reasoning_content_parity_across_streaming_and_nonstreaming(api_client):
     stream_resp = _post(client, stream=True)
     assert stream_resp.status_code == 200
     chunks = _sse_chunks(stream_resp)
-    stream_reasoning: dict = {}
+    stream_text = ""
+    stream_signatures = []
     for c in chunks:
         if not isinstance(c, dict):
             continue
         delta = c.get("choices", [{}])[0].get("delta", {})
         rc = delta.get("reasoning_content")
-        if rc:
-            stream_reasoning.update(rc)
+        if rc is not None:
+            assert isinstance(rc, str), f"reasoning_content must be a string on the wire, got {rc!r}"
+            stream_text += rc
+        stream_signatures += [d["signature"] for d in delta.get("reasoning_details") or [] if d.get("signature")]
 
-    assert nonstream_reasoning.get("text") == "the reasoning"
-    assert nonstream_reasoning.get("signature") == "sig-parity"
-    assert stream_reasoning.get("text") == "the reasoning"
-    assert stream_reasoning.get("signature") == "sig-parity"
-    assert nonstream_reasoning.get("text") == stream_reasoning.get("text")
-    assert nonstream_reasoning.get("signature") == stream_reasoning.get("signature")
+    assert isinstance(nonstream_text, str), f"reasoning_content must be a string on the wire, got {nonstream_text!r}"
+    assert nonstream_text == stream_text == "the reasoning"
+    assert nonstream_signatures == stream_signatures == ["sig-parity"]
+
+
+def test_reasoning_renders_as_a_string_and_reasoning_details(api_client):
+    """`reasoning_content` is the thinking text as a string, and the signature
+    and redacted content travel in OpenRouter-style `reasoning_details`
+    entries. An object-valued `reasoning_content` is refused by strict
+    OpenAI-compatible decoders (vLLM Semantic Router answers 502)."""
+    client, mock_bedrock = api_client
+    mock_bedrock.return_value.converse.return_value = {
+        "output": {"message": {"content": [
+            {"reasoningContent": {"reasoningText": {"text": "think", "signature": "sig"}}},
+            {"reasoningContent": {"redactedContent": b"opaque"}},
+            {"text": "the answer"},
+        ]}},
+        "stopReason": "end_turn",
+        "usage": {"inputTokens": 5, "outputTokens": 5},
+    }
+    msg = _post(client, stream=False).json()["choices"][0]["message"]
+    assert msg["reasoning_content"] == "think"
+    types = [d["type"] for d in msg["reasoning_details"]]
+    assert types[0] == "reasoning.text" and msg["reasoning_details"][0]["signature"] == "sig"
+    assert all(d["format"] == "anthropic-claude-v1" for d in msg["reasoning_details"])
 
 
 # ---------------------------------------------------------------------------

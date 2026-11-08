@@ -224,7 +224,8 @@ for where a broker is the better choice.
   **Extended thinking is not served on this route**: Bedrock would return
   reasoning blocks and this route's response builder does not render them, so
   `thinking` is not forwarded rather than billed for and discarded. Use
-  `/v1/chat/completions`, which returns it as `reasoning_content`.
+  `/v1/chat/completions`, which returns the thinking text as the string `reasoning_content` and its signature in
+  `reasoning_details`.
 - **OpenAI Chat Completions endpoint.** `POST /v1/chat/completions` accepts
   the same payloads as the OpenAI Chat Completions API — point
   `OPENAI_BASE_URL` at your deployment and use the OpenAI SDKs directly.
