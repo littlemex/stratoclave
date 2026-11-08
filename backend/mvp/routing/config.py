@@ -296,6 +296,19 @@ def tenant_shadow_pref(tenant_id: str) -> Optional[bool]:
         return None
 
 
+def reset_for_test() -> None:
+    """Forget every cached and last-known-good routing config in this process.
+
+    For tests only. Both maps are module globals keyed by tenant (and user), and
+    the test suite reuses tenant ids across tests whose moto tables are fresh: a
+    config read by one test was served to the next until its TTL expired, so an
+    allowlist one test wrote refused a model in another (`model_not_allowed`)
+    depending only on which worker ran them in which order.
+    """
+    _cache.clear()
+    _last_known_good.clear()
+
+
 def invalidate_routing_cache(tenant_id: str, user_id: Optional[str] = None) -> None:
     """Drop the cached routing config for a tenant (or one of its users).
 

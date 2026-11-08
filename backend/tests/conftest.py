@@ -161,6 +161,15 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
         _bedrock.reset_client_cache()
     except Exception:  # noqa: BLE001
         pass
+    # Tenant routing configs are cached per process on a TTL, and so is the
+    # last-known-good copy. Tests reuse tenant ids over fresh moto tables, so a
+    # config one test wrote reached the next: an intermittent 403
+    # `model_not_allowed` in tests that never configured an allowlist.
+    try:
+        from mvp.routing import config as _routing_config
+        _routing_config.reset_for_test()
+    except Exception:  # noqa: BLE001 — routing import optional in minimal envs
+        pass
     # External VSR client caches a process-local pin state + httpx client.
     try:
         from mvp.vsr import client as _vsr
