@@ -44,6 +44,10 @@ MEASURED = {
     "opus": (5_500_000, 27_500_000, 550_000, 6_875_000),
     "opus-legacy": (15_000_000, 75_000_000, 1_500_000, 18_750_000),
     "fable": (11_000_000, 55_000_000, 1_100_000, 13_750_000),
+    # Claude Fable 5.2, from bedrock:ListFoundationModelAgreementOffers on
+    # 2026-11-10 (USE1_input/output/cache_read/cache_write_tokens_standard =
+    # 8.8 / 44 / 0.22 / 11 USD per MTok).
+    "fable-5-2": (8_800_000, 44_000_000, 220_000, 11_000_000),
     # C12/C16: Claude Fable 5's global-profile-scope price point, 10% below the
     # in-region "fable" row. Verified against defaults/pricing.json's own
     # "fable-global" row directly (not copied from a report on trust): that row
