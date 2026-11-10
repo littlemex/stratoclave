@@ -60,6 +60,13 @@
       "cache_write_per_mtok_microusd": 13750000,
       "notes": "Claude Fable 5.1 — $11/$55 per MTok in-region, same as Fable 5 on input and output, but cache read is $0.275 rather than $1.10. Measured 2026-09-23. Its own key because \"fable\" would charge four times the real cache-read rate."
     },
+    "fable-5-2": {
+      "input_per_mtok_microusd": 8800000,
+      "output_per_mtok_microusd": 44000000,
+      "cache_read_per_mtok_microusd": 220000,
+      "cache_write_per_mtok_microusd": 11000000,
+      "notes": "Claude Fable 5.2 in-region (us-east-1): $8.80 input, $44.00 output, $0.22 cache read, $11.00 cache write per MTok, from bedrock:ListFoundationModelAgreementOffers on 2026-11-10 (USE1_*_tokens_standard). Every leg is 0.8x the fable-5-1 row. Its own key, because sharing fable-5-1 would charge Fable 5.2 requests 25% more. The global-scope rates (10% lower) are not used here."
+    },
     "fable-global": {
       "input_per_mtok_microusd": 10000000,
       "output_per_mtok_microusd": 50000000,
