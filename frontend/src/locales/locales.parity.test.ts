@@ -108,4 +108,21 @@ describe('locale bundles agree', () => {
     }
     expect(mismatched).toEqual({})
   })
+
+  it('every nested $t() reference resolves to a string in the same locale', () => {
+    // A nested reference to a missing key renders the key path itself, in the middle
+    // of a sentence, and no other check here reads inside a value.
+    const broken: string[] = []
+    for (const [name, flat] of [
+      ['en', flatEn],
+      ['ja', flatJa],
+    ] as const) {
+      for (const [key, value] of flat) {
+        for (const m of value.matchAll(/\$t\(([^),]+)/g)) {
+          if (typeof flat.get(m[1].trim()) !== 'string') broken.push(`${name}: ${key} -> ${m[1]}`)
+        }
+      }
+    }
+    expect(broken).toEqual([])
+  })
 })

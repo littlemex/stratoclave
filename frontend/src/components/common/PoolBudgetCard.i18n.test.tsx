@@ -16,13 +16,17 @@ import i18n from '@/lib/i18n'
  * type error; the fixtures still carry a sentinel value under that name, as the API
  * does, to show it never reaches the page.
  *
- * Every money field that could be printed in place of another has its own value, and
- * each figure is matched with the words around it, so printing the wrong field, or
- * swapping two, fails.
+ * The fields the sentence could print by mistake (baseline, limit, grant cap) have
+ * values different from the two it should print, and each figure is matched with
+ * the words around it, so printing the wrong field, or swapping two, fails.
  */
 
 const SENTINEL = 'BACKEND-ENGLISH-SENTENCE-MUST-NOT-RENDER'
 const label = () => i18n.t('admin_tenant_detail.pool.follow_seats_button')
+const LABELS: Record<string, string> = {
+  en: 'Follow the seat count again',
+  ja: 'シート数への連動に戻す',
+}
 
 // manual $500, entitlement $600, baseline $510, granted $50, limit $550, cap $520.
 function manualPool(overrides: Partial<PoolBudget> = {}): PoolBudget {
@@ -97,6 +101,13 @@ afterEach(async () => {
 })
 
 describe('the pool mode sentence is localized by the console', () => {
+  it('a manual pool with no figure shows none rather than $0.00', async () => {
+    await i18n.changeLanguage('en')
+    const text = renderCard(manualPool({ manual_limit_microusd: null }))
+    expect(text).not.toContain('$0.00')
+    expect(text).toMatch(/held at —/)
+  })
+
   it('a manual pool, in English, puts each figure in its place', async () => {
     await i18n.changeLanguage('en')
     const text = renderCard(manualPool())
@@ -118,6 +129,9 @@ describe('the pool mode sentence is localized by the console', () => {
     'the sentence names the button exactly when the button is there (%s)',
     async (lang) => {
       await i18n.changeLanguage(lang)
+      // Pinned once per language, so a missing or renamed key (which would render the
+      // same raw key path in the sentence and on the button) fails here.
+      expect(label()).toBe(LABELS[lang])
       expect(renderCard(manualPool())).toContain(label())
       expect(screen.getByTestId('pool-follow-seats-button').textContent).toContain(label())
       cleanup()
@@ -142,6 +156,7 @@ describe('the pool mode sentence is localized by the console', () => {
     await i18n.changeLanguage('en')
     let text = renderCard(seatPool())
     expect(text).toMatch(/seat count \(3\), which entitles it to \$600\.00 a month/)
+    expect(text).not.toContain(label())
     cleanup()
     await i18n.changeLanguage('ja')
     text = renderCard(seatPool())

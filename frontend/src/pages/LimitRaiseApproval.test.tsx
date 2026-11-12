@@ -346,6 +346,7 @@ describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume a
     // language (see PoolBudgetCard); the backend's English `mode_sentence` is for API
     // callers. What R21b asks for still holds: the figure, what the seats would
     // entitle the tenant to, and how to return to them, not the name of a state.
+    await i18n.changeLanguage('en')
     render(withRouting(<LimitRaiseApproval />))
     const sentence = await screen.findByTestId('pool-mode-sentence')
     expect(sentence.textContent).toMatch(/held at \$40\.00/)

@@ -114,9 +114,13 @@ export function PoolBudgetCard({
                       ? 'admin_tenant_detail.pool.mode_manual_resumable'
                       : 'admin_tenant_detail.pool.mode_manual',
                     {
-                      // Mirrors the backend's fallback; `manual_limit_microusd` is
-                      // non-null whenever `seat_tracked` is false.
-                      figure: fmtMicroUsd(pool.manual_limit_microusd ?? 0),
+                      // `manual_limit_microusd` is non-null whenever `seat_tracked` is
+                      // false. If that ever breaks, show no figure rather than $0.00,
+                      // which on this card would mean every request is refused.
+                      figure:
+                        pool.manual_limit_microusd == null
+                          ? '—'
+                          : fmtMicroUsd(pool.manual_limit_microusd),
                       entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
                     },
                   )}
