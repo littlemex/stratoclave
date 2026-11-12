@@ -4,6 +4,11 @@
 # infrastructure. Each ecosystem below is pinned to its manifest directory.
 # Schedules are staggered across the week so review load stays predictable.
 #
+# Every ecosystem groups its own minor/patch updates into a single weekly PR
+# (`all`) and its major updates into a second weekly PR (`majors`), instead of
+# one PR per package. Before this change each ecosystem could open one PR per
+# bumped package every week; `all` + `majors` turns that into at most two.
+#
 # Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
@@ -28,6 +33,18 @@ updates:
     commit-message:
       prefix: "chore(ci)"
       include: "scope"
+    groups:
+      all:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      majors:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   # Backend — FastAPI / boto3 / Pydantic etc.
   - package-ecosystem: "pip"
@@ -42,6 +59,18 @@ updates:
     commit-message:
       prefix: "chore(backend)"
       include: "scope"
+    groups:
+      all:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      majors:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   # Frontend — Vite / React / shadcn.
   - package-ecosystem: "npm"
@@ -57,18 +86,29 @@ updates:
       prefix: "chore(frontend)"
       include: "scope"
     groups:
-      # React and its immediate ecosystem tend to release together; batch
-      # them to avoid floods of individually-trivial PRs.
-      react:
+      all:
         patterns:
-          - "react"
-          - "react-*"
-          - "@types/react*"
-      tailwind:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      majors:
         patterns:
-          - "tailwindcss"
-          - "@tailwindcss/*"
-          - "tailwind-*"
+          - "*"
+        update-types:
+          - "major"
+    ignore:
+      # TypeScript 7 (the native, Go-based compiler line) cannot be adopted
+      # here: @typescript-eslint/parser and @typescript-eslint/eslint-plugin
+      # (8.72.2, the latest as of 2026-11-13) both declare
+      # `peerDependencies.typescript: ">=4.8.4 <6.1.0"`, so installing
+      # typescript@7.x makes `npm install` fail the peer check before eslint
+      # ever runs. 6.0.3 is also the newest release on the 6.x line (verified
+      # against the npm registry 2026-11-13; typescript has no 6.1+ yet), so
+      # this pin currently costs nothing. Re-evaluate once
+      # @typescript-eslint publishes a release whose peer range includes 7.x.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # IaC — AWS CDK v2 (TypeScript).
   - package-ecosystem: "npm"
@@ -84,12 +124,45 @@ updates:
       prefix: "chore(iac)"
       include: "scope"
     groups:
-      aws-cdk:
+      all:
         patterns:
-          - "aws-cdk"
-          - "aws-cdk-lib"
-          - "@aws-cdk/*"
-          - "constructs"
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      majors:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+    ignore:
+      # Same TypeScript 7 / @typescript-eslint peer-range block as frontend
+      # (see that ignore entry for the detail); this workspace additionally
+      # runs ts-jest, whose 29.4.15 peerDependencies declare
+      # `typescript: ">=4.3 <7"` — a second, independent block on the same
+      # major.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # cdk-nag 3.0.x rewrites its engine from an `IAspect` to CDK's native
+      # `IPolicyValidationPlugin` (Validations.of(...).addPlugins(...)) and
+      # removes the bulk `NagSuppressions.addResourceSuppressions` /
+      # `addStackSuppressions` API in favor of acknowledging one finding at a
+      # time via `Validations.of(construct).acknowledge({ id, reason })`.
+      # That by itself was migrated (see bin/iac.ts history). The blocker is
+      # narrower and upstream: v3's own MIGRATION.md states "In v3, each
+      # finding must be acknowledged individually... Prefix matching
+      # (acknowledging AwsSolutions-IAM5 to suppress all findings) is not yet
+      # supported." This stack's AwsSolutions-IAM5 suppressions are
+      # deliberately blanket (wildcard DynamoDB GSI reads, the Bedrock
+      # inference-profile and foundation-model ARNs the gateway is allowed to
+      # invoke) and NOT a fixed list: `cdk synth --all` on this branch with
+      # cdk-nag 3.0.2 produced dozens of per-ARN "Acknowledge with
+      # 'AwsSolutions::AwsSolutions-IAM5[Resource::<exact ARN>]'" errors, each
+      # naming an ARN that is per-account/region/prefix and changes with the
+      # model catalogue — not a stable list this repo could hardcode.
+      # Re-evaluate once cdk-nag ships prefix/wildcard acknowledgment.
+      - dependency-name: "cdk-nag"
+        update-types: ["version-update:semver-major"]
 
   # Root-level npm manifest (package-lock.json exists at the repo root).
   - package-ecosystem: "npm"
@@ -104,6 +177,26 @@ updates:
     commit-message:
       prefix: "chore(root)"
       include: "scope"
+    groups:
+      all:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      majors:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+    ignore:
+      # No TypeScript-consuming lint/test tool lives in this manifest, but it
+      # is pinned to the same 6.0.3 ceiling as frontend/iac for the same
+      # reason (there is no newer 6.x release to move to, and 7.x is what
+      # those two workspaces cannot yet take) so all three stay on one
+      # TypeScript line rather than drifting apart.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # CLI — Rust / Cargo.
   - package-ecosystem: "cargo"
@@ -118,3 +211,15 @@ updates:
     commit-message:
       prefix: "chore(cli)"
       include: "scope"
+    groups:
+      all:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      majors:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
