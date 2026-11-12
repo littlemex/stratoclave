@@ -34,6 +34,10 @@ Repository = "https://github.com/littlemex/stratoclave"
 Issues = "https://github.com/littlemex/stratoclave/issues"
 
 [tool.pytest.ini_options]
+# pytest-asyncio 1.x warns once this is unset, since a future release changes
+# the default; "function" is both the current default and the scope every
+# async fixture here already assumes, so this only silences the warning.
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     # Hits REAL AWS (DynamoDB / CloudFront). Skipped by default; opt in with the
     # documented env var. NOT a per-commit gate — run it pre-merge.

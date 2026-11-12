@@ -846,7 +846,7 @@ function RoutingConfigDialog({
       try {
         body = JSON.parse(text)
       } catch (e) {
-        throw new Error(`Invalid JSON: ${(e as Error).message}`)
+        throw new Error(`Invalid JSON: ${(e as Error).message}`, { cause: e })
       }
       return api.admin.setRoutingConfig(tenantId, body)
     },

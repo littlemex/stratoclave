@@ -8,11 +8,11 @@
 -r requirements.txt
 
 # Testing
-# pytest 9.0.3 fixes CVE-2025-71176 (path traversal in tmp_path).
-# pytest-asyncio 1.4.0 is the first release whose dist-deps allow
-# pytest 9 (the 0.24.x line caps at pytest<9).
-pytest==9.0.3
-pytest-asyncio==1.4.0
+# pytest 9.0.3 fixed CVE-2025-71176 (path traversal in tmp_path); 9.2.0 is the
+# latest patch on that line. pytest-asyncio 1.4.0 was the first release whose
+# dist-deps allow pytest 9 (the 0.24.x line caps at pytest<9); 1.5.0 is current.
+pytest==9.2.0
+pytest-asyncio==1.5.0
 pytest-cov==7.1.0
 # Process-level parallelism. The suite's table names are fixed in conftest, which would
 # collide under threads and does not under processes: moto's state is per-process, so each
@@ -22,23 +22,24 @@ pytest-cov==7.1.0
 pytest-xdist==3.8.0
 
 # AWS SDK mock for backend tests
-moto[dynamodb,cognitoidp,sts]==5.2.2
+moto[dynamodb,cognitoidp,sts]==5.2.5
 # moto[cognitoidp] uses joserfc to sign its fake JWTs.
-# joserfc 1.6.3 fixes CVE-2026-27932 (CPU exhaustion via unbounded
-# PBES2 p2c parameter); 1.7.5 and 1.7.6 fix CVE-2026-119283 and
-# CVE-2026-119284, which pip-audit --strict reports against 1.7.1.
-joserfc==1.7.6
+# joserfc 1.6.3 fixed CVE-2026-27932 (CPU exhaustion via unbounded
+# PBES2 p2c parameter); 1.7.5 and 1.7.6 fixed CVE-2026-119283 and
+# CVE-2026-119284, which pip-audit --strict reports against 1.7.1. 1.8.0 is
+# the latest release on top of those fixes.
+joserfc==1.8.0
 
 # Linting / formatting
-ruff==0.8.4
+ruff==0.17.5
 
 # Formal / property-based tests for the pooled-billing logic.
 # test_billing_formal_z3.py proves the concurrency invariants with an SMT
 # solver (all interleavings, not examples); test_billing_stateful.py fuzzes
 # the reserve/settle/release/reap/set-limit lifecycle with Hypothesis against
 # billing/ledger.py (the executable spec of the DynamoDB money logic).
-z3-solver==4.13.0.0
-hypothesis==6.112.1
+z3-solver==5.4.1.0
+hypothesis==6.170.15
 
 # Parses the machine-readable coverage.yaml each workshop scenario carries
 # (scenarios/_schema/coverage.py). Dev/CI only — the workshop tooling never
