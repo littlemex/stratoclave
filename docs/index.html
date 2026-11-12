@@ -371,7 +371,7 @@ footer a{color:var(--ink2)}
 <body>
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="#top" aria-label="Stratoclave">
+    <a class="brand" href="#top" aria-label="Stratoclave" translate="no">
       <img src="assets/stratomark.svg" width="30" height="30" alt="" aria-hidden="true">
       Stratoclave
     </a>
@@ -408,7 +408,7 @@ footer a{color:var(--ink2)}
         </div>
       </div>
       <figure class="browser hero-shot rv">
-        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">your-deployment.cloudfront.net/admin/tenants/…</span></div>
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url" translate="no">your-deployment.cloudfront.net/admin/tenants/…</span></div>
         <img class="hs-en" src="screenshots/console/02_tenant_detail_pool.en.png" alt="The Stratoclave console showing a tenant's monthly dollar pool: limit, in flight, settled and available." data-t-alt="hero.shot" width="1440" height="900">
       </figure>
     </div>
@@ -452,7 +452,7 @@ sclv claude -- "Summarize this repository"</pre></div>
       </div>
       <div class="rv">
         <details class="more" style="margin-top:0;border-top:0"><summary data-t="ob.other">Other tools and the three endpoints</summary><div class="body">
-        <div class="tabs" role="tablist" aria-label="Setup by tool" data-t-aria="tools.tablist">
+        <div class="tabs" translate="no" role="tablist" aria-label="Setup by tool" data-t-aria="tools.tablist">
           <button role="tab" aria-selected="true" aria-controls="tp0" id="tb0">codex</button>
           <button role="tab" aria-selected="false" aria-controls="tp1" id="tb1" tabindex="-1">Anthropic SDK</button>
           <button role="tab" aria-selected="false" aria-controls="tp2" id="tb2" tabindex="-1">OpenAI SDK</button>
@@ -510,19 +510,19 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     <div class="grid2 rv" style="gap:32px;align-items:start">
       <div class="tree" role="img" aria-label="Example: tenant Acme Research with a 500 dollar monthly pool, a team lead and two users with their own token quotas, and per-model dollar quotas." data-t-aria="tn.alt">
         <div class="t-tenant">
-          <div class="t-row"><b>Acme Research</b><span class="pill" data-t="tn.tenant">tenant</span></div>
+          <div class="t-row"><b translate="no">Acme Research</b><span class="pill" data-t="tn.tenant">tenant</span></div>
           <div class="t-pool"><span data-t="tn.pool">Dollar pool, November</span><span class="mono">$500.00</span></div>
           <div class="bar"><i style="width:38%"></i><i class="res" style="width:6%"></i></div>
           <div class="t-legend"><span data-t="tn.settled">settled $190.40</span><span data-t="tn.reserved">in flight $31.20</span><span data-t="tn.left">left $278.40</span></div>
         </div>
         <div class="t-kids">
-          <div class="t-member"><span class="role lead">team_lead</span><b>priya</b><span class="mono muted" data-t="tn.q1">2,000,000 tokens</span></div>
-          <div class="t-member"><span class="role">user</span><b>sam</b><span class="mono muted" data-t="tn.q2">500,000 tokens</span></div>
-          <div class="t-member"><span class="role">user</span><b>yuki</b><span class="mono muted" data-t="tn.q3">500,000 tokens</span></div>
+          <div class="t-member"><span class="role lead" translate="no">team_lead</span><b translate="no">priya</b><span class="mono muted" data-t="tn.q1">2,000,000 tokens</span></div>
+          <div class="t-member"><span class="role" translate="no">user</span><b translate="no">sam</b><span class="mono muted" data-t="tn.q2">500,000 tokens</span></div>
+          <div class="t-member"><span class="role" translate="no">user</span><b translate="no">yuki</b><span class="mono muted" data-t="tn.q3">500,000 tokens</span></div>
         </div>
         <div class="t-models">
           <span class="t-label" data-t="tn.models">Per-model dollar quotas</span>
-          <span class="chipm">Opus <b class="mono">$200</b></span><span class="chipm">Sonnet <b class="mono">$250</b></span><span class="chipm">Haiku <b class="mono" data-t="tn.nolimit">no cap</b></span>
+          <span class="chipm"><span translate="no">Opus</span> <b class="mono">$200</b></span><span class="chipm"><span translate="no">Sonnet</span> <b class="mono">$250</b></span><span class="chipm"><span translate="no">Haiku</span> <b class="mono" data-t="tn.nolimit">no cap</b></span>
         </div>
         <p class="muted" style="font-size:13px;margin:12px 2px 0" data-t="tn.example">Example values. One request reserves from all three levels in the same transaction, or from none.</p>
       </div>
@@ -531,9 +531,9 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <table class="roles">
           <thead><tr><th data-t="tn.role">Role</th><th data-t="tn.can">What they can do</th></tr></thead>
           <tbody>
-            <tr><td><span class="role adm">admin</span></td><td data-t="tn.r1">Every tenant: create tenants and users, set pools, quotas and model access, approve new models, see all usage.</td></tr>
-            <tr><td><span class="role lead">team_lead</span></td><td data-t="tn.r2">Only the tenants they own: invite and remove members, adjust members' quotas, see the tenant's usage.</td></tr>
-            <tr><td><span class="role">user</span></td><td data-t="tn.r3">Themselves: call models, issue and revoke their own API keys, see their own usage, ask for more.</td></tr>
+            <tr><td><span class="role adm" translate="no">admin</span></td><td data-t="tn.r1">Every tenant: create tenants and users, set pools, quotas and model access, approve new models, see all usage.</td></tr>
+            <tr><td><span class="role lead" translate="no">team_lead</span></td><td data-t="tn.r2">Only the tenants they own: invite and remove members, adjust members' quotas, see the tenant's usage.</td></tr>
+            <tr><td><span class="role" translate="no">user</span></td><td data-t="tn.r3">Themselves: call models, issue and revoke their own API keys, see their own usage, ask for more.</td></tr>
           </tbody>
         </table>
         <div class="ask">
@@ -573,12 +573,12 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <div class="tf-n">2</div>
         <h3 data-t="tg.s2">One row per request</h3>
         <div class="table-scroll"><table class="rows">
-          <thead><tr><th>task_tag</th><th>cost (µ$)</th><th data-t="tg.c.req">requested</th><th data-t="tg.c.bill">billed</th><th>in</th><th>out</th></tr></thead>
+          <thead><tr><th translate="no">task_tag</th><th data-t="tg.c.cost">cost (µ$)</th><th data-t="tg.c.req">requested</th><th data-t="tg.c.bill">billed</th><th>in</th><th>out</th></tr></thead>
           <tbody>
-            <tr><td><span class="tg t1">billing-import</span></td><td>54,223</td><td>opus-5</td><td>sonnet-5</td><td>18,422</td><td>1,163</td></tr>
-            <tr><td><span class="tg t1">billing-import</span></td><td>9,130</td><td>sonnet-5</td><td>sonnet-5</td><td>2,210</td><td>388</td></tr>
-            <tr><td><span class="tg t2">nightly-eval</span></td><td>450,241</td><td>gpt-5.6-sol</td><td>gpt-5.6-sol</td><td>64,180</td><td>2,947</td></tr>
-            <tr><td><span class="tg t0">unlabelled</span></td><td>2,145</td><td>haiku-4-5</td><td>haiku-4-5</td><td>900</td><td>210</td></tr>
+            <tr><td><span translate="no" class="tg t1">billing-import</span></td><td>54,223</td><td translate="no">opus-5</td><td translate="no">sonnet-5</td><td>18,422</td><td>1,163</td></tr>
+            <tr><td><span translate="no" class="tg t1">billing-import</span></td><td>9,130</td><td translate="no">sonnet-5</td><td translate="no">sonnet-5</td><td>2,210</td><td>388</td></tr>
+            <tr><td><span translate="no" class="tg t2">nightly-eval</span></td><td>450,241</td><td translate="no">gpt-5.6-sol</td><td translate="no">gpt-5.6-sol</td><td>64,180</td><td>2,947</td></tr>
+            <tr><td><span translate="no" class="tg t0">unlabelled</span></td><td>2,145</td><td translate="no">haiku-4-5</td><td translate="no">haiku-4-5</td><td>900</td><td>210</td></tr>
           </tbody>
         </table></div>
         <p class="muted" data-t="tg.s2p">The first row asked for Opus and was served by Sonnet after Opus's quota ran out; both names stay on the row. No prompt or response is stored.</p>
@@ -587,9 +587,9 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <div class="tf-n">3</div>
         <h3 data-t="tg.s3">Totals by task</h3>
         <div class="tagbars" id="tagbars">
-          <div><span class="tg t2">nightly-eval</span><i style="--w:87.3%"></i><b class="mono">$0.4502</b></div>
-          <div><span class="tg t1">billing-import</span><i style="--w:12.3%"></i><b class="mono">$0.0634</b></div>
-          <div><span class="tg t0">unlabelled</span><i style="--w:.42%"></i><b class="mono">$0.0021</b></div>
+          <div><span translate="no" class="tg t2">nightly-eval</span><i style="--w:87.3%"></i><b class="mono">$0.4502</b></div>
+          <div><span translate="no" class="tg t1">billing-import</span><i style="--w:12.3%"></i><b class="mono">$0.0634</b></div>
+          <div><span translate="no" class="tg t0">unlabelled</span><i style="--w:.42%"></i><b class="mono">$0.0021</b></div>
         </div>
         <p class="muted" data-t="tg.s3p">The console shows the same totals per member and per tag for each tenant, and every user can see their own.</p>
       </div>
@@ -612,7 +612,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     <div class="gallery rv">
       <div class="shots-nav" role="tablist" aria-label="Console screens" data-t-aria="ui.nav" id="shots-nav"></div>
       <figure class="browser">
-        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url" id="shot-url">your-deployment/</span></div>
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url" id="shot-url" translate="no">your-deployment/</span></div>
         <div class="viewport" id="shot-view"></div>
         <figcaption id="shot-cap" aria-live="polite"></figcaption>
       </figure>
@@ -630,11 +630,11 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
       <ol class="nm-track" id="nm-track">
         <li><span class="nm-dot"></span><div><b data-t="nm.s1">Discovered</b><span data-t="nm.s1p">Found in your account's Bedrock models, with its price read from AWS.</span></div></li>
         <li><span class="nm-dot"></span><div><b data-t="nm.s2">Candidate</b><span data-t="nm.s2p">An administrator picks it in the console and gives it an alias.</span></div></li>
-        <li><span class="nm-dot"></span><div><b data-t="nm.s3">Probed with a real call</b><span data-t="nm.s3p">One call per mode, sync and stream, and the charge is checked in the ledger.</span><span class="nm-checks"><i>sync</i><i>stream</i></span></div></li>
+        <li><span class="nm-dot"></span><div><b data-t="nm.s3">Probed with a real call</b><span data-t="nm.s3p">One call per mode, sync and stream, and the charge is checked in the ledger.</span><span class="nm-checks" translate="no"><i>sync</i><i>stream</i></span></div></li>
         <li><span class="nm-dot"></span><div><b data-t="nm.s4">Live</b><span data-t="nm.s4p">Granted to tenants and listed in the gateway's model list. Clients call it by name through the same three APIs.</span></div></li>
       </ol>
       <figure class="browser nm-shot">
-        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">your-deployment.cloudfront.net/admin/discovery/candidates</span></div>
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url" translate="no">your-deployment.cloudfront.net/admin/discovery/candidates</span></div>
         <img class="hs-en" src="screenshots/console/06_model_discovery_candidates.en.png" alt="The console's model discovery page: two candidate models with their verification state per invocation mode." data-t-alt="nm.shot" width="1440" height="900" loading="lazy">
       </figure>
     </div>
@@ -866,7 +866,7 @@ component, under the axioms stated at the top of each test file above.</pre>
         </dl>
       </div>
       <div class="mcard rv">
-        <div class="stat">Invocations</div>
+        <div class="stat" translate="no">Invocations</div>
         <div class="mlabel" data-t="m.c3.l">counts calls that were not billed</div>
         <dl>
           <dt data-t="m.assume">The usual assumption</dt><dd data-t="m.c3.a">The CloudWatch <code>Invocations</code> metric tracks what you pay for.</dd>
@@ -926,7 +926,7 @@ npm install
 <footer>
   <div class="wrap">
     <span data-t="foot.l">Open source under Apache-2.0.</span>
-    <span>
+    <span translate="no">
       <a href="https://github.com/littlemex/stratoclave">GitHub</a> &middot;
       <a href="https://github.com/littlemex/stratoclave#readme">README</a> &middot;
       <a href="https://github.com/littlemex/stratoclave/blob/main/docs/ARCHITECTURE.md">ARCHITECTURE</a> &middot;
@@ -1331,6 +1331,7 @@ Object.assign(window.__JA, {
 <script>
 Object.assign(window.__JA, {
 'nav.newmodels': 'モデル',
+'v1.kind.cache_read': 'キャッシュ読み取り', 'v1.kind.input': '入力', 'v1.kind.output': '出力', 'v1.sep': '、', 'tg.c.cost': '金額 (µ$)',
 'p5.k': '即日', 'p5.h': '新しい Bedrock モデルを、コンソールから', 'p5.p': '新しいモデルは候補としてコンソールに現れます。実際に 1 回呼んで確かめ、昇格すれば、約 1 分後には全チームが使えます。',
 'nm.eyebrow': '新しいモデル',
 'nm.h': 'Bedrock に新しいモデルが出たら、コンソールで昇格するだけで全チームが使える。',
@@ -1345,6 +1346,7 @@ Object.assign(window.__JA, {
 });
 </script>
 <script>
+// frontend/e2e/docs-landing-page.spec.ts reads window.__SHOTS to check every file exists.
 window.__SHOTS = [
   { id: 's1', file: '02_tenant_detail_pool', path: '/admin/tenants/…', en: 'Tenant pool', cap: 'A tenant\'s dollar pool for the month: limit, what is in flight, what has settled, and what is left. Every request reserves from it before the model is called.' },
   { id: 's2', file: '03_usage_by_tag', path: '/admin/tenants/…/usage-by-tag', en: 'Spend by tag', cap: 'Spend split by member and by task tag, with requests, cost and tokens. Untagged spend stays visible as unlabelled.' },
@@ -1381,7 +1383,13 @@ const JA = window.__JA || {};
 // Keep a number with its counter word on one line ("1 回", "402 で" stays breakable).
 for (const k in JA) JA[k] = JA[k].replace(/(\d) (?=[回件本つ秒日種倍行])/g, '$1\u00a0');
 const fmt = (s, o) => s.replace(/\{(\w+)\}/g, (_, k) => (k in o ? o[k] : '{' + k + '}'));
-const tr = (key, en, o = {}) => fmt(LANG === 'ja' && JA[key] ? JA[key] : en, o);
+// A key the script asks for in Japanese and the bundle lacks is recorded, so the
+// landing-page spec can fail on English that only script would print.
+window.__TR_MISS = [];
+const tr = (key, en, o = {}) => {
+  if (LANG === 'ja' && !JA[key] && !window.__TR_MISS.includes(key)) window.__TR_MISS.push(key);
+  return fmt(LANG === 'ja' && JA[key] ? JA[key] : en, o);
+};
 window.__tr = tr;
 function applyLang(lang) {
   LANG = lang;
@@ -1701,17 +1709,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, RM.matches ? 0 : ms));
 /* ---------- price bars (inside a collapsible) ---------- */
 (() => {
   const box = $('#price-bars'); if (!box) return;
-  const rows = [['Haiku 3.5, cache read', 0.0080], ['Gemma, input', 0.0140], ['Sonnet 5, input', 0.22], ['Opus, output', 2.75], ['Fable, output', 5.50], ['Opus legacy, output', 7.50]];
+  // Model names stay as they are; the token kind is translated.
+  const rows = [['Haiku 3.5', 'cache_read', 0.0080], ['Gemma', 'input', 0.0140], ['Sonnet 5', 'input', 0.22], ['Opus', 'output', 2.75], ['Fable', 'output', 5.50], ['Opus legacy', 'output', 7.50]];
+  const kind = (k) => tr('v1.kind.' + k, { cache_read: 'cache read', input: 'input', output: 'output' }[k]);
   const lo = Math.log10(0.004), hi = Math.log10(8);
-  box.innerHTML = rows.map(([n, v]) => {
+  const render = () => { box.innerHTML = rows.map(([n, k, v]) => {
     const w = (Math.log10(v) - lo) / (hi - lo) * 100;
     return `<div style="display:grid;grid-template-columns:9.5em 1fr 4.2em;gap:8px;align-items:center;font-size:13px;margin:5px 0">
-      <span>${n}</span><span style="height:8px;background:var(--line2);border-radius:4px;overflow:hidden"><i class="pb" style="display:block;height:100%;width:${w}%;background:${v > 7 ? 'repeating-linear-gradient(135deg,var(--accent) 0 5px,color-mix(in srgb,var(--accent) 60%,var(--bg)) 5px 10px)' : 'var(--accent)'};transform-origin:left;transform:scaleX(0);transition:transform .7s cubic-bezier(.2,.7,.2,1)"></i></span>
+      <span><span translate="no">${n}</span>${tr('v1.sep', ', ')}${kind(k)}</span><span style="height:8px;background:var(--line2);border-radius:4px;overflow:hidden"><i class="pb" style="display:block;height:100%;width:${w}%;background:${v > 7 ? 'repeating-linear-gradient(135deg,var(--accent) 0 5px,color-mix(in srgb,var(--accent) 60%,var(--bg)) 5px 10px)' : 'var(--accent)'};transform-origin:left;transform:scaleX(0);transition:transform .7s cubic-bezier(.2,.7,.2,1)"></i></span>
       <span class="mono" style="text-align:right">$${v.toFixed(v < 1 ? 4 : 2)}</span></div>`;
-  }).join('') + `<p class="muted" style="font-size:12px;margin-top:6px" data-t="v1.note">${tr('v1.note', 'Cost of 100,000 tokens at the bundled list prices. Log scale; the figures are the amounts.')}</p>`;
+  }).join('') + `<p class="muted" style="font-size:12px;margin-top:6px">${tr('v1.note', 'Cost of 100,000 tokens at the bundled list prices. Log scale; the figures are the amounts.')}</p>`; };
+  render();
   const grow = () => $$('.pb', box).forEach((b, i) => setTimeout(() => { b.style.transform = 'scaleX(1)'; }, RM.matches ? 0 : 80 * i));
   box.closest('details').addEventListener('toggle', (e) => { if (e.target.open) grow(); });
-  document.addEventListener('langchange', () => { const p = box.querySelector('[data-t]'); if (p) p.innerHTML = tr('v1.note', 'Cost of 100,000 tokens at the bundled list prices. Log scale; the figures are the amounts.'); });
+  document.addEventListener('langchange', () => {
+    const bar = box.querySelector('.pb');
+    const grown = !!bar && bar.style.transform === 'scaleX(1)';
+    render();
+    if (grown) box.querySelectorAll('.pb').forEach((b) => { b.style.transition = 'none'; b.style.transform = 'scaleX(1)'; });
+  });
 })();
 
 /* ---------- console gallery ---------- */

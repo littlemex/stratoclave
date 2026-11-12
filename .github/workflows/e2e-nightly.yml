@@ -28,6 +28,11 @@ on:
     paths:
       - "frontend/**"
       - "frontend/e2e/**"
+      # frontend/e2e/docs-landing-page.spec.ts tests the landing page, so a change
+      # to the page has to run it too; without these, a pull request that only
+      # rewrote docs/index.html merged without its spec running.
+      - "docs/index.html"
+      - "docs/screenshots/console/**"
       - "docker-compose.yml"
       - "Makefile"
       - "scripts/local/**"
