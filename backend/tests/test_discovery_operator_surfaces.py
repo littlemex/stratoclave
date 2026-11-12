@@ -110,6 +110,51 @@ _PRICING_KEY = "opus"
 
 
 # ---------------------------------------------------------------------------
+# Assertion 0 (#281 item 2): the fake `bedrock` CONTROL-PLANE client every
+# probe-route test in this file now needs, verbatim from `test_discovery_
+# probe.py`'s own copy -- see that file for the full reasoning.
+# ---------------------------------------------------------------------------
+class _FakeAgreementClient:
+    def __init__(self, rate_card: list[dict]):
+        self._rate_card = rate_card
+
+    def list_foundation_model_agreement_offers(self, *, modelId: str):
+        return {"offers": [{"termDetails": {
+            "usageBasedPricingTerm": {"rateCard": self._rate_card}}}]}
+
+
+def _rate_card_for(pricing_key: str) -> list[dict]:
+    from decimal import Decimal
+
+    from mvp.pricing import baseline_rates
+
+    rate = baseline_rates()[pricing_key]
+    legs = {
+        "input_tokens_standard": rate.input_per_mtok_microusd,
+        "output_tokens_standard": rate.output_per_mtok_microusd,
+        "cache_read_tokens_standard": rate.cache_read_per_mtok_microusd,
+        "cache_write_tokens_standard": rate.cache_write_per_mtok_microusd,
+    }
+    return [
+        {"dimension": dimension, "price": str(Decimal(micro) / Decimal(1_000_000)),
+         "unit": "Units"}
+        for dimension, micro in legs.items()
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _default_agreement_rate_matches(monkeypatch: pytest.MonkeyPatch):
+    """See `test_discovery_probe.py`'s identical fixture: patches assertion 0's
+    control-plane client, autouse, to answer with `_PRICING_KEY`'s own
+    published rate so every probe-route test in this file that is not itself
+    about assertion 0 is unaffected by its addition."""
+    monkeypatch.setattr(
+        "mvp.discovery.probe._default_agreement_client",
+        lambda region: _FakeAgreementClient(_rate_card_for(_PRICING_KEY)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # App/permission scaffolding: the real evaluator, the real seeded
 # permissions document, mounted the same way `test_entitlement_store.py`'s
 # own `TestPermissionGate` mounts an admin router -- so a test that asks

@@ -61,6 +61,7 @@ a probe that only checks for a 200.
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Optional
 
 import pytest
@@ -81,6 +82,64 @@ REAL_PRICING_KEY = "opus"
 # resolve it to the `default` row (E11, already shipped) -- silently, at the
 # pricing layer -- which is exactly the trap assertion 4 exists to catch.
 UNRESOLVABLE_PRICING_KEY = "not-a-registered-pricing-key-zzz"
+
+
+# ---------------------------------------------------------------------------
+# Assertion 0 (#281 item 2): the fake `bedrock` CONTROL-PLANE client every
+# test in this file now needs, since `probe()` reads one before it ever
+# reaches the `bedrock-runtime` call `_patch_bedrock_clients` (above) fakes.
+# ---------------------------------------------------------------------------
+class _FakeAgreementClient:
+    """A `bedrock` control-plane client double: the one method assertion 0
+    calls (`list_foundation_model_agreement_offers`), nothing else."""
+
+    def __init__(self, rate_card: list[dict]):
+        self._rate_card = rate_card
+        self.calls: list[str] = []
+
+    def list_foundation_model_agreement_offers(self, *, modelId: str):
+        self.calls.append(modelId)
+        return {"offers": [{"termDetails": {
+            "usageBasedPricingTerm": {"rateCard": self._rate_card}}}]}
+
+
+def _rate_card_for(pricing_key: str) -> list[dict]:
+    """A region-free, `Units`-priced agreement rate card (the generation-3
+    snake_case shape `pricing_feeds.dimensions` reads as pricing every region
+    alike) whose derived `Selection` is EXACTLY `pricing_key`'s own bundled-floor
+    rate -- so the default fixture below reproduces this file's existing
+    assumption (the record's model bills at `REAL_PRICING_KEY`'s own rate) rather
+    than introducing a new one."""
+    from mvp.pricing import baseline_rates
+
+    rate = baseline_rates()[pricing_key]
+    legs = {
+        "input_tokens_standard": rate.input_per_mtok_microusd,
+        "output_tokens_standard": rate.output_per_mtok_microusd,
+        "cache_read_tokens_standard": rate.cache_read_per_mtok_microusd,
+        "cache_write_tokens_standard": rate.cache_write_per_mtok_microusd,
+    }
+    return [
+        {"dimension": dimension, "price": str(Decimal(micro) / Decimal(1_000_000)),
+         "unit": "Units"}
+        for dimension, micro in legs.items()
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _default_agreement_rate_matches(monkeypatch: pytest.MonkeyPatch):
+    """`probe()`'s assertion 0 (#281 item 2) reads a SEPARATE, control-plane
+    `bedrock` client on every call now, independent of the `bedrock-runtime`
+    double `_patch_bedrock_clients` installs per test. Patched here, autouse,
+    to answer with exactly `REAL_PRICING_KEY`'s own published rate, so every
+    test in this file that is not itself about assertion 0 is unaffected by
+    its addition -- the same reasoning `_unrestricted_system_scope`, below,
+    already applies to the eligibility axis. A test that needs a DIFFERENT
+    answer (a mismatch, an unreadable card) overrides this patch directly."""
+    monkeypatch.setattr(
+        "mvp.discovery.probe._default_agreement_client",
+        lambda region: _FakeAgreementClient(_rate_card_for(REAL_PRICING_KEY)),
+    )
 
 
 def _scope() -> ObservationScope:
@@ -301,6 +360,166 @@ class TestPricingMustResolveThroughTheEntrysOwnKey:
 
         verdict = get_probe_verdict(record.profile_id, SYNC)
         assert verdict is None or verdict.state != "verified"
+
+
+# ---------------------------------------------------------------------------
+# Assertion 0 (#281 item 2): a resolvable, non-default pricing key is not
+# enough -- it has to be the RIGHT tier, not merely A tier that happens to
+# price the same four dimensions this model counts.
+# ---------------------------------------------------------------------------
+class TestAssertion0PriceMustMatchWhatAWSPublishes:
+    def test_a_cheaper_real_tier_that_prices_every_dimension_does_not_verify(
+        self, _system_tenant_pool, monkeypatch
+    ):
+        """The exact failure #281 item 2 describes: `"haiku"` is a real,
+        resolvable pricing key that prices all four dimensions this record's
+        model counts -- assertions 1 through 4 alone would pass it exactly as
+        cleanly as `REAL_PRICING_KEY` ("opus") does in the test above, since
+        the two tests are otherwise identical. The default agreement-client
+        fixture (module level, above) answers for `REAL_PRICING_KEY`, i.e.
+        this model's TRUE published rate is Opus-priced; promoting it at the
+        cheaper Haiku tier is the wrong-tier mistake #281 item 2 describes,
+        and it must be refused before the paid Converse call is even made
+        (`fake.calls` stays empty) -- assertion 0 needs no usage to check a
+        rate."""
+        fake = _FakeBedrockRuntime(response=_valid_converse_response())
+        _patch_bedrock_clients(monkeypatch, fake)
+
+        from mvp.discovery.probe import probe
+        from mvp.discovery.verdict import get_probe_verdict
+
+        record = _record()
+        result = probe(
+            record, _candidate(record, pricing_key="haiku", wire_protocol="messages"),
+            invocation=SYNC,
+        )
+
+        assert result.passed is False
+        assert result.verdict is None
+        assert result.blocker is not None
+        assert result.blocker.type == "protocol_unverified"
+        assert result.blocker.subtype == "pricing_key_rate_mismatch"
+        assert fake.calls == [], (
+            "a wrong-tier key must be refused before the paid Converse call, "
+            "not after spending it"
+        )
+
+        verdict = get_probe_verdict(record.profile_id, SYNC)
+        assert verdict is None or verdict.state != "verified"
+
+    def test_a_dearer_real_tier_than_published_still_verifies(
+        self, _system_tenant_pool, monkeypatch
+    ):
+        """The direction stated in the module docstring: charging MORE than
+        AWS publishes is not refused -- only charging LESS is. `"opus-legacy"`
+        prices every leg ABOVE `REAL_PRICING_KEY` ("opus", this test's AWS
+        answer) and is otherwise the identical setup to the failing test
+        above, so the only thing distinguishing the two outcomes is which
+        side of the published rate the key lands on."""
+        fake = _FakeBedrockRuntime(response=_valid_converse_response())
+        _patch_bedrock_clients(monkeypatch, fake)
+
+        from mvp.discovery.probe import probe
+
+        record = _record()
+        result = probe(
+            record, _candidate(record, pricing_key="opus-legacy", wire_protocol="messages"),
+            invocation=SYNC,
+        )
+        assert result.passed is True, result.blocker
+        assert fake.calls != [], "a dearer key must still reach the real call"
+
+    def test_a_model_with_no_independently_derivable_rate_fails_closed(
+        self, _system_tenant_pool, monkeypatch
+    ):
+        """AWS answers `ValidationException: Agreement not supported for this
+        model` for a provider this account's agreement-offers API does not
+        meter at all (`mvp.pricing_feeds.agreement`'s own measured case). With
+        nothing to check `pricing_key` against, this must refuse rather than
+        silently pass as a verified price -- the standing requirement (#281
+        item 2) that an unverifiable rate never reads as a verified one."""
+        from botocore.exceptions import ClientError
+
+        class _NotMarketplaceMetered:
+            def list_foundation_model_agreement_offers(self, *, modelId: str):
+                raise ClientError(
+                    {"Error": {"Code": "ValidationException",
+                                "Message": "Agreement not supported for this model."},
+                     "ResponseMetadata": {"HTTPStatusCode": 400}},
+                    "ListFoundationModelAgreementOffers",
+                )
+
+        monkeypatch.setattr(
+            "mvp.discovery.probe._default_agreement_client",
+            lambda region: _NotMarketplaceMetered(),
+        )
+        fake = _FakeBedrockRuntime(response=_valid_converse_response())
+        _patch_bedrock_clients(monkeypatch, fake)
+
+        from mvp.discovery.probe import probe
+        from mvp.discovery.verdict import get_probe_verdict
+
+        record = _record()
+        result = probe(
+            record, _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
+        )
+
+        assert result.passed is False
+        assert result.verdict is None
+        assert result.blocker is not None
+        assert result.blocker.type == "protocol_unverified"
+        assert result.blocker.subtype == "pricing_rate_unverifiable"
+        assert fake.calls == [], (
+            "an unverifiable rate must be refused before the paid Converse "
+            "call, not after spending it"
+        )
+
+        verdict = get_probe_verdict(record.profile_id, SYNC)
+        assert verdict is None or verdict.state != "verified"
+
+    def test_a_leg_the_card_only_published_outside_this_scope_is_not_held_against_the_key(
+        self, _system_tenant_pool, monkeypatch
+    ):
+        """A leg `dimensions.select()` had to WIDEN -- no exact row for the
+        region/scope asked, so it took the dearer stand-in from elsewhere --
+        must not be compared: the stand-in is already inflated past the true
+        in-scope number by construction, and holding a correct, cheaper,
+        in-scope key to that inflated number would fail a right answer for no
+        reason but the widening. Built by publishing the card only under
+        `global` scope while this record resolves to `geo` (its `us.` prefix),
+        so every leg here is widened, and a correct `REAL_PRICING_KEY` must
+        still verify because nothing is left to compare it against."""
+        from decimal import Decimal
+
+        from mvp.pricing import baseline_rates
+
+        rate = baseline_rates()[REAL_PRICING_KEY]
+        widened_card = [
+            {"dimension": f"USE1_{dim}_global", "price": str(Decimal(micro) / Decimal(1_000_000)),
+             "unit": "Units"}
+            for dim, micro in (
+                ("input_tokens", rate.input_per_mtok_microusd),
+                ("output_tokens", rate.output_per_mtok_microusd),
+                ("cache_read_tokens", rate.cache_read_per_mtok_microusd),
+                ("cache_write_tokens", rate.cache_write_per_mtok_microusd),
+            )
+        ]
+        monkeypatch.setattr(
+            "mvp.discovery.probe._default_agreement_client",
+            lambda region: _FakeAgreementClient(widened_card),
+        )
+        fake = _FakeBedrockRuntime(response=_valid_converse_response())
+        _patch_bedrock_clients(monkeypatch, fake)
+
+        from mvp.discovery.probe import probe
+
+        record = _record()
+        result = probe(
+            record, _candidate(record, pricing_key=REAL_PRICING_KEY, wire_protocol="messages"),
+            invocation=SYNC,
+        )
+        assert result.passed is True, result.blocker
 
 
 # ---------------------------------------------------------------------------

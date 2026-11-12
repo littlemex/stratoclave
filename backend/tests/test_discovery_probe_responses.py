@@ -12,6 +12,7 @@ the live endpoint (2026-09-24) rather than shapes read off a specification.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any, Optional
 
 import httpx
@@ -24,6 +25,59 @@ SYNC = "sync"
 STREAM = "stream"
 #: A key with a reviewed floor row, so assertion 4 has a non-zero charge to find.
 REAL_PRICING_KEY = "gpt-5.6-sol"
+
+
+# ---------------------------------------------------------------------------
+# Assertion 0 (#281 item 2): the fake `bedrock` CONTROL-PLANE client every
+# test in this file now needs, since `probe()` reads one before it ever
+# reaches the `/responses` transport this file otherwise drives end to end.
+# Verbatim sibling of `test_discovery_probe.py`'s own copy -- see that file
+# for the full reasoning; this one answers for `REAL_PRICING_KEY` as defined
+# above (`"gpt-5.6-sol"`, not `"opus"`).
+# ---------------------------------------------------------------------------
+class _FakeAgreementClient:
+    """A `bedrock` control-plane client double: the one method assertion 0
+    calls (`list_foundation_model_agreement_offers`), nothing else."""
+
+    def __init__(self, rate_card: list[dict]):
+        self._rate_card = rate_card
+        self.calls: list[str] = []
+
+    def list_foundation_model_agreement_offers(self, *, modelId: str):
+        self.calls.append(modelId)
+        return {"offers": [{"termDetails": {
+            "usageBasedPricingTerm": {"rateCard": self._rate_card}}}]}
+
+
+def _rate_card_for(pricing_key: str) -> list[dict]:
+    """A region-free, `Units`-priced agreement rate card whose derived
+    `Selection` is EXACTLY `pricing_key`'s own bundled-floor rate."""
+    from mvp.pricing import baseline_rates
+
+    rate = baseline_rates()[pricing_key]
+    legs = {
+        "input_tokens_standard": rate.input_per_mtok_microusd,
+        "output_tokens_standard": rate.output_per_mtok_microusd,
+        "cache_read_tokens_standard": rate.cache_read_per_mtok_microusd,
+        "cache_write_tokens_standard": rate.cache_write_per_mtok_microusd,
+    }
+    return [
+        {"dimension": dimension, "price": str(Decimal(micro) / Decimal(1_000_000)),
+         "unit": "Units"}
+        for dimension, micro in legs.items()
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _default_agreement_rate_matches(monkeypatch: pytest.MonkeyPatch):
+    """See `test_discovery_probe.py`'s identical fixture: patches assertion
+    0's control-plane client, autouse, to answer with `REAL_PRICING_KEY`'s own
+    published rate so every test in this file that is not itself about
+    assertion 0 is unaffected by its addition."""
+    monkeypatch.setattr(
+        "mvp.discovery.probe._default_agreement_client",
+        lambda region: _FakeAgreementClient(_rate_card_for(REAL_PRICING_KEY)),
+    )
 
 MEASURED_USAGE = {
     "input_tokens": 7,

@@ -20,6 +20,43 @@ actually agree with each other.
 Anything else is `protocol_unverified`, with the subtype naming which
 assertion failed (see `mvp.discovery.records.BLOCKER_TYPES`).
 
+**Assertion 0 — Price (#281 item 2), checked before any of the above and
+before any ledger hold is opened.** The four assertions prove a charge was
+ATTRIBUTED to `pricing_key` — non-zero, not `default`, every dimension
+accounted for. None of them prove the attributed charge is the right SIZE. A
+`pricing_key` naming a real, resolvable, wrong tier that happens to price the
+same four dimensions as the right one passes assertions 1 through 4 exactly
+as cleanly as the right key would, and bills every subsequent request at the
+wrong tier with no signal at any layer. `pricing_key` is a human input — the
+one of the three a promotion requires where money actually lives — and this
+is the one check against something other than the human who typed it:
+`mvp.discovery.reconcile.derive_selection` (the SAME selector a reconciliation
+pass already runs to suggest a key, asked fresh, at probe time, not trusted
+from whenever that pass ran) against AWS's own published rate card for this
+record's model, leg by leg. A leg the selector widened — priced outside the
+region or scope asked for, at the dearer stand-in `dimensions.select()`
+returns for exactly that case — is not compared: it is already inflated past
+the true in-scope number by construction, and holding a correct, cheaper,
+in-scope rate to that inflated number would fail it for no reason but the
+widening. A leg AWS prices nowhere is not compared either. Of what remains,
+the direction checked is one-sided: `pricing_key` resolving BELOW what AWS
+publishes fails (`pricing_key_rate_mismatch`) — under-charging is the one
+direction the standing rule (#281 item 1; `mvp.pricing._floored_default`)
+never allows. Resolving ABOVE is not re-litigated here, for the same reason
+`dimensions.select()` itself treats over-charging as the safe residual
+everywhere else in this package (`widened`, `unknown_profile_prefix`'s
+dearer-scope default): a human who chose a dearer wrong tier by mistake is a
+pricing judgement call for whoever reviews the promotion, not a fact this
+probe can check against AWS. When AWS's agreement-offer card cannot be read
+or parsed for this model at all — no agreement, no access, an unparseable
+row, no per-token price anywhere — there is nothing to check `pricing_key`
+against, and this fails closed (`pricing_rate_unverifiable`) rather than
+passing silently: a model this API cannot independently price is out of
+scope for THIS verification path, not a model this path has cleared. Run
+before the hold opens and before any Converse/`/responses` call, because it
+needs no usage at all — only the two rates — so a wrong-tier key is caught
+for free, not at the cost of the call it would otherwise still spend.
+
 **Signature note, reported rather than invented.** The master contract's
 Interface section writes this as `probe(record, *, mode) -> ProbeResult`. A
 `DiscoveredRecord` carries no price at all — no pricing key, no rate card, no
@@ -128,6 +165,16 @@ _RESPONSES_MAX_OUTPUT_TOKENS = 16
 #: usage after the call, per assertion 4.
 _PROBE_INPUT_TOKENS_EST = 32
 
+#: Assertion 0's slack, in micro-USD per MTok, per leg. `mvp.pricing_feeds.
+#: composite._to_micro` already rounds a freshly-derived USD-per-MTok `Decimal` UP
+#: (never down) before this compares it against the resolved rate's own integer
+#: micro-USD field, so the only gap this absorbs is the ceiling itself landing one
+#: micro-USD above the true value on a price whose decimal expansion does not divide
+#: evenly — never a genuine tier gap, which is leg-by-leg multiples of a cent per
+#: MTok at the smallest. Not a percentage: a relative tolerance would widen exactly
+#: as the rate grows, which is the one place a real wrong-tier gap also grows.
+_RATE_MATCH_TOLERANCE_MICROUSD = 1
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -209,6 +256,23 @@ def _default_bedrock_client(region: str):
     from .. import _bedrock_clients
 
     return _bedrock_clients.bedrock_runtime_client(region)
+
+
+def _default_agreement_client(region: str):
+    """A fresh `bedrock` CONTROL-PLANE client for `region` — a different AWS
+    service from `_default_bedrock_client`'s `bedrock-runtime` above, built
+    separately rather than reused, because the two answer completely
+    different calls: `bedrock-runtime.converse` is what assertions 1-4 spend
+    money against, `bedrock.list_foundation_model_agreement_offers` is the
+    free, control-plane read assertion 0 (above) checks `pricing_key` against,
+    through `mvp.discovery.gates.fetch_rate_card` (via `mvp.discovery.
+    reconcile.derive_selection`). Not memoized like its sibling: this client
+    is used once per probe call rather than per request, so the pooling this
+    module's `bedrock-runtime` accessor exists for does not apply here.
+    """
+    import boto3
+
+    return boto3.client("bedrock", region_name=region)
 
 
 def _drain_converse_stream(resp: dict) -> Optional[dict]:
@@ -488,13 +552,13 @@ _TRANSPORTS: dict[str, _Transport] = {
 def probe(
     record: DiscoveredRecord, candidate: PromotionCandidate, *, invocation: str,
     bedrock: Optional[Any] = None, sts: Optional[Any] = None,
-    http: Optional[Any] = None,
+    http: Optional[Any] = None, agreement_client: Optional[Any] = None,
 ) -> ProbeResult:
-    """Perform the four assertions for `candidate` against `record`'s underlying
-    Bedrock identity, under `invocation`, priced at the candidate's pricing key over
-    its wire protocol. Raises `ledger.ProbeAttemptRefused` when the attempt cannot
-    even be made (see that exception's docstring for the closed reasons); returns a
-    `ProbeResult` for every attempt that WAS made, pass or fail.
+    """Perform assertion 0 and the four assertions for `candidate` against `record`'s
+    underlying Bedrock identity, under `invocation`, priced at the candidate's pricing
+    key over its wire protocol. Raises `ledger.ProbeAttemptRefused` when the attempt
+    cannot even be made (see that exception's docstring for the closed reasons);
+    returns a `ProbeResult` for every attempt that WAS made, pass or fail.
 
     The candidate is passed whole, not as its pricing key and protocol, because the
     verdict names what it verified: the candidate's digest and the record's. A
@@ -508,14 +572,17 @@ def probe(
     a verdict that only exists in a `ProbeResult` a caller forgot to persist
     is indistinguishable, to them, from a probe that never ran.
 
-    `bedrock`/`sts`/`http` are injection seams for tests, exactly like `mvp.
-    discovery.reconcile.run_pass`'s own `bedrock`/`sts` parameters — built
+    `bedrock`/`sts`/`http`/`agreement_client` are injection seams for tests, exactly
+    like `mvp.discovery.reconcile.run_pass`'s own `bedrock`/`sts` parameters — built
     lazily from `boto3`/`httpx` only when not supplied, never at import time.
     `http` is the `"responses"` transport's seam (an `httpx.Client`, which a test builds
     over `httpx.MockTransport`); `bedrock` is the `"messages"` one. Supplying the seam
     that belongs to the OTHER transport raises `TypeError` rather than being ignored --
     dropping it silently is how a test suite ends up minting a real bearer and billing a
-    real call.
+    real call. `agreement_client` is independent of both: it is a `bedrock` CONTROL-PLANE
+    client (see `_default_agreement_client`), read by assertion 0 regardless of which
+    transport `wire_protocol` names, so it is exempt from the other-transport refusal
+    above.
     """
     if invocation not in INVOCATION_VALUES:
         raise ValueError(f"unknown invocation {invocation!r}; must be one of {sorted(INVOCATION_VALUES)}")
@@ -572,7 +639,45 @@ def probe(
     ledger.check_probe_scope_eligibility(record)
 
     from .. import _money
-    from ..pricing import effective_rates, rate_usage, snapshot_rates
+    from ..pricing import BILLABLE_LEGS, effective_rates, rate_usage, snapshot_rates
+    from ..pricing_feeds.composite import _to_micro
+    from ..pricing_feeds.dimensions import base_model_id, scope_for_model_id
+    from .reconcile import derive_selection
+
+    # Assertion 0 — price (#281 item 2). Needs no usage and opens no hold, so it
+    # runs first: a wrong-tier key is refused for free instead of at the cost of
+    # the call assertions 1-4 would otherwise still spend. See the module
+    # docstring's own "Assertion 0" section for the full reasoning; this is the
+    # mechanical half of it.
+    agreement = agreement_client or _default_agreement_client(region)
+    derived, derivation_blocker = derive_selection(
+        base_model_id(record.raw_id),
+        candidate_regions=record.destination_regions or (region,),
+        scope=scope_for_model_id(record.raw_id), bedrock=agreement,
+    )
+    if derivation_blocker is not None:
+        return _failure(
+            invocation, "pricing_rate_unverifiable",
+            f"could not independently derive {record.raw_id!r}'s published rate to "
+            f"check pricing_key={pricing_key!r} against: {derivation_blocker.type}/"
+            f"{derivation_blocker.subtype} — {derivation_blocker.evidence}",
+        )
+    resolved_for_check = snapshot_rates(pricing_key)
+    rate_mismatches = [
+        f"{leg.name}: pricing_key={pricing_key!r} resolves to "
+        f"{getattr(resolved_for_check, leg.rate_field)} micro-USD/MTok, AWS "
+        f"publishes {_to_micro(derived.rates[leg.name])}"
+        for leg in BILLABLE_LEGS
+        if leg.name in derived.rates and leg.name not in derived.widened
+        and getattr(resolved_for_check, leg.rate_field) + _RATE_MATCH_TOLERANCE_MICROUSD
+        < _to_micro(derived.rates[leg.name])
+    ]
+    if rate_mismatches:
+        return _failure(
+            invocation, "pricing_key_rate_mismatch",
+            f"pricing_key={pricing_key!r} under-charges against AWS's own published "
+            f"rate for {record.raw_id!r}: " + "; ".join(rate_mismatches),
+        )
 
     # Everything that can raise and does not need the hold runs BEFORE it. A rate-table
     # read or an STS call failing after the reservation is open, but before the `try`
