@@ -260,7 +260,9 @@ export interface PoolBudget {
   remaining_usd_cents: number
   // The ceiling's composition, so the total beside it can be checked. The mode is
   // a SENTENCE and not a state name: a field spelling "per_seat" named a state and
-  // told the reader nothing they could act on.
+  // told the reader nothing they could act on. `mode_sentence` is the backend's
+  // English rendering for API callers; the console composes its own, localized,
+  // from the fields below (see PoolBudgetCard), and must not render this one.
   mode_sentence: string
   seat_tracked: boolean
   seat_count: number

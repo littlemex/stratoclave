@@ -212,6 +212,8 @@
       "available_label": "利用可能額",
       "seats_label": "シート数",
       "seats_value": "{{count}}（{{entitlement}} 相当）",
+      "mode_seat_tracked": "このプールはテナントのシート数 ({{count}}) に従い、月 {{entitlement}} が上限になります。メンバーが増減するたびに 1 シート分ずつ変わり、金額を手動で保存するとシート数には従わなくなります。",
+      "mode_manual": "このプールは手動で設定した {{figure}} に固定されていて、テナントのシート数には従っていません。シート数に従えば {{entitlement}} になります。シート数に戻すには「シート数に従うに戻す」を使ってください。",
       "granted_label": "追加付与額",
       "remaining_grant_cap_label": "追加付与の残り上限",
       "grant_cap_derived": "ベースラインからの導出値",

@@ -35,10 +35,15 @@ import { cn } from '@/lib/utils'
  * tracking as the one role that cannot see it happened. Two components would also
  * be two renderings of one row, and they would eventually disagree.
  *
- * The mode is rendered as a SENTENCE the backend composes, not as a state name. A
- * field spelling "per_seat" named a state and said nothing an operator could act
- * on: not what the tenant is entitled to, not how the state was entered, and not
- * how to leave it.
+ * The mode is rendered as a SENTENCE, not as a state name. A field spelling
+ * "per_seat" named a state and said nothing an operator could act on: not what the
+ * tenant is entitled to, not how the state was entered, and not how to leave it.
+ *
+ * The console composes that sentence itself, from the structured fields, through
+ * i18n. The backend's `mode_sentence` is English prose for API callers; rendering
+ * it here put an untranslated paragraph on the Japanese screen, and its "send
+ * {"follow_seats": true} to this endpoint" is an instruction for a different
+ * client than the one that has a button for it.
  */
 export interface PoolBudgetApi {
   setPoolBudget: (
@@ -94,7 +99,15 @@ export function PoolBudgetCard({
         ) : pool ? (
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground" data-testid="pool-mode-sentence">
-              {pool.mode_sentence}
+              {pool.seat_tracked
+                ? t('admin_tenant_detail.pool.mode_seat_tracked', {
+                    count: pool.seat_count,
+                    entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
+                  })
+                : t('admin_tenant_detail.pool.mode_manual', {
+                    figure: fmtMicroUsd(pool.manual_limit_microusd ?? pool.baseline_microusd),
+                    entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
+                  })}
             </p>
             <dl
               className="grid gap-x-6 gap-y-3 sm:grid-cols-2"

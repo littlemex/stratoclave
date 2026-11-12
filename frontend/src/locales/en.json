@@ -212,6 +212,8 @@
       "available_label": "Available",
       "seats_label": "Seats",
       "seats_value": "{{count}} (entitling {{entitlement}})",
+      "mode_seat_tracked": "This pool follows the tenant's seat count ({{count}}), which entitles it to {{entitlement}} a month. It moves by one seat's worth whenever somebody joins or leaves; saving a figure by hand stops that.",
+      "mode_manual": "This pool is held at {{figure}}, a figure set by hand, and no longer follows the tenant's seat count, which would entitle it to {{entitlement}}. Use “Follow the seat count again” to return it to the seat count.",
       "granted_label": "Granted",
       "remaining_grant_cap_label": "Remaining grant cap",
       "grant_cap_derived": "derived from baseline",

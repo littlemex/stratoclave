@@ -342,15 +342,17 @@ describe('LimitRaiseApproval — R36/B6: remaining grant cap shown before typing
 })
 
 describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume action', () => {
-  it('renders the mode sentence verbatim, not a paraphrase of `mode`', async () => {
+  it('renders the mode as a sentence built from the parts, not a paraphrase of `mode`', async () => {
+    // The console composes the sentence from the structured fields, in the reader's
+    // language (see PoolBudgetCard); the backend's English `mode_sentence` is for API
+    // callers. What R21b asks for still holds: the figure, what the seats would
+    // entitle the tenant to, and how to return to them, not the name of a state.
     render(withRouting(<LimitRaiseApproval />))
-    await waitFor(() =>
-      expect(
-        screen.getByText(
-          'This budget was set manually; membership changes do not change this budget.',
-        ),
-      ).toBeInTheDocument(),
-    )
+    const sentence = await screen.findByTestId('pool-mode-sentence')
+    expect(sentence.textContent).toContain('$40.00')
+    expect(sentence.textContent).toContain('$600.00')
+    expect(sentence.textContent).toContain('Follow the seat count again')
+    expect(sentence.textContent).not.toContain(POOL_FIXTURE.mode_sentence)
   })
 
   it('renders the seat entitlement (seat count), not just the derived microusd figure', async () => {
