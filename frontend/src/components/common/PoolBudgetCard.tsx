@@ -71,7 +71,8 @@ export function PoolBudgetCard({
 }) {
   const { t } = useTranslation()
   const [dialogOpen, setDialogOpen] = useState(false)
-  // One predicate for the follow-seats button and for the sentence that names it.
+  // One predicate for the follow-seats button and for the sentence that names it
+  // (the sentence picks the key that names the button only when this is true).
   const canResume = Boolean(pool?.resume_action)
 
   return (
@@ -108,19 +109,17 @@ export function PoolBudgetCard({
                     count: pool.seat_count,
                     entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
                   })
-                : t('admin_tenant_detail.pool.mode_manual', {
-                    // The backend's sentence prints `manual_limit_microusd or 0`; so does
-                    // this one, so a missing figure is never shown as some other number.
-                    figure: fmtMicroUsd(pool.manual_limit_microusd ?? 0),
-                    entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
-                  })}
-              {/* Names the button only where the button is rendered (same predicate). */}
-              {!pool.seat_tracked && canResume
-                ? ' ' +
-                  t('admin_tenant_detail.pool.mode_manual_resume', {
-                    button: t('admin_tenant_detail.pool.follow_seats_button'),
-                  })
-                : null}
+                : t(
+                    canResume
+                      ? 'admin_tenant_detail.pool.mode_manual_resumable'
+                      : 'admin_tenant_detail.pool.mode_manual',
+                    {
+                      // Mirrors the backend's fallback; `manual_limit_microusd` is
+                      // non-null whenever `seat_tracked` is false.
+                      figure: fmtMicroUsd(pool.manual_limit_microusd ?? 0),
+                      entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
+                    },
+                  )}
             </p>
             <dl
               className="grid gap-x-6 gap-y-3 sm:grid-cols-2"

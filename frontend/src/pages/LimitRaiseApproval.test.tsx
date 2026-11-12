@@ -50,7 +50,6 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import i18n from '@/lib/i18n'
 
 // This component reads `usePermissions()` (for `isAdmin`, which picks the
 // `api.admin` vs `api.teamLead` route namespace), which in turn requires an
@@ -92,6 +91,7 @@ vi.mock('@/lib/api', async () => {
   }
 })
 
+import i18n from '@/lib/i18n'
 import LimitRaiseApproval from './LimitRaiseApproval'
 
 function withRouting(children: ReactNode) {
@@ -126,8 +126,6 @@ const POOL_FIXTURE = {
   over_ceiling_microusd: 300_000,
   pool_limit_usd_cents: 4_000_00,
   remaining_usd_cents: -30,
-  mode_sentence:
-    'This budget was set manually; membership changes do not change this budget.',
   seat_tracked: false,
   seat_count: 12,
   seat_rate_microusd: 50_000_000,
@@ -350,10 +348,8 @@ describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume a
     // entitle the tenant to, and how to return to them, not the name of a state.
     render(withRouting(<LimitRaiseApproval />))
     const sentence = await screen.findByTestId('pool-mode-sentence')
-    expect(sentence.textContent).toContain('$40.00')
-    expect(sentence.textContent).toContain('$600.00')
-    expect(POOL_FIXTURE.mode_sentence).not.toBe('')
-    expect(sentence.textContent).not.toContain(POOL_FIXTURE.mode_sentence)
+    expect(sentence.textContent).toMatch(/held at \$40\.00/)
+    expect(sentence.textContent).toMatch(/entitle it to \$600\.00/)
     // The sentence names the follow-seats button, so that button must be on this page.
     const label = i18n.t('admin_tenant_detail.pool.follow_seats_button')
     expect(sentence.textContent).toContain(label)

@@ -91,10 +91,6 @@ function poolBudget(overrides: Partial<PoolBudget> = {}): PoolBudget {
     over_ceiling_microusd: 0,
     pool_limit_usd_cents: 40_000,
     remaining_usd_cents: 40_000,
-    mode_sentence:
-      "This pool follows the tenant's seat count: 2 seats entitle it to " +
-      "$400.00 a month, and it moves by one seat's worth whenever somebody " +
-      'joins or leaves. Setting a figure by hand stops that.',
     seat_tracked: true,
     seat_count: 2,
     seat_rate_microusd: 200_000_000,
@@ -142,12 +138,6 @@ describe('A4 / R21: the team-lead tenant view also renders the pool mode as a se
         remaining_microusd: 100_000_000,
         pool_limit_usd_cents: 10_000,
         remaining_usd_cents: 10_000,
-        mode_sentence:
-          'This pool is held at $100.00, a figure set by hand, and no longer ' +
-          "follows the tenant's seat count. The seats would entitle it to " +
-          '$400.00, which is more than the figure, so the figure is now the ' +
-          'smaller of the two. Sending {"follow_seats": true} to this endpoint ' +
-          'returns it to the seat count.',
         seat_tracked: false,
         manual_limit_microusd: 100_000_000,
         baseline_microusd: 100_000_000,

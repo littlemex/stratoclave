@@ -1,6 +1,3 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
-
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -15,14 +12,19 @@ import i18n from '@/lib/i18n'
  * It used to render the backend's `mode_sentence`, which is English prose for API
  * callers, so the Japanese tenant screen showed an English paragraph, and told an
  * operator with a button for it to "send {"follow_seats": true} to this endpoint".
- * A sentinel `mode_sentence` below proves the card no longer reads that field, and
- * every money figure in the fixtures is distinct, so printing the wrong one fails.
+ * `mode_sentence` is no longer in the console's `PoolBudget` type, so reading it is a
+ * type error; the fixtures still carry a sentinel value under that name, as the API
+ * does, to show it never reaches the page.
+ *
+ * Every money field that could be printed in place of another has its own value, and
+ * each figure is matched with the words around it, so printing the wrong field, or
+ * swapping two, fails.
  */
 
 const SENTINEL = 'BACKEND-ENGLISH-SENTENCE-MUST-NOT-RENDER'
 const label = () => i18n.t('admin_tenant_detail.pool.follow_seats_button')
 
-// manual $500, entitlement $600, granted $50, limit $550: four different numbers.
+// manual $500, entitlement $600, baseline $510, granted $50, limit $550, cap $520.
 function manualPool(overrides: Partial<PoolBudget> = {}): PoolBudget {
   return {
     tenant_id: 'acme',
@@ -35,52 +37,58 @@ function manualPool(overrides: Partial<PoolBudget> = {}): PoolBudget {
     over_ceiling_microusd: 0,
     pool_limit_usd_cents: 55_000,
     remaining_usd_cents: 55_000,
-    mode_sentence: SENTINEL,
     seat_tracked: false,
     seat_count: 3,
     seat_rate_microusd: 200_000_000,
     seat_entitlement_microusd: 600_000_000,
     manual_limit_microusd: 500_000_000,
     pool_granted_microusd: 50_000_000,
-    baseline_microusd: 500_000_000,
+    baseline_microusd: 510_000_000,
     entitlement_exceeds_figure: true,
     resume_action: 'follow_seats',
     grant_cap_microusd: null,
-    effective_grant_cap_microusd: 500_000_000,
+    effective_grant_cap_microusd: 520_000_000,
     grant_cap_is_derived: true,
-    remaining_grant_cap_microusd: 450_000_000,
+    remaining_grant_cap_microusd: 470_000_000,
     ...overrides,
   }
 }
 
-// 3 seats entitle $600, granted $50, limit $650.
+// 3 seats entitle $600; baseline $610, granted $50, limit $660, cap $620.
 function seatPool(): PoolBudget {
   return manualPool({
     seat_tracked: true,
     manual_limit_microusd: null,
     resume_action: null,
     entitlement_exceeds_figure: false,
-    baseline_microusd: 600_000_000,
-    pool_limit_microusd: 650_000_000,
-    remaining_microusd: 650_000_000,
+    baseline_microusd: 610_000_000,
+    pool_limit_microusd: 660_000_000,
+    remaining_microusd: 660_000_000,
+    effective_grant_cap_microusd: 620_000_000,
+    remaining_grant_cap_microusd: 570_000_000,
   })
 }
 
+const OTHER_FIGURES = ['$510.00', '$520.00', '$550.00', '$610.00', '$620.00', '$660.00']
+
 function renderCard(p: PoolBudget) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const fromApi = { ...p, mode_sentence: SENTINEL } as PoolBudget
   render(
     <QueryClientProvider client={client}>
       <PoolBudgetCard
         tenantId="acme"
-        pool={p}
+        pool={fromApi}
         isLoading={false}
         onChanged={() => {}}
-        poolApi={{ setPoolBudget: async () => p }}
+        poolApi={{ setPoolBudget: async () => fromApi }}
       />
     </QueryClientProvider>,
   )
   expect(document.body.textContent).not.toContain(SENTINEL)
-  return screen.getByTestId('pool-mode-sentence').textContent ?? ''
+  const text = screen.getByTestId('pool-mode-sentence').textContent ?? ''
+  for (const other of OTHER_FIGURES) expect(text).not.toContain(other)
+  return text
 }
 
 afterEach(async () => {
@@ -89,21 +97,22 @@ afterEach(async () => {
 })
 
 describe('the pool mode sentence is localized by the console', () => {
-  it.each(['en', 'ja'])(
-    'a manual pool names its own figure and the entitlement (%s)',
-    async (lang) => {
-      await i18n.changeLanguage(lang)
-      const text = renderCard(manualPool())
-      expect(text).toContain('$500.00')
-      expect(text).toContain('$600.00')
-      expect(text).not.toContain('$550.00')
-      expect(text).not.toContain('follow_seats')
-      if (lang === 'ja') {
-        expect(text).toMatch(/手動/)
-        expect(text).not.toMatch(/This pool|a figure set by hand/)
-      }
-    },
-  )
+  it('a manual pool, in English, puts each figure in its place', async () => {
+    await i18n.changeLanguage('en')
+    const text = renderCard(manualPool())
+    expect(text).toMatch(/held at \$500\.00, a figure set by hand/)
+    expect(text).toMatch(/entitle it to \$600\.00/)
+    expect(text).not.toContain('follow_seats')
+  })
+
+  it('a manual pool, in Japanese, puts each figure in its place', async () => {
+    await i18n.changeLanguage('ja')
+    const text = renderCard(manualPool())
+    expect(text).toMatch(/手動で設定した \$500\.00/)
+    expect(text).toMatch(/\$600\.00 分の枠/)
+    expect(text).not.toMatch(/This pool|a figure set by hand/)
+    expect(text).not.toMatch(/。 /)
+  })
 
   it.each(['en', 'ja'])(
     'the sentence names the button exactly when the button is there (%s)',
@@ -112,46 +121,31 @@ describe('the pool mode sentence is localized by the console', () => {
       expect(renderCard(manualPool())).toContain(label())
       expect(screen.getByTestId('pool-follow-seats-button').textContent).toContain(label())
       cleanup()
-      const withoutResume = renderCard(manualPool({ resume_action: null }))
-      expect(withoutResume).not.toContain(label())
+      expect(renderCard(manualPool({ resume_action: null }))).not.toContain(label())
       expect(screen.queryByTestId('pool-follow-seats-button')).not.toBeInTheDocument()
     },
   )
 
   it.each(['en', 'ja'])(
-    'a seat-tracked pool names the seat count and the entitlement (%s)',
+    'the entitlement that outgrew the figure is shown on its own line (%s)',
     async (lang) => {
       await i18n.changeLanguage(lang)
-      const text = renderCard(seatPool())
-      expect(text).toContain('(3)')
-      expect(text).toContain('$600.00')
-      expect(text).not.toContain('$650.00')
-      expect(text).not.toContain(label())
-      if (lang === 'ja') {
-        expect(text).toMatch(/シート数/)
-        expect(text).not.toMatch(/This pool/)
-      }
+      renderCard(manualPool())
+      expect(screen.getByTestId('pool-entitlement-outgrew').textContent).toContain('$600.00')
+      cleanup()
+      renderCard(manualPool({ entitlement_exceeds_figure: false }))
+      expect(screen.queryByTestId('pool-entitlement-outgrew')).not.toBeInTheDocument()
     },
   )
-})
 
-describe('no console screen renders backend prose meant for API callers', () => {
-  it('only the API type declaration names mode_sentence outside tests', () => {
-    const root = join(__dirname, '..', '..')
-    const offenders: string[] = []
-    const walk = (dir: string) => {
-      for (const name of readdirSync(dir)) {
-        const p = join(dir, name)
-        if (statSync(p).isDirectory()) walk(p)
-        else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) {
-          const code = readFileSync(p, 'utf8')
-            .replace(/\/\*[\s\S]*?\*\//g, '')
-            .replace(/\/\/.*$/gm, '')
-          if (/\bmode_sentence\b/.test(code)) offenders.push(relative(root, p))
-        }
-      }
-    }
-    walk(root)
-    expect(offenders).toEqual(['lib/api.ts'])
+  it('a seat-tracked pool names the seat count and the entitlement, in both languages', async () => {
+    await i18n.changeLanguage('en')
+    let text = renderCard(seatPool())
+    expect(text).toMatch(/seat count \(3\), which entitles it to \$600\.00 a month/)
+    cleanup()
+    await i18n.changeLanguage('ja')
+    text = renderCard(seatPool())
+    expect(text).toMatch(/シート数 \(3\) に従い、月 \$600\.00 分の枠/)
+    expect(text).not.toContain(label())
   })
 })
