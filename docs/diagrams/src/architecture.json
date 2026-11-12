@@ -1,0 +1,24 @@
+{
+ "nodes": [
+  {"id": "tools", "label": "Claude Code\ncodex, SDKs\nCLI, console", "role": "neutral", "col": 0, "row": 1},
+  {"id": "cf", "label": "CloudFront\n+ WAF", "role": "neutral", "col": 1, "row": 1},
+  {"id": "alb", "label": "ALB", "role": "neutral", "col": 2, "row": 1},
+  {"id": "gw", "label": "Stratoclave\nECS Fargate", "role": "primary", "col": 3, "row": 1, "stack": true},
+  {"id": "idp", "label": "Cognito\nAWS STS", "role": "neutral", "col": 3, "row": 0},
+  {"id": "ddb", "label": "DynamoDB\nquotas, ledger", "role": "accent", "col": 3, "row": 2},
+  {"id": "claude", "label": "Bedrock\nClaude", "role": "secondary", "col": 4, "row": 0},
+  {"id": "oai", "label": "Bedrock\nGPT, Grok", "role": "secondary", "col": 4, "row": 1},
+  {"id": "self", "label": "your GPU or\nlocal LLM", "role": "tertiary", "col": 4, "row": 2, "dashed": true}
+ ],
+ "edges": [
+  {"from": "tools", "to": "cf", "label": "HTTPS"},
+  {"from": "cf", "to": "alb"},
+  {"from": "alb", "to": "gw"},
+  {"from": "gw", "to": "idp", "label": "who", "dashed": true},
+  {"from": "gw", "to": "ddb", "label": "reserve, settle", "emph": true},
+  {"from": "gw", "to": "claude"},
+  {"from": "gw", "to": "oai"},
+  {"from": "gw", "to": "self", "dashed": true}
+ ],
+ "legend": {"primary": "the gateway", "accent": "the money", "secondary": "Amazon Bedrock", "tertiary": "self-hosted (off by default)"}
+}

@@ -1,0 +1,13 @@
+{
+ "nodes": [
+  {"id": "die", "label": "process dies\nafter reserve", "role": "neutral", "col": 0, "row": 0},
+  {"id": "hold", "label": "hold row\nstays behind", "role": "accent", "col": 1, "row": 0},
+  {"id": "sweep", "label": "a later request\nsweeps it", "role": "tertiary", "col": 2, "row": 0},
+  {"id": "back", "label": "RECLAIM\nheadroom back", "role": "accent", "col": 3, "row": 0}
+ ],
+ "edges": [
+  {"from": "die", "to": "hold"},
+  {"from": "hold", "to": "sweep", "label": "expired"},
+  {"from": "sweep", "to": "back", "label": "once", "emph": true}
+ ]
+}

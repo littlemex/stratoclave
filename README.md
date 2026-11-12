@@ -404,13 +404,14 @@ for where a broker is the better choice.
 
 ## Architecture at a glance
 
-Four diagrams, in the order they are meant to be read: **architecture** (the map),
-**request flow** (what happens to one request), **credit reservation** (where the money
-moves), and **Vouch-by-STS** (the auth edge). Each is rendered from the `.drawio` source
-beside it in `docs/diagrams/`.
+The diagrams are small on purpose: each one shows a single step. Read them in this order:
+**architecture** (the map), **request flow** (what happens to one request), **failover**
+(what happens when an upstream stalls or a quota runs out), the three **money** figures
+(reserve, settle, reclaim), and **Vouch-by-STS** (the auth edge). Each PNG is drawn from the
+JSON spec of the same name in [`docs/diagrams/src/`](./docs/diagrams/src).
 
 <p align="center">
-  <img src="./docs/diagrams/architecture.png" alt="Stratoclave architecture: clients to CloudFront to ALB to a single ECS Fargate backend (RBAC, credit pipeline, InfraRouter, audit) serving /v1/messages, /v1/chat/completions, and /openai/v1/responses; DynamoDB single store, Cognito, CloudWatch Logs, STS Vouch path, and Amazon Bedrock (us-east-1 primary to us-west-2 failover) plus the OpenAI-compatible endpoint." width="100%">
+  <img src="./docs/diagrams/architecture.png" alt="Architecture: your tools reach CloudFront with WAF, then an ALB, then the Stratoclave service on ECS Fargate. The service checks identity with Cognito or AWS STS, reserves and settles money in DynamoDB, and calls Amazon Bedrock (Claude, and GPT and Grok on the OpenAI-compatible endpoint) or, when enabled, a self-hosted OpenAI-compatible model." width="100%">
 </p>
 
 The Stratoclave control plane lives inside a **single AWS region of your
@@ -465,8 +466,22 @@ its own price and serving the model actually reserved.
   degenerate configuration; it needs no special setup and is locked by test.
 
 <p align="center">
-  <img src="./docs/diagrams/request-routing.png" alt="Request flow: client to budget authorize (atomic reserve) to staged breaker to model resolver (cascading fallback) to InfraRouter (retry + region failover) to Bedrock converse, with a second upstream — the OpenAI-compatible endpoint on bedrock-runtime, which has no retry and no failover — reached directly from the resolver; then settle once and return." width="100%">
+  <img src="./docs/diagrams/request-flow.png" alt="One request: reserve the budget; if it does not fit, return 402 without calling a model; otherwise pick the model, call it, settle once against the reported usage, and return the response." width="100%">
 </p>
+
+The request is admitted or refused at the reserve step, before any model is called. The
+settle step runs once, against the usage the model reported, including on a mid-stream
+disconnect.
+
+<p align="center">
+  <img src="./docs/diagrams/failover.png" alt="Two fallbacks: on the streaming path a 429 or an empty stream in us-east-1 retries the same model in us-west-2; when a per-model quota is used up, the request cascades from Opus to Sonnet to Haiku." width="100%">
+</p>
+
+Two fallbacks are independent. A stalled region retries the same model in another region
+(streaming path only; the non-streaming Anthropic call and the OpenAI-compatible endpoint
+have no failover). An exhausted per-model quota moves the request down the tenant's chain,
+and each candidate is reserved and settled at its own price.
+
 
 For a detailed walkthrough of components, data model, and invariants, see
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
@@ -673,7 +688,7 @@ in its AWS `iam` auth method: the client signs
 the backend trusts only the `Arn` / `UserId` / `Account` that STS returns.
 
 <p align="center">
-  <img src="./docs/diagrams/vouch-by-sts.png" alt="Vouch-by-STS flow: CLI signs GetCallerIdentity, backend forwards to STS, backend provisions or resolves a Cognito user and issues an access_token." width="100%">
+  <img src="./docs/diagrams/vouch-by-sts.png" alt="Vouch-by-STS: the CLI signs GetCallerIdentity; the gateway checks the request shape and forwards it unchanged to AWS STS; STS checks the signature and returns the Arn; the gateway checks the account and role and issues an access token." width="100%">
 </p>
 
 This is what makes the SSO path identity-provider agnostic. Anything that
@@ -707,8 +722,31 @@ upfront reservation (1× / 2× / 4× / 8× for `low` / `medium` / `high` /
 `max_output_tokens` alone implies. The minimum reservation is 8 192 tokens
 per request regardless of multiplier.
 
+The money moves in three steps. Each figure below is one of them.
+
+**1. Reserve.** With a dollar pool set, one `TransactWriteItems` adds the reservation `R` to
+the user's counter, takes it from the pool headroom (and from the per-model quota when one is set), appends a `RESERVE` ledger event, and
+writes a hold row with an expiry. Every write carries its own condition, so if any one fails
+nothing is written and the caller gets `402` before a model is called.
+
 <p align="center">
-  <img src="./docs/diagrams/credit-reservation.png" alt="Credit reservation flow: authenticate, then one TransactWriteItems that moves the per-user counter and the pool headroom, appends an immutable RESERVE ledger event and writes a hold row; invoke the upstream, refund the diff, settle the ledger and write a UsageLogs row." width="100%">
+  <img src="./docs/diagrams/reserve.png" alt="Reserve: the request's reservation R goes into one TransactWriteItems that checks the user quota, the pool headroom, appends a RESERVE ledger event and writes a hold row; if all four hold the model is called, if any fails the caller gets 402 and nothing is written." width="100%">
+</p>
+
+**2. Settle.** When the model reports usage, one transaction releases `R`, charges the actual
+cost, appends a `SETTLE` event and deletes the hold. The usage log gets one row. A second
+settle for the same reservation loses its conditional write.
+
+<p align="center">
+  <img src="./docs/diagrams/settle.png" alt="Settle: the model's reported tokens go into one transaction that releases R, charges the actual cost, appends a SETTLE ledger event and deletes the hold row; the usage log gets one row, and a second settle is refused." width="100%">
+</p>
+
+**3. Reclaim.** If the process dies between reserve and settle, its hold row stays behind. A
+later pooled request sweeps expired holds and returns the headroom in one conditional
+transaction, so a hold is reclaimed at most once.
+
+<p align="center">
+  <img src="./docs/diagrams/reclaim.png" alt="Reclaim: a process dies after reserve, its hold row stays behind, a later request sweeps the expired hold, and a RECLAIM returns the headroom exactly once." width="100%">
 </p>
 
 The credit model, role matrix, and the underlying DynamoDB tables are
@@ -1002,8 +1040,8 @@ section. Changing the behaviour means changing the document first.
 Measured runs live in [`docs/benchmarks/`](./docs/benchmarks) and demo assets in
 [`docs/demo/`](./docs/demo) — the synthetic ones carry a `SYNTHETIC` banner.
 
-Diagram sources are in [`docs/diagrams/`](./docs/diagrams) as both
-`*.drawio` (editable in [diagrams.net](https://www.diagrams.net/)) and `*.png`.
+Diagram sources are the JSON specs in [`docs/diagrams/src/`](./docs/diagrams/src); each
+`docs/diagrams/<name>.png` is drawn from `src/<name>.json`.
 
 ## Security
 

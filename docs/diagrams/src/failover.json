@@ -1,0 +1,16 @@
+{
+ "nodes": [
+  {"id": "pick", "label": "chosen model", "role": "tertiary", "col": 0, "row": 0},
+  {"id": "east", "label": "us-east-1", "role": "secondary", "col": 1, "row": 0},
+  {"id": "west", "label": "us-west-2", "role": "secondary", "col": 2, "row": 0},
+  {"id": "opus", "label": "Opus", "role": "secondary", "col": 0, "row": 1},
+  {"id": "sonnet", "label": "Sonnet", "role": "secondary", "col": 1, "row": 1},
+  {"id": "haiku", "label": "Haiku", "role": "secondary", "col": 2, "row": 1}
+ ],
+ "edges": [
+  {"from": "pick", "to": "east"},
+  {"from": "east", "to": "west", "label": "429, empty", "emph": true},
+  {"from": "opus", "to": "sonnet", "label": "quota used up", "emph": true},
+  {"from": "sonnet", "to": "haiku", "label": "quota used up", "emph": true}
+ ]
+}
