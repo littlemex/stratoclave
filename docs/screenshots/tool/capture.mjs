@@ -30,6 +30,7 @@
  */
 
 import { chromium } from 'playwright'
+import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -56,41 +57,34 @@ const TOKEN_STORAGE_KEY = 'stratoclave_tokens'
 // File suffix: en is the canonical "no suffix" version, ja is the sibling.
 const SUFFIX = LOCALE === 'en' ? '' : '.ja'
 
-// Per-page anchor headings, by locale. Each entry is the h1 text that
-// must appear before we screenshot — guards against navigating before
-// the React tree has rendered the localized text.
-const ANCHORS = {
-  en: {
-    login: 'Stratoclave',
-    dashboard: 'Welcome',
-    me_usage: 'My usage history',
-    me_api_keys: 'Long-lived API keys',
-    admin_users: 'User administration',
-    admin_user_new: 'New user',
-    admin_user_detail: '@',           // user email contains @
-    admin_tenants: 'Tenant administration',
-    admin_tenant_detail: 'Members',   // matches admin_tenant_detail.members_title
-    admin_usage_logs: 'All usage',
-    admin_trusted_accounts: 'Trusted AWS accounts',
-    admin_trusted_account_detail: 'Allowed role patterns',
-  },
-  ja: {
-    login: 'Stratoclave',
-    dashboard: 'ようこそ',
-    me_usage: '自分の使用履歴',
-    me_api_keys: 'API',
-    admin_users: 'ユーザー管理',
-    admin_user_new: '新規ユーザー作成',
-    admin_user_detail: '@',
-    admin_tenants: 'テナント管理',
-    admin_tenant_detail: 'メンバー',
-    admin_usage_logs: 'すべての使用履歴',
-    admin_trusted_accounts: '信頼された AWS アカウント',
-    admin_trusted_account_detail: '許可されたロールパターン',
-  },
+// Per-page anchors: text that must be on screen, in this run's language, before
+// a page is saved. They are read from the console's own i18n bundles by key, not
+// copied, so a reworded translation cannot leave the tool waiting for a string the
+// app no longer shows (three of them had drifted when the copies were checked).
+// `frontend/src/lib/captureTool.test.ts` checks every key exists in both bundles.
+const BUNDLE = JSON.parse(
+  readFileSync(resolve(__dirname, '..', '..', '..', 'frontend', 'src', 'locales', `${LOCALE}.json`), 'utf8'),
+)
+function tr(key) {
+  const v = key.split('.').reduce((o, k) => (o == null ? o : o[k]), BUNDLE)
+  if (typeof v !== 'string') throw new Error(`no string ${key} in ${LOCALE}.json`)
+  // The visible text before any interpolation or <Trans> tag.
+  return v.split('{{')[0].replace(/<\/?\d+>/g, '').replace(/[、,\s]+$/, '').trim()
 }
-
-const A = ANCHORS[LOCALE]
+const A = {
+  login: 'Stratoclave',
+  dashboard: tr('dashboard.welcome'),
+  me_usage: tr('me_usage.title'),
+  me_api_keys: tr('me_api_keys.title'),
+  admin_users: tr('admin_users.title'),
+  admin_user_new: tr('admin_user_new.title'),
+  admin_user_detail: '@', // the heading is the user's email address
+  admin_tenants: tr('admin_tenants.title'),
+  admin_tenant_detail: tr('admin_tenant_detail.members_title'), // the h1 is the tenant's name
+  admin_usage_logs: tr('admin_usage_logs.title'),
+  admin_trusted_accounts: tr('admin_trusted_accounts.title'),
+  admin_trusted_account_detail: tr('admin_trusted_account_detail.role_patterns_title'),
+}
 
 /**
  * Run `fn(page)` against a brand-new browser context.
@@ -203,15 +197,15 @@ async function captureAuth(name, path, { anchor, fullPage = false, waitMs = 2500
     await seedStorage(page)
     // 3. Navigate to the target page; React boots with both.
     await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle' })
-    // The page's own heading, in this run's language, must be on screen before
+    // The page's own anchor text, in this run's language, must be on screen before
     // anything is saved. A token the console does not accept lands on the
     // sign-in page, and a wrong locale shows the other language's heading; both
     // make a picture that looks fine and is wrong, so neither is written.
     try {
-      await page.locator('h1', { hasText: anchor }).first().waitFor({ timeout: 20_000 })
+      await page.getByText(anchor).first().waitFor({ state: 'visible', timeout: 20_000 })
     } catch {
       const got = await page.locator('h1').first().textContent().catch(() => '?')
-      throw new Error(`${name}: expected the heading "${anchor}" (${LOCALE}), found "${got}"; nothing saved`)
+      throw new Error(`${name}: expected "${anchor}" (${LOCALE}) on screen, h1 is "${got}"; nothing saved`)
     }
     await page.waitForTimeout(waitMs)
     const out = resolve(IMG_DIR, `${name}${SUFFIX}.png`)

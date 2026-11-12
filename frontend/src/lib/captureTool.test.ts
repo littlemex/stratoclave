@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 
 import { TOKEN_STORAGE_KEY } from './cognito'
 import { LOCALE_STORAGE_KEY } from './i18n'
+import en from '@/locales/en.json'
+import ja from '@/locales/ja.json'
 
 /**
  * The screenshot tool (`docs/screenshots/tool/capture.mjs`) seeds the console's
@@ -40,5 +42,18 @@ describe('the screenshot tool seeds storage the way the console reads it', () =>
   it('sets the locale in the browser, without writing it to the server', () => {
     expect(code(tool)).toMatch(/route\('\*\*\/api\/mvp\/me'/)
     expect(code(tool)).not.toMatch(/method:\s*'PATCH'|me\('PATCH'/)
+  })
+
+  it('reads every page anchor from keys that exist in both bundles', () => {
+    const keys = [...code(tool).matchAll(/\btr\('([^']+)'\)/g)].map((m) => m[1])
+    expect(keys.length).toBeGreaterThan(5)
+    const lookup = (bundle: unknown, key: string) =>
+      key
+        .split('.')
+        .reduce<unknown>((o, k) => (o as Record<string, unknown> | undefined)?.[k], bundle)
+    for (const key of keys) {
+      expect(typeof lookup(en, key), `en.json ${key}`).toBe('string')
+      expect(typeof lookup(ja, key), `ja.json ${key}`).toBe('string')
+    }
   })
 })
