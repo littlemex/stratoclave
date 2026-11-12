@@ -3,7 +3,7 @@
  *
  * - Receives an Authorization Code from the Hosted UI and exchanges it for access_token / id_token / refresh_token
  * - Because the backend only accepts access_token, the frontend also uses access_token for API authorization
- * - Tokens are stored in sessionStorage("stratoclave_tokens"), scoped to the tab; see STORAGE_KEY below for why not localStorage
+ * - Tokens are stored in sessionStorage("stratoclave_tokens"), scoped to the tab; see the P0-7 note on STORAGE_KEY below for why not localStorage
  * - The case of being opened from the CLI via URL query `?token=xxx` is also handled here (only StoredTokens.access_token is populated)
  */
 
@@ -18,7 +18,7 @@ import { getClientId, getCognitoDomain, getRedirectUri } from './config'
 // so the next session always re-authenticates via the Hosted UI. The
 // long-term fix is to move `refresh_token` into an HttpOnly cookie
 // with a BFF, tracked in the P1 roadmap.
-const STORAGE_KEY = 'stratoclave_tokens'
+export const STORAGE_KEY = 'stratoclave_tokens'
 const PKCE_KEY = 'stratoclave_pkce_verifier'
 // P0-4 (2026-04 security review): OAuth `state` and OIDC `nonce` guard
 // the authorization-code flow against login CSRF and ID-token replay.

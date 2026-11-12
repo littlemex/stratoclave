@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { STORAGE_KEY } from './cognito'
 import { LOCALE_STORAGE_KEY } from './i18n'
 
 /**
@@ -16,14 +17,13 @@ import { LOCALE_STORAGE_KEY } from './i18n'
 const ROOT = join(__dirname, '..', '..', '..')
 const tool = readFileSync(join(ROOT, 'docs', 'screenshots', 'tool', 'capture.mjs'), 'utf8')
 const cognito = readFileSync(join(__dirname, 'cognito.ts'), 'utf8')
-const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+const code = (src: string) =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
 
 describe('the screenshot tool seeds storage the way the console reads it', () => {
   it('uses the token key the console uses', () => {
-    const appKey = /const STORAGE_KEY = '([^']+)'/.exec(cognito)?.[1]
     const toolKey = /const TOKEN_STORAGE_KEY = '([^']+)'/.exec(tool)?.[1]
-    expect(appKey).toBeTruthy()
-    expect(toolKey).toBe(appKey)
+    expect(toolKey).toBe(STORAGE_KEY)
   })
 
   it('writes the token where the console reads it', () => {
@@ -36,6 +36,15 @@ describe('the screenshot tool seeds storage the way the console reads it', () =>
   it('uses the console locale key and sets the server-side locale', () => {
     const toolKey = /const LOCALE_STORAGE_KEY = '([^']+)'/.exec(tool)?.[1]
     expect(toolKey).toBe(LOCALE_STORAGE_KEY)
-    expect(code(tool)).toMatch(/\/api\/mvp\/me[`'"][\s\S]{0,80}method: 'PATCH'/)
+    const body = code(tool)
+    expect(body).toMatch(/\/api\/mvp\/me`/)
+    // main() sets the run's locale first, captures, then checks it held.
+    expect(body).toMatch(
+      /async function main\(\) \{[\s\S]{0,120}await me\('PATCH', \{ locale: LOCALE \}\)\s*try \{\s*await captureAll\(\)/,
+    )
+  })
+
+  it('refuses to save a sign-in page as an authenticated screenshot', () => {
+    expect(code(tool)).toMatch(/landed on the sign-in page/)
   })
 })
