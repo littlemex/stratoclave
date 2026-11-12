@@ -190,7 +190,8 @@ table.rows td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line2);color:
 <style>
 .hero-shot{margin:0}
 .hero-shot img{display:block;width:100%;height:auto}
-.pillars{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:56px}
+.pillars{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-top:56px}
+@media (max-width:1100px){.pillars{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:900px){.pillars{grid-template-columns:1fr 1fr}}
 @media (max-width:520px){.pillars{grid-template-columns:1fr}}
 a.pillar{display:flex;flex-direction:column;gap:6px;background:var(--shade);border-radius:var(--r-box);padding:20px;color:var(--ink2);font-size:14.5px;transition:transform .25s var(--ease),background .25s}
@@ -213,6 +214,23 @@ html[lang=ja] .mcard dt{text-transform:none;letter-spacing:.02em}
 .mcard dd{margin:2px 0 0;font-size:14.5px;color:var(--ink2)}
 .mcard dt:nth-of-type(3){color:var(--accent)}
 .mcard dd:last-child{color:var(--ink)}
+</style>
+<style>
+.nm-grid{display:grid;grid-template-columns:.9fr 1.1fr;gap:32px;align-items:center}
+@media (max-width:900px){.nm-grid{grid-template-columns:1fr}}
+.nm-grid>*{min-width:0}
+ol.nm-track{list-style:none;margin:0;padding:0;position:relative}
+ol.nm-track::before{content:"";position:absolute;left:11px;top:14px;bottom:14px;width:2px;background:var(--line)}
+ol.nm-track li{position:relative;display:grid;grid-template-columns:24px 1fr;gap:14px;padding:12px 0}
+ol.nm-track li div{display:flex;flex-direction:column;gap:3px;font-size:14.5px;color:var(--ink2)}
+ol.nm-track li b{font-size:17px;color:var(--ink)}
+.nm-dot{width:24px;height:24px;border-radius:50%;background:var(--card);border:2px solid var(--line);position:relative;z-index:1;transition:background .4s,border-color .4s,transform .4s var(--ease)}
+ol.nm-track li.on .nm-dot{background:var(--accent);border-color:var(--accent);transform:scale(1.08)}
+ol.nm-track li.on .nm-dot::after{content:"";position:absolute;left:7px;top:3px;width:6px;height:11px;border:solid var(--bg);border-width:0 2.4px 2.4px 0;transform:rotate(45deg)}
+.nm-checks{display:flex;gap:8px;margin-top:4px}
+.nm-checks i{font-style:normal;font-family:var(--mono);font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:6px;padding:1px 8px;color:var(--ink3);transition:all .4s}
+ol.nm-track li.on .nm-checks i{border-color:var(--ok);color:var(--ok);background:var(--ok-soft)}
+.nm-shot{margin:0}.nm-shot img{display:block;width:100%;height:auto}
 </style>
 <style>
 /* hero */
@@ -362,6 +380,7 @@ footer a{color:var(--ink2)}
       <a href="#tenants" data-t="nav.tenants">Tenants</a>
       <a href="#tags" data-t="nav.tags">Spend</a>
       <a href="#console" data-t="nav.console">Console</a>
+      <a href="#newmodels" data-t="nav.newmodels">Models</a>
       <a href="#why" data-t="nav.why">Guarantee</a>
       <a href="#start" data-t="nav.start">Start</a>
     </nav>
@@ -397,6 +416,7 @@ footer a{color:var(--ink2)}
       <a class="pillar rv" href="#onboard"><span class="k" data-t="p1.k">Access</span><b data-t="p1.h">One URL for every team</b><span data-t="p1.p">The CLI configures itself from the deployment URL and signs people in with the AWS login they already use.</span></a>
       <a class="pillar rv" href="#tenants"><span class="k" data-t="p2.k">Control</span><b data-t="p2.h">Budgets per tenant, user and model</b><span data-t="p2.p">A monthly dollar pool per tenant, token quotas per member, dollar quotas per model, and roles that scope who can change them.</span></a>
       <a class="pillar rv" href="#tags"><span class="k" data-t="p3.k">Visibility</span><b data-t="p3.h">Spend by team, member and task</b><span data-t="p3.p">Tag a request with the work it is for, and every cent is filed under that task in rows you can recompute.</span></a>
+      <a class="pillar rv" href="#newmodels"><span class="k" data-t="p5.k">Day zero</span><b data-t="p5.h">New Bedrock models, from the console</b><span data-t="p5.p">New models appear as candidates. Check one with a real call, promote it, and every team can use it a minute later.</span></a>
       <a class="pillar rv" href="#why"><span class="k" data-t="p4.k">Guarantee</span><b data-t="p4.h">Refused before the model runs</b><span data-t="p4.p">The budget is reserved in one DynamoDB transaction, so concurrent calls cannot race past it. The money rules are checked with Z3.</span></a>
     </div>
     <div class="stats rv">
@@ -599,7 +619,31 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     </div>
   </div>
 </section>
-<section id="why" class="band">
+<section id="newmodels" class="band">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow" data-t="nm.eyebrow">New models</div>
+      <h2 data-t="nm.h">A model lands on Bedrock. Promote it in the console, and every team can use it.</h2>
+      <p class="lede" data-t="nm.lede">The gateway reads your account's Bedrock model list and AWS's own price APIs, and new models show up in the console as candidates. An administrator checks one with a real call and promotes it. It joins the catalogue on every gateway replica within about a minute, with no code change and no redeploy, and the budgets, quotas and tags you already have apply to it from the first request.</p>
+    </div>
+    <div class="nm-grid rv">
+      <ol class="nm-track" id="nm-track">
+        <li><span class="nm-dot"></span><div><b data-t="nm.s1">Discovered</b><span data-t="nm.s1p">Found in your account's Bedrock models, with its price read from AWS.</span></div></li>
+        <li><span class="nm-dot"></span><div><b data-t="nm.s2">Candidate</b><span data-t="nm.s2p">An administrator picks it in the console and gives it an alias.</span></div></li>
+        <li><span class="nm-dot"></span><div><b data-t="nm.s3">Probed with a real call</b><span data-t="nm.s3p">One call per mode, sync and stream, and the charge is checked in the ledger.</span><span class="nm-checks"><i>sync</i><i>stream</i></span></div></li>
+        <li><span class="nm-dot"></span><div><b data-t="nm.s4">Live</b><span data-t="nm.s4p">Granted to tenants and listed in the gateway's model list. Clients call it by name through the same three APIs.</span></div></li>
+      </ol>
+      <figure class="browser nm-shot">
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">your-deployment.cloudfront.net/admin/discovery/candidates</span></div>
+        <img class="hs-en" src="screenshots/console/06_model_discovery_candidates.en.png" alt="The console's model discovery page: two candidate models with their verification state per invocation mode." data-t-alt="nm.shot" width="1440" height="900" loading="lazy">
+      </figure>
+    </div>
+    <details class="more rv" style="margin-top:20px"><summary data-t="nm.d">What still needs a release</summary>
+      <div class="body"><p data-t="nm.dp">The catalogue is data, so adding a model needs no release. Prices are different: a charge needs a reviewed price row, and those ship with the release, so that a model is never billed at a price nobody checked. A model whose price matches an existing row goes live from the console alone; a model with a new price needs its row added first. Activation is a compare-and-set on the probe result, so a model that changed after it was probed is not activated on stale evidence.</p></div>
+    </details>
+  </div>
+</section>
+<section id="why">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="why.eyebrow">The guarantee</div>
@@ -703,7 +747,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     </div></details>
   </div>
 </section>
-<section id="proof">
+<section id="proof" class="band">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="proof.eyebrow">Formal verification</div>
@@ -777,7 +821,7 @@ component, under the axioms stated at the top of each test file above.</pre>
       </div>
   </div>
 </section>
-<section id="models" class="band">
+<section id="models">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="models.eyebrow">Bring your own models</div>
@@ -795,7 +839,7 @@ component, under the axioms stated at the top of each test file above.</pre>
   </div>
 </section>
 
-<section id="measured">
+<section id="measured" class="band">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="m.eyebrow">Measured on Bedrock</div>
@@ -836,7 +880,7 @@ component, under the axioms stated at the top of each test file above.</pre>
   </div>
 </section>
 
-<section id="start" class="band">
+<section id="start">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="start.eyebrow">Start</div>
@@ -1285,6 +1329,22 @@ Object.assign(window.__JA, {
 });
 </script>
 <script>
+Object.assign(window.__JA, {
+'nav.newmodels': 'モデル',
+'p5.k': '即日', 'p5.h': '新しい Bedrock モデルを、コンソールから', 'p5.p': '新しいモデルは候補としてコンソールに現れます。実際に 1 回呼んで確かめ、昇格すれば、約 1 分後には全チームが使えます。',
+'nm.eyebrow': '新しいモデル',
+'nm.h': 'Bedrock に新しいモデルが出たら、コンソールで昇格するだけで全チームが使える。',
+'nm.lede': 'ゲートウェイはアカウントの Bedrock のモデル一覧と AWS 自身の価格 API を読み、新しいモデルを候補としてコンソールに表示します。管理者が実際に 1 回呼んで確かめ、昇格させると、約 1 分ですべてのゲートウェイに組み込まれます。コードの変更も再デプロイも要りません。いまある予算、枠、タグは、最初のリクエストからそのまま効きます。',
+'nm.s1': '発見', 'nm.s1p': 'アカウントの Bedrock のモデルから見つけ、価格を AWS から読み込みます。',
+'nm.s2': '候補', 'nm.s2p': '管理者がコンソールで選び、呼び出し用の名前を付けます。',
+'nm.s3': '実際に呼んで確認', 'nm.s3p': '同期とストリーミングで 1 回ずつ呼び、台帳に課金が記録されることを確かめます。',
+'nm.s4': '利用開始', 'nm.s4p': 'テナントに付与され、ゲートウェイのモデル一覧に載ります。クライアントは同じ 3 つの API から名前で呼べます。',
+'nm.shot': 'コンソールのモデル発見画面。2 つの候補モデルについて、呼び出し方式ごとの確認状態を表示している。',
+'nm.d': 'リリースが必要になる場合',
+'nm.dp': 'カタログはデータなので、モデルを足すだけならリリースは要りません。価格は別で、課金にはレビュー済みの価格行が必要です。誰も確認していない単価で請求しないよう、価格行はリリースに含めて出します。既存の価格行と同じ単価のモデルはコンソールだけで使い始められ、新しい単価のモデルは先に価格行を足します。昇格は確認結果に対する compare-and-set なので、確認したあとに変わったモデルが古い結果のまま有効になることはありません。',
+});
+</script>
+<script>
 window.__SHOTS = [
   { id: 's1', file: '02_tenant_detail_pool', path: '/admin/tenants/…', en: 'Tenant pool', cap: 'A tenant\'s dollar pool for the month: limit, what is in flight, what has settled, and what is left. Every request reserves from it before the model is called.' },
   { id: 's2', file: '03_usage_by_tag', path: '/admin/tenants/…/usage-by-tag', en: 'Spend by tag', cap: 'Spend split by member and by task tag, with requests, cost and tokens. Untagged spend stays visible as unlabelled.' },
@@ -1369,7 +1429,7 @@ const secIO = new IntersectionObserver((es) => {
     for (const a of navLinks) a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id);
   }
 }, { rootMargin: '-45% 0px -50% 0px' });
-['onboard', 'tenants', 'tags', 'console', 'why', 'start'].forEach((id) => { const s = document.getElementById(id); if (s) secIO.observe(s); });
+['onboard', 'tenants', 'tags', 'console', 'newmodels', 'why', 'start'].forEach((id) => { const s = document.getElementById(id); if (s) secIO.observe(s); });
 
 /* ---------- details: animate height ---------- */
 for (const d of $$('details.more')) {
@@ -1896,6 +1956,15 @@ function clear(svg) { for (const c of [...svg.childNodes]) if (c.nodeName !== 't
   const b = $('#tagbars'); if (!b) return;
   if (RM.matches) { b.classList.add('in'); return; }
   new IntersectionObserver((es, o) => { for (const e of es) if (e.isIntersecting) { b.classList.add('in'); o.disconnect(); } }, { threshold: .5 }).observe(b);
+})();
+/* ---------- new models: the steps light up in order when seen ---------- */
+(() => {
+  const t = $('#nm-track'); if (!t) return;
+  const items = $$('li', t);
+  if (RM.matches) { items.forEach((li) => li.classList.add('on')); return; }
+  new IntersectionObserver((es, o) => {
+    for (const e of es) if (e.isIntersecting) { o.disconnect(); items.forEach((li, i) => setTimeout(() => li.classList.add('on'), 300 + i * 650)); }
+  }, { threshold: .5 }).observe(t);
 })();
 })();
 </script>
