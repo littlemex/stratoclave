@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "rates": {
+    "ollama-local": {
+      "input_per_mtok_usd": "0.05",
+      "output_per_mtok_usd": "0.20",
+      "notes": "docs/LOCAL_MODELS.md: illustrative operator cost-recovery rate for a laptop-hosted Ollama endpoint, chosen only to make the reserve/settle arithmetic visible in the ledger. Not a measured number -- see docs/design/price-feeds.md Sec.4 for how a real self-hosted rate is supposed to be derived (measured occupancy, not a guess)."
+    }
+  }
+}
