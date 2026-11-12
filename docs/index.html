@@ -4,8 +4,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Stratoclave: a hard dollar budget in front of Amazon Bedrock</title>
-<meta name="description" content="Stratoclave is an open-source gateway for Amazon Bedrock that reserves the budget before every model call and records each charge in an append-only ledger.">
+<title>Stratoclave: the budget gateway for Amazon Bedrock</title>
+<meta name="description" content="Stratoclave is an open-source budget gateway for Amazon Bedrock: one URL for every team, dollar budgets per tenant, user and model enforced before the call, and spend by team and task in an append-only ledger.">
 <style>
 :root{
   /* Cloudscape visual-refresh tokens (light) */
@@ -108,14 +108,12 @@ section.band .panel{border-color:transparent}
 @media (prefers-reduced-motion: reduce){.rv{opacity:1;transform:none;transition:none}}
 </style>
 <style>
-.gallery{display:grid;grid-template-columns:240px 1fr;gap:28px;align-items:start}
-@media (max-width:900px){.gallery{grid-template-columns:1fr}}
-.shots-nav{display:flex;flex-direction:column;gap:4px}
-@media (max-width:900px){.shots-nav{flex-direction:row;overflow-x:auto;padding-bottom:6px}}
-.shots-nav button{font:inherit;text-align:left;font-size:14px;font-weight:600;color:var(--ink2);background:none;border:0;border-left:2px solid var(--line2);padding:9px 14px;cursor:pointer;white-space:nowrap}
-.shots-nav button[aria-selected="true"]{color:var(--ink);border-left-color:var(--accent);background:var(--shade)}
+.gallery{display:grid;grid-template-columns:1fr;gap:16px}
+.shots-nav{display:flex;flex-wrap:wrap;gap:4px}
+@media (max-width:700px){.shots-nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:6px}}
+.shots-nav button{font:inherit;font-size:14px;font-weight:600;color:var(--ink2);background:none;border:1.5px solid var(--line2);border-radius:var(--r-btn);padding:5px 14px;cursor:pointer;white-space:nowrap}
+.shots-nav button[aria-selected="true"]{color:var(--bg);border-color:var(--ink);background:var(--ink)}
 .shots-nav button:hover{color:var(--ink)}
-@media (max-width:900px){.shots-nav button{border-left:0;border-bottom:2px solid var(--line2)}.shots-nav button[aria-selected="true"]{border-bottom-color:var(--accent)}}
 figure.browser{margin:0;border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:0 30px 60px -30px rgba(15,20,26,.35),var(--shadow);background:var(--card)}
 .browser .bar{display:flex;align-items:center;gap:7px;height:34px;padding:0 14px;background:var(--shade);border-bottom:1px solid var(--line2)}
 .browser .bar i{width:10px;height:10px;border-radius:50%;background:var(--line)}
@@ -166,7 +164,7 @@ table.roles td:first-child{width:110px}
 .ask h3{margin-bottom:8px}
 ol.mini{margin:0;padding-left:20px;font-size:15px;color:var(--ink2)}
 ol.mini li{margin:3px 0}
-.tagflow{display:grid;grid-template-columns:.9fr 1.35fr .85fr;gap:20px}
+.tagflow{display:grid;grid-template-columns:.8fr 1.7fr .8fr;gap:20px}
 @media (max-width:1000px){.tagflow{grid-template-columns:1fr}}
 .tagflow>*{min-width:0}
 .tf-step{background:var(--card);border-radius:var(--r-box);padding:20px;box-shadow:var(--shadow);position:relative}
@@ -187,6 +185,20 @@ table.rows td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line2);color:
 .tagbars i::after{content:"";position:absolute;inset:0;width:var(--w);min-width:2px;background:var(--accent);transform-origin:left;transform:scaleX(var(--s,0));transition:transform .9s var(--ease)}
 .tagbars.in i::after{--s:1}
 .tagbars b{justify-self:end;grid-row:1;grid-column:2;font-size:13px}
+</style>
+<style>
+.hero-shot{margin:0}
+.hero-shot img{display:block;width:100%;height:auto}
+.pillars{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:56px}
+@media (max-width:900px){.pillars{grid-template-columns:1fr 1fr}}
+@media (max-width:520px){.pillars{grid-template-columns:1fr}}
+a.pillar{display:flex;flex-direction:column;gap:6px;background:var(--shade);border-radius:var(--r-box);padding:20px;color:var(--ink2);font-size:14.5px;transition:transform .25s var(--ease),background .25s}
+a.pillar:hover{text-decoration:none;transform:translateY(-3px);background:var(--accent-soft)}
+a.pillar .k{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+html[lang=ja] a.pillar .k{text-transform:none;letter-spacing:.04em}
+a.pillar b{font-size:17px;color:var(--ink);line-height:1.35}
+.stats{margin-top:32px}
+.stats b{font-size:34px}
 </style>
 <style>
 /* hero */
@@ -280,7 +292,7 @@ details.more .body{padding:2px 0 14px;color:var(--ink2);font-size:15px;overflow:
 .claims li{display:grid;grid-template-columns:22px 1fr;gap:10px;padding:10px 0;border-bottom:1px solid var(--line2);font-size:15px;color:var(--ink2)}
 .claims li:last-child{border-bottom:0}
 .claims svg{margin-top:4px}
-pre.term.wrap{white-space:pre-wrap;overflow-wrap:anywhere}
+pre.term.wrap{white-space:pre-wrap;overflow-wrap:normal}
 pre.term{background:var(--code-bg);color:var(--code-ink);border-radius:12px;padding:18px 20px;overflow-x:auto;margin:0;line-height:1.6;font-size:13px;white-space:pre}
 pre.term .p{color:#7cc4ff}
 pre.term .c{color:#9aa0aa}
@@ -335,9 +347,8 @@ footer a{color:var(--ink2)}
       <a href="#onboard" data-t="nav.onboard">Onboarding</a>
       <a href="#tenants" data-t="nav.tenants">Tenants</a>
       <a href="#tags" data-t="nav.tags">Spend</a>
-      <a href="#why" data-t="nav.why">Guarantee</a>
-      <a href="#proof" data-t="nav.proof">Proof</a>
       <a href="#console" data-t="nav.console">Console</a>
+      <a href="#why" data-t="nav.why">Guarantee</a>
       <a href="#start" data-t="nav.start">Start</a>
     </nav>
     <div class="lang" role="group" aria-label="Language">
@@ -357,24 +368,28 @@ footer a{color:var(--ink2)}
       <div class="rv">
         <div class="eyebrow" data-t="hero.eyebrow">Open source. Runs in your own AWS account.</div>
         <h1 data-t="hero.h">The budget gateway for <span class="hl">Amazon Bedrock</span>.</h1>
-        <p class="lede" data-t="hero.lede">Give every team every Bedrock model behind one URL. Cap spend in dollars per tenant, per user and per model before a call runs, see which team and which task spent it, and keep a ledger that adds up.</p>
+        <p class="lede" data-t="hero.lede">One URL gives every team Bedrock through Claude Code, codex or the SDKs they already use. Set a monthly dollar pool per tenant, token quotas per user and dollar quotas per model; a request that doesn't fit is refused before the model is called. See spend by team, member and task, backed by an append-only ledger you can recompute.</p>
         <div class="cta">
           <a class="btn primary" href="#start" data-t="hero.cta1">Get started</a>
           <a class="btn ghost" href="https://github.com/littlemex/stratoclave" data-t="hero.cta2">View on GitHub</a>
         </div>
-        <p class="muted" style="font-size:14px;margin-top:16px"><a href="#proof" data-t="hero.limits">What the ceiling does not cover</a></p>
       </div>
-      <div class="rv"><div class="stage" role="img" aria-label="Animation: requests race into the gateway; the ones that fit the budget pass to the model and the budget bar fills up to the limit; the rest are refused with 402 at the gate." data-t-aria="hero.aria">
-        <canvas id="hero-cv"></canvas>
-      </div>
-      <div class="cap"><span data-t="hero.cap">Simulation in your browser</span><span id="hero-tally" aria-live="off"></span></div>
-      </div>
+      <figure class="browser hero-shot rv">
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url">your-deployment.cloudfront.net/admin/tenants/…</span></div>
+        <img class="hs-en" src="screenshots/console/02_tenant_detail_pool.en.png" alt="The Stratoclave console showing a tenant's monthly dollar pool: limit, in flight, settled and available." data-t-alt="hero.shot" width="1440" height="900">
+      </figure>
+    </div>
+    <div class="pillars">
+      <a class="pillar rv" href="#onboard"><span class="k" data-t="p1.k">Access</span><b data-t="p1.h">One URL for every team</b><span data-t="p1.p">The CLI configures itself from the deployment URL and signs people in with the AWS login they already use.</span></a>
+      <a class="pillar rv" href="#tenants"><span class="k" data-t="p2.k">Control</span><b data-t="p2.h">Budgets per tenant, user and model</b><span data-t="p2.p">A monthly dollar pool per tenant, token quotas per member, dollar quotas per model, and roles that scope who can change them.</span></a>
+      <a class="pillar rv" href="#tags"><span class="k" data-t="p3.k">Visibility</span><b data-t="p3.h">Spend by team, member and task</b><span data-t="p3.p">Tag a request with the work it is for, and every cent is filed under that task in rows you can recompute.</span></a>
+      <a class="pillar rv" href="#why"><span class="k" data-t="p4.k">Guarantee</span><b data-t="p4.h">Refused before the model runs</b><span data-t="p4.p">The budget is reserved in one DynamoDB transaction, so concurrent calls cannot race past it. The money rules are checked with Z3.</span></a>
     </div>
     <div class="stats rv">
-      <div><b>1</b><span data-t="st1">DynamoDB transaction reserves the tenant pool, the user quota and the model quota together</span></div>
-      <div><b>3</b><span data-t="st2">compatible APIs: Anthropic Messages, OpenAI Chat Completions and Responses</span></div>
-      <div><b>130</b><span data-t="st3">Z3 and property checks on the money rules, replayed in about 10 seconds</span></div>
-      <div><b>0</b><span data-t="st4">Postgres, Redis or SaaS control planes to run</span></div>
+      <div><b data-t="st1n">3</b><span data-t="st1">limits, tenant pool, user quota and model quota, reserved in one DynamoDB transaction</span></div>
+      <div><b data-t="st2n">3</b><span data-t="st2">compatible APIs: Anthropic Messages, OpenAI Chat Completions and Responses</span></div>
+      <div><b data-t="st3n">130</b><span data-t="st3">Z3 and property checks on the budget logic, replayed in about 10 seconds</span></div>
+      <div><b data-t="st4n">0</b><span data-t="st4">extra Postgres, Redis or SaaS control planes to run</span></div>
     </div>
   </div>
 </section>
@@ -383,7 +398,7 @@ footer a{color:var(--ink2)}
     <div class="sec-head rv">
       <div class="eyebrow" data-t="ob.eyebrow">Onboarding</div>
       <h2 data-t="ob.h">Hand out one URL. Your team is in.</h2>
-      <p class="lede" data-t="ob.lede">The stack serves the API and the web console from the same CloudFront address. Users give the CLI that one URL; it discovers everything else, signs them in with the AWS login they already have, and Claude Code, codex and the SDKs work unchanged.</p>
+      <p class="lede" data-t="ob.lede">The API and the web console share one CloudFront URL. Users paste it into the CLI, which fetches the rest of its configuration and signs them in with the AWS login they already have. Claude Code, codex and the SDKs work unchanged.</p>
     </div>
 
     <ol class="steps rv">
@@ -395,13 +410,14 @@ footer a{color:var(--ink2)}
     <div class="grid2" style="margin-top:28px;align-items:start">
       <div class="rv">
         <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
-<pre class="term wrap">curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-cli.sh \
-  | STRATOCLAVE_URL=https://your-deployment.cloudfront.net bash
+<pre class="term">export STRATOCLAVE_URL=https://your-deployment.cloudfront.net
+curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-cli.sh | bash
 sclv auth sso --profile your-aws-profile
 sclv claude -- "Summarize this repository"</pre></div>
         <p class="muted" style="font-size:14px;margin-top:10px" data-t="ob.note">The installer adds <code>stratoclave</code> and its short alias <code>sclv</code> to your PATH. Claude Code and codex are installed separately.</p>
       </div>
       <div class="rv">
+        <details class="more" style="margin-top:0;border-top:0"><summary data-t="ob.other">Other tools and the three endpoints</summary><div class="body">
         <div class="tabs" role="tablist" aria-label="Setup by tool" data-t-aria="tools.tablist">
           <button role="tab" aria-selected="true" aria-controls="tp0" id="tb0">codex</button>
           <button role="tab" aria-selected="false" aria-controls="tp1" id="tb1" tabindex="-1">Anthropic SDK</button>
@@ -424,15 +440,12 @@ export ANTHROPIC_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
 export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
           <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n2">For Chat Completions, point the SDK at <code>https://your-deployment.cloudfront.net/v1</code> instead.</p>
         </div>
-        <details class="more"><summary data-t="tools.dE">The three endpoints</summary>
-          <div class="body">
-            <ul class="endpoints">
+            <ul class="endpoints" style="margin-top:16px">
               <li data-t="tools.e1"><code>POST /v1/messages</code> Anthropic Messages: streaming, tool use, vision, prompt caching. Anthropic SDK, Claude Code, Claude Desktop Cowork.</li>
               <li data-t="tools.e2"><code>POST /v1/chat/completions</code> OpenAI Chat Completions: streaming and tool calling. Unsupported parameters fail with 400 instead of being dropped.</li>
               <li data-t="tools.e3"><code>POST /openai/v1/responses</code> OpenAI Responses, for the codex CLI, served by the OpenAI-compatible models on Bedrock.</li>
             </ul>
-          </div>
-        </details>
+        </div></details>
       </div>
     </div>
 
@@ -442,7 +455,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
           <div class="eyebrow" data-t="vs.eyebrow">Vouch-by-STS</div>
           <h3 style="font-size:24px;margin-bottom:10px" data-t="vs.h">Sign in with the AWS login you already have</h3>
           <p data-t="vs.p1">The CLI signs <code>sts:GetCallerIdentity</code> on your machine and sends the signed request. The gateway forwards it to AWS STS unchanged and trusts only the Arn, UserId and Account that STS returns. Your AWS credentials never leave your laptop, and the gateway never holds an identity-provider refresh token, so a compromised gateway cannot reach your IAM Identity Center or SAML IdP.</p>
-          <p class="muted" style="font-size:15px" data-t="vs.p2">Works with <code>aws sso login</code>, saml2aws, and Entra ID, Okta or ADFS through SAML. Each signed request is accepted once. Trusted accounts and allowed role patterns are set per AWS account; long-lived IAM users and EC2 instance profiles are refused by default. This is the same pattern as HashiCorp Vault's AWS auth method.</p>
+          <details class="more"><summary data-t="vs.more">Which logins work, and what is refused</summary><div class="body"><p data-t="vs.p2">Works with <code>aws sso login</code>, saml2aws, and Entra ID, Okta or ADFS through SAML. Each signed request is accepted once. Trusted accounts and allowed role patterns are set per AWS account; long-lived IAM users and EC2 instance profiles are refused by default. This is the same pattern as HashiCorp Vault's AWS auth method.</p></div></details>
         </div>
         <div>
           <svg id="vouch-svg" role="img" aria-labelledby="vouch-title"><title id="vouch-title" data-t="vs.alt">Vouch-by-STS: the CLI signs GetCallerIdentity, the gateway checks the request and forwards it unchanged to AWS STS, STS returns the Arn, the gateway checks the account and role, and issues an access token.</title></svg>
@@ -456,8 +469,8 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="tn.eyebrow">Tenants, teams and quotas</div>
-      <h2 data-t="tn.h">Run it like a SaaS: tenants, roles and budgets out of the box.</h2>
-      <p class="lede" data-t="tn.lede">Each tenant gets a dollar pool for the month. Each member gets a token quota, and each model can get its own dollar quota. Team leads manage their own tenant; nobody sees another tenant's data. The same roles decide what the API, the CLI and the console let you do.</p>
+      <h2 data-t="tn.h">Multi-tenant from day one: tenants, roles and budgets built in.</h2>
+      <p class="lede" data-t="tn.lede">Each tenant gets a dollar pool for the month. Each member gets a token quota, and each model can get its own dollar quota. Team leads manage only their own tenant and never see another's data. The same roles decide what the API, the CLI and the console let you do.</p>
     </div>
 
     <div class="grid2 rv" style="gap:32px;align-items:start">
@@ -482,7 +495,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
 
       <div>
         <table class="roles">
-          <thead><tr><th data-t="tn.role">Role</th><th data-t="tn.can">Can</th></tr></thead>
+          <thead><tr><th data-t="tn.role">Role</th><th data-t="tn.can">What they can do</th></tr></thead>
           <tbody>
             <tr><td><span class="role adm">admin</span></td><td data-t="tn.r1">Every tenant: create tenants and users, set pools, quotas and model access, approve new models, see all usage.</td></tr>
             <tr><td><span class="role lead">team_lead</span></td><td data-t="tn.r2">Only the tenants they own: invite and remove members, adjust members' quotas, see the tenant's usage.</td></tr>
@@ -490,9 +503,9 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
           </tbody>
         </table>
         <div class="ask">
-          <h3 data-t="tn.ask.h">Ask for more, and it ends by itself</h3>
+          <h3 data-t="tn.ask.h">Temporary raises that expire on their own</h3>
           <ol class="mini">
-            <li data-t="tn.ask1">A refused member asks for a raise in the console.</li>
+            <li data-t="tn.ask1">A member who hits a limit requests more in the console.</li>
             <li data-t="tn.ask2">An administrator approves an amount and an end date.</li>
             <li data-t="tn.ask3">The grant raises the ceiling, then expires. Nobody has to remember to lower it.</li>
           </ol>
@@ -509,29 +522,29 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     <div class="sec-head rv">
       <div class="eyebrow" data-t="tg.eyebrow">Spend you can attribute</div>
       <h2 data-t="tg.h">Tag the work, and the bill splits itself.</h2>
-      <p class="lede" data-t="tg.lede">Send one header with any request, and its cost is filed under that task: a nightly evaluation, a billing import, a customer. Every row carries the tokens and the price it was charged at, so each total can be recomputed, and untagged spend is kept under its own name instead of disappearing.</p>
+      <p class="lede" data-t="tg.lede">Send one header with any request, and its cost is filed under that task: a nightly evaluation, a billing import, a customer. Every row carries the tokens and the price it was charged at, so each total can be recomputed, and untagged spend shows up as <code>unlabelled</code> instead of vanishing.</p>
     </div>
 
     <div class="tagflow rv">
       <div class="tf-step">
         <div class="tf-n">1</div>
         <h3 data-t="tg.s1">Label the request</h3>
-        <div class="codewrap"><pre class="term wrap">curl https://your-deployment.cloudfront.net/v1/messages \
+        <div class="codewrap"><pre class="term">curl https://your-deployment.cloudfront.net/v1/messages \
   -H "x-api-key: $STRATOCLAVE_API_KEY" \
   -H "x-sc-task-tag: nightly-eval" \
   -d @request.json</pre></div>
-        <p class="muted" data-t="tg.s1p">A tag can never refuse a request. A malformed one is dropped, the response says why, and the request runs.</p>
+        <p class="muted" data-t="tg.s1p">A tag never blocks a request. A malformed tag is dropped, the response says why, and the request runs.</p>
       </div>
       <div class="tf-step">
         <div class="tf-n">2</div>
         <h3 data-t="tg.s2">One row per request</h3>
         <div class="table-scroll"><table class="rows">
-          <thead><tr><th>user</th><th data-t="tg.c.req">requested</th><th data-t="tg.c.bill">billed</th><th>in</th><th>out</th><th>cost_microusd</th><th>task_tag</th></tr></thead>
+          <thead><tr><th>task_tag</th><th>cost (µ$)</th><th data-t="tg.c.req">requested</th><th data-t="tg.c.bill">billed</th><th>in</th><th>out</th></tr></thead>
           <tbody>
-            <tr><td>u_41c9</td><td>opus-5</td><td>sonnet-5</td><td>18,422</td><td>1,163</td><td>54,223</td><td><span class="tg t1">billing-import</span></td></tr>
-            <tr><td>u_41c9</td><td>sonnet-5</td><td>sonnet-5</td><td>2,210</td><td>388</td><td>9,130</td><td><span class="tg t1">billing-import</span></td></tr>
-            <tr><td>u_8ba0</td><td>gpt-5.6-sol</td><td>gpt-5.6-sol</td><td>64,180</td><td>2,947</td><td>450,241</td><td><span class="tg t2">nightly-eval</span></td></tr>
-            <tr><td>u_8ba0</td><td>haiku-4-5</td><td>haiku-4-5</td><td>900</td><td>210</td><td>2,145</td><td><span class="tg t0">unlabelled</span></td></tr>
+            <tr><td><span class="tg t1">billing-import</span></td><td>54,223</td><td>opus-5</td><td>sonnet-5</td><td>18,422</td><td>1,163</td></tr>
+            <tr><td><span class="tg t1">billing-import</span></td><td>9,130</td><td>sonnet-5</td><td>sonnet-5</td><td>2,210</td><td>388</td></tr>
+            <tr><td><span class="tg t2">nightly-eval</span></td><td>450,241</td><td>gpt-5.6-sol</td><td>gpt-5.6-sol</td><td>64,180</td><td>2,947</td></tr>
+            <tr><td><span class="tg t0">unlabelled</span></td><td>2,145</td><td>haiku-4-5</td><td>haiku-4-5</td><td>900</td><td>210</td></tr>
           </tbody>
         </table></div>
         <p class="muted" data-t="tg.s2p">The first row asked for Opus and was served by Sonnet after Opus's quota ran out; both names stay on the row. No prompt or response is stored.</p>
@@ -550,16 +563,33 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
 
     <details class="more rv" style="margin-top:20px"><summary data-t="tg.d1">What a tag total does and does not mean</summary>
       <div class="body">
-        <p data-t="tg.d1p">Tags attribute spend; budgets enforce it. The hard limits are the tenant pool, the user quota and the model quota, and a tag never changes what is admitted. A tag's total is a floor for the cost of that work: requests for the same work that carried no tag are counted under <code>unlabelled</code>. Amounts are kept as integer micro-dollars and turned into dollars only for display, so rounding never adds up to a different bill. Usage rows are kept for 90 days; the ledger is the charge of record.</p>
+        <p data-t="tg.d1p">Tags attribute spend; budgets enforce it. The hard limits are the tenant pool, the user quota and the model quota, and a tag never changes what is admitted. A tag's total is a floor for the cost of that work: requests for the same work that carried no tag are counted under <code>unlabelled</code>. Amounts are kept as integer micro-dollars and turned into dollars only for display, so rounding never adds up to a different bill. Usage rows are kept for 90 days; the ledger is the system of record for charges.</p>
       </div>
     </details>
   </div>
 </section>
-<section id="why">
+<section id="console">
   <div class="wrap">
     <div class="sec-head rv">
-      <div class="eyebrow" data-t="why.eyebrow">Why it exists</div>
-      <h2 data-t="why.h">Checking the balance first does not stop concurrent calls.</h2>
+      <div class="eyebrow" data-t="ui.eyebrow">Web console</div>
+      <h2 data-t="ui.h">The admin console ships with it.</h2>
+      <p class="lede" data-t="ui.lede">Admins set pools and quotas, approve new models and see where the money went. Every user sees their own usage and keys. The console ships with the stack, in English and Japanese. These are real screens, with fictional data.</p>
+    </div>
+    <div class="gallery rv">
+      <div class="shots-nav" role="tablist" aria-label="Console screens" data-t-aria="ui.nav" id="shots-nav"></div>
+      <figure class="browser">
+        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url" id="shot-url">your-deployment/</span></div>
+        <div class="viewport" id="shot-view"></div>
+        <figcaption id="shot-cap" aria-live="polite"></figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+<section id="why" class="band">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow" data-t="why.eyebrow">The guarantee</div>
+      <h2 data-t="why.h">Check-then-call can't hold a budget under concurrency.</h2>
       <p class="lede" data-t="why.lede">When an application reads the balance and then calls the model, every call that arrives at the same moment sees the same balance, and all of them go through. Move the sliders and run both designs on the same traffic.</p>
     </div>
 
@@ -609,7 +639,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
       </div>
       <div class="panel card rv">
         <div class="icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><rect x="3.5" y="2.5" width="13" height="15" rx="2"/><path d="M7 7h6M7 10.5h6M7 14h3.5"/></svg></div>
-        <h3 data-t="v2.h">A ledger that only grows</h3>
+        <h3 data-t="v2.h">An append-only ledger</h3>
         <p data-t="v2.p">Every movement of money is one event in an append-only table. The gateway cannot edit or delete a settled charge: its code has no such call and its IAM role has no such permission.</p>
         <details class="more"><summary data-t="v2.more">What the ledger holds</summary>
           <div class="body">
@@ -621,7 +651,7 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
       <div class="panel card rv">
         <div class="icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 10a6 6 0 1 0 2-4.5"/><path d="M3.5 3v3.5H7"/></svg></div>
         <h3 data-t="v3.h">Crashed reservations are reclaimed, once</h3>
-        <p data-t="v3.p">Each reservation writes a hold row in the same transaction. If the process dies before settling, a later request finds the expired hold and returns the money exactly once, unless the model call had already left; then the hold is kept.</p>
+        <p data-t="v3.p">Each reservation writes a hold row in the same transaction. If the process dies before settling, a later request finds the expired hold and returns the money exactly once. If the model call had already gone out, the hold stays, because Bedrock may have billed it.</p>
         <details class="more"><summary data-t="v3.more">How the reclaim works, and its limit</summary>
           <div class="body">
             <p data-t="v3.d1">There is no extra process or timer. Pooled requests run a small, bounded sweep of expired holds; the decrement and the delete are one conditional transaction, so two sweepers cannot credit the same hold twice.</p>
@@ -630,16 +660,9 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         </details>
       </div>
     </div>
-  </div>
-</section>
-<section id="how" class="band">
-  <div class="wrap">
-    <div class="sec-head rv">
-      <div class="eyebrow" data-t="how.eyebrow">How one request moves</div>
-      <h2 data-t="how.h">Reserve, call, settle once.</h2>
-      <p class="lede" data-t="how.lede">Money is held before the model sees the request, and settled against what the model actually reported. A request that does not fit is refused at the door, so the model is never called for it.</p>
-    </div>
-    <div class="panel flow rv">
+    <details class="more rv" style="margin-top:28px"><summary data-t="how.sum">Follow one request: reserve, call, settle once</summary><div class="body">
+      <p data-t="how.lede">Money is held before the model sees the request, and settled against what the model actually reported. A request that does not fit is refused at the door, so the model is never called for it.</p>
+    <div class="panel flow">
       <svg id="flow-svg" role="img" aria-labelledby="flow-title"><title id="flow-title" data-t="how.svgtitle">A request is authenticated, reserves its budget, calls the model, and settles once. If the reservation fails it is refused with 402.</title></svg>
       <div hidden><span data-t="how.n0">Authenticate</span><span data-t="how.n0s">key, Cognito, STS</span><span data-t="how.n1">Reserve</span><span data-t="how.n1s">one transaction</span><span data-t="how.n2">Call the model</span><span data-t="how.n2s">Bedrock or your own</span><span data-t="how.n3">Settle once</span><span data-t="how.n3s">refund the difference</span><span data-t="how.n4">402, no call</span></div>
       <p class="steptext" id="flow-text" aria-live="polite" data-t="how.t0">Press play to send one request through.</p>
@@ -650,30 +673,54 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
     </div>
 
     <div class="deep">
-      <details class="more rv"><summary data-t="how.d1">A staged breaker, not an on/off switch</summary>
+      <details class="more"><summary data-t="how.d1">A staged breaker, not an on/off switch</summary>
         <div class="body"><p data-t="how.d1p">Near the limit the gateway changes behaviour before it refuses: with about 25% left it moves requests to a cheaper model tier, and at about 5% the breaker itself refuses with 402. The breaker is advisory; the hard stop is still the reservation, which refuses anything that does not fit at any level.</p></div>
       </details>
-      <details class="more rv"><summary data-t="how.d2">Failover and model cascade</summary>
+      <details class="more"><summary data-t="how.d2">Failover and model cascade</summary>
         <div class="body"><p data-t="how.d2p">On streaming calls, a 429 or an empty stream retries the same model in another region (for example us-east-1 to us-west-2). Separately, when one model's quota is used up, the request moves down the tenant's chain, such as Opus to Sonnet to Haiku, and each candidate is reserved and settled at its own price. The non-streaming Anthropic path is single-region.</p></div>
       </details>
-      <details class="more rv"><summary data-t="how.d3">Prices read from AWS, and never lowered by a failure</summary>
+      <details class="more"><summary data-t="how.d3">Prices read from AWS, and never lowered by a failure</summary>
         <div class="body"><p data-t="how.d3p">A rate resolves from an admin override, then a live read of AWS's own price APIs, then a stored snapshot, then a reviewed floor bundled with the release. A failed or implausible fetch falls through to the next rung instead of charging less. Price feeds are opt-in, and a floor-only deployment is valid. The rate is pinned at reserve time, so a price change mid-request does not move the charge.</p></div>
       </details>
-      <details class="more rv"><summary data-t="how.d4">A new Bedrock model, usually without a release</summary>
+      <details class="more"><summary data-t="how.d4">A new Bedrock model, usually without a release</summary>
         <div class="body"><p data-t="how.d4p">Discovery finds the new model and its price, an operator makes it a candidate, a real probe call confirms the charge actually appears, and then it is activated and granted to tenants. The catalogue is data. A model with a new price still needs its reviewed price row, which ships in a release.</p></div>
       </details>
     </div>
+    </div></details>
   </div>
 </section>
 <section id="proof">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="proof.eyebrow">Formal verification</div>
-      <h2 data-t="proof.h">The money rules are proven on a model, and the code is tested against it.</h2>
+      <h2 data-t="proof.h">The budget rules are proven on a formal model, and the code is tested against it.</h2>
       <p class="lede" data-t="proof.lede">The reserve and settle rules are written down as a model and checked with the Z3 solver, so a property holds for every input inside its stated bounds rather than for the cases someone thought to test. Each proof is held to three standards.</p>
     </div>
 
-    <div class="triad rv">
+
+    <div class="grid2" style="margin-top:28px">
+      <div class="panel rv">
+        <h3 style="margin-bottom:8px" data-t="proof.yes">Proven on the formal model</h3>
+        <ul class="claims">
+          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y1">Reserve and settle cannot count the same money twice.</span></li>
+          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y2">If the amount reserved up front is a sound upper bound, the conditional write is a hard ceiling. For tenants with a dollar pool, reserving that bound is on by default.</span></li>
+          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y3">Pinning the rate at reserve time is enough to keep the ceiling when prices change mid-request.</span></li>
+          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y4">Rounding is always up, so a charge is never below its exact cost; no overflow within realistic bounds; a refund cannot push a balance negative.</span></li>
+        </ul>
+      </div>
+      <div class="panel rv">
+        <h3 style="margin-bottom:8px" data-t="proof.no">Outside the proof</h3>
+        <ul class="claims">
+          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="proof.n1">The implementation and DynamoDB's own behaviour. The differential tests sample the code; they do not prove it.</span></li>
+          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="proof.n2">A charge that lands at Bedrock while the process dies before recording it.</span></li>
+          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="proof.n3">Tokens that can't be bounded from request size: image tokens, which scale with pixels, and server-side tool results.</span></li>
+        </ul>
+      </div>
+    </div>
+
+        <div class="deep rv" style="margin-top:20px">
+        <details class="more"><summary data-t="proof.dm">How each property is held to three standards</summary><div class="body">
+    <div class="triad">
       <div>
         <div class="n">01</div>
         <h3 data-t="proof.t1">A proof</h3>
@@ -690,28 +737,9 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <p data-t="proof.t3p">The real Python and an independent reference run on the same inputs, which checks the shipped code against the model on sampled inputs.</p>
       </div>
     </div>
-
-    <div class="grid2" style="margin-top:28px">
-      <div class="panel rv">
-        <h3 style="margin-bottom:8px" data-t="proof.yes">Proven, over the model</h3>
-        <ul class="claims">
-          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y1">Reserve and settle cannot count the same money twice.</span></li>
-          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y2">If the amount reserved up front is a sound upper bound, the conditional write is a hard ceiling. For tenants with a dollar pool, reserving that bound is on by default.</span></li>
-          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y3">Pinning the rate at reserve time is enough to keep the ceiling when prices change mid-request.</span></li>
-          <li><svg width="16" height="16" aria-hidden="true"><path d="M2 8.5l4 4 8-9" fill="none" stroke="var(--ok)" stroke-width="2.4"/></svg><span data-t="proof.y4">Rounding is always up, so a charge is never below its exact cost; no overflow within realistic bounds; a refund cannot push a balance negative.</span></li>
-        </ul>
-      </div>
-      <div class="panel rv">
-        <h3 style="margin-bottom:8px" data-t="proof.no">Outside the proof</h3>
-        <ul class="claims">
-          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="proof.n1">The implementation and DynamoDB's own behaviour. The differential tests sample the code; they do not prove it.</span></li>
-          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="proof.n2">A charge that lands at Bedrock while the process dies before recording it.</span></li>
-          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="proof.n3">Tokens the bound cannot see from bytes: image tokens, which scale with pixels, and server-side tool results.</span></li>
-        </ul>
-      </div>
-    </div>
-
-    <div class="rv" style="margin-top:24px">
+        </div></details>
+        <details class="more"><summary data-t="proof.dr">Run the proofs yourself: make prove</summary><div class="body">
+<div>
         <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-copy="make prove" data-t="copy">Copy</button></div>
 <pre class="term wrap" id="prove-pre"><span class="p">$</span> make prove
 130 passed in 8.80s
@@ -722,7 +750,7 @@ component, under the axioms stated at the top of each test file above.</pre>
         </div>
         <p class="muted" style="font-size:13px;margin-top:8px" data-t="proof.run">Ten Z3 proof files, about ten seconds on a laptop, no network and no AWS account.</p>
       </div>
-    <div class="deep rv" style="margin-top:8px">
+        </div></details>
         <details class="more"><summary data-t="proof.d1">The defect the proofs found first</summary>
           <div class="body"><p data-t="proof.d1p">Writing the model exposed a mismatch before it reached production: settle charged four token kinds while the estimate priced three, with no cache-write leg. On the shipped rates, a request with 1,000 input, 100 output and 5,000 cache-write tokens reserved 7,500 micro-dollars and settled at 38,750. Both sides now read one list of billable legs.</p></div>
         </details>
@@ -753,25 +781,7 @@ component, under the axioms stated at the top of each test file above.</pre>
   </div>
 </section>
 
-<section id="console">
-  <div class="wrap">
-    <div class="sec-head rv">
-      <div class="eyebrow" data-t="ui.eyebrow">Web console</div>
-      <h2 data-t="ui.h">A web console comes with it.</h2>
-      <p class="lede" data-t="ui.lede">Admins set pools and quotas, approve new models and see where the money went. Every user sees their own usage and keys. The console ships with the stack, in English and Japanese. These are real screens, with fictional data.</p>
-    </div>
-    <div class="gallery rv">
-      <div class="shots-nav" role="tablist" aria-label="Console screens" data-t-aria="ui.nav" id="shots-nav"></div>
-      <figure class="browser">
-        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span class="url" id="shot-url">your-deployment/</span></div>
-        <div class="viewport" id="shot-view"></div>
-        <figcaption id="shot-cap" aria-live="polite"></figcaption>
-      </figure>
-    </div>
-  </div>
-</section>
-
-<section id="measured" class="band">
+<section id="measured">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="m.eyebrow">Measured</div>
@@ -783,11 +793,11 @@ component, under the axioms stated at the top of each test file above.</pre>
       <div class="rv"><div class="stat">Invocations</div><p data-t="m.s2">in CloudWatch also counts rejections that are not billed, so it cannot stand in for the bill.</p></div>
       <div class="rv"><div class="stat">1 &rarr; 2</div><p data-t="m.s3"><code>max_attempts: 1</code> in botocore becomes two counted invocations. The extra charge lands on a call that succeeds, so no error handler ever sees it.</p></div>
     </div>
-    <p style="margin-top:24px;font-size:15px"><a id="meas-link" href="https://github.com/littlemex/stratoclave/blob/main/docs/MEASUREMENTS.md" data-t="m.link">All five findings, with where each one's evidence stops: docs/MEASUREMENTS.md</a></p>
+    <p style="margin-top:24px;font-size:15px"><a id="meas-link" href="https://github.com/littlemex/stratoclave/blob/main/docs/MEASUREMENTS.md" data-t="m.link">All five findings, and how far the evidence goes: docs/MEASUREMENTS.md</a></p>
   </div>
 </section>
 
-<section id="start">
+<section id="start" class="band">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="start.eyebrow">Start</div>
@@ -821,7 +831,7 @@ npm install
         <ul class="claims">
           <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="lim.1">Fewer providers than general proxies such as LiteLLM. Stratoclave only adds a provider whose calls and prices it can verify first-hand.</span></li>
           <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="lim.2">Choosing the model is left to an external router. The integration with vLLM Semantic Router is built but not wired yet.</span></li>
-          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="lim.3">The usage log keeps 90 days. The ledger is the charge of record; an archival export is a tracked gap.</span></li>
+          <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="lim.3">The usage log keeps 90 days. The ledger is the system of record for charges; an archival export is a tracked gap.</span></li>
           <li><svg width="16" height="16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" fill="none" stroke="var(--ink3)" stroke-width="2" stroke-dasharray="3 2"/></svg><span data-t="lim.4">Live measurements use small samples, and no latency SLO is claimed.</span></li>
         </ul>
       </div>
@@ -1140,6 +1150,80 @@ Object.assign(window.__JA, {
 });
 </script>
 <script>
+// Second editorial pass. Terms: 予算/金額/費用 (not お金), 形式モデル, ロール, サインイン, 利用ログ, 確保中.
+Object.assign(window.__JA, {
+'doc.title': 'Stratoclave: Amazon Bedrock のための予算ゲートウェイ',
+'nav.console': 'コンソール', 'nav.why': '保証',
+'hero.eyebrow': 'オープンソースの予算ゲートウェイ。自社の AWS アカウントで動く',
+'hero.h': 'Amazon Bedrock を、<br><span class="hl">予算つきで全チームへ</span>。',
+'hero.lede': 'URL を 1 つ配れば、どのチームも Claude Code や codex、SDK からそのまま Bedrock を使えます。テナントの月次予算、ユーザーのトークン枠、モデルごとのドル枠を決めておけば、収まらない呼び出しはモデルに届く前に止まります。誰がどの作業にいくら使ったかも、あとから検算できる形で残ります。',
+'hero.cta1': 'はじめる',
+'hero.shot': 'Stratoclave のコンソール。テナントの月次ドル予算について、上限、確保中、精算済み、残りを表示している。',
+'p1.k': '配る', 'p1.h': 'URL 1 つで全チームへ', 'p1.p': 'CLI はデプロイ先の URL から自分で設定を取り込み、普段の AWS ログインでサインインします。',
+'p2.k': '決める', 'p2.h': 'テナント、ユーザー、モデルごとの予算', 'p2.p': 'テナントには月次のドル予算、メンバーにはトークン枠、モデルにはドル枠。変更できる人はロールで決まります。',
+'p3.k': '見える', 'p3.h': 'チーム、メンバー、作業ごとの支出', 'p3.p': 'リクエストに作業のタグを付ければ、1 セント単位で作業ごとに集計され、行から検算できます。',
+'p4.k': '守る', 'p4.h': 'モデルが動く前に止める', 'p4.p': '予算は 1 回の DynamoDB トランザクションで確保するので、同時アクセスでもすり抜けません。予算のロジックは Z3 で検証しています。',
+'st1n': '3 段', 'st1': 'テナント、ユーザー、モデルの上限を、1 回のトランザクションでまとめて確保',
+'st2n': '3 種', 'st2': 'Anthropic Messages、OpenAI Chat Completions、Responses に互換',
+'st3n': '130 件', 'st3': 'Z3 とプロパティ検査で予算ロジックを検証。約 10 秒で再実行',
+'st4n': '0', 'st4': '追加で運用する Postgres、Redis、SaaS 管理基盤',
+'ob.h': '配るのは URL 1 つだけ。',
+'ob.lede': 'API も Web コンソールも、同じ CloudFront の URL で提供します。利用者がすることは、その URL を CLI に渡すことだけです。設定は CLI が自動で取得し、サインインは普段の AWS ログインのまま。Claude Code も codex も SDK も、そのまま動きます。',
+'ob.s1': 'デプロイは 1 回',
+'ob.s2p': 'インストーラが CLI を用意し、その URL の <code>/.well-known/stratoclave-config</code> から設定を読み込みます。Cognito のプール ID やクライアント ID を手で写す必要はありません。',
+'ob.s3p': 'AWS SSO、saml2aws、パスワードのいずれかでサインインし、有効期限の短いキーで Claude Code や codex をゲートウェイ経由で動かします。',
+'ob.other': 'ほかのツールと 3 つのエンドポイント',
+'vs.h': '普段の AWS ログインで、そのままサインイン',
+'vs.p1': 'CLI が手元で <code>sts:GetCallerIdentity</code> に署名し、その署名済みリクエストを送ります。ゲートウェイはそれを手を加えずに AWS STS へ転送し、STS が返す Arn、UserId、Account だけを信用します。AWS の認証情報が手元の端末から出ることはありません。ゲートウェイは IdP のリフレッシュトークンを持たないため、万一侵害されても IAM Identity Center や SAML IdP には到達できません。',
+'vs.more': '使えるログインと、拒否されるもの',
+'vs.k2': 'アクション、ホスト、時刻、nonce',
+'tn.eyebrow': 'テナント、チーム、枠',
+'tn.h': 'テナント、ロール、予算を標準装備。社内 SaaS のように運用できる。',
+'tn.lede': 'テナントには月次のドル予算 (プール)、メンバーにはトークン枠、モデルにはドル枠を設定できます。チームリーダーが管理できるのは自分のテナントだけで、ほかのテナントのデータは見えません。API、CLI、コンソールのどこから操作しても、できることは同じロールで決まります。',
+'tn.reserved': '確保中 $31.20',
+'tn.role': 'ロール',
+'tn.ask.h': '足りなければ申請。引き上げは期限つきで、自動で戻る',
+'tn.ask1': '上限に達したメンバーが、コンソールから引き上げを申請します。',
+'tn.ask3': '承認された分だけ上限が上がり、期限が来れば自動で元に戻ります。戻し忘れは起きません。',
+'tn.d1': 'サインインの方法とロールの関係',
+'tn.d1p': 'Cognito のパスワード、Vouch-by-STS、<code>sk-stratoclave-*</code> の API キーは、どれも同じユーザーに結びつきます。どの方法でサインインしてもロールは変わらず、どのロールもテナントの外には届きません。API キーには呼べる範囲 (例えば Responses API だけ) を個別に付けられ、1 人が持てる有効なキーの数にも上限があります。権限の必要な変更は、すべて監査イベントとして記録します。',
+'tg.h': 'タグを 1 つ付ければ、コストは作業ごとに分かれる。',
+'tg.lede': 'リクエストにヘッダーを 1 つ足すだけで、費用が「夜間評価」「請求データの取り込み」「顧客別」といった作業単位で集計されます。各行にトークン数と適用単価が残るので、合計はいつでも検算できます。タグのない支出も unlabelled として残り、内訳から漏れません。',
+'tg.s1p': 'タグが原因でリクエストが拒否されることはありません。形式が不正なタグは無視し、理由を応答で返したうえで、リクエストは通常どおり処理します。',
+'tg.s2p': '1 行目は Opus を要求し、Opus の枠を使い切っていたため Sonnet で処理されました。両方のモデル名が行に残ります。プロンプトと応答は保存しません。',
+'tg.s3p': 'コンソールでは、同じ集計をテナントごとにメンバー別、タグ別で確認できます。利用者も自分の分を確認できます。',
+'tg.d1': 'タグ別合計の読み方',
+'tg.d1p': 'タグは支出を振り分けるもので、予算を強制するのはテナントのプール、ユーザーの枠、モデルの枠です。タグによって通るリクエストが変わることはありません。タグの合計は、その作業にかかった費用の下限です。同じ作業でもタグを付け忘れたリクエストは <code>unlabelled</code> に数えられるからです。金額は micro-USD の整数で持ち、表示するときだけドルに直すので、丸めの積み重ねで金額がずれることはありません。利用ログの保持は 90 日で、課金の正本は台帳です。',
+'ui.eyebrow': 'Web コンソール',
+'ui.h': 'Web コンソールも標準装備。',
+'ui.lede': '管理者はプールと枠を決め、新しいモデルを承認し、支出の内訳を確認できます。利用者は自分の使用量とキーを管理します。英語と日本語に対応したコンソールが、スタックに含まれています。以下は実際の画面です (データはサンプル)。',
+'why.eyebrow': '保証',
+'why.h': '「残高を見てから呼ぶ」では、同時アクセスを止められない。',
+'v2.h': '追記しかできない台帳',
+'v2.p': '予算の動きは 1 つずつ、追記専用のテーブルにイベントとして残ります。精算済みの金額をゲートウェイが書き換えたり消したりすることはできません。コードにそうした呼び出しがなく、IAM ロールにもその権限がないためです。',
+'v3.h': 'プロセスが落ちても、確保した予算は 1 回だけ戻る',
+'v3.p': '確保のたびに、同じトランザクションで保留行 (hold) を書きます。精算の前にプロセスが落ちても、あとから来たリクエストが期限切れの保留行を見つけ、1 回だけ予算を戻します。すでにモデルを呼び出していた場合は、課金されている可能性があるため戻しません。',
+'how.sum': '1 件のリクエストを追う: 確保、呼び出し、1 回だけ精算',
+'how.lede': 'モデルにリクエストが届く前に予算を確保し、モデルが報告した実際の使用量で精算します。予算に収まらないリクエストは入り口で断るので、モデルは一度も呼ばれません。',
+'how.d2': 'リージョン切り替えと、モデルの自動フォールバック',
+'how.d3': '単価は AWS から取得。取得に失敗しても安くは請求しない',
+'proof.eyebrow': '形式検証',
+'proof.h': '予算のロジックは形式モデルで証明し、実装はそれと突き合わせて確かめる。',
+'proof.lede': '確保と精算の規則を形式モデルとして書き下し、Z3 ソルバーで検査しています。誰かが思いついたケースだけでなく、明示した範囲のすべての入力で性質が成り立つことを示します。',
+'proof.dm': '1 つの性質を 3 つの方法で確かめる',
+'proof.dr': '証明を手元で再実行する: make prove',
+'proof.yes': '形式モデル上で証明済み', 'proof.no': '証明の対象外',
+'proof.y1': '確保と精算で、同じ金額を二重に計上することはありません。',
+'proof.y2': '確保額が実費の上界になっていれば、条件付き書き込みだけで上限は破られません。ドルのプールを持つテナントでは、この上界での確保が既定で有効です。',
+'proof.n3': 'リクエストの大きさからは上限を見積もれないトークン。画素数に比例する画像のトークンと、サーバー側のツールの結果です。',
+'models.note': '<b>既定では無効です。</b>自前のモデルへの経路は <code>HYBRID_SERVING_ENABLED</code> で有効にし、運用者が <code>STRATOCLAVE_VLLM_ENDPOINTS</code> に載せたエンドポイントだけを呼びます。自前のハードウェアには定価がないので、運用者が決めた原価回収の単価で値付けします。いまはストリーミングの <code>/v1/messages</code> がこの経路を通ります (ノート PC 上の Ollama で、確保から精算まで確認済み)。ストリーミングでない呼び出しと <code>/v1/chat/completions</code> は、現時点では Bedrock のみです。',
+'m.h': 'Bedrock の請求を、実際に測った。',
+'m.lede': 'ゲートウェイを使うかどうかに関係なく役に立つ、3 つの実測結果です。予算のコードがいまの形をしている理由でもあります。',
+'lim.s': '既知の制限',
+'lim.3': '利用ログの保持は 90 日です。課金の正本は台帳で、長期保管用の書き出しは今後の課題です。',
+});
+</script>
+<script>
 window.__SHOTS = [
   { id: 's1', file: '02_tenant_detail_pool', path: '/admin/tenants/…', en: 'Tenant pool', cap: 'A tenant\'s dollar pool for the month: limit, what is in flight, what has settled, and what is left. Every request reserves from it before the model is called.' },
   { id: 's2', file: '03_usage_by_tag', path: '/admin/tenants/…/usage-by-tag', en: 'Spend by tag', cap: 'Spend split by member and by task tag, with requests, cost and tokens. Untagged spend stays visible as unlabelled.' },
@@ -1192,7 +1276,13 @@ function applyLang(lang) {
     if (!(key in EN)) EN[key] = el.getAttribute('aria-label');
     el.setAttribute('aria-label', lang === 'ja' && JA[k] ? JA[k] : EN[key]);
   }
-  document.title = tr('doc.title', 'Stratoclave: a hard dollar budget in front of Amazon Bedrock');
+  for (const el of $$('[data-t-alt]')) {
+    const k = el.dataset.tAlt, key = 'alt:' + k;
+    if (!(key in EN)) EN[key] = el.getAttribute('alt');
+    el.setAttribute('alt', lang === 'ja' && JA[k] ? JA[k] : EN[key]);
+  }
+  for (const im of $$('img.hs-en')) im.src = im.src.replace(/\.(en|ja)\.png$/, '.' + lang + '.png');
+  document.title = tr('doc.title', 'Stratoclave: the budget gateway for Amazon Bedrock');
   for (const b of $$('.lang button')) b.setAttribute('aria-pressed', String(b.dataset.lang === lang));
   const meas = 'https://github.com/littlemex/stratoclave/blob/main/docs/' + (lang === 'ja' ? 'MEASUREMENTS.ja.md' : 'MEASUREMENTS.md');
   for (const a of $$('#meas-link,#foot-meas')) a.href = meas;
@@ -1218,7 +1308,7 @@ const secIO = new IntersectionObserver((es) => {
     for (const a of navLinks) a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id);
   }
 }, { rootMargin: '-45% 0px -50% 0px' });
-['why', 'how', 'proof', 'models', 'start'].forEach((id) => { const s = document.getElementById(id); if (s) secIO.observe(s); });
+['onboard', 'tenants', 'tags', 'console', 'why', 'start'].forEach((id) => { const s = document.getElementById(id); if (s) secIO.observe(s); });
 
 /* ---------- details: animate height ---------- */
 for (const d of $$('details.more')) {
