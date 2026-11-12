@@ -15,10 +15,18 @@
  *   LOCALE=en  → <base>.png        (canonical English version)
  *   LOCALE=ja  → <base>.ja.png     (Japanese sibling)
  *
- * Locale is forced via the same sessionStorage key the React app's
- * i18next LanguageDetector reads (`stratoclave_locale`). This is a
- * client-side override only; the server-side /me locale is not touched,
- * because that would require a write call against the user's row.
+ * Locale: the console takes it from the signed-in user's record on every
+ * `/me` fetch, so a client-side override alone is replaced as soon as the app
+ * boots. The tool therefore sets the user's locale with `PATCH /api/mvp/me`
+ * before capturing (the same call the console's language switcher makes), and
+ * also seeds the session key the app reads before `/me` answers. Run it with a
+ * throwaway demo user: the locale written is left in place.
+ *
+ * The access token goes in sessionStorage under the key `frontend/src/lib/
+ * cognito.ts` uses; the console moved tokens out of localStorage, and a token
+ * left there is ignored, which made every authenticated shot a sign-in page.
+ * `frontend/src/lib/captureTool.test.ts` keeps both keys and the storage in
+ * step with the app.
  */
 
 import { chromium } from 'playwright'
@@ -104,8 +112,8 @@ async function freshBrowser(fn) {
 }
 
 /**
- * Seed both localStorage (auth token) and sessionStorage (locale)
- * before any React code runs. Called after the first navigation lands
+ * Seed the auth token and the locale into sessionStorage, where the console
+ * reads them, before any React code runs. Called after the first navigation lands
  * us on the correct origin so the storage write goes to the right
  * domain bucket.
  */
@@ -113,7 +121,7 @@ async function seedStorage(page, { token } = { token: TOKEN }) {
   await page.evaluate(
     ([tokenKey, tokenVal, localeKey, localeVal]) => {
       if (tokenVal) {
-        localStorage.setItem(
+        sessionStorage.setItem(
           tokenKey,
           JSON.stringify({
             access_token: tokenVal,
@@ -135,7 +143,7 @@ async function captureUnauth(name, anchor, waitMs = 3000) {
     // Triple-sure: clear auth, but seed locale.
     await page.evaluate(
       ([tokenKey, localeKey, localeVal]) => {
-        localStorage.removeItem(tokenKey)
+        sessionStorage.removeItem(tokenKey)
         sessionStorage.setItem(localeKey, localeVal)
       },
       [TOKEN_STORAGE_KEY, LOCALE_STORAGE_KEY, LOCALE],
@@ -157,7 +165,7 @@ async function captureUnauthHover(name, anchor, hoverSelector, waitMs = 800) {
     await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' })
     await page.evaluate(
       ([tokenKey, localeKey, localeVal]) => {
-        localStorage.removeItem(tokenKey)
+        sessionStorage.removeItem(tokenKey)
         sessionStorage.setItem(localeKey, localeVal)
       },
       [TOKEN_STORAGE_KEY, LOCALE_STORAGE_KEY, LOCALE],
@@ -205,7 +213,18 @@ async function captureAuth(name, path, { anchor, fullPage = false, waitMs = 2500
   })
 }
 
+/** Make the server-side locale the one this run captures; see the header. */
+async function setServerLocale() {
+  const res = await fetch(`${BASE_URL}/api/mvp/me`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ locale: LOCALE }),
+  })
+  if (!res.ok) throw new Error(`PATCH /api/mvp/me failed: ${res.status} ${await res.text()}`)
+}
+
 async function main() {
+  await setServerLocale()
   // 01. Login (unauth)
   await captureUnauth('01_login', A.login)
 

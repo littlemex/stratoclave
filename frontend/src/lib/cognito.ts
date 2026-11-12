@@ -3,7 +3,7 @@
  *
  * - Receives an Authorization Code from the Hosted UI and exchanges it for access_token / id_token / refresh_token
  * - Because the backend only accepts access_token, the frontend also uses access_token for API authorization
- * - Tokens are stored in localStorage("stratoclave_tokens") (unrelated to the 0.25rem rounded UI spec; purely data)
+ * - Tokens are stored in sessionStorage("stratoclave_tokens"), scoped to the tab; see STORAGE_KEY below for why not localStorage
  * - The case of being opened from the CLI via URL query `?token=xxx` is also handled here (only StoredTokens.access_token is populated)
  */
 
@@ -239,7 +239,7 @@ export async function refreshTokens(
 }
 
 // ---------- Logout ----------
-/** Clear localStorage and redirect to the Hosted UI logout endpoint */
+/** Clear the stored tokens and redirect to the Hosted UI logout endpoint */
 export function logoutRedirect(): void {
   clearTokens()
   const params = new URLSearchParams({
