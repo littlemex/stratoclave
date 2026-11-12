@@ -126,6 +126,69 @@ figure.browser{margin:0;border-radius:14px;overflow:hidden;border:1px solid var(
 .browser figcaption{padding:12px 16px;font-size:14px;color:var(--ink2);border-top:1px solid var(--line2);min-height:3.2em}
 </style>
 <style>
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:52px;border-top:1px solid var(--line2);padding-top:24px}
+@media (max-width:900px){.stats{grid-template-columns:1fr 1fr}}
+.stats b{display:block;font-size:40px;font-weight:700;letter-spacing:-.03em;line-height:1.1;color:var(--ink)}
+.stats span{font-size:14px;color:var(--ink2)}
+ol.steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media (max-width:900px){ol.steps{grid-template-columns:1fr}}
+ol.steps li{display:grid;grid-template-columns:36px 1fr;gap:12px;background:var(--card);border-radius:var(--r-box);padding:20px;box-shadow:var(--shadow)}
+ol.steps .num{width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--bg);display:grid;place-items:center;font-weight:700}
+ol.steps h3{margin:3px 0 6px}
+ol.steps p{font-size:15px;color:var(--ink2);margin:0}
+#vouch-svg{width:100%;height:auto;display:block}
+#vouch-svg text{font-family:var(--font);fill:var(--ink);font-size:15px;font-weight:700}
+#vouch-svg text.s{fill:var(--ink3);font-size:12.5px;font-weight:400}
+.tree{background:var(--shade);border-radius:var(--r-box);padding:22px}
+.t-tenant{background:var(--card);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow)}
+.t-row{display:flex;align-items:center;gap:10px;font-size:18px}
+.pill{font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:var(--r-btn);padding:1px 9px;color:var(--ink3)}
+.t-pool{display:flex;justify-content:space-between;margin-top:10px;font-size:14px;color:var(--ink2)}
+.t-pool .mono{font-weight:700;color:var(--ink)}
+.tree .bar{display:flex;height:10px;border-radius:5px;background:var(--line2);overflow:hidden;margin:8px 0 6px}
+.tree .bar i{background:var(--accent)}
+.tree .bar i.res{background:repeating-linear-gradient(135deg,var(--accent) 0 4px,transparent 4px 8px)}
+.t-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--ink3)}
+.t-kids{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px;position:relative}
+.t-kids::before{content:"";position:absolute;left:16%;right:16%;top:-8px;border-top:1.5px solid var(--line)}
+.t-member{background:var(--card);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px;font-size:14px;box-shadow:var(--shadow)}
+.role{display:inline-block;align-self:flex-start;font-family:var(--mono);font-size:11px;font-weight:700;border-radius:6px;padding:1px 7px;background:var(--line2);color:var(--ink2)}
+.role.lead{background:var(--accent-soft);color:var(--accent)}
+.role.adm{background:var(--ink);color:var(--bg)}
+.t-models{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:14px}
+.t-label{font-size:12px;color:var(--ink3);margin-right:4px}
+.chipm{font-size:13px;background:var(--card);border:1px solid var(--line2);border-radius:var(--r-btn);padding:3px 12px}
+table.roles{width:100%;border-collapse:collapse;font-size:15px}
+table.roles th{text-align:left;font-size:12px;color:var(--ink3);font-weight:700;padding:0 0 8px;border-bottom:1px solid var(--line)}
+table.roles td{padding:12px 10px 12px 0;border-bottom:1px solid var(--line2);vertical-align:top;color:var(--ink2)}
+table.roles td:first-child{width:110px}
+.ask{margin-top:22px}
+.ask h3{margin-bottom:8px}
+ol.mini{margin:0;padding-left:20px;font-size:15px;color:var(--ink2)}
+ol.mini li{margin:3px 0}
+.tagflow{display:grid;grid-template-columns:.9fr 1.35fr .85fr;gap:20px}
+@media (max-width:1000px){.tagflow{grid-template-columns:1fr}}
+.tagflow>*{min-width:0}
+.tf-step{background:var(--card);border-radius:var(--r-box);padding:20px;box-shadow:var(--shadow);position:relative}
+.tf-n{font-family:var(--mono);font-size:12px;color:var(--ink3)}
+.tf-step h3{margin:4px 0 12px}
+.tf-step p.muted{font-size:13.5px;margin:12px 0 0}
+.tf-step pre.term{font-size:12px;padding:14px}
+.table-scroll{overflow-x:auto}
+table.rows{border-collapse:collapse;font-family:var(--mono);font-size:12px;white-space:nowrap;width:100%}
+table.rows th{text-align:left;color:var(--ink3);font-weight:700;padding:4px 10px 6px 0;border-bottom:1px solid var(--line)}
+table.rows td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line2);color:var(--ink2)}
+.tg{display:inline-block;font-family:var(--mono);font-size:12px;font-weight:700;border-radius:6px;padding:1px 8px}
+.tg.t1{background:var(--accent-soft);color:var(--accent)}
+.tg.t2{background:var(--ink);color:var(--bg)}
+.tg.t0{background:transparent;color:var(--ink3);border:1px dashed var(--line)}
+.tagbars>div{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;align-items:center;margin-bottom:14px}
+.tagbars i{grid-column:1/-1;height:10px;border-radius:5px;background:var(--line2);position:relative;overflow:hidden}
+.tagbars i::after{content:"";position:absolute;inset:0;width:var(--w);min-width:2px;background:var(--accent);transform-origin:left;transform:scaleX(var(--s,0));transition:transform .9s var(--ease)}
+.tagbars.in i::after{--s:1}
+.tagbars b{justify-self:end;grid-row:1;grid-column:2;font-size:13px}
+</style>
+<style>
 /* hero */
 .hero-grid{display:grid;grid-template-columns:1.05fr 1fr;gap:48px;align-items:center}
 @media (max-width:960px){.hero-grid{grid-template-columns:1fr;gap:28px}}
@@ -269,10 +332,12 @@ footer a{color:var(--ink2)}
       Stratoclave
     </a>
     <nav class="sections" aria-label="Sections">
-      <a href="#why" data-t="nav.why">Why</a>
-      <a href="#how" data-t="nav.how">How</a>
+      <a href="#onboard" data-t="nav.onboard">Onboarding</a>
+      <a href="#tenants" data-t="nav.tenants">Tenants</a>
+      <a href="#tags" data-t="nav.tags">Spend</a>
+      <a href="#why" data-t="nav.why">Guarantee</a>
       <a href="#proof" data-t="nav.proof">Proof</a>
-      <a href="#models" data-t="nav.models">Models</a>
+      <a href="#console" data-t="nav.console">Console</a>
       <a href="#start" data-t="nav.start">Start</a>
     </nav>
     <div class="lang" role="group" aria-label="Language">
@@ -290,11 +355,11 @@ footer a{color:var(--ink2)}
   <div class="wrap">
     <div class="hero-grid">
       <div class="rv">
-        <div class="eyebrow" data-t="hero.eyebrow">Open-source gateway for Amazon Bedrock</div>
-        <h1 data-t="hero.h">A shared dollar budget that <span class="hl">concurrent calls cannot race past</span>.</h1>
-        <p class="lede" data-t="hero.lede">Stratoclave reserves the money before the model is called, in one DynamoDB transaction, and records every charge it settles in an append-only ledger you can recompute every balance from. Your SDKs, Claude Code and codex keep working as they are.</p>
+        <div class="eyebrow" data-t="hero.eyebrow">Open source. Runs in your own AWS account.</div>
+        <h1 data-t="hero.h">The budget gateway for <span class="hl">Amazon Bedrock</span>.</h1>
+        <p class="lede" data-t="hero.lede">Give every team every Bedrock model behind one URL. Cap spend in dollars per tenant, per user and per model before a call runs, see which team and which task spent it, and keep a ledger that adds up.</p>
         <div class="cta">
-          <a class="btn primary" href="#start" data-t="hero.cta1">Quick start</a>
+          <a class="btn primary" href="#start" data-t="hero.cta1">Get started</a>
           <a class="btn ghost" href="https://github.com/littlemex/stratoclave" data-t="hero.cta2">View on GitHub</a>
         </div>
         <p class="muted" style="font-size:14px;margin-top:16px"><a href="#proof" data-t="hero.limits">What the ceiling does not cover</a></p>
@@ -305,15 +370,192 @@ footer a{color:var(--ink2)}
       <div class="cap"><span data-t="hero.cap">Simulation in your browser</span><span id="hero-tally" aria-live="off"></span></div>
       </div>
     </div>
-    <div class="chips">
-      <div class="chip rv"><b data-t="chip1.b">One transaction</b><span data-t="chip1.s">Tenant pool, user quota and model quota are reserved together.</span></div>
-      <div class="chip rv"><b data-t="chip2.b">A proven money model</b><span data-t="chip2.s">Z3 checks the reserve and settle rules. Run <code>make prove</code>.</span></div>
-      <div class="chip rv"><b data-t="chip3.b">Three APIs</b><span data-t="chip3.s">Anthropic Messages, OpenAI Chat Completions and Responses.</span></div>
-      <div class="chip rv"><b data-t="chip4.b">Your own models too</b><span data-t="chip4.s">Bedrock and self-hosted OpenAI-compatible models share one ledger (opt-in).</span></div>
+    <div class="stats rv">
+      <div><b>1</b><span data-t="st1">DynamoDB transaction reserves the tenant pool, the user quota and the model quota together</span></div>
+      <div><b>3</b><span data-t="st2">compatible APIs: Anthropic Messages, OpenAI Chat Completions and Responses</span></div>
+      <div><b>130</b><span data-t="st3">Z3 and property checks on the money rules, replayed in about 10 seconds</span></div>
+      <div><b>0</b><span data-t="st4">Postgres, Redis or SaaS control planes to run</span></div>
     </div>
   </div>
 </section>
-<section id="why" class="band">
+<section id="onboard" class="band">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow" data-t="ob.eyebrow">Onboarding</div>
+      <h2 data-t="ob.h">Hand out one URL. Your team is in.</h2>
+      <p class="lede" data-t="ob.lede">The stack serves the API and the web console from the same CloudFront address. Users give the CLI that one URL; it discovers everything else, signs them in with the AWS login they already have, and Claude Code, codex and the SDKs work unchanged.</p>
+    </div>
+
+    <ol class="steps rv">
+      <li><span class="num">1</span><div><h3 data-t="ob.s1">Deploy once</h3><p data-t="ob.s1p">The administrator runs one script. It prints a CloudFront URL that serves both the gateway and the console.</p></div></li>
+      <li><span class="num">2</span><div><h3 data-t="ob.s2">Paste the URL</h3><p data-t="ob.s2p">The installer builds the CLI and reads <code>/.well-known/stratoclave-config</code> from that URL. Nobody copies a Cognito pool ID or client ID.</p></div></li>
+      <li><span class="num">3</span><div><h3 data-t="ob.s3">Sign in, start working</h3><p data-t="ob.s3p">Sign in with AWS SSO, saml2aws or a password, then run Claude Code or codex through the gateway with a short-lived key.</p></div></li>
+    </ol>
+
+    <div class="grid2" style="margin-top:28px;align-items:start">
+      <div class="rv">
+        <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
+<pre class="term wrap">curl -fsSL https://raw.githubusercontent.com/littlemex/stratoclave/main/scripts/install-cli.sh \
+  | STRATOCLAVE_URL=https://your-deployment.cloudfront.net bash
+sclv auth sso --profile your-aws-profile
+sclv claude -- "Summarize this repository"</pre></div>
+        <p class="muted" style="font-size:14px;margin-top:10px" data-t="ob.note">The installer adds <code>stratoclave</code> and its short alias <code>sclv</code> to your PATH. Claude Code and codex are installed separately.</p>
+      </div>
+      <div class="rv">
+        <div class="tabs" role="tablist" aria-label="Setup by tool" data-t-aria="tools.tablist">
+          <button role="tab" aria-selected="true" aria-controls="tp0" id="tb0">codex</button>
+          <button role="tab" aria-selected="false" aria-controls="tp1" id="tb1" tabindex="-1">Anthropic SDK</button>
+          <button role="tab" aria-selected="false" aria-controls="tp2" id="tb2" tabindex="-1">OpenAI SDK</button>
+        </div>
+        <div role="tabpanel" id="tp0" aria-labelledby="tb0">
+          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
+<pre class="term">sclv codex -- "Summarize this repository"</pre></div>
+          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n3">Mints a key that can only call the Responses API; your <code>~/.codex/config.toml</code> is untouched.</p>
+        </div>
+        <div role="tabpanel" id="tp1" aria-labelledby="tb1" hidden>
+          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
+<pre class="term">export ANTHROPIC_BASE_URL=https://your-deployment.cloudfront.net
+export ANTHROPIC_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
+          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n1">The application code does not change. Issue the key from the CLI or the web console.</p>
+        </div>
+        <div role="tabpanel" id="tp2" aria-labelledby="tb2" hidden>
+          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
+<pre class="term">export OPENAI_BASE_URL=https://your-deployment.cloudfront.net/openai/v1
+export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
+          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n2">For Chat Completions, point the SDK at <code>https://your-deployment.cloudfront.net/v1</code> instead.</p>
+        </div>
+        <details class="more"><summary data-t="tools.dE">The three endpoints</summary>
+          <div class="body">
+            <ul class="endpoints">
+              <li data-t="tools.e1"><code>POST /v1/messages</code> Anthropic Messages: streaming, tool use, vision, prompt caching. Anthropic SDK, Claude Code, Claude Desktop Cowork.</li>
+              <li data-t="tools.e2"><code>POST /v1/chat/completions</code> OpenAI Chat Completions: streaming and tool calling. Unsupported parameters fail with 400 instead of being dropped.</li>
+              <li data-t="tools.e3"><code>POST /openai/v1/responses</code> OpenAI Responses, for the codex CLI, served by the OpenAI-compatible models on Bedrock.</li>
+            </ul>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <div class="panel rv" style="margin-top:36px">
+      <div class="grid2" style="gap:36px;align-items:center">
+        <div>
+          <div class="eyebrow" data-t="vs.eyebrow">Vouch-by-STS</div>
+          <h3 style="font-size:24px;margin-bottom:10px" data-t="vs.h">Sign in with the AWS login you already have</h3>
+          <p data-t="vs.p1">The CLI signs <code>sts:GetCallerIdentity</code> on your machine and sends the signed request. The gateway forwards it to AWS STS unchanged and trusts only the Arn, UserId and Account that STS returns. Your AWS credentials never leave your laptop, and the gateway never holds an identity-provider refresh token, so a compromised gateway cannot reach your IAM Identity Center or SAML IdP.</p>
+          <p class="muted" style="font-size:15px" data-t="vs.p2">Works with <code>aws sso login</code>, saml2aws, and Entra ID, Okta or ADFS through SAML. Each signed request is accepted once. Trusted accounts and allowed role patterns are set per AWS account; long-lived IAM users and EC2 instance profiles are refused by default. This is the same pattern as HashiCorp Vault's AWS auth method.</p>
+        </div>
+        <div>
+          <svg id="vouch-svg" role="img" aria-labelledby="vouch-title"><title id="vouch-title" data-t="vs.alt">Vouch-by-STS: the CLI signs GetCallerIdentity, the gateway checks the request and forwards it unchanged to AWS STS, STS returns the Arn, the gateway checks the account and role, and issues an access token.</title></svg>
+          <div hidden><span data-t="vs.n1">CLI signs GetCallerIdentity</span><span data-t="vs.n2">Gateway checks the request</span><span data-t="vs.n3">AWS STS verifies, returns Arn</span><span data-t="vs.n4">Gateway checks account, role</span><span data-t="vs.n5">Access token issued</span><span data-t="vs.k1">credentials stay local</span><span data-t="vs.k2">action, host, time, nonce</span><span data-t="vs.k3">forwarded unchanged</span><span data-t="vs.k4">trusted account, role pattern</span><span data-t="vs.k5">no IdP refresh token</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="tenants">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow" data-t="tn.eyebrow">Tenants, teams and quotas</div>
+      <h2 data-t="tn.h">Run it like a SaaS: tenants, roles and budgets out of the box.</h2>
+      <p class="lede" data-t="tn.lede">Each tenant gets a dollar pool for the month. Each member gets a token quota, and each model can get its own dollar quota. Team leads manage their own tenant; nobody sees another tenant's data. The same roles decide what the API, the CLI and the console let you do.</p>
+    </div>
+
+    <div class="grid2 rv" style="gap:32px;align-items:start">
+      <div class="tree" role="img" aria-label="Example: tenant Acme Research with a 500 dollar monthly pool, a team lead and two users with their own token quotas, and per-model dollar quotas." data-t-aria="tn.alt">
+        <div class="t-tenant">
+          <div class="t-row"><b>Acme Research</b><span class="pill" data-t="tn.tenant">tenant</span></div>
+          <div class="t-pool"><span data-t="tn.pool">Dollar pool, November</span><span class="mono">$500.00</span></div>
+          <div class="bar"><i style="width:38%"></i><i class="res" style="width:6%"></i></div>
+          <div class="t-legend"><span data-t="tn.settled">settled $190.40</span><span data-t="tn.reserved">in flight $31.20</span><span data-t="tn.left">left $278.40</span></div>
+        </div>
+        <div class="t-kids">
+          <div class="t-member"><span class="role lead">team_lead</span><b>priya</b><span class="mono muted" data-t="tn.q1">2,000,000 tokens</span></div>
+          <div class="t-member"><span class="role">user</span><b>sam</b><span class="mono muted" data-t="tn.q2">500,000 tokens</span></div>
+          <div class="t-member"><span class="role">user</span><b>yuki</b><span class="mono muted" data-t="tn.q3">500,000 tokens</span></div>
+        </div>
+        <div class="t-models">
+          <span class="t-label" data-t="tn.models">Per-model dollar quotas</span>
+          <span class="chipm">Opus <b class="mono">$200</b></span><span class="chipm">Sonnet <b class="mono">$250</b></span><span class="chipm">Haiku <b class="mono" data-t="tn.nolimit">no cap</b></span>
+        </div>
+        <p class="muted" style="font-size:13px;margin:12px 2px 0" data-t="tn.example">Example values. One request reserves from all three levels in the same transaction, or from none.</p>
+      </div>
+
+      <div>
+        <table class="roles">
+          <thead><tr><th data-t="tn.role">Role</th><th data-t="tn.can">Can</th></tr></thead>
+          <tbody>
+            <tr><td><span class="role adm">admin</span></td><td data-t="tn.r1">Every tenant: create tenants and users, set pools, quotas and model access, approve new models, see all usage.</td></tr>
+            <tr><td><span class="role lead">team_lead</span></td><td data-t="tn.r2">Only the tenants they own: invite and remove members, adjust members' quotas, see the tenant's usage.</td></tr>
+            <tr><td><span class="role">user</span></td><td data-t="tn.r3">Themselves: call models, issue and revoke their own API keys, see their own usage, ask for more.</td></tr>
+          </tbody>
+        </table>
+        <div class="ask">
+          <h3 data-t="tn.ask.h">Ask for more, and it ends by itself</h3>
+          <ol class="mini">
+            <li data-t="tn.ask1">A refused member asks for a raise in the console.</li>
+            <li data-t="tn.ask2">An administrator approves an amount and an end date.</li>
+            <li data-t="tn.ask3">The grant raises the ceiling, then expires. Nobody has to remember to lower it.</li>
+          </ol>
+        </div>
+        <details class="more"><summary data-t="tn.d1">How sign-in and roles fit together</summary>
+          <div class="body"><p data-t="tn.d1p">Cognito passwords, Vouch-by-STS and <code>sk-stratoclave-*</code> API keys all resolve to the same user record, so the way someone signs in never decides their role, and no role reaches beyond its tenant. API keys carry scopes of their own (for example a key that may only call the Responses API) and a per-user cap on how many are active. Every privileged change is written as an audit event.</p></div>
+        </details>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="tags" class="band">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow" data-t="tg.eyebrow">Spend you can attribute</div>
+      <h2 data-t="tg.h">Tag the work, and the bill splits itself.</h2>
+      <p class="lede" data-t="tg.lede">Send one header with any request, and its cost is filed under that task: a nightly evaluation, a billing import, a customer. Every row carries the tokens and the price it was charged at, so each total can be recomputed, and untagged spend is kept under its own name instead of disappearing.</p>
+    </div>
+
+    <div class="tagflow rv">
+      <div class="tf-step">
+        <div class="tf-n">1</div>
+        <h3 data-t="tg.s1">Label the request</h3>
+        <div class="codewrap"><pre class="term wrap">curl https://your-deployment.cloudfront.net/v1/messages \
+  -H "x-api-key: $STRATOCLAVE_API_KEY" \
+  -H "x-sc-task-tag: nightly-eval" \
+  -d @request.json</pre></div>
+        <p class="muted" data-t="tg.s1p">A tag can never refuse a request. A malformed one is dropped, the response says why, and the request runs.</p>
+      </div>
+      <div class="tf-step">
+        <div class="tf-n">2</div>
+        <h3 data-t="tg.s2">One row per request</h3>
+        <div class="table-scroll"><table class="rows">
+          <thead><tr><th>user</th><th data-t="tg.c.req">requested</th><th data-t="tg.c.bill">billed</th><th>in</th><th>out</th><th>cost_microusd</th><th>task_tag</th></tr></thead>
+          <tbody>
+            <tr><td>u_41c9</td><td>opus-5</td><td>sonnet-5</td><td>18,422</td><td>1,163</td><td>54,223</td><td><span class="tg t1">billing-import</span></td></tr>
+            <tr><td>u_41c9</td><td>sonnet-5</td><td>sonnet-5</td><td>2,210</td><td>388</td><td>9,130</td><td><span class="tg t1">billing-import</span></td></tr>
+            <tr><td>u_8ba0</td><td>gpt-5.6-sol</td><td>gpt-5.6-sol</td><td>64,180</td><td>2,947</td><td>450,241</td><td><span class="tg t2">nightly-eval</span></td></tr>
+            <tr><td>u_8ba0</td><td>haiku-4-5</td><td>haiku-4-5</td><td>900</td><td>210</td><td>2,145</td><td><span class="tg t0">unlabelled</span></td></tr>
+          </tbody>
+        </table></div>
+        <p class="muted" data-t="tg.s2p">The first row asked for Opus and was served by Sonnet after Opus's quota ran out; both names stay on the row. No prompt or response is stored.</p>
+      </div>
+      <div class="tf-step">
+        <div class="tf-n">3</div>
+        <h3 data-t="tg.s3">Totals by task</h3>
+        <div class="tagbars" id="tagbars">
+          <div><span class="tg t2">nightly-eval</span><i style="--w:87.3%"></i><b class="mono">$0.4502</b></div>
+          <div><span class="tg t1">billing-import</span><i style="--w:12.3%"></i><b class="mono">$0.0634</b></div>
+          <div><span class="tg t0">unlabelled</span><i style="--w:.42%"></i><b class="mono">$0.0021</b></div>
+        </div>
+        <p class="muted" data-t="tg.s3p">The console shows the same totals per member and per tag for each tenant, and every user can see their own.</p>
+      </div>
+    </div>
+
+    <details class="more rv" style="margin-top:20px"><summary data-t="tg.d1">What a tag total does and does not mean</summary>
+      <div class="body">
+        <p data-t="tg.d1p">Tags attribute spend; budgets enforce it. The hard limits are the tenant pool, the user quota and the model quota, and a tag never changes what is admitted. A tag's total is a floor for the cost of that work: requests for the same work that carried no tag are counted under <code>unlabelled</code>. Amounts are kept as integer micro-dollars and turned into dollars only for display, so rounding never adds up to a different bill. Usage rows are kept for 90 days; the ledger is the charge of record.</p>
+      </div>
+    </details>
+  </div>
+</section>
+<section id="why">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="why.eyebrow">Why it exists</div>
@@ -390,7 +632,7 @@ footer a{color:var(--ink2)}
     </div>
   </div>
 </section>
-<section id="how">
+<section id="how" class="band">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="how.eyebrow">How one request moves</div>
@@ -423,7 +665,7 @@ footer a{color:var(--ink2)}
     </div>
   </div>
 </section>
-<section id="proof" class="band">
+<section id="proof">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="proof.eyebrow">Formal verification</div>
@@ -493,7 +735,7 @@ component, under the axioms stated at the top of each test file above.</pre>
       </div>
   </div>
 </section>
-<section id="models">
+<section id="models" class="band">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="models.eyebrow">Bring your own models</div>
@@ -511,74 +753,12 @@ component, under the axioms stated at the top of each test file above.</pre>
   </div>
 </section>
 
-<section id="tools" class="band">
-  <div class="wrap">
-    <div class="grid2" style="gap:48px;align-items:start">
-      <div class="rv">
-        <div class="eyebrow" data-t="tools.eyebrow">Works with your tools</div>
-        <h2 style="margin-bottom:14px" data-t="tools.h">Keep your tools. Change where they point.</h2>
-        <p class="lede" data-t="tools.lede">Three compatible APIs, so your SDKs and CLIs stay as they are.</p>
-        <ul class="endpoints">
-          <li data-t="tools.e1"><code>POST /v1/messages</code> Anthropic Messages: streaming, tool use, vision, prompt caching. Anthropic SDK, Claude Code, Claude Desktop Cowork.</li>
-          <li data-t="tools.e2"><code>POST /v1/chat/completions</code> OpenAI Chat Completions: streaming and tool calling. Unsupported parameters fail with 400 instead of being dropped.</li>
-          <li data-t="tools.e3"><code>POST /openai/v1/responses</code> OpenAI Responses, for the codex CLI, served by the OpenAI-compatible models on Bedrock.</li>
-        </ul>
-        <details class="more"><summary data-t="tools.d1">Three ways in, three roles</summary>
-          <div class="body">
-            <p data-t="tools.d1p1">Sign in with Cognito (e-mail and password), with Vouch-by-STS (no password), or with an <code>sk-stratoclave-*</code> API key. Roles are admin (the whole tenant), team_lead (their own team) and user (themselves). The way in does not decide the role, and no role reaches another tenant.</p>
-            <p data-t="tools.d1p2">With Vouch-by-STS, the CLI signs <code>sts:GetCallerIdentity</code>, the gateway forwards the signed request to STS unchanged, and trusts only the Arn, UserId and Account that STS returns. It works with <code>aws sso login</code>, saml2aws, and Entra ID, Okta or ADFS through SAML. The gateway never holds an IdP refresh token. Long-lived IAM users and EC2 instance profiles are refused by default.</p>
-          </div>
-        </details>
-        <details class="more"><summary data-t="tools.d2">Perimeter: no VPN needed</summary>
-          <div class="body"><p data-t="tools.d2p">CloudFront serves over TLS 1.2 or later with HSTS and a strict CSP. WAFv2 runs four rules: CommonRuleSet, KnownBadInputs, IpReputation and a per-IP rate limit. The S3 bucket is reachable only through Origin Access Control, and the ALB only from CloudFront.</p></div>
-        </details>
-      </div>
-      <div class="rv">
-        <div class="tabs" role="tablist" aria-label="Setup by tool" data-t-aria="tools.tablist">
-          <button role="tab" aria-selected="true" aria-controls="tp0" id="tb0">Claude Code</button>
-          <button role="tab" aria-selected="false" aria-controls="tp1" id="tb1" tabindex="-1">Anthropic SDK</button>
-          <button role="tab" aria-selected="false" aria-controls="tp2" id="tb2" tabindex="-1">OpenAI SDK</button>
-          <button role="tab" aria-selected="false" aria-controls="tp3" id="tb3" tabindex="-1">codex</button>
-        </div>
-        <div role="tabpanel" id="tp0" aria-labelledby="tb0">
-          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
-<pre class="term">stratoclave setup https://your-deployment
-stratoclave auth sso --profile your-aws-profile
-stratoclave claude -- "Summarize this repository"</pre></div>
-          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n0">Runs the real claude binary with a short-lived key. Claude Code is installed separately.</p>
-        </div>
-        <div role="tabpanel" id="tp1" aria-labelledby="tb1" hidden>
-          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
-<pre class="term">export ANTHROPIC_BASE_URL=https://your-deployment
-export ANTHROPIC_API_KEY=$STRATOCLAVE_API_KEY
-python3 -c 'import anthropic; print(anthropic.Anthropic().messages.create(model="claude-sonnet-4-6", max_tokens=64, messages=[{"role":"user","content":"Hello"}]).content[0].text)'</pre></div>
-          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n1">The application code does not change. Issue the key from the CLI or the web console.</p>
-        </div>
-        <div role="tabpanel" id="tp2" aria-labelledby="tb2" hidden>
-          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
-<pre class="term">export OPENAI_BASE_URL=https://your-deployment/openai/v1
-export OPENAI_API_KEY=$STRATOCLAVE_API_KEY
-python3 -c 'import openai; print(openai.OpenAI().responses.create(model="openai.gpt-5.6-sol", input="Hello").output_text)'</pre></div>
-          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n2">For Chat Completions, point the SDK at <code>https://your-deployment/v1</code> instead.</p>
-        </div>
-        <div role="tabpanel" id="tp3" aria-labelledby="tb3" hidden>
-          <div class="codewrap"><div class="codehead"><button class="copy" type="button" data-t="copy">Copy</button></div>
-<pre class="term">stratoclave setup https://your-deployment
-stratoclave auth sso --profile your-aws-profile
-stratoclave codex -- "Summarize this repository"</pre></div>
-          <p class="muted" style="font-size:14px;margin-top:10px" data-t="tools.n3">Mints a key that can only call the Responses API; your <code>~/.codex/config.toml</code> is untouched.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section id="console">
   <div class="wrap">
     <div class="sec-head rv">
       <div class="eyebrow" data-t="ui.eyebrow">Web console</div>
-      <h2 data-t="ui.h">Everything the ledger knows, on one screen.</h2>
-      <p class="lede" data-t="ui.lede">Admins set pools and quotas, approve new models and see where the money went. Every user sees their own usage and keys. The console ships with the stack, in English and Japanese.</p>
+      <h2 data-t="ui.h">A web console comes with it.</h2>
+      <p class="lede" data-t="ui.lede">Admins set pools and quotas, approve new models and see where the money went. Every user sees their own usage and keys. The console ships with the stack, in English and Japanese. These are real screens, with fictional data.</p>
     </div>
     <div class="gallery rv">
       <div class="shots-nav" role="tablist" aria-label="Console screens" data-t-aria="ui.nav" id="shots-nav"></div>
@@ -885,7 +1065,101 @@ Object.assign(window.__JA, {
 });
 </script>
 <script>
-window.__SHOTS = [];
+Object.assign(window.__JA, {
+'doc.title': 'Stratoclave: Amazon Bedrock のための予算ゲートウェイ',
+'nav.onboard': '導入', 'nav.tenants': 'テナント', 'nav.tags': '支出', 'nav.why': '保証', 'nav.proof': '証明', 'nav.console': '画面', 'nav.start': 'はじめる',
+
+'hero.eyebrow': 'オープンソース。あなたの AWS アカウントの中で動きます。',
+'hero.h': 'Amazon Bedrock のための、<br><span class="hl">予算ゲートウェイ</span>。',
+'hero.lede': 'URL を 1 つ配るだけで、全チームが Bedrock のモデルを使えるようになります。テナント、ユーザー、モデルごとの上限をドルで決め、呼び出しの前に確保します。どのチームがどの作業に使ったかが分かり、台帳の数字は必ず合います。',
+'hero.cta1': 'はじめる', 'hero.cta2': 'GitHub で見る',
+'st1': '回の DynamoDB トランザクションで、テナントのプール、ユーザーの枠、モデルの枠をまとめて確保',
+'st2': 'つの互換 API。Anthropic Messages、OpenAI Chat Completions、Responses',
+'st3': '件の Z3 とプロパティ検査で、お金の規則を約 10 秒で再確認',
+'st4': 'Postgres も Redis も SaaS のコントロールプレーンも、用意する必要はありません',
+
+'ob.eyebrow': '導入',
+'ob.h': '配るのは URL 1 つだけ。',
+'ob.lede': 'API と Web コンソールは、同じ CloudFront のアドレスから配信されます。利用者はその URL を CLI に渡すだけです。残りの設定は CLI が自分で取りにいき、いつもの AWS のログインでサインインでき、Claude Code も codex も SDK もそのまま動きます。',
+'ob.s1': '1 回デプロイする', 'ob.s1p': '管理者がスクリプトを 1 本実行すると、ゲートウェイとコンソールの両方を配信する CloudFront の URL が表示されます。',
+'ob.s2': 'URL を貼る', 'ob.s2p': 'インストーラが CLI を用意し、その URL の <code>/.well-known/stratoclave-config</code> から設定を読み込みます。Cognito のプール ID やクライアント ID を写す人はいません。',
+'ob.s3': 'サインインして使う', 'ob.s3p': 'AWS SSO、saml2aws、パスワードのどれかでサインインし、短時間だけ有効なキーで Claude Code や codex をゲートウェイ経由で動かします。',
+'ob.note': 'インストーラは <code>stratoclave</code> と短い別名 <code>sclv</code> を PATH に入れます。Claude Code と codex は別にインストールしてください。',
+'tools.tablist': 'ツールごとの設定例',
+'tools.n1': 'アプリのコードは変えません。キーは CLI か Web コンソールで発行します。',
+'tools.n2': 'Chat Completions を使うときは、接続先を <code>https://your-deployment.cloudfront.net/v1</code> にします。',
+'tools.n3': 'Responses API だけを呼べるキーを発行します。<code>~/.codex/config.toml</code> は書き換えません。',
+'tools.dE': '3 つのエンドポイント',
+'vs.eyebrow': 'Vouch-by-STS',
+'vs.h': 'いま使っている AWS のログインで、そのままサインイン',
+'vs.p1': 'CLI が手元で <code>sts:GetCallerIdentity</code> に署名し、その署名済みリクエストを送ります。ゲートウェイはそれを手を加えずに AWS STS へ転送し、STS が返す Arn、UserId、Account だけを信用します。AWS の認証情報はノート PC から出ていきません。ゲートウェイは IdP のリフレッシュトークンを持たないので、たとえ乗っ取られても、IAM Identity Center や SAML の IdP には手が届きません。',
+'vs.p2': '<code>aws sso login</code>、saml2aws、SAML 経由の Entra ID、Okta、ADFS で使えます。署名済みリクエストは 1 回しか受け付けません。信頼する AWS アカウントと許可するロールのパターンは、アカウントごとに決めます。長期の IAM ユーザーと EC2 インスタンスプロファイルは、既定で拒否します。HashiCorp Vault の AWS 認証と同じ方式です。',
+'vs.alt': 'Vouch-by-STS の流れ。CLI が GetCallerIdentity に署名し、ゲートウェイがリクエストを確かめて AWS STS にそのまま転送し、STS が Arn を返し、ゲートウェイがアカウントとロールを確かめてアクセストークンを発行する。',
+'vs.n1': 'CLI が GetCallerIdentity に署名', 'vs.k1': '認証情報は手元から出ない',
+'vs.n2': 'ゲートウェイがリクエストを確認', 'vs.k2': 'アクション、宛先、時刻、使い捨ての値',
+'vs.n3': 'AWS STS が署名を検証し Arn を返す', 'vs.k3': '手を加えずに転送',
+'vs.n4': 'ゲートウェイがアカウントとロールを確認', 'vs.k4': '信頼するアカウント、ロールのパターン',
+'vs.n5': 'アクセストークンを発行', 'vs.k5': 'IdP のリフレッシュトークンは持たない',
+
+'tn.eyebrow': 'テナント、チーム、枠',
+'tn.h': 'SaaS と同じ形で運用できる。テナント、役割、予算が最初からそろっている。',
+'tn.lede': 'テナントには月ごとのドル予算 (プール)、メンバーにはトークンの枠、モデルにはモデルごとのドル枠を持たせられます。チームリーダーは自分のテナントだけを管理し、ほかのテナントのデータは誰にも見えません。API でも CLI でもコンソールでも、できることは同じ役割で決まります。',
+'tn.alt': '例: 月 500 ドルのプールを持つテナント Acme Research に、チームリーダー 1 人とユーザー 2 人がそれぞれのトークン枠を持ち、モデルごとのドル枠がある。',
+'tn.tenant': 'テナント', 'tn.pool': '11 月のドル予算',
+'tn.settled': '精算済み $190.40', 'tn.reserved': '処理中 $31.20', 'tn.left': '残り $278.40',
+'tn.q1': '2,000,000 トークン', 'tn.q2': '500,000 トークン', 'tn.q3': '500,000 トークン',
+'tn.models': 'モデルごとのドル枠', 'tn.nolimit': '上限なし',
+'tn.example': '数字は例です。1 件のリクエストは、3 つの段のすべてから同じトランザクションで確保されるか、どこからも確保されないかのどちらかです。',
+'tn.role': '役割', 'tn.can': 'できること',
+'tn.r1': 'すべてのテナント。テナントとユーザーの作成、プール、枠、使えるモデルの設定、新しいモデルの承認、全体の使用量の確認。',
+'tn.r2': '自分が持つテナントだけ。メンバーの招待と削除、メンバーの枠の調整、テナントの使用量の確認。',
+'tn.r3': '自分自身。モデルの呼び出し、自分の API キーの発行と失効、自分の使用量の確認、上限の申請。',
+'tn.ask.h': '足りなくなったら申請する。上げた枠は期限が来れば戻る',
+'tn.ask1': '拒否されたメンバーが、コンソールから上限の引き上げを申請します。',
+'tn.ask2': '管理者が金額と終了日を決めて承認します。',
+'tn.ask3': '承認された分だけ上限が上がり、期限が来れば自動で元に戻ります。下げ忘れはありません。',
+'tn.d1': 'サインインの方法と役割の関係',
+'tn.d1p': 'Cognito のパスワード、Vouch-by-STS、<code>sk-stratoclave-*</code> の API キーは、どれも同じユーザーに結びつきます。どの方法で入っても役割は変わらず、どの役割もテナントの外には届きません。API キーには呼べる範囲 (例えば Responses API だけ) を個別に付けられ、1 人が持てる有効なキーの数にも上限があります。権限の必要な変更は、すべて監査イベントとして記録します。',
+
+'tg.eyebrow': '支出の内訳',
+'tg.h': '作業にタグを付ければ、請求は自動で分かれる。',
+'tg.lede': 'リクエストにヘッダーを 1 つ付けるだけで、その費用は作業ごとに集計されます。夜間の評価、請求データの取り込み、顧客ごと、といった単位です。どの行にもトークン数と課金した単価が残るので合計は計算し直せます。タグのない支出も、消えずに自分の名前で残ります。',
+'tg.s1': 'リクエストにタグを付ける',
+'tg.s1p': 'タグがリクエストを断ることはありません。形式が正しくないタグは捨てられ、その理由が応答に書かれ、リクエストはそのまま処理されます。',
+'tg.s2': '1 リクエストにつき 1 行',
+'tg.c.req': '要求', 'tg.c.bill': '課金',
+'tg.s2p': '1 行目は Opus を要求し、Opus の枠を使い切っていたため Sonnet で処理されました。両方のモデル名が行に残ります。プロンプトと応答は保存しません。',
+'tg.s3': '作業ごとの合計',
+'tg.s3p': 'コンソールでは、テナントごとに同じ合計をメンバー別、タグ別に見られます。利用者は自分の分を見られます。',
+'tg.d1': 'タグの合計が意味すること、しないこと',
+'tg.d1p': 'タグは支出を振り分けるもので、予算を強制するのはテナントのプール、ユーザーの枠、モデルの枠です。タグによって通るリクエストが変わることはありません。タグの合計は、その作業にかかった費用の下限です。同じ作業でもタグを付け忘れたリクエストは <code>unlabelled</code> に数えられるからです。金額は micro-USD の整数で持ち、表示するときだけドルに直すので、丸めの積み重ねで請求額がずれることはありません。使用ログの保持は 90 日で、課金の正本は台帳です。',
+
+'ui.eyebrow': 'Web コンソール',
+'ui.h': '管理画面も最初から付いてくる。',
+'ui.lede': '管理者はプールと枠を決め、新しいモデルを承認し、お金の行き先を確かめます。利用者は自分の使用量とキーを管理します。英語と日本語に対応したコンソールが、スタックに含まれています。下は実際の画面です (データは架空のものです)。',
+});
+</script>
+<script>
+window.__SHOTS = [
+  { id: 's1', file: '02_tenant_detail_pool', path: '/admin/tenants/…', en: 'Tenant pool', cap: 'A tenant\'s dollar pool for the month: limit, what is in flight, what has settled, and what is left. Every request reserves from it before the model is called.' },
+  { id: 's2', file: '03_usage_by_tag', path: '/admin/tenants/…/usage-by-tag', en: 'Spend by tag', cap: 'Spend split by member and by task tag, with requests, cost and tokens. Untagged spend stays visible as unlabelled.' },
+  { id: 's3', file: '01_dashboard', path: '/', en: 'Dashboard', cap: 'What every user sees first: their remaining credit, their tenant and role, and the way into each part of the console.' },
+  { id: 's4', file: '04_me_usage', path: '/me/usage', en: 'My usage', cap: 'A user\'s own history: tokens by model and the most recent requests, visible with their own permissions only.' },
+  { id: 's5', file: '07_api_keys', path: '/me/api-keys', en: 'API keys', cap: 'Issue a scoped sk-stratoclave-* key for a tool or a service, see exactly what it may call, and revoke it at once if it leaks.' },
+  { id: 's6', file: '06_model_discovery_candidates', path: '/admin/discovery/candidates', en: 'New models', cap: 'Models found on your account\'s Bedrock access, each verified with a real call, per invocation mode, before anyone can use it.' },
+  { id: 's7', file: '05_pricing', path: '/admin/pricing', en: 'Pricing', cap: 'The effective price of every model and token kind: the reviewed defaults, with any operator override on top.' },
+  { id: 's8', file: '08_trusted_accounts', path: '/admin/trusted-accounts', en: 'Trusted accounts', cap: 'The AWS accounts whose SSO and STS sign-ins are accepted, with the provisioning policy and allowed role patterns for each.' },
+];
+Object.assign(window.__JA, {
+  'ui.s1': 'テナントのプール', 'ui.s1.cap': 'テナントの今月のドル予算 (プール)。上限、処理中の確保、精算済み、残りが一目で分かります。リクエストはモデルを呼ぶ前に、ここから確保します。',
+  'ui.s2': 'タグ別の支出', 'ui.s2.cap': 'メンバーごと、タスクのタグごとに、件数、金額、トークン数を集計します。タグのない支出も「unlabelled」として残ります。',
+  'ui.s3': 'ダッシュボード', 'ui.s3.cap': 'ログインして最初に見る画面です。残りのクレジット、所属テナントと役割、各機能への入り口が並びます。',
+  'ui.s4': '自分の使用量', 'ui.s4.cap': '自分の使用履歴です。モデル別のトークン数と直近のリクエストを、自分の権限の範囲だけで確認できます。',
+  'ui.s5': 'API キー', 'ui.s5.cap': 'ツールやサービス用に、呼べる範囲を絞った sk-stratoclave-* のキーを発行します。何を呼べるかを確かめられ、漏れたらすぐ失効できます。',
+  'ui.s6': '新しいモデル', 'ui.s6.cap': 'アカウントの Bedrock で使えるモデルを見つけ、呼び出し方式ごとに実際に 1 回呼んで確かめてから、利用を許可します。',
+  'ui.s7': '料金', 'ui.s7.cap': 'モデルとトークンの種類ごとの実効単価です。レビュー済みの既定値に、運用者の上書きを重ねて表示します。',
+  'ui.s8': '信頼する AWS アカウント', 'ui.s8.cap': 'SSO と STS でのサインインを受け入れる AWS アカウントの一覧です。アカウントごとに、ユーザーの作り方と許可するロールのパターンを決めます。',
+});
 </script>
 <script>
 (() => {
@@ -1256,6 +1530,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, RM.matches ? 0 : ms));
   nav.addEventListener('pointerdown', () => { user = true; });
   new IntersectionObserver((es) => { for (const e of es) { on = e.isIntersecting; auto(); } }, { threshold: .3 }).observe(view);
   document.addEventListener('langchange', () => show(cur));
+  view.style.cursor = 'zoom-in';
+  view.title = 'Open full size';
+  view.addEventListener('click', () => { const im = imgs[cur]; if (im && im.src) window.open(im.src, '_blank', 'noopener'); });
   show(0);
 })();
 
@@ -1430,6 +1707,44 @@ function clear(svg) { for (const c of [...svg.childNodes]) if (c.nodeName !== 't
   svg.addEventListener('pointerenter', wake); svg.addEventListener('focus', wake);
   svg.addEventListener('pointerleave', rest); svg.addEventListener('blur', rest);
   new IntersectionObserver((es) => { for (const e of es) { on = e.isIntersecting; if (on) tick(); else clearTimeout(timer); } }, { threshold: .2 }).observe(svg);
+})();
+/* ---------- Vouch-by-STS: five steps, a token walks them once when seen ---------- */
+(() => {
+  const svg = $('#vouch-svg'); if (!svg) return;
+  let walked = false;
+  function build() {
+    clear(svg);
+    svg.setAttribute('viewBox', '0 0 460 470');
+    const roles = ['', 'on', '', 'on', 'ok'];
+    const y0 = 14, H = 70, gap = 22, x = 14, w = 432;
+    el('path', { class: 'wire', d: `M${x + 30} ${y0 + H} V ${y0 + 4 * (H + gap)}`, fill: 'none', stroke: 'var(--line)', 'stroke-width': 2 }, svg);
+    for (let i = 0; i < 5; i++) {
+      const y = y0 + i * (H + gap);
+      const g = el('g', { class: 'vs-node', 'data-i': i }, svg);
+      el('rect', { x, y, width: w, height: H, rx: 14, fill: i === 2 ? 'var(--shade)' : 'var(--card)', stroke: i === 4 ? 'var(--accent)' : 'var(--line)', 'stroke-width': 1.5 }, g);
+      el('circle', { cx: x + 30, cy: y + H / 2, r: 13, fill: i === 4 ? 'var(--accent)' : 'var(--bg)', stroke: i === 4 ? 'var(--accent)' : 'var(--ink2)', 'stroke-width': 1.5 }, g);
+      el('text', { x: x + 30, y: y + H / 2 + 5, 'text-anchor': 'middle', style: 'font-size:13px;fill:' + (i === 4 ? 'var(--bg)' : 'var(--ink)') }, g, String(i + 1));
+      el('text', { x: x + 58, y: y + 30 }, g, label('vs.n' + (i + 1)));
+      el('text', { class: 's', x: x + 58, y: y + 52 }, g, label('vs.k' + (i + 1)));
+    }
+  }
+  function walk() {
+    if (walked || RM.matches) return; walked = true;
+    $$('.vs-node', svg).forEach((g, i) => {
+      g.style.opacity = '0'; g.style.transform = 'translateY(8px)'; g.style.transition = 'opacity .45s ease, transform .45s ease';
+      setTimeout(() => { g.style.opacity = '1'; g.style.transform = 'none'; }, 200 + i * 260);
+    });
+  }
+  build();
+  document.addEventListener('langchange', () => { build(); });
+  new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting) walk(); }, { threshold: .4 }).observe(svg);
+})();
+
+/* ---------- tag totals grow when seen ---------- */
+(() => {
+  const b = $('#tagbars'); if (!b) return;
+  if (RM.matches) { b.classList.add('in'); return; }
+  new IntersectionObserver((es, o) => { for (const e of es) if (e.isIntersecting) { b.classList.add('in'); o.disconnect(); } }, { threshold: .5 }).observe(b);
 })();
 })();
 </script>
