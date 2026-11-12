@@ -43,7 +43,9 @@ import { cn } from '@/lib/utils'
  * i18n. The backend's `mode_sentence` is English prose for API callers; rendering
  * it here put an untranslated paragraph on the Japanese screen, and its "send
  * {"follow_seats": true} to this endpoint" is an instruction for a different
- * client than the one that has a button for it.
+ * client than the one that has a button for it. The backend's clause about an
+ * entitlement that outgrew the figure is not repeated in the sentence: the card
+ * shows it as its own line (`pool-entitlement-outgrew`).
  */
 export interface PoolBudgetApi {
   setPoolBudget: (
@@ -69,6 +71,8 @@ export function PoolBudgetCard({
 }) {
   const { t } = useTranslation()
   const [dialogOpen, setDialogOpen] = useState(false)
+  // One predicate for the follow-seats button and for the sentence that names it.
+  const canResume = Boolean(pool?.resume_action)
 
   return (
     <Card data-testid="pool-budget-card">
@@ -105,9 +109,18 @@ export function PoolBudgetCard({
                     entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
                   })
                 : t('admin_tenant_detail.pool.mode_manual', {
-                    figure: fmtMicroUsd(pool.manual_limit_microusd ?? pool.baseline_microusd),
+                    // The backend's sentence prints `manual_limit_microusd or 0`; so does
+                    // this one, so a missing figure is never shown as some other number.
+                    figure: fmtMicroUsd(pool.manual_limit_microusd ?? 0),
                     entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
                   })}
+              {/* Names the button only where the button is rendered (same predicate). */}
+              {!pool.seat_tracked && canResume
+                ? ' ' +
+                  t('admin_tenant_detail.pool.mode_manual_resume', {
+                    button: t('admin_tenant_detail.pool.follow_seats_button'),
+                  })
+                : null}
             </p>
             <dl
               className="grid gap-x-6 gap-y-3 sm:grid-cols-2"
@@ -199,7 +212,7 @@ export function PoolBudgetCard({
             ) : null}
             {/* The reversal, offered wherever the latch is visible. A figure used
                 to be permanent because no request could undo it. */}
-            {pool.resume_action ? (
+            {canResume ? (
               <FollowSeatsButton
                 tenantId={tenantId}
                 period={pool.period}

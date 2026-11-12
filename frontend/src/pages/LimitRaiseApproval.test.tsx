@@ -50,6 +50,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import i18n from '@/lib/i18n'
 
 // This component reads `usePermissions()` (for `isAdmin`, which picks the
 // `api.admin` vs `api.teamLead` route namespace), which in turn requires an
@@ -351,8 +352,12 @@ describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume a
     const sentence = await screen.findByTestId('pool-mode-sentence')
     expect(sentence.textContent).toContain('$40.00')
     expect(sentence.textContent).toContain('$600.00')
-    expect(sentence.textContent).toContain('Follow the seat count again')
+    expect(POOL_FIXTURE.mode_sentence).not.toBe('')
     expect(sentence.textContent).not.toContain(POOL_FIXTURE.mode_sentence)
+    // The sentence names the follow-seats button, so that button must be on this page.
+    const label = i18n.t('admin_tenant_detail.pool.follow_seats_button')
+    expect(sentence.textContent).toContain(label)
+    expect(screen.getByTestId('pool-follow-seats-button').textContent).toContain(label)
   })
 
   it('renders the seat entitlement (seat count), not just the derived microusd figure', async () => {
