@@ -94,13 +94,15 @@ export interface EcsStackProps extends cdk.StackProps {
    * Activates the live pricing subsystem (docs/design/price-feeds.md). Sets
    * `STRATOCLAVE_PRICE_SOURCE` to this value (e.g. `"bedrock-live"`) on the task
    * definition, AND is the switch that decides whether the read-only
-   * price-discovery IAM statement (`bedrock:ListFoundationModelAgreementOffers`,
-   * `pricing:GetProducts`) is attached to the task role at all — the two are
-   * gated on the same prop so a deployment cannot carry the permission with no
-   * variable naming a source to use it, or the variable with no permission to
-   * fetch. Absent/undefined => neither is present, and `active_source_name()`
-   * resolves to the bundled `json` source exactly as it does today (feature
-   * ships dark).
+   * price-discovery IAM statement for the Price List API (`pricing:GetProducts`)
+   * is attached to the task role at all — the two are gated on the same prop so
+   * a deployment cannot carry the permission with no variable naming a source to
+   * use it, or the variable with no permission to fetch. Absent/undefined =>
+   * `pricing:GetProducts` is not granted, and `active_source_name()` resolves to
+   * the bundled `json` source exactly as it does today (feature ships dark).
+   * `bedrock:ListFoundationModelAgreementOffers` is NOT gated on this prop — see
+   * the `AllowBedrockReadOnly` statement, further down, for why the probe needs
+   * it unconditionally.
    */
   priceSource?: string;
 
@@ -764,6 +766,16 @@ export class EcsStack extends cdk.Stack {
     // Bedrock read-only operations (model discovery / /v1/models).
     // ListFoundationModels / ListInferenceProfiles do not support
     // resource-level scoping, so the resource list stays at `*`.
+    //
+    // `ListFoundationModelAgreementOffers` belongs here, unconditionally, rather than
+    // only inside `AllowReadOnlyPriceDiscovery` below (gated on `props.priceSource`):
+    // the probe's own assertion 0 (#281 item 2, `mvp.discovery.probe` ->
+    // `mvp.discovery.reconcile.derive_selection`) calls this API on every promotion
+    // attempt, in the SAME task role, regardless of whether the live price-feed
+    // subsystem is turned on. A deployment with no `priceSource` configured must
+    // still be able to verify a pricing key against AWS, or every probe fails closed
+    // (`pricing_rate_unverifiable`) for a reason that has nothing to do with the
+    // binding being checked.
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowBedrockReadOnly',
@@ -773,6 +785,7 @@ export class EcsStack extends cdk.Stack {
           'bedrock:ListInferenceProfiles',
           'bedrock:GetFoundationModel',
           'bedrock:GetInferenceProfile',
+          'bedrock:ListFoundationModelAgreementOffers',
         ],
         resources: ['*'],
       }),
@@ -847,17 +860,15 @@ export class EcsStack extends cdk.Stack {
     // Read-only price discovery for the live rate feed
     // (`STRATOCLAVE_PRICE_SOURCE=bedrock-live`, see docs/design/price-feeds.md).
     //
-    // Two APIs, because Bedrock publishes its prices in two places and neither covers
-    // everything: `ListFoundationModelAgreementOffers` carries the Marketplace-metered
-    // families (every current Claude model, and GPT-5.x) while the Price List carries
-    // the ones AWS bills directly (Nova, Llama, Mistral, Qwen, Grok, ...).
+    // Only `pricing:GetProducts` (the Price List API, for the families AWS bills
+    // directly: Nova, Llama, Mistral, Qwen, Grok, ...) is gated here. The Marketplace-
+    // metered families' own API, `bedrock:ListFoundationModelAgreementOffers`, is
+    // granted unconditionally above (`AllowBedrockReadOnly`) — the probe's assertion 0
+    // needs it whether or not this feed is turned on; see that statement's comment.
     //
     // `bedrock:CreateFoundationModelAgreement` is deliberately NOT granted. The
     // agreement response carries a signed `offerToken` that that action consumes, so
-    // granting it would turn reading a price into subscribing to a paid product. Both
-    // actions here are reads; neither is resource-scopeable in a way that has been
-    // tested, so they follow the `*` precedent above rather than a guess that fails
-    // closed at refresh time.
+    // granting it would turn reading a price into subscribing to a paid product.
     //
     // Gated on `props.priceSource`, same as the env vars built below: this statement
     // and `STRATOCLAVE_PRICE_SOURCE` are the two halves of turning the subsystem on,
@@ -871,7 +882,6 @@ export class EcsStack extends cdk.Stack {
           sid: 'AllowReadOnlyPriceDiscovery',
           effect: iam.Effect.ALLOW,
           actions: [
-            'bedrock:ListFoundationModelAgreementOffers',
             'pricing:GetProducts',
           ],
           resources: ['*'],

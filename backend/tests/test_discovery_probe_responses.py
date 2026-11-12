@@ -71,12 +71,14 @@ def _rate_card_for(pricing_key: str) -> list[dict]:
 @pytest.fixture(autouse=True)
 def _default_agreement_rate_matches(monkeypatch: pytest.MonkeyPatch):
     """See `test_discovery_probe.py`'s identical fixture: patches assertion
-    0's control-plane client, autouse, to answer with `REAL_PRICING_KEY`'s own
-    published rate so every test in this file that is not itself about
-    assertion 0 is unaffected by its addition."""
+    0's shared client builder (`mvp.discovery.gates._bedrock_client`),
+    autouse, to answer with `REAL_PRICING_KEY`'s own published rate so every
+    test in this file that is not itself about assertion 0 is unaffected by
+    its addition."""
+    default_fake = _FakeAgreementClient(_rate_card_for(REAL_PRICING_KEY))
     monkeypatch.setattr(
-        "mvp.discovery.probe._default_agreement_client",
-        lambda region: _FakeAgreementClient(_rate_card_for(REAL_PRICING_KEY)),
+        "mvp.discovery.gates._bedrock_client",
+        lambda client=None, *, region=None: client if client is not None else default_fake,
     )
 
 MEASURED_USAGE = {
@@ -227,6 +229,37 @@ class TestAVerifiedResponsesProbe:
             http=_client(handler),
         )
         assert result.passed is True, result.blocker
+
+    def test_a_wrong_cheaper_tier_is_refused_before_any_responses_call(
+        self, _system_tenant_pool
+    ):
+        """Assertion 0 (#281 item 2) applies to the `responses` wire protocol
+        exactly as it does to `messages` -- it runs before ANY transport call,
+        so the `/responses` endpoint must never be reached for a wrong-tier
+        key. `"haiku"` is a real, resolvable key that prices every dimension
+        this record's model counts, strictly cheaper than `REAL_PRICING_KEY`
+        ("gpt-5.6-sol", this file's default agreement-client answer) on every
+        leg."""
+        calls: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+            calls.append(request)
+            return httpx.Response(200, json={"status": "completed", "usage": MEASURED_USAGE})
+
+        from mvp.discovery.probe import probe
+
+        result = probe(
+            _record(),
+            _candidate(pricing_key="haiku", wire_protocol="responses"),
+            invocation=SYNC,
+            http=_client(handler),
+        )
+        assert result.passed is False
+        assert result.verdict is None
+        assert result.blocker is not None
+        assert result.blocker.type == "protocol_unverified"
+        assert result.blocker.subtype == "pricing_key_rate_mismatch"
+        assert calls == [], "the /responses endpoint must never be reached"
 
 
 class TestWhatMustNotBeSettled:

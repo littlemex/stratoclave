@@ -13,7 +13,12 @@ import { EcsStack } from '../lib/ecs-stack';
  * Interface (CONTRACT.md, resolved): with the source unset, the synthesised
  * template must be byte-for-byte what it was before this change -- no
  * `STRATOCLAVE_PRICE_SOURCE` environment entry, no `AllowReadOnlyPriceDiscovery`
- * IAM statement. With the source selected, both must appear. The three feed knobs
+ * IAM statement granting `pricing:GetProducts`. With the source selected, both
+ * must appear. `bedrock:ListFoundationModelAgreementOffers` is a SEPARATE case
+ * (#281 item 2): it is granted unconditionally regardless of `priceSource`, since
+ * the probe's own assertion 0 needs it on every promotion attempt whether or not
+ * the live price-feed subsystem this file is otherwise about is turned on. The
+ * three feed knobs
  * (`STRATOCLAVE_PRICE_FEED_INTERVAL_SECONDS`, `STRATOCLAVE_PRICE_FEED_BUDGET_SECONDS`,
  * `STRATOCLAVE_PRICE_FEED_STALE_AFTER_SECONDS`) are part of what "the task
  * definition carries" alongside the source: present on the task definition when
@@ -62,12 +67,8 @@ function synth(opts: {
   return Template.fromStack(stack);
 }
 
-/** True if any IAM policy statement in the synthesized template is the read-only
- * price-discovery statement (`bedrock:ListFoundationModelAgreementOffers` +
- * `pricing:GetProducts`). Matched on the action pair rather than `Sid`, so a code
- * author who renames the `Sid` while gating it does not accidentally pass this by
- * losing the match. */
-function hasPriceDiscoveryStatement(template: Template): boolean {
+/** True if any IAM policy statement in the synthesized template grants `action`. */
+function hasAction(template: Template, action: string): boolean {
   const policies = template.findResources('AWS::IAM::Policy');
   return Object.values(policies).some((policy: any) => {
     const statements = policy.Properties?.PolicyDocument?.Statement ?? [];
@@ -75,12 +76,19 @@ function hasPriceDiscoveryStatement(template: Template): boolean {
       const actions: string[] = Array.isArray(statement.Action)
         ? statement.Action
         : [statement.Action];
-      return (
-        actions.includes('pricing:GetProducts') &&
-        actions.includes('bedrock:ListFoundationModelAgreementOffers')
-      );
+      return actions.includes(action);
     });
   });
+}
+
+/** True if any IAM policy statement in the synthesized template grants the gated
+ * Price List read (`pricing:GetProducts`) — the half of the former price-discovery
+ * pair that is still gated on `priceSource`. `bedrock:ListFoundationModelAgreementOffers`
+ * moved to the unconditional `AllowBedrockReadOnly` statement (#281 item 2: the
+ * probe's own assertion 0 needs it regardless of the live price-feed source), and
+ * is checked separately, below, in both scenarios. */
+function hasPriceDiscoveryStatement(template: Template): boolean {
+  return hasAction(template, 'pricing:GetProducts');
 }
 
 /** The value of `envName` on the (single) backend container, or `undefined` if not
@@ -161,6 +169,22 @@ describe('EcsStack price-feeds deployment (M16)', () => {
       expect(hasEnvVar(template, 'STRATOCLAVE_PRICE_SOURCE')).toBe(
         hasPriceDiscoveryStatement(template),
       );
+    },
+  );
+
+  // #281 item 2: the probe's assertion 0 reads `bedrock:ListFoundationModelAgreementOffers`
+  // on every promotion attempt, independent of the live price-feed subsystem this file
+  // otherwise tests. A deployment with no `priceSource` configured must still carry this
+  // permission, or every probe fails closed for a reason that has nothing to do with the
+  // binding being checked.
+  test.each([
+    ['with the source selected', { priceSource: 'bedrock-live' }],
+    ['without the source selected', {}],
+  ] as const)(
+    'bedrock:ListFoundationModelAgreementOffers is granted unconditionally (%s)',
+    (_label, opts) => {
+      const template = synth(opts);
+      expect(hasAction(template, 'bedrock:ListFoundationModelAgreementOffers')).toBe(true);
     },
   );
 });

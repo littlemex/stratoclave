@@ -145,12 +145,14 @@ def _rate_card_for(pricing_key: str) -> list[dict]:
 @pytest.fixture(autouse=True)
 def _default_agreement_rate_matches(monkeypatch: pytest.MonkeyPatch):
     """See `test_discovery_probe.py`'s identical fixture: patches assertion 0's
-    control-plane client, autouse, to answer with `_PRICING_KEY`'s own
-    published rate so every probe-route test in this file that is not itself
-    about assertion 0 is unaffected by its addition."""
+    shared client builder (`mvp.discovery.gates._bedrock_client`), autouse,
+    to answer with `_PRICING_KEY`'s own published rate so every probe-route
+    test in this file that is not itself about assertion 0 is unaffected by
+    its addition."""
+    default_fake = _FakeAgreementClient(_rate_card_for(_PRICING_KEY))
     monkeypatch.setattr(
-        "mvp.discovery.probe._default_agreement_client",
-        lambda region: _FakeAgreementClient(_rate_card_for(_PRICING_KEY)),
+        "mvp.discovery.gates._bedrock_client",
+        lambda client=None, *, region=None: client if client is not None else default_fake,
     )
 
 
@@ -714,6 +716,38 @@ def test_a_passing_probe_returns_200_verified_and_a_non_zero_charge(
     assert body.get("charged_microusd", 0) > 0, (
         "assertion 4 requires a non-zero charge, not merely a successful call"
     )
+
+
+def test_a_wrong_cheaper_tier_is_refused_through_the_admin_route_before_any_charge(
+    dynamodb_mock, _system_tenant_pool, monkeypatch,
+):
+    """Assertion 0 (#281 item 2), exercised through the actual HTTP route
+    rather than the domain function directly -- the shape this file commits
+    to elsewhere. `"haiku"` is a real, resolvable key, strictly cheaper than
+    `_PRICING_KEY` ("opus", this file's default agreement-client answer) on
+    every leg, and must be refused before the `bedrock-runtime` double is
+    ever called."""
+    profile_id = "us.acme.wrong-tier-probe-v1"
+    put_discovered_record(_record(profile_id))
+    put_promotion_candidate(
+        _candidate(profile_id, alias="acme-wrong-tier-probe-v1", pricing_key="haiku")
+    )
+
+    fake = _FakeBedrockRuntime(response=_valid_converse_response())
+    _patch_bedrock(monkeypatch, fake)
+
+    client = _client_as(dynamodb_mock, ["admin"])
+    resp = client.post(
+        f"/api/mvp/admin/discovery/candidates/{profile_id}/probe", json={"invocation": SYNC},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("passed") is False, body
+    assert body.get("verdict") is None
+    blocker = body.get("blocker") or {}
+    assert blocker.get("type") == "protocol_unverified"
+    assert blocker.get("subtype") == "pricing_key_rate_mismatch"
+    assert fake.calls == [], "the bedrock-runtime double must never be called"
 
 
 def test_probe_refuses_once_the_current_record_is_blocked_even_though_the_candidate_predates_it(

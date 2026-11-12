@@ -33,14 +33,18 @@ is the one check against something other than the human who typed it:
 `mvp.discovery.reconcile.derive_selection` (the SAME selector a reconciliation
 pass already runs to suggest a key, asked fresh, at probe time, not trusted
 from whenever that pass ran) against AWS's own published rate card for this
-record's model, leg by leg. A leg the selector widened — priced outside the
-region or scope asked for, at the dearer stand-in `dimensions.select()`
-returns for exactly that case — is not compared: it is already inflated past
-the true in-scope number by construction, and holding a correct, cheaper,
-in-scope rate to that inflated number would fail it for no reason but the
-widening. A leg AWS prices nowhere is not compared either. Of what remains,
-the direction checked is one-sided: `pricing_key` resolving BELOW what AWS
-publishes fails (`pricing_key_rate_mismatch`) — under-charging is the one
+record's model, leg by leg. Every leg the card prices is compared, including
+one `dimensions.select()` had to widen — the best available number across
+every region and scope on the card is still the best evidence this build has,
+and a card published under only one scope (a single-region card, a `global.`-
+only publication for a `us.` profile) must not verify with nothing compared
+on the legs that matter: `select()` itself refuses to answer at all unless
+`input` and `output` both resolve, so those two legs are never absent from
+the comparison. A leg AWS prices NOWHERE on the card — no row at any region or
+scope — is not compared, because there is no number, widened or not, to
+compare it to. Of what remains, the direction checked is one-sided:
+`pricing_key` resolving BELOW what AWS publishes fails
+(`pricing_key_rate_mismatch`) — under-charging is the one
 direction the standing rule (#281 item 1; `mvp.pricing._floored_default`)
 never allows. Resolving ABOVE is not re-litigated here, for the same reason
 `dimensions.select()` itself treats over-charging as the safe residual
@@ -56,6 +60,12 @@ scope for THIS verification path, not a model this path has cleared. Run
 before the hold opens and before any Converse/`/responses` call, because it
 needs no usage at all — only the two rates — so a wrong-tier key is caught
 for free, not at the cost of the call it would otherwise still spend.
+**Residual, named rather than solved here:** this checks the rate `pricing_key`
+resolves to AT THIS PROBE, and `ProbeVerdict` binds the key's NAME
+(`pricing_key_at_verification`), not the rate value this assertion compared —
+an admin who lowers that key's rate between a passing probe and activation is
+not caught by this clause. See `docs/design/CONTRACTS.md` C7.8 for the same
+sentence kept next to the clause it is about.
 
 **Signature note, reported rather than invented.** The master contract's
 Interface section writes this as `probe(record, *, mode) -> ProbeResult`. A
@@ -256,23 +266,6 @@ def _default_bedrock_client(region: str):
     from .. import _bedrock_clients
 
     return _bedrock_clients.bedrock_runtime_client(region)
-
-
-def _default_agreement_client(region: str):
-    """A fresh `bedrock` CONTROL-PLANE client for `region` — a different AWS
-    service from `_default_bedrock_client`'s `bedrock-runtime` above, built
-    separately rather than reused, because the two answer completely
-    different calls: `bedrock-runtime.converse` is what assertions 1-4 spend
-    money against, `bedrock.list_foundation_model_agreement_offers` is the
-    free, control-plane read assertion 0 (above) checks `pricing_key` against,
-    through `mvp.discovery.gates.fetch_rate_card` (via `mvp.discovery.
-    reconcile.derive_selection`). Not memoized like its sibling: this client
-    is used once per probe call rather than per request, so the pooling this
-    module's `bedrock-runtime` accessor exists for does not apply here.
-    """
-    import boto3
-
-    return boto3.client("bedrock", region_name=region)
 
 
 def _drain_converse_stream(resp: dict) -> Optional[dict]:
@@ -580,9 +573,11 @@ def probe(
     that belongs to the OTHER transport raises `TypeError` rather than being ignored --
     dropping it silently is how a test suite ends up minting a real bearer and billing a
     real call. `agreement_client` is independent of both: it is a `bedrock` CONTROL-PLANE
-    client (see `_default_agreement_client`), read by assertion 0 regardless of which
-    transport `wire_protocol` names, so it is exempt from the other-transport refusal
-    above.
+    client, passed straight through to `mvp.discovery.reconcile.derive_selection` ->
+    `mvp.discovery.gates.fetch_rate_card`, which already builds a real one when `None` is
+    supplied (`gates._bedrock_client`) — this module adds no second builder for it. Read
+    by assertion 0 regardless of which transport `wire_protocol` names, so it is exempt
+    from the other-transport refusal above.
     """
     if invocation not in INVOCATION_VALUES:
         raise ValueError(f"unknown invocation {invocation!r}; must be one of {sorted(INVOCATION_VALUES)}")
@@ -644,16 +639,22 @@ def probe(
     from ..pricing_feeds.dimensions import base_model_id, scope_for_model_id
     from .reconcile import derive_selection
 
+    # The rate `pricing_key` resolves to, frozen here and reused for everything below —
+    # assertion 0's comparison AND assertion 3/4's mapping and charge — rather than a
+    # second, later `snapshot_rates(pricing_key)` call that could read a different
+    # version if an admin flips `CURRENT` in between. One read, one rate, for the whole
+    # call.
+    rate_snapshot = snapshot_rates(pricing_key)
+
     # Assertion 0 — price (#281 item 2). Needs no usage and opens no hold, so it
     # runs first: a wrong-tier key is refused for free instead of at the cost of
     # the call assertions 1-4 would otherwise still spend. See the module
     # docstring's own "Assertion 0" section for the full reasoning; this is the
     # mechanical half of it.
-    agreement = agreement_client or _default_agreement_client(region)
     derived, derivation_blocker = derive_selection(
         base_model_id(record.raw_id),
         candidate_regions=record.destination_regions or (region,),
-        scope=scope_for_model_id(record.raw_id), bedrock=agreement,
+        scope=scope_for_model_id(record.raw_id), bedrock=agreement_client, region=region,
     )
     if derivation_blocker is not None:
         return _failure(
@@ -662,14 +663,26 @@ def probe(
             f"check pricing_key={pricing_key!r} against: {derivation_blocker.type}/"
             f"{derivation_blocker.subtype} — {derivation_blocker.evidence}",
         )
-    resolved_for_check = snapshot_rates(pricing_key)
+    # Every leg `derived` prices is compared, widened or not. A `widened` leg is the
+    # DEAREST number `dimensions.select()` could find for this token class across every
+    # region/scope on the card -- the best available evidence, not necessarily dearer
+    # than a true, unpublished in-scope price -- so excluding it would let a model
+    # published only under one scope (a `global.`-only card for a `us.` profile, a
+    # single-region card) verify with NOTHING compared on the legs that matter most,
+    # which is the exact silent-pass #281 item 2 is about. `select()` itself guarantees
+    # `input` and `output` are always present when `derived` is not `None` (it refuses
+    # otherwise), so this comparison is never vacuous on the two legs every request
+    # bills. A leg `derived` has no number for AT ALL (the provider publishes none, ever)
+    # is still not compared -- there is nothing to compare it to, not a dearer stand-in.
+    compared = [
+        leg for leg in BILLABLE_LEGS if leg.name in derived.rates
+    ]
     rate_mismatches = [
         f"{leg.name}: pricing_key={pricing_key!r} resolves to "
-        f"{getattr(resolved_for_check, leg.rate_field)} micro-USD/MTok, AWS "
+        f"{getattr(rate_snapshot, leg.rate_field)} micro-USD/MTok, AWS "
         f"publishes {_to_micro(derived.rates[leg.name])}"
-        for leg in BILLABLE_LEGS
-        if leg.name in derived.rates and leg.name not in derived.widened
-        and getattr(resolved_for_check, leg.rate_field) + _RATE_MATCH_TOLERANCE_MICROUSD
+        for leg in compared
+        if getattr(rate_snapshot, leg.rate_field) + _RATE_MATCH_TOLERANCE_MICROUSD
         < _to_micro(derived.rates[leg.name])
     ]
     if rate_mismatches:
@@ -677,6 +690,16 @@ def probe(
             invocation, "pricing_key_rate_mismatch",
             f"pricing_key={pricing_key!r} under-charges against AWS's own published "
             f"rate for {record.raw_id!r}: " + "; ".join(rate_mismatches),
+        )
+    if not compared:
+        # Defensive, not reachable today: `select()`'s own contract guarantees `input`
+        # and `output` are both in `derived.rates` whenever `derived` is not `None`. If
+        # that contract is ever loosened, a rate with nothing comparable must still
+        # refuse rather than pass silently with zero legs checked.
+        return _failure(
+            invocation, "pricing_rate_unverifiable",
+            f"{record.raw_id!r}'s derived rate carried no leg this build could compare "
+            f"pricing_key={pricing_key!r} against",
         )
 
     # Everything that can raise and does not need the hold runs BEFORE it. A rate-table
@@ -758,7 +781,10 @@ def probe(
             attempt.evidence or "the response carried no readable usage block",
         )
 
-    rate_snapshot = snapshot_rates(pricing_key)
+    # `rate_snapshot` was already frozen above, before assertion 0 -- reused here
+    # rather than read again, so the mapping/charge below and the magnitude check
+    # above are provably the same rate, never two reads that could straddle an
+    # admin's `CURRENT` flip.
 
     # Assertion 3: mapping. A leg the snapshot prices at a rate of exactly
     # zero is not projected — the same "zero legs are real" reading E6's own

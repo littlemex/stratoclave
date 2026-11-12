@@ -346,6 +346,7 @@ def _build_card(
 
 def derive_selection(
     model_id: str, *, candidate_regions: Iterable[str], scope: Optional[str], bedrock,
+    region: Optional[str] = None,
 ) -> tuple[Optional[Selection], Optional[Blocker]]:
     """The same card -> `Selection` pipeline `build_record` uses to mint a pricing
     key, exposed so a SECOND caller that already knows a model id, its candidate
@@ -355,23 +356,31 @@ def derive_selection(
     duplicated). `mvp.discovery.probe`'s rate-magnitude assertion (#281 item 2) is
     that second caller: it asks AWS fresh, at probe time, rather than trusting
     whatever this function answered during the reconciliation pass that suggested
-    a key, because a price this gateway is about to charge from has to be
-    verified at the moment it goes live, not at the moment it was first
-    suggested.
+    a key, because the live price can have moved since that pass ran.
+
+    `bedrock` is the SAME `client=`/`region=` seam `fetch_rate_card` already
+    exposes — pass `None` to let it build a real control-plane `bedrock` client
+    via `gates._bedrock_client`, which is also what a caller supplying no client
+    at all gets; this module adds no second client builder for it. `region`
+    is forwarded verbatim and matters only when `bedrock` is `None` -- a test or
+    a caller that already has a client ignores it, the same way `fetch_rate_card`
+    does.
 
     Returns `(selection, None)` once a card resolves to a usable input/output
     price, or `(None, blocker)` naming why it does not: `no_agreement_offer` or
-    `no_model_access` (`fetch_rate_card` could not read a card at all),
-    `price_dimensions_unknown` (a row parsed into neither a price nor a
-    recognised exclusion), or `no_token_pricing` (the card parsed completely and
-    still carries no usable input/output price). Never raises for any of these —
-    see `fetch_rate_card`'s own docstring for why a card that cannot be read is
-    reported, not an exception. Does NOT check `agreement_offers_method_missing`
-    or any per-pass `rate_card_api_unavailable` short-circuit itself — those are
-    `run_pass`'s own "ask the environment once, not once per caller" concerns,
-    and `build_record`, below, still applies them before ever reaching here.
+    `no_model_access` (`fetch_rate_card` could not read a card at all, including
+    an old botocore with no `list_foundation_model_agreement_offers` method —
+    `fetch_rate_card` checks that itself, for every caller, not only `run_pass`'s
+    own once-per-pass optimisation), `price_dimensions_unknown` (a row parsed
+    into neither a price nor a recognised exclusion), or `no_token_pricing` (the
+    card parsed completely and still carries no usable input/output price).
+    Never raises for any of these — see `fetch_rate_card`'s own docstring for why
+    a card that cannot be read is reported, not an exception. Does NOT apply
+    `run_pass`'s own per-pass `rate_card_api_unavailable` short-circuit itself —
+    that is one fact about an entire PASS asking N times, not about asking once,
+    and `build_record`, below, still applies it before ever reaching here.
     """
-    rate_card, agreement_blocker = fetch_rate_card(model_id, client=bedrock)
+    rate_card, agreement_blocker = fetch_rate_card(model_id, client=bedrock, region=region)
     if agreement_blocker is not None:
         return None, agreement_blocker
     tokens_blocker = gate_card_prices_tokens(rate_card or [])
