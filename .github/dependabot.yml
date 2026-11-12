@@ -224,3 +224,10 @@ updates:
           - "*"
         update-types:
           - "major"
+    ignore:
+      # rustyline 19 uses the `cfg_select!` macro, which is not stable on the
+      # toolchain pinned in rust-toolchain.toml (1.94.1): the build fails with
+      # E0658 "use of unstable library feature `cfg_select`". Take it together
+      # with a toolchain bump.
+      - dependency-name: "rustyline"
+        versions: [">=19"]
