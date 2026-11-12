@@ -1245,6 +1245,15 @@
   },
   "cl-84ecabc2bbb7": {
    "first_seen": "added by PR 3 (the per-user dollar quota): docs/design/limits.md gained guarantee sentences describing the new user_dollar_quota wall"
+  },
+  "cl-a1beaeebcfd2": {
+   "first_seen": "added by the diagram split: the README now describes the money path in three figures (reserve, settle, reclaim), and these are their captions and alt text"
+  },
+  "cl-bd62771de1be": {
+   "first_seen": "added by the diagram split: the README now describes the money path in three figures (reserve, settle, reclaim), and these are their captions and alt text"
+  },
+  "cl-ee020a4882f0": {
+   "first_seen": "added by the diagram split: the README now describes the money path in three figures (reserve, settle, reclaim), and these are their captions and alt text"
   }
  },
  "retired": {
