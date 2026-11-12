@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="./docs/assets/stratomark.svg" alt="Stratoclave" width="96" height="96">
+
 # Stratoclave
 
 **Budget enforcement and an auditable ledger for Amazon Bedrock.<br>Model routing stays external.**
