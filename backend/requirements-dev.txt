@@ -45,4 +45,4 @@ hypothesis==6.170.15
 # (scenarios/_schema/coverage.py). Dev/CI only — the workshop tooling never
 # runs in the production image. Present transitively already; pinned here so
 # the scenarios coverage aggregation has a declared dependency.
-PyYAML>=6.0
+PyYAML>=6.0.3
