@@ -1,0 +1,52 @@
+{
+ "nodes": [
+  {
+   "id": "up",
+   "label": "the model\nreports usage",
+   "role": "secondary",
+   "col": 0,
+   "row": 0,
+   "h": 1
+  },
+  {
+   "id": "tx",
+   "label": "one transaction\n\nrelease R\ncharge the actual cost\nledger SETTLE event\nhold row deleted",
+   "role": "accent",
+   "col": 1,
+   "row": 0,
+   "w": 2,
+   "h": 2,
+   "align": "left"
+  },
+  {
+   "id": "log",
+   "label": "usage log\none row",
+   "role": "neutral",
+   "col": 3,
+   "row": 0
+  },
+  {
+   "id": "dup",
+   "label": "second settle\nrefused",
+   "role": "neutral",
+   "col": 3,
+   "row": 1
+  }
+ ],
+ "edges": [
+  {
+   "from": "up",
+   "to": "tx",
+   "label": "tokens"
+  },
+  {
+   "from": "tx",
+   "to": "log"
+  },
+  {
+   "from": "tx",
+   "to": "dup",
+   "dashed": true
+  }
+ ]
+}

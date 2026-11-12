@@ -1,0 +1,15 @@
+{
+ "nodes": [
+  {"id": "cli", "label": "CLI signs\nGetCallerIdentity", "role": "neutral", "col": 0, "row": 0},
+  {"id": "shape", "label": "gateway checks\nthe shape", "role": "primary", "col": 1, "row": 0},
+  {"id": "sts", "label": "AWS STS\nchecks signature", "role": "secondary", "col": 2, "row": 0},
+  {"id": "gate", "label": "gateway checks\naccount, role", "role": "primary", "col": 3, "row": 0},
+  {"id": "tok", "label": "access token", "role": "accent", "col": 4, "row": 0}
+ ],
+ "edges": [
+  {"from": "cli", "to": "shape", "label": "signed"},
+  {"from": "shape", "to": "sts", "label": "as is"},
+  {"from": "sts", "to": "gate", "label": "Arn"},
+  {"from": "gate", "to": "tok", "emph": true}
+ ]
+}

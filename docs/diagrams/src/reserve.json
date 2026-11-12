@@ -1,0 +1,52 @@
+{
+ "nodes": [
+  {
+   "id": "req",
+   "label": "request\nmax tokens\n+ prompt size",
+   "role": "neutral",
+   "col": 0,
+   "row": 0,
+   "h": 1
+  },
+  {
+   "id": "tx",
+   "label": "one TransactWriteItems\n\nuser quota + R <= limit\npool headroom - R >= 0\nledger RESERVE event\nhold row with expiry",
+   "role": "accent",
+   "col": 1,
+   "row": 0,
+   "w": 2,
+   "h": 2,
+   "align": "left"
+  },
+  {
+   "id": "ok",
+   "label": "all four hold\ncall the model",
+   "role": "secondary",
+   "col": 3,
+   "row": 0
+  },
+  {
+   "id": "no",
+   "label": "any one fails\n402, no writes",
+   "role": "neutral",
+   "col": 3,
+   "row": 1
+  }
+ ],
+ "edges": [
+  {
+   "from": "req",
+   "to": "tx",
+   "label": "R"
+  },
+  {
+   "from": "tx",
+   "to": "ok"
+  },
+  {
+   "from": "tx",
+   "to": "no",
+   "emph": true
+  }
+ ]
+}
