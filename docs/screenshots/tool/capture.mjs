@@ -17,15 +17,10 @@
  *
  * Locale: the console takes it from the signed-in user's record on every
  * `/me` fetch, so a client-side override alone is replaced as soon as the app
- * boots. The tool therefore sets the user's locale with `PATCH /api/mvp/me`
- * before capturing (the same call the console's language switcher makes), and
- * also seeds the session key the app reads before `/me` answers. The user's
- * previous locale is restored when the run ends. Locale is per-user server
- * state, so run the en and ja captures one after the other, not in parallel;
- * the run checks the locale it captured is still the one it set.
- *
- * API_BASE_URL defaults to BASE_URL (CloudFront serves both); set it when the
- * console and the API are on different origins, e.g. a local Vite dev server.
+ * boots. The tool therefore rewrites the `locale` field of the `GET
+ * /api/mvp/me` response inside the browser, for every page it opens, and also
+ * seeds the session key the app reads before `/me` answers. Nothing is written
+ * to the server, so en and ja runs can run side by side and any token works.
  *
  * The access token goes in sessionStorage under the key `frontend/src/lib/
  * cognito.ts` uses; the console moved tokens out of localStorage, and a token
@@ -42,7 +37,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const IMG_DIR = resolve(__dirname, '..', 'images')
 
 const BASE_URL = process.env.BASE_URL ?? 'https://d111111abcdef8.cloudfront.net'
-const API_BASE_URL = process.env.API_BASE_URL ?? BASE_URL
 const TOKEN = process.env.TOKEN
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID
 const TRUSTED_ACCOUNT_ID = process.env.TRUSTED_ACCOUNT_ID  // optional
@@ -109,6 +103,13 @@ async function freshBrowser(fn) {
       viewport: VIEWPORT,
       deviceScaleFactor: 1,
       storageState: undefined,
+    })
+    // Answer the console's locale question with this run's locale; see the header.
+    await ctx.route('**/api/mvp/me', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue()
+      const res = await route.fetch()
+      if (!res.ok()) return route.fulfill({ response: res })
+      await route.fulfill({ response: res, json: { ...(await res.json()), locale: LOCALE } })
     })
     const page = await ctx.newPage()
     await fn(page, ctx)
@@ -202,54 +203,26 @@ async function captureAuth(name, path, { anchor, fullPage = false, waitMs = 2500
     await seedStorage(page)
     // 3. Navigate to the target page; React boots with both.
     await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle' })
-    if (anchor) {
-      try {
-        await page.locator('h1', { hasText: anchor }).first().waitFor({ timeout: 20_000 })
-      } catch {
-        const got = await page.locator('h1').first().textContent().catch(() => '?')
-        console.warn(`  [warn] anchor "${anchor}" not found; h1="${got}"`)
-      }
+    // The page's own heading, in this run's language, must be on screen before
+    // anything is saved. A token the console does not accept lands on the
+    // sign-in page, and a wrong locale shows the other language's heading; both
+    // make a picture that looks fine and is wrong, so neither is written.
+    try {
+      await page.locator('h1', { hasText: anchor }).first().waitFor({ timeout: 20_000 })
+    } catch {
+      const got = await page.locator('h1').first().textContent().catch(() => '?')
+      throw new Error(`${name}: expected the heading "${anchor}" (${LOCALE}), found "${got}"; nothing saved`)
     }
     await page.waitForTimeout(waitMs)
     const out = resolve(IMG_DIR, `${name}${SUFFIX}.png`)
     await page.screenshot({ path: out, fullPage })
-    const finalUrl = page.url()
+    const finalUrl = new URL(page.url()).pathname
     const finalH1 = await page.locator('h1').first().textContent().catch(() => '(none)')
-    // A token the console does not accept lands on the sign-in page, which is a
-    // screenshot that looks fine and is wrong. Refuse it rather than saving it.
-    if (finalH1?.trim() === A.login || /\/login\b/.test(finalUrl)) {
-      throw new Error(`${name}: landed on the sign-in page; the token was not accepted`)
-    }
     console.log(`[cap:${LOCALE}] ${name}${SUFFIX}.png  ${finalUrl}  h1=${JSON.stringify(finalH1)}`)
   })
 }
 
-/** The signed-in user's server-side locale, read and written through /me. */
-async function me(method, body) {
-  const res = await fetch(`${API_BASE_URL}/api/mvp/me`, {
-    method,
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) throw new Error(`${method} /api/mvp/me failed: ${res.status} ${await res.text()}`)
-  return res.json()
-}
-
 async function main() {
-  const previous = (await me('GET')).locale
-  await me('PATCH', { locale: LOCALE })
-  try {
-    await captureAll()
-    const now = (await me('GET')).locale
-    if (now !== LOCALE) {
-      throw new Error(`the user's locale changed to ${now} during the run; run locales one at a time`)
-    }
-  } finally {
-    if (previous && previous !== LOCALE) await me('PATCH', { locale: previous })
-  }
-}
-
-async function captureAll() {
   // 01. Login (unauth)
   await captureUnauth('01_login', A.login)
 
