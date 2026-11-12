@@ -147,7 +147,7 @@ log_info "AWS account: $ACCOUNT"
 log_info "AWS region:  $REGION"
 log_info "Prefix:      $PREFIX"
 
-command -v node >/dev/null || { log_error "Node.js 20+ is required."; exit 1; }
+command -v node >/dev/null || { log_error "Node.js 22 is required (see .nvmrc; exact ranges in the engines field of frontend/package.json and iac/package.json)."; exit 1; }
 log_info "Node: $(node --version)"
 
 # Env preflight (Fable consult D3). When the body region != us-east-1, both the
