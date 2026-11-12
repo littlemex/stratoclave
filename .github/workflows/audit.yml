@@ -50,7 +50,7 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install pip-audit
@@ -90,7 +90,7 @@ jobs:
         working-directory: iac
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -111,7 +111,7 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -119,35 +119,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Audit
-        # Fails on any high or critical advisory not on the allowlist below. npm
-        # has no per-advisory --ignore, so the JSON report is filtered instead.
+        # `npm audit` exits non-zero on vulnerabilities at "moderate" or
+        # higher; --audit-level=high keeps low-severity dev-only findings
+        # out of the merge gate while still failing on anything serious.
         #
-        #   GHSA-vfj7-8cjw-p6xm  braces stack-exhaustion DoS (high). No fixed
-        #   version exists: the latest braces (3.0.3) is affected. It is reached
-        #   only through tailwindcss 3 (chokidar / micromatch / fast-glob) while
-        #   it scans this repository's own content globs at build time, never on
-        #   input from a user. Delete it once braces publishes a fix, or when the
-        #   frontend moves to tailwindcss 4, which no longer depends on it.
-        run: |
-          python3 - <<'PY'
-          import json, subprocess, sys
-          ALLOW = {"GHSA-vfj7-8cjw-p6xm"}
-          out = subprocess.run(
-              ["npm", "audit", "--audit-level=high", "--json"],
-              capture_output=True, text=True).stdout
-          report = json.loads(out)
-          blocking = []
-          for name, v in report.get("vulnerabilities", {}).items():
-              if v.get("severity") not in ("high", "critical"):
-                  continue
-              ids = {via.get("url", "").rsplit("/", 1)[-1]
-                     for via in v.get("via", []) if isinstance(via, dict)}
-              if ids - ALLOW:
-                  blocking.append((name, v.get("severity"), sorted(ids)))
-          if blocking:
-              print("Blocking high/critical advisories (not on allowlist):")
-              for n, sev, ids in blocking:
-                  print(f"  {n} [{sev}] {ids}")
-              sys.exit(1)
-          print(f"npm audit: only allowlisted advisories present ({sorted(ALLOW)}); OK.")
-          PY
+        # The GHSA-vfj7-8cjw-p6xm (braces stack-exhaustion DoS) allowlist that
+        # used to live here is gone: it was reachable only through tailwindcss 3's
+        # chokidar / micromatch / fast-glob chain, and the frontend moved to
+        # tailwindcss 4 (`@tailwindcss/vite`), which does not depend on braces.
+        run: npm audit --audit-level=high
