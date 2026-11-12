@@ -2174,6 +2174,24 @@
    "claim": "It is documented here so that nobody reads its number as a budget, and so that an operator who wants a money ceiling per user knows the answer is `user_dollar_quota` (across every model at once) or the per-model quota's user scope (one model at a time), not the token quota.",
    "anchor": "contract:C14.33",
    "note": "the clause is what makes 'across every model at once' true of user_dollar_quota (no model in its key), as an alternative to the per-model quota's user scope"
+  },
+  {
+   "id": "cl-bd62771de1be",
+   "claim": "<p align=\"center\"> <img src=\"./docs/diagrams/reserve.png\" alt=\"Reserve: the request's reservation R goes into one TransactWriteItems that checks the user quota, the pool headroom, appends a RESERVE ledger event and writes a hold row; if all four hold the model is called, if any fails the caller gets 402 and nothing is written.\" width=\"100%\"> </p>",
+   "anchor": "contract:C1.1@a32b5b92",
+   "note": "alt text of the reserve figure; the same one-transaction admission as the hero sentence"
+  },
+  {
+   "id": "cl-ee020a4882f0",
+   "claim": "A later pooled request sweeps expired holds and returns the headroom in one conditional transaction, so a hold is reclaimed at most once.",
+   "anchor": "contract:C3.1@c99b5ea8,C3.4@5dccb5dd",
+   "note": "the reclaim step of the money figures; same property as cl-405e956c1399"
+  },
+  {
+   "id": "cl-a1beaeebcfd2",
+   "claim": "<p align=\"center\"> <img src=\"./docs/diagrams/reclaim.png\" alt=\"Reclaim: a process dies after reserve, its hold row stays behind, a later request sweeps the expired hold, and a RECLAIM returns the headroom exactly once.\" width=\"100%\"> </p>",
+   "anchor": "contract:C3.1@c99b5ea8,C3.4@5dccb5dd",
+   "note": "alt text of the reclaim figure; same property as cl-405e956c1399"
   }
  ]
 }

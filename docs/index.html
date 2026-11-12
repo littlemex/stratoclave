@@ -202,6 +202,19 @@ a.pillar b{font-size:17px;color:var(--ink);line-height:1.35}
 .stats b{font-size:34px}
 </style>
 <style>
+.mgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media (max-width:900px){.mgrid{grid-template-columns:1fr}}
+.mcard{background:var(--shade);border-radius:var(--r-box);padding:22px}
+.mcard .stat{font-size:32px}
+.mlabel{font-size:14px;color:var(--ink2);margin:4px 0 14px}
+.mcard dl{margin:0}
+.mcard dt{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);margin-top:12px}
+html[lang=ja] .mcard dt{text-transform:none;letter-spacing:.02em}
+.mcard dd{margin:2px 0 0;font-size:14.5px;color:var(--ink2)}
+.mcard dt:nth-of-type(3){color:var(--accent)}
+.mcard dd:last-child{color:var(--ink)}
+</style>
+<style>
 /* hero */
 .hero-grid{display:grid;grid-template-columns:1.05fr 1fr;gap:48px;align-items:center}
 @media (max-width:960px){.hero-grid{grid-template-columns:1fr;gap:28px}}
@@ -785,16 +798,41 @@ component, under the axioms stated at the top of each test file above.</pre>
 <section id="measured">
   <div class="wrap">
     <div class="sec-head rv">
-      <div class="eyebrow" data-t="m.eyebrow">Measured</div>
-      <h2 data-t="m.h">We measured what Bedrock actually bills.</h2>
-      <p class="lede" data-t="m.lede">Three things we observed that matter whether or not you ever run the gateway. They are why the budget code looks the way it does.</p>
+      <div class="eyebrow" data-t="m.eyebrow">Measured on Bedrock</div>
+      <h2 data-t="m.h">Bedrock does not document which failed calls it bills. We measured it.</h2>
+      <p class="lede" data-t="m.lede">A budget has to know what a timeout, a rejection or a retry costs. AWS's documentation does not say, and most client code assumes a failed call is free and gives the money back. We tested that assumption against Bedrock's own CloudWatch token counters (us-east-1, 2026-08-29), and it leaks money in three ways.</p>
     </div>
-    <div class="statrow">
-      <div class="rv"><div class="stat" data-count="1493">1,493</div><p data-t="m.s1">output tokens billed for a Converse call abandoned at a 2 s client read timeout. The caller received nothing.</p></div>
-      <div class="rv"><div class="stat">Invocations</div><p data-t="m.s2">in CloudWatch also counts rejections that are not billed, so it cannot stand in for the bill.</p></div>
-      <div class="rv"><div class="stat">1 &rarr; 2</div><p data-t="m.s3"><code>max_attempts: 1</code> in botocore becomes two counted invocations. The extra charge lands on a call that succeeds, so no error handler ever sees it.</p></div>
+    <div class="mgrid">
+      <div class="mcard rv">
+        <div class="stat" data-count="1493">1,493</div>
+        <div class="mlabel" data-t="m.c1.l">output tokens billed for a call that returned nothing</div>
+        <dl>
+          <dt data-t="m.assume">The usual assumption</dt><dd data-t="m.c1.a">The client timed out, so nothing was billed.</dd>
+          <dt data-t="m.saw">What we measured</dt><dd data-t="m.c1.m">A Converse call abandoned at a 2 s client read timeout. The model kept generating and Bedrock recorded 1,493 output tokens.</dd>
+          <dt data-t="m.does">What Stratoclave does</dt><dd data-t="m.c1.s">Once a call has left for the model, its reservation is kept, not refunded, so the budget does not hand back money that was spent.</dd>
+        </dl>
+      </div>
+      <div class="mcard rv">
+        <div class="stat">1 &rarr; 2</div>
+        <div class="mlabel" data-t="m.c2.l">billed attempts from <code>max_attempts: 1</code></div>
+        <dl>
+          <dt data-t="m.assume">The usual assumption</dt><dd data-t="m.c2.a"><code>max_attempts: 1</code> means one call.</dd>
+          <dt data-t="m.saw">What we measured</dt><dd data-t="m.c2.m">botocore turns it into two attempts. If the second succeeds, the first is still billed, and your code only ever sees a success.</dd>
+          <dt data-t="m.does">What Stratoclave does</dt><dd data-t="m.c2.s">The SDK is pinned to exactly one attempt. Retries and region failover happen in the gateway's own router, where each attempt is reserved and settled.</dd>
+        </dl>
+      </div>
+      <div class="mcard rv">
+        <div class="stat">Invocations</div>
+        <div class="mlabel" data-t="m.c3.l">counts calls that were not billed</div>
+        <dl>
+          <dt data-t="m.assume">The usual assumption</dt><dd data-t="m.c3.a">The CloudWatch <code>Invocations</code> metric tracks what you pay for.</dd>
+          <dt data-t="m.saw">What we measured</dt><dd data-t="m.c3.m">It also counts rejected requests that produced no tokens. A burst of rejections looks like spend.</dd>
+          <dt data-t="m.does">What Stratoclave does</dt><dd data-t="m.c3.s">Every charge is settled from the token usage the model reported, at the price pinned when it was reserved.</dd>
+        </dl>
+      </div>
     </div>
-    <p style="margin-top:24px;font-size:15px"><a id="meas-link" href="https://github.com/littlemex/stratoclave/blob/main/docs/MEASUREMENTS.md" data-t="m.link">All five findings, and how far the evidence goes: docs/MEASUREMENTS.md</a></p>
+    <p style="margin-top:24px;font-size:15px"><a id="meas-link" href="https://github.com/littlemex/stratoclave/blob/main/docs/MEASUREMENTS.md" data-t="m.link">All five findings, the conditions, and a harness to reproduce them: docs/MEASUREMENTS.md</a></p>
+    <p class="muted" style="font-size:13px" data-t="m.note">Each finding is an existence proof from a small number of trials, not a rate. The document says where each one's evidence stops.</p>
   </div>
 </section>
 
@@ -1222,6 +1260,28 @@ Object.assign(window.__JA, {
 'm.lede': 'ゲートウェイを使うかどうかに関係なく役に立つ、3 つの実測結果です。予算のコードがいまの形をしている理由でもあります。',
 'lim.s': '既知の制限',
 'lim.3': '利用ログの保持は 90 日です。課金の正本は台帳で、長期保管用の書き出しは今後の課題です。',
+});
+</script>
+<script>
+Object.assign(window.__JA, {
+'m.eyebrow': 'Bedrock での実測',
+'m.h': 'どの失敗が課金されるか、Bedrock は文書にしていない。だから測った。',
+'m.lede': '予算を管理するには、タイムアウトや拒否、リトライにいくらかかるかを知る必要があります。ところが AWS のドキュメントには書かれておらず、多くのクライアントのコードは「失敗した呼び出しは無料」とみなして予算を戻します。この前提を Bedrock 自身の CloudWatch のトークン数 (us-east-1、2026-08-29) で確かめたところ、予算の計算が実際の請求とずれる場面が 3 つ見つかりました。',
+'m.assume': 'よくある前提', 'm.saw': '測った結果', 'm.does': 'Stratoclave の対応',
+'m.c1.l': '何も受け取れなかった呼び出しに請求された出力トークン',
+'m.c1.a': 'クライアントがタイムアウトしたのだから、課金はない。',
+'m.c1.m': '2 秒の読み取りタイムアウトで打ち切った Converse 呼び出しでも、モデルは生成を続け、Bedrock は 1,493 出力トークンを記録しました。',
+'m.c1.s': 'モデルへの呼び出しが出たあとの確保は、返金せずに残します。実際に使われたかもしれない予算を戻さないためです。',
+'m.c2.l': '<code>max_attempts: 1</code> で課金された試行回数',
+'m.c2.a': '<code>max_attempts: 1</code> なら呼び出しは 1 回。',
+'m.c2.m': 'botocore はこれを 2 回の試行に読み替えます。2 回目が成功すると 1 回目も課金されたまま、コードには成功しか見えません。',
+'m.c2.s': 'SDK の試行は必ず 1 回に固定し、リトライとリージョン切り替えはゲートウェイ自身のルーターで行います。試行ごとに確保と精算をします。',
+'m.c3.l': '課金されていない呼び出しも数える指標',
+'m.c3.a': 'CloudWatch の <code>Invocations</code> を見れば、支払う分が分かる。',
+'m.c3.m': 'トークンを生まなかった拒否も数えます。拒否が続くと、支出が増えたように見えます。',
+'m.c3.s': '課金は、モデルが報告したトークン数と、確保の時点で固定した単価で精算します。',
+'m.link': '5 つの実測のすべて、測定条件、再現用のハーネス: docs/MEASUREMENTS.ja.md',
+'m.note': 'どれも少ない試行で「起こりうる」ことを示したもので、発生率ではありません。それぞれの根拠がどこまで届くかは文書に書いてあります。',
 });
 </script>
 <script>
