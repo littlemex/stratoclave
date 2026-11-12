@@ -78,14 +78,23 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["mvp-openai-responses"])
 
 
-def _open_hold(**kwargs) -> _money.Hold:
+def _open_hold(*, payload: Optional[dict] = None, **kwargs) -> _money.Hold:
     """The reservation this route just took, as the object that owns ending it.
 
     `settle` / `release` resolve this module's globals at CALL time so a suite
     patching `settle_reservation_and_log` or `_release_pool` here still observes
     every write.
+
+    `payload`, when given, is the canonical OpenAI-shape payload this request
+    is about to send — the ONE place `provider_outcome.stamp_attempt_id` is
+    called from on this route (issue #247 / hard-ceiling section 3a), so a
+    future caller of `_open_hold` on this route gets the swap automatically
+    just by passing `payload=`, rather than needing to remember a second
+    statement after every call site (review finding: the swap used to be
+    duplicated at each call site, which is exactly the shape of defect where a
+    future route silently ships the placeholder instead of the real hold id).
     """
-    return _money.Hold(
+    hold = _money.Hold(
         settle=lambda **kw: settle_reservation_and_log(**kw),
         release=lambda ctx: _release_pool(ctx),
         # Records the departure on the durable hold when an ending keeps the
@@ -95,6 +104,9 @@ def _open_hold(**kwargs) -> _money.Hold:
         mark_departed=_money.hold_departure_marker(kwargs.get("tenants_repo")),
         **kwargs,
     )
+    if payload is not None:
+        _provider_outcome.stamp_attempt_id(payload, hold.hold_id)
+    return hold
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +334,11 @@ def _reasoning_multiplier(body: "OpenAIResponsesRequest") -> int:
 
 
 def _build_openai_responses_payload(
-    body: "OpenAIResponsesRequest", entry: "ModelEntry", *, stream: bool
+    body: "OpenAIResponsesRequest",
+    entry: "ModelEntry",
+    *,
+    stream: bool,
+    tenant_id: Optional[str] = None,
 ) -> dict:
     """The exact JSON `payload` `/openai/v1/responses` sends to the OpenAI-compatible endpoint,
     extracted so it can be built ONCE, BEFORE the reserve call
@@ -331,10 +347,24 @@ def _build_openai_responses_payload(
     `mvp.chat_completions._build_openai_chat_payload`. Forwards the RESOLVED
     Bedrock model id, not the client-facing alias, because the endpoint only knows
     ids like "xai.grok-4.6" / "openai.gpt-5.6-sol".
+
+    Also merges the issue #247 correlation marker into `metadata`, in the SAME
+    build so it is inside what the survey below measures — see
+    `provider_outcome.stamp_openai_metadata_marker` for why `sc_attempt_id` is
+    a placeholder here and `stamp_attempt_id` for where it becomes real.
+    Takes `tenant_id` (`user.org_id`), not the whole `user` object: a bare
+    string is all this function needs, and the Responses API's OWN `user`
+    body field is a different thing entirely — passing the `AuthenticatedUser`
+    object through a parameter literally named `user` invited exactly that
+    confusion (review finding). `tenant_id` is optional only for the
+    standalone-call fallback paths that have no request in flight (e.g. a
+    unit test exercising this function alone); the real route always
+    supplies it.
     """
     payload = body.model_dump(exclude_none=True)
     payload["model"] = entry.bedrock_model_id
     payload["stream"] = stream
+    _provider_outcome.stamp_openai_metadata_marker(payload, tenant_id)
     return payload
 
 
@@ -609,7 +639,7 @@ async def create_response(
     # the cascade's actual selection further down (content bytes never depend
     # on which model was selected, only this one field does — same reasoning
     # as `mvp.anthropic`/`mvp.chat_completions`).
-    openai_payload = _build_openai_responses_payload(body, entry, stream=body.stream)
+    openai_payload = _build_openai_responses_payload(body, entry, stream=body.stream, tenant_id=getattr(user, "org_id", None))
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey the canonical payload, but ONLY when enforcement might use it —
@@ -758,6 +788,7 @@ async def create_response(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=entry.bedrock_model_id,
         request_id=ctx.request_id if ctx else None, route="responses",
+        payload=payload,
     )
     sent = False
     try:
@@ -918,23 +949,26 @@ async def _stream_response(
     # `provider_responded`: at least one event came back (see claim_stream_interrupted).
     sent = False
     provider_responded = False
-    hold = _open_hold(
-        user=user, tenants_repo=tenants_repo, reservation=reservation,
-        model_id=entry.bedrock_model_id, request_id=request_id,
-        route="responses_stream",
-    )
-    # The provider continuation id the stream actually minted (from
-    # response.completed). None unless a real completed event carried one — so a
-    # cut / errored / id-less stream arms NO provider-state lock (Fable review §2).
-    minted_id: Optional[str] = None
 
     if payload is None:
         # Standalone-call fallback (e.g. a caller/test exercising this
         # generator in isolation, pre-reserve survey never having run): build
         # it here exactly as the route used to. The real route path always
         # supplies `payload` pre-built (via `_build_openai_responses_payload`),
-        # so this branch is never taken there.
-        payload = _build_openai_responses_payload(body, entry, stream=True)
+        # so this branch is never taken there. Built BEFORE `_open_hold`
+        # below so the placeholder it carries can be swapped for the real
+        # hold id in the same place the non-streaming path does it.
+        payload = _build_openai_responses_payload(body, entry, stream=True, tenant_id=getattr(user, "org_id", None))
+
+    hold = _open_hold(
+        user=user, tenants_repo=tenants_repo, reservation=reservation,
+        model_id=entry.bedrock_model_id, request_id=request_id,
+        route="responses_stream", payload=payload,
+    )
+    # The provider continuation id the stream actually minted (from
+    # response.completed). None unless a real completed event carried one — so a
+    # cut / errored / id-less stream arms NO provider-state lock (Fable review §2).
+    minted_id: Optional[str] = None
 
     client = _openai_client(entry.bedrock_region)
     try:
