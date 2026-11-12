@@ -100,20 +100,23 @@ prove:
 	@echo "GIVEN that the reserve estimate dominates the settled actual per"
 	@echo "component — under the axioms stated at the top of each test file above."
 	@echo ""
-	@echo "That premise is NOT proved and is false today: run 'make verify-rating'"
-	@echo "for the differential checks and the pinned known defect. Also proved:"
-	@echo "replacing the reserve-time estimate with a sound BOUND makes the"
-	@echo "existing conditional write a hard ceiling, with nothing else changed."
+	@echo "That premise is not proved here: 'make verify-rating' checks it against the"
+	@echo "real pricing code and reports where it holds. Also proved: replacing the"
+	@echo "estimate with a sound BOUND makes the existing conditional write a hard"
+	@echo "ceiling, with nothing else changed."
 
 # The differential half of the formal layer: drives the real pricing functions and
 # an independently written reference with the same inputs, so "the encoding matches
 # the code" is sampled rather than assumed. No network, no AWS, no container.
 verify-rating:
-	cd backend && python3 -m pytest tests/test_rating_differential.py -q
+	cd backend && python3 -m pytest tests/test_rating_differential.py tests/test_billable_legs_registry.py tests/test_make_prove_message.py -q -rxX
 	@echo ""
-	@echo "One xfail is expected and is a tracking device, not a nuisance: the"
-	@echo "estimator prices three components while the charger bills four, so a"
-	@echo "prompt-cache write settles above its reservation. See docs/EVIDENCE.md."
+	@echo "The estimate dominates the settle on the rate axis: both sides read one list"
+	@echo "of billable legs, so how the provider classifies input tokens (fresh, cache"
+	@echo "read, cache write) can no longer push the settle above the reservation. On"
+	@echo "the token axis it does not: an estimated token count is not a bound, and"
+	@echo "test_rating_differential.py pins that boundary. The byte-count bound that"
+	@echo "does carry the ceiling is tested in test_billable_legs_registry.py."
 
 # Everything in the formal layer that needs no credentials and no container.
 verify-formal: prove verify-rating
