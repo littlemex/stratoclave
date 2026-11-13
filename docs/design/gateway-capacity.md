@@ -212,7 +212,7 @@ call, urllib3 opened a connection and discarded it on release, so every reservat
 and settlement paid a fresh TLS handshake. Throughput collapsing from 91.9 req/s at
 512 concurrent to 31.7 at 1024, rather than plateauing, is that: per-request cost
 growing with concurrency. This was the same defect already fixed for the Bedrock and
-mantle clients, missed on the client that carries twice the traffic.
+OpenAI-compatible clients, missed on the client that carries twice the traffic.
 
 An earlier revision of this document blamed the GIL. That was wrong, and worth
 recording as wrong: on a one-vCPU task, GIL serialization and CPU saturation are the

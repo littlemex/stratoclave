@@ -118,7 +118,8 @@ call. The reasoning is wrong even where the conclusion is convenient.
 Also latent: the reap-timeout derivation multiplies `(connect + read)` by
 `RETRY_MAX_ATTEMPTS` believing it is an attempt count, understating the Bedrock leg by one
 attempt. It does not break the invariant today only because `max()` is dominated by
-mantle's 600 s read timeout. Fix the meaning, not the number.
+the OpenAI transport's 600 s streaming read timeout
+(`_openai_transport.STREAM_READ_TIMEOUT_SECONDS`). Fix the meaning, not the number.
 
 ## 4. The design: attempts, evidence, liability
 

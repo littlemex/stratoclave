@@ -107,7 +107,19 @@ def test_a_renamed_grammar_does_not_raise():
         assert parse_agreement_dimension(name) is None  # type: ignore[arg-type]
 
 
+def test_the_mantle_id_suffix_segment_is_not_removed():
+    """Issue #246's retired gateway TRANSPORT and this upstream billing-naming
+    segment are unrelated facts that share a word; a `mantle` cleanup across the
+    tree must not touch `billing_region_prefixes.json`'s `id_suffix_segments`,
+    or every real `…-mantle-…` Price List row goes unparsed."""
+    from mvp.pricing_feeds.dimensions import _ALLOWED_ID_SUFFIX_SEGMENTS
+
+    assert "mantle" in _ALLOWED_ID_SUFFIX_SEGMENTS
+
+
 # --- the Price List grammar --------------------------------------------------
+
+
 @pytest.mark.parametrize("usagetype,model_id,expected", [
     ("USE1-xai.grok-4.6-mantle-input-tokens-standard", "xai.grok-4.6",
      ("us-east-1", RateDimension("input", "geo"))),
