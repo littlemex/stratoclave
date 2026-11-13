@@ -3,7 +3,7 @@
  *
  * - Receives an Authorization Code from the Hosted UI and exchanges it for access_token / id_token / refresh_token
  * - Because the backend only accepts access_token, the frontend also uses access_token for API authorization
- * - Tokens are stored in localStorage("stratoclave_tokens") (unrelated to the 0.25rem rounded UI spec; purely data)
+ * - Tokens are stored in sessionStorage("stratoclave_tokens"), scoped to the tab; see the P0-7 note on TOKEN_STORAGE_KEY below for why not localStorage
  * - The case of being opened from the CLI via URL query `?token=xxx` is also handled here (only StoredTokens.access_token is populated)
  */
 
@@ -18,7 +18,7 @@ import { getClientId, getCognitoDomain, getRedirectUri } from './config'
 // so the next session always re-authenticates via the Hosted UI. The
 // long-term fix is to move `refresh_token` into an HttpOnly cookie
 // with a BFF, tracked in the P1 roadmap.
-const STORAGE_KEY = 'stratoclave_tokens'
+export const TOKEN_STORAGE_KEY = 'stratoclave_tokens'
 const PKCE_KEY = 'stratoclave_pkce_verifier'
 // P0-4 (2026-04 security review): OAuth `state` and OIDC `nonce` guard
 // the authorization-code flow against login CSRF and ID-token replay.
@@ -239,7 +239,7 @@ export async function refreshTokens(
 }
 
 // ---------- Logout ----------
-/** Clear localStorage and redirect to the Hosted UI logout endpoint */
+/** Clear the stored tokens and redirect to the Hosted UI logout endpoint */
 export function logoutRedirect(): void {
   clearTokens()
   const params = new URLSearchParams({
@@ -254,13 +254,13 @@ export function saveTokens(tokens: StoredTokens): void {
   // P0-7: sessionStorage instead of localStorage so tokens die with the
   // tab. Any XSS still wins here (same origin), but at least tokens do
   // not survive across browser restarts or leak to long-closed tabs.
-  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tokens))
+  sessionStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(tokens))
 }
 
 export function getStoredTokens(): StoredTokens | null {
   // P0-7: read tokens from sessionStorage. Any leftover entries in
   // localStorage are migrated away from by clearTokens().
-  const raw = sessionStorage.getItem(STORAGE_KEY)
+  const raw = sessionStorage.getItem(TOKEN_STORAGE_KEY)
   if (!raw) return null
   try {
     return JSON.parse(raw) as StoredTokens
@@ -273,9 +273,9 @@ export function clearTokens(): void {
   // Clear both storage locations — sessionStorage is the canonical
   // location after P0-7, but we defensively remove any stray entry
   // that might have been written by an older build of the SPA.
-  sessionStorage.removeItem(STORAGE_KEY)
+  sessionStorage.removeItem(TOKEN_STORAGE_KEY)
   try {
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(TOKEN_STORAGE_KEY)
   } catch {
     // localStorage may be disabled; harmless.
   }
