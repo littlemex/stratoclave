@@ -36,6 +36,14 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Fixed
 
+- **A tenant gets the same provisioning from either creation route (C14.36).** Both
+  `POST /api/mvp/admin/tenants` and `POST /api/mvp/team-lead/tenants` now go through one
+  operation. Behaviour change: a tenant created by a team lead now gets the explicit
+  `shadow_vsr = true` routing default an admin-created tenant already got, and
+  `STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT` opts out both routes. Existing
+  team-lead tenants are not backfilled. A failed best-effort provisioning step now logs
+  `tenant_provisioning_step_failed` with the step's name; the shadow default's failure
+  used to log `shadow_default_provision_failed`.
 - **`PATCH /api/mvp/team-lead/tenants/{id}` requires `tenants:update-own`.** The route
   renames a tenant and changes its `default_credit`, and was gated on `tenants:read-own`,
   so an API key scoped to `tenants:read-own` alone could change them. Such a key now

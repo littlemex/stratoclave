@@ -87,7 +87,7 @@ def shadow_enabled(tenant_shadow: Optional[bool] = None) -> bool:
     Dark-by-default note: for a tenant that never touched its config (None), and
     with no env set, this is False — an EXISTING tenant behaves exactly as before
     this change. NEW tenants are shipped with an explicit stored True (see
-    admin_tenants._provision_shadow_default); the force-off env is the lever that
+    tenant_lifecycle._provision_shadow_default); the force-off env is the lever that
     stops them without touching stored config."""
     if _global_force_off():
         return False
