@@ -88,7 +88,7 @@ from dynamo.tenant_budgets import (
 )
 from limits import MAX_POOL_BUDGET_USD_CENTS
 
-from .authz import log_audit_event, require_permission
+from .authz import is_tenant_owner, log_audit_event, owned_tenant_or_404, require_permission
 from .deps import AuthenticatedUser
 from .reserve_limits import RESERVE_LIMITS, is_grantable_wall
 
@@ -716,6 +716,25 @@ def raise_hint_for_priced_candidates(
 # ---------------------------------------------------------------------------
 # Authority, as an item inside the transaction
 # ---------------------------------------------------------------------------
+def _authority_item(
+    *, actor: AuthenticatedUser, tenant_id: str, as_owner: bool
+) -> dict[str, Any]:
+    """The approver's authority for a service's transaction: on the ownership path,
+    check the one rule, `authz.is_tenant_owner`, now, then return the condition
+    that re-asserts its pointer half at commit.
+
+    The role half is not read from the tenants table, so the condition does not
+    carry it; it is current as of this request (C6.4). The check costs one tenant
+    read per decision, the price of keeping the rule in one place. Every service
+    calls this; `_authority_condition_check_item` stays a pure builder so the
+    transaction's own refusal can be tested without the check in front of it."""
+    if as_owner and not is_tenant_owner(TenantsRepository().get(tenant_id), actor):
+        raise AuthorityDenied(
+            "The authority to decide raises for this tenant is not held.",
+            tenant_id=tenant_id)
+    return _authority_condition_check_item(actor=actor, tenant_id=tenant_id, as_owner=as_owner)
+
+
 def _authority_condition_check_item(
     *, actor: AuthenticatedUser, tenant_id: str, as_owner: bool
 ) -> dict[str, Any]:
@@ -743,6 +762,10 @@ def _authority_condition_check_item(
     """
     tenants_table = TenantsRepository()._table.name
     if as_owner:
+        # The pointer half of `authz.is_tenant_owner` (C6.10), re-asserted at
+        # commit so an ownership change in flight cancels the grant. The whole
+        # rule, role included, is checked before the transaction by
+        # `_authority_item`.
         return {
             "ConditionCheck": {
                 "TableName": tenants_table,
@@ -1248,7 +1271,7 @@ def approve_limit_raise(
         _elapsed_now_iso = _iso_at(now)
         try:
             repo.transact_write([
-                _authority_condition_check_item(
+                _authority_item(
                     actor=actor, tenant_id=tenant_id, as_owner=as_owner),
                 repo.decide_request_txn_item(
                     request_id=request_id, to_status=STATUS_REJECTED,
@@ -1439,7 +1462,7 @@ def approve_limit_raise(
             approved_amount_microusd=amount, cap_minus_amount=cap_minus_amount)
 
     items = [
-        _authority_condition_check_item(
+        _authority_item(
             actor=actor, tenant_id=tenant_id, as_owner=as_owner),
         repo.decide_request_txn_item(
             request_id=request_id, to_status=STATUS_APPROVED,
@@ -1536,7 +1559,7 @@ def reject_limit_raise(
     tenant_id = str(request.get("tenant_id") or "")
     now_iso = _now_iso()
     items = [
-        _authority_condition_check_item(
+        _authority_item(
             actor=actor, tenant_id=tenant_id, as_owner=as_owner),
         repo.decide_request_txn_item(
             request_id=request_id, to_status=STATUS_REJECTED,
@@ -1671,7 +1694,7 @@ def revoke_grant(
     row_tenant = str(grant.get("tenant_id") or tenant_id)
     now_iso = _now_iso()
     items = [
-        _authority_condition_check_item(
+        _authority_item(
             actor=actor, tenant_id=row_tenant, as_owner=as_owner),
         *_revoke_txn_items(
             repo=repo, budgets=budgets, grant=grant, to_status=GRANT_REVOKED,
@@ -2542,15 +2565,11 @@ def admin_revoke_limit_grant(
 
 
 # --- the approver, for their own tenants --------------------------------
-def _require_owned(tenant_id: str, actor: AuthenticatedUser) -> None:
-    """The same ownership check the rest of the team-lead surface uses, and the
-    same unified 404 for a tenant that is not theirs -- a distinct 403 would tell
-    a caller that a tenant they cannot see exists."""
-    tenant = TenantsRepository().get(tenant_id)
-    if not tenant or tenant.get("team_lead_user_id") != actor.user_id:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-
+# These routes are the ownership path and nothing else, so an admin who does not
+# own the tenant is refused here like anyone else (`owned_tenant_or_404`); the
+# admin routes above are the admin path. The approve, reject and revoke services
+# also take the ownership path (`as_owner=True`): it checks `is_tenant_owner`
+# before the transaction and re-asserts the owner pointer inside it.
 @router.get("/team-lead/limit-raises")
 def team_lead_list_limit_raises(
     tenant_id: str = Query(..., min_length=1),
@@ -2558,7 +2577,7 @@ def team_lead_list_limit_raises(
     limit: int = Query(100, ge=1, le=200),
     actor: AuthenticatedUser = Depends(require_permission("limits:approve-own")),
 ) -> dict[str, Any]:
-    _require_owned(tenant_id, actor)
+    owned_tenant_or_404(tenant_id, actor)
     repo = QuotaEventsRepository()
     return {
         "tenant_id": tenant_id,
@@ -2615,7 +2634,7 @@ def team_lead_list_limit_grants(
     tenant_id: str = Query(..., min_length=1),
     actor: AuthenticatedUser = Depends(require_permission("limits:approve-own")),
 ) -> dict[str, Any]:
-    _require_owned(tenant_id, actor)
+    owned_tenant_or_404(tenant_id, actor)
     repo = QuotaEventsRepository()
     page, truncated = repo.list_grants_for_tenant_page(tenant_id=tenant_id)
     # See `admin_list_limit_grants`'s own comment: the page is bounded and
@@ -2634,7 +2653,7 @@ def team_lead_revoke_limit_grant(
     tenant_id: str = Query(..., min_length=1),
     actor: AuthenticatedUser = Depends(require_permission("limits:approve-own")),
 ) -> dict[str, Any]:
-    _require_owned(tenant_id, actor)
+    owned_tenant_or_404(tenant_id, actor)
     return _guard(
         revoke_grant, actor=actor, tenant_id=tenant_id, grant_id=grant_id,
         reason=body.reason, as_owner=True)

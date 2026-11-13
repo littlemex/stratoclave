@@ -1015,6 +1015,9 @@
   "cl-e44c42c8d665": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-e458cd99f072": {
+   "first_seen": "added by the one-tenant-ownership-check change: docs/ARCHITECTURE.md names the ownership gate (C6.10)"
+  },
   "cl-e4f2b49f8e49": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -1485,6 +1488,7 @@
     "C6.7": "E",
     "C6.8": "E",
     "C6.9": "E",
+    "C6.10": "B",
     "C7.1": "E",
     "C7.2": "E",
     "C7.3": "E",

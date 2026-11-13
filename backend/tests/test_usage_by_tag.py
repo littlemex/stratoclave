@@ -186,7 +186,7 @@ class TestPageBoundAndTruncationFlag:
 class _FakeAdmin:
     """An admin actor: passes `require_permission` (monkeypatched wide open
     below regardless of the exact scope name each route ends up using) AND
-    `team_lead._require_owner`'s admin bypass, so the SAME actor can hit the
+    `authz.owned_tenant_or_404`'s admin bypass, so the SAME actor can hit the
     `/me`, `/admin` and `/team-lead` routes without needing a second,
     ownership-scoped identity just to prove the admin/team-lead bodies
     match."""
@@ -222,7 +222,7 @@ def by_tag_client(dynamodb_mock, monkeypatch):
     from mvp.team_lead import router as team_lead_router
     from dynamo.tenants import TenantsRepository
 
-    # `team_lead._require_owner` looks the tenant up regardless of actor
+    # `authz.owned_tenant_or_404` looks the tenant up regardless of actor
     # role, so it must exist even for the admin bypass path.
     TenantsRepository().create(
         tenant_id="acme-eng", name="Acme Eng", team_lead_user_id="someone-else",

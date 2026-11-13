@@ -5,7 +5,8 @@ Follows design doc §3:
 - Cognito Groups are not used; the `cognito:groups` claim is ignored.
 - Wildcards match only on exact resource name (users:* covers users:create but not
   users-admin:create; resource names must not contain - or _).
-- require_tenant_owner returns unified 404 for non-admins (enumeration defense).
+- is_tenant_owner is the one tenant-ownership rule; the route gates built on it
+  return a unified 404 (enumeration defense).
 - High-risk admin operations emit structured audit JSON to CloudWatch.
 """
 from __future__ import annotations
@@ -275,76 +276,73 @@ def require_any_role(
     def _dep(user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
         if not any(r in user.roles for r in allowed_roles):
             raise HTTPException(status_code=403, detail="Forbidden role")
-        if user.auth_kind == "api_key":
-            if scope is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "This endpoint cannot be reached with an API key: its "
-                        "authorization is role-based and the key's scopes cannot "
-                        "be evaluated against it."
-                    ),
-                )
-            if not _permission_matches(user.key_scopes or [], scope):
-                raise HTTPException(
-                    status_code=403, detail=f"Missing permission: {scope}")
+        if user.auth_kind == "api_key" and scope is None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This endpoint cannot be reached with an API key: its "
+                    "authorization is role-based and the key's scopes cannot "
+                    "be evaluated against it."
+                ),
+            )
+        if scope is not None:
+            ensure_key_scope(user, scope)
         return user
 
     return _dep
 
 
-def require_tenant_owner(
-    tenant_id_param: str = "tenant_id", *, scope: Optional[str] = None
-) -> Callable[..., AuthenticatedUser]:
-    """Allow only the tenant owner (team_lead_user_id == user.user_id) or an admin.
+def ensure_key_scope(user: AuthenticatedUser, scope: str) -> None:
+    """Refuse an API key that does not carry `scope`; a bearer token passes.
 
-    Admins have access to all tenants.
-    Non-owners and non-existent tenants both return a unified 404 (§3.7, enumeration defense).
-    """
+    A gate that tests roles or ownership cannot see a key's narrowing on its own,
+    because a key carries its owner's roles. Every such gate that is not
+    `require_permission` calls this first (contract C6.1)."""
+    if user.auth_kind == "api_key" and not _permission_matches(user.key_scopes or [], scope):
+        raise HTTPException(status_code=403, detail=f"Missing permission: {scope}")
 
-    def _dep(
-        tenant_id: str,
-        user: AuthenticatedUser = Depends(get_current_user),
-    ) -> AuthenticatedUser:
-        # Ownership is a role fact, and an API key holds its owner's roles, so this
-        # gate cannot distinguish a narrowed key from its owner. It names the scope
-        # a key must ALSO carry; without one, a key is refused rather than admitted
-        # on its owner's authority (see `require_any_role`).
-        if user.auth_kind == "api_key":
-            if scope is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "This endpoint cannot be reached with an API key: its "
-                        "authorization is ownership-based and the key's scopes "
-                        "cannot be evaluated against it."
-                    ),
-                )
-            if not _permission_matches(user.key_scopes or [], scope):
-                raise HTTPException(
-                    status_code=403, detail=f"Missing permission: {scope}")
-        tenant = TenantsRepository().get(tenant_id)
-        if "admin" in user.roles:
-            if not tenant:
-                raise HTTPException(status_code=404, detail="Tenant not found")
-            return user
-        # Ownership requires BOTH the tenant pointer AND the team_lead role. A
-        # user demoted out of team_lead must lose owner power even if a stale
-        # `team_lead_user_id` still points at them (defense-in-depth: the role-
-        # change path also clears the pointer, but this makes the demotion
-        # effective immediately regardless). (Fable capability audit)
-        if (
-            not tenant
-            or tenant.get("team_lead_user_id") != user.user_id
-            or "team_lead" not in user.roles
-        ):
-            raise HTTPException(status_code=404, detail="Tenant not found")
-        return user
 
-    # When the param name is "tenant_id", FastAPI injects the path parameter automatically.
-    # For a different name, ensure the endpoint uses "tenant_id" as the path param name.
-    _dep.__name__ = f"require_tenant_owner_{tenant_id_param}"
-    return _dep
+def is_tenant_owner(tenant: Optional[dict[str, Any]], user: AuthenticatedUser) -> bool:
+    """The tenant-ownership rule, and its only statement: the tenant names the
+    caller as `team_lead_user_id` AND the caller holds the `team_lead` role. A
+    user demoted out of `team_lead` loses owner power at once, even while a stale
+    pointer still names them. Admin reach is not part of it; the two route gates
+    below differ only in that."""
+    return bool(tenant) and tenant.get("team_lead_user_id") == user.user_id \
+        and "team_lead" in user.roles
+
+
+def _tenant_or_404(tenant_id: str) -> dict[str, Any]:
+    tenant = TenantsRepository().get(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
+
+
+def owned_tenant_or_404(tenant_id: str, user: AuthenticatedUser) -> dict[str, Any]:
+    """The route gate for the ownership path: the caller must own the tenant by
+    `is_tenant_owner`, and an admin is no exception (the team-lead limit-raise
+    routes, where an admin uses the admin routes instead). Returns the tenant.
+
+    A tenant the caller does not own and a tenant that does not exist both raise
+    the same 404, so the tenant space cannot be enumerated. This decides ownership
+    only, not an API key's scopes: call it from a route gated by
+    `require_permission`, or call `ensure_key_scope` first.
+    `test_tenant_ownership_has_one_implementation.py` checks both."""
+    tenant = _tenant_or_404(tenant_id)
+    if not is_tenant_owner(tenant, user):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
+
+
+def owned_or_admin_tenant_or_404(tenant_id: str, user: AuthenticatedUser) -> dict[str, Any]:
+    """The route gate for a tenant an owner manages and an admin may also reach:
+    an admin passes for every tenant that exists, anyone else by `is_tenant_owner`.
+    The same 404 and the same scope caveat as `owned_tenant_or_404`."""
+    tenant = _tenant_or_404(tenant_id)
+    if "admin" in user.roles or is_tenant_owner(tenant, user):
+        return tenant
+    raise HTTPException(status_code=404, detail="Tenant not found")
 
 
 # -----------------------------------------------------------------

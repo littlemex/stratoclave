@@ -2,13 +2,14 @@
 
 `user_has_permission` implements the intersection correctly, and every shipped
 route reaches it through `require_permission`, so the scope-narrowing guarantee
-holds today. What does not hold is that it CANNOT be bypassed: two role-only
-dependencies exist beside it (`require_any_role`, `require_tenant_owner`) and they
-read `user.roles` alone. An API key carries its owner's full roles, so a key
-issued with a narrowed scope satisfies them.
+holds today. What does not hold is that it CANNOT be bypassed: a role-only
+dependency exists beside it (`require_any_role`; `require_tenant_owner`, the other
+one, was deleted with the ownership copies, C6.10) and it reads `user.roles`
+alone. An API key carries its owner's full roles, so a key issued with a narrowed
+scope satisfies it.
 
-Nothing routes through those two today — which is why this is a shape to close
-rather than a hole to patch. The tests below pin both halves: the dependencies
+Nothing routes through it today — which is why this is a shape to close rather
+than a hole to patch. The tests below pin both halves: the dependencies
 themselves refuse a narrowed credential they cannot evaluate, and no route
 dependency may gate on roles alone.
 """
@@ -220,27 +221,43 @@ class TestAGateOutsideADependencyStillEvaluatesTheIntersection:
             permission="tenants:update",
         )
 
-    def test_no_route_reads_roles_without_evaluating_scopes(self):
-        """Static sweep for the shape rather than for the two spellings: any
-        function in a route module that tests membership in `user.roles` must be
-        inside a module that also consults `user_has_permission`, so the scope side
-        cannot be forgotten by copying an existing handler."""
+    def test_no_function_reads_roles_without_evaluating_scopes(self):
+        """Per function, not per module: a function under mvp/ that tests
+        membership in `.roles` must either be a route gated by
+        `require_permission`, or call a scope evaluator (`ensure_key_scope`,
+        `user_has_permission`, `_permission_matches`) itself. A module-level check
+        would accept a role read and a scope check in unrelated functions."""
         root = pathlib.Path(__file__).resolve().parents[1]
+        evaluators = {"ensure_key_scope", "user_has_permission", "_permission_matches"}
+
+        def name(node):
+            return node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
+
         offenders: list[str] = []
+        readers = 0
         for path in (root / "mvp").rglob("*.py"):
             if path.name in ("authz.py", "deps.py"):
                 continue  # where the intersection is DEFINED
-            text = path.read_text()
-            reads_roles = ".roles" in text and (
-                'in user.roles' in text or 'in _user.roles' in text
-                or 'in current_user.roles' in text
-            )
-            evaluates_scopes = (
-                "user_has_permission" in text or "_permission_matches" in text
-                or "require_permission" in text
-            )
-            if reads_roles and not evaluates_scopes:
-                offenders.append(path.relative_to(root).as_posix())
+            for fn in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                reads = [n for n in ast.walk(fn) if isinstance(n, ast.Compare)
+                         and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops)
+                         and any(isinstance(a, ast.Attribute) and a.attr == "roles"
+                                 for c in n.comparators for a in ast.walk(c))]
+                if not reads:
+                    continue
+                readers += 1
+                gated = any(
+                    isinstance(d, ast.Call) and name(d.func) == "Depends" and d.args
+                    and isinstance(d.args[0], ast.Call)
+                    and name(d.args[0].func) == "require_permission"
+                    for d in list(fn.args.defaults) + list(fn.args.kw_defaults))
+                evaluates = any(isinstance(n, ast.Call) and name(n.func) in evaluators
+                                for n in ast.walk(fn))
+                if not (gated or evaluates):
+                    offenders.append(f"{path.relative_to(root).as_posix()}:{fn.lineno} {fn.name}")
+        assert readers >= 1, "the sweep found no role reads; it is not seeing the code"
         assert offenders == [], offenders
 
 
@@ -251,7 +268,7 @@ class TestNoRouteGatesOnRolesAlone:
         endpoint whose `Depends(...)` names a role-only gate is reported here with
         its file and line rather than discovered by an auditor."""
         root = pathlib.Path(__file__).resolve().parents[1]
-        role_only = {"require_any_role", "require_tenant_owner"}
+        role_only = {"require_any_role"}
         offenders: list[str] = []
 
         for path in (root / "mvp").rglob("*.py"):

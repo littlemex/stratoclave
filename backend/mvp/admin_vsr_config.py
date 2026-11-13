@@ -12,7 +12,7 @@ Routes (feature-flagged on ``EXTERNAL_VSR_ENABLED`` + a configured bucket):
 
   * ``default``       -> admin only (org-wide knob);
   * a real tenant id  -> the tenant OWNER (team_lead) or an admin
-    (``require_tenant_owner`` semantics; unknown tenant => 404, enumeration
+    (``owned_or_admin_tenant_or_404`` semantics; unknown tenant => 404, enumeration
     defense).
 
 LOOSE COUPLING: the body is raw text (``text/plain`` / ``application/yaml``),
@@ -26,9 +26,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from dynamo import TenantsRepository
-
-from .authz import _permission_matches, get_current_user, log_audit_event
+from .authz import (
+    ensure_key_scope,
+    get_current_user,
+    log_audit_event,
+    owned_or_admin_tenant_or_404,
+)
 from .deps import AuthenticatedUser
 from .vsr import config_store as store
 
@@ -49,46 +52,26 @@ def _require_enabled() -> None:
 def _authorize(
     tenant_id: str, user: AuthenticatedUser, *, permission: str
 ) -> None:
-    """Allow: an admin for any id (incl. ``default``); a tenant owner for their
-    OWN tenant. Everything else -> unified 404 (enumeration defense), matching
-    ``require_tenant_owner``.
+    """The VSR config gate. It is not a FastAPI dependency, so it evaluates the
+    credential itself (contract C6.1). In this order:
 
-    ``default`` is admin-only: it is not a real tenant, so no team_lead can own
-    it, and a non-admin must not read/alter the org-wide fallback.
-
-    An API key must ALSO carry `permission` in its scopes. The role tests below are
-    blind to them: a key carries its owner's roles, so an admin's key narrowed to
-    `messages:send` satisfied `"admin" in user.roles` and could write this config.
-    Authority is the intersection of the role and the credential's scope, and every
-    gate has to evaluate it (contract C6.1) — including a helper that is not a
-    FastAPI dependency. Only the scope side is added here: for a bearer token the
-    roles ARE the authority, and the ownership rules below already express it."""
-    if user.auth_kind == "api_key" and not _permission_matches(
-            user.key_scopes or [], permission):
-        raise HTTPException(
-            status_code=403, detail=f"Missing permission: {permission}")
-    # Shape-guard the id BEFORE it reaches DynamoDB (same charset/length as the
-    # S3-key guard): an unbounded/garbage path param must never become a
-    # GetItem lookup surface. A non-conforming id maps to the same uniform 404
-    # (enumeration defense) — it cannot name a real tenant nor `default`.
+    1. An API key must carry `permission` (`ensure_key_scope`): a key carries its
+       owner's roles, so an admin's key narrowed to `messages:send` would otherwise
+       pass the role tests below and write this config. 403.
+    2. A malformed id is refused before it reaches DynamoDB, with the same 404 a
+       missing tenant gets, so it can name neither a real tenant nor `default`.
+    3. `default` is the org-wide fallback, not a tenant: no team lead can own it,
+       so only an admin reaches it, and a non-admin gets the unified 404.
+    4. Any other id goes through the gate `owned_or_admin_tenant_or_404`: an admin
+       reaches an existing tenant, a team lead only their own."""
+    ensure_key_scope(user, permission)
     if not store._SAFE_ID.match(tenant_id or ""):
         raise HTTPException(status_code=404, detail="Tenant not found")
-    if "admin" in user.roles:
-        if tenant_id == store.DEFAULT_KEY:
-            return
-        if not TenantsRepository().get(tenant_id):
-            raise HTTPException(status_code=404, detail="Tenant not found")
-        return
-    # Non-admin: only a team_lead owning THIS tenant. `default` can never match.
     if tenant_id == store.DEFAULT_KEY:
+        if "admin" in user.roles:
+            return
         raise HTTPException(status_code=404, detail="Tenant not found")
-    tenant = TenantsRepository().get(tenant_id)
-    if (
-        not tenant
-        or tenant.get("team_lead_user_id") != user.user_id
-        or "team_lead" not in user.roles
-    ):
-        raise HTTPException(status_code=404, detail="Tenant not found")
+    owned_or_admin_tenant_or_404(tenant_id, user)
 
 
 async def _read_body(request: Request) -> str:
