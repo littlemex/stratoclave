@@ -86,6 +86,16 @@ for k, v in _TABLE_ENVS.items():
     os.environ.setdefault(k, v)
 
 
+# A test that rebinds a module-level function of the application by assignment,
+# instead of through `monkeypatch`, leaves every later test in the same worker
+# running against the replacement. The guard in `tests/_module_patch_guard.py`
+# fails the test that does it; see that module for what it watches.
+from tests import _module_patch_guard as _guard  # noqa: E402
+
+_application_functions_are_restored = _guard._application_functions_are_restored
+monkeypatch = _guard.monkeypatch
+
+
 @pytest.fixture(autouse=True)
 def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guarantee AWS_PROFILE is not set during tests so the mock endpoints

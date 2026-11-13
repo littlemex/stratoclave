@@ -301,13 +301,12 @@ def _make_app() -> FastAPI:
     return app
 
 
-def _override_auth(app: FastAPI, user: AuthenticatedUser) -> None:
+def _override_auth(app: FastAPI, user: AuthenticatedUser, monkeypatch: pytest.MonkeyPatch) -> None:
     from mvp import deps, authz
 
     app.dependency_overrides[deps.get_current_user] = lambda: user
-    authz.user_has_permission.__globals__["user_has_permission"] = (
-        lambda u, permission: permission == "responses:send"
-    )
+    monkeypatch.setattr(
+        authz, "user_has_permission", lambda u, permission: permission == "responses:send")
 
 
 @pytest.fixture
@@ -383,10 +382,10 @@ def _post_response(client: TestClient, **extra) -> httpx.Response:
 
 class TestOpenAIResponsesStampsTheMarker:
     def test_sent_payload_carries_the_real_hold_id_and_tenant(
-        self, stub_auth_user, _stub_credit_pipeline, capture_openai_request
+        self, monkeypatch, stub_auth_user, _stub_credit_pipeline, capture_openai_request
     ):
         app = _make_app()
-        _override_auth(app, stub_auth_user)
+        _override_auth(app, stub_auth_user, monkeypatch)
         client = TestClient(app)
 
         resp = _post_response(client)
@@ -399,10 +398,10 @@ class TestOpenAIResponsesStampsTheMarker:
         assert ATTEMPT_ID_PLACEHOLDER not in json.dumps(sent)
 
     def test_callers_own_metadata_is_preserved_beside_the_marker(
-        self, stub_auth_user, _stub_credit_pipeline, capture_openai_request
+        self, monkeypatch, stub_auth_user, _stub_credit_pipeline, capture_openai_request
     ):
         app = _make_app()
-        _override_auth(app, stub_auth_user)
+        _override_auth(app, stub_auth_user, monkeypatch)
         client = TestClient(app)
 
         resp = _post_response(client, metadata={"customer_ref": "c-1"})
@@ -414,10 +413,10 @@ class TestOpenAIResponsesStampsTheMarker:
         assert sent["metadata"]["sc_tenant"] == "org-responses-1"
 
     def test_a_caller_metadata_key_matching_ours_is_overwritten_by_the_gateway(
-        self, stub_auth_user, _stub_credit_pipeline, capture_openai_request
+        self, monkeypatch, stub_auth_user, _stub_credit_pipeline, capture_openai_request
     ):
         app = _make_app()
-        _override_auth(app, stub_auth_user)
+        _override_auth(app, stub_auth_user, monkeypatch)
         client = TestClient(app)
 
         resp = _post_response(client, metadata={"sc_tenant": "whatever-the-caller-sent"})
@@ -469,10 +468,10 @@ def capture_openai_stream_request(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_openai_responses_streaming_also_carries_the_real_hold_id(
-    stub_auth_user, _stub_credit_pipeline, capture_openai_stream_request
+    monkeypatch, stub_auth_user, _stub_credit_pipeline, capture_openai_stream_request
 ):
     app = _make_app()
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
     client = TestClient(app)
 
     with client.stream(
