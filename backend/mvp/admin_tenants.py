@@ -298,8 +298,9 @@ class PoolBudgetResponse(BaseModel):
     pool_limit_usd_cents: int
     remaining_usd_cents: int
     # --- the ceiling's composition, so the total beside it can be checked ---
-    # The mode is a SENTENCE, not a field: `mode_sentence` is what a surface
-    # renders, and the parts are here so a surface can build its own. A field
+    # The mode is a SENTENCE, not a field: `mode_sentence` is the English
+    # rendering for API callers, and the parts are here so a surface can build its
+    # own (the web console does, in the reader's language). A field
     # spelling "per_seat" told an operator the name of a state and nothing about
     # what it meant for them, which is why the state that ended seat tracking
     # could be entered without anyone noticing they had entered it.

@@ -91,6 +91,7 @@ vi.mock('@/lib/api', async () => {
   }
 })
 
+import i18n from '@/lib/i18n'
 import LimitRaiseApproval from './LimitRaiseApproval'
 
 function withRouting(children: ReactNode) {
@@ -125,8 +126,6 @@ const POOL_FIXTURE = {
   over_ceiling_microusd: 300_000,
   pool_limit_usd_cents: 4_000_00,
   remaining_usd_cents: -30,
-  mode_sentence:
-    'This budget was set manually; membership changes do not change this budget.',
   seat_tracked: false,
   seat_count: 12,
   seat_rate_microusd: 50_000_000,
@@ -342,15 +341,20 @@ describe('LimitRaiseApproval — R36/B6: remaining grant cap shown before typing
 })
 
 describe('LimitRaiseApproval — R21b: mode sentence, seat entitlement, resume action', () => {
-  it('renders the mode sentence verbatim, not a paraphrase of `mode`', async () => {
+  it('renders the mode as a sentence built from the parts, not a paraphrase of `mode`', async () => {
+    // The console composes the sentence from the structured fields, in the reader's
+    // language (see PoolBudgetCard); the backend's English `mode_sentence` is for API
+    // callers. What R21b asks for still holds: the figure, what the seats would
+    // entitle the tenant to, and how to return to them, not the name of a state.
+    await i18n.changeLanguage('en')
     render(withRouting(<LimitRaiseApproval />))
-    await waitFor(() =>
-      expect(
-        screen.getByText(
-          'This budget was set manually; membership changes do not change this budget.',
-        ),
-      ).toBeInTheDocument(),
-    )
+    const sentence = await screen.findByTestId('pool-mode-sentence')
+    expect(sentence.textContent).toMatch(/held at \$40\.00/)
+    expect(sentence.textContent).toMatch(/entitle it to \$600\.00/)
+    // The sentence names the follow-seats button, so that button must be on this page.
+    const label = i18n.t('admin_tenant_detail.pool.follow_seats_button')
+    expect(sentence.textContent).toContain(label)
+    expect(screen.getByTestId('pool-follow-seats-button').textContent).toContain(label)
   })
 
   it('renders the seat entitlement (seat count), not just the derived microusd figure', async () => {

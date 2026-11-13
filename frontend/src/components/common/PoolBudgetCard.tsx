@@ -35,10 +35,17 @@ import { cn } from '@/lib/utils'
  * tracking as the one role that cannot see it happened. Two components would also
  * be two renderings of one row, and they would eventually disagree.
  *
- * The mode is rendered as a SENTENCE the backend composes, not as a state name. A
- * field spelling "per_seat" named a state and said nothing an operator could act
- * on: not what the tenant is entitled to, not how the state was entered, and not
- * how to leave it.
+ * The mode is rendered as a SENTENCE, not as a state name. A field spelling
+ * "per_seat" named a state and said nothing an operator could act on: not what the
+ * tenant is entitled to, not how the state was entered, and not how to leave it.
+ *
+ * The console composes that sentence itself, from the structured fields, through
+ * i18n. The backend's `mode_sentence` is English prose for API callers; rendering
+ * it here put an untranslated paragraph on the Japanese screen, and its "send
+ * {"follow_seats": true} to this endpoint" is an instruction for a different
+ * client than the one that has a button for it. The backend's clause about an
+ * entitlement that outgrew the figure is not repeated in the sentence: the card
+ * shows it as its own line (`pool-entitlement-outgrew`).
  */
 export interface PoolBudgetApi {
   setPoolBudget: (
@@ -64,6 +71,9 @@ export function PoolBudgetCard({
 }) {
   const { t } = useTranslation()
   const [dialogOpen, setDialogOpen] = useState(false)
+  // One predicate for the follow-seats button and for the sentence that names it
+  // (the sentence picks the key that names the button only when this is true).
+  const canResume = Boolean(pool?.resume_action)
 
   return (
     <Card data-testid="pool-budget-card">
@@ -94,7 +104,26 @@ export function PoolBudgetCard({
         ) : pool ? (
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground" data-testid="pool-mode-sentence">
-              {pool.mode_sentence}
+              {pool.seat_tracked
+                ? t('admin_tenant_detail.pool.mode_seat_tracked', {
+                    count: pool.seat_count,
+                    entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
+                  })
+                : t(
+                    canResume
+                      ? 'admin_tenant_detail.pool.mode_manual_resumable'
+                      : 'admin_tenant_detail.pool.mode_manual',
+                    {
+                      // `manual_limit_microusd` is non-null whenever `seat_tracked` is
+                      // false. If that ever breaks, show no figure rather than $0.00,
+                      // which on this card would mean every request is refused.
+                      figure:
+                        pool.manual_limit_microusd == null
+                          ? '—'
+                          : fmtMicroUsd(pool.manual_limit_microusd),
+                      entitlement: fmtMicroUsd(pool.seat_entitlement_microusd),
+                    },
+                  )}
             </p>
             <dl
               className="grid gap-x-6 gap-y-3 sm:grid-cols-2"
@@ -186,7 +215,7 @@ export function PoolBudgetCard({
             ) : null}
             {/* The reversal, offered wherever the latch is visible. A figure used
                 to be permanent because no request could undo it. */}
-            {pool.resume_action ? (
+            {canResume ? (
               <FollowSeatsButton
                 tenantId={tenantId}
                 period={pool.period}

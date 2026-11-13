@@ -105,10 +105,6 @@ function poolBudget(overrides: Partial<PoolBudget> = {}): PoolBudget {
     over_ceiling_microusd: 0,
     pool_limit_usd_cents: 60_000,
     remaining_usd_cents: 60_000,
-    mode_sentence:
-      "This pool follows the tenant's seat count: 3 seats entitle it to " +
-      "$600.00 a month, and it moves by one seat's worth whenever somebody " +
-      'joins or leaves. Setting a figure by hand stops that.',
     seat_tracked: true,
     seat_count: 3,
     seat_rate_microusd: 200_000_000,
@@ -159,12 +155,6 @@ describe('R21: the pool mode renders as a sentence, not a field', () => {
         remaining_microusd: 100_000_000,
         pool_limit_usd_cents: 10_000,
         remaining_usd_cents: 10_000,
-        mode_sentence:
-          'This pool is held at $100.00, a figure set by hand, and no longer ' +
-          "follows the tenant's seat count. The seats would entitle it to " +
-          '$600.00, which is more than the figure, so the figure is now the ' +
-          'smaller of the two. Sending {"follow_seats": true} to this endpoint ' +
-          'returns it to the seat count.',
         seat_tracked: false,
         manual_limit_microusd: 100_000_000,
         baseline_microusd: 100_000_000,
@@ -187,12 +177,6 @@ describe('R21: the pool mode renders as a sentence, not a field', () => {
         remaining_microusd: 100_000_000,
         pool_limit_usd_cents: 10_000,
         remaining_usd_cents: 10_000,
-        mode_sentence:
-          'This pool is held at $100.00, a figure set by hand, and no longer ' +
-          "follows the tenant's seat count. The seats would entitle it to " +
-          '$600.00, which is more than the figure, so the figure is now the ' +
-          'smaller of the two. Sending {"follow_seats": true} to this endpoint ' +
-          'returns it to the seat count.',
         seat_tracked: false,
         manual_limit_microusd: 100_000_000,
         baseline_microusd: 100_000_000,

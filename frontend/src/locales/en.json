@@ -212,6 +212,9 @@
       "available_label": "Available",
       "seats_label": "Seats",
       "seats_value": "{{count}} (entitling {{entitlement}})",
+      "mode_seat_tracked": "This pool follows the tenant's seat count ({{count}}), which entitles it to {{entitlement}} a month. It moves by one seat's worth whenever somebody joins or leaves; saving a figure by hand stops that.",
+      "mode_manual": "This pool is held at {{figure}}, a figure set by hand, and no longer follows the tenant's seat count, which would entitle it to {{entitlement}}.",
+      "mode_manual_resumable": "This pool is held at {{figure}}, a figure set by hand, and no longer follows the tenant's seat count, which would entitle it to {{entitlement}}. Use “$t(admin_tenant_detail.pool.follow_seats_button)” to return it to the seat count.",
       "granted_label": "Granted",
       "remaining_grant_cap_label": "Remaining grant cap",
       "grant_cap_derived": "derived from baseline",
@@ -219,7 +222,7 @@
       "over_ceiling_by": "Over ceiling by {{amount}}. Committed spend exceeds the ceiling, so every new request is refused until the period rolls over or the ceiling is raised.",
       "entitlement_outgrew_figure": "The seats now entitle this tenant to {{entitlement}}, which is more than the figure it is held at. The figure is the smaller of the two.",
       "follow_seats_button": "Follow the seat count again",
-      "latch_warning": "Saving a figure stops this ceiling following the tenant's seat count. Zero is a figure and means every request is refused; to go back to the seat count, use “Follow the seat count again” rather than typing a number."
+      "latch_warning": "Saving a figure stops this ceiling following the tenant's seat count. Zero is a figure and means every request is refused; to go back to the seat count, use “$t(admin_tenant_detail.pool.follow_seats_button)” rather than typing a number."
     },
     "usage_by_tag_link": "Usage by tag"
   },
