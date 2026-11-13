@@ -32,6 +32,16 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   says so under *Changed* with the variable that restores the previous behaviour. A
   default is a judgement about what is safe, not an interface.
 
+## [Unreleased]
+
+### Fixed
+
+- **`PATCH /api/mvp/team-lead/tenants/{id}` requires `tenants:update-own`.** The route
+  renames a tenant and changes its `default_credit`, and was gated on `tenants:read-own`,
+  so an API key scoped to `tenants:read-own` alone could change them. Such a key now
+  gets 403 on this route; a team lead's console session is unaffected, since the
+  `team_lead` role holds both. Clause C6.9 states the rule for every write route.
+
 ## [1.4.0] — 2026-09-06
 
 Found after 1.3.0 was cut, while asking what regression tests the release's own

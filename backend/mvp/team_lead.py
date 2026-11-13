@@ -218,7 +218,7 @@ def get_own_tenant(
 def update_own_tenant(
     tenant_id: str,
     body: UpdateTenantTeamLeadRequest,
-    actor: AuthenticatedUser = Depends(require_permission("tenants:read-own")),
+    actor: AuthenticatedUser = Depends(require_permission("tenants:update-own")),
 ) -> TenantItem:
     _require_owner(tenant_id, actor)
     try:
