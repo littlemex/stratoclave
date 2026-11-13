@@ -155,7 +155,7 @@ def install_openai_stream(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-def _override_auth(app: FastAPI, user: AuthenticatedUser) -> None:
+def _override_auth(app: FastAPI, user: AuthenticatedUser, monkeypatch: pytest.MonkeyPatch) -> None:
     """Bypass cognito JWT verification by overriding the dep produced by
     `require_permission("responses:send")`. The dep object identity is
     a fresh closure each call; we install the override against the
@@ -175,9 +175,10 @@ def _override_auth(app: FastAPI, user: AuthenticatedUser) -> None:
     def _fake_has(u: AuthenticatedUser, permission: str) -> bool:  # noqa: ARG001
         return permission == "responses:send"
 
-    # Patch in-place so the closure inside the route also sees the
-    # permissive evaluator.
-    authz.user_has_permission.__globals__["user_has_permission"] = _fake_has  # type: ignore[attr-defined]
+    # The route's closure looks `user_has_permission` up in the authz module at
+    # call time, so patching the module attribute reaches it. Through
+    # monkeypatch, so the real evaluator is back for the next test.
+    monkeypatch.setattr(authz, "user_has_permission", _fake_has)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +211,7 @@ def _multiline_data_frame(event: str, payload: str) -> bytes:
 
 
 def test_stream_completes_and_settles_with_upstream_usage(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     sse = b"".join(
         [
@@ -230,7 +231,7 @@ def test_stream_completes_and_settles_with_upstream_usage(
     )
 
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
     client = TestClient(app)
@@ -271,7 +272,7 @@ def test_stream_completes_and_settles_with_upstream_usage(
 
 
 def test_stream_multiline_data_completed_event_extracts_usage(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     # An upstream that pretty-prints the JSON across multiple `data:`
     # lines, with a literal newline between members. This is what the
@@ -287,7 +288,7 @@ def test_stream_multiline_data_completed_event_extracts_usage(
     sse = _frame("response.created", {"type": "response.created"}) + multiline
 
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
     client = TestClient(app)
@@ -324,7 +325,7 @@ def test_stream_multiline_data_completed_event_extracts_usage(
 
 
 def test_stream_unterminated_final_event_is_terminated_by_proxy(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     # Note: NO trailing `\n\n` after the response.completed event.
     sse = (
@@ -337,7 +338,7 @@ def test_stream_unterminated_final_event_is_terminated_by_proxy(
     )
 
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
     client = TestClient(app)
@@ -419,7 +420,7 @@ def test_stream_buffers_event_split_across_chunks(monkeypatch, stub_auth_user, _
     monkeypatch.setattr(orx, "_openai_client", _fake_openai_client)
 
     app = _make_app()
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
     client = TestClient(app)
@@ -447,7 +448,7 @@ def test_stream_buffers_event_split_across_chunks(monkeypatch, stub_auth_user, _
 
 
 def test_stream_preserves_blank_line_event_terminator(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     # Two events back-to-back: an interior event and a terminal one.
     sse = (
@@ -460,7 +461,7 @@ def test_stream_preserves_blank_line_event_terminator(
     )
 
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
     client = TestClient(app)
@@ -520,7 +521,7 @@ def test_a_200_the_route_cannot_parse_still_ends_the_reservation(
     covered separately. Explicit rather than inherited: this test used to rely on
     the flag's default being off, and became wrong the moment the default flipped."""
     app = install_openai_stream(b"this is not json", status=200)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from mvp import provider_outcome as _po
 
@@ -574,7 +575,7 @@ def test_a_stream_cut_after_its_usage_is_charged_not_refunded(
     )
 
     app = _make_app()
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
 
@@ -614,7 +615,7 @@ _MEASURED_USAGE = {
 
 
 def test_a_data_only_terminal_is_metered(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     """The regression the whole change exists for: with no `event:` line anywhere, this
     route used to settle `0 / 0` for every streamed call."""
@@ -622,7 +623,7 @@ def test_a_data_only_terminal_is_metered(
         _data_only_frame({"type": "response.completed",
                           "response": {"id": "r", "usage": _MEASURED_USAGE}})
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
 
@@ -639,7 +640,7 @@ def test_a_data_only_terminal_is_metered(
 
 
 def test_a_terminal_whose_usage_will_not_parse_is_not_settled_at_all(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     """An unreadable terminal must reach the ledger as an unobserved outcome, not as a
     settled zero. The parser refusing to report a zero buys nothing if the route
@@ -653,7 +654,7 @@ def test_a_terminal_whose_usage_will_not_parse_is_not_settled_at_all(
     sse = _data_only_frame({"type": "response.completed",
                             "response": {"id": "r", "usage": {"input_tokens": 5}}})
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
 
@@ -671,14 +672,14 @@ def test_a_terminal_whose_usage_will_not_parse_is_not_settled_at_all(
 
 
 def test_a_stream_with_no_terminal_at_all_is_not_settled(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline
 ):
     """The other half of the same condition, and the one a clean upstream close
     produces."""
     sse = _data_only_frame({"type": "response.created", "response": {"id": "r"}}) + \
         _data_only_frame({"type": "response.output_text.delta", "delta": "hi"})
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
 
@@ -714,7 +715,7 @@ _MEASURED_COLD_WRITE = {
     ids=["cache-hit", "cold-write"],
 )
 def test_the_route_settles_the_decomposed_legs_not_the_raw_input(
-    install_openai_stream, stub_auth_user, _stub_credit_pipeline, usage, expected
+    monkeypatch, install_openai_stream, stub_auth_user, _stub_credit_pipeline, usage, expected
 ):
     """The cache fixtures at the ROUTE, which is where the double charge lived.
 
@@ -725,7 +726,7 @@ def test_the_route_settles_the_decomposed_legs_not_the_raw_input(
     sse = _data_only_frame({"type": "response.completed",
                             "response": {"id": "r", "usage": usage}})
     app = install_openai_stream(sse)
-    _override_auth(app, stub_auth_user)
+    _override_auth(app, stub_auth_user, monkeypatch)
 
     from fastapi.testclient import TestClient
 
