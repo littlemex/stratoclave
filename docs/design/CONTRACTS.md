@@ -570,7 +570,7 @@ without paying a cost the clause names.
   stale silently the day someone adds a document and forgets the list:
   `docs/MEASUREMENTS.md`, `docs/MEASUREMENTS.ja.md`, `docs/CLI_GUIDE.md`,
   `docs/CODEX_GUIDE.md`, `docs/COWORK_INTEGRATION.md`, `docs/GETTING_STARTED.md`,
-  `docs/LOCAL.md`, `docs/VSR_CONFIG_CONTRACT.md`, `docs/design/calibrated-mode.md`,
+  `docs/LOCAL.md`, `docs/LOCAL_MODELS.md`, `docs/VSR_CONFIG_CONTRACT.md`, `docs/design/calibrated-mode.md`,
   `docs/design/charge-loss.md`, `docs/design/gateway-capacity.md`,
   `docs/design/ledger-hot-path.md`, `docs/design/pending-protocol.md`,
   `docs/design/vsr-savings-certificate.md`, `docs/EVIDENCE.md`,

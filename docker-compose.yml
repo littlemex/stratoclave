@@ -63,6 +63,30 @@ services:
       # unboundable content is refused. `scripts/local/prove_ceiling.py` needs it
       # on; `make demo` does not care either way.
       STRATOCLAVE_HARD_CEILING_GATE: ${STRATOCLAVE_HARD_CEILING_GATE:-}
+      # Off by default (the shipped posture): a registry entry can only ever
+      # declare served_by="vllm" if this is "true" AND its endpoint_key is in
+      # the allowlist below — see backend/mvp/serving/vllm.py and
+      # docs/LOCAL_MODELS.md. Empty/unset means the flag reads false.
+      HYBRID_SERVING_ENABLED: ${HYBRID_SERVING_ENABLED:-}
+      # Operator allowlist, {"<endpoint_key>": "<url>"} — the SSRF guard that
+      # keeps a vLLM entry from ever inventing a URL. Empty means no
+      # self-hosted endpoint is servable even with the flag on.
+      STRATOCLAVE_VLLM_ENDPOINTS: ${STRATOCLAVE_VLLM_ENDPOINTS:-}
+      # Points at an alternate registry document (adds a served_by="vllm"
+      # entry on top of the shipped catalog) — unset uses the shipped
+      # backend/mvp/defaults/models.json untouched. See docs/LOCAL_MODELS.md.
+      STRATOCLAVE_MODEL_REGISTRY_PATH: ${STRATOCLAVE_MODEL_REGISTRY_PATH:-}
+      # Operator-declared cost-recovery rate document for self-hosted
+      # endpoints (backend/mvp/pricing_feeds/selfhosted.py). Unset means a
+      # servable vLLM entry has no published rate and falls back to the
+      # bundled floor.
+      STRATOCLAVE_SELFHOSTED_RATES_PATH: ${STRATOCLAVE_SELFHOSTED_RATES_PATH:-}
+      # Empty means the built-in bundled floor (defaults/pricing.json) is
+      # charged, including for a vLLM entry's own "vllm" pricing_key — the
+      # self-hosted rate document above only takes effect once this names the
+      # live feed pipeline ("bedrock-live"), same as a real deployment. See
+      # docs/LOCAL_MODELS.md and docs/design/price-feeds.md Sec.4.
+      STRATOCLAVE_PRICE_SOURCE: ${STRATOCLAVE_PRICE_SOURCE:-}
       AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
       # Deliberately NOT overriding a Bedrock endpoint: inference stays real.
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -73,10 +97,24 @@ services:
       HOME: /app
       AWS_CONFIG_FILE: /app/.aws/config
       AWS_SHARED_CREDENTIALS_FILE: /app/.aws/credentials
+      # Empty by default — only needed when AWS_PROFILE resolves through a
+      # credential_process binary (an internal SSO wrapper, Isengard, etc.)
+      # that exists on your host but not inside this image. Export static
+      # credentials first (`aws configure export-credentials --profile
+      # <name> --format env`) and set these three, and the gateway uses them
+      # directly instead of invoking the missing binary. See docs/LOCAL_MODELS.md.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       DEFAULT_ORG_ID: default-org
     volumes:
       # Read-only: this container can use your credentials, never edit them.
       - ${HOME}/.aws:/app/.aws:ro
+      # Read-only: lets STRATOCLAVE_MODEL_REGISTRY_PATH / _SELFHOSTED_RATES_PATH
+      # above point at a document under scripts/local/ (outside the backend/
+      # build context) without baking it into the image. Mounted unconditionally;
+      # harmless when the two env vars above are unset. See docs/LOCAL_MODELS.md.
+      - ./scripts/local:/app/local-dev:ro
     restart: unless-stopped
 
 volumes:

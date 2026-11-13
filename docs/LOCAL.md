@@ -14,6 +14,8 @@ make down    # stop everything, wipe the local ledger
 
 `demo-offline` is a separate, AWS-free path — see [below](#no-aws-account-use-demo-offline).
 
+Want to put a self-hosted model (Ollama, vLLM, llama.cpp) behind this same gateway instead of Bedrock? See [`docs/LOCAL_MODELS.md`](./LOCAL_MODELS.md).
+
 ## What you need before `make up`
 
 - Docker or [Finch](https://github.com/runfinch/finch) with its VM running.
