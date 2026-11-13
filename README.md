@@ -18,6 +18,8 @@ An AWS account with Bedrock access is still required; Bedrock usage is billed no
 [![API: OpenAI Chat](https://img.shields.io/badge/API-OpenAI_Chat_Completions-10A37F.svg)](#api-compatibility)
 [![API: OpenAI Responses](https://img.shields.io/badge/API-OpenAI_Responses-412991.svg)](#api-compatibility)
 
+**[Project page](https://littlemex.github.io/stratoclave/?lang=en)** ([日本語](https://littlemex.github.io/stratoclave/?lang=ja)): what Stratoclave does, with screenshots of the console.
+
 </div>
 
 ---
@@ -433,8 +435,8 @@ single Bedrock `converse` / `converseStream` backend against an
 inference-profile allowlist — different wire shapes, one control core. OpenAI
 Responses calls (`/openai/v1/responses`) are forwarded by httpx to the
 bedrock-runtime service at `bedrock-runtime.{region}.amazonaws.com/openai/v1`, where the
-region is per-model (GPT-5.4 and Grok 4.6 → us-west-2; GPT-5.5, GPT-5.6 Sol/Terra,
-and Gemma 4 → us-east-2). The gateway forwards the resolved Bedrock model id (not
+region is per-model, taken from each model's `bedrock_region` in
+[`backend/mvp/defaults/models.json`](./backend/mvp/defaults/models.json). The gateway forwards the resolved Bedrock model id (not
 the client-facing alias), so both `grok-4.6` and `xai.grok-4.6` route correctly.
 All Bedrock calls
 originate from the single Fargate task; no second control-plane region is
@@ -547,9 +549,14 @@ and makes no external network calls: it folds a checked-in workload through the
 shipped rating and savings code. It exercises the accounting arithmetic only — no
 reserve, no settle, no ledger write, no inference.
 
+To put a self-hosted model (Ollama, vLLM, llama.cpp) behind the local gateway from
+[`docs/LOCAL.md`](./docs/LOCAL.md), see [`docs/LOCAL_MODELS.md`](./docs/LOCAL_MODELS.md).
+It is off by default (`HYBRID_SERVING_ENABLED=true` turns it on), and today only the
+streaming `/v1/messages` route reaches a self-hosted model.
+
 ### Deploy the full stack to AWS
 
-Prerequisites: AWS CLI with an administrator profile, Node.js 22 (the `engines` field in `frontend/package.json` gives the exact range), Docker,
+Prerequisites: AWS CLI with an administrator profile, Node.js 22.22.2 or later in the 22 line ([`.nvmrc`](./.nvmrc) selects 22; the `engines` fields in `frontend/package.json` and `iac/package.json` give the exact accepted ranges), Docker,
 and Bedrock model access enabled for the Claude family in your region.
 
 One-line install. The AWS account id is derived from your current credentials
@@ -668,7 +675,7 @@ print(resp.output_text)
 ```
 
 The `responses:send` scope is required; all three roles (`admin`, `team_lead`,
-`user`) carry it by default. GPT-5.x, xAI Grok, and Google Gemma are served via
+`user`) carry it by default. GPT-5.6 and xAI Grok are served via
 the OpenAI-compatible endpoint on bedrock-runtime and gated by the `STRATOCLAVE_CODEX_ENABLED` feature flag on the
 ECS task. The default codex model is `openai.gpt-5.6-sol` (override per call with
 `--model`, or per deployment with the `DEFAULT_CODEX_MODEL` env). See
@@ -865,12 +872,13 @@ from a human form is a typo risk.
 | `POST /api/mvp/billing/authorizations/{id}/{capture,void}` | Capture (settle, ≤ authorized) or void (release) an open authorization. Requires `billing:write`. |
 | `GET  /api/mvp/billing/authorizations/{id}` | Authorization status (authorized / captured / voided / expired). Requires `billing:read`. |
 | `/api/mvp/admin/*`                     | Admin and team-lead operations (user, tenant, credit, usage, trusted accounts, invites). |
+| `/api/mvp/team-lead/*`                 | A team lead's operations on the tenants they own (members, credit, pool budget, usage, limit raises). |
 
-The Claude family (via Bedrock `converse`) and the OpenAI family (via the
-bedrock-runtime Responses API, currently `gpt-5.4` and `gpt-5.5`) are the
-supported providers. Any model outside the explicit allowlist is rejected
-with HTTP 400. The full registry lives in
-[`backend/mvp/models.py`](./backend/mvp/models.py).
+The shipped registry, [`backend/mvp/defaults/models.json`](./backend/mvp/defaults/models.json),
+covers the Claude family, NVIDIA Nemotron Super 3 and Qwen3 Next 80B via Bedrock
+`converse`, and GPT-5.6 Sol/Terra and xAI Grok 4.6 via the bedrock-runtime
+Responses API. Another Bedrock model that speaks `converse` or the Responses API is
+added at runtime once an admin discovers, prices and promotes it. Any model outside the registry is rejected with HTTP 400.
 
 ## Stratoclave vs. LiteLLM vs. a credential broker
 
@@ -889,7 +897,7 @@ AWS-native gateway that trades breadth for depth of per-tenant control.
 | Dimension | Stratoclave | LiteLLM Proxy | AWS credential broker |
 |---|---|---|---|
 | Sits in the data path? | **Yes** (gateway) | **Yes** (gateway) | **No** (client → Bedrock direct) |
-| Providers | Amazon Bedrock — Claude (incl. Opus 5 / Fable 5) via `converse`; and, via the OpenAI-compatible endpoint on bedrock-runtime, OpenAI GPT-5.x (incl. GPT-5.6 Sol/Terra), xAI Grok 4.6, and Google Gemma 4 **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Still fewer providers than LiteLLM — a breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
+| Providers | Amazon Bedrock — Claude (incl. Opus 5 / Fable 5), NVIDIA Nemotron Super 3 and Qwen3 Next 80B via `converse`; OpenAI GPT-5.6 Sol/Terra and xAI Grok 4.6 via the OpenAI-compatible endpoint on bedrock-runtime; other Bedrock models that speak `converse` or the Responses API, once an admin discovers, prices and promotes them **+ a `served_by="vllm"` transport seam that binds a self-hosted GPU / any OpenAI-compatible endpoint to the same reserve/rating/settle ledger** (ships dark). **Still fewer providers than LiteLLM — a breadth loss today**, and a deliberate trade: breadth is capped by what Stratoclave can *execute and bill first-party*. The planned vLLM Semantic Router delegation (dark, unwired) improves *which* model is chosen *within* that set — it does not widen the set | **100+** (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, …) — clear breadth win | Amazon Bedrock, Anthropic models only |
 | API surfaces | Anthropic Messages **+ OpenAI Chat Completions** (shared converse core) + OpenAI Responses | OpenAI Chat/Responses/Embeddings across providers | Native Anthropic Messages only |
 | Tenants as a managed object | **Yes** — create / assign / reassign as a first-class object (reassignment is a `TransactWriteItems`) | Teams / orgs (global/team/user/key budgets) | **No** — only the IdP identity |
 | Budget: bypass-proof? | **No client bypass** *and* **no overspend race** — pool + per-user tokens + per-model quota reserved pre-flight in one `TransactWriteItems` (optimistic snapshot lock; overshoot loses the write → `402`). **Hard at admission**, and that is the claim: no request is admitted past the limit — the limit on the amount the request is admitted AT. Whether the settled charge stays under that amount depends on how it was priced: a byte-count bound dominates any usage the provider can report, the older token estimate does not, and the bound gates admission only where `STRATOCLAVE_HARD_CEILING_GATE` is on. It is also not a hard bound on the *bill*, because an outcome the gateway cannot observe — a read timeout, a killed process — is one the gateway cannot price. Those are now classified rather than assumed unbilled (`mvp/provider_outcome.py`), and `STRATOCLAVE_UNOBSERVED_HOLDS` **defaults on**, so such an outcome KEEPS its reservation rather than handing the budget back as though the call were free. An operator can set that flag falsy to get the weaker behaviour back. See the crash-safe row below. | **No client bypass**, and **pre-call reservation is shipped** — `litellm/proxy/spend_tracking/budget_reservation.py` (first committed 2026-04-30) reserves before the call, fails closed when the reservation cannot be written, clamps adversarial `max_tokens`, and covers seven scopes. The admission counter is a `DualCache` (in-process + Redis) with the DB as an authority that catches up; the code documents recovery paths for Redis restart / cross-pod reset. **We have not tested whether the ceiling holds through cache loss, and we do not claim it fails.** The honest difference is the guarantee level, not the presence of a reservation. Verify against the version you deploy | **Soft** — enforcement lives in IAM/SCP (model-ARN allow/deny); the dollar/usage counter is telemetry-based (checked at STS refresh, ~1 h), so it caps identity/model access, not spend at request time |
@@ -1010,7 +1018,9 @@ ledger — a saving without a ledger behind it is a billing dispute waiting to h
 | Document                                                        | For                                                          |
 |-----------------------------------------------------------------|--------------------------------------------------------------|
 | [`docs/MEASUREMENTS.md`](./docs/MEASUREMENTS.md) ([日本語](./docs/MEASUREMENTS.ja.md)) | **What a failed Bedrock call actually costs** — measured against the provider's own counters, each finding with the point where its evidence stops, plus the harness. Useful whether or not you run Stratoclave. |
+| [Project page](https://littlemex.github.io/stratoclave/?lang=en) ([日本語](https://littlemex.github.io/stratoclave/?lang=ja)) | The overview, with screenshots of the console. |
 | [`docs/LOCAL.md`](./docs/LOCAL.md)                              | Run the whole gateway on one machine against real Bedrock, and what that mode does and does not prove. |
+| [`docs/LOCAL_MODELS.md`](./docs/LOCAL_MODELS.md)                | Put a self-hosted model (Ollama, vLLM, llama.cpp) behind the gateway. |
 | [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md)          | Deployed-stack walkthrough: install the CLI, sign in, make a call. |
 | [`docs/SCOPE.md`](./docs/SCOPE.md)                              | What Stratoclave is / is NOT, and the rules for deciding whether a feature belongs. |
 | [`docs/EVIDENCE.md`](./docs/EVIDENCE.md)                        | Reach-map: each differentiating claim, its strongest evidence today, and what that evidence does not cover (with commit SHAs). |
