@@ -27,9 +27,10 @@ export const WAF_REGION = 'us-east-1'; // AWS hard requirement: CLOUDFRONT-scope
 // primary's jurisdiction below (residency safety).
 const DEFAULT_FAILOVER_REGIONS = ['us-west-2', 'eu-west-1'];
 const FAILOVER_DISABLE_SENTINELS = new Set(['', 'none', 'disabled', 'off']);
-// Hardcoded in mvp/models.py — the codex path calls bedrock-mantle in these
-// regions regardless of OPENAI_BEDROCK_REGIONS. A backend drift test
-// (test_openai_region_residency_contract.py) guards that these stay in sync.
+// Hardcoded in mvp/models.py — the codex path calls the OpenAI-compatible surface
+// on bedrock-runtime in these regions regardless of OPENAI_BEDROCK_REGIONS. A
+// backend drift test (test_openai_region_residency_contract.py) guards that
+// these stay in sync.
 const OPENAI_REGISTRY_REGIONS = ['us-west-2', 'us-east-2'];
 // Geo (cross-region) inference-profile prefixes. Denylist — extend as AWS ships
 // new geographies. us-gov is included though the gov partition is rejected.

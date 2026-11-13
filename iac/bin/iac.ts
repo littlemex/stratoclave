@@ -307,7 +307,7 @@ if (backendOpenAiConnections < backendSyncRouteThreads) {
   cdk.Annotations.of(app).addWarning(
     `OPENAI_TRANSPORT_MAX_CONNECTIONS (${backendOpenAiConnections}) is below ` +
       `GATEWAY_SYNC_ROUTE_THREADS (${backendSyncRouteThreads}): a task can admit more ` +
-      'mantle requests than it holds connections for, so the surplus waits on the ' +
+      'OpenAI-compatible requests than it holds connections for, so the surplus waits on the ' +
       'connection pool rather than on the model.',
   );
 }
@@ -592,7 +592,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
       ? { SC_FAULT_INJECTION: '1' }
       : {}),
 
-    // OpenAI (codex / GPT-5.x) on Amazon Bedrock — bedrock-mantle endpoint.
+    // OpenAI (codex / GPT-5.x) on Amazon Bedrock — the OpenAI-compatible surface on
+    // bedrock-runtime.
     // GPT-5.4 / GPT-5.5 are GA only in us-east-2 / us-west-2; the route handler
     // in mvp/openai_responses.py picks the per-model region out of the model
     // REGISTRY (mvp/models.py), NOT from OPENAI_BEDROCK_REGIONS — that var is a

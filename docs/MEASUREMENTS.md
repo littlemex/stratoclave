@@ -25,7 +25,7 @@ never see.
 | A charge follows the HTTP status | The line is **whether the model ran**, not whether the call failed. A service rejection (`ValidationException`, HTTP 400) records an invocation but **no token counters**; a completed stream records exact usage | Only `ValidationException` was measured. Other rejection codes and HTTP statuses inherit that zero **by argument, not by counter** |
 | `Invocations` counts what you pay for | `Invocations` **also counts rejections**, which produced no token counters. The token counters are the signal closest to the bill | It is a count, so it cannot distinguish billed from unbilled or say how much either way |
 | `max_attempts: 1` means one call | botocore resolves it to `total_max_attempts = 2`, and rewrites the caller's own dict in place | Reproduced offline against botocore 1.35.99. The resulting **second charge** was measured in the same account, but the harness here checks the resolution, not the charge |
-| An abandoned call is unattributable | With model invocation logging on, the abandoned call's record was retrieved **by a `requestMetadata` marker alone**, carrying `in 22 / out 1,493` | Two records observed, delivered 35 s and 41 s after the call. **Converse only**: on the OpenAI-compatible endpoint the marker is recorded as `null`. Retrieval is by hand — the harness stamps the marker, it does not search the log |
+| An abandoned call is unattributable | With model invocation logging on, the abandoned call's record was retrieved **by a `requestMetadata` marker alone**, carrying `in 22 / out 1,493` | Two records observed, delivered 35 s and 41 s after the call. Both are Converse calls; the OpenAI-compatible routes are a separate finding, in `docs/EVIDENCE.md`'s row "The same is true on the OpenAI-compatible routes". Retrieval is by hand — the harness stamps the marker, it does not search the log |
 
 Everything above was measured on **2026-08-29, us-east-1**, one condition per
 minute, on models the account otherwise never invokes (so the counters could not
@@ -43,9 +43,8 @@ not enough to state a rate, which is why no rate is stated anywhere here.
 opposed to its OpenAI-compatible endpoint); a *read timeout* is your client giving
 up on a response it is still waiting for; *model invocation logging* is a Bedrock
 setting that writes one record per call to S3 or CloudWatch Logs, optionally
-without the prompt and response text; *`bedrock-mantle`* is the older
-OpenAI-compatible surface, which Stratoclave no longer uses; *CUR* is the AWS Cost
-and Usage Report, the itemised billing export.
+without the prompt and response text; *CUR* is the AWS Cost and Usage Report, the
+itemised billing export.
 
 ## Finding 1: your timeout is not the model's timeout
 
@@ -146,11 +145,15 @@ retrieved **by that marker alone** and carried the exact token counts.
 | Delivery lag to the log destination | 35–41 s |
 | Text delivery | off — the record is metadata only |
 
-Limits, stated plainly: this is **Converse only**. On the OpenAI-compatible
-endpoint the log record exists but `requestMetadata` is recorded as `null`, so
-those attempts are aggregate evidence rather than per-request attribution. And
-`bedrock-mantle` produces no record at all — which is one of the reasons
-Stratoclave moved its OpenAI-compatible traffic to the endpoint AWS recommends.
+Limits, stated plainly: the table above is **Converse only**. An earlier version of
+this document also listed the OpenAI-compatible endpoint's `requestMetadata` as
+recorded `null`, as a provider limitation; that was the signature of the gateway not
+sending the marker, not of the field being dropped (issue #247). What was measured
+after the marker shipped, at what tier, and the two deliberate cases where no
+per-attempt id is carried, are in `docs/EVIDENCE.md`'s row "The same is true on the
+OpenAI-compatible routes". Stratoclave serves its OpenAI-compatible traffic only
+through `bedrock-runtime`'s `/openai/v1` (C13.5) — the endpoint AWS recommends, and,
+as measured 2026-09-03, the only one whose calls appear in model invocation logs.
 
 Because the marker has to be on the request *before* it is sent, stamping it is a
 correctness requirement rather than an optimisation. Values are ids the gateway

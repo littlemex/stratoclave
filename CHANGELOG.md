@@ -36,6 +36,17 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Fixed
 
+- **`bedrock-mantle` is named as unsupported, not just absent (C13.5, issue #246).**
+  `docs/EVIDENCE.md`, `docs/MEASUREMENTS.md` and `docs/MEASUREMENTS.ja.md` no longer state
+  a `bedrock-mantle` limitation as current. `docs/MEASUREMENTS.md` and `.ja` also carried a
+  stale claim about the OpenAI-compatible routes themselves — that `requestMetadata` is
+  recorded `null` there — which #247 had already corrected in `EVIDENCE.md` but not in
+  these two. Comments, `models.json` and IaC prose that named `bedrock-mantle` where the
+  supported surface (`bedrock-runtime`'s `/openai/v1`) was the point are renamed. The name,
+  hyphenated or bare, is now banned from every `.md`/`.ts`/`.rs` file in the repository
+  outside three named exceptions, and from `.py`/`.sh`/`.json`/`.txt` source under
+  `backend/` and `scripts/`, pinned by new tests. The upstream AWS price-list usage-type
+  strings that contain the literal word `mantle` are unchanged, pinned by a new test.
 - **A tenant gets the same provisioning from either creation route (C14.36).** Both
   `POST /api/mvp/admin/tenants` and `POST /api/mvp/team-lead/tenants` now go through one
   operation. Behaviour change: a tenant created by a team lead now gets the explicit

@@ -204,8 +204,8 @@ export class FrontendStack extends cdk.Stack {
               //
               // 60 s is the maximum without a service-quota increase. The gateway
               // caps its own non-streaming read below this (see
-              // `_mantle_transport`), so a slow upstream produces our JSON 502
-              // rather than the CDN's HTML.
+              // `_openai_transport.py`'s `DEFAULT_NONSTREAM_READ_TIMEOUT`), so a slow
+              // upstream produces our JSON 502 rather than the CDN's HTML.
               originReadTimeout: 60,
               // Reuse the origin connection between requests; the default is 5 s,
               // which throws it away between bursts for the same reason the client

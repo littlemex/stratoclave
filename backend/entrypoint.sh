@@ -20,11 +20,11 @@ echo "[INFO] Starting Stratoclave Backend"
 # unchanged unless a deployment asks for more, and the IaC sets it alongside the
 # task size for that reason.
 #
-# What each worker keeps its own copy of: the bedrock-mantle bearer cache, the
-# httpx and boto3 connection pools, the pricing cache, and the router's advisory
-# cooldown map. All are per-process by design and correct when duplicated — the
-# cost is N times the token mints per TTL and N times the idle connections, which
-# is the price of not sharing a GIL.
+# What each worker keeps its own copy of: the Bedrock bearer-token cache for the
+# OpenAI-compatible transport, the httpx and boto3 connection pools, the pricing
+# cache, and the router's advisory cooldown map. All are per-process by design
+# and correct when duplicated — the cost is N times the token mints per TTL and
+# N times the idle connections, which is the price of not sharing a GIL.
 WORKERS="${GATEWAY_UVICORN_WORKERS:-1}"
 if ! [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[FAIL] GATEWAY_UVICORN_WORKERS must be a positive integer (got '${WORKERS}')" >&2

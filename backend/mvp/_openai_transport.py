@@ -47,21 +47,22 @@ logger = get_logger(__name__)
 DEFAULT_TOKEN_TTL = timedelta(seconds=900)
 
 # The OpenAI-compatible surface on `bedrock-runtime`, which is the endpoint AWS
-# recommends: the `the OpenAI-compatible endpoint` documentation opens with "For new applications,
-# we recommend the `bedrock-runtime` endpoint" and marks it as such in its own
+# recommends: AWS's Bedrock documentation opens with "For new applications, we
+# recommend the `bedrock-runtime` endpoint" and marks it as such in its own
 # endpoint table.
 #
-# This used to point at `https://bedrock-runtime.{region}.amazonaws.com/openai/v1`, and
-# moving it is not cosmetic. Two capabilities this gateway needs are documented as
-# absent on the OpenAI-compatible endpoint and present here:
+# This used to point at `bedrock-mantle`'s own endpoint, and moving it off that is
+# not cosmetic. Two capabilities this gateway needs are documented as absent on
+# `bedrock-mantle` and present here (C13.5: `bedrock-mantle` is not a supported
+# transport, for this reason):
 #
 #   * Model invocation logging is "only supported for calls made through the
 #     `bedrock-runtime` endpoint. This includes the OpenAI-compatible Responses and
-#     Chat Completions APIs on that endpoint. Calls made through other endpoints,
-#     such as the same APIs on `the OpenAI-compatible endpoint`, are not currently captured."
+#     Chat Completions APIs on that endpoint. Calls made through other endpoints
+#     are not currently captured" — `bedrock-mantle` is one such other endpoint.
 #     Verified: a call here produces a log record with `operation:
-#     "ChatCompletions"` and its token counts. On the OpenAI-compatible endpoint there is no record at all,
-#     so an abandoned call left nothing to reconcile against.
+#     "ChatCompletions"` and its token counts. On `bedrock-mantle` there is no
+#     record at all, so an abandoned call left nothing to reconcile against.
 #   * The usage block carries `input_tokens_details.cached_tokens`,
 #     `cache_write_tokens` and `output_tokens_details.reasoning_tokens`, so a
 #     cached or reasoning-heavy call can be priced on what it actually was.
