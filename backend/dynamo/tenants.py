@@ -193,6 +193,24 @@ class TenantsRepository:
         return resp.get("Items", []), resp.get("LastEvaluatedKey")
 
     # ----- write -----
+    @staticmethod
+    def new_tenant_id() -> str:
+        """The id format of a tenant created through a route."""
+        return f"tenant-{uuid4()}"
+
+    def ensure_below_tenant_limit(self, team_lead_user_id: str) -> None:
+        """Raise `TenantLimitExceededError` when the owner already holds the most
+        tenants allowed. Admin-owned tenants are exempt. `create` checks it too; a
+        caller with work to do before the row calls it first."""
+        if team_lead_user_id == ADMIN_OWNED:
+            return
+        existing = self.count_by_owner(team_lead_user_id)
+        if existing >= self.TEAM_LEAD_TENANT_LIMIT:
+            raise TenantLimitExceededError(
+                f"Team lead {team_lead_user_id} already owns {existing} tenants "
+                f"(limit={self.TEAM_LEAD_TENANT_LIMIT})"
+            )
+
     def create(
         self,
         *,
@@ -203,16 +221,9 @@ class TenantsRepository:
         tenant_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create a new tenant. Raises ConditionalCheckFailed if the tenant_id already exists."""
-        # Check the team lead cap (admin-owned tenants are exempt).
-        if team_lead_user_id != ADMIN_OWNED:
-            existing = self.count_by_owner(team_lead_user_id)
-            if existing >= self.TEAM_LEAD_TENANT_LIMIT:
-                raise TenantLimitExceededError(
-                    f"Team lead {team_lead_user_id} already owns {existing} tenants "
-                    f"(limit={self.TEAM_LEAD_TENANT_LIMIT})"
-                )
+        self.ensure_below_tenant_limit(team_lead_user_id)
 
-        tid = tenant_id or f"tenant-{uuid4()}"
+        tid = tenant_id or self.new_tenant_id()
         now = _now_iso()
         item: dict[str, Any] = {
             "tenant_id": tid,

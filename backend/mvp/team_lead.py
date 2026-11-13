@@ -36,7 +36,7 @@ from dynamo import (
     current_period,
 )
 from limits import MAX_TOKEN_CREDIT
-from dynamo.tenant_budgets import PoolLimitExceedsMaximumError, seat_pool_limit_microusd
+from dynamo.tenant_budgets import PoolLimitExceedsMaximumError
 from dynamo.user_tenants import CreditExhaustedError, is_unlimited
 from .admin_tenants import (
     PoolBudgetResponse,
@@ -44,10 +44,10 @@ from .admin_tenants import (
     UsageByTagResponse,
     _MICRO_USD_PER_CENT,
     _pool_response,
-    _provision_seat_pool,
     apply_pool_budget_request,
     usage_by_tag_response,
 )
+from . import tenant_lifecycle
 from .credit_ops import CreditAction
 
 from .authz import (
@@ -143,42 +143,23 @@ def create_tenant(
     body: CreateTenantTeamLeadRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
 ) -> TenantItem:
-    """Create a Tenant owned by the calling Team Lead. team_lead_user_id is forced to user.user_id."""
-    # L8: validate seats (1, at creation) x SEAT_MONTHLY_USD against
-    # MAX_POOL_BUDGET_USD_CENTS BEFORE writing anything (same gate the admin
-    # route applies) — a misconfigured SEAT_MONTHLY_USD refuses loudly rather
-    # than creating a tenant with no pool (or a silently-clamped one).
+    """Create a tenant owned by the calling team lead; the owner is the caller and is
+    never read from the body. The rest of creation is `tenant_lifecycle.create_tenant`,
+    shared with the admin route, so a tenant gets the same provisioning from either."""
     try:
-        seat_pool_limit_microusd(1)
-    except PoolLimitExceedsMaximumError as e:
-        raise HTTPException(status_code=422, detail=f"seat_pool_limit_exceeds_maximum: {e}")
-    # Written at ZERO seats and grown by the same ±1-seat delta every membership
-    # change applies, so the ceiling equals the seat count at every moment. One
-    # seat here would count the owner twice.
-    pool_limit_microusd = seat_pool_limit_microusd(0)
-    try:
-        item = TenantsRepository().create(
+        item = tenant_lifecycle.create_tenant(
             name=body.name,
             team_lead_user_id=actor.user_id,
             default_credit=body.default_credit,
-            created_by=actor.user_id,
+            actor=actor,
+            audit_event="team_lead_tenant_created",
+            audit_details={"name": body.name},
         )
+    except PoolLimitExceedsMaximumError as e:
+        # Raised by the seat-rate check, which runs before anything is written.
+        raise HTTPException(status_code=422, detail=f"seat_pool_limit_exceeds_maximum: {e}")
     except TenantLimitExceededError as e:
-        raise HTTPException(
-            status_code=403, detail=f"tenant_limit_exceeded: {e}"
-        )
-    log_audit_event(
-        event="team_lead_tenant_created",
-        actor_id=actor.user_id,
-        actor_email=actor.email,
-        target_id=item["tenant_id"],
-        target_type="tenant",
-        details={"name": body.name},
-    )
-    # L3: the same default dollar pool the admin route provisions, shared via
-    # `admin_tenants._provision_seat_pool` so the pool a tenant gets does not
-    # depend on which route created it.
-    _provision_seat_pool(item["tenant_id"], pool_limit_microusd=pool_limit_microusd, actor=actor)
+        raise HTTPException(status_code=403, detail=f"tenant_limit_exceeded: {e}")
     return _to_tenant_item(item)
 
 

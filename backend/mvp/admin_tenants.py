@@ -37,6 +37,7 @@ from dynamo.tenant_budgets import (
 )
 from limits import MAX_POOL_BUDGET_USD_CENTS, MAX_TOKEN_CREDIT
 
+from . import tenant_lifecycle
 from .authz import log_audit_event, require_permission
 from .deps import DEFAULT_ORG_ID, AuthenticatedUser
 
@@ -548,114 +549,28 @@ def list_tenants(
     )
 
 
-def _provision_shadow_default(tenant_id: str, *, actor_id: str) -> None:
-    """New tenants get shadow VSR ON by default so the Savings Certificate is
-    populated from week one (the litellm-wedge value prop). This writes an
-    EXPLICIT shadow_vsr=True routing-config record (not an implicit default), so
-    existing tenants are untouched and the state is visible/auditable. An OSS
-    operator can opt the default out with STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT
-    =false. Best-effort + fenced: never fails tenant creation (shadow is advisory,
-    money-neutral)."""
-    import os
-
-    # inverse-default (ON unless explicitly disabled): accept the common falsy
-    # spellings symmetrically so an operator's "0"/"no"/"off" also opts out
-    # (Fable per-tenant review-2 Low — do not regress to a literal "false").
-    if os.getenv("STRATOCLAVE_SHADOW_VSR_NEW_TENANT_DEFAULT", "true").strip().lower() in (
-            "false", "0", "no", "off"):
-        return
-    try:
-        from . import admin_routing as _ar
-
-        _ar.provision_shadow_default_config(tenant_id, updated_by=actor_id)
-    except Exception as e:  # noqa: BLE001 — advisory default; never break creation.
-        try:
-            from core.logging import get_logger
-            get_logger(__name__).warning("shadow_default_provision_failed",
-                                         tenant_id=tenant_id, error=str(e))
-        except Exception:
-            pass
-
-
-def _provision_seat_pool(
-    tenant_id: str, *, pool_limit_microusd: int, actor: AuthenticatedUser
-) -> None:
-    """Write the tenant's default dollar pool at creation: a SEAT-TRACKED row for
-    the current period, at ZERO seats. It reaches `seats x rate` through the same
-    ±1-seat delta every membership change applies, so the ceiling equals the seat
-    count at every moment rather than at creation only. Shared by both
-    create_tenant routes (admin and team-lead) so the pool a tenant gets does not
-    depend on which route created it.
-
-    Seat-tracked means the row carries NO operator figure at all: absence is the
-    sentinel, so nothing has to be written to say "follow the seats".
-
-    `pool_limit_microusd` is computed and L8-validated by the CALLER before the
-    Tenants row is written (see `create_tenant`), so a misconfigured seat rate
-    refuses loudly with no tenant created at all — this function's own write is not
-    where that check happens. At zero seats it is zero, which is why the row is
-    seeded from the seat count rather than from that figure.
-    """
-    period = current_period()
-    TenantBudgetsRepository().create_seat_tracked_pool(
-        tenant_id=tenant_id,
-        period=period,
-        seat_count=0,
-    )
-    log_audit_event(
-        event="tenant_pool_provisioned",
-        actor_id=actor.user_id,
-        actor_email=actor.email,
-        target_id=tenant_id,
-        target_type="tenant",
-        after={
-            "period": period,
-            "pool_limit_microusd": pool_limit_microusd,
-            "seat_tracked": True,
-            "seats": 0,
-        },
-    )
-
-
 @router.post("", response_model=TenantItem, status_code=201)
 def create_tenant(
     body: CreateTenantRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:create")),
 ) -> TenantItem:
+    """Create a tenant owned by the team lead the body names, verified first. The rest
+    of creation is `tenant_lifecycle.create_tenant`, shared with the team-lead route."""
     _verify_team_lead(body.team_lead_user_id)
-    # L8: validate ONE seat against MAX_POOL_BUDGET_USD_CENTS before writing
-    # anything, so a misconfigured SEAT_MONTHLY_USD refuses loudly rather than
-    # creating a tenant with a silently-clamped pool.
     try:
-        seat_pool_limit_microusd(1)
-    except PoolLimitExceedsMaximumError as e:
-        raise HTTPException(status_code=422, detail=f"seat_pool_limit_exceeds_maximum: {e}")
-    # The pool is written at ZERO seats and reaches its size through the same
-    # ±1-seat delta every later membership change uses. Writing one seat here
-    # instead would count the owner twice: a fresh tenant has no memberships yet,
-    # and the first `ensure` adds its own seat. Zero is also the honest ceiling
-    # for a tenant nobody is a member of — there is no caller to admit.
-    pool_limit_microusd = seat_pool_limit_microusd(0)
-    try:
-        item = TenantsRepository().create(
+        item = tenant_lifecycle.create_tenant(
             name=body.name,
             team_lead_user_id=body.team_lead_user_id,
             default_credit=body.default_credit,
-            created_by=actor.user_id,
+            actor=actor,
+            audit_event="tenant_created",
+            audit_details={"name": body.name, "team_lead_user_id": body.team_lead_user_id},
         )
+    except PoolLimitExceedsMaximumError as e:
+        # Raised by the seat-rate check, which runs before anything is written.
+        raise HTTPException(status_code=422, detail=f"seat_pool_limit_exceeds_maximum: {e}")
     except TenantLimitExceededError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    log_audit_event(
-        event="tenant_created",
-        actor_id=actor.user_id,
-        actor_email=actor.email,
-        target_id=item["tenant_id"],
-        target_type="tenant",
-        details={"name": body.name, "team_lead_user_id": body.team_lead_user_id},
-    )
-    # after the create audit so the log reads create -> provision.
-    _provision_seat_pool(item["tenant_id"], pool_limit_microusd=pool_limit_microusd, actor=actor)
-    _provision_shadow_default(item["tenant_id"], actor_id=actor.user_id)
     return _to_tenant_item(item)
 
 
