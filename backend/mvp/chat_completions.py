@@ -68,14 +68,21 @@ logger = get_logger(__name__)
 _run_ending = _money.run_ending
 
 
-def _open_hold(**kwargs) -> _money.Hold:
+def _open_hold(*, payload: Optional[dict] = None, **kwargs) -> _money.Hold:
     """The reservation this route just took, as the object that owns ending it.
 
     `settle` / `release` resolve this module's globals at CALL time so a suite
     patching `_settle_reservation_and_log` or `_release_pool` here still observes
     every write.
+
+    `payload`, when given (the OpenAI-transport leg only — the Converse leg
+    never passes it), is the canonical payload about to be sent; this is the
+    ONE place `provider_outcome.stamp_attempt_id` is called from on this
+    route (issue #247 / hard-ceiling section 3a), so it happens automatically
+    for any call site that passes `payload=` rather than needing its own
+    follow-up statement.
     """
-    return _money.Hold(
+    hold = _money.Hold(
         settle=lambda **kw: _settle_reservation_and_log(**kw),
         release=lambda ctx: _release_pool(ctx),
         # Records the departure on the durable hold when an ending keeps the
@@ -85,6 +92,9 @@ def _open_hold(**kwargs) -> _money.Hold:
         mark_departed=_money.hold_departure_marker(kwargs.get("tenants_repo")),
         **kwargs,
     )
+    if payload is not None:
+        _provider_outcome.stamp_attempt_id(payload, hold.hold_id)
+    return hold
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +610,7 @@ def chat_completions(
         # `_openai_chat_completion` — same reasoning as the Converse `kwargs`
         # above: one payload, surveyed and then sent, not two independently
         # built copies.
-        openai_payload, injected_usage = _build_openai_chat_payload(body, entry)
+        openai_payload, injected_usage = _build_openai_chat_payload(body, entry, getattr(user, "org_id", None))
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey whichever canonical payload this request will actually send —
@@ -955,7 +965,11 @@ def _openai_status(upstream: int) -> int:
     return upstream if upstream in _openai_PASSTHROUGH_STATUSES else 502
 
 
-def _build_openai_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry") -> tuple[dict, bool]:
+def _build_openai_chat_payload(
+    body: ChatCompletionsRequest,
+    entry: "ModelEntry",
+    tenant_id: Optional[str] = None,
+) -> tuple[dict, bool]:
     """The exact JSON `payload` `/v1/chat/completions` sends to the OpenAI-compatible endpoint
     (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
     the reserve call — docs/design/hard-ceiling.md section 3a requires the bound
@@ -965,6 +979,18 @@ def _build_openai_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry"
     Building it pre-reserve also means `_openai_chat_completion` below no
     longer rebuilds it — one canonical payload, surveyed and then sent,
     rather than two independently-constructed copies that could drift.
+
+    Also merges the issue #247 correlation marker into `metadata`, inside
+    this same build — see `mvp.openai_responses._build_openai_responses_payload`
+    (identical reasoning, mirrored here) and
+    `provider_outcome.stamp_openai_metadata_marker`/`stamp_attempt_id`.
+    Takes `tenant_id` (`user.org_id`), not the whole `user` object — see
+    `_build_openai_responses_payload`'s docstring for why (this body shape
+    also has its own `user` field, which is a different thing and is NOT
+    echoed by Bedrock — see the issue's own measurement). `tenant_id` is
+    optional only for the standalone-call fallback in
+    `_openai_chat_completion` and for unit tests exercising this function
+    alone; the real route always supplies it.
     """
     payload = body.model_dump(exclude_none=True)
     payload["model"] = entry.bedrock_model_id
@@ -983,6 +1009,9 @@ def _build_openai_chat_payload(body: ChatCompletionsRequest, entry: "ModelEntry"
             opts["include_usage"] = True
             injected_usage = True
         payload["stream_options"] = opts
+    _provider_outcome.stamp_openai_metadata_marker(
+        payload, tenant_id
+    )
     return payload, injected_usage
 
 
@@ -1029,15 +1058,21 @@ def _openai_chat_completion(
         # it here exactly as the route used to, byte-identically to
         # `_build_openai_chat_payload`. The real route path always supplies
         # `payload` pre-built, so this branch is never taken there.
-        payload, injected_usage = _build_openai_chat_payload(body, entry)
+        payload, injected_usage = _build_openai_chat_payload(body, entry, getattr(user, "org_id", None))
 
     # The hold's latch is what keeps a 4xx on a streamed request from being
     # refunded by the error branch and then settled again by the generator's
     # cleanup: whichever ending arrives first wins and the rest are no-ops.
+    # `payload=` makes `_open_hold` swap the real hold id in for the
+    # placeholder `_build_openai_chat_payload` surveyed (issue #247 /
+    # hard-ceiling section 3a — see `provider_outcome.stamp_attempt_id`).
+    # Covers both the streaming and non-streaming branches below: this hold
+    # is the only one either opens.
     hold = _open_hold(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=entry.bedrock_model_id, requested_model=body.model,
         request_id=request_id, route="chat_completions_openai",
+        payload=payload,
     )
 
     def _settle(

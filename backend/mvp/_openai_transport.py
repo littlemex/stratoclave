@@ -70,11 +70,20 @@ DEFAULT_TOKEN_TTL = timedelta(seconds=900)
 # this endpoint accepts it as a bearer. Verified against a real call rather than
 # assumed, which is why the token machinery below is untouched by the move.
 #
-# What this endpoint does NOT give us: `requestMetadata` is accepted and then
-# recorded as `null` on the OpenAI-compatible APIs (the per-request metadata
-# documentation lists only InvokeModel/Converse and their streaming forms). So
-# these routes have aggregate evidence that an attempt occurred and what it cost,
-# not per-hold attribution. `/v1/messages` on Converse has both.
+# CORRECTION (2026-11, issue #247): this comment used to say `requestMetadata`
+# was recorded as `null` on the OpenAI-compatible APIs as a limitation of the
+# endpoint, citing the per-request metadata documentation's InvokeModel/Converse
+# listing. That was wrong, and `null` was the giveaway rather than the evidence
+# for it: `null` is what an invocation log record looks like when nothing was
+# sent, not what one looks like when the field is dropped. Measured 2026-09-03
+# (issue #247's own measurement table, four candidate mechanisms tried): the
+# OpenAI-standard `metadata` body field — not the Converse spelling
+# `requestMetadata`, which these APIs reject with 400 — IS echoed into the log
+# record as `requestMetadata` on both `operation: Responses` and `operation:
+# ChatCompletions`. `mvp.openai_responses` and `mvp.chat_completions` now stamp
+# it (`provider_outcome.attempt_request_metadata`
+# merged into `metadata` by `stamp_openai_metadata_marker`/`stamp_attempt_id`),
+# so these routes have the same per-hold attribution Converse does.
 #
 # The `/openai/v1` prefix is part of the contract and distinct from the bare `/v1`
 # the OpenAI-compatible endpoint served these models under.

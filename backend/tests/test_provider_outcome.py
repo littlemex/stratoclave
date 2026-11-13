@@ -167,6 +167,311 @@ def test_request_metadata_carries_ids_and_nothing_else():
 
 
 # ---------------------------------------------------------------------------
+# Issue #247 — the OpenAI-compatible routes' correlation marker. These three
+# functions decide what `metadata` the gateway actually sends on
+# `/v1/chat/completions` and `/openai/v1/responses`: `merge_openai_metadata`
+# (collision rule + OpenAI's 16-key ceiling), `stamp_openai_metadata_marker`
+# (called from inside the payload builder, pre-reserve) and `stamp_attempt_id`
+# (the post-reserve, same-length swap — see the module docstring above them).
+# ---------------------------------------------------------------------------
+
+
+class TestMergeOpenAIMetadata:
+    def test_no_caller_metadata_gateway_keys_pass_through(self):
+        marker = {"sc_attempt_id": "abc", "sc_tenant": "t1"}
+        assert po.merge_openai_metadata(None, marker) == marker
+
+    def test_caller_metadata_is_preserved_alongside_the_marker(self):
+        caller = {"customer_ref": "order-42", "region": "jp"}
+        marker = {"sc_attempt_id": "abc", "sc_tenant": "t1"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged == {
+            "customer_ref": "order-42",
+            "region": "jp",
+            "sc_attempt_id": "abc",
+            "sc_tenant": "t1",
+        }
+        # The input dict itself must not be mutated -- a caller-owned object
+        # a route handed in must come back unchanged from its own point of view.
+        assert caller == {"customer_ref": "order-42", "region": "jp"}
+
+    def test_gateway_keys_win_on_a_name_collision(self):
+        caller = {"sc_attempt_id": "whatever-the-caller-sent"}
+        marker = {"sc_attempt_id": "real-hold-id"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged["sc_attempt_id"] == "real-hold-id", (
+            "the gateway's own correlation id is the one that must reach the "
+            "log record; a caller that happens to reuse the name must not "
+            "silently own it"
+        )
+
+    def test_empty_marker_is_a_no_op(self):
+        caller = {"a": "b"}
+        assert po.merge_openai_metadata(caller, {}) == caller
+
+    def test_non_dict_caller_metadata_is_treated_as_absent(self):
+        marker = {"sc_attempt_id": "abc"}
+        assert po.merge_openai_metadata("not-a-dict", marker) == marker
+        assert po.merge_openai_metadata(123, marker) == marker
+        assert po.merge_openai_metadata(None, marker) == marker
+        assert po.merge_openai_metadata([1, 2, 3], marker) == marker
+
+    def test_logs_when_the_marker_is_dropped_for_the_key_ceiling(self, capsys, caplog):
+        import logging
+
+        # `mvp.provider_outcome.logger` is structlog. Whether it prints
+        # straight to stdout (capsys) or routes through stdlib logging
+        # (caplog) depends on whether some OTHER test in this process has
+        # already called `configure_logging()` -- observed to differ between
+        # a solo run and a full `-n 4` xdist run, since worker/import order
+        # differs. Checking both makes this test depend on the message being
+        # emitted, not on which of the two paths structlog happens to be
+        # wired through at the moment it runs. `caplog.set_level(INFO)` is
+        # required on the stdlib-logging path: this event is logged at
+        # `info` (an ordinary, caller-triggerable condition -- see
+        # `merge_openai_metadata`'s comment), and caplog's own capturing
+        # handler defaults to WARNING, which would silently drop it.
+        caplog.set_level(logging.INFO)
+        caller = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS)}
+        marker = {"sc_attempt_id": "abc", "sc_tenant": "t1"}
+        po.merge_openai_metadata(caller, marker)
+        out = capsys.readouterr().out
+        seen = "openai_metadata_marker_dropped_key_ceiling" in out or any(
+            "openai_metadata_marker_dropped_key_ceiling" in str(r.msg)
+            for r in caplog.records
+        )
+        assert seen, "dropping the marker for the key ceiling must be observable, not silent"
+
+    def test_caller_at_the_key_ceiling_drops_the_whole_marker_not_the_caller(self):
+        # 16 keys is OpenAI's own documented ceiling (acceptance criterion:
+        # "the gateway's marker fits with headroom for caller keys" / "never
+        # break a valid caller request").
+        caller = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS)}
+        marker = {"sc_attempt_id": "abc", "sc_tenant": "t1"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged == caller, (
+            "a caller already at the 16-key ceiling must get its own request "
+            "back unmodified -- refusing it, or pushing it over the ceiling, "
+            "would turn a correlation nicety into an outage"
+        )
+
+    def test_marker_is_all_or_nothing_not_partial(self):
+        # 15 keys: there is room for exactly ONE more, not both of ours. A
+        # marker with only `sc_tenant` (or only `sc_attempt_id`) is a
+        # misleading half-handle, not a smaller one, so neither is added.
+        caller = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS - 1)}
+        marker = {"sc_attempt_id": "abc", "sc_tenant": "t1"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert "sc_attempt_id" not in merged
+        assert "sc_tenant" not in merged
+        assert merged == caller
+
+    def test_collision_keys_are_stripped_not_counted_as_already_occupying_a_slot(self):
+        # 15 keys, one of which IS one of ours ("sc_attempt_id"): it is
+        # stripped as a reserved name BEFORE counting (not kept and
+        # overwritten in place), leaving 14 of the caller's own keys plus
+        # the 2-key marker = 16, which fits exactly.
+        caller = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS - 2)}
+        caller["sc_attempt_id"] = "stale"
+        marker = {"sc_attempt_id": "fresh", "sc_tenant": "t1"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged["sc_attempt_id"] == "fresh"
+        assert merged["sc_tenant"] == "t1"
+        assert len(merged) == po.OPENAI_METADATA_MAX_KEYS
+
+    def test_a_caller_cannot_forge_the_reserved_keys_by_padding_metadata_to_the_ceiling(self):
+        # Found in review (issue #247): the ORIGINAL version of this function
+        # counted a caller's own `sc_tenant`/`sc_attempt_id` as "already
+        # occupying a slot" and left it untouched whenever the marker had to
+        # be dropped for the key-count ceiling -- so a caller who filled the
+        # other 15 slots with filler and set `sc_tenant` to a victim tenant id
+        # got that forged value sent to Bedrock's invocation log looking
+        # exactly like the gateway's own correlation marker. The fix: the
+        # reserved names are stripped unconditionally, on every path,
+        # BEFORE anything is counted.
+        caller = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS - 1)}
+        caller["sc_tenant"] = "victim-tenant"
+        marker = {"sc_attempt_id": "real-hold-id", "sc_tenant": "real-tenant"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged.get("sc_tenant") != "victim-tenant", (
+            "a caller-supplied value under a reserved key name must never "
+            "reach the wire, whether or not the gateway's own marker fits"
+        )
+        assert "sc_attempt_id" not in merged
+        assert "sc_tenant" not in merged
+        # The caller's own 15 non-reserved keys are untouched.
+        assert all(merged[f"k{i}"] == "v" for i in range(po.OPENAI_METADATA_MAX_KEYS - 1))
+
+    def test_a_caller_cannot_forge_sc_attempt_id_the_same_way(self):
+        caller = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS - 1)}
+        caller["sc_attempt_id"] = "another-tenants-hold-id"
+        marker = {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER, "sc_tenant": "t1"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged.get("sc_attempt_id") != "another-tenants-hold-id"
+        assert "sc_attempt_id" not in merged
+        assert "sc_tenant" not in merged
+
+    def test_reserved_key_stripping_is_case_and_whitespace_insensitive(self):
+        # Round-3 review finding: a caller sending `SC_TENANT` or `sc_tenant `
+        # does not literally collide with the lowercase, untrimmed key the
+        # marker itself uses, so it would otherwise survive as a decoy a
+        # case-insensitive log query could mistake for the gateway's field.
+        caller = {"SC_TENANT": "victim", " sc_attempt_id ": "another-hold", "k": "v"}
+        marker = {"sc_attempt_id": "real", "sc_tenant": "real-tenant"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert merged == {"k": "v", "sc_attempt_id": "real", "sc_tenant": "real-tenant"}
+
+    def test_14_caller_keys_plus_both_reserved_names_still_fits_at_16(self):
+        # The exact boundary round-3 asked to pin: 14 generic keys + the
+        # caller's OWN (forged) copies of both reserved names = 16 keys
+        # before stripping. After stripping, 14 generic keys remain, and the
+        # gateway's 2 keys fit exactly (14 + 2 = 16) -- the marker is
+        # stamped, not dropped, and none of the caller's forged values leak
+        # through.
+        caller = {f"k{i}": "v" for i in range(14)}
+        caller["sc_attempt_id"] = "forged-attempt"
+        caller["sc_tenant"] = "forged-tenant"
+        assert len(caller) == 16
+        marker = {"sc_attempt_id": "real-attempt", "sc_tenant": "real-tenant"}
+        merged = po.merge_openai_metadata(caller, marker)
+        assert len(merged) == 16
+        assert merged["sc_attempt_id"] == "real-attempt"
+        assert merged["sc_tenant"] == "real-tenant"
+        assert all(merged[f"k{i}"] == "v" for i in range(14))
+
+    def test_reserved_keys_constant_matches_attempt_request_metadata(self):
+        # Round-3 nit: the reserved-name set must be the SAME set
+        # `attempt_request_metadata` (Converse's own marker) actually
+        # produces, by construction -- not two places maintaining the same
+        # two string literals independently.
+        assert po.RESERVED_METADATA_KEYS == frozenset(
+            po.attempt_request_metadata("x", "x").keys()
+        )
+
+
+class TestStampOpenAIMetadataMarker:
+    def test_adds_placeholder_attempt_id_and_tenant(self):
+        payload = {"input": "hi"}
+        added = po.stamp_openai_metadata_marker(payload, "tenant-1")
+        assert added is True
+        assert payload["metadata"] == {
+            "sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER,
+            "sc_tenant": "tenant-1",
+        }
+
+    def test_placeholder_is_the_same_length_as_a_real_hold_id(self):
+        import uuid
+
+        assert len(po.ATTEMPT_ID_PLACEHOLDER) == len(str(uuid.uuid4()))
+
+    def test_placeholder_matches_the_actual_hold_id_minting_function(self):
+        # The length match above is against `uuid.uuid4()` directly; this
+        # pins it against the function `mvp._pipeline` actually calls, so a
+        # future change to how hold ids are minted (not just to uuid's own
+        # string format) is caught here rather than silently disabling the
+        # swap in `stamp_attempt_id` everywhere.
+        from mvp._pipeline import _fresh_idempotency_token
+
+        assert len(_fresh_idempotency_token()) == len(po.ATTEMPT_ID_PLACEHOLDER)
+
+    def test_preserves_callers_own_metadata(self):
+        payload = {"input": "hi", "metadata": {"order_id": "o-1"}}
+        po.stamp_openai_metadata_marker(payload, "tenant-1")
+        assert payload["metadata"]["order_id"] == "o-1"
+        assert payload["metadata"]["sc_tenant"] == "tenant-1"
+
+    def test_no_tenant_still_stamps_the_attempt_placeholder(self):
+        payload = {"input": "hi"}
+        po.stamp_openai_metadata_marker(payload, None)
+        assert payload["metadata"] == {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER}
+
+    def test_returns_false_and_leaves_caller_metadata_untouched_at_the_ceiling(self):
+        caller_md = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS)}
+        payload = {"input": "hi", "metadata": dict(caller_md)}
+        added = po.stamp_openai_metadata_marker(payload, "tenant-1")
+        assert added is False
+        assert payload["metadata"] == caller_md
+
+
+class TestStampAttemptId:
+    def test_swaps_placeholder_for_the_real_hold_id(self):
+        payload = {"metadata": {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER, "sc_tenant": "t1"}}
+        real_id = "11111111-2222-3333-4444-555555555555"
+        po.stamp_attempt_id(payload, real_id)
+        assert payload["metadata"]["sc_attempt_id"] == real_id
+        assert payload["metadata"]["sc_tenant"] == "t1"
+
+    def test_swap_does_not_change_the_serialised_byte_length(self):
+        import json
+
+        payload = {"metadata": {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER}}
+        before = len(json.dumps(payload).encode("utf-8"))
+        po.stamp_attempt_id(payload, "11111111-2222-3333-4444-555555555555")
+        after = len(json.dumps(payload).encode("utf-8"))
+        assert before == after, (
+            "the hard-ceiling bound (docs/design/hard-ceiling.md section 3a) "
+            "is computed over the payload WITH the placeholder in it; the "
+            "post-reserve swap must not move the payload's serialised byte "
+            "count out from under that bound"
+        )
+
+    def test_no_op_when_the_marker_was_never_stamped(self):
+        payload = {"metadata": {"other": "value"}}
+        po.stamp_attempt_id(payload, "some-hold-id")
+        assert payload["metadata"] == {"other": "value"}
+
+    def test_no_op_without_metadata_at_all(self):
+        payload = {"input": "hi"}
+        po.stamp_attempt_id(payload, "some-hold-id")
+        assert payload == {"input": "hi"}
+
+    def test_no_usable_id_deletes_only_the_attempt_id_not_the_whole_marker(self):
+        # Round-2 review finding: leaving the PLACEHOLDER on the wire when
+        # there is no real id to swap in would put the SAME 36 characters on
+        # every such request -- a marker that looks real, joins to nothing,
+        # and is indistinguishable from every other request this ever
+        # happens to. Deleting it only ever shrinks the payload, which cannot
+        # move the serialised byte count above what the bound was computed
+        # over, so it stays sound.
+        #
+        # `sc_tenant`, unlike `sc_attempt_id`, is NOT a placeholder here --
+        # `stamp_openai_metadata_marker` resolves it to its real value at
+        # build time with no placeholder stage, so by the time this runs it
+        # is already correct, true information. Discarding it along with the
+        # attempt id would throw away a working correlation handle for no
+        # reason, and would make this route STRICTER than Converse, which
+        # sends `attempt_request_metadata`'s `sc_tenant` alone in exactly
+        # this situation (an unpooled tenant with no hold id at all --
+        # hard-ceiling.md section 7a).
+        payload = {
+            "metadata": {
+                "sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER,
+                "sc_tenant": "t1",
+                "caller_key": "x",
+            }
+        }
+        po.stamp_attempt_id(payload, None)
+        assert "sc_attempt_id" not in payload["metadata"]
+        assert payload["metadata"]["sc_tenant"] == "t1"
+        assert payload["metadata"]["caller_key"] == "x"
+
+    def test_no_usable_id_drops_metadata_entirely_when_nothing_else_is_in_it(self):
+        payload = {"metadata": {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER}}
+        po.stamp_attempt_id(payload, None)
+        assert "metadata" not in payload
+
+    def test_mutation_guard_a_length_changing_id_is_refused_not_swapped_in(self):
+        # If a future change to hold-id minting ever produced a differently
+        # sized id, swapping it in would silently move the bound out from
+        # under the payload actually sent. This pins the fail-safe: such an
+        # id is refused (and the attempt-id key deleted, same as the falsy
+        # case), never substituted.
+        payload = {"metadata": {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER}}
+        po.stamp_attempt_id(payload, "too-short")
+        assert "metadata" not in payload
+
+
+# ---------------------------------------------------------------------------
 # The other transport. Every route that reaches the Bedrock OpenAI-compatible
 # endpoint raises `httpx` exceptions, and none of them was recognised here: they
 # all fell through to the catch-all and held a full ceiling. That is the right
