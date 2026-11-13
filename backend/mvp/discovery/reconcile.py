@@ -128,7 +128,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from core.logging import get_logger
 
@@ -157,6 +157,7 @@ from .records import (
 from ..pricing_feeds.base import STRATOCLAVE_REGION_ENV
 from ..pricing_feeds.dimensions import (
     EXCLUDED,
+    Selection,
     base_model_id,
     parse_agreement_dimension,
     per_mtok,
@@ -343,6 +344,65 @@ def _build_card(
     return card, unknown
 
 
+def derive_selection(
+    model_id: str, *, candidate_regions: Iterable[str], scope: Optional[str], bedrock,
+    region: Optional[str] = None,
+) -> tuple[Optional[Selection], Optional[Blocker]]:
+    """The same card -> `Selection` pipeline `build_record` uses to mint a pricing
+    key, exposed so a SECOND caller that already knows a model id, its candidate
+    regions and its scope can ask AWS the identical question again, rather than
+    re-deriving it a different way (`mvp.discovery.pricing_key`'s own rule: "there
+    is no second selector here" — this is the one selector, shared, not
+    duplicated). `mvp.discovery.probe`'s rate-magnitude assertion (#281 item 2) is
+    that second caller: it asks AWS fresh, at probe time, rather than trusting
+    whatever this function answered during the reconciliation pass that suggested
+    a key, because the live price can have moved since that pass ran.
+
+    `bedrock` is the SAME `client=`/`region=` seam `fetch_rate_card` already
+    exposes — pass `None` to let it build a real control-plane `bedrock` client
+    via `gates._bedrock_client`, which is also what a caller supplying no client
+    at all gets; this module adds no second client builder for it. `region`
+    is forwarded verbatim and matters only when `bedrock` is `None` -- a test or
+    a caller that already has a client ignores it, the same way `fetch_rate_card`
+    does.
+
+    Returns `(selection, None)` once a card resolves to a usable input/output
+    price, or `(None, blocker)` naming why it does not: `no_agreement_offer` or
+    `no_model_access` (`fetch_rate_card` could not read a card at all, including
+    an old botocore with no `list_foundation_model_agreement_offers` method —
+    `fetch_rate_card` checks that itself, for every caller, not only `run_pass`'s
+    own once-per-pass optimisation), `price_dimensions_unknown` (a row parsed
+    into neither a price nor a recognised exclusion), or `no_token_pricing` (the
+    card parsed completely and still carries no usable input/output price).
+    Never raises for any of these — see `fetch_rate_card`'s own docstring for why
+    a card that cannot be read is reported, not an exception. Does NOT apply
+    `run_pass`'s own per-pass `rate_card_api_unavailable` short-circuit itself —
+    that is one fact about an entire PASS asking N times, not about asking once,
+    and `build_record`, below, still applies it before ever reaching here.
+    """
+    rate_card, agreement_blocker = fetch_rate_card(model_id, client=bedrock, region=region)
+    if agreement_blocker is not None:
+        return None, agreement_blocker
+    tokens_blocker = gate_card_prices_tokens(rate_card or [])
+    if tokens_blocker is not None:
+        return None, tokens_blocker
+    card, unknown_dimensions = _build_card(rate_card or [])
+    if unknown_dimensions:
+        return None, Blocker(
+            type="price_dimensions_unknown", subtype="unparseable_rate_card_row",
+            evidence=f"{len(unknown_dimensions)} row(s) did not parse: "
+            f"{sorted(unknown_dimensions)[:5]!r}",
+        )
+    selection = select(card, regions=candidate_regions, scope=scope)
+    if selection is None:
+        return None, Blocker(
+            type="no_token_pricing", subtype="selector_refused",
+            evidence="dimensions.select() found no usable input/output "
+            "price among this card's resolved rows",
+        )
+    return selection, None
+
+
 def build_record(
     summary: Mapping[str, Any], *, bedrock, invocation_region: str,
     observation_scope: ObservationScope,
@@ -427,33 +487,14 @@ def build_record(
         # card is left unresolved without a per-record blocker or note.
         pass
     else:
-        rate_card, agreement_blocker = fetch_rate_card(base_id, client=bedrock)
-        if agreement_blocker is not None:
-            blockers.append(agreement_blocker)
+        selection, selection_blocker = derive_selection(
+            base_id, candidate_regions=destination_regions or (invocation_region,),
+            scope=scope_for_model_id(raw_id), bedrock=bedrock,
+        )
+        if selection_blocker is not None:
+            blockers.append(selection_blocker)
         else:
-            tokens_blocker = gate_card_prices_tokens(rate_card or [])
-            if tokens_blocker is not None:
-                blockers.append(tokens_blocker)
-            else:
-                card, unknown_dimensions = _build_card(rate_card or [])
-                if unknown_dimensions:
-                    blockers.append(Blocker(
-                        type="price_dimensions_unknown", subtype="unparseable_rate_card_row",
-                        evidence=f"{len(unknown_dimensions)} row(s) did not parse: "
-                        f"{sorted(unknown_dimensions)[:5]!r}",
-                    ))
-                else:
-                    scope = scope_for_model_id(raw_id)
-                    candidate_regions = destination_regions or (invocation_region,)
-                    selection = select(card, regions=candidate_regions, scope=scope)
-                    if selection is None:
-                        blockers.append(Blocker(
-                            type="no_token_pricing", subtype="selector_refused",
-                            evidence="dimensions.select() found no usable input/output "
-                            "price among this card's resolved rows",
-                        ))
-                    else:
-                        pricing_key = key_for_selection(selection, enabled_modes=ENABLED_MODES)
+            pricing_key = key_for_selection(selection, enabled_modes=ENABLED_MODES)
 
     record = DiscoveredRecord(
         profile_id=raw_id,

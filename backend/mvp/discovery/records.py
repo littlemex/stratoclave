@@ -101,10 +101,11 @@ BLOCKER_TYPES = frozenset({
     # E7's probe: invoking the model is the only thing that can observe
     # whether its wire protocol actually works, so this could not exist
     # before a probe did. Subtypes (see `mvp.discovery.probe`'s module
-    # docstring for which assertion mints which): `converse_call_failed`
-    # (assertion 1, transport), `usage_counters_missing` (assertion 2,
-    # usage), `counter_dimension_mismatch` (assertion 3, mapping),
-    # `charge_not_attributed` (assertion 4, ledger).
+    # docstring for which assertion mints which): `pricing_rate_unverifiable`
+    # and `pricing_key_rate_mismatch` (assertion 0, price — #281 item 2),
+    # `converse_call_failed` (assertion 1, transport), `usage_counters_missing`
+    # (assertion 2, usage), `counter_dimension_mismatch` (assertion 3,
+    # mapping), `charge_not_attributed` (assertion 4, ledger).
     "protocol_unverified",
 })
 
