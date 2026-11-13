@@ -443,9 +443,9 @@ def test_the_estimate_path_is_not_a_bound_on_the_token_count():
 def test_the_shipped_rate_document_prices_cache_writes_above_input():
     """The property that makes the missing leg expensive rather than academic.
 
-    If a future rate document priced cache writes at or below input, the overrun
-    would shrink and the defect could be mistaken for fixed. Pinning it here means
-    the reason the defect matters cannot drift out from under the xfail above.
+    If cache writes were priced at or below input, the rate-axis regression tests
+    above would pass even with the cache-write leg dropped from the estimator; this
+    keeps them non-vacuous.
     """
     rate = baseline_rates()["default"]
     assert rate.cache_write_per_mtok_microusd > rate.input_per_mtok_microusd, (
