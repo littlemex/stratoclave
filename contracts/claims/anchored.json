@@ -982,7 +982,7 @@
   {
    "id": "cl-e09f5a8e830d",
    "claim": "**deny** — an empty list denies every assumed-role identity",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-745072b5abcb",
@@ -997,7 +997,7 @@
   {
    "id": "cl-c00400dfbd94",
    "claim": "The `x-api-key` header is accepted as an alternative to `Authorization: Bearer` for clients that cannot set the `Authorization` header.",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-3becf4c607ac",
@@ -1263,7 +1263,7 @@
   {
    "id": "cl-4b0cc58e6492",
    "claim": "- a dedicated `responses:send` scope on `POST /openai/v1/responses` and `GET /openai/v1/models`; all three identity paths (Cognito, STS vouch, `sk-stratoclave-*`) must carry this scope to reach the OpenAI routes.",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-951e3b34d8ce",
@@ -1343,12 +1343,12 @@
   {
    "id": "cl-b4c9b93161d8",
    "claim": "**AuthContext** accepts `access_token` through three ingress paths: (1) a `?ui_ticket=<nonce>` URL parameter written by the CLI during `stratoclave ui open` — the SPA exchanges the nonce for the real token bundle via `POST /api/mvp/auth/ui-ticket/consume`, then strips the query parameter from `window.location` immediately so the plaintext token never appears in the URL bar or server access logs (session-fixation fix, P0-8 2026-04 review; nonce has a 30-second TTL and is single-use), (2) the Cognito Hosted UI callback with PKCE, and (3) a previously saved token in `localStorage`.",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-84b8fada9c5f",
    "claim": "The backend enforces `token_use=access`, so the frontend never passes `id_token`.",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-7c971e1854d8",
@@ -1429,7 +1429,7 @@
   {
    "id": "cl-84f82546642d",
    "claim": "The App Client Stratoclave uses is a *public* client (no client secret), as is standard for SPA + PKCE + native CLI.",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-192b660ec030",
@@ -1461,7 +1461,7 @@
   {
    "id": "cl-c64f79b501cb",
    "claim": "Every protected route uses `require_permission(\"...\")` as a FastAPI `Depends`.",
-   "anchor": "contract:C6.1@65486e7a"
+   "anchor": "contract:C6.1@bd43747d"
   },
   {
    "id": "cl-bbb411d2649c",
@@ -2192,6 +2192,11 @@
    "claim": "<p align=\"center\"> <img src=\"./docs/diagrams/reclaim.png\" alt=\"Reclaim: a process dies after reserve, its hold row stays behind, a later request sweeps the expired hold, and a RECLAIM returns the headroom exactly once.\" width=\"100%\"> </p>",
    "anchor": "contract:C3.1@c99b5ea8,C3.4@5dccb5dd",
    "note": "alt text of the reclaim figure; same property as cl-405e956c1399"
+  },
+  {
+   "id": "cl-e458cd99f072",
+   "claim": "`authz.owned_or_admin_tenant_or_404(tenant_id, user)` — the ownership gate every team-lead route that takes a tenant id calls, and the VSR config gate too.",
+   "anchor": "contract:C6.10@f27338bb"
   }
  ]
 }

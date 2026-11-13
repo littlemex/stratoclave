@@ -190,9 +190,11 @@ class _FakeTenants:
 @pytest.fixture
 def app_client(s3_bucket, monkeypatch):
     from mvp import admin_vsr_config as mod
+    from mvp import authz
 
     tenants = {"tenant-a": {"tenant_id": "tenant-a", "team_lead_user_id": "lead-1"}}
-    monkeypatch.setattr(mod, "TenantsRepository", lambda: _FakeTenants(tenants))
+    # The gate reads tenants through `authz.owned_tenant_or_404`.
+    monkeypatch.setattr(authz, "TenantsRepository", lambda: _FakeTenants(tenants))
     _install_validate(monkeypatch, _valid_handler)
 
     app = FastAPI()
@@ -281,7 +283,9 @@ def test_garbage_tenant_id_never_reaches_dynamo(app_client, monkeypatch):
     def _boom():
         raise AssertionError("DynamoDB reached with a garbage id")
 
-    monkeypatch.setattr(mod, "TenantsRepository", lambda: type("T", (), {"get": staticmethod(lambda tid: _boom())})())
+    from mvp import authz
+
+    monkeypatch.setattr(authz, "TenantsRepository", lambda: type("T", (), {"get": staticmethod(lambda tid: _boom())})())
     _as(_User(user_id="lead-1", roles=["team_lead"]))
     r = client.get("/api/mvp/admin/tenants/" + ("x" * 200) + "/vsr-config")
     assert r.status_code == 404

@@ -12,7 +12,7 @@ pool and is refused on another tenant's. The audit line carries before/after."
 
 Today `mvp.team_lead.router` has NO `/pool-budget` route at all — every
 request below 404s at the FastAPI routing layer with the generic
-`{"detail": "Not Found"}` body, not the application's `_require_owner`
+`{"detail": "Not Found"}` body, not the application's `owned_tenant_or_404`
 `{"detail": "Tenant not found"}` body. The "refused on another tenant's" test
 distinguishes the two bodies specifically so it cannot pass today for the
 wrong reason (a route that does not exist refuses EVERY tenant, owned or not,

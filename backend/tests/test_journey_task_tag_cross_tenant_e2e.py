@@ -253,7 +253,7 @@ def test_journey_the_team_lead_of_one_tenant_cannot_read_the_other(
 
     Walks: seed both tenants with real spend, then L1 requests `GET
     /team-lead/tenants/{T2}/usage/by-tag`. Asserts a 404 -- the same
-    unified "tenant not found" `_require_owner` gives a non-owner for ANY
+    unified "tenant not found" `owned_tenant_or_404` gives a non-owner for ANY
     tenant, existent or not, so the response shape cannot be used to probe
     which tenant ids are real -- and, as a same-request contrast, that his
     identical call against his OWN tenant (T1) succeeds and reports his real

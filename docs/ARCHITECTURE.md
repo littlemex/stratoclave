@@ -560,9 +560,14 @@ tasks within that TTL without any coordination.
 Team leads must be *structurally* unable to see other tenants, not merely
 denied. Two mechanisms enforce this:
 
-1. `require_tenant_owner(tenant_id)` — a FastAPI dependency that returns
-   `404 Not Found` for any tenant the caller does not own. Admins are
-   exempt. Non-existent tenants return the same `404`. The caller cannot
+1. `authz.owned_or_admin_tenant_or_404(tenant_id, user)` — the ownership
+   gate every team-lead route that takes a tenant id calls, and the VSR config
+   gate too. It returns `404 Not Found` for any tenant the caller does not own:
+   the tenant must name the caller as `team_lead_user_id` and the caller must
+   hold the `team_lead` role (`authz.is_tenant_owner`), so a demoted team lead
+   loses access at once. Admins reach every existing tenant. The team-lead
+   limit-raise routes use `authz.owned_tenant_or_404` instead, which admits
+   owners only. Non-existent tenants return the same `404`. The caller cannot
    distinguish "this tenant doesn't exist" from "this tenant isn't yours".
 2. `Tenants.team_lead_user_id` is a GSI partition key. Team-lead listings
    query by the caller's own `user_id`, so other tenants are never fetched

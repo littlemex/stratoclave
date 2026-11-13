@@ -241,7 +241,7 @@ def test_global_admin_target_403(tl_client):
 
 
 def test_non_owner_tenant_404(tl_client):
-    # tl-1 does not own OTHER_TENANT -> unified 404 from _require_owner.
+    # tl-1 does not own OTHER_TENANT -> unified 404 from owned_tenant_or_404.
     r = _patch(tl_client, OTHER_TENANT, {"email": "other@ex.co", "reset_used": True})
     assert r.status_code == 404
 

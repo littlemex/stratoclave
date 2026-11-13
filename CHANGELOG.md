@@ -41,6 +41,16 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   so an API key scoped to `tenants:read-own` alone could change them. Such a key now
   gets 403 on this route; a team lead's console session is unaffected, since the
   `team_lead` role holds both. Clause C6.9 states the rule for every write route.
+- **Tenant ownership has one statement, `authz.is_tenant_owner` (C6.10).** The
+  team-lead routes, the team-lead limit-raise routes and the approve, reject and revoke
+  services each had their own form of it, and none required the `team_lead` role: a
+  user demoted out of `team_lead` while a tenant still named them passed the inner
+  check. The outer permission gate refused such a user, so this was not reachable;
+  every inner check now refuses too, and `GET /api/mvp/team-lead/tenants` lists no
+  tenants for them. One case changes for a caller the outer gate admits: on the
+  team-lead limit-raise routes, a user whose roles include `admin` but not
+  `team_lead`, and whom a tenant still names as its owner, is now refused there; the
+  admin limit-raise routes are unchanged.
 
 ## [1.4.0] — 2026-09-06
 

@@ -50,7 +50,12 @@ from .admin_tenants import (
 )
 from .credit_ops import CreditAction
 
-from .authz import log_audit_event, require_permission
+from .authz import (
+    is_tenant_owner,
+    log_audit_event,
+    owned_or_admin_tenant_or_404,
+    require_permission,
+)
 from .deps import AuthenticatedUser
 
 
@@ -117,21 +122,6 @@ class UsageBucket(BaseModel):
     by_model: dict[str, int] = {}
     by_user_email: dict[str, int] = {}
     sample_size: int = 0
-
-
-# -----------------------------------------------------------------------
-# Helpers: owner check returning 404 for non-owner / non-existent
-# -----------------------------------------------------------------------
-def _require_owner(tenant_id: str, actor: AuthenticatedUser) -> dict[str, Any]:
-    """Allow only the owner (or an admin). Non-owners and non-existent tenants both return a unified 404."""
-    tenant = TenantsRepository().get(tenant_id)
-    if "admin" in actor.roles:
-        if not tenant:
-            raise HTTPException(status_code=404, detail="Tenant not found")
-        return tenant
-    if not tenant or tenant.get("team_lead_user_id") != actor.user_id:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
 
 
 def _to_tenant_item(item: dict[str, Any]) -> TenantItem:
@@ -201,7 +191,10 @@ def list_own_tenants(
         # Admins should use the admin API, but since we got a request return all instead of empty.
         items, _ = TenantsRepository().list_all(limit=100)
     else:
-        items = TenantsRepository().list_by_owner(actor.user_id)
+        # The index finds tenants whose pointer names the caller; the ownership
+        # rule also needs the role, so a demoted team lead lists nothing.
+        items = [t for t in TenantsRepository().list_by_owner(actor.user_id)
+                 if is_tenant_owner(t, actor)]
     return TenantListResponse(tenants=[_to_tenant_item(it) for it in items])
 
 
@@ -210,7 +203,7 @@ def get_own_tenant(
     tenant_id: str,
     actor: AuthenticatedUser = Depends(require_permission("tenants:read-own")),
 ) -> TenantItem:
-    item = _require_owner(tenant_id, actor)
+    item = owned_or_admin_tenant_or_404(tenant_id, actor)
     return _to_tenant_item(item)
 
 
@@ -220,7 +213,7 @@ def update_own_tenant(
     body: UpdateTenantTeamLeadRequest,
     actor: AuthenticatedUser = Depends(require_permission("tenants:update-own")),
 ) -> TenantItem:
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
     try:
         item = TenantsRepository().update(
             tenant_id=tenant_id,
@@ -252,7 +245,7 @@ def set_own_pool_budget(
     The admin-only ``PUT /admin/tenants/{id}/pool-budget`` mirror: same request
     body, same semantics, same audit events, through the same shared
     `apply_pool_budget_request`, so a pool ceiling looks identical in the log
-    regardless of which route moved it. Reuses `_require_owner` — the SAME
+    regardless of which route moved it. Reuses `owned_or_admin_tenant_or_404` — the SAME
     ownership check every other team-lead-scoped write in this router uses — so a
     team lead may set only their OWN tenant's pool; another tenant's returns the
     same unified 404 as every other endpoint here.
@@ -261,7 +254,7 @@ def set_own_pool_budget(
     ends seat tracking. `{"follow_seats": true}` is the reversal, available to the
     same role that can make it necessary.
     """
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
     return apply_pool_budget_request(tenant_id=tenant_id, body=body, actor=actor)
 
 
@@ -284,7 +277,7 @@ def get_own_pool_budget(
     row means: unlimited at the pool level, with only per-user token budgets
     applying.
     """
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
     resolved = period or current_period()
     summary = TenantBudgetsRepository().pool_summary(tenant_id, resolved)
     if summary is None:
@@ -300,7 +293,7 @@ def list_members(
     actor: AuthenticatedUser = Depends(require_permission("tenants:read-own")),
 ) -> TenantMembersResponse:
     """List members of a tenant (email + credit only; user_id is not exposed)."""
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
     user_tenants_repo = UserTenantsRepository()
     resp = user_tenants_repo._table.query(
         IndexName="tenant-id-index",
@@ -350,7 +343,7 @@ def set_member_credit(
     """Set/clear a member's per-user token quota within the caller's own tenant.
 
     Authorization is defense-in-depth: the `users:update-own-tenant` scope gate,
-    plus `_require_owner` (the caller must own this tenant, or be an admin), plus
+    plus `owned_or_admin_tenant_or_404` (the caller must own this tenant, or be an admin), plus
     a target guard that the member is an ACTIVE, plain-`user` member of THIS
     tenant — checked on BOTH the tenant-membership role AND the user's global
     roles, so a global admin who happens to be assigned here as `user` still
@@ -359,7 +352,7 @@ def set_member_credit(
     Non-owner / non-existent tenant and unknown / cross-tenant member all return a
     unified 404 (enumeration defense); a privileged target returns 403 and is
     audited (a denied escalation attempt is the signal worth keeping)."""
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
 
     # Normalize the email for lookup: strip whitespace, and if the exact spelling
     # misses, retry lowercased (copy-paste and casing are the usual causes of a
@@ -454,7 +447,7 @@ def get_own_tenant_usage(
     since_days: int = Query(30, ge=1, le=365),
     actor: AuthenticatedUser = Depends(require_permission("usage:read-own-tenant")),
 ) -> UsageBucket:
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
     since_iso = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
 
     repo = UsageLogsRepository()
@@ -495,8 +488,8 @@ def get_own_tenant_usage_by_tag(
     parameters (including the same `pattern` validation on `period`, so a
     malformed value 422s the same way here), same response shape, through the
     same shared `usage_by_tag_response`, so a task-tag total looks identical
-    regardless of which route read it. Reuses `_require_owner`, the same
+    regardless of which route read it. Reuses `owned_or_admin_tenant_or_404`, the same
     ownership check every other team-lead-scoped read in this router uses.
     """
-    _require_owner(tenant_id, actor)
+    owned_or_admin_tenant_or_404(tenant_id, actor)
     return usage_by_tag_response(tenant_id=tenant_id, period=period, user_id=user_id)
