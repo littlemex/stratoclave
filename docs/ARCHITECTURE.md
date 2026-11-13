@@ -272,9 +272,10 @@ via `POST /api/mvp/auth/ui-ticket/consume`, then strips the query parameter
 from `window.location` immediately so the plaintext token never appears in the
 URL bar or server access logs (session-fixation fix, P0-8 2026-04 review;
 nonce has a 30-second TTL and is single-use),
-(2) the Cognito Hosted UI callback with PKCE, and (3) a previously saved token
-in `localStorage`. The backend enforces `token_use=access`, so the frontend
-never passes `id_token`.
+(2) the Cognito Hosted UI callback with PKCE, and (3) a token bundle read back
+from `sessionStorage`, which is scoped to the tab's session rather than shared
+across tabs. The backend enforces `token_use=access`, so the frontend never
+passes `id_token`.
 
 Vite's dev server proxies `/api/*`, `/v1/*`, and `/.well-known/*` to the
 same ALB the frontend would hit in production, so local and production

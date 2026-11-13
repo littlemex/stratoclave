@@ -715,6 +715,9 @@
   "cl-a5345ade4766": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
+  "cl-a56eea264b2e": {
+   "first_seen": "reworded from cl-b4c9b93161d8"
+  },
   "cl-a5f92213e6ca": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -774,9 +777,6 @@
   },
   "cl-b25161053705": {
    "first_seen": "added by the price-feed change: docs/design/price-feeds.md entered covered_documents, so its guarantee sentences became registered claims"
-  },
-  "cl-b4c9b93161d8": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
   "cl-b5b90dd0ba55": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
@@ -1324,6 +1324,11 @@
    "disposition": "reworded-to",
    "target": "cl-ee049bfef5db",
    "why": "the reclaim's coverage of the token and per-model counters ships, so the sentence stating that the token reservation has no recovery path became false; the obligation moved to the sentence that states what the reclaim now covers"
+  },
+  "cl-b4c9b93161d8": {
+   "disposition": "reworded-to",
+   "target": "cl-a56eea264b2e",
+   "why": "the console keeps its token in sessionStorage (P0-7), so the sentence naming localStorage as the third ingress path was false; the reworded sentence names the storage the code uses"
   }
  },
  "detector": {

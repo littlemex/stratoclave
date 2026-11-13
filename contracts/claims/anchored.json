@@ -1341,8 +1341,8 @@
    "anchor": "contract:C1.5@9cd99058"
   },
   {
-   "id": "cl-b4c9b93161d8",
-   "claim": "**AuthContext** accepts `access_token` through three ingress paths: (1) a `?ui_ticket=<nonce>` URL parameter written by the CLI during `stratoclave ui open` — the SPA exchanges the nonce for the real token bundle via `POST /api/mvp/auth/ui-ticket/consume`, then strips the query parameter from `window.location` immediately so the plaintext token never appears in the URL bar or server access logs (session-fixation fix, P0-8 2026-04 review; nonce has a 30-second TTL and is single-use), (2) the Cognito Hosted UI callback with PKCE, and (3) a previously saved token in `localStorage`.",
+   "id": "cl-a56eea264b2e",
+   "claim": "**AuthContext** accepts `access_token` through three ingress paths: (1) a `?ui_ticket=<nonce>` URL parameter written by the CLI during `stratoclave ui open` — the SPA exchanges the nonce for the real token bundle via `POST /api/mvp/auth/ui-ticket/consume`, then strips the query parameter from `window.location` immediately so the plaintext token never appears in the URL bar or server access logs (session-fixation fix, P0-8 2026-04 review; nonce has a 30-second TTL and is single-use), (2) the Cognito Hosted UI callback with PKCE, and (3) a token bundle read back from `sessionStorage`, which is scoped to the tab's session rather than shared across tabs.",
    "anchor": "contract:C6.1@bd43747d"
   },
   {
