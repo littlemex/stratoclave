@@ -549,7 +549,7 @@ reserve, no settle, no ledger write, no inference.
 
 ### Deploy the full stack to AWS
 
-Prerequisites: AWS CLI with an administrator profile, Node.js 20 LTS, Docker,
+Prerequisites: AWS CLI with an administrator profile, Node.js 22 (the `engines` field in `frontend/package.json` gives the exact range), Docker,
 and Bedrock model access enabled for the Claude family in your region.
 
 One-line install. The AWS account id is derived from your current credentials

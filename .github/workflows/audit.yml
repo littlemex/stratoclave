@@ -92,7 +92,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version-file: .nvmrc
+          check-latest: true
           cache: npm
           cache-dependency-path: iac/package-lock.json
       - name: Install dependencies
@@ -113,7 +114,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version-file: .nvmrc
+          check-latest: true
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies

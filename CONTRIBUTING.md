@@ -65,7 +65,7 @@ design discussion in an issue before a PR is reviewed.
 ### Prerequisites
 
 - **Python 3.11+** with `uv` or `pip`
-- **Node.js 20+** with `npm`
+- **Node.js 22** with `npm` (the version CI uses is in `.nvmrc`; the exact ranges are the `engines` fields in `frontend/package.json` and `iac/package.json`). `npm ci` refuses a Node outside them, because `frontend/.npmrc` and `iac/.npmrc` set `engine-strict`
 - **Rust stable** (1.78 or newer) via `rustup`
 - **AWS CDK v2** (installed via `npm install` inside `iac/`)
 - **finch** or **Docker** for container builds
