@@ -440,6 +440,49 @@ export class NetworkStack extends cdk.Stack {
       );
     }
 
+    // Round-2 implementation review (the cross-stack export-transition
+    // checker's own `forward: vpc-contract -> vpc` failure): the SAME
+    // automatic-export shape as `lib/alb-stack.ts`'s `vpc-contract` fix
+    // above, on a different edge of the graph. `lib/alb-stack.ts` still
+    // imports `this.albSecurityGroup.securityGroupId` at `vpc-contract`
+    // (`needsPublicAlb` includes it), so CDK auto-exports it from here; at
+    // `vpc`, AlbStack stops building the public ALB at all and that import
+    // disappears, which would ALSO make this automatic export disappear in
+    // the SAME deploy — this stack (the producer) is updated before
+    // AlbStack (the consumer, still on its OLD `vpc-contract` template at
+    // that instant) in `cdk deploy --all`'s order, so CloudFormation would
+    // refuse the delete. Force the SAME auto-generated export name to keep
+    // existing from `vpc` on.
+    //
+    // Unlike `lib/alb-stack.ts`'s pair (which only needs forcing through
+    // ONE extra state, because the FOLLOWING `vpc` deploy deletes the
+    // public ALB that made them meaningful), there is no later state in
+    // this five-value migration that ever removes the public ALB's
+    // security group itself — `this.albSecurityGroup` above is created
+    // UNCONDITIONALLY, in every `cloudfrontOrigin` mode, and was already
+    // the final home of this exact tradeoff before this fix existed: by
+    // `vpc`, `needsPublicAlbSg` (above) has already dropped every ingress
+    // rule on it, so it is a real, billed-at-zero, empty security group
+    // that admits nothing, sitting unused forever rather than a stand-in
+    // for a live public ALB. Keeping its GroupId exported alongside it
+    // costs nothing further and avoids reopening this exact deadlock a
+    // second time if some later caller ever starts importing it again.
+    // Removing the group (and this export) entirely is a deploy OUTSIDE
+    // this five-state sequence, left to an operator who wants to do it —
+    // see docs/DEPLOYMENT.md's "VPC origin" > "Rollback" section.
+    //
+    // Never forced for `entryMode: 'both'`: that mode always resolves
+    // `cloudfrontOrigin` to `'vpc'` too (`lib/entry-config.ts`) but NEVER
+    // builds a public ALB in ANY state it can reach (`needsPublicAlb` is
+    // unconditionally false whenever `entryMode === 'both', in
+    // `lib/alb-stack.ts`) — there is no natural reference to this export
+    // for `both` to lose, ever, so forcing one into existence here would
+    // be a template diff with no prior state to carry it forward from,
+    // for a mode this five-state migration does not apply to at all.
+    if (cloudfrontOrigin === 'vpc' && entryMode !== 'both') {
+      this.exportValue(this.albSecurityGroup.securityGroupId);
+    }
+
     // Parameter Store exports
     putStringParameter(this, 'VpcIdParam', {
       prefix: props.prefix,

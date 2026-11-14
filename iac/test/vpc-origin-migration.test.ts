@@ -135,6 +135,20 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
       // direction — a real `cdk deploy --all` for the ROLLBACK step reads
       // the "to" state as OLD (currently deployed) and the "from" state as
       // NEW (what the rollback redeploys).
+      //
+      // EXCEPT `vpc-expand -> public`: docs/DEPLOYMENT.md's "Rollback"
+      // section documents that ONE pair as requiring a two-deploy
+      // `--exclusively` sequence, not a single `cdk deploy --all` — see the
+      // two dedicated tests below, which check the single-deploy shape IS
+      // unsafe and the two-deploy sequence IS safe. Asserting this generic
+      // "single deploy is safe" shape here too, for this one pair, would
+      // directly contradict those two tests on the exact same
+      // `checkExportTransition` call (and did, before this fix — the two
+      // blocks disagreed about the same transition instead of this loop
+      // skipping the pair its own exception is about).
+      if (fromName === 'public' && toName === 'vpc-expand') {
+        continue;
+      }
       test(`rollback: ${toName} -> ${fromName}`, () => {
         const problems = checkExportTransition(toOut().allStacks, fromOut().allStacks);
         expect(problems.unresolvedImports).toEqual([]);
@@ -153,9 +167,92 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
     // design does NOT make safe in one step, rather than silently passing
     // everything and only being trusted on the strength of the OTHER
     // (safe) results above.
-    test('rollback vpc-expand -> public in ONE deploy is correctly flagged UNSAFE (this is why docs/DEPLOYMENT.md documents a two-deploy `--exclusively` workaround instead)', () => {
+    test('rollback vpc-expand -> public in ONE deploy is correctly flagged UNSAFE (this is why docs/DEPLOYMENT.md documents a three-deploy `--exclusively` workaround instead)', () => {
       const problems = checkExportTransition(expandOut.allStacks, publicOut.allStacks);
       expect(isSafeTransition(problems)).toBe(false);
+    });
+
+    // The documented three-deploy workaround itself (docs/DEPLOYMENT.md's
+    // "Rollback" section, `vpc-expand` bullet), checked as the THREE
+    // separate `cdk deploy` invocations the operator actually runs would
+    // apply it, rather than skipped because the one-shot version is
+    // already known unsafe. A stack set "mixed" between two synthesized
+    // states models exactly what is live on AWS partway through the
+    // sequence: whichever stacks a later command has not reached yet are
+    // still running their template from the FIRST (OLD, `vpc-expand`)
+    // synth.
+    //
+    // Two deploys, not the one `docs/DEPLOYMENT.md` used to describe
+    // before this fix, because AlbStack sits on BOTH sides of the same
+    // shape of deadlock here: it is the CONSUMER of NetworkStack's
+    // `internalAlbSecurityGroup` export (built into the internal ALB this
+    // stack constructs) exactly the way FrontendStack/EcsStack are
+    // consumers of AlbStack's internal-ALB exports, AND it is the
+    // PRODUCER of those same internal-ALB exports FOR FrontendStack/
+    // EcsStack. `cdk deploy --all` always deploys NetworkStack before
+    // AlbStack (AlbStack depends on it), so NetworkStack cannot drop
+    // `internalAlbSecurityGroup` in the SAME deploy where AlbStack (not
+    // yet updated at that instant) still imports it — AlbStack has to stop
+    // importing it in ITS OWN prior deploy, same as FrontendStack/EcsStack
+    // had to stop importing AlbStack's exports in THEIR prior deploy, one
+    // layer further out.
+    function withOverriddenStacks(
+      oldStacks: StackSet,
+      newStacks: StackSet,
+      fileFragments: string[],
+    ): StackSet {
+      const mixed: StackSet = { ...oldStacks };
+      for (const file of Object.keys(newStacks)) {
+        if (fileFragments.some((frag) => file.includes(frag))) {
+          mixed[file] = newStacks[file];
+        }
+      }
+      return mixed;
+    }
+
+    test('rollback vpc-expand -> public: the documented three-deploy `--exclusively` sequence is safe at EACH step', () => {
+      // Step 1: `cd iac && npx cdk deploy <frontend> <ecs> --exclusively`
+      // with `STRATOCLAVE_CLOUDFRONT_ORIGIN=public` exported. NetworkStack
+      // and AlbStack are still deployed at `vpc-expand` the whole time this
+      // command runs — only FrontendStack/EcsStack move to their `public`
+      // template, which is simply them STOPPING an import of AlbStack's
+      // internal-ALB exports; nothing is deleted out from under anything
+      // still using it.
+      const afterStep1 = withOverriddenStacks(expandOut.allStacks, publicOut.allStacks, [
+        '-frontend.',
+        '-ecs.',
+      ]);
+      const step1 = checkExportTransition(expandOut.allStacks, afterStep1);
+      expect(step1.unresolvedImports).toEqual([]);
+      expect(step1.unsafeRemovals).toEqual([]);
+      expect(isSafeTransition(step1)).toBe(true);
+
+      // Step 2: `cd iac && npx cdk deploy <alb> --exclusively` (same env).
+      // FrontendStack/EcsStack are ALREADY on `public` (step 1), so
+      // AlbStack is now free to drop its internal ALB, its target group,
+      // and their exports — nothing imports them any more. Dropping the
+      // internal ALB ALSO drops AlbStack's own import of NetworkStack's
+      // `internalAlbSecurityGroup` export; NetworkStack itself is still
+      // UNCHANGED (still `vpc-expand`) the whole time this command runs,
+      // so there is no producer-side deletion attempted in this step at
+      // all, only a consumer dropping its own reference.
+      const afterStep2 = withOverriddenStacks(afterStep1, publicOut.allStacks, ['-alb.']);
+      const step2 = checkExportTransition(afterStep1, afterStep2);
+      expect(step2.unresolvedImports).toEqual([]);
+      expect(step2.unsafeRemovals).toEqual([]);
+      expect(isSafeTransition(step2)).toBe(true);
+
+      // Step 3: `./iac/scripts/deploy-all.sh` (same env) catches
+      // NetworkStack up to `public`, removing `internalAlbSecurityGroup`
+      // and the isolated subnets it needed. By now nothing in the OLD
+      // state (`afterStep2`) imports that export any more (step 2 already
+      // took care of the one remaining importer, AlbStack) — the same
+      // one-state-gap trick `vpc-contract` uses on the way up, done here
+      // as separate commands instead of a fifth migration state.
+      const step3 = checkExportTransition(afterStep2, publicOut.allStacks);
+      expect(step3.unresolvedImports).toEqual([]);
+      expect(step3.unsafeRemovals).toEqual([]);
+      expect(isSafeTransition(step3)).toBe(true);
     });
   });
 

@@ -355,6 +355,38 @@ export class AlbStack extends cdk.Stack {
       new cdk.CfnOutput(this, 'AlbDnsName', { value: publicBuilt.alb.loadBalancerDnsName });
       new cdk.CfnOutput(this, 'AlbArn', { value: publicBuilt.alb.loadBalancerArn });
 
+      // Round-2 implementation review (the cross-stack export-transition
+      // checker's own `forward: vpc-switch -> vpc-contract` failure): CDK
+      // only creates a cross-stack export for `publicBuilt.alb.loadBalancerDnsName`
+      // / `publicBuilt.targetGroup.targetGroupArn` AUTOMATICALLY, while some
+      // OTHER stack's template actually references the value — and
+      // `vpc-contract`'s whole point (see `cloudfrontOrigin`'s doc in
+      // `lib/entry-config.ts`) is that `lib/frontend-stack.ts` and
+      // `lib/ecs-stack.ts` stop referencing BOTH of them in this exact
+      // deploy. Left alone, the automatic export would ALSO disappear in
+      // that same deploy, the instant nothing imports it — collapsing the
+      // one-state gap `vpc-contract` exists to create back down to zero,
+      // and reproducing the exact deadlock it was meant to solve: `cdk
+      // deploy --all` updates this stack (the producer) before
+      // FrontendStack/EcsStack (the consumers), so CloudFormation would see
+      // this stack try to delete an export those consumers' still-OLD,
+      // not-yet-redeployed templates still import, and refuse it ("Export
+      // ... cannot be deleted as it is in use by ...").
+      // `Stack.exportValue(...)` — CDK's own documented technique for
+      // exactly this — forces the SAME auto-generated export name to keep
+      // existing for this one state even though nothing in THIS state's own
+      // template needs it, so that deploy succeeds. The FOLLOWING deploy
+      // (`vpc`) drops `publicBuilt` (and this whole `if` block) entirely —
+      // there is no public ALB left to export anything about, so nothing
+      // removes these two exports while anything still imports them: by
+      // then FrontendStack/EcsStack's own OLD state is already
+      // `vpc-contract`, which (because of this same `exportValue` call) no
+      // longer imports either one.
+      if (cloudfrontOrigin === 'vpc-contract') {
+        this.exportValue(publicBuilt.alb.loadBalancerDnsName);
+        this.exportValue(publicBuilt.targetGroup.targetGroupArn);
+      }
+
       this.publicAlb = publicBuilt.alb;
     }
 

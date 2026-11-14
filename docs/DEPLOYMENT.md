@@ -661,7 +661,14 @@ What each step does:
   to delete. The public ALB, its target group, and its exports are still
   declared by AlbStack, UNCHANGED from `vpc-switch`; nothing routes to the
   public path and nothing imports its exports anymore, but it has not been
-  deleted yet. `deploy-all.sh` refuses to run this step until the LIVE
+  deleted yet. AlbStack (`lib/alb-stack.ts`) explicitly keeps exporting the
+  public ALB's DNS name and target-group ARN for exactly this one step
+  (`Stack.exportValue(...)`), because CDK only creates those exports
+  automatically while some OTHER stack's template still references them —
+  and FrontendStack/EcsStack stopping that reference in THIS SAME deploy
+  would otherwise make the automatic export vanish too, reopening the
+  deadlock the next paragraph describes one step early. `deploy-all.sh`
+  refuses to run this step until the LIVE
   CloudFront distribution's behaviours are confirmed already targeting the
   VPC origin AND the distribution's own `Status` is `Deployed` — not merely
   until a `vpc-switch` deploy has been RUN, but until it has actually
@@ -676,7 +683,17 @@ What each step does:
   already deployed successfully — because AlbStack deleting those exports
   while FrontendStack/EcsStack still imported them is exactly the
   CloudFormation deadlock ("Export ... cannot be deleted as it is in use
-  by ...") this four-step sequence exists to avoid.
+  by ...") this four-step sequence exists to avoid. NetworkStack's own
+  public ALB security group (`lib/network-stack.ts`'s `AlbSecurityGroup`,
+  always present regardless of mode) is not among the resources this step
+  removes: it already admits nothing, in every state from `vpc` on (no
+  ingress rule is added once `STRATOCLAVE_CLOUDFRONT_ORIGIN` is `vpc`), and
+  NetworkStack keeps its GroupId exported (also via `Stack.exportValue(...)`)
+  past the point AlbStack stops importing it, for the same CloudFormation
+  reason as the previous paragraph. Removing this one empty, unused
+  security group entirely is a deploy outside this five-value sequence,
+  left for an operator who wants it; leaving it in place costs nothing
+  beyond the one unused resource.
 
 A bare `cdk deploy --all` (or `./iac/scripts/deploy-all.sh`) with none of
 these variables set resolves to `vpc` — the default. Run against an existing
@@ -697,10 +714,12 @@ constraint, reversed: each rollback step is re-ADDING an export, which
 very first one, `vpc` -> `vpc-contract`, which recreates the public ALB
 that no longer exists, and the very last one, `vpc-expand` -> `public`,
 which has the SAME shape of cross-stack ordering problem the forward
-migration does (see below) because FrontendStack imports the internal ALB
-to build the VPC origin, and EcsStack registers with its target group,
-from `vpc-expand` onward — stopping that import is a CONSUMER-side change
-the same way `vpc-contract` is on the way up.
+migration does (see below), twice over: FrontendStack imports the
+internal ALB to build the VPC origin, EcsStack registers with its target
+group, and AlbStack itself imports NetworkStack's
+`internalAlbSecurityGroup`, all from `vpc-expand` onward — each of those
+is a CONSUMER-side change that has to land before the stack it imports
+from can drop the export, the same way `vpc-contract` is on the way up.
 
 - From `vpc`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-contract` through
   `deploy-all.sh`. This recreates the public ALB, its target group, and its
@@ -714,18 +733,29 @@ the same way `vpc-contract` is on the way up.
   origin; both ALBs remain.
 - From `vpc-expand`: do NOT redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`
   in one `cdk deploy --all` — that has the identical cross-stack deadlock
-  the forward migration's `vpc-contract` step exists to avoid, just on the
-  INTERNAL ALB's exports instead of the public one's: FrontendStack still
-  imports `internalAlb` to build the VPC origin resource, and EcsStack still
-  registers with the internal target group, at `vpc-expand`, so AlbStack
-  cannot delete the internal ALB's exports in the same deploy where both
-  stop importing them. Do it in two deploys instead, using CDK's own
-  `--exclusively` flag to update the consumers first: `cd iac && npx cdk
-  deploy stratoclave-frontend stratoclave-ecs --exclusively
-  --require-approval never` (with `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`
-  already exported) to drop the VPC origin and the internal target-group
-  registration, THEN `./iac/scripts/deploy-all.sh` (same env) to let
-  AlbStack/NetworkStack remove the internal ALB and its isolated subnets.
+  the forward migration's `vpc-contract` step exists to avoid, one layer
+  deeper: AlbStack is a consumer of NetworkStack's
+  `internalAlbSecurityGroup` export here, the same way FrontendStack and
+  EcsStack are consumers of AlbStack's own internal-ALB exports, so
+  NetworkStack cannot delete that export in the same deploy where AlbStack
+  ALSO stops importing it, any more than AlbStack could delete its own
+  exports while FrontendStack/EcsStack still imported them. Do it in
+  three deploys instead, using CDK's own
+  `--exclusively` flag to move each layer of consumer before its own
+  producer, with `STRATOCLAVE_CLOUDFRONT_ORIGIN=public` already exported
+  for every command below:
+  1. `cd iac && npx cdk deploy stratoclave-frontend stratoclave-ecs
+     --exclusively --require-approval never` drops FrontendStack's VPC
+     origin and EcsStack's internal target-group registration.
+     AlbStack's internal ALB and target group are untouched.
+  2. `cd iac && npx cdk deploy stratoclave-alb --exclusively
+     --require-approval never` removes AlbStack's internal ALB and target
+     group, which also drops AlbStack's own import of NetworkStack's
+     `internalAlbSecurityGroup` export — nothing else still imports
+     either export after step 1.
+  3. `./iac/scripts/deploy-all.sh` lets NetworkStack remove
+     `internalAlbSecurityGroup` and the isolated subnets it needed, now
+     that AlbStack (step 2) no longer imports it.
 - From `vpc` with no intermediate step ever run: there is no rollback
   deploy, because the public ALB no longer exists. Restoring it means
   running the migration again from the start under the same prefix, which

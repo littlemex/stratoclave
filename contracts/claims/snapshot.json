@@ -1507,12 +1507,6 @@
   "cl-4365b6e0f7df": {
    "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
   },
-  "cl-af0b708246ec": {
-   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
-  },
-  "cl-1b5773ea2ee1": {
-   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
-  },
   "cl-f63c030645ac": {
    "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
   },
@@ -1536,6 +1530,18 @@
   },
   "cl-bb40445cb116": {
    "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-e5fb08afbe8c": {
+   "first_seen": "docs/DEPLOYMENT.md, cross-stack export-transition fix (vpc-expand->public rollback, second deadlock layer)"
+  },
+  "cl-03bdf164c848": {
+   "first_seen": "docs/DEPLOYMENT.md, cross-stack export-transition fix (vpc-expand->public rollback, second deadlock layer)"
+  },
+  "cl-bd9a838d9924": {
+   "first_seen": "docs/DEPLOYMENT.md, cross-stack export-transition fix (vpc-expand->public rollback, second deadlock layer)"
+  },
+  "cl-d451f475a51b": {
+   "first_seen": "docs/DEPLOYMENT.md, cross-stack export-transition fix (vpc-contract->vpc deadlock, NetworkStack's forced AlbSecurityGroup export)"
   }
  },
  "retired": {
@@ -1721,8 +1727,8 @@
   },
   "cl-47ddbb2f965f": {
    "disposition": "reworded-to",
-   "target": "cl-af0b708246ec",
-   "why": "the one-step 'redeploy public' rollback this sentence described is no longer correct -- it has the same cross-stack export deadlock the forward migration's vpc-contract step exists to avoid, just on the internal ALB's exports; replaced by guidance for the two-deploy --exclusively workaround"
+   "target": "cl-e5fb08afbe8c",
+   "why": "the one-step 'redeploy public' rollback this sentence described is no longer correct -- it has the same cross-stack export deadlock the forward migration's vpc-contract step exists to avoid, just on the internal ALB's exports; retargeted straight at the live successor (cl-e5fb08afbe8c) rather than through cl-af0b708246ec, itself since retired, per the ratchet's own rule against moving the hole one hop over"
   },
   "cl-3fb7166160bf": {
    "disposition": "reworded-to",
@@ -1748,6 +1754,16 @@
    "disposition": "reworded-to",
    "target": "cl-bb40445cb116",
    "why": "reworded to name the ALB (not the NLB) as the backend-observed peer, and to add the uvicorn --proxy-headers/FORWARDED_ALLOW_IPS check"
+  },
+  "cl-af0b708246ec": {
+   "disposition": "reworded-to",
+   "target": "cl-e5fb08afbe8c",
+   "why": "the vpc-expand rollback bullet was rewritten: the single-layer FrontendStack/EcsStack deadlock it described turned out to have a second layer (AlbStack is itself a consumer of NetworkStack's internalAlbSecurityGroup export), so the sentence now states both layers; the obligation moved rather than ended."
+  },
+  "cl-1b5773ea2ee1": {
+   "disposition": "reworded-to",
+   "target": "cl-03bdf164c848",
+   "why": "the documented workaround grew from a two-deploy sequence (frontend+ecs, then deploy-all.sh) to a three-deploy sequence (frontend+ecs, then alb alone, then deploy-all.sh) once the second deadlock layer (AlbStack's own import of internalAlbSecurityGroup) was found; this sentence split into cl-03bdf164c848 (the frontend/ecs step) and cl-bd9a838d9924 (the new alb-alone step)."
   }
  },
  "detector": {
