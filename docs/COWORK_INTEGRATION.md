@@ -143,7 +143,7 @@ With the test green, use Cowork normally. Each inference request goes through:
 
 Because Stratoclave does not cache revocations, the old key becomes invalid immediately after the revoke.
 
-> **Revoking today.** `stratoclave api-key revoke` requires the SHA-256 hash of the plaintext, not the masked `sk-stratoclave-XXXX...YYYY` identifier shown by `stratoclave api-key list`. Until the list output is enriched, revoke from the web UI (**Account -> API keys -> Revoke**), or directly via `DELETE /api/mvp/me/api-keys/{key_hash}`. See [CLI_GUIDE.md -> Known limitations](CLI_GUIDE.md#known-limitations).
+> **Revoking a key.** `stratoclave api-key revoke <key_id>` takes the masked `sk-stratoclave-XXXX...YYYY` identifier that `stratoclave api-key list` prints; the web UI (**Account -> API keys -> Revoke**) does the same.
 
 ---
 

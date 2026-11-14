@@ -8,7 +8,11 @@ Filters:
   - since / until: ISO 8601 (timestamp_log_id has "{iso}#{uuid}" format, enabling SK range queries)
   - limit + cursor (UsageLogs LastEvaluatedKey)
 
-When neither tenant_id nor user_id is provided, falls back to a full Scan (truncated at limit 100).
+At least one of tenant_id / user_id is required: the ECS task role is not
+granted dynamodb:Scan on this table (it is audit-critical; see
+iac/lib/ecs-stack.ts's ScanLimitedToAdminConsoleTables statement), so an
+unfiltered request is refused with 400 rather than attempting a Scan that
+IAM would deny.
 """
 from __future__ import annotations
 
@@ -118,7 +122,37 @@ def list_usage_logs(
     repo = UsageLogsRepository()
     decoded_cursor = _decode_cursor(cursor)
 
-    # Filter priority: tenant_id > user_id > full scan.
+    # Filter priority: tenant_id > user_id > full scan -- except the ECS task
+    # role has never actually been granted `dynamodb:Scan` on this table.
+    # `iac/lib/ecs-stack.ts`'s `ScanLimitedToAdminConsoleTables` statement
+    # (P0-10, 2026-04 security review) deliberately keeps `usage-logs` off
+    # the Scan allowlist, alongside sessions/messages/sse-tokens/sso-nonces,
+    # because this table is one of the audit-critical ones a Scan-capable RCE
+    # could bulk-exfiltrate. That review tightened the IAM policy table by
+    # table but never came back to this route's "no filter -> full Scan"
+    # fallback, so calling it with neither `tenant_id` nor `user_id` -- which
+    # is exactly what the Admin > Usage web page does on first render, before
+    # an operator ever touches the filter form -- hits `AccessDeniedException`
+    # and surfaces as an unhandled 500 (confirmed on a real deployment:
+    # CloudWatch shows `botocore.exceptions.ClientError: ... AccessDeniedException
+    # ... dynamodb:Scan ... table/<prefix>-usage-logs`). Refuse up front with a
+    # 400 that names the fix, instead of attempting the denied Scan: this
+    # keeps the Scan-denial intact (no IAM change) and matches what
+    # docs/ADMIN_GUIDE.md and docs/CLI_GUIDE.md already tell operators to do
+    # ("Always pass --tenant or --user when possible to avoid scans").
+    if not tenant_id and not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "tenant_id or user_id is required: this deployment's IAM policy "
+                "does not grant dynamodb:Scan on the usage-logs table (by design -- "
+                "it is an audit-critical table), so an unfiltered query cannot be "
+                "served. Pass --tenant/--user (CLI) or fill in the tenant_id/user_id "
+                "filter (web UI) and try again."
+            ),
+        )
+
+    # Filter priority: tenant_id > user_id.
     if tenant_id:
         key = boto3_key("tenant_id").eq(tenant_id)
         if since:
@@ -144,11 +178,10 @@ def list_usage_logs(
             kwargs["ExclusiveStartKey"] = decoded_cursor
         resp = repo._table.query(**kwargs)
     else:
-        # Full Scan (admin only, truncated at limit 100).
-        kwargs = {"Limit": limit}
-        if decoded_cursor:
-            kwargs["ExclusiveStartKey"] = decoded_cursor
-        resp = repo._table.scan(**kwargs)
+        # Unreachable: the 400 above returns before this point when neither
+        # filter is set. assert, not pass, so a future edit that removes the
+        # guard fails loudly here instead of silently re-opening the Scan.
+        raise AssertionError("unreachable: tenant_id/user_id guard above")
 
     items = [_to_entry(it) for it in resp.get("Items", [])]
     return UsageLogsResponse(

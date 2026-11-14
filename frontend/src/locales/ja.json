@@ -356,7 +356,7 @@
   },
   "admin_usage_logs": {
     "title": "全体使用量",
-    "intro": "UsageLogs テーブルの全件をフィルタ付きで確認します。tenant_id 指定時は PK Query、user_id 指定時は GSI Query、いずれも無ければ Scan です (100 件で truncate)。",
+    "intro": "UsageLogs テーブルをフィルタ付きで確認します。tenant_id 指定時は PK Query、user_id 指定時は GSI Query で取得します。どちらか一方の指定が必須です。このテーブルは監査用のため Scan (絞り込み無しの全件取得) を許可していません。",
     "filter_title": "絞り込み",
     "filter_desc": "ISO 8601 (<1>2026-04-01T00:00:00Z</1> 形式) を since / until に入力できます。",
     "apply": "絞り込み適用",
@@ -375,7 +375,8 @@
     "fallback_badge": "フォールバック",
     "fallback_from": "要求モデル {{requested}} からフォールバック",
     "fallback_from_quota_exhausted": "要求モデル {{requested}} からフォールバック(クォータ枯渇)",
-    "fallback_from_grant_expired": "要求モデル {{requested}} からフォールバック(グラントの期限切れ)"
+    "fallback_from_grant_expired": "要求モデル {{requested}} からフォールバック(グラントの期限切れ)",
+    "row_filter_required": "上の欄に tenant_id か user_id を入力して絞り込みを適用してください。絞り込み無しの全件取得はこのテーブルでは許可されていません。"
   },
   "admin_tenants": {
     "title": "テナント管理",

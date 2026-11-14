@@ -345,10 +345,8 @@ Hand the returned plaintext to the user via a secure channel.
 
 Revocation is immediate: the next request using the key returns `401 Unauthorized`.
 
-- Self-service: **Account -> API keys -> Revoke**, or `stratoclave api-key revoke <key_hash>`.
-- Admin override: **Admin -> API keys -> Revoke any key**, or `stratoclave api-key admin-revoke <key_hash>`.
-
-> **Known limitation.** `stratoclave api-key list` does not currently include `key_hash` in its output, so revoking via the CLI requires the SHA-256 hash to come from elsewhere (the admin Web UI, or a direct HTTP call to `GET /api/mvp/admin/api-keys`). See [CLI_GUIDE.md](CLI_GUIDE.md#known-limitations) for the workaround.
+- Self-service: **Account -> API keys -> Revoke**, or `stratoclave api-key revoke <key_id>` with the masked `key_id` that `stratoclave api-key list` prints.
+- Admin override: **Admin -> API keys -> Revoke any key**, or `stratoclave api-key admin-revoke <key_id>` with the `key_id` from `stratoclave api-key admin-list`.
 
 ### Viewing all API keys (admin only)
 
@@ -515,7 +513,7 @@ aws cognito-idp admin-set-user-password \
 | `stratoclave admin user create` returns an object where `temporary_password` is `null` | This is the intentional default. See [Provisioning a new user](#provisioning-a-new-user) and follow up with `aws cognito-idp admin-set-user-password --no-permanent`. |
 | `stratoclave admin user create ... --role admin` returns `403` | `ALLOW_ADMIN_CREATION` is not `true` on the running backend task. Re-enable it for the duration of the bootstrap, then turn it back off. See [Locking down after bootstrap](#locking-down-after-bootstrap). |
 | `stratoclave admin users list` returns a `clap` parse error | The noun is singular; run `stratoclave admin user list`. Same for `admin tenant list`. |
-| `stratoclave api-key revoke` fails with "key not found" | The command expects the SHA-256 hash, not the masked `sk-stratoclave-XXXX...YYYY` identifier printed by `api-key list`. Use the Admin UI, or call `DELETE /api/mvp/admin/api-keys/{key_hash}` with the hash from `GET /api/mvp/admin/api-keys`. |
+| `stratoclave api-key revoke` fails with "key not found" | Pass the masked `key_id` exactly as `api-key list` prints it (`sk-stratoclave-XXXX...YYYY`). A key owned by another user is revoked with `api-key admin-revoke`. The HTTP routes take the same `key_id`: `DELETE /api/mvp/me/api-keys/by-key-id/{key_id}` and `DELETE /api/mvp/admin/api-keys/by-key-id/{key_id}`; the older routes keyed by hash answer `410 Gone`. |
 | Admin UI tiles look wrong after the initial deploy | Hard-reload with `Cmd+Shift+R` / `Ctrl+Shift+R` to bust CloudFront's cache of the SPA bundle. |
 | Admin actions return `403` while other requests succeed | Your user record still has `roles=["user"]`. Use the web UI or call `PATCH /api/mvp/admin/users/{user_id}/roles` to add `admin`. |
 | SSO login is rejected with `sso_login_denied` | Inspect the `reason` field in the matching `sso_login_denied` audit event. Common causes: trusted-account entry missing, role pattern mismatch, or identity type not opted in. |

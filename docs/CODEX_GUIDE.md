@@ -245,16 +245,11 @@ ACTIVE list.
 From the CLI:
 
 ```bash
-stratoclave api-key revoke <key_hash>
+stratoclave api-key revoke <key_id>
 ```
 
-`<key_hash>` is the SHA-256 hex digest of the plaintext key. Note that
-`stratoclave api-key create` does **not** print the hash in its output
-(it shows only `key_id`, scopes, and `expires_at`), and
-`stratoclave api-key list` also does not expose `key_hash`. Until the
-list output is enriched, use the web UI (**Account -> API keys -> Revoke**)
-or call `DELETE /api/mvp/me/api-keys/{key_hash}` directly. See
-[CLI_GUIDE.md -> Known limitations](CLI_GUIDE.md#known-limitations).
+`<key_id>` is the masked `sk-stratoclave-XXXX...YYYY` identifier that
+`stratoclave api-key create` and `stratoclave api-key list` print.
 
 ## Path C — direct Bedrock (no Stratoclave)
 
