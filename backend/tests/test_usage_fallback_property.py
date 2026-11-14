@@ -23,7 +23,14 @@ import pytest
 from hypothesis import assume, given, strategies as st
 
 from mvp.me import _derive_fallback
-from mvp.models import _REGISTRY, resolve_bedrock_model, resolve_model
+from mvp import models as _models
+from mvp.inference_boundary import compose as _compose, primary_region as _primary
+from mvp.models import resolve_bedrock_model, resolve_model
+
+# The models this (default, US) deployment serves: the bundled registry minus the
+# variants the inference boundary hides here. Computed with the pure rule, not
+# `registry_entries()`, which would read the activated-entry store at import.
+_REGISTRY = _compose(_models._REGISTRY, boundary=None, primary=_primary())[0]
 
 # Per-model spelling lists (every alias + the bedrock id) + the bedrock id it
 # canonicalizes to on the write path.
@@ -182,33 +189,46 @@ def test_record_read_roundtrip_moto():
     (None, None)."""
     from moto import mock_aws
 
+    from dynamo.client import get_dynamodb_resource
+
     with mock_aws():
-        table = _moto_usage_table()
-        from dynamo.usage_logs import UsageLogsRepository
+        # The repository's DynamoDB resource is cached process-wide; one built by
+        # an earlier test outside the mock would send these writes to real AWS.
+        # Cleared on the way in and out, as the shared `dynamodb_mock` fixture does.
+        get_dynamodb_resource.cache_clear()
+        try:
+            _roundtrip(_moto_usage_table())
+        finally:
+            get_dynamodb_resource.cache_clear()
 
-        repo = UsageLogsRepository(table_name="usage-fallback-test")
-        opus_bedrock = _REGISTRY[0].bedrock_model_id
-        haiku_bedrock = _REGISTRY[-1].bedrock_model_id
-        # Fallback row: requested opus, served haiku (both stored as bedrock ids).
-        repo.record(
-            tenant_id="t1", user_id="u1", user_email="e@x.com",
-            model_id=haiku_bedrock, input_tokens=1, output_tokens=1,
-            requested_model_id=opus_bedrock,
-        )
-        # Legacy-shaped row: no requested_model_id at all.
-        repo.record(
-            tenant_id="t1", user_id="u1", user_email="e@x.com",
-            model_id=opus_bedrock, input_tokens=1, output_tokens=1,
-        )
-        import boto3
 
-        items = table.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key("tenant_id").eq("t1")
-        )["Items"]
-        assert len(items) == 2
-        by_req = {it.get("requested_model_id"): it for it in items}
-        fb = by_req[opus_bedrock]
-        assert _derive_fallback(fb.get("requested_model_id"), str(fb["model_id"])) is True
-        legacy = by_req[None]
-        assert "requested_model_id" not in legacy
-        assert _derive_fallback(legacy.get("requested_model_id"), str(legacy["model_id"])) is None
+def _roundtrip(table):
+    """The round trip itself, against `table` inside the caller's mock."""
+    from dynamo.usage_logs import UsageLogsRepository
+
+    repo = UsageLogsRepository(table_name="usage-fallback-test")
+    opus_bedrock = _REGISTRY[0].bedrock_model_id
+    haiku_bedrock = _REGISTRY[-1].bedrock_model_id
+    # Fallback row: requested opus, served haiku (both stored as bedrock ids).
+    repo.record(
+        tenant_id="t1", user_id="u1", user_email="e@x.com",
+        model_id=haiku_bedrock, input_tokens=1, output_tokens=1,
+        requested_model_id=opus_bedrock,
+    )
+    # Legacy-shaped row: no requested_model_id at all.
+    repo.record(
+        tenant_id="t1", user_id="u1", user_email="e@x.com",
+        model_id=opus_bedrock, input_tokens=1, output_tokens=1,
+    )
+    import boto3
+
+    items = table.query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("tenant_id").eq("t1")
+    )["Items"]
+    assert len(items) == 2
+    by_req = {it.get("requested_model_id"): it for it in items}
+    fb = by_req[opus_bedrock]
+    assert _derive_fallback(fb.get("requested_model_id"), str(fb["model_id"])) is True
+    legacy = by_req[None]
+    assert "requested_model_id" not in legacy
+    assert _derive_fallback(legacy.get("requested_model_id"), str(legacy["model_id"])) is None

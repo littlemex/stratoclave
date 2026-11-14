@@ -453,6 +453,11 @@ def async_client(region: str) -> httpx.AsyncClient:
     ownership rule behind one name, which is how a pooled connection ends up
     closed by whoever thought they owned it.
     """
+    # The OpenAI-compatible transport reaches a region only through these two
+    # constructors, so a region outside the inference boundary is refused here.
+    from .inference_boundary import require_region
+
+    require_region(region)
     client = _async_clients.get(region)
     if client is not None and not client.is_closed:
         return client
@@ -477,6 +482,11 @@ def sync_client(region: str) -> httpx.Client:
     Same ownership rule as `async_client`: process-wide, not closed by the caller,
     auth passed per request, and no per-call override.
     """
+    # The OpenAI-compatible transport reaches a region only through these two
+    # constructors, so a region outside the inference boundary is refused here.
+    from .inference_boundary import require_region
+
+    require_region(region)
     client = _sync_clients.get(region)
     if client is not None and not client.is_closed:
         return client

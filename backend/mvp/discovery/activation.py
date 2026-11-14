@@ -54,6 +54,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional
 
+from ..inference_boundary import reach_from_destinations as _boundary_reach
+
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
@@ -177,10 +179,15 @@ class ActivationRefused(ValueError):
     WIRE_PROTOCOL_MISMATCH = "wire_protocol_mismatch"
     VERDICT_SUBJECT_CHANGED = "verdict_subject_changed"
     IDENTIFIER_TAKEN = "identifier_taken"
+    # The deployment has an inference boundary and this model can be served
+    # outside it (or its destinations were never recorded). Refused before any
+    # write, with the reason `mvp.inference_boundary` gives.
+    OUTSIDE_BOUNDARY = "outside_inference_boundary"
     REASONS = frozenset({
         NOT_PERMITTED, CANDIDATE_NOT_FOUND, RECORD_NOT_FOUND, VERDICT_NOT_FOUND,
         VERDICT_NOT_VERIFIED, VERDICT_IDENTITY_MISMATCH, PRICING_KEY_MISMATCH,
         WIRE_PROTOCOL_MISMATCH, VERDICT_SUBJECT_CHANGED, IDENTIFIER_TAKEN,
+        OUTSIDE_BOUNDARY,
     })
 
     def __init__(self, reason: str, message: str) -> None:
@@ -266,6 +273,8 @@ def _entry_fields(entry: ModelEntry) -> dict[str, Any]:
         "access": entry.access,
         "jurisdiction_bounded": entry.jurisdiction_bounded,
         "jurisdiction": entry.jurisdiction,
+        "inference_regions": (list(entry.inference_regions)
+                              if entry.inference_regions is not None else None),
     }
 
 
@@ -282,6 +291,10 @@ def _entry_from_fields(fields: Mapping[str, Any]) -> ModelEntry:
         access=fields["access"],
         jurisdiction_bounded=bool(fields["jurisdiction_bounded"]),
         jurisdiction=fields.get("jurisdiction"),
+        # Absent on an entry activated before the field existed: never recorded,
+        # which the inference boundary treats as unknown reach.
+        inference_regions=(tuple(fields["inference_regions"])
+                           if fields.get("inference_regions") else None),
     )
 
 
@@ -619,7 +632,8 @@ def _commit_activation(
         ) from exc
 
 
-def _build_entry(candidate: PromotionCandidate, *, jurisdiction_bounded: bool) -> ModelEntry:
+def _build_entry(candidate: PromotionCandidate, *, jurisdiction_bounded: bool,
+                 destination_regions) -> ModelEntry:
     """The candidate-to-registry-entry mapping, applied.
 
     `provider`, `model_family`, `profile_scope` and the three human inputs
@@ -657,6 +671,8 @@ def _build_entry(candidate: PromotionCandidate, *, jurisdiction_bounded: bool) -
         access="entitlement_required",
         jurisdiction_bounded=jurisdiction_bounded,
         jurisdiction=candidate.jurisdiction if jurisdiction_bounded else None,
+        inference_regions=_boundary_reach(destination_regions, profile_scope=candidate.profile_scope,
+                                          source_region=candidate.bedrock_region),
     )
 
 
@@ -850,7 +866,17 @@ def activate_candidate(
     verified_record = record_digest(record)
     _check_subject(verdict, candidate_digest=verified_candidate, record_digest=verified_record)
 
-    entry = _build_entry(candidate, jurisdiction_bounded=record.jurisdiction_bounded)
+    entry = _build_entry(candidate, jurisdiction_bounded=record.jurisdiction_bounded,
+                         destination_regions=record.destination_regions)
+    # A model the inference boundary would leave out is refused here, by name,
+    # rather than activated and then silently absent from the registry.
+    from .. import inference_boundary as _boundary
+
+    outside = _boundary.exclusion_reason(entry, boundary=_boundary.configured(),
+                                         primary=_boundary.primary_region())
+    if outside is not None:
+        raise ActivationRefused(ActivationRefused.OUTSIDE_BOUNDARY,
+                                f"{entry.bedrock_model_id} cannot be activated here: {outside}")
     activated = ActivatedEntry(
         profile_id=profile_id,
         invocation=invocation,

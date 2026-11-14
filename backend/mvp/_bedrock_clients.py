@@ -154,6 +154,11 @@ def bedrock_runtime_client(region: str, *, config: Optional[Config] = None):
 
 
 def _build_client(region: str, config: Config):
+    # Every bedrock-runtime client in the process is built here, so this is where
+    # a region outside the inference boundary is refused, whatever led to it.
+    from .inference_boundary import require_region
+
+    require_region(region)
     return _SESSION.client(
         "bedrock-runtime",
         region_name=region,
@@ -188,8 +193,9 @@ def deployment_client():
     that target's region. `ModelEntry.bedrock_region` is authoritative only for the
     OpenAI-compatible surface on bedrock-runtime.
     """
-    region = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1"
-    return bedrock_runtime_client(region)
+    from .inference_boundary import primary_region
+
+    return bedrock_runtime_client(primary_region())
 
 
 def client_for_model(entry):

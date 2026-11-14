@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "$comment": "Test fixture for region-decoupling.test.ts, loaded via STRATOCLAVE_MODEL_REGISTRY_PATH. Shaped like backend/mvp/defaults/models.json but with a jp.-prefixed entry added so the inference-region boundary's data-driven DEFAULT_BEDROCK_MODEL check can be exercised against a geography the REAL bundled file does not carry yet. Not read by the backend; iac-only.",
+  "models": [
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "us.anthropic.claude-opus-5",
+      "bedrock_region": "us-east-1",
+      "wire_protocol": "messages",
+      "profile_scope": "us"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "jp.anthropic.claude-opus-4-7",
+      "bedrock_region": "ap-northeast-1",
+      "wire_protocol": "messages",
+      "profile_scope": "jp"
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "global.anthropic.claude-fable-5",
+      "bedrock_region": "us-east-1",
+      "wire_protocol": "messages",
+      "profile_scope": "global"
+    },
+    {
+      "provider": "openai",
+      "bedrock_model_id": "us.openai.gpt-5.6-sol",
+      "bedrock_region": "us-east-2",
+      "wire_protocol": "responses",
+      "profile_scope": "us"
+    },
+    {
+      "provider": "xai",
+      "bedrock_model_id": "us.xai.grok-4.6",
+      "bedrock_region": "us-west-2",
+      "wire_protocol": "responses",
+      "profile_scope": "us"
+    }
+  ]
+}

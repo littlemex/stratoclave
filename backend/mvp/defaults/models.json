@@ -55,6 +55,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-opus-5",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-opus-5"
       ],
@@ -71,6 +72,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-fable-5",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-fable-5"
       ],
@@ -87,6 +89,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "global.anthropic.claude-fable-5",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["*"],
       "aliases": [
         "claude-fable-5-global"
       ],
@@ -102,6 +105,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-opus-4-7",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-opus-4-7"
       ],
@@ -117,6 +121,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-opus-4-6-v1",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-opus-4-6"
       ],
@@ -132,6 +137,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-opus-4-5",
         "claude-opus-4-5-20251101"
@@ -148,6 +154,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-opus-4-1-20250805-v1:0",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-opus-4-1",
         "claude-opus-4-1-20250805"
@@ -181,6 +188,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-sonnet-5",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-sonnet-5"
       ],
@@ -197,6 +205,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-sonnet-4-6",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-sonnet-4-6"
       ],
@@ -212,6 +221,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-sonnet-4-5",
         "claude-sonnet-4-5-20250929"
@@ -228,6 +238,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "claude-haiku-4-5",
         "claude-haiku-4-5-20251001"
@@ -278,6 +289,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-3-haiku-20240307-v1:0",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-west-2"],
       "aliases": [
         "claude-3-haiku"
       ],
@@ -309,6 +321,7 @@
       "provider": "anthropic",
       "bedrock_model_id": "us.anthropic.claude-3-sonnet-20240229-v1:0",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1", "us-west-2"],
       "aliases": [
         "claude-3-sonnet"
       ],
@@ -324,6 +337,7 @@
       "provider": "openai",
       "bedrock_model_id": "us.openai.gpt-5.6-sol",
       "bedrock_region": "us-east-2",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "gpt-5.6-sol",
         "openai.gpt-5.6-sol",
@@ -342,6 +356,7 @@
       "provider": "openai",
       "bedrock_model_id": "us.openai.gpt-5.6-terra",
       "bedrock_region": "us-east-2",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "gpt-5.6-terra",
         "openai.gpt-5.6-terra",
@@ -360,6 +375,7 @@
       "provider": "xai",
       "bedrock_model_id": "us.xai.grok-4.6",
       "bedrock_region": "us-west-2",
+      "inference_regions": ["us-east-1", "us-east-2", "us-west-2"],
       "aliases": [
         "grok-4.6",
         "xai.grok-4.6",
@@ -378,6 +394,7 @@
       "provider": "nvidia",
       "bedrock_model_id": "nvidia.nemotron-super-3-120b",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1"],
       "aliases": [
         "nemotron-super-3-120b",
         "nvidia.nemotron-super-3-120b"
@@ -395,6 +412,7 @@
       "provider": "qwen",
       "bedrock_model_id": "qwen.qwen3-next-80b-a3b",
       "bedrock_region": "us-east-1",
+      "inference_regions": ["us-east-1"],
       "aliases": [
         "qwen3-next-80b",
         "qwen.qwen3-next-80b-a3b"
@@ -408,6 +426,88 @@
       "pricing_key": "qwen",
       "price_model_id": "qwen.qwen3-next-80b-a3b-instruct",
       "notes": "Chosen over qwen3-235b-a22b-2507 because Bedrock offers that one only in us-west-2, outside a us-east-1 residency policy. Converse transport; same /v1/messages exclusion and same unpriced-defaults-high rule as nemotron. profile_scope is \"no_profile\" for the same reason as nemotron: a bare foundation-model id, granted by exact ARN in iac/lib/ecs-stack.ts rather than by inference profile."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "jp.anthropic.claude-opus-4-7",
+      "bedrock_region": "ap-northeast-1",
+      "inference_regions": [
+        "ap-northeast-1",
+        "ap-northeast-3"
+      ],
+      "aliases": [
+        "claude-opus-4-7"
+      ],
+      "wire_protocol": "messages",
+      "profile_scope": "jp",
+      "model_family": "claude-opus-4-7",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "jp",
+      "pricing_key": "opus",
+      "notes": "The Japan variant of us.anthropic.claude-opus-4-7: same aliases, so a deployment calling Bedrock from ap-northeast-1 serves these names inside Japan and a US deployment never sees this entry (mvp.inference_boundary). Destinations Tokyo and Osaka from GetInferenceProfile in ap-northeast-1, and the Tokyo Regional CRIS price $5.50/$27.50 per MTok equals the shared pricing_key 'opus' (both measured 2026-11-14)."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "jp.anthropic.claude-sonnet-4-6",
+      "bedrock_region": "ap-northeast-1",
+      "inference_regions": [
+        "ap-northeast-1",
+        "ap-northeast-3"
+      ],
+      "aliases": [
+        "claude-sonnet-4-6"
+      ],
+      "wire_protocol": "messages",
+      "profile_scope": "jp",
+      "model_family": "claude-sonnet-4-6",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "jp",
+      "pricing_key": "sonnet",
+      "notes": "The Japan variant of us.anthropic.claude-sonnet-4-6: same aliases, so a deployment calling Bedrock from ap-northeast-1 serves these names inside Japan and a US deployment never sees this entry (mvp.inference_boundary). Destinations Tokyo and Osaka from GetInferenceProfile in ap-northeast-1, and the Tokyo Regional CRIS price $3.30/$16.50 per MTok equals the shared pricing_key 'sonnet' (both measured 2026-11-14)."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "jp.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "bedrock_region": "ap-northeast-1",
+      "inference_regions": [
+        "ap-northeast-1",
+        "ap-northeast-3"
+      ],
+      "aliases": [
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929"
+      ],
+      "wire_protocol": "messages",
+      "profile_scope": "jp",
+      "model_family": "claude-sonnet-4-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "jp",
+      "pricing_key": "sonnet",
+      "notes": "The Japan variant of us.anthropic.claude-sonnet-4-5-20250929-v1:0: same aliases, so a deployment calling Bedrock from ap-northeast-1 serves these names inside Japan and a US deployment never sees this entry (mvp.inference_boundary). Destinations Tokyo and Osaka from GetInferenceProfile in ap-northeast-1, and the Tokyo Regional CRIS price $3.30/$16.50 per MTok equals the shared pricing_key 'sonnet' (both measured 2026-11-14)."
+    },
+    {
+      "provider": "anthropic",
+      "bedrock_model_id": "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "bedrock_region": "ap-northeast-1",
+      "inference_regions": [
+        "ap-northeast-1",
+        "ap-northeast-3"
+      ],
+      "aliases": [
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "wire_protocol": "messages",
+      "profile_scope": "jp",
+      "model_family": "claude-haiku-4-5",
+      "access": "general",
+      "jurisdiction_bounded": true,
+      "jurisdiction": "jp",
+      "pricing_key": "haiku",
+      "notes": "The Japan variant of us.anthropic.claude-haiku-4-5-20251001-v1:0: same aliases, so a deployment calling Bedrock from ap-northeast-1 serves these names inside Japan and a US deployment never sees this entry (mvp.inference_boundary). Destinations Tokyo and Osaka from GetInferenceProfile in ap-northeast-1, and the Tokyo Regional CRIS price $1.10/$5.50 per MTok equals the shared pricing_key 'haiku' (both measured 2026-11-14)."
     }
   ]
 }

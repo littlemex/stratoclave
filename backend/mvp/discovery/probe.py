@@ -600,6 +600,17 @@ def probe(
             f"the candidate does not describe the model this record names "
             f"({'; '.join(disagreeing)}); derive the candidate again from the current record",
         )
+    # A model the inference boundary leaves out is never called, not even once to
+    # verify it: the probe's prompt would be served outside the boundary.
+    from ..inference_boundary import discovered_exclusion_reason
+
+    outside = discovered_exclusion_reason(
+        bedrock_region=candidate.bedrock_region, wire_protocol=candidate.wire_protocol,
+        profile_scope=record.profile_scope, destination_regions=record.destination_regions)
+    if outside is not None:
+        raise ProbeAttemptRefused(
+            "outside_inference_boundary",
+            f"{candidate.bedrock_model_id} is outside the inference boundary: {outside}")
     pricing_key = candidate.pricing_key
     wire_protocol = candidate.wire_protocol
 

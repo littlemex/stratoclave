@@ -111,7 +111,10 @@ class ProbeAttemptRefused(ValueError):
       rather than letting it proceed unbilled.
     """
 
-    REASONS = frozenset({"probe_refused", "probe_unmetered"})
+    # `outside_inference_boundary`: the model can be served outside the
+    # deployment's inference boundary (`mvp.inference_boundary`), so not even the
+    # probe's prompt may be sent. The same code promotion and activation use.
+    REASONS = frozenset({"probe_refused", "probe_unmetered", "outside_inference_boundary"})
 
     def __init__(self, reason: str, detail: str) -> None:
         if reason not in self.REASONS:

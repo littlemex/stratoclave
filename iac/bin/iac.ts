@@ -83,12 +83,28 @@ const defaultBedrockModel = regionCfg.defaultBedrockModel;
 const failoverRegionsEnv = regionCfg.failoverRegionsEnv;
 const codexEnabled = regionCfg.codexEnabled;
 const residencyWarnings = regionCfg.residencyWarnings;
+// Hard allowlist of regions Bedrock inference may run in (STRATOCLAVE_INFERENCE_REGIONS),
+// or undefined when unset (no boundary). Drives both the ECS task role's IAM
+// (lib/ecs-stack.ts, EcsStackProps.inferenceRegions) and the container env
+// forwarded below, so AWS itself — not just this synth — refuses anything
+// outside it. See docs/DEPLOYMENT.md, "Keeping inference inside a set of regions".
+const inferenceRegions = regionCfg.inferenceRegions;
 
 // Deprecated bare env-var names (e.g. CODEX_ENABLED -> STRATOCLAVE_CODEX_ENABLED)
 // used as a fallback this synth. Surfaced immediately as CDK Annotations on the
 // app so they show up in `cdk synth`/`cdk diff` regardless of which stacks end
 // up being created.
 for (const w of regionCfg.deprecationWarnings) {
+  cdk.Annotations.of(app).addWarning(w);
+}
+// Inference-region boundary: an informational annotation naming the effective
+// boundary is ALWAYS added (not gated on a boundary being set), so a redeploy
+// from a shell that forgot to export STRATOCLAVE_INFERENCE_REGIONS shows up as
+// a visible change rather than silently widening back to "none". Warnings
+// (failover-ignored / deploy-region-outside-boundary) are only ever non-empty
+// when a boundary is actually set.
+cdk.Annotations.of(app).addInfo(regionCfg.inferenceBoundaryInfo);
+for (const w of regionCfg.inferenceBoundaryWarnings) {
   cdk.Annotations.of(app).addWarning(w);
 }
 if (process.env.STRATOCLAVE_VLLM_ENDPOINTS === undefined && process.env.VLLM_ENDPOINTS !== undefined) {
@@ -342,6 +358,13 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   targetGroup: albStack.targetGroup,
   userPoolArn: cognitoStack.userPool.userPoolArn,
   dynamoDbTableArns: dynamoDBStack.allTableArns,
+  // Hard allowlist of regions Bedrock inference may run in
+  // (STRATOCLAVE_INFERENCE_REGIONS). Undefined => no boundary, today's IAM
+  // (plus the always-added jp.anthropic.* grant). Set => the task role's
+  // Bedrock IAM is generated from exactly this list (see "Keeping inference
+  // inside a set of regions" IAM-generation block in lib/ecs-stack.ts), the
+  // SAME list forwarded into the container env above.
+  inferenceRegions,
   // Per-tenant VSR config bucket (opaque blobs, versioned). Provisioned only
   // when the external VSR feature is switched on: without it the admin surface
   // 404s and no bucket/grant/env is created (feature ships dark). The bucket
@@ -580,6 +603,17 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // region residency.
     ...(failoverRegionsEnv !== undefined
       ? { STRATOCLAVE_FAILOVER_REGIONS: failoverRegionsEnv }
+      : {}),
+
+    // Inference-region boundary (STRATOCLAVE_INFERENCE_REGIONS). Passed through
+    // ONLY when the operator set it, normalised to the SAME comma-joined,
+    // trimmed, deduplicated list `resolveRegionConfig` validated and that
+    // `lib/ecs-stack.ts` used to generate the task role's Bedrock IAM — so the
+    // container's own model-listing boundary is provably the same set AWS IAM
+    // already enforces, not a second, independently-typed copy of it. Unset
+    // preserves today's behaviour (no boundary).
+    ...(inferenceRegions !== undefined
+      ? { STRATOCLAVE_INFERENCE_REGIONS: inferenceRegions.join(',') }
       : {}),
 
     // Fault injection for live failover verification (mvp/routing/fault.py).
@@ -840,6 +874,11 @@ class BackendConfigStack extends Stack {
       value: defaultBedrockModel,
       description: 'Bedrock fallback model inference profile ID',
     });
+    // No SSM parameter for the inference-region boundary: nothing reads one.
+    // The effective boundary is already visible via the `cdk synth`/`cdk diff`
+    // info annotation (regionCfg.inferenceBoundaryInfo, added near the top of
+    // this file) and the container env (STRATOCLAVE_INFERENCE_REGIONS, set
+    // above) -- an SSM parameter here would be a third copy with no reader.
 
     cdk.Tags.of(this).add('Project', 'Stratoclave');
     cdk.Tags.of(this).add('Prefix', prefix);

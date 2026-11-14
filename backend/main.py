@@ -138,6 +138,19 @@ async def lifespan(app: FastAPI):
 
     validate_default_org_id()
 
+    # The inference boundary (STRATOCLAVE_INFERENCE_REGIONS): refuse a deployment
+    # whose region, default model or model names contradict it, before traffic.
+    # A no-op without a boundary.
+    from mvp import inference_boundary as _boundary
+    from mvp.models import DEFAULT_MODEL, registry_entries, registry_exclusions
+
+    _boundary.check_startup(entries=registry_entries(), exclusions=registry_exclusions(),
+                            default_model=DEFAULT_MODEL)
+    _effective_boundary = _boundary.configured()
+    logger.info("inference_boundary_effective",
+                boundary=sorted(_effective_boundary) if _effective_boundary else "none",
+                served=len(registry_entries()), excluded=len(registry_exclusions()))
+
     # OSS zero-touch seed: idempotently populate Permissions / Default Tenant.
     # A failure here does not prevent the backend from starting (service continuity first;
     # exceptions are suppressed inside seed_all).
