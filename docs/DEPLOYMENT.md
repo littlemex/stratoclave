@@ -76,7 +76,7 @@ A successful `deploy-all.sh` run provisions **nine CloudFormation stacks** in de
 | # | Stack                 | Resources                                                             | Purpose |
 | - | --------------------- | --------------------------------------------------------------------- | ------- |
 | 1 | `<Prefix>NetworkStack`  | VPC, 2 public subnets, SGs, VPC Flow Logs (CloudWatch, 30 d)          | Public-subnet-only network (no NAT). ALB SG inbound is restricted to the AWS-managed **CloudFront origin-facing prefix list** — direct ALB DNS probes fail at L4. |
-| 2 | `<Prefix>DynamodbStack` | 23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff) | All persistent state, `PAY_PER_REQUEST`. Audit-critical tables (`usage-logs`, `api-keys`) survive `cdk destroy`. |
+| 2 | `<Prefix>DynamodbStack` | 23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), `credit-ledger` and `quota-events` (RETAIN), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff) | All persistent state, `PAY_PER_REQUEST`. Audit tables (`api-keys`, `usage-logs`, `credit-ledger`, `quota-events`) survive `cdk destroy`; see [Teardown](#teardown). |
 | 3 | `<Prefix>EcrStack`      | Private ECR repository (RETAIN)                                       | Holds the backend container image. Rollback surface of last resort. |
 | 4 | `<Prefix>AlbStack`      | Internet-facing ALB, target group, HTTP listener on :80, `deletionProtection=true` in production | Public entry point for the backend; listeners use `open:false` so no 0.0.0.0/0 ingress is punched on the ALB SG. |
 | 5 | `<Prefix>WafStack`      | **WAFv2 WebACL** (CLOUDFRONT scope, `us-east-1`): CommonRuleSet, KnownBadInputs, IpReputation, rate-based (5-minute window, per-IP), optional IPSet allowlist | Opt-out with `ENABLE_WAF=false`. ARN is cross-stack referenced by FrontendStack. |
@@ -1036,7 +1036,7 @@ cd iac
 npx cdk destroy --all --profile "$AWS_PROFILE"
 ```
 
-> **Destructive.** `cdk destroy --all` removes every Stratoclave CloudFormation stack in the target account. All Stratoclave DynamoDB tables are deleted, so every user, tenant, API key, and usage log is lost. Only run this if you truly want to wipe the deployment.
+> **Destructive.** `cdk destroy --all` removes every Stratoclave CloudFormation stack in the target account. The working tables are deleted, so every user and tenant is lost; the audit tables listed below are kept. Only run this if you truly want to wipe the deployment.
 
 **`STRATOCLAVE_ENTRY=private` only: reject every connection before destroying.** A VPC endpoint service with an active or a still-pending connection cannot be deleted; `cdk destroy` of the `<Prefix>-private-link` stack fails until every connection is gone. Reject them first, in the provider account:
 
@@ -1047,12 +1047,30 @@ aws ec2 reject-vpc-endpoint-connections --region us-east-1 --service-id <your en
 
 Then `cdk destroy --all` as above.
 
-Things that **remain** after `cdk destroy` and need manual cleanup if you want a truly empty account:
+Things that **remain** after `cdk destroy`. They are kept on purpose (`RemovalPolicy.RETAIN`), and each has a fixed name derived from `STRATOCLAVE_PREFIX`, so **a redeploy with the same prefix fails with "already exists"** until they are deleted or the prefix is changed:
 
-- **CloudWatch Logs** groups (retention is set but the groups are not deleted with the stacks).
-- **S3 buckets** marked `RemovalPolicy.RETAIN`. The frontend bucket is `DESTROY`; review the stack to confirm if you have customised it.
-- **The Cognito domain prefix** is unusable for **24 hours** after deletion. Redeploying immediately with the same `STRATOCLAVE_PREFIX` will fail; either wait a day or choose a new prefix.
-- **ECR images** inside the repository. The stack deletes the repository by default; if you disabled that, purge images first.
+| Resource | Name | Why it is kept |
+|---|---|---|
+| ECR repository | `<prefix>-backend` | Released images are the rollback of last resort. |
+| DynamoDB audit tables | `<prefix>-api-keys`, `<prefix>-usage-logs`, `<prefix>-credit-ledger`, `<prefix>-quota-events` | Audit record; kept in every environment. |
+| Secrets Manager secret | `<prefix>/bootstrap-admin-temp-password` | Pre-created so the task role needs only `PutSecretValue`; it holds the first admin's temporary password. |
+| CloudWatch Logs groups | `/ecs/<prefix>-backend`, `/aws/ecs/containerinsights/<prefix>-cluster/performance`, and the custom-resource Lambda groups `/aws/lambda/<prefix>-*` | Incident evidence. |
+| S3 bucket (only if the semantic router config bucket is enabled) | `<prefix>-vsr-config-<account>` | Versioned configuration. |
+
+To start over with the same prefix, export what you need from the audit tables first, then delete them:
+
+```bash
+export PREFIX=stratoclave
+aws ecr delete-repository --repository-name "$PREFIX-backend" --force
+for t in api-keys usage-logs credit-ledger quota-events; do aws dynamodb delete-table --table-name "$PREFIX-$t"; done
+aws secretsmanager delete-secret --secret-id "$PREFIX/bootstrap-admin-temp-password" --force-delete-without-recovery
+for g in "/ecs/$PREFIX-backend" "/aws/ecs/containerinsights/$PREFIX-cluster/performance" $(aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/$PREFIX-" --query 'logGroups[].logGroupName' --output text); do aws logs delete-log-group --log-group-name "$g"; done
+```
+
+Also note:
+
+- **The Cognito domain prefix** may be unusable for a while after deletion. If a redeploy with the same `STRATOCLAVE_PREFIX` fails on the user pool domain, wait or choose a new prefix.
+- **ECR images** are deleted together with the repository by the `--force` above.
 
 To also uninstall the client-side CLI, see [GETTING_STARTED.md -> Uninstall](GETTING_STARTED.md#uninstall).
 
