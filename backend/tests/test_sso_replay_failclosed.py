@@ -21,7 +21,7 @@ import pytest
 from fastapi import HTTPException
 
 
-def _headers(auth: str = "AWS4-HMAC-SHA256 Credential=AKIAxxxx/..."):
+def _headers(auth: str = "AWS4-HMAC-SHA256 Credential=AKIAxxxx/x, SignedHeaders=host;x-amz-date, Signature=abc"):
     return {
         "Authorization": auth,
         "X-Amz-Date": "20260430T000000Z",

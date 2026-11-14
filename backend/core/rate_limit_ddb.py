@@ -334,15 +334,26 @@ class DynamoRateLimiter:
                     )
                 return request
 
+            def _note_principal(request, kwargs):
+                # FastAPI has already resolved the route's dependencies, so an
+                # authenticated route's verified user is among the arguments.
+                # The bucket key reads it from request.state (core.rate_limit).
+                user = next((v for v in kwargs.values()
+                             if type(v).__name__ == "AuthenticatedUser"), None)
+                if user is not None and getattr(user, "user_id", None):
+                    request.state.rate_principal = user.user_id
+
             @functools.wraps(func)
             def sync_wrapper(*args, **kwargs):
                 request = _require_request(args, kwargs)
+                _note_principal(request, kwargs)
                 _check(bucket_scope, self._client_key(request), limit, window)
                 return func(*args, **kwargs)
 
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs):
                 request = _require_request(args, kwargs)
+                _note_principal(request, kwargs)
                 # _check does a blocking boto3 call; never run it on the event
                 # loop or a slow table freezes every co-located SSE stream and
                 # trips ALB health checks.

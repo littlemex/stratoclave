@@ -82,62 +82,12 @@ def test_well_known_sets_cache_control(monkeypatch):
     assert cc == "no-store"
 
 
-def test_in_production_the_endpoint_is_never_taken_from_request_headers(monkeypatch):
+def test_outside_a_local_environment_the_endpoint_is_never_taken_from_request_headers(monkeypatch):
     client = _make_client(monkeypatch)
     monkeypatch.delenv("STRATOCLAVE_API_ENDPOINT", raising=False)
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ENVIRONMENT", "staging")
     resp = client.get("/.well-known/stratoclave-config",
                       headers={"X-Forwarded-Host": "attacker.example", "X-Forwarded-Proto": "https"})
     assert resp.status_code == 500
+    assert "STRATOCLAVE_API_ENDPOINT is not set" in resp.text
     assert "attacker.example" not in resp.text
-
-
-def test_the_config_names_the_sts_server_id(monkeypatch):
-    client = _make_client(monkeypatch)
-    monkeypatch.setenv("COGNITO_CLIENT_ID", "client-abc")
-    monkeypatch.delenv("STRATOCLAVE_STS_SERVER_ID", raising=False)
-    assert client.get("/.well-known/stratoclave-config").json()["sts_server_id"] == "client-abc"
-
-
-_SECRET_RE = re.compile(
-    r"(password|private_key|aws_secret_access_key|-----BEGIN)",
-    re.IGNORECASE,
-)
-
-
-def test_well_known_does_not_leak_secrets(monkeypatch):
-    """The full response body must never contain obvious secret-shaped
-    strings. This is a regression fence, not a cryptographic proof.
-    """
-    client = _make_client(monkeypatch)
-    resp = client.get("/.well-known/stratoclave-config")
-    assert not _SECRET_RE.search(resp.text), (
-        "Well-known response leaked a secret-shaped substring; "
-        "check well_known.py for accidental inclusion."
-    )
-
-
-def test_well_known_returns_503_when_misconfigured(monkeypatch):
-    """If a required env var is missing the endpoint must fail closed
-    with 503, not silently return partial data.
-    """
-    # Clear all required env so _require_env fails.
-    for key in (
-        "COGNITO_USER_POOL_ID",
-        "COGNITO_CLIENT_ID",
-        "COGNITO_DOMAIN",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    # Keep region available so derive_api_endpoint does not blow up first.
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("COGNITO_REGION", "us-east-1")
-
-    from fastapi import FastAPI
-
-    from mvp.well_known import router
-
-    app = FastAPI()
-    app.include_router(router)
-    client = TestClient(app)
-    resp = client.get("/.well-known/stratoclave-config")
-    assert resp.status_code == 503

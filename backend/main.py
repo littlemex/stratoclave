@@ -135,8 +135,10 @@ async def lifespan(app: FastAPI):
     # fit the correlation marker (C13.6): reconciliation needs `sc_tenant`, so
     # this stops startup rather than logging, unlike the seed below.
     from mvp.deps import validate_default_org_id
+    from mvp.sso_sts import validate_audience_config
 
     validate_default_org_id()
+    validate_audience_config()
 
     # The inference boundary (STRATOCLAVE_INFERENCE_REGIONS): refuse a deployment
     # whose region, default model or model names contradict it, before traffic.

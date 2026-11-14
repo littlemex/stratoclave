@@ -54,18 +54,21 @@ struct SsoExchangeResponse {
     new_user: bool,
 }
 
-/// The gateway's `sts_server_id` from `/.well-known/stratoclave-config`, or None when
-/// the gateway does not publish one (older deployments) or cannot be reached.
-async fn fetch_sts_server_id(api_endpoint: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Doc {
-        #[serde(default)]
-        sts_server_id: Option<String>,
-    }
-    let url = format!("{}/.well-known/stratoclave-config", api_endpoint.trim_end_matches('/'));
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().ok()?;
-    let doc: Doc = client.get(&url).send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
-    doc.sts_server_id.filter(|s| !s.is_empty())
+/// The host of the gateway URL this CLI was set up against: the audience the
+/// signed GetCallerIdentity is bound to. Known to the CLI on its own (from
+/// `stratoclave setup <url>`), never taken from the gateway, so a look-alike
+/// endpoint cannot have a request signed for the real one.
+fn audience_host(api_endpoint: &str) -> Result<String> {
+    let url = reqwest::Url::parse(api_endpoint)
+        .with_context(|| format!("api_endpoint is not a URL: {api_endpoint}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("api_endpoint has no host: {api_endpoint}"))?
+        .to_ascii_lowercase();
+    Ok(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
 }
 
 pub async fn login(opts: SsoLoginOptions) -> Result<()> {
@@ -122,14 +125,15 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
         "application/x-www-form-urlencoded".to_string(),
     );
     headers_map.insert("Host".to_string(), sts_host.clone());
-    // Bind the signed request to this gateway: the header is signed, so STS refuses
-    // any change to it, and the gateway refuses a request naming another server.
-    // Without it, a GetCallerIdentity signed here could be replayed against another
-    // service that verifies identity the same way, and the reverse. Absent when the
-    // gateway predates the field.
-    if let Some(server_id) = fetch_sts_server_id(&config.api_endpoint).await {
-        headers_map.insert("X-Stratoclave-Server-Id".to_string(), server_id);
-    }
+    // Bind the signed request to this gateway's host: the header is signed, so STS
+    // refuses any change to it, and the gateway refuses a request naming a host
+    // that is not its own. Without it, a GetCallerIdentity signed here could be
+    // replayed against another service that verifies identity the same way, and
+    // the reverse.
+    headers_map.insert(
+        "X-Stratoclave-Audience".to_string(),
+        audience_host(&config.api_endpoint)?,
+    );
 
     let signable = SignableRequest::new(
         "POST",
@@ -220,4 +224,17 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
     eprintln!("     user_id={}", login.user_id);
     eprintln!("     token saved to ~/.stratoclave/mvp_tokens.json");
     Ok(())
+}
+
+#[cfg(test)]
+mod audience_tests {
+    use super::audience_host;
+
+    #[test]
+    fn the_audience_is_the_lowercased_host_of_the_configured_endpoint() {
+        assert_eq!(audience_host("https://D1.CloudFront.net").unwrap(), "d1.cloudfront.net");
+        assert_eq!(audience_host("https://gw.internal.example.com/").unwrap(), "gw.internal.example.com");
+        assert_eq!(audience_host("http://127.0.0.1:8080").unwrap(), "127.0.0.1:8080");
+        assert!(audience_host("not a url").is_err());
+    }
 }
