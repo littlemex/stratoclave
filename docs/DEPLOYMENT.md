@@ -1000,7 +1000,7 @@ fields @timestamp, arn, audience_bound
 | stats count() by arn
 ```
 
-The second `filter` clause matches the literal JSON substring rather than comparing a discovered `audience_bound` field to a boolean literal: CloudWatch Logs Insights' own auto-discovery of JSON fields, and whether `= false` compares correctly against whatever type it infers, is not something this document has run against a real log group to confirm. A string match on `"audience_bound": false` (optional space after the colon, to tolerate either JSON serializer convention) is read directly off the line `core.logging`'s `JSONRenderer` actually produces, so it cannot silently match nothing the way an unproven field comparison could — which would make "no `false` events" trivially, and wrongly, true.
+The second `filter` clause matches the literal JSON text. Measured on a real log group: this query and `filter audience_bound = 0` both count the unbound sign-in, while `filter audience_bound = false` matches nothing, so do not use the boolean literal: it would make "no `false` events" true when it is not.
 
 ```text
 fields @timestamp, presented_host, reason
@@ -1012,7 +1012,7 @@ fields @timestamp, presented_host, reason
 
 **Local development:** a gateway with `ENVIRONMENT` set to `development`, `local` or `test` may run with no `STRATOCLAVE_API_ENDPOINT` at all (`core.deployment.is_local_environment`), but `mvp.sso_sts.expected_audiences()` then has no host to compare against, so `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` is refused at startup (there would be nothing for a bound request to match) and `audience_bound` is always reported false for every sign-in on that process. Set `STRATOCLAVE_API_ENDPOINT=http://127.0.0.1:<port>` (the port the backend listens on) to exercise the bound path locally.
 
-Two gaps remain, both covered in "Rate limits on sign-in routes" immediately below rather than here: the coarse per-address flood guard every sign-in route shares, and the fact that a request which fails authentication on an AUTHENTICATED route is not rate-limited at all.
+Rate limits on the sign-in routes, including what they do not cover on the private entry and for requests that fail authentication on an authenticated route, are in "Rate limits on sign-in routes" immediately below.
 
 ## Rate limits on sign-in routes
 
