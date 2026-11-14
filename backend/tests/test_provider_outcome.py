@@ -352,7 +352,7 @@ class TestMergeOpenAIMetadata:
 class TestStampOpenAIMetadataMarker:
     def test_adds_placeholder_attempt_id_and_tenant(self):
         payload = {"input": "hi"}
-        added = po.stamp_openai_metadata_marker(payload, "tenant-1")
+        added = po.stamp_openai_metadata_marker(payload, "tenant-1", user_id=None)
         assert added is True
         assert payload["metadata"] == {
             "sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER,
@@ -376,19 +376,19 @@ class TestStampOpenAIMetadataMarker:
 
     def test_preserves_callers_own_metadata(self):
         payload = {"input": "hi", "metadata": {"order_id": "o-1"}}
-        po.stamp_openai_metadata_marker(payload, "tenant-1")
+        po.stamp_openai_metadata_marker(payload, "tenant-1", user_id=None)
         assert payload["metadata"]["order_id"] == "o-1"
         assert payload["metadata"]["sc_tenant"] == "tenant-1"
 
     def test_no_tenant_still_stamps_the_attempt_placeholder(self):
         payload = {"input": "hi"}
-        po.stamp_openai_metadata_marker(payload, None)
+        po.stamp_openai_metadata_marker(payload, None, user_id=None)
         assert payload["metadata"] == {"sc_attempt_id": po.ATTEMPT_ID_PLACEHOLDER}
 
     def test_returns_false_and_leaves_caller_metadata_untouched_at_the_ceiling(self):
         caller_md = {f"k{i}": "v" for i in range(po.OPENAI_METADATA_MAX_KEYS)}
         payload = {"input": "hi", "metadata": dict(caller_md)}
-        added = po.stamp_openai_metadata_marker(payload, "tenant-1")
+        added = po.stamp_openai_metadata_marker(payload, "tenant-1", user_id=None)
         assert added is False
         assert payload["metadata"] == caller_md
 

@@ -338,8 +338,8 @@ def _build_openai_responses_payload(
     entry: "ModelEntry",
     *,
     stream: bool,
-    tenant_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    tenant_id: Optional[str],
+    user_id: Optional[str],
 ) -> dict:
     """The exact JSON `payload` `/openai/v1/responses` sends to the OpenAI-compatible endpoint,
     extracted so it can be built ONCE, BEFORE the reserve call
@@ -365,7 +365,7 @@ def _build_openai_responses_payload(
     payload = body.model_dump(exclude_none=True)
     payload["model"] = entry.bedrock_model_id
     payload["stream"] = stream
-    _provider_outcome.stamp_openai_metadata_marker(payload, tenant_id, user_id)
+    _provider_outcome.stamp_openai_metadata_marker(payload, tenant_id, user_id=user_id)
     return payload
 
 
@@ -640,8 +640,11 @@ async def create_response(
     # the cascade's actual selection further down (content bytes never depend
     # on which model was selected, only this one field does — same reasoning
     # as `mvp.anthropic`/`mvp.chat_completions`).
-    openai_payload = _build_openai_responses_payload(body, entry, stream=body.stream, tenant_id=getattr(user, "org_id", None),
-        user_id=getattr(user, "user_id", None))
+    openai_payload = _build_openai_responses_payload(
+        body, entry, stream=body.stream,
+        tenant_id=getattr(user, "org_id", None),
+        user_id=getattr(user, "user_id", None),
+    )
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey the canonical payload, but ONLY when enforcement might use it —
@@ -960,8 +963,11 @@ async def _stream_response(
         # so this branch is never taken there. Built BEFORE `_open_hold`
         # below so the placeholder it carries can be swapped for the real
         # hold id in the same place the non-streaming path does it.
-        payload = _build_openai_responses_payload(body, entry, stream=True, tenant_id=getattr(user, "org_id", None),
-        user_id=getattr(user, "user_id", None))
+        payload = _build_openai_responses_payload(
+            body, entry, stream=True,
+            tenant_id=getattr(user, "org_id", None),
+            user_id=getattr(user, "user_id", None),
+        )
 
     hold = _open_hold(
         user=user, tenants_repo=tenants_repo, reservation=reservation,

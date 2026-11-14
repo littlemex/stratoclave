@@ -155,8 +155,10 @@ Ollama's own usage chunk carried, not the reservation estimate.
 
 ## Attributing calls on your endpoint
 
-Every inference call the gateway makes to your endpoint carries three HTTP request headers:
-`X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`. They are
+Every inference call the gateway makes to your endpoint carries up to three HTTP request
+headers: `X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`, each
+absent in the cases listed in
+[request-bodies.md](design/request-bodies.md#attribution-what-a-logged-record-says-about-who-sent-it). They are
 the same values Bedrock receives as `requestMetadata` and records in its invocation
 log, and they are not in the request body, so your model never sees them. To get a
 per-tenant and per-user record of calls, have whatever sits in front of the model

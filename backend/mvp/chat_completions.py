@@ -611,7 +611,7 @@ def chat_completions(
         # above: one payload, surveyed and then sent, not two independently
         # built copies.
         openai_payload, injected_usage = _build_openai_chat_payload(
-            body, entry, getattr(user, "org_id", None), getattr(user, "user_id", None))
+            body, entry, getattr(user, "org_id", None), user_id=getattr(user, "user_id", None))
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey whichever canonical payload this request will actually send —
@@ -969,8 +969,9 @@ def _openai_status(upstream: int) -> int:
 def _build_openai_chat_payload(
     body: ChatCompletionsRequest,
     entry: "ModelEntry",
-    tenant_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    tenant_id: Optional[str],
+    *,
+    user_id: Optional[str],
 ) -> tuple[dict, bool]:
     """The exact JSON `payload` `/v1/chat/completions` sends to the OpenAI-compatible endpoint
     (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
@@ -1011,9 +1012,7 @@ def _build_openai_chat_payload(
             opts["include_usage"] = True
             injected_usage = True
         payload["stream_options"] = opts
-    _provider_outcome.stamp_openai_metadata_marker(
-        payload, tenant_id, user_id
-    )
+    _provider_outcome.stamp_openai_metadata_marker(payload, tenant_id, user_id=user_id)
     return payload, injected_usage
 
 
@@ -1061,7 +1060,7 @@ def _openai_chat_completion(
         # `_build_openai_chat_payload`. The real route path always supplies
         # `payload` pre-built, so this branch is never taken there.
         payload, injected_usage = _build_openai_chat_payload(
-            body, entry, getattr(user, "org_id", None), getattr(user, "user_id", None))
+            body, entry, getattr(user, "org_id", None), user_id=getattr(user, "user_id", None))
 
     # The hold's latch is what keeps a 4xx on a streamed request from being
     # refunded by the error branch and then settled again by the generator's

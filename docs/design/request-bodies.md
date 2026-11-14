@@ -83,8 +83,8 @@ each transport (C13.6). Bedrock echoes it into the invocation log.
 | Marker key | What it is | When it is absent |
 |---|---|---|
 | `sc_tenant` | the tenant id | when the value does not pass the value rule below; in the case below where the whole marker is dropped |
-| `sc_user` | the gateway's own user id: the id the console and the usage records use, not an email, a Cognito username or an AWS identity | when the principal has no user id; when the value does not pass the value rule; in the same case |
-| `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold |
+| `sc_user` | the principal's `user_id`, the id the console and the usage records use | when the principal has no user id; when the value does not pass the value rule; first, when the OpenAI-compatible key limit below leaves no room for it |
+| `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold; in the case below where the whole marker is dropped |
 
 **The value rule.** Bedrock refuses the whole call when a `requestMetadata` value has
 a character outside letters, digits, whitespace and `:_@$#=/+,-.`. So each value is
@@ -99,13 +99,14 @@ altered. The call goes out with the other parts. An admin-chosen tenant id such 
 | The OpenAI-compatible surface on `bedrock-runtime` | the OpenAI-standard `metadata` field (#247) |
 | A self-hosted endpoint | HTTP request headers, see [Self-hosted endpoints](#self-hosted-endpoints) |
 
-On the OpenAI-compatible surface, Bedrock accepts 16 `metadata` keys. A caller whose
-own `metadata` and the marker together exceed 16 keys (14 or more of the caller's with
-a full marker) gets the request sent without the gateway's marker entirely rather than
-refused; that record carries none of the keys.
+On the OpenAI-compatible surface, Bedrock accepts 16 `metadata` keys. When a caller's
+own keys leave no room for the full marker, `sc_user` is left out first, and the attempt
+and tenant pair is still sent (14 of the caller's keys). A caller with 15 or more keys
+gets the request sent without the gateway's marker entirely rather than refused; that
+record carries none of the keys.
 
-So a logged record is attributable to a tenant and a user by key, and `sc_user`
-joins it to the usage records and the console's user list directly. The marker is
+So a logged record is attributable to a tenant and a user by key when the key is
+present, and `sc_user` joins it to the usage records and the console's user list directly. The marker is
 values the gateway already holds; it carries no email and nothing from the request's
 content.
 

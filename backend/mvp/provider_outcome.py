@@ -321,23 +321,21 @@ def unobserved_holds_enforced() -> bool:
     return raw.strip().lower() in _TRUTHY
 
 
-#: The correlation marker's keys, and what each names (C13.6). The Converse
-#: `requestMetadata`, the OpenAI-compatible `metadata` merge, the reserved-name
-#: set and the self-hosted headers all use these keys; `test_provider_outcome.py`
-#: holds `MARKER_KEYS`, `MARKER_HEADERS` and `RESERVED_METADATA_KEYS` to one set.
-MARKER_KEYS: dict[str, str] = {
-    "sc_tenant": "the tenant id",
-    "sc_attempt_id": "the id of this attempt's money hold",
-    "sc_user": "the gateway's own user id (not an email or any other provider identity)",
-}
-
-#: The marker as HTTP request headers, for a self-hosted endpoint (C13.6). The
-#: gateway sends them on every inference call; recording them is the endpoint's job.
+#: The correlation marker (C13.6): each key, and the HTTP request header that
+#: carries it to a self-hosted endpoint. This is the one table of the marker's
+#: keys; `MARKER_KEYS`, `RESERVED_METADATA_KEYS` and `attempt_request_metadata`
+#: are derived from it. What each key names:
+#:   sc_tenant      the tenant id
+#:   sc_attempt_id  the id of this attempt's money hold
+#:   sc_user        whatever the gateway uses as the principal's `user_id`
+#: The gateway sends the headers on every inference call; recording them is the
+#: endpoint's job.
 MARKER_HEADERS: dict[str, str] = {
     "sc_tenant": "X-Stratoclave-Tenant",
     "sc_attempt_id": "X-Stratoclave-Attempt-Id",
     "sc_user": "X-Stratoclave-User",
 }
+MARKER_KEYS: tuple[str, ...] = tuple(MARKER_HEADERS)
 
 _MARKER_VALUE_MAX = 256
 
@@ -360,6 +358,11 @@ def marker_value_ok(value: object) -> bool:
     return isinstance(value, str) and _MARKER_VALUE_RE.fullmatch(value) is not None
 
 
+# Keys already reported as dropped by `attempt_request_metadata`, so a tenant
+# whose id never fits logs once per process rather than once per call.
+_reported_drops: set[str] = set()
+
+
 def attempt_request_metadata(
     hold_id: Optional[str], tenant_id: Optional[str] = None, user_id: Optional[str] = None,
 ) -> dict[str, str]:
@@ -375,13 +378,26 @@ def attempt_request_metadata(
     rather than an optimisation.
 
     Values are ids the gateway minted or holds: the hold id, the tenant id, and
-    the gateway's own user id. No prompt, no email, nothing derived from request
-    content. A value that is absent, longer than Bedrock's 256-character limit or
-    outside `_MARKER_VALUE_RE` is left out, so the call is never refused because
-    of its marker; the other parts are still sent.
+    the principal's `user_id`. Nothing derived from request content. A value that
+    is absent is left out; a value that is longer than Bedrock's 256-character
+    limit or outside `_MARKER_VALUE_RE` is left out too, and logged once per
+    process by key (never the value), so the call is never refused because of its
+    marker and a lost attribution is still visible. The other parts are sent.
     """
-    parts = {"sc_attempt_id": hold_id, "sc_tenant": tenant_id, "sc_user": user_id}
-    return {key: value for key, value in parts.items() if marker_value_ok(value)}
+    given = {"sc_attempt_id": hold_id, "sc_tenant": tenant_id, "sc_user": user_id}
+    assert given.keys() == MARKER_HEADERS.keys()
+    md: dict[str, str] = {}
+    for key, value in given.items():
+        if value is None or value == "":
+            continue
+        value = str(value)
+        if marker_value_ok(value):
+            md[key] = value
+        elif key not in _reported_drops:
+            _reported_drops.add(key)
+            logger.warning("correlation_marker_value_dropped", key=key,
+                           reason="too_long" if len(value) > _MARKER_VALUE_MAX else "characters")
+    return md
 
 
 def marker_headers(marker: Optional[dict]) -> dict[str, str]:
@@ -458,6 +474,7 @@ OPENAI_METADATA_MAX_VALUE_LEN = 512
 # than 256 characters, itself inside OpenAI's 512-char cap),
 # so only the 16-key ceiling can actually be violated by adding them.
 assert len(ATTEMPT_ID_PLACEHOLDER) <= OPENAI_METADATA_MAX_VALUE_LEN
+assert marker_value_ok(ATTEMPT_ID_PLACEHOLDER)
 
 #: The `sc_*` names this module ever puts in `metadata` are RESERVED — a
 #: caller's own value under one of these names is never forwarded, whether or
@@ -470,9 +487,10 @@ assert len(ATTEMPT_ID_PLACEHOLDER) <= OPENAI_METADATA_MAX_VALUE_LEN
 #: like the gateway's own correlation marker. Found in review (issue #247);
 #: pinned by `TestMergeOpenAIMetadata::test_a_caller_cannot_forge_the_reserved_keys_by_padding_metadata_to_the_ceiling`.
 #:
-#: The same set as `MARKER_KEYS`, so the names a caller may not use and the
-#: names the gateway sends cannot drift apart.
-RESERVED_METADATA_KEYS = frozenset(MARKER_KEYS)
+#: Derived from `MARKER_HEADERS`, the same table `attempt_request_metadata`
+#: is checked against, so the names a caller may not use and the names the
+#: gateway sends cannot drift apart.
+RESERVED_METADATA_KEYS = frozenset(MARKER_HEADERS)
 
 
 def merge_openai_metadata(
@@ -550,7 +568,7 @@ def merge_openai_metadata(
 
 
 def stamp_openai_metadata_marker(
-    payload: dict, tenant_id: Optional[str], user_id: Optional[str] = None,
+    payload: dict, tenant_id: Optional[str], *, user_id: Optional[str],
 ) -> bool:
     """Merge the gateway's correlation keys into `payload["metadata"]`,
     BEFORE the hard-ceiling survey runs over `payload` — see the module-level
@@ -561,6 +579,11 @@ def stamp_openai_metadata_marker(
     `merge_openai_metadata` dropped it for being over OpenAI's key-count
     ceiling) — the caller uses this to decide whether `stamp_attempt_id`
     later has anything to swap.
+
+    When the full marker does not fit under the ceiling, the attempt and tenant
+    pair is tried without `sc_user` before giving up: that pair is what fitted
+    before `sc_user` existed, and it is the part reconciliation needs. The pair
+    itself is still all or nothing (`merge_openai_metadata`).
     """
     # Built from `attempt_request_metadata` — the SAME function Converse
     # calls — rather than re-typing `"sc_attempt_id"`/`"sc_tenant"` here, so
@@ -569,6 +592,9 @@ def stamp_openai_metadata_marker(
     # agreeing on two string literals).
     marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id, user_id)
     merged = merge_openai_metadata(payload.get("metadata"), marker)
+    if merged.get("sc_attempt_id") != ATTEMPT_ID_PLACEHOLDER and "sc_user" in marker:
+        without_user = {k: v for k, v in marker.items() if k != "sc_user"}
+        merged = merge_openai_metadata(payload.get("metadata"), without_user)
     if merged.get("sc_attempt_id") != ATTEMPT_ID_PLACEHOLDER:
         # The key-count ceiling made `merge_openai_metadata` drop the whole
         # marker (the caller's own `sc_attempt_id`, if any, was stripped by

@@ -60,6 +60,22 @@ def test_a_value_bedrock_would_refuse_is_left_out_and_the_rest_still_sent(bad):
     assert po.attempt_request_metadata("h-1", bad, "u-1") == {"sc_attempt_id": "h-1", "sc_user": "u-1"}
 
 
+def test_a_dropped_value_is_logged_once_by_key_and_never_by_value(monkeypatch):
+    seen = []
+    monkeypatch.setattr(po, "_reported_drops", set())
+    monkeypatch.setattr(po.logger, "warning", lambda event, **kw: seen.append((event, kw)))
+    po.attempt_request_metadata("h-1", "team|secret", "u-1")
+    po.attempt_request_metadata("h-2", "team|secret", "u-2")
+    assert seen == [("correlation_marker_value_dropped", {"key": "sc_tenant", "reason": "characters"})]
+
+
+def test_the_ids_the_gateway_mints_always_pass():
+    from mvp._pipeline import _fresh_idempotency_token
+
+    assert po.marker_value_ok(_fresh_idempotency_token())
+    assert po.marker_value_ok(po.ATTEMPT_ID_PLACEHOLDER)
+
+
 @pytest.mark.parametrize("good", ["default-org", "u@x.com/1+2=3,#$:_-.", "team a", "x" * 256,
                                   "3f2b8c1e-0d4a-4e7b-9c1f-2a6b5d8e9f01"])
 def test_ids_inside_the_bedrock_set_are_sent_unchanged(good):
@@ -85,27 +101,31 @@ def test_the_headers_and_the_bedrock_marker_follow_one_value_rule(value):
 
 def test_the_openai_metadata_carries_the_user_too():
     payload: dict = {}
-    assert po.stamp_openai_metadata_marker(payload, "t-1", "u-1") is True
+    assert po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1") is True
     assert payload["metadata"]["sc_user"] == "u-1"
     assert payload["metadata"]["sc_tenant"] == "t-1"
 
 
-def test_the_openai_key_ceiling_now_leaves_room_for_three_keys():
-    """Bedrock accepts 16 `metadata` keys. With three marker keys, a caller using
-    14 or more of its own gets the request sent without the marker, rather than
-    refused (the whole marker, never part of it)."""
-    thirteen = {f"k{i}": "v" for i in range(13)}
-    fourteen = {f"k{i}": "v" for i in range(14)}
-    p13: dict = {"metadata": dict(thirteen)}
-    p14: dict = {"metadata": dict(fourteen)}
-    assert po.stamp_openai_metadata_marker(p13, "t-1", "u-1") is True
-    assert po.stamp_openai_metadata_marker(p14, "t-1", "u-1") is False
-    assert not set(po.MARKER_KEYS) & set(p14["metadata"])
+@pytest.mark.parametrize("caller_keys, sent", [
+    (13, {"sc_attempt_id", "sc_tenant", "sc_user"}),
+    (14, {"sc_attempt_id", "sc_tenant"}),
+    (15, set()),
+])
+def test_under_the_openai_key_ceiling_the_user_key_gives_way_first(caller_keys, sent):
+    """Bedrock accepts 16 `metadata` keys. When the full marker does not fit,
+    `sc_user` is dropped first, so the attempt and tenant pair that fitted before
+    `sc_user` existed still fits; the pair itself is all or nothing, and the
+    request is sent rather than refused."""
+    payload: dict = {"metadata": {f"k{i}": "v" for i in range(caller_keys)}}
+    added = po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1")
+    assert set(payload["metadata"]) & set(po.MARKER_KEYS) == sent
+    assert added is ("sc_attempt_id" in sent)
+    assert len(payload["metadata"]) <= po.OPENAI_METADATA_MAX_KEYS
 
 
 def test_a_caller_cannot_forge_the_user_key():
     payload = {"metadata": {"sc_user": "someone-else", " SC_USER ": "x"}}
-    po.stamp_openai_metadata_marker(payload, "t-1", "u-1")
+    po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1")
     assert payload["metadata"]["sc_user"] == "u-1"
     assert " SC_USER " not in payload["metadata"]
 
@@ -164,29 +184,56 @@ def _callee_name(call: ast.Call) -> str:
     return f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
 
 
+def _functions(tree):
+    return [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _innermost_function(tree, node):
+    """The innermost function whose body contains `node`."""
+    best = None
+    for fn in _functions(tree):
+        if any(n is node for n in ast.walk(fn)):
+            if best is None or any(n is fn for n in ast.walk(best)):
+                best = fn
+    return best
+
+
 def _invoke_stream_functions():
     """Every function passed as `invoke_stream=` to `run_stream` under mvp/,
-    resolved inside the function that makes the call (where `_invoke` is defined)
-    so two same-named helpers in one module cannot stand in for each other."""
+    resolved inside the function that makes the call (where `_invoke` is
+    defined), so a same-named helper elsewhere in the module cannot stand in."""
     for path in sorted((BACKEND / "mvp").rglob("*.py")):
         rel = path.relative_to(BACKEND).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        for scope in [tree, *scopes]:
-            body_nodes = [n for stmt in scope.body for n in ast.walk(stmt)]
-            for call in body_nodes:
-                if not (isinstance(call, ast.Call) and _callee_name(call) == "run_stream"):
+        for call in ast.walk(tree):
+            if not (isinstance(call, ast.Call) and _callee_name(call) == "run_stream"):
+                continue
+            for kw in call.keywords:
+                if kw.arg != "invoke_stream":
                     continue
-                for kw in call.keywords:
-                    if kw.arg != "invoke_stream":
-                        continue
-                    assert isinstance(kw.value, ast.Name), (
-                        f"{rel}: invoke_stream= must be a named function this check can read")
-                    local = [n for n in body_nodes
-                             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                             and n.name == kw.value.id]
-                    assert len(local) == 1, f"{rel}: cannot resolve invoke_stream={kw.value.id}"
-                    yield rel, local[0]
+                assert isinstance(kw.value, ast.Name), (
+                    f"{rel}: invoke_stream= must be a named function this check can read")
+                scope = _innermost_function(tree, call) or tree
+                local = [n for n in _functions(scope) if n.name == kw.value.id and n is not scope]
+                assert len(local) == 1, f"{rel}: cannot resolve invoke_stream={kw.value.id}"
+                yield rel, local[0]
+
+
+def _passes_on(fn, name):
+    """Whether `name` is passed on: an argument of a call, a dict value, or the
+    value of an assignment, not merely tested."""
+    for n in ast.walk(fn):
+        values = []
+        if isinstance(n, ast.Call):
+            values = n.args + [k.value for k in n.keywords]
+        elif isinstance(n, ast.Dict):
+            values = n.values
+        elif isinstance(n, ast.Assign):
+            values = [n.value]
+        for v in values:
+            if any(isinstance(x, ast.Name) and x.id == name for x in ast.walk(v)):
+                return True
+    return False
 
 
 def test_every_streaming_route_attaches_the_marker_it_is_handed():
@@ -195,8 +242,7 @@ def test_every_streaming_route_attaches_the_marker_it_is_handed():
     for rel, fn in found:
         params = [a.arg for a in fn.args.kwonlyargs + fn.args.args]
         assert "request_metadata" in params, f"{rel}:{fn.name} does not take request_metadata"
-        used = any(isinstance(n, ast.Name) and n.id == "request_metadata" for n in ast.walk(fn))
-        assert used, f"{rel}:{fn.name} takes request_metadata and drops it"
+        assert _passes_on(fn, "request_metadata"), f"{rel}:{fn.name} takes request_metadata and drops it"
 
 
 def test_the_streaming_messages_route_sends_the_marker_to_converse_stream(monkeypatch, dynamodb_mock):
@@ -289,30 +335,37 @@ def test_the_streaming_chat_route_sends_the_marker_to_converse_stream(monkeypatc
     assert md == {"sc_tenant": "default-org", "sc_user": "u-1", "sc_attempt_id": "hold-MARK"}, seen["kwargs"]
 
 
-# --- the OpenAI-compatible surface: every payload build passes the user ------
+# --- every Bedrock call site under mvp/ -------------------------------------
 
-_OPENAI_BUILDERS = {"_build_openai_chat_payload": 3, "_build_openai_responses_payload": None}
+# Call sites that do not attach the marker themselves, and why.
+_PROVIDER_CALLS_EXEMPT = {
+    # The router sends the payload the route built; `_invoke` in mvp/anthropic.py
+    # put the marker in it (checked through the route above).
+    ("mvp/routing/infrarouter.py", "_attempt_invoke"),
+    # An admin's probe of a model's availability: not a tenant's call, no hold.
+    ("mvp/discovery/probe.py", "_call_messages"),
+}
 
 
-def test_every_openai_payload_build_passes_the_user():
-    """The builders default `user_id` to None so a test may call them bare; this
-    holds every call in mvp/ to passing one. The behaviour of the value itself is
-    pinned through the routes in `test_openai_request_marker.py`."""
-    calls = 0
+def test_every_bedrock_call_site_attaches_the_marker_or_is_named_here():
+    found = set()
     for path in sorted((BACKEND / "mvp").rglob("*.py")):
+        rel = path.relative_to(BACKEND).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for call in ast.walk(tree):
-            if not (isinstance(call, ast.Call) and _callee_name(call) in _OPENAI_BUILDERS):
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute) and node.attr in {"converse", "converse_stream"}
+                    and isinstance(node.ctx, ast.Load)):
                 continue
-            calls += 1
-            position = _OPENAI_BUILDERS[_callee_name(call)]
-            arg = next((kw.value for kw in call.keywords if kw.arg == "user_id"), None)
-            if arg is None and position is not None and len(call.args) > position:
-                arg = call.args[position]
-            where = f"{path.relative_to(BACKEND)}:{call.lineno}"
-            assert arg is not None, f"{where} builds an OpenAI payload without the user"
-            assert not (isinstance(arg, ast.Constant) and arg.value is None), where
-    assert calls >= 4, calls
+            fn = _innermost_function(tree, node)
+            name = fn.name if fn else "<module>"
+            found.add((rel, name))
+            if (rel, name) in _PROVIDER_CALLS_EXEMPT:
+                continue
+            mentions = {getattr(n, "id", None) for n in ast.walk(fn)} | {
+                getattr(n, "value", None) for n in ast.walk(fn) if isinstance(n, ast.Constant)}
+            assert mentions & {"request_metadata", "requestMetadata", "_attempt_md"}, (
+                f"{rel}:{name} calls Bedrock without the correlation marker")
+    assert _PROVIDER_CALLS_EXEMPT <= found, _PROVIDER_CALLS_EXEMPT - found
 
 
 # --- self-hosted: the headers -------------------------------------------------
@@ -362,14 +415,29 @@ def test_a_self_hosted_call_carries_the_marker_as_headers(monkeypatch):
         "the marker must not reach the self-hosted model's input")
 
 
-@pytest.mark.parametrize("module", ["mvp/serving/vllm.py"])
-def test_the_self_hosted_transport_takes_its_header_names_from_the_one_table(module):
-    """The header names are spelled once, in `provider_outcome.MARKER_HEADERS`."""
+# Self-hosted transports with no request site of their own yet, and why.
+_SERVING_WITHOUT_REQUESTS = {
+    # Not wired to a real endpoint: the transport is a hook a test installs.
+    # When it gets a request site, this check covers it (C13.6).
+    "mvp/serving/semantic_router.py",
+}
+_SERVING_MODULES = sorted(
+    p.relative_to(BACKEND).as_posix() for p in (BACKEND / "mvp" / "serving").glob("*.py")
+    if p.name != "__init__.py")
+
+
+@pytest.mark.parametrize("module", _SERVING_MODULES)
+def test_every_self_hosted_request_carries_the_marker_headers(module):
+    """Every request site under mvp/serving/ passes `marker_headers`, and the
+    header names are spelled once, in `provider_outcome.MARKER_HEADERS`."""
     text = (BACKEND / module).read_text(encoding="utf-8")
     assert "X-Stratoclave-" not in text
     tree = ast.parse(text)
     requests = [c for c in ast.walk(tree) if isinstance(c, ast.Call)
                 and getattr(c.func, "attr", "") in {"stream", "post", "request", "send"}]
+    if module in _SERVING_WITHOUT_REQUESTS:
+        assert not requests, f"{module} now sends requests; remove it from the exemption"
+        return
     assert requests, "no request site found"
     for call in requests:
         headers = next((kw.value for kw in call.keywords if kw.arg == "headers"), None)

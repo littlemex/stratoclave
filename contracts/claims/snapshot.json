@@ -796,9 +796,6 @@
   "cl-b6c56af3d180": {
    "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
   },
-  "cl-b73b5500b126": {
-   "first_seen": "docs/design/request-bodies.md, the self-hosted marker interface (C13.6)"
-  },
   "cl-b756f1d21d7e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -1263,6 +1260,12 @@
   },
   "cl-ee020a4882f0": {
    "first_seen": "added by the diagram split: the README now describes the money path in three figures (reserve, settle, reclaim), and these are their captions and alt text"
+  },
+  "cl-2a82f3544beb": {
+   "first_seen": "docs/design/request-bodies.md, the marker value rule and the self-hosted headers (C13.6)"
+  },
+  "cl-6e0d28fc93c8": {
+   "first_seen": "docs/design/request-bodies.md, the marker value rule and the self-hosted headers (C13.6)"
   }
  },
  "retired": {
@@ -1335,6 +1338,11 @@
    "disposition": "reworded-to",
    "target": "cl-a56eea264b2e",
    "why": "the console keeps its token in sessionStorage (P0-7), so the sentence naming localStorage as the third ingress path was false; the reworded sentence names the storage the code uses"
+  },
+  "cl-b73b5500b126": {
+   "disposition": "reworded-to",
+   "target": "cl-6e0d28fc93c8",
+   "why": "the self-hosted sentence now says each inference call and names the value rule; the obligation moved rather than ended"
   }
  },
  "detector": {

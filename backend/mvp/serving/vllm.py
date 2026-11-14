@@ -70,6 +70,8 @@ import httpx
 
 from core.logging import get_logger
 
+from ..provider_outcome import marker_headers
+
 logger = get_logger(__name__)
 
 
@@ -382,8 +384,6 @@ def vllm_invoke(target, payload: dict) -> dict:
     try:
         # The correlation marker travels as headers, not in the body (C13.6): the
         # endpoint's model never sees it, and recording it is the endpoint's job.
-        from mvp.provider_outcome import marker_headers
-
         cm = client.stream(
             "POST", "/v1/chat/completions", json=body,
             headers={"Accept": "text/event-stream", "Accept-Encoding": "identity",

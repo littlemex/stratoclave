@@ -37,13 +37,17 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 ### Added
 
 - **Model invocation logs can be attributed to a user, on every transport (C13.6).** The
-  correlation marker now carries `sc_user`, the gateway's own user id, beside `sc_tenant` and
-  `sc_attempt_id`. A self-hosted endpoint receives the same marker as the headers
-  `X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`, which its
-  operator can write to an access log. On the OpenAI-compatible surface `sc_user` is now a
-  reserved `metadata` key: a value a caller sends under it is replaced. The marker is up to
-  three keys of the 16 Bedrock accepts, so it is left out whole when the caller's keys and the
-  marker's together exceed 16 (14 or more of the caller's with a full marker; was 15).
+  correlation marker now carries `sc_user`, the principal's `user_id`, beside `sc_tenant` and
+  `sc_attempt_id`. This reverses the earlier statement that the marker carries no user
+  identifier: whoever can read the invocation logs can now see calls per user, so grant read
+  access to them as to per-user usage data (`docs/design/request-bodies.md`). A self-hosted
+  endpoint receives the same marker as the headers `X-Stratoclave-Tenant`,
+  `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`, which its operator can write to an
+  access log. On the OpenAI-compatible surface `sc_user` is now a reserved `metadata` key: a
+  value a caller sends under it is replaced. When a caller's own keys leave no room for the
+  full marker under Bedrock's 16-key limit, `sc_user` is left out first and the attempt and
+  tenant pair is still sent, as before; a caller with 15 or more keys gets no marker, as
+  before.
 
 - **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
   `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit
@@ -65,6 +69,7 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   streamed through Converse without `requestMetadata`, so their invocation-log records could
   not be matched to an attempt, a tenant or a user; only non-streaming calls carried it. The
   marker is now handed to every streaming route by the shared stream flow.
+
 - **`bedrock-mantle` is named as unsupported, not just absent (C13.5, issue #246).**
   `docs/EVIDENCE.md`, `docs/MEASUREMENTS.md` and `docs/MEASUREMENTS.ja.md` no longer state
   a `bedrock-mantle` limitation as current. `docs/MEASUREMENTS.md` and `.ja` also carried a

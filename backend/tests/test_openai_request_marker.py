@@ -264,7 +264,7 @@ def test_surveyed_bytes_equal_sent_bytes_through_the_real_pipeline():
 
     entry = _entry()
     body = _body(extra_body={"metadata": {"caller_key": "x"}})
-    payload, _ = _build_openai_chat_payload(body, entry, "org-bytes")
+    payload, _ = _build_openai_chat_payload(body, entry, "org-bytes", user_id=None)
     assert payload["metadata"]["sc_attempt_id"] == ATTEMPT_ID_PLACEHOLDER, (
         "the placeholder must already be in the payload the builder hands "
         "to the caller, i.e. BEFORE the survey below ever runs"
@@ -501,7 +501,7 @@ def test_surveyed_bytes_equal_sent_bytes_for_responses_payload_too():
         {"model": "gpt-5.6-sol", "input": "hi", "metadata": {"caller_key": "x"}}
     )
     payload = _build_openai_responses_payload(
-        body, _entry(), stream=False, tenant_id="org-bytes-resp"
+        body, _entry(), stream=False, tenant_id="org-bytes-resp", user_id=None
     )
     assert payload["metadata"]["sc_attempt_id"] == ATTEMPT_ID_PLACEHOLDER
 
