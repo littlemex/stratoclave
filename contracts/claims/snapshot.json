@@ -1449,6 +1449,69 @@
   },
   "cl-c4c2332d80a2": {
    "first_seen": "docs/DEPLOYMENT.md, the private-entry shared-address caveat corrected to one address per load balancer node after a real-machine measurement"
+  },
+  "cl-b306293589bc": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-24b5d2104ac3": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-ca627b5e4ec8": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-805120466ed6": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-ea49a5eabc51": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-d79021bc692d": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-5488b66696d7": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-47ddbb2f965f": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-1b3499ffafbc": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-b8ecf7b563a6": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-6d9060b888c8": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-ae363dc7d5c0": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-4b34bca3da70": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-188d718a49ea": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-3fb7166160bf": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-112458c088f1": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-c11d55914fdb": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-c22fa0ce3226": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-4c05023a072c": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-e34d217774b4": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-52c82bce8e14": {
+   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
   }
  },
  "retired": {

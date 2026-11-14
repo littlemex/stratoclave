@@ -2518,6 +2518,111 @@
    "claim": "- **On the private entry, clients do not have their own addresses.** The gateway sees each request as coming from the internal load balancer node that forwarded it, so all clients share one address per load balancer node: two by default, one per Availability Zone (measured: wrong-password attempts from one client alternated between two node addresses and the first `429` came at attempt 16, not 11).",
    "anchor": "contract:C6.13@4d26afd0",
    "note": "measured on a private-entry deployment: two load balancer node addresses, first 429 at attempt 16"
+  },
+  {
+   "id": "cl-b306293589bc",
+   "claim": "It cannot be reached by its DNS name from outside this account's VPC.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-24b5d2104ac3",
+   "claim": "The VPC origin is never shared outside the account: do not use AWS Resource Access Manager (RAM) to share it.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-ca627b5e4ec8",
+   "claim": "`iac/scripts/deploy-all.sh` checks this for an existing deployment before every `vpc`-ish deploy (every value except `public`), resolving the AZ IDs of the subnets the internal ALB will use and refusing if any is unsupported.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-805120466ed6",
+   "claim": "If an existing deployment's VPC already sits in an unsupported AZ, it cannot move there without replacing its subnets.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-ea49a5eabc51",
+   "claim": "`STRATOCLAVE_CLOUDFRONT_ORIGIN=public` remains the supported path for that account; it never builds a CloudFront VPC origin or the isolated subnets it needs.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-d79021bc692d",
+   "claim": "An **existing** deployment whose ALB is internet-facing cannot jump to `vpc` in one deploy — the ALB's internet-facing/internal scheme cannot change in place (CloudFormation replaces the load balancer), and the replacement has to exist, be registered with CloudFront, and be healthy before the old one can safely be removed.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-5488b66696d7",
+   "claim": "Run against an existing deployment that still has a live internet-facing ALB and has never run `vpc-expand`/`vpc-switch`, that would attempt the one-shot replacement this staged migration exists to avoid.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-47ddbb2f965f",
+   "claim": "The public ALB was never touched, so this removes only the internal ALB and the VPC origin.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-1b3499ffafbc",
+   "claim": "For a migration, probe the distribution through `vpc-switch` with a multi-minute streaming request held open across the deploy, not only a short request, since the origin read/keepalive timeouts and the backend's own streaming behaviour are what a short probe cannot exercise:",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-b8ecf7b563a6",
+   "claim": "To verify the public bypass is actually closed after the `vpc` step, point a second CloudFront distribution at the old public ALB's DNS name and confirm it cannot be created against a VPC origin it was never shared (RAM) to, and that the DNS name itself no longer resolves to a live load balancer:",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-6d9060b888c8",
+   "claim": "`STRATOCLAVE_CLOUDFRONT_ORIGIN` is forced to `vpc` in this mode and refuses every other value: `both`'s whole point is that the ALB has no public address, so there is nothing for `public`/`vpc-expand`/`vpc-switch` to describe a state of.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-ae363dc7d5c0",
+   "claim": "- **Port 80**, a plain HTTP forward (never a redirect to :443 — a redirect would break CloudFront's VPC-origin traffic, which expects a response on this port, not a 301).",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-4b34bca3da70",
+   "claim": "The ALB security group admits the CloudFront origin-facing managed prefix list on port 80 and the internal NLB's security group on port 443 — the union of what each path needs on its own, never a shared rule.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-188d718a49ea",
+   "claim": "The ALB-wide `X-Forwarded-For` processing attribute is left at AWS's default (`append`), not set to `remove` the way a pure `private` deployment sets it: the CloudFront leg needs the viewer's address for unauthenticated rate limiting, and that attribute is per ALB, not per listener, so it cannot be `remove` for one leg and `append` for the other.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-3fb7166160bf",
+   "claim": "The backend distinguishes the two legs using `X-Forwarded-Port`, an ALB-set header that always carries the port of the listener that accepted the connection.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-112458c088f1",
+   "claim": "It is never a value a client can supply: unlike `X-Forwarded-For`, there is no \"preserve\" mode for it — see the [X-Forwarded-Port documentation](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/x-forwarded-headers.html#x-forwarded-port).",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-c11d55914fdb",
+   "claim": "The match is positive, not a deny-list: only a request whose `X-Forwarded-Port` is exactly `80` (the CloudFront leg), or whose header is absent entirely (every entry mode but `both` never sends this header in a test fixture, and must not have its behaviour changed by this check's mere existence), keeps the deployment's configured `RATE_LIMIT_TRUSTED_HOPS`.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-c22fa0ce3226",
+   "claim": "Every other value — a confirmed `443` (PrivateLink), or anything this check does not recognise — is treated as if `RATE_LIMIT_TRUSTED_HOPS=0` had been set for that one request only.",
+   "anchor": "boundary:the design document states the condition in the sentence"
+  },
+  {
+   "id": "cl-4c05023a072c",
+   "claim": "Every consumer behind the same NLB AZ shares one rate-limit bucket on this leg, the same coarseness a pure `private` deployment already has and for the same reason.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-e34d217774b4",
+   "claim": "In this mode, two candidate endpoints are configured on the container (`STRATOCLAVE_API_ENDPOINT`, the CloudFront URL, and `STRATOCLAVE_API_ENDPOINT_PRIVATE`, the PrivateLink URL), and the backend selects between them by the same `X-Forwarded-Port` signal described above — never by reading a URL out of a request header.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-52c82bce8e14",
+   "claim": "The shared internal ALB has real access logs enabled (an S3 bucket this stack creates), the same as a pure `private` deployment and for the same reason: the PrivateLink leg never touches CloudFront, so CloudFront's edge logs do not cover it.",
+   "anchor": "boundary:the design document states the condition in the sentence"
   }
  ]
 }

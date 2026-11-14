@@ -4,6 +4,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { applyCommonTags, paramPath, putStringParameter } from './_common';
+import { hasCloudFrontLeg, hasPrivateLinkLeg } from './entry-config';
 
 export interface NetworkStackProps extends cdk.StackProps {
   /** Prefix applied to all resource names */
@@ -171,7 +172,7 @@ export class NetworkStack extends cdk.Stack {
     // group, on :443). `entryMode` is resolved once, above, before the VPC
     // is even constructed — see this prop's doc for the `'both'` case,
     // where BOTH this block and the one below it run.
-    if (entryMode === 'cloudfront' || entryMode === 'both') {
+    if (hasCloudFrontLeg(entryMode)) {
       const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
         this,
         'CloudFrontOriginFacingPrefixListLookup',
@@ -213,7 +214,7 @@ export class NetworkStack extends cdk.Stack {
         'Allow HTTP from CloudFront edge locations only',
       );
     }
-    if (entryMode === 'private' || entryMode === 'both') {
+    if (hasPrivateLinkLeg(entryMode)) {
       // The internal NLB's security group, created here (not in
       // lib/private-link-stack.ts) so that both of the rules it needs can
       // be ordinary same-stack L2 calls: `addIngressRule` and

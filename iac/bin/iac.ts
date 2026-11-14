@@ -14,7 +14,12 @@ import {
   putStringParameter,
 } from '../lib/_common';
 import { resolveRegionConfig } from '../lib/region-config';
-import { resolveEntryConfig, resolveCloudfrontOriginConfig } from '../lib/entry-config';
+import {
+  resolveEntryConfig,
+  resolveCloudfrontOriginConfig,
+  hasCloudFrontLeg,
+  hasPrivateLinkLeg,
+} from '../lib/entry-config';
 import { NetworkStack } from '../lib/network-stack';
 import { EcrStack } from '../lib/ecr-stack';
 import { AlbStack } from '../lib/alb-stack';
@@ -364,7 +369,7 @@ albStack.addDependency(networkStack);
 // silently disable WAF (the token-based reference makes that structurally
 // impossible and also enforces deploy ordering).
 let wafStack: WafStack | undefined;
-if ((entryConfig.mode === 'cloudfront' || entryConfig.mode === 'both') && enableWaf) {
+if (hasCloudFrontLeg(entryConfig.mode) && enableWaf) {
   wafStack = new WafStack(
     app,
     // Qualified by the body region: see `pinnedStackName`. Two deployments that
@@ -387,7 +392,7 @@ if ((entryConfig.mode === 'cloudfront' || entryConfig.mode === 'both') && enable
 // in 'private' mode: no CloudFront distribution, no S3 console bucket at
 // all — that is the whole point of "headless".
 let frontendStack: FrontendStack | undefined;
-if (entryConfig.mode === 'cloudfront' || entryConfig.mode === 'both') {
+if (hasCloudFrontLeg(entryConfig.mode)) {
   frontendStack = new FrontendStack(app, stackName(prefix, 'frontend'), {
     env,
     // Consumes the us-east-1 WebACL ARN. crossRegionReferences must match the
@@ -457,6 +462,22 @@ if (entryConfig.mode === 'private') {
   }
   entryUrl = cloudFrontUrl;
 }
+
+// `stsAudiences` (CDK context, resolved near the top of this file) merged
+// with the PrivateLink host `STRATOCLAVE_ENTRY=both` adds — NOT with
+// `cloudFrontUrl`: the backend's own `mvp.sso_sts.expected_audiences()`
+// already includes `core.deployment.api_endpoint()` (== `STRATOCLAVE_API_ENDPOINT`,
+// the CloudFront URL in cloudfront/both mode) unconditionally, so repeating
+// it here would be a second, redundant entry in the same comma-separated
+// list, not a second distinct host. Computed here (after `privateUrl` is
+// known) and read once below, rather than as a second
+// `STRATOCLAVE_STS_AUDIENCES` key spread into the same object literal — a
+// duplicate key the object literal would otherwise silently keep only the
+// LAST of, dropping the context-sourced value entirely.
+const stsAudiencesEffective =
+  entryConfig.mode === 'both' && privateUrl
+    ? [stsAudiences, privateUrl].filter((s) => s.length > 0).join(',')
+    : stsAudiences;
 
 // --- 5b. Private-entry publication (STRATOCLAVE_ENTRY=private or both): an
 // internal NLB + VPC endpoint service fronting the internal ALB above. See
@@ -789,8 +810,8 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
 
     // Public API endpoint. This is the value returned as api_endpoint in
     // /.well-known/stratoclave-config (see backend/mvp/well_known.py's own
-    // resolution order comment — this env var always wins there, in both
-    // modes, so no change was needed in that file at all).
+    // resolution order comment — this env var always wins there via
+    // `core.deployment.api_endpoint()`).
     // 'cloudfront': the CloudFront HTTPS URL — unchanged. Always return the
     // CloudFront URL; returning the ALB URL directly would cause the CLI to
     // call it over HTTP.
@@ -817,23 +838,6 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     ...(entryConfig.mode === 'both' && privateUrl
       ? { STRATOCLAVE_API_ENDPOINT_PRIVATE: privateUrl }
       : {}),
-    // Forward-wiring only: this variable does not exist on `main` yet (it
-    // is being added by a separate, in-flight change to the sign-in
-    // audience allow-list, `backend/core/sts_auth.py` or similar, not
-    // present in this tree). Wired here so that change's own PR only has
-    // to start READING it rather than also adding the IaC plumbing. Comma-
-    // joined, in the order a reader would expect: the CloudFront host
-    // first (whenever it exists), the PrivateLink host second (whenever it
-    // exists) — not deduplicated beyond what `Array.from(new Set(...))`
-    // below already guarantees for the degenerate case where both resolve
-    // to the same string.
-    ...(entryConfig.mode === 'both'
-      ? {
-          STRATOCLAVE_STS_AUDIENCES: Array.from(
-            new Set([cloudFrontUrl, privateUrl].filter((u): u is string => !!u)),
-          ).join(','),
-        }
-      : {}),
 
     // Comma-separated extra hosts a signed AWS sign-in may also name
     // (`mvp.sso_sts.expected_audiences`), for a deployment reached under
@@ -846,7 +850,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // from a shell that forgot to export it does not blank out a value a
     // PREVIOUS deploy configured (docs/DEPLOYMENT.md, "Binding AWS sign-in
     // to this gateway").
-    STRATOCLAVE_STS_AUDIENCES: stsAudiences,
+    STRATOCLAVE_STS_AUDIENCES: stsAudiencesEffective,
     // Requires every signed AWS sign-in to name one of the hosts above
     // (`mvp.sso_sts.audience_required`, read with `core.deployment
     // .strict_flag`: an unrecognised spelling fails the backend's own
@@ -1356,7 +1360,7 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
   // never touches CloudFront, same as pure `private`), so the ELB2
   // rationale is equally inapplicable there.
   const albSuppressions =
-    entryConfig.mode === 'private' || entryConfig.mode === 'both'
+    hasPrivateLinkLeg(entryConfig.mode)
       ? appLevelSuppressions.filter((s) => s.id !== 'AwsSolutions-ELB2')
       : appLevelSuppressions;
   NagSuppressions.addStackSuppressions(albStack, albSuppressions);

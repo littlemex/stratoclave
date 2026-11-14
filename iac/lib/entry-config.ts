@@ -62,6 +62,35 @@ export type EntryConfig =
   | { readonly mode: 'private'; readonly privateEntry: PrivateEntryConfig }
   | { readonly mode: 'both'; readonly privateEntry: PrivateEntryConfig };
 
+/**
+ * `true` whenever this entry mode has a CloudFront leg at all (`cloudfront`
+ * and `both` — not `private`). Reviewed design note (Fable 5.2, both-mode
+ * design review): `lib/network-stack.ts`'s SG wiring used to be a single
+ * `if (entryMode === 'cloudfront') { ... } else { ... }`, which is exactly
+ * the shape that silently drops a mode when a THIRD value is added — `both`
+ * needed BOTH branches to run, and the original `if`/`else` could not say
+ * that at all. The two independent `if` blocks that replaced it (and every
+ * other place in `bin/iac.ts` that branches the same way) use this function
+ * — and `hasPrivateLinkLeg` below — instead of a raw `=== 'cloudfront' ||
+ * === 'both'` comparison, at every call site that does not ALSO need
+ * TypeScript to narrow `EntryConfig` itself down to its `privateEntry`-
+ * carrying members afterward (`bin/iac.ts`'s two sites that read
+ * `entryConfig.privateEntry` inside the branch keep the raw literal
+ * comparison on purpose: TypeScript's control-flow analysis is documented
+ * to narrow a discriminated union from a direct comparison on its
+ * discriminant, and this file does not depend on the less certain case of
+ * that narrowing surviving a call through a plain boolean-returning
+ * function).
+ */
+export function hasCloudFrontLeg(mode: EntryConfig['mode']): boolean {
+  return mode === 'cloudfront' || mode === 'both';
+}
+
+/** `true` whenever this entry mode has a PrivateLink leg at all (`private` and `both` — not `cloudfront`). See `hasCloudFrontLeg`'s doc. */
+export function hasPrivateLinkLeg(mode: EntryConfig['mode']): boolean {
+  return mode === 'private' || mode === 'both';
+}
+
 export type Env = Record<string, string | undefined>;
 
 // `aws` partition only, deliberately — same posture as region-config.ts's
