@@ -68,6 +68,7 @@ fn audience_host(api_endpoint: &str) -> Result<String> {
     let host = url
         .host_str()
         .ok_or_else(|| anyhow!("api_endpoint has no host: {api_endpoint}"))?
+        .trim_end_matches('.')
         .to_ascii_lowercase();
     Ok(match url.port() {
         Some(port) => format!("{host}:{port}"),

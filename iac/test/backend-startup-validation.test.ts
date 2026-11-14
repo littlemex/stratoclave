@@ -172,7 +172,9 @@ describe('a fresh deployment starts under ENVIRONMENT=production, for every tier
     expect(containerEnv.ENVIRONMENT).toBe('production');
 
     const { code, output } = runStartupValidation(containerEnv);
-    expect(code === 0, `main.py failed its own startup validation:\n${output}`).toBe(true);
+    if (code !== 0) {
+      throw new Error(`main.py failed its own startup validation:\n${output}`);
+    }
   }, 180_000);
 
   test('a fresh container env actually names every _REQUIRED_IN_PRODUCTION variable (regression pin, read from main.py itself rather than hand-copied)', () => {
