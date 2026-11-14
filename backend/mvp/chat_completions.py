@@ -610,7 +610,8 @@ def chat_completions(
         # `_openai_chat_completion` — same reasoning as the Converse `kwargs`
         # above: one payload, surveyed and then sent, not two independently
         # built copies.
-        openai_payload, injected_usage = _build_openai_chat_payload(body, entry, getattr(user, "org_id", None))
+        openai_payload, injected_usage = _build_openai_chat_payload(
+            body, entry, getattr(user, "org_id", None), getattr(user, "user_id", None))
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey whichever canonical payload this request will actually send —
@@ -969,6 +970,7 @@ def _build_openai_chat_payload(
     body: ChatCompletionsRequest,
     entry: "ModelEntry",
     tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[dict, bool]:
     """The exact JSON `payload` `/v1/chat/completions` sends to the OpenAI-compatible endpoint
     (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
@@ -1010,7 +1012,7 @@ def _build_openai_chat_payload(
             injected_usage = True
         payload["stream_options"] = opts
     _provider_outcome.stamp_openai_metadata_marker(
-        payload, tenant_id
+        payload, tenant_id, user_id
     )
     return payload, injected_usage
 
@@ -1058,7 +1060,8 @@ def _openai_chat_completion(
         # it here exactly as the route used to, byte-identically to
         # `_build_openai_chat_payload`. The real route path always supplies
         # `payload` pre-built, so this branch is never taken there.
-        payload, injected_usage = _build_openai_chat_payload(body, entry, getattr(user, "org_id", None))
+        payload, injected_usage = _build_openai_chat_payload(
+            body, entry, getattr(user, "org_id", None), getattr(user, "user_id", None))
 
     # The hold's latch is what keeps a 4xx on a streamed request from being
     # refunded by the error branch and then settled again by the generator's
@@ -1473,14 +1476,15 @@ async def _stream_chat(
             # nothing here that could invent one.
             yield _sse({"error": {"message": message, "type": "api_error"}})
 
-    def _invoke(*, body, model_id):
+    def _invoke(*, body, model_id, request_metadata):
         # kwargs was built (and validated) pre-reserve by the caller. Honour the
         # model_id run_stream passes so the payload can't drift from the caller
         # (today they always match — this path does not go through InfraRouter,
         # so there is no model failover — but keeping model_id load-bearing
         # avoids a silent same-model re-invoke if that ever changes).
         client = deployment_client()
-        return client.converse_stream(**{**kwargs, "modelId": model_id})
+        marker = {"requestMetadata": request_metadata} if request_metadata else {}
+        return client.converse_stream(**{**kwargs, **marker, "modelId": model_id})
 
     async for frame in _budget_flow.run_stream(
         body=body,

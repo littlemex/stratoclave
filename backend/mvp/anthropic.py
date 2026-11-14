@@ -1195,12 +1195,15 @@ async def _stream_messages(
     _routed_box: dict = {}          # filled by _invoke once routing commits
     _started_at_ms = int(_time.time() * 1000)
 
-    async def _invoke(*, body, model_id):
+    async def _invoke(*, body, model_id, request_metadata):
         from .routing import route_stream as _route
         from .routing.types import RouteRequest
 
         kwargs = _build_bedrock_kwargs(body, model_id)
         kwargs.pop("modelId", None)
+        # After the survey, as on the non-streaming path: not model input (C13.6).
+        if request_metadata:
+            kwargs["requestMetadata"] = request_metadata
 
         # P0-12: propagate the edge-minted correlation ids as opaque pass-through
         # (the routing layer must NOT read them).

@@ -82,10 +82,17 @@ async def run_stream(
             # why this cannot be inferred from the exception type instead.
             hold.provider_call_starting()
             import inspect
+            # The correlation marker (C13.6) comes from the hold, the one object that
+            # knows the attempt, tenant and user, and every invoke_stream attaches it to
+            # the provider call. Passed here rather than built by each route, so a new
+            # streaming route cannot forget it.
+            request_metadata = hold.request_metadata()
             if inspect.iscoroutinefunction(invoke_stream):
-                resp = await invoke_stream(body=body, model_id=model_id)
+                resp = await invoke_stream(body=body, model_id=model_id,
+                                           request_metadata=request_metadata)
             else:
-                resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id)
+                resp = await asyncio.to_thread(invoke_stream, body=body, model_id=model_id,
+                                               request_metadata=request_metadata)
         except asyncio.CancelledError:
             # The client went away while the request was in flight. `except
             # Exception` does not cover this, and letting the `finally` settle a

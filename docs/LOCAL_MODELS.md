@@ -153,6 +153,17 @@ with `pong` (or similar) in a `content_block_delta`. Read the ledger back —
 reported (`qwen2.5:0.5b`, not the alias `local-ollama`) and the token counts
 Ollama's own usage chunk carried, not the reservation estimate.
 
+## Attributing calls on your endpoint
+
+Every call the gateway makes to your endpoint carries three HTTP request headers:
+`X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`. They are
+the same values Bedrock receives as `requestMetadata` and records in its invocation
+log, and they are not in the request body, so your model never sees them. To get a
+per-tenant and per-user record of calls, have whatever sits in front of the model
+server write those headers into its access log. The gateway does not store or read
+that log; what is kept there, and for how long, is yours to decide. See
+[request-bodies.md](design/request-bodies.md#self-hosted-endpoints).
+
 ## What does not work today, and why
 
 This is a structural property of where the router is wired in, not a config

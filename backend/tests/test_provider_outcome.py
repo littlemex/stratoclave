@@ -345,8 +345,8 @@ class TestMergeOpenAIMetadata:
         # produces, by construction -- not two places maintaining the same
         # two string literals independently.
         assert po.RESERVED_METADATA_KEYS == frozenset(
-            po.attempt_request_metadata("x", "x").keys()
-        )
+            po.attempt_request_metadata("x", "x", "x").keys()
+        ) == frozenset(po.MARKER_KEYS) == frozenset(po.MARKER_HEADERS)
 
 
 class TestStampOpenAIMetadataMarker:

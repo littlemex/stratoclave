@@ -320,10 +320,31 @@ def unobserved_holds_enforced() -> bool:
     return raw.strip().lower() in _TRUTHY
 
 
+#: The correlation marker's keys, and what each names (C13.6). This is the one
+#: place they are spelled: the Converse `requestMetadata`, the OpenAI-compatible
+#: `metadata` merge, the reserved-name set and the self-hosted headers are all
+#: derived from it.
+MARKER_KEYS: dict[str, str] = {
+    "sc_tenant": "the tenant id",
+    "sc_attempt_id": "the id of this attempt's money hold",
+    "sc_user": "the gateway's own user id (not an email or any other provider identity)",
+}
+
+#: The marker as HTTP request headers, for a self-hosted endpoint (C13.6). The
+#: gateway sends them on every call; recording them is the endpoint's job.
+MARKER_HEADERS: dict[str, str] = {
+    "sc_tenant": "X-Stratoclave-Tenant",
+    "sc_attempt_id": "X-Stratoclave-Attempt-Id",
+    "sc_user": "X-Stratoclave-User",
+}
+
+_MARKER_VALUE_MAX = 256
+
+
 def attempt_request_metadata(
-    hold_id: Optional[str], tenant_id: Optional[str] = None
+    hold_id: Optional[str], tenant_id: Optional[str] = None, user_id: Optional[str] = None,
 ) -> dict[str, str]:
-    """The correlation handle to stamp on a provider call.
+    """The correlation handle to stamp on a provider call (C13.6).
 
     Bedrock echoes `requestMetadata` into model invocation log records, verified
     on real Bedrock: a record for a call abandoned on read timeout was retrieved
@@ -334,15 +355,33 @@ def attempt_request_metadata(
     gateway did not observe, which makes stamping it a correctness requirement
     rather than an optimisation.
 
-    Values are ids the gateway minted. No prompt, no user identifier, nothing
-    derived from request content.
+    Values are ids the gateway minted or holds: the hold id, the tenant id, and
+    the gateway's own user id. No prompt, no email, nothing derived from request
+    content. Each value is capped at Bedrock's 256-character limit.
     """
     md: dict[str, str] = {}
     if hold_id:
-        md["sc_attempt_id"] = str(hold_id)[:256]
+        md["sc_attempt_id"] = str(hold_id)[:_MARKER_VALUE_MAX]
     if tenant_id:
-        md["sc_tenant"] = str(tenant_id)[:256]
+        md["sc_tenant"] = str(tenant_id)[:_MARKER_VALUE_MAX]
+    if user_id:
+        md["sc_user"] = str(user_id)[:_MARKER_VALUE_MAX]
     return md
+
+
+def marker_headers(marker: Optional[dict]) -> dict[str, str]:
+    """The marker as the HTTP request headers a self-hosted endpoint receives.
+
+    Only the gateway's own keys are carried, under their fixed header names. A
+    value that is not printable ASCII is left out rather than sent mangled: a
+    header cannot carry CR, LF or non-ASCII, and the ids the gateway mints are
+    plain ASCII, so a value that is not is not one of them."""
+    out: dict[str, str] = {}
+    for key, header in MARKER_HEADERS.items():
+        value = (marker or {}).get(key)
+        if isinstance(value, str) and value and value.isascii() and value.isprintable():
+            out[header] = value[:_MARKER_VALUE_MAX]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +463,7 @@ assert len(ATTEMPT_ID_PLACEHOLDER) <= OPENAI_METADATA_MAX_VALUE_LEN
 #: truthy dummy values so both keys appear), not re-typed as string literals
 #: — the two routes' reserved-name set and the Converse marker's actual key
 #: names must stay the same set by construction, not by two places agreeing.
-RESERVED_METADATA_KEYS = frozenset(attempt_request_metadata("x", "x").keys())
+RESERVED_METADATA_KEYS = frozenset(MARKER_KEYS)
 
 
 def merge_openai_metadata(
@@ -502,7 +541,7 @@ def merge_openai_metadata(
 
 
 def stamp_openai_metadata_marker(
-    payload: dict, tenant_id: Optional[str]
+    payload: dict, tenant_id: Optional[str], user_id: Optional[str] = None,
 ) -> bool:
     """Merge the gateway's correlation keys into `payload["metadata"]`,
     BEFORE the hard-ceiling survey runs over `payload` — see the module-level
@@ -519,7 +558,7 @@ def stamp_openai_metadata_marker(
     # the two routes' key names cannot drift apart ("the same identifiers
     # Converse carries" is then true by construction, not by two call sites
     # agreeing on two string literals).
-    marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id)
+    marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id, user_id)
     merged = merge_openai_metadata(payload.get("metadata"), marker)
     if merged.get("sc_attempt_id") != ATTEMPT_ID_PLACEHOLDER:
         # The key-count ceiling made `merge_openai_metadata` drop the whole

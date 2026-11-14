@@ -36,6 +36,14 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Added
 
+- **Model invocation logs can be attributed to a user, on every transport (C13.6).** The
+  correlation marker now carries `sc_user`, the gateway's own user id, beside `sc_tenant` and
+  `sc_attempt_id`. A self-hosted endpoint receives the same marker as the headers
+  `X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`, which its
+  operator can write to an access log. On the OpenAI-compatible surface the marker is three
+  keys of the 16 Bedrock accepts, so a caller using 14 or more of its own gets none of it
+  (was 15).
+
 - **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
   `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit
   log, where a body can be found instead (Bedrock model invocation logging, an
@@ -47,6 +55,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Fixed
 
+- **Streaming calls carried no correlation marker.** `/v1/messages` and `/v1/chat/completions`
+  streamed through Converse without `requestMetadata`, so their invocation-log records could
+  not be matched to an attempt, a tenant or a user; only non-streaming calls carried it. The
+  marker is now handed to every streaming route by the shared stream flow.
 - **`bedrock-mantle` is named as unsupported, not just absent (C13.5, issue #246).**
   `docs/EVIDENCE.md`, `docs/MEASUREMENTS.md` and `docs/MEASUREMENTS.ja.md` no longer state
   a `bedrock-mantle` limitation as current. `docs/MEASUREMENTS.md` and `.ja` also carried a

@@ -796,6 +796,9 @@
   "cl-b6c56af3d180": {
    "first_seen": "added by the period-rollover fix and the recorded future-work direction (F1): limits.md sections 4 and 6"
   },
+  "cl-b73b5500b126": {
+   "first_seen": "docs/design/request-bodies.md, the self-hosted marker interface (C13.6)"
+  },
   "cl-b756f1d21d7e": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -1571,6 +1574,7 @@
     "C12.7": "B",
     "C13.4": "E",
     "C13.5": "E",
+    "C13.6": "E",
     "C14.33": "B",
     "C14.34": "E",
     "C14.35": "B",

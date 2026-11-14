@@ -139,7 +139,7 @@ def _make_gen(stream_factory, settle_calls, repo):
         body=None,
         model_id="test",
         hold=_hold(repo, lambda **kw: settle_calls.append(kw)),
-        invoke_stream=lambda *, body, model_id: {"stream": stream_factory()},
+        invoke_stream=lambda *, body, model_id, request_metadata: {"stream": stream_factory()},
         adapter=_TestAdapter(),
     )
 
@@ -261,7 +261,7 @@ def test_invoke_failure_refunds_and_releases(monkeypatch):
     settle_calls = []
     repo = _FakeRepo()
 
-    def raising_invoke(*, body, model_id):
+    def raising_invoke(*, body, model_id, request_metadata):
         raise RuntimeError("connection refused")
 
     gen = _budget_flow.run_stream(
@@ -360,7 +360,7 @@ def test_disconnect_during_offloaded_settle_settles_once():
     gen = _budget_flow.run_stream(
         body=None, model_id="test",
         hold=_hold(repo, slow_settle),
-        invoke_stream=lambda *, body, model_id: {"stream": _simple_stream()},
+        invoke_stream=lambda *, body, model_id, request_metadata: {"stream": _simple_stream()},
         adapter=_TestAdapter(),
     )
 
@@ -390,7 +390,7 @@ def test_invoke_error_disconnect_does_not_settle_after_refund():
     settle_count = {"n": 0}
     refund_release = {"n": 0}
 
-    def boom(*, body, model_id):
+    def boom(*, body, model_id, request_metadata):
         raise RuntimeError("invoke failed")
 
     repo = _FakeRepo()
@@ -464,7 +464,7 @@ def test_a_cancelled_abandon_is_not_replaced_by_a_zero_settle(monkeypatch):
     monkeypatch.setattr(money.Ending, "detached",
                         lambda self: detached.append(self))
 
-    def boom(*, body, model_id):
+    def boom(*, body, model_id, request_metadata):
         raise RuntimeError("invoke failed")
 
     hold = _hold(repo, lambda **kw: settle_calls.append(kw))
@@ -503,7 +503,7 @@ def test_a_cancellation_during_invoke_is_not_a_free_request(monkeypatch):
     repo = _FakeRepo()
     monkeypatch.setattr(money.Ending, "detached", lambda self: self._write())
 
-    async def cancelled_invoke(*, body, model_id):
+    async def cancelled_invoke(*, body, model_id, request_metadata):
         raise asyncio.CancelledError()
 
     hold = _hold(repo, lambda **kw: settle_calls.append(kw))
@@ -550,7 +550,7 @@ def test_a_claimed_write_cancelled_before_it_starts_is_still_written(monkeypatch
 
     monkeypatch.setattr(asyncio, "to_thread", _never_starts_the_write)
 
-    async def _invoke(*, body, model_id):
+    async def _invoke(*, body, model_id, request_metadata):
         return {"stream": _simple_stream()}
 
     gen = _budget_flow.run_stream(
@@ -620,7 +620,7 @@ def test_the_write_survives_a_cancellation_while_it_is_in_flight():
     gen = _budget_flow.run_stream(
         body=None, model_id="test",
         hold=_hold(repo, slow_settle),
-        invoke_stream=lambda *, body, model_id: {"stream": _simple_stream()},
+        invoke_stream=lambda *, body, model_id, request_metadata: {"stream": _simple_stream()},
         adapter=_TestAdapter(),
     )
 

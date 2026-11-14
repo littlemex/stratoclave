@@ -339,9 +339,9 @@ def test_the_observability_hook_only_runs_for_the_winner_and_cannot_break_a_sett
     assert len(settled) == 1, "a raising hook cost the request its settle"
 
 
-def test_the_correlation_marker_carries_the_hold_and_the_tenant():
+def test_the_correlation_marker_carries_the_hold_the_tenant_and_the_user():
     hold, _repo, _settled, _released = _hold()
-    assert hold.request_metadata() == {"sc_attempt_id": "hold-1", "sc_tenant": "acme"}
+    assert hold.request_metadata() == {"sc_attempt_id": "hold-1", "sc_tenant": "acme", "sc_user": "u"}
 
 
 # ---------------------------------------------------------------------------
