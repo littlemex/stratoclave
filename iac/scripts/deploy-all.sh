@@ -194,6 +194,57 @@ log_error() { echo "[ERROR] $(date +%H:%M:%S) $1" | tee -a "$DEPLOYMENT_LOG" >&2
 log_warn()  { echo "[WARN]  $(date +%H:%M:%S) $1" | tee -a "$DEPLOYMENT_LOG"; }
 log_ok()    { echo "[OK]    $(date +%H:%M:%S) $1" | tee -a "$DEPLOYMENT_LOG"; }
 
+# Round-1 implementation review (Fable B2, Sol's two matching blockers): a
+# plain `x=$(aws ... 2>/dev/null)` under `set -euo pipefail` aborts the WHOLE
+# script the instant that `aws` call exits non-zero — and it legitimately
+# does, routinely, for a "this resource does not exist yet" result such as
+# `LoadBalancerNotFound` (no public ALB under the new 'vpc' default, or after
+# `vpc-contract` removes it) or `ParameterNotFound` (no VPC yet, first
+# deploy). `2>/dev/null` threw the real error text away, so the operator saw
+# the script die with no explanation at all.
+#
+# This wrapper runs the AWS CLI call with `set +e` around it, captures BOTH
+# the exit code and stderr, and only then decides: a recognised "absent"
+# error signature prints nothing and returns 0 (success, empty result) so
+# the caller's own `if [ -z "$x" ]` branches see exactly what they already
+# expect; anything else is a genuine failure (wrong region, no permission,
+# throttled, a real service error) and is NEVER silently treated as
+# "absent" — it logs the real stderr and exits the whole script loudly,
+# which `2>/dev/null` previously made impossible to tell apart from the
+# routine case.
+#
+# Usage: `x=$(aws_lookup_or_empty "<what this is, for the error message>" \
+#   aws <service> <action> --query ... --output text)`
+aws_lookup_or_empty() {
+  local description="$1"
+  shift
+  local out rc err_file
+  err_file=$(mktemp)
+  set +e
+  out=$("$@" 2>"$err_file")
+  rc=$?
+  set -e
+  local err
+  err=$(cat "$err_file")
+  rm -f "$err_file"
+  if [ "$rc" -eq 0 ]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  case "$err" in
+    *LoadBalancerNotFound*|*TargetGroupNotFound*|*ListenerNotFound*|*ParameterNotFound*|*ParameterNotFoundException*)
+      # Routine "this does not exist (yet, or any more)" — the caller's own
+      # empty-string handling is the correct response, not a script abort.
+      printf ''
+      return 0
+      ;;
+    *)
+      log_error "$description failed: ${err:-<aws exited $rc with no stderr>}"
+      exit 1
+      ;;
+  esac
+}
+
 on_error() {
   local exit_code=$?
   local line_no=$1
@@ -341,9 +392,10 @@ check_alb_scheme_guard() {
   # already covers.
   if [ "$ENTRY" = "private" ] || [ "$ENTRY" = "both" ]; then expected_scheme="internal"; else expected_scheme="internet-facing"; fi
   local actual_scheme
-  actual_scheme=$(aws elbv2 describe-load-balancers \
+  actual_scheme=$(aws_lookup_or_empty "looking up the live ALB named '$ALB_STACK'" \
+    aws elbv2 describe-load-balancers \
     --names "$ALB_STACK" --region "$REGION" \
-    --query 'LoadBalancers[0].Scheme' --output text 2>/dev/null)
+    --query 'LoadBalancers[0].Scheme' --output text)
   if [ -z "$actual_scheme" ] || [ "$actual_scheme" = "None" ]; then
     # The ALB stack exists but the load balancer itself does not (yet, or
     # any more) — nothing to compare against.
@@ -361,6 +413,62 @@ check_alb_scheme_guard() {
   fi
 }
 check_alb_scheme_guard
+
+# Entry-mode switch guard, part 2 (round-1 implementation review, item 11 —
+# "refuse vpc<->private and private<->both explicitly"). `check_alb_scheme_guard`
+# above detects a switch by comparing the LIVE ALB's scheme against what
+# this run's ENTRY expects — which works for `public` <-> `private` (an
+# internet-facing ALB named "${PREFIX}-alb" vs. an internal one under the
+# SAME name), but misses `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc` entirely:
+# under that state NO alb is ever named "${PREFIX}-alb" at all (only the
+# internal, CDK-generated-name one exists — see lib/alb-stack.ts's
+# `needsPublicAlb`), so `check_alb_scheme_guard` finds nothing to compare
+# against and allows the switch through. A `cloudfront`/`vpc` deployment
+# switched straight to `private` (or vice versa) would still replace
+# NetworkStack's security groups and AlbStack's listeners out from under a
+# live deployment exactly as unsafely as the `public` <-> `private` case
+# that guard already catches — it just cannot SEE it happening.
+#
+# This guard uses a signal that does not depend on any ALB's name at all:
+# whether FrontendStack and PrivateLinkStack exist, which is a pure
+# function of which ENTRY value the LAST successful deploy used —
+# `cloudfront` (any cloudfrontOrigin): FrontendStack yes, PrivateLinkStack
+# no. `private`: FrontendStack no, PrivateLinkStack yes. `both`: both yes.
+# Three ENTRY values, three distinct (yes,no) pairs — every switch between
+# any two of them changes at least one side of the pair, so this check
+# alone covers the whole matrix, including the `vpc` <-> `private` and
+# `private` <-> `both` gaps `check_alb_scheme_guard` cannot see.
+#
+# Runs even under --dry-run, same reasoning as `check_alb_scheme_guard`.
+check_entry_mode_stack_guard() {
+  local frontend_exists="false" private_link_exists="false"
+  if stack_exists "$FRONTEND_STACK"; then frontend_exists="true"; fi
+  if stack_exists "$PRIVATE_LINK_STACK"; then private_link_exists="true"; fi
+  if [ "$frontend_exists" = "false" ] && [ "$private_link_exists" = "false" ]; then
+    # Neither stack has ever deployed — a fresh prefix, nothing to compare
+    # this run's ENTRY against.
+    return 0
+  fi
+  local deployed_entry=""
+  if [ "$frontend_exists" = "true" ] && [ "$private_link_exists" = "false" ]; then
+    deployed_entry="cloudfront"
+  elif [ "$frontend_exists" = "false" ] && [ "$private_link_exists" = "true" ]; then
+    deployed_entry="private"
+  elif [ "$frontend_exists" = "true" ] && [ "$private_link_exists" = "true" ]; then
+    deployed_entry="both"
+  fi
+  if [ -n "$deployed_entry" ] && [ "$deployed_entry" != "$ENTRY" ]; then
+    local msg="STRATOCLAVE_ENTRY=$ENTRY was requested, but this prefix's last successful deploy used STRATOCLAVE_ENTRY=$deployed_entry (FrontendStack exists: $frontend_exists, PrivateLinkStack exists: $private_link_exists). Switching entry mode on an existing deployment is not supported for ANY pair of modes — cloudfront<->private, cloudfront<->both, AND private<->both all replace NetworkStack's security groups and AlbStack's listeners out from under a live deployment rather than failing cleanly. Deploy STRATOCLAVE_ENTRY=$ENTRY under a fresh STRATOCLAVE_PREFIX instead. See docs/DEPLOYMENT.md's entry-mode section."
+    if [ "$DRY_RUN" = true ]; then
+      log_warn "$msg"
+      log_warn "  (--dry-run does not stop here; the real invocation would refuse with exit 1.)"
+    else
+      log_error "$msg"
+      exit 1
+    fi
+  fi
+}
+check_entry_mode_stack_guard
 
 # cloudfrontOrigin migration guard. ENTRY=cloudfront's PUBLIC ALB is ALWAYS
 # named exactly "${PREFIX}-alb" when it exists (lib/alb-stack.ts's primary
@@ -397,15 +505,48 @@ check_cloudfront_origin_migration_guard() {
     return 0
   fi
   local live_public_scheme
-  live_public_scheme=$(aws elbv2 describe-load-balancers \
+  live_public_scheme=$(aws_lookup_or_empty "looking up the live public ALB named '${PREFIX}-alb'" \
+    aws elbv2 describe-load-balancers \
     --names "${PREFIX}-alb" --region "$REGION" \
-    --query 'LoadBalancers[0].Scheme' --output text 2>/dev/null)
+    --query 'LoadBalancers[0].Scheme' --output text)
   local live_internal_dns live_internal_alb_present
   live_internal_dns=$(get_stack_output "$ALB_STACK" "InternalAlbDnsName")
   if [ -n "$live_internal_dns" ]; then live_internal_alb_present="true"; else live_internal_alb_present="false"; fi
 
+  # The two facts `cfo_migration_decision` needs beyond "did vpc-expand/
+  # vpc-switch ever run at all" (round-1 implementation review, Fable
+  # should-fix 2 / Sol's matching should-fix: presence of the internal ALB
+  # alone let a forgotten env var skip straight from vpc-expand to vpc).
+  # Both read the LIVE CloudFront distribution, not CDK's synthesized idea
+  # of it, so a switch that is still mid-propagation or a contraction that
+  # has not actually deployed cannot be mistaken for one that has.
+  local live_switch_deployed="false" live_public_origin_declared="false"
+  if [ "$live_internal_alb_present" = "true" ] && stack_exists "$FRONTEND_STACK"; then
+    local dist_id
+    dist_id=$(get_stack_output "$FRONTEND_STACK" "CloudFrontDistributionId")
+    if [ -n "$dist_id" ]; then
+      local dist_status target_origin_id
+      dist_status=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' status" \
+        aws cloudfront get-distribution --id "$dist_id" \
+        --query 'Distribution.Status' --output text)
+      target_origin_id=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' behaviours" \
+        aws cloudfront get-distribution-config --id "$dist_id" \
+        --query 'DistributionConfig.CacheBehaviors.Items[0].TargetOriginId' --output text)
+      if [ "$dist_status" = "Deployed" ] && [ "$target_origin_id" = "ALBVpcOrigin" ]; then
+        live_switch_deployed="true"
+      fi
+      local public_origin_count
+      public_origin_count=$(aws_lookup_or_empty "looking up CloudFront distribution '$dist_id' origins" \
+        aws cloudfront get-distribution-config --id "$dist_id" \
+        --query "length(DistributionConfig.Origins.Items[?Id=='ALBOrigin'])" --output text)
+      if [ "$public_origin_count" != "0" ] && [ -n "$public_origin_count" ]; then
+        live_public_origin_declared="true"
+      fi
+    fi
+  fi
+
   local msg
-  if msg="$(cfo_migration_decision "$CLOUDFRONT_ORIGIN" "$live_public_scheme" "$live_internal_alb_present")"; then
+  if msg="$(cfo_migration_decision "$CLOUDFRONT_ORIGIN" "$live_public_scheme" "$live_internal_alb_present" "$live_switch_deployed" "$live_public_origin_declared")"; then
     return 0
   fi
   if [ "$DRY_RUN" = true ]; then
@@ -431,47 +572,76 @@ check_cloudfront_origin_migration_guard
 # one than an operator assumed.
 #
 # Skipped entirely for STRATOCLAVE_CLOUDFRONT_ORIGIN=public (no VPC origin
-# built at all in that mode) and under --dry-run (no AWS mutation is about
-# to happen, and `cdk synth`'s own account/region resolution is what this
-# check needs real credentials for anyway).
+# built at all in that mode). Round-1 implementation review (both reviews'
+# matching should-fix): this check used to be skipped under --dry-run too
+# ("no AWS mutation is about to happen") — but it is READ-ONLY, so a
+# `--dry-run` plan telling an operator a run is safe while silently having
+# skipped the one check that would have refused it is worse than running
+# it; it now runs unconditionally. It also used to WARN and continue (fail
+# OPEN) on a lookup error or on finding zero subnets — fixed to fail CLOSED
+# (refuse the deploy) on either, below.
 check_vpc_origin_az_support() {
   if [ "$CLOUDFRONT_ORIGIN" = "public" ]; then
     return 0
   fi
-  if [ "$DRY_RUN" = true ]; then
-    log_warn "AZ pre-flight for VPC origins skipped under --dry-run; the real invocation checks it."
-    return 0
-  fi
-  # The AZs the VPC actually picked. For an EXISTING deployment, read them
-  # off the live public subnets (the VPC's AZ choice does not change once
-  # the VPC exists — see lib/network-stack.ts's doc on why appending the
-  # PrivateIsolated group cannot move them). For a FRESH deployment there
-  # is no VPC yet to query; this check then runs again, for real, on the
-  # NEXT invocation after the VPC exists — a VPC origin create failure in
-  # an unsupported AZ on a first deploy is loud and CloudFormation rolls
-  # back cleanly, which is an acceptable (if less friendly) fallback for
-  # the one case this pre-flight cannot see ahead of time.
   local vpc_id
-  vpc_id=$(aws ssm get-parameter --name "/${PREFIX}/network/vpc-id" \
-    --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null)
+  vpc_id=$(aws_lookup_or_empty "looking up the existing VPC for prefix '$PREFIX'" \
+    aws ssm get-parameter --name "/${PREFIX}/network/vpc-id" \
+    --region "$REGION" --query 'Parameter.Value' --output text)
+  local az_ids=""
   if [ -z "$vpc_id" ] || [ "$vpc_id" = "None" ]; then
-    log_info "No existing VPC found for prefix '$PREFIX' (first deploy) — AZ pre-flight will run again on the next invocation, once subnets exist."
-    return 0
+    # FRESH deployment: no VPC exists yet, so there is no live subnet to
+    # read an AZ ID off of — but there is still something to check, because
+    # an operator CAN still choose AZs before the first deploy (pinning
+    # them in committed CDK context), which is the one case a post-hoc
+    # check cannot undo. Replicate CDK's own default AZ selection for a
+    # `cdk.json` with no pinned `availability-zones:...` context key and no
+    # explicit `maxAzs` override: the CDK AZ context provider queries
+    # EC2 DescribeAvailabilityZones for the account/region, sorts the
+    # results by zone NAME, and `ec2.Vpc`'s own default `maxAzs: 2`
+    # (lib/network-stack.ts) takes the first two of that sorted list.
+    log_info "No existing VPC found for prefix '$PREFIX' (first deploy) — resolving the AZs a fresh 'cdk deploy' would pick by replicating CDK's own default AZ selection (first 2, sorted by zone name)."
+    az_ids=$(aws_lookup_or_empty "resolving this account/region's Availability Zones for a fresh deploy" \
+      aws ec2 describe-availability-zones --region "$REGION" \
+      --filters 'Name=zone-type,Values=availability-zone' \
+      --query 'sort_by(AvailabilityZones, &ZoneName)[:2].ZoneId' --output text)
+  else
+    # EXISTING deployment: read the AZ IDs off the PRIVATE_ISOLATED subnets
+    # directly when they exist (round-1 implementation review: the previous
+    # version checked the PUBLIC subnets' zone NAMES as a proxy for "the
+    # internal ALB's own subnets", rather than the isolated subnets the
+    # internal ALB actually lives in). `AvailabilityZoneId` is returned
+    # directly by `describe-subnets` — no second describe-availability-zones
+    # round trip needed to turn a zone NAME into an ID the way the old
+    # per-public-subnet loop required. Falls back to the public subnets'
+    # AZs only when no isolated subnets exist yet (this deployment has
+    # never run a non-'public' cloudfrontOrigin before) — the VPC's AZ
+    # choice is the same regardless of which subnet group is queried, once
+    # the VPC itself exists (see lib/network-stack.ts's doc on why
+    # appending the PrivateIsolated group cannot move the VPC's own AZs).
+    az_ids=$(aws_lookup_or_empty "looking up this VPC's PrivateIsolated subnet AZs" \
+      aws ec2 describe-subnets --region "$REGION" \
+      --filters "Name=vpc-id,Values=$vpc_id" "Name=tag:aws-cdk:subnet-type,Values=Isolated" \
+      --query 'Subnets[].AvailabilityZoneId' --output text)
+    if [ -z "$az_ids" ]; then
+      az_ids=$(aws_lookup_or_empty "looking up this VPC's Public subnet AZs" \
+        aws ec2 describe-subnets --region "$REGION" \
+        --filters "Name=vpc-id,Values=$vpc_id" "Name=tag:aws-cdk:subnet-type,Values=Public" \
+        --query 'Subnets[].AvailabilityZoneId' --output text)
+    fi
   fi
-  local az_names
-  az_names=$(aws ec2 describe-subnets --region "$REGION" \
-    --filters "Name=vpc-id,Values=$vpc_id" "Name=tag:aws-cdk:subnet-type,Values=Public" \
-    --query 'Subnets[].AvailabilityZone' --output text 2>/dev/null)
-  if [ -z "$az_names" ]; then
-    log_warn "Could not resolve this VPC's Availability Zones (describe-subnets returned none); skipping the VPC-origin AZ check. Verify manually: aws ec2 describe-availability-zones --region $REGION"
-    return 0
+  if [ -z "$az_ids" ]; then
+    # Fail CLOSED, not open: a previous version warned and continued here,
+    # which is indistinguishable from "checked and found nothing wrong" to
+    # an operator reading the log — round-1 implementation review (both
+    # reviews' matching should-fix).
+    log_error "Could not resolve any Availability Zone for this deployment's VPC (prefix '$PREFIX', region $REGION) — refusing rather than silently skipping the VPC-origin AZ check. Verify manually before retrying: aws ec2 describe-subnets --region $REGION --filters Name=vpc-id,Values=$vpc_id"
+    exit 1
   fi
-  local az_id az_zone_name unsupported_found=false
-  for az_zone_name in $az_names; do
-    az_id=$(aws ec2 describe-availability-zones --region "$REGION" \
-      --zone-names "$az_zone_name" --query 'AvailabilityZones[0].ZoneId' --output text 2>/dev/null)
+  local az_id unsupported_found=false
+  for az_id in $az_ids; do
     if cfo_az_unsupported "$az_id"; then
-      log_error "This deployment's VPC uses $az_zone_name, Availability Zone ID $az_id — CloudFront VPC origins are unsupported there."
+      log_error "This deployment's VPC uses Availability Zone ID $az_id — CloudFront VPC origins are unsupported there."
       unsupported_found=true
     fi
   done

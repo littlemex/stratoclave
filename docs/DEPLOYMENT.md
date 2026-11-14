@@ -742,12 +742,21 @@ internet regardless (the Cognito user pool) and what else is not provided on
 this path.
 
 `STRATOCLAVE_ENTRY` is read once at synth and decides which stacks get built;
-switching an existing deployment between `cloudfront` and `private` is not
-supported — `iac/scripts/deploy-all.sh` refuses it outright at its
-pre-flight check, because the ALB would change from internet-facing to
-internal in place, which CloudFormation does by replacing the load balancer
-and would take a live deployment down rather than failing cleanly. Deploy
-`private` under a fresh `STRATOCLAVE_PREFIX`.
+switching an existing deployment between ANY two of `cloudfront`, `private`,
+and `both` is not supported — `iac/scripts/deploy-all.sh` refuses every
+pairing outright at its pre-flight check, because each switch replaces
+NetworkStack's security groups and AlbStack's listeners out from under a
+live deployment rather than failing cleanly. Two checks enforce this
+together: `check_alb_scheme_guard` compares the live ALB's scheme (an
+internet-facing ALB would change to internal in place, which CloudFormation
+does by replacing the load balancer) against what this run's `STRATOCLAVE_ENTRY`
+expects, and `check_entry_mode_stack_guard` compares whether FrontendStack
+and PrivateLinkStack exist against the same thing — needed because
+`STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc` builds no ALB under the name the first
+check looks for at all, so `cloudfront`/`vpc` <-> `private` and
+`private` <-> `both` would otherwise slip through undetected (round-1
+implementation review). Deploy the other mode under a fresh
+`STRATOCLAVE_PREFIX` instead.
 
 `iac/scripts/deploy-all.sh` supports both entry modes: with
 `STRATOCLAVE_ENTRY=private` set, it deploys the same stacks `cdk deploy --all`
