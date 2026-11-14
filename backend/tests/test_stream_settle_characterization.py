@@ -205,7 +205,7 @@ def test_settle_runs_exactly_once_on_disconnect_at_any_yield(
         model_id="us.anthropic.claude-opus-4-7",
         hold=_hold(user, ctx, reservation, counting_settle,
                    release=lambda c: release_pool(c)),
-        invoke_stream=lambda *, body, model_id: fake.converse_stream(),
+        invoke_stream=lambda *, body, model_id, request_metadata: fake.converse_stream(),
         adapter=_TestAdapter(),
     )
     asyncio.run(_drive(gen, stop_after=stop_after))
@@ -248,7 +248,7 @@ def test_a_disconnect_before_the_usage_event_is_retained_by_default(
         model_id="us.anthropic.claude-opus-4-7",
         hold=_hold(user, ctx, reservation, counting_settle,
                    release=lambda c: release_pool(c)),
-        invoke_stream=lambda *, body, model_id: fake.converse_stream(),
+        invoke_stream=lambda *, body, model_id, request_metadata: fake.converse_stream(),
         adapter=_TestAdapter(),
     )
     asyncio.run(_drive(gen, stop_after=stop_after))
@@ -279,7 +279,7 @@ def test_a_disconnect_before_the_provider_call_returns_the_reservation(
         model_id="us.anthropic.claude-opus-4-7",
         hold=_hold(user, ctx, reservation, counting_settle,
                    release=lambda c: release_pool(c)),
-        invoke_stream=lambda *, body, model_id: fake.converse_stream(),
+        invoke_stream=lambda *, body, model_id, request_metadata: fake.converse_stream(),
         adapter=_TestAdapter(),
     )
     asyncio.run(_drive(gen, stop_after=1))
@@ -310,7 +310,7 @@ def test_invoke_time_failure_releases_pool_and_does_not_settle(
         "ConverseStream",
     )
 
-    def raising_invoke(*, body, model_id):
+    def raising_invoke(*, body, model_id, request_metadata):
         raise err
 
     gen = _budget_flow.run_stream(
@@ -356,7 +356,7 @@ def test_mid_stream_failure_settles_once_and_does_not_release(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
         hold=_hold(user, ctx, reservation, counting_settle, release=counting_release),
-        invoke_stream=lambda *, body, model_id: {"stream": _RaisingMidStream()},
+        invoke_stream=lambda *, body, model_id, request_metadata: {"stream": _RaisingMidStream()},
         adapter=_TestAdapter(),
     )
     chunks = asyncio.run(_drive(gen))
@@ -389,7 +389,7 @@ def test_a_mid_stream_break_with_nothing_observed_is_retained_by_default(
         body=_make_body(),
         model_id="us.anthropic.claude-opus-4-7",
         hold=_hold(user, ctx, reservation, counting_settle, release=counting_release),
-        invoke_stream=lambda *, body, model_id: {"stream": _RaisingMidStream()},
+        invoke_stream=lambda *, body, model_id, request_metadata: {"stream": _RaisingMidStream()},
         adapter=_TestAdapter(),
     )
     chunks = asyncio.run(_drive(gen))

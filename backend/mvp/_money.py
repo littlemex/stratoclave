@@ -493,7 +493,8 @@ class Hold:
         so stamping it is a correctness requirement — see
         `provider_outcome.attempt_request_metadata`.
         """
-        return _outcome.attempt_request_metadata(self.hold_id, self.tenant_id)
+        return _outcome.attempt_request_metadata(
+            self.hold_id, self.tenant_id, getattr(self.user, "user_id", None))
 
     # ------------------------------------------------- claim, then write later
 

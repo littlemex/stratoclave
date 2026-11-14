@@ -77,35 +77,72 @@ logging configured in each.
 
 ## Attribution: what a logged record says about who sent it
 
-The gateway stamps a correlation marker on its provider calls, on both transports:
-`requestMetadata` on Converse, the OpenAI-standard `metadata` field on the
-OpenAI-compatible surface (#247). Bedrock echoes it into the invocation log.
+The gateway stamps a correlation marker on each provider call, streaming or not, on
+each transport (C13.6). Bedrock echoes it into the invocation log.
 
 | Marker key | What it is | When it is absent |
 |---|---|---|
-| `sc_tenant` | the tenant id | in the case below where the whole marker is dropped |
-| `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold |
+| `sc_tenant` | the tenant id | when the value does not pass the value rule below; in the case below where the whole marker is dropped |
+| `sc_user` | the principal's `user_id`, the id the console and the usage records use | when the principal has no user id; when the value does not pass the value rule; first, when the OpenAI-compatible key limit below leaves no room for it |
+| `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold; in the case below where the whole marker is dropped |
 
-On the OpenAI-compatible surface, a caller whose own `metadata` already uses 15 or
-more of the 16 keys Bedrock accepts gets the request sent without the gateway's
-marker entirely rather than refused; that record carries neither key.
+**The value rule.** Bedrock refuses the whole call when a `requestMetadata` value has
+a character outside letters, digits, whitespace and `:_@$#=/+,-.`. So each value is
+checked before it is sent, against that set with whitespace narrowed to an inner
+space, at most 256 characters, and a value that does not pass is left out, never
+altered. The call goes out with the other parts. An admin-chosen tenant id such as
+`team|a` therefore reaches the log without `sc_tenant`, and the call still succeeds.
 
-**The marker carries no user identifier, and neither does the rest of the record.**
-The record's `identity` field names the gateway's task role, which is the same whichever
-user sent the request, and the gateway sends no user identifier to the provider.
+| Transport | Where the marker goes |
+|---|---|
+| Bedrock Converse (`/v1/messages`, and `/v1/chat/completions` for Bedrock-native models), streaming or not | `requestMetadata` |
+| The OpenAI-compatible surface on `bedrock-runtime` | the OpenAI-standard `metadata` field (#247) |
+| A self-hosted endpoint | HTTP request headers, see [Self-hosted endpoints](#self-hosted-endpoints) |
 
-Nor does the record share a key with a durable gateway record that names a user. The
-attempt id is not stored on the usage row or in the credit ledger, and the hold row
-that pairs it with a user is deleted when the request settles (no log line was found
-that writes the two together; that was a search, not a checked property). So the
-record is attributable to a tenant by key (except when the marker was dropped, above)
-and not to a user by key.
+On the OpenAI-compatible surface, Bedrock accepts 16 `metadata` keys. When a caller's
+own keys leave no room for the full marker, `sc_user` is left out first, and the attempt
+and tenant pair is still sent (14 of the caller's keys). A caller with 15 or more keys
+gets the request sent without the gateway's marker entirely rather than refused; that
+record carries none of the keys.
 
-That is not the same as anonymous. A usage row carries the tenant, the time, the model
-and the token counts, and so does the log record; matching on those will often single
-out one usage row, and with it one user, for the 90 days the row exists. Do not treat
-invocation logs as de-identified per user. Recording the attempt id on the usage row
-would make the join exact rather than inferred; that is not built.
+So a logged record is attributable to a tenant and a user by key when the key is
+present, and `sc_user` joins it to the usage records and the console's user list directly. The marker is
+values the gateway already holds; it carries no email and nothing from the request's
+content.
+
+**What this means for whoever can read the logs.** With logging on, anyone who can
+read the destination can see, per user id, which model was called when and with how
+many tokens, and with text delivery on, what was sent. Grant read access to the
+destination as you would to per-user usage data.
+
+## Self-hosted endpoints
+
+A model registered as served by a self-hosted endpoint (`served_by` `vllm`, behind
+`HYBRID_SERVING_ENABLED`) gets the same marker, as HTTP request headers on every
+inference call:
+
+| Header | Value |
+|---|---|
+| `X-Stratoclave-Tenant` | `sc_tenant` |
+| `X-Stratoclave-User` | `sc_user` |
+| `X-Stratoclave-Attempt-Id` | `sc_attempt_id` |
+
+The responsibilities split at the wire:
+
+- **The gateway** sends the headers on each inference call, with the same values and
+  the same absence rules as the Bedrock marker (the value rule above also keeps every
+  value a valid header value), and never puts them in the request body, so the
+  endpoint's model never sees them and they cost no tokens. The gateway stores nothing
+  about the call beyond what it stores for a Bedrock call, and reads nothing back from
+  the endpoint's logs.
+- **The endpoint's operator** decides what to keep. A reverse proxy in front of the
+  model server that writes these three headers into its access log, together with the
+  token counts or the response status, gives the same per-tenant and per-user record
+  Bedrock's invocation log gives. Whether the bodies are kept there is equally the
+  operator's choice.
+
+The semantic-router transport (`served_by` `semantic-router`) is not wired to a real
+endpoint yet; when it is, it sends the same headers (C13.6).
 
 ## "We need prompt history"
 
@@ -117,6 +154,6 @@ property this document states. The capability already exists one layer down:
    each tenant served from that account and region, not of one tenant.
 2. Choose the destination's retention, encryption and read permissions as you would
    for any store of customer content.
-3. Use `sc_tenant` to split the records by tenant. There is no per-user key in these
-   records today, though a user can often be inferred (see the previous section).
+3. Use `sc_tenant` and `sc_user` to split the records by tenant and by user (see
+   [Attribution](#attribution-what-a-logged-record-says-about-who-sent-it)).
 

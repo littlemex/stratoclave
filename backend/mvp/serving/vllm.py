@@ -70,6 +70,8 @@ import httpx
 
 from core.logging import get_logger
 
+from ..provider_outcome import marker_headers
+
 logger = get_logger(__name__)
 
 
@@ -380,9 +382,12 @@ def vllm_invoke(target, payload: dict) -> dict:
     # Open the stream synchronously. httpx.Client.stream is a context manager;
     # we must keep it open across the generator's lifetime, so drive it manually.
     try:
+        # The correlation marker travels as headers, not in the body (C13.6): the
+        # endpoint's model never sees it, and recording it is the endpoint's job.
         cm = client.stream(
             "POST", "/v1/chat/completions", json=body,
-            headers={"Accept": "text/event-stream", "Accept-Encoding": "identity"},
+            headers={"Accept": "text/event-stream", "Accept-Encoding": "identity",
+                     **marker_headers(payload.get("requestMetadata"))},
         )
         resp = cm.__enter__()
     except httpx.ConnectError as e:
