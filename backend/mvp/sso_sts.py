@@ -11,7 +11,7 @@ Security policy (design doc §7.4):
 """
 from __future__ import annotations
 
-import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -22,8 +22,20 @@ from urllib.parse import urlparse, parse_qs
 import httpx
 from fastapi import HTTPException
 
+from core.logging import get_logger
 
-_log = logging.getLogger(__name__)
+# `get_logger` (structlog's stdlib-wrapping `BoundLogger`), never a bare
+# `logging.getLogger`: a plain stdlib logger's `.info(msg, extra={...})` call
+# puts the `extra` dict on the `LogRecord` object, but `setup_logging`'s
+# production handler formats records with `"%(message)s"`, which never reads
+# it -- so every field the runbook below tells an operator to watch
+# (`audience_bound`, `presented_host`, `reason`) would be silently absent
+# from the actual JSON line shipped to CloudWatch, while the call site still
+# looked correct. `get_logger(...).info(event, **fields)` renders through
+# structlog's own JSON processor instead, which is the path every other
+# module here uses and the one the runbook's Logs Insights queries actually
+# parse.
+_log = get_logger(__name__)
 
 _ALLOWED_STS_HOSTS = {
     "sts.amazonaws.com",
@@ -36,6 +48,20 @@ _ALLOWED_STS_HOSTS = {
     "sts.ap-northeast-1.amazonaws.com",
     "sts.ap-southeast-1.amazonaws.com",
     "sts.ap-southeast-2.amazonaws.com",
+}
+
+#: Query-string parameter names (case-insensitive) that mean the request is
+#: signed via SigV4's query-string form rather than the `Authorization`
+#: header. `_validate_inputs` refuses any of these outright -- see its own
+#: comment for why letting one through would make `_check_audience`'s
+#: "was this header covered by the signature" claim unverifiable.
+_QUERY_SIGV4_PARAMETERS = {
+    "x-amz-algorithm",
+    "x-amz-credential",
+    "x-amz-date",
+    "x-amz-signedheaders",
+    "x-amz-signature",
+    "x-amz-security-token",
 }
 
 _STS_ACTION = "GetCallerIdentity"
@@ -89,6 +115,7 @@ def verify_and_call_sts(
     client (which would force us to re-sign and lose the pass-through).
     """
     _validate_inputs(method, url, headers, body)
+    audience_bound = _check_audience(headers)
 
     # Replay guard (P3-1, sweep-4 C-Critical-B2 fail-closed restored).
     #
@@ -129,7 +156,7 @@ def verify_and_call_sts(
         # table / IAM / throttling problem.
         _log.error(
             "sso_nonce_store_unavailable_fail_closed",
-            extra={"error": str(e), "error_type": type(e).__name__},
+            error=str(e), error_type=type(e).__name__,
         )
         raise HTTPException(
             status_code=401,
@@ -164,10 +191,15 @@ def verify_and_call_sts(
 
     # Parse the XML response.
     try:
-        return _parse_sts_response(resp.text)
+        identity = _parse_sts_response(resp.text)
     except (ET.ParseError, KeyError) as e:
-        _log.error("sts_response_parse_failed", extra={"error": str(e)})
+        _log.error("sts_response_parse_failed", error=str(e))
         raise HTTPException(status_code=502, detail="Malformed STS response")
+    # After STS has verified the caller, so junk cannot inflate it: the share of
+    # unbound exchanges is how an operator knows every CLI is upgraded before
+    # turning STRATOCLAVE_STS_AUDIENCE_REQUIRED on (docs/DEPLOYMENT.md).
+    _log.info("sso_sts_exchange_verified", arn=identity.arn, audience_bound=audience_bound)
+    return identity
 
 
 def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str = "") -> None:
@@ -181,6 +213,27 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str =
         raise HTTPException(
             status_code=400,
             detail=f"STS host not allowed: {parsed.hostname}",
+        )
+
+    # Refuse a query-string SigV4 (presigned-URL signing). `_check_audience`
+    # below trusts the `Authorization` header's `SignedHeaders` list to say
+    # whether `AUDIENCE_HEADER` was covered by the signature STS verified --
+    # true only when STS verified THAT header. A request can carry a valid
+    # query-string signature (which STS also accepts) alongside a fabricated,
+    # unsigned `Authorization` header that merely claims the audience header
+    # was signed; nothing here would call STS wrong, but `_check_audience`
+    # would believe a claim STS never checked. Refusing any of SigV4's query
+    # parameters outright removes the ambiguity rather than trying to prefer
+    # one signature over the other.
+    query_params = {k.lower() for k in parse_qs(parsed.query, keep_blank_values=True)}
+    forbidden = query_params & _QUERY_SIGV4_PARAMETERS
+    if forbidden:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "STS request must not sign via the query string "
+                f"(found {sorted(forbidden)}); use header-based SigV4"
+            ),
         )
 
     # Validate Action=GetCallerIdentity. The action can be in the query string or,
@@ -227,6 +280,164 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str =
         raise HTTPException(
             status_code=400, detail="Authorization header (sigv4) is required"
         )
+
+    # A syntactically well-formed SigV4 header whose Credential names no
+    # access key id at all (`Credential=/20261114/us-east-1/sts/aws4_request`)
+    # is not a credential; refuse it here rather than forward it to STS or
+    # let `access_key_id_of` return None and have a caller skip it quietly.
+    # A header that is malformed in some OTHER way falls through this check
+    # (`credential` stays None) and is caught later by `_check_audience`'s own
+    # `_sigv4_parameters` call, which raises the general "malformed" 400.
+    try:
+        credential = _sigv4_parameters(lowered["authorization"])["Credential"]
+    except HTTPException:
+        credential = None
+    if credential is not None and not credential.split("/", 1)[0]:
+        raise HTTPException(
+            status_code=400, detail="Authorization Credential has no access key id"
+        )
+
+
+#: The header that binds a signed GetCallerIdentity to THIS gateway: the host of
+#: the gateway URL the CLI is configured to send the exchange to -- the same
+#: value used for the audience and for the POST target (`cli/src/mvp/sso.rs`'s
+#: `login`), so a request signed for one gateway only ever names one host.
+#: The CLI puts it in the request before signing, so it is covered by the
+#: signature and STS refuses any change to it; the gateway refuses a request
+#: naming a host that is not one of its own API URLs.
+#:
+#: What it protects against, once `STRATOCLAVE_STS_AUDIENCE_REQUIRED` is on: a
+#: GetCallerIdentity a user signed for another service using the same pattern
+#: (HashiCorp Vault's AWS auth is the well-known one) or for a look-alike gateway
+#: being replayed here inside the 5 minute window. Until it is on, a request
+#: without the header is still accepted, so CLIs that predate it keep working.
+AUDIENCE_HEADER = "x-stratoclave-audience"
+
+
+def expected_audiences() -> frozenset[str]:
+    """This gateway's own hosts: the host of `STRATOCLAVE_API_ENDPOINT`, plus any
+    hosts in `STRATOCLAVE_STS_AUDIENCES` (comma-separated URLs, for a deployment
+    reached under more than one name), normalised as `core.deployment.host_of`."""
+    from core.deployment import api_endpoint, host_of
+
+    urls = [api_endpoint() or ""] + os.getenv("STRATOCLAVE_STS_AUDIENCES", "").split(",")
+    return frozenset(h for h in (host_of(u) for u in urls if u.strip()) if h)
+
+
+def audience_required() -> bool:
+    """Whether a signed request with no `AUDIENCE_HEADER` is refused.
+
+    Read with `strict_flag` rather than `flag`: this setting gates a security
+    control, so a typo in it (`enabled`, `y`, `required`) must fail startup
+    rather than silently read as off and ship the gate open.
+    """
+    from core.deployment import strict_flag
+
+    return strict_flag("STRATOCLAVE_STS_AUDIENCE_REQUIRED")
+
+
+def validate_audience_config() -> None:
+    """Startup check: every `STRATOCLAVE_STS_AUDIENCES` entry must name a host, and
+    with the requirement on, the gateway must have at least one host to compare
+    with, or every sign-in would be refused."""
+    from core.deployment import host_of
+
+    bad = [u for u in os.getenv("STRATOCLAVE_STS_AUDIENCES", "").split(",")
+           if u.strip() and host_of(u) is None]
+    if bad:
+        raise RuntimeError(f"STRATOCLAVE_STS_AUDIENCES has entries that are not http(s) URLs: {bad}")
+    if audience_required() and not expected_audiences():
+        raise RuntimeError("STRATOCLAVE_STS_AUDIENCE_REQUIRED is on but no API URL is configured, "
+                           "so no signed request could name this gateway")
+
+
+def _sigv4_parameters(authorization: str) -> dict[str, str]:
+    """The SigV4 Authorization parameters, parsed strictly: exactly one each of
+    Credential, SignedHeaders and Signature after the algorithm, nothing else, so
+    the gateway reads the same SignedHeaders STS verifies."""
+    scheme, _, rest = authorization.strip().partition(" ")
+    if scheme != "AWS4-HMAC-SHA256":
+        raise HTTPException(status_code=400, detail="malformed SigV4 Authorization header: scheme")
+    params: dict[str, str] = {}
+    for part in rest.split(","):
+        key, sep, value = part.strip().partition("=")
+        if not sep or key in params or key not in {"Credential", "SignedHeaders", "Signature"}:
+            raise HTTPException(status_code=400, detail="malformed SigV4 Authorization header")
+        params[key] = value
+    if set(params) != {"Credential", "SignedHeaders", "Signature"}:
+        raise HTTPException(status_code=400, detail="malformed SigV4 Authorization header")
+    return params
+
+
+def access_key_id_of(headers: dict[str, str]) -> Optional[str]:
+    """The access key id a signed `GetCallerIdentity` names: the first slash-
+    separated component of its `Authorization` header's `Credential=` scope
+    string (`<access-key-id>/<date>/<region>/<service>/aws4_request`), parsed
+    with the same strict `_sigv4_parameters` this module uses to decide
+    whether `AUDIENCE_HEADER` was signed -- so a request this gateway would
+    refuse as malformed is not read as naming an access key id here either.
+
+    Not used to rate-limit `/sso-exchange` BEFORE STS verification: an
+    access key id read here is merely parsed out of an unverified header, not
+    evidence its holder made the request, so charging a bucket keyed on it
+    would let anyone who merely knows (not holds) a victim's access key id
+    spend that victim's quota with a forged, STS-will-reject header. `/sso-
+    exchange` charges `core.rate_limit.check_identity_rate_limit` only AFTER
+    `verify_and_call_sts` has proven the caller holds the credential, keyed on
+    the account STS actually verified rather than on this. None when the
+    header is missing or malformed.
+    """
+    lowered = {k.lower(): v for k, v in headers.items()}
+    try:
+        credential = _sigv4_parameters(lowered.get("authorization", ""))["Credential"]
+    except HTTPException:
+        return None
+    access_key_id = credential.split("/", 1)[0]
+    return access_key_id or None
+
+
+def _check_audience(headers: dict[str, str]) -> bool:
+    """Refuse a signed request bound to a host that is not this gateway's; return
+    whether the request was bound at all.
+
+    Every refusal is logged as a WARNING (`sso_sts_audience_refused`) naming the
+    host the request presented, if any, and the reason, before the exception
+    reaches the caller -- otherwise a host an operator forgot to list in
+    `STRATOCLAVE_STS_AUDIENCES` (see docs/DEPLOYMENT.md's runbook) produces a
+    401 the caller sees and nothing the operator can find in logs.
+    """
+    lowered = {k.lower(): v for k, v in headers.items()}
+    try:
+        return _check_audience_or_raise(lowered, headers)
+    except HTTPException as exc:
+        _log.warning(
+            "sso_sts_audience_refused",
+            presented_host=lowered.get(AUDIENCE_HEADER, ""),
+            reason=exc.detail,
+        )
+        raise
+
+
+def _check_audience_or_raise(lowered: dict[str, str], headers: dict[str, str]) -> bool:
+    if len(lowered) != len(headers):
+        raise HTTPException(status_code=400, detail="header names repeat with different case")
+    signed = set(_sigv4_parameters(lowered.get("authorization", ""))["SignedHeaders"].split(";"))
+    present = AUDIENCE_HEADER in lowered
+    if AUDIENCE_HEADER in signed and not present:
+        raise HTTPException(status_code=401, detail=f"{AUDIENCE_HEADER} is signed but missing")
+    if not present:
+        if audience_required():
+            raise HTTPException(status_code=401, detail=(
+                f"the signed request must carry {AUDIENCE_HEADER}; update the CLI"))
+        return False
+    if AUDIENCE_HEADER not in signed:
+        raise HTTPException(status_code=401, detail=f"{AUDIENCE_HEADER} must be a signed header")
+    expected = expected_audiences()
+    if not expected:
+        raise HTTPException(status_code=401, detail="this gateway has no API URL configured to compare with")
+    if lowered[AUDIENCE_HEADER].strip().lower() not in expected:
+        raise HTTPException(status_code=401, detail=f"the signed request names another host in {AUDIENCE_HEADER}")
+    return True
 
 
 def _signed_action(query: str, body: str) -> Optional[str]:

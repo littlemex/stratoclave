@@ -33,7 +33,12 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.rate_limit import SSO_EXCHANGE_RATE_LIMIT, limiter
+from core.rate_limit import (
+    SSO_EXCHANGE_RATE_LIMIT,
+    check_identity_rate_limit,
+    limiter,
+    sign_in_address,
+)
 
 from dynamo import (
     SsoPreRegistrationsRepository,
@@ -212,10 +217,26 @@ def _cognito_admin_password_auth(
 @router.post("/sso-exchange", response_model=SsoExchangeResponse)
 @limiter.limit(SSO_EXCHANGE_RATE_LIMIT)
 def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeResponse:
-    """P0-3: per-IP rate limit (default 20/minute). The STS presigned
-    verification itself is cheap but we forward it to the AWS STS API,
-    so an unbounded rate would let an attacker waste our rate budget
-    and run identity-enumeration against the allowlisted accounts."""
+    """Two independent limits (`core/rate_limit.py`): the decorator above is
+    this route's own per-address flood guard, at `SSO_EXCHANGE_RATE_LIMIT`
+    (default 20/minute) -- the STS presigned verification itself is cheap but
+    we forward it to the AWS STS API, so an unbounded rate would let an
+    attacker waste our rate budget and run identity-enumeration against the
+    allowlisted accounts.
+
+    There is deliberately NO identity-keyed charge before STS has verified
+    the request. An access key id parsed out of `body.headers`'
+    `Authorization` string at this point is an attacker-controlled string,
+    not proof of anything -- `Authorization` is the whole JSON body a caller
+    POSTs, unsigned-by-us and unverified-by-anyone until `verify_and_call_sts`
+    below actually calls STS. Charging a bucket keyed on it here would let
+    anyone who merely knows (not holds) a victim's access key id -- which is
+    not a secret, unlike the key itself -- spend that victim's quota by
+    fabricating a SigV4-shaped header STS will reject; the real control
+    against that is identical to any other forged signature: STS itself
+    refuses it. Only once `verify_and_call_sts` has returned successfully
+    (meaning STS verified the signature against real, held credentials) does
+    this charge the IDENTITY THAT WAS ACTUALLY VERIFIED, below."""
     _ = request
     # 1. Verify STS presigned request and extract identity.
     sts_identity = verify_and_call_sts(
@@ -223,6 +244,20 @@ def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeRespo
         url=body.url,
         headers=dict(body.headers),
         body=body.body,
+    )
+
+    # Charge the bucket for the identity STS just verified -- the account id
+    # plus the AWS-assigned, caller-cannot-choose prefix of the UserId
+    # (`principal_id`; falls back to the full ARN for the rare identity type
+    # that has none), not the RoleSessionName tail of the ARN, which whoever
+    # called AssumeRole picks and could rotate per request to evade a
+    # per-ARN bucket the same way an unverified access key id could.
+    check_identity_rate_limit(
+        "auth_sso_exchange_identity",
+        "sts",
+        f"{sts_identity.account_id}:{sts_identity.principal_id or sts_identity.arn}",
+        sign_in_address(request),
+        SSO_EXCHANGE_RATE_LIMIT,
     )
 
     # 2. Run the 4-gate validation.

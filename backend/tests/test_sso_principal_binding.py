@@ -220,7 +220,7 @@ def test_an_identity_center_role_still_resolves(sso_tables):
 
 def _headers():
     return {
-        "Authorization": "AWS4-HMAC-SHA256 Credential=AKIA/20260830/us-east-1/sts/aws4_request",
+        "Authorization": "AWS4-HMAC-SHA256 Credential=AKIA/20260830/us-east-1/sts/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc",
         "X-Amz-Date": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc
         ).strftime("%Y%m%dT%H%M%SZ"),

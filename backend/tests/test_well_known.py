@@ -7,7 +7,7 @@ These tests lock the contract so CLI consumers can rely on it:
   - required fields are present.
   - no field value leaks secrets (password / aws_secret_access_key /
     private keys etc.).
-  - Cache-Control header is set to public, max-age=300.
+  - Cache-Control is no-store: the document says where a CLI sends credentials.
   - Endpoint is reachable without Authorization.
 """
 from __future__ import annotations
@@ -79,8 +79,33 @@ def test_well_known_sets_cache_control(monkeypatch):
     client = _make_client(monkeypatch)
     resp = client.get("/.well-known/stratoclave-config")
     cc = resp.headers.get("cache-control", "").lower()
-    assert "public" in cc
-    assert "max-age=300" in cc
+    assert cc == "no-store"
+
+
+def test_outside_a_local_environment_the_endpoint_is_never_taken_from_request_headers(monkeypatch):
+    """Without STRATOCLAVE_API_ENDPOINT, a deployment refuses (503, as for any
+    missing setting) rather than hand a CLI a URL named by X-Forwarded-Host."""
+    client = _make_client(monkeypatch)
+    monkeypatch.delenv("STRATOCLAVE_API_ENDPOINT", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "staging")
+    resp = client.get("/.well-known/stratoclave-config",
+                      headers={"X-Forwarded-Host": "attacker.example", "X-Forwarded-Proto": "https"})
+    assert resp.status_code == 503
+    assert "STRATOCLAVE_API_ENDPOINT" in resp.text
+    assert "attacker.example" not in resp.text
+    # The 503 itself is never cached, same as the 200 it would have been --
+    # a shared cache serving a stale 503 to a different client is as wrong as
+    # serving a stale endpoint.
+    assert resp.headers.get("cache-control", "").lower() == "no-store"
+
+
+def test_in_a_local_environment_the_endpoint_may_come_from_request_headers(monkeypatch):
+    client = _make_client(monkeypatch)
+    monkeypatch.delenv("STRATOCLAVE_API_ENDPOINT", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    resp = client.get("/.well-known/stratoclave-config",
+                      headers={"X-Forwarded-Host": "gw.local", "X-Forwarded-Proto": "http"})
+    assert resp.status_code == 200 and resp.json()["api_endpoint"] == "http://gw.local"
 
 
 _SECRET_RE = re.compile(
@@ -125,3 +150,4 @@ def test_well_known_returns_503_when_misconfigured(monkeypatch):
     client = TestClient(app)
     resp = client.get("/.well-known/stratoclave-config")
     assert resp.status_code == 503
+    assert resp.headers.get("cache-control", "").lower() == "no-store"

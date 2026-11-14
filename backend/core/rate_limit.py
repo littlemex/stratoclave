@@ -54,10 +54,11 @@ deployment without Redis or any new infrastructure class — see
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 _log = logging.getLogger(__name__)
 
@@ -169,6 +170,40 @@ SSO_EXCHANGE_RATE_LIMIT = os.getenv("SSO_EXCHANGE_RATE_LIMIT", "20/minute")
 # the ~20-way concurrency the reserve CAS was tuned for.
 BILLING_WRITE_RATE_LIMIT = os.getenv("BILLING_WRITE_RATE_LIMIT", "60/minute")
 
+# Sign-in routes keep their OWN per-route address bucket (the `@limiter
+# .limit(LOGIN_RATE_LIMIT)`-style decorator, at the SAME numbers this module
+# always had: 10/minute login, 10/minute respond, 20/minute sso-exchange,
+# 20/minute ui-ticket/consume) rather than one shared, looser bucket.
+#
+# Pooling every sign-in route into ONE shared address-keyed scope at a much
+# higher ceiling (say, 300/minute, reasoning that normal shared egress -- a
+# NAT, or the private entry's single load-balancer address -- needs a
+# generous floor) would add nothing a per-route bucket at these numbers does
+# not already give for free: the sum of the four routes' own limits
+# (10 + 10 + 20 + 20 = 60/minute) is already well under such a ceiling, so a
+# shared bucket would never bind before a route's own did -- a strictly
+# looser outer guard with no observable effect, at the cost of a second
+# scope to reason about. Each route's own per-address decorator IS the
+# flood guard for that route.
+#
+# What is NOT per-route is identity-guessing protection: the tight,
+# credential-guessing limits (`LOGIN_RATE_LIMIT` etc.) are enforced by a
+# SEPARATE check keyed on BOTH the identity the request names AND the
+# client's own address (`identity_key`/`check_identity_rate_limit` below),
+# run explicitly inside each handler -- the identity lives in the request
+# BODY, which a `Request`-only decorator cannot read, and before body
+# validation the identity is not even attacker-controlled yet. Binding the
+# address into that key is the fix for a real attack: without it, an
+# attacker names a victim's email from as many addresses as they control, and
+# each address gets its OWN 10/minute budget against the SAME victim bucket
+# -- ten guesses, discard the address, repeat, and the victim is locked out
+# of their own account by requests that never came from anywhere the victim
+# would ever log in from. With the address in the key, every attacking
+# address only ever spends ITS OWN (victim, that address) bucket; the
+# victim's bucket for their OWN address is untouched. See docs/DEPLOYMENT.md's
+# rate-limit section for the full threat model, including what this does and
+# does not do on the private entry, where every client shares one address.
+
 
 # The limiter is DynamoDB-backed (fixed-window, TTL-reaped). Per-IP
 # counters are shared across every ECS task, so caps hold under
@@ -177,14 +212,133 @@ BILLING_WRITE_RATE_LIMIT = os.getenv("BILLING_WRITE_RATE_LIMIT", "60/minute")
 # verbatim; only the counter storage moved from in-process to DynamoDB.
 from core.rate_limit_ddb import DynamoRateLimiter  # noqa: E402
 
-limiter = DynamoRateLimiter(client_key_func=_client_key)
+def _request_key(request: Request) -> str:
+    """The rate-limit bucket: the verified user when the route authenticated one,
+    else the client address (`_client_key`).
+
+    Never a header value the caller presents: an unverified header would let a
+    caller pick a fresh bucket per request by sending a made-up key. The user id
+    is set on `request.state` by the authentication dependency
+    (`mvp.deps.get_current_user`), which FastAPI resolves before the limited
+    route runs, so it exists only after authentication has succeeded. Keyed on the user because an address is a poor
+    identity for an authenticated caller: users behind one NAT share it, and on
+    the private (PrivateLink) entry every request arrives from the load balancer.
+    Unauthenticated routes (sign-in) key on the address here too -- this IS
+    that route's own flood guard, at the numbers this module always used
+    (`LOGIN_RATE_LIMIT` etc., applied directly as the decorator's own scope).
+    Credential-guessing protection is the SEPARATE identity-plus-address check
+    each sign-in handler runs itself (`check_identity_rate_limit`), which this
+    address-only bucket does not replace: binding only the address here would
+    let an attacker trying many different identities from one address spend
+    only this one flood-guard budget while writing an unbounded number of
+    identity counters. A request that fails authentication never reaches the
+    limiter."""
+    principal = getattr(getattr(request, "state", None), "rate_principal", None)
+    if principal:
+        return f"user:{principal}"
+    return _client_key(request)
+
+
+limiter = DynamoRateLimiter(client_key_func=_request_key)
+
+
+#: A generous cap on the identity string a sign-in request may name, well
+#: above any real email (RFC 5321's own limit is 254 bytes) or access key id
+#: (20 characters), chosen so the cap itself never rejects a real identity --
+#: its only job is to stop an unbounded string from reaching DynamoDB at all.
+#: Without it, a caller could name an arbitrarily long "email", and whatever
+#: DynamoDB itself does with an oversize key item (a `ValidationException`,
+#: which this module's own documented failure policy reads as "misconfigured
+#: table" and fails CLOSED on -- see `rate_limit_ddb._check`) is a response an
+#: attacker chose, not one this module decided.
+MAX_IDENTITY_LENGTH = 320
+
+
+def sign_in_address(request: Request) -> str:
+    """The address an identity bucket is bound to, alongside the identity
+    itself (`identity_key`) -- the same address `_client_key` already
+    derives for the decorator's own flood-guard bucket, exposed here so a
+    sign-in handler can read it once and pass it to both."""
+    return _client_key(request)
+
+
+def identity_key(kind: str, raw: str, address: str) -> str:
+    """The rate-limit bucket for an identity a sign-in request NAMES ITSELF AS,
+    not one it merely presents in a free-form header -- the username/email a
+    `/login` or `/respond` body carries, or (post-verification only; see
+    `check_identity_rate_limit`) the account a `/sso-exchange` caller's
+    signature proved -- bound together with the CLIENT'S OWN ADDRESS.
+
+    The address half is load-bearing, not incidental: an identity-only bucket
+    is a lever an attacker who does not hold the credential can still pull --
+    name a victim's email from address after address, ten guesses each, and
+    the victim's own sign-in attempts share that same exhausted bucket no
+    matter which address they come from. Binding the address means every
+    attacking address only ever spends ITS OWN (identity, address) bucket;
+    the victim's bucket, keyed on the victim's OWN address, is never touched
+    by a request that never came from there.
+
+    `kind` separates login/respond's email namespace from sso-exchange's
+    account namespace so one could not collide with the other. The identity
+    half is lowercased and stripped (so `Alice@Example.com` and
+    `alice@example.com` share one bucket) then hashed with SHA-256 before it
+    becomes part of a DynamoDB key: the raw value would otherwise be
+    unbounded-length PII sitting in a rate-limit table whose only job is
+    counting. Empty or over `MAX_IDENTITY_LENGTH` raises 400 rather than
+    either silently skipping the check or handing DynamoDB a value an
+    attacker chose the shape of.
+    """
+    normalized = raw.strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail=f"{kind} identity must not be empty")
+    if len(normalized) > MAX_IDENTITY_LENGTH:
+        raise HTTPException(status_code=400, detail=f"{kind} identity is too long")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"identity:{kind}:{digest}:{address}"
+
+
+def check_identity_rate_limit(scope: str, kind: str, raw_identity: str, address: str, spec: str) -> None:
+    """Run one DynamoDB-backed rate check immediately, keyed on the identity a
+    sign-in request names TOGETHER WITH the caller's own address
+    (`identity_key`) rather than on the `Request` object the
+    `@limiter.limit(...)` decorator reads -- the identity lives in a body
+    field FastAPI has not finished parsing at decoration time, so this has to
+    run inside the handler, after `body` exists.
+
+    For `/login` and `/respond` this runs before any expensive work (the
+    Cognito call) because the identity is already fully determined from the
+    request body at that point and binding the address closes the
+    targeted-lockout gap regardless of ordering. For `/sso-exchange` the
+    identity is NOT available pre-verification at all -- an access key id
+    parsed out of an unverified `Authorization` header is not evidence its
+    holder is making the request -- so that route calls this only AFTER
+    `verify_and_call_sts` has proven control of the credential; see
+    `mvp/sso_exchange.py`.
+
+    Raises `RateLimitExceeded` (a 429, an `HTTPException` subclass -- see
+    `rate_limit_ddb.RateLimitExceeded`) exactly as the decorator does,
+    through the same `_check`/`_parse_spec` this module's own
+    `DynamoRateLimiter.limit` uses, so the two mechanisms share one failure
+    policy, one TTL-reaped table and one 429 shape; FastAPI converts it to a
+    429 response the same way it would from the decorator, because the
+    conversion happens at the ASGI/exception-handler layer around the whole
+    request, not inside the decorator's own wrapper.
+    """
+    from core.rate_limit_ddb import _check, _parse_spec
+
+    limit, window = _parse_spec(spec)
+    _check(scope, identity_key(kind, raw_identity, address), limit, window)
 
 
 __all__ = [
     "BILLING_WRITE_RATE_LIMIT",
     "LOGIN_RATE_LIMIT",
+    "MAX_IDENTITY_LENGTH",
     "RESPOND_RATE_LIMIT",
     "RateLimitExceeded",
     "SSO_EXCHANGE_RATE_LIMIT",
+    "check_identity_rate_limit",
+    "identity_key",
     "limiter",
+    "sign_in_address",
 ]

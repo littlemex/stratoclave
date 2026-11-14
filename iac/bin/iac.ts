@@ -211,6 +211,41 @@ const wafUnauthenticatedRateLimit = positiveIntFromEnv(
 const wafIpAllowlistEnabled =
   (process.env.WAF_IP_ALLOWLIST_ENABLED || 'false').toLowerCase() === 'true';
 
+// Sign-in binding and rate-limit settings, from CDK CONTEXT rather than
+// `process.env` -- deliberately unlike most knobs in this file. A shell
+// that runs `cdk deploy` without having exported a value must not blank out
+// a value a PREVIOUS deploy configured: reading these as `process.env.X ||
+// ''` would do exactly that on every redeploy from a shell that forgot
+// to re-export it, silently locking out users of a secondary host or
+// turning STRATOCLAVE_STS_AUDIENCE_REQUIRED back off. This is read with
+// `app.node.tryGetContext`, the same mechanism this file already uses for
+// `certTenantIds`/`projectorShadow` below -- BUT the durability this exists
+// for only holds if the value is set by editing `iac/cdk.json`'s own
+// "context" object directly (committed, shared, read on every synth with
+// no flag to remember), not by passing `-c name=value` on each `cdk
+// deploy` invocation, which is exactly as forgettable as the environment
+// variable this replaces. See docs/DEPLOYMENT.md, "Binding AWS sign-in to
+// this gateway" and "Rate limits on sign-in routes".
+const stsAudiences = (app.node.tryGetContext('stsAudiences') as string | undefined) || '';
+const stsAudienceRequiredRaw = app.node.tryGetContext('stsAudienceRequired');
+const stsAudienceRequired = stsAudienceRequiredRaw === undefined ? '' : String(stsAudienceRequiredRaw);
+// The backend's own `core.deployment.strict_flag` accepts exactly these
+// spellings (case-insensitive) and fails ITS OWN startup on anything else;
+// mirrored here so a typo fails synth instead of reaching a deployed task.
+const recognisedBooleanSpellings = ['1', 'true', 'yes', 'on', '', '0', 'false', 'no', 'off'];
+if (!recognisedBooleanSpellings.includes(stsAudienceRequired.toLowerCase())) {
+  throw new Error(
+    `stsAudienceRequired context value must be a recognised boolean (got "${stsAudienceRequired}"); ` +
+      `set it with -c stsAudienceRequired=true (or persist it in cdk.json's "context").`,
+  );
+}
+const authLoginRateLimit =
+  (app.node.tryGetContext('authLoginRateLimit') as string | undefined) || '10/minute';
+const authRespondRateLimit =
+  (app.node.tryGetContext('authRespondRateLimit') as string | undefined) || '10/minute';
+const ssoExchangeRateLimit =
+  (app.node.tryGetContext('ssoExchangeRateLimit') as string | undefined) || '20/minute';
+
 // --- 1. Network (Public Subnet 2 AZ, no NAT) ---
 const networkStack = new NetworkStack(app, stackName(prefix, 'network'), {
   env,
@@ -554,7 +589,25 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   // IMAGE_TAG=<sha-or-release-tag> alongside the deploy command.
   imageTag: process.env.IMAGE_TAG || 'latest',
   environment: {
-    ENVIRONMENT: envName,
+    // Deliberately NOT `envName`. `envName`/`isProd` above answer "which
+    // resource tier should this stack use" (deletion protection, PITR,
+    // retain-on-delete, ECS exec default) -- an operator choice that is
+    // allowed to be `development` for a disposable sandbox stack. The
+    // container's own `ENVIRONMENT` answers a different question the
+    // backend asks of it: "has this process been deployed at all, as
+    // opposed to running on a developer's own machine" (`core.deployment
+    // .is_local_environment`, and every one-off `environment == "production"`
+    // check in `main.py`/`mvp/authz.py` that predates that module). Every
+    // ECS Fargate task IS a deployment by construction, whatever resource
+    // tier it was synthesized with, so this is always `'production'` --
+    // see docs/DEPLOYMENT.md's `ENVIRONMENT` row (under "Backend environment
+    // variables") for the behaviours this controls and why conflating the
+    // two meant a `cdk deploy` with no `ENVIRONMENT` exported (the default)
+    // shipped a production-reachable gateway running every local-machine
+    // relaxation: the required-env check skipped, CORS's `http://` refusal
+    // skipped, and the admin-creation bootstrap window's expiry requirement
+    // skipped.
+    ENVIRONMENT: 'production',
     STRATOCLAVE_PREFIX: prefix,
     AWS_REGION: env.region,
 
@@ -661,6 +714,34 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // 'private': the operator's own domain name for the PrivateLink
     // publication — the single private URL returned in the config.
     STRATOCLAVE_API_ENDPOINT: entryUrl,
+
+    // Comma-separated extra hosts a signed AWS sign-in may also name
+    // (`mvp.sso_sts.expected_audiences`), for a deployment reached under
+    // more than one name. No default: an empty string is what the backend
+    // already treats as "none configured" (`core.deployment`'s `.strip()`
+    // empty-check). Passed unconditionally, like `STRATOCLAVE_API_ENDPOINT`
+    // and `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` above/below -- the container's
+    // key set must not depend on which shell ran `cdk deploy`. Sourced from
+    // CDK CONTEXT (`stsAudiences` above), not `process.env`, so a deploy
+    // from a shell that forgot to export it does not blank out a value a
+    // PREVIOUS deploy configured (docs/DEPLOYMENT.md, "Binding AWS sign-in
+    // to this gateway").
+    STRATOCLAVE_STS_AUDIENCES: stsAudiences,
+    // Requires every signed AWS sign-in to name one of the hosts above
+    // (`mvp.sso_sts.audience_required`, read with `core.deployment
+    // .strict_flag`: an unrecognised spelling fails the backend's own
+    // startup rather than silently reading as off -- `stsAudienceRequired`
+    // above fails SYNTH on the same unrecognised spellings, so a typo is
+    // caught before a task is ever built). Off by default so CLIs older
+    // than 0.2.1 keep working; see the same runbook.
+    STRATOCLAVE_STS_AUDIENCE_REQUIRED: stsAudienceRequired,
+    // Sign-in rate limits (`core/rate_limit.py`'s `LOGIN_RATE_LIMIT` /
+    // `RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT`), also from CDK
+    // context for the same persistence reason -- see docs/DEPLOYMENT.md,
+    // "Rate limits on sign-in routes".
+    AUTH_LOGIN_RATE_LIMIT: authLoginRateLimit,
+    AUTH_RESPOND_RATE_LIMIT: authRespondRateLimit,
+    SSO_EXCHANGE_RATE_LIMIT: ssoExchangeRateLimit,
 
     // Feature flags (MVP)
     VERIFIED_PERMISSIONS_ENABLED: 'false',

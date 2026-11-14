@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { hermeticSynthEnv } from './_hermetic-synth';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -85,6 +86,9 @@ describe('documented env wiring: an exported variable the CDK app never reads', 
     AWS_DEFAULT_REGION: 'the AWS SDK and CLI',
     PATH: 'the shell, when a document shows how to put the CLI on it',
     STRATOCLAVE_API_ENDPOINT: 'the stratoclave CLI, which talks to a deployment rather than building one',
+    PREFIX: "the teardown snippet's own shell variable (docs/DEPLOYMENT.md, \"Teardown\"), "
+      + 'interpolated into the aws CLI commands directly below it in the same snippet; '
+      + 'not read by the CDK app, which takes its prefix from STRATOCLAVE_PREFIX',
   };
 
   /** Files that could plausibly carry a deploy procedure. */
@@ -221,7 +225,7 @@ describe('documented env wiring: an exported variable the CDK app never reads', 
         execFileSync('npx', ['cdk', 'synth', '--all', '-o', outDir, '--quiet'], {
           cwd: iacDir,
           env: {
-            ...process.env,
+            ...hermeticSynthEnv(),
             CDK_DEFAULT_ACCOUNT: '123456789012',
             CDK_DEFAULT_REGION: 'us-east-1',
             STRATOCLAVE_REGION: 'us-east-1',

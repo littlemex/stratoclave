@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { hermeticSynthEnv } from './_hermetic-synth';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -48,7 +49,7 @@ describe('DynamoDB table env wiring: every declared table reaches the service ta
         {
           cwd: iacDir,
           env: {
-            ...process.env,
+            ...hermeticSynthEnv(),
             CDK_DEFAULT_ACCOUNT: '123456789012',
             CDK_DEFAULT_REGION: 'us-east-1',
             STRATOCLAVE_REGION: 'us-east-1',

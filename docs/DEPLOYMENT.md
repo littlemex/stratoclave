@@ -22,9 +22,11 @@ If you only want to use an existing Stratoclave deployment, you do not need this
 9. [Cost estimate](#cost-estimate)
 10. [Updates and re-deploys](#updates-and-re-deploys)
 11. [Local development](#local-development)
-12. [Backend environment variables](#backend-environment-variables)
-13. [Teardown](#teardown)
-14. [Troubleshooting](#troubleshooting)
+12. [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)
+13. [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)
+14. [Backend environment variables](#backend-environment-variables)
+15. [Teardown](#teardown)
+16. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -779,9 +781,9 @@ There is no web console: this mode is headless by design, API and CLI only.
 There is no WAF on this path — a CLOUDFRONT-scope web ACL cannot attach to
 an internal ALB, and this slice does not add a REGIONAL one.
 
-**"No internet-facing path to the gateway API" is narrower than "no
-internet-facing entry point at all" for the whole deployment**, and two
-things stay reachable from the public internet regardless of entry mode:
+**"No internet-facing path to this deployment's own API" is narrower than "no
+internet-facing entry point at all", except for two things that stay
+reachable from the public internet regardless of entry mode:**
 
 - **The Cognito user pool and its Hosted UI domain are still public.** The
   app client has no client secret and `USER_PASSWORD_AUTH` is enabled (both
@@ -797,20 +799,32 @@ things stay reachable from the public internet regardless of entry mode:
   does not change that placement or add a second one.
 
 **The per-IP rate limit is a shared-fate availability risk here, not merely
-"coarse".** Every request on this path arrives from the internal NLB, not
-from the original client, so a limiter keyed on the immediate peer address
-puts every principal reaching the gateway through PrivateLink into the
-same bucket — with no WAF in front to catch a flood earlier, one noisy or
-compromised consumer can exhaust that shared bucket and produce 429s for
-every other consumer, not just itself. The backend's rate-limit keying is
-being changed, separately from this IaC change, so that an AUTHENTICATED
-request is bucketed by the verified user rather than the address — once
-that lands, this path's per-user limits are exactly as precise as
-`cloudfront`'s. What stays genuinely shared on this path even after that
-change is the UNAUTHENTICATED sign-in routes (`/api/mvp/auth/login`,
-`/respond`, `/sso-exchange`): with no verified identity yet, the address is
-still the only key available, and on this path that address is the shared
-NLB-facing ALB address, not the real caller's.
+"coarse", for the routes it still applies to.** Every request on this path
+arrives from the internal NLB, not from the original client, so a limiter
+keyed on the immediate peer address puts every principal reaching the
+gateway through PrivateLink into the same bucket — with no WAF in front to
+catch a flood earlier, one noisy or compromised consumer can exhaust that
+shared bucket and produce 429s for every other consumer, not just itself.
+
+An AUTHENTICATED request is bucketed by the verified user rather than the
+address (`core.rate_limit._request_key`), so this path's per-user limits are
+exactly as precise as `cloudfront`'s, and a caller behind the NLB cannot be
+locked out by another authenticated caller sharing the same address. What
+stays genuinely shared on this path is the UNAUTHENTICATED sign-in routes
+(`/api/mvp/auth/login`, `/respond`, `/sso-exchange`, `/ui-ticket/consume`):
+with no verified identity yet, these are rate-limited twice (see "Rate
+limits on sign-in routes" below) — a tight limit keyed on the identity
+TOGETHER WITH the address (the email, or, for `/sso-exchange`, the account
+STS verifies), and each route's own per-address flood guard
+(`AUTH_LOGIN_RATE_LIMIT` etc.), which bounds total sign-in volume from one
+address regardless of how many distinct (possibly made-up) identities it
+tries. Because every client on this path shares one address, the
+identity-plus-address bucket is effectively identity-only here: one
+accepted consumer can still lock a named user out of signing in from
+anywhere else on this entry. Size `AUTH_LOGIN_RATE_LIMIT` /
+`AUTH_RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT` for that topology
+specifically — see "Rate limits on sign-in routes" below for the full
+threat model and the operator lever.
 
 This is deliberate, not simply unfixed: the ALB attribute
 `routing.http.xff_header_processing.mode` is set to `remove` specifically
@@ -962,13 +976,63 @@ See [CLI_GUIDE.md](CLI_GUIDE.md) for the full usage.
 
 ---
 
+## Binding AWS sign-in to this gateway
+
+Signing in with an AWS identity (`stratoclave auth sso`, Vouch-by-STS) works by the CLI signing an STS `GetCallerIdentity` request and handing it to the gateway, which forwards it to STS to learn who the caller is. A signed request of that kind is not specific to the service it was made for: another service that verifies identity the same way (HashiCorp Vault's AWS auth is the best-known) could pass on a request it received, and the gateway would accept it inside the 5 minute window it itself allows for a signature's age (AWS SigV4 allows up to 15 minutes; this gateway refuses anything older than 5, its own tighter limit, not AWS's). To stop that, CLI 0.2.1 and later add a header to the request before signing it, `X-Stratoclave-Audience`, set to the host of the gateway URL the request is sent to. Because the header is signed, STS refuses any change to it.
+
+Two separate things happen with that header, on two separate schedules:
+
+- **A request bound to a host that is not this gateway's own is always refused — unconditionally, regardless of `STRATOCLAVE_STS_AUDIENCE_REQUIRED` below.** If `X-Stratoclave-Audience` is present at all, its value must be a host in `STRATOCLAVE_API_ENDPOINT` or `STRATOCLAVE_STS_AUDIENCES`, or the gateway refuses the request. This is why every host users reach the gateway through — every custom domain, every CloudFront alias, the PrivateLink domain on the private entry — has to be listed in `STRATOCLAVE_STS_AUDIENCES` **before** distributing CLI 0.2.1 or later: a CLI configured against a host the gateway does not know about gets 401 on every sign-in attempt from the moment it is upgraded, not only after the requirement below is turned on.
+- **A request with no `X-Stratoclave-Audience` header at all is still accepted**, so CLIs older than 0.2.1 keep working, until the gateway is told to stop accepting them.
+
+To turn the second one off (require every sign-in to carry a bound audience):
+
+1. Make sure `STRATOCLAVE_API_ENDPOINT` (and `STRATOCLAVE_STS_AUDIENCES` if the gateway is reached under more than one name) lists every URL users set the CLI up against. `STRATOCLAVE_API_ENDPOINT` is composed by `iac/bin/iac.ts` itself; `STRATOCLAVE_STS_AUDIENCES` is sourced from CDK CONTEXT (see the environment variable table below) — set it by editing `iac/cdk.json`'s own "context" object directly. A value set by hand on the task definition, or passed only as a `-c` flag on one `cdk deploy` invocation, is dropped on the next deploy that does not repeat it.
+2. Have everyone upgrade to CLI 0.2.1 or later.
+3. Watch the gateway's `sso_sts_exchange_verified` log events (success) and `sso_sts_audience_refused` (WARNING, logged on every refusal, with the host that was presented and the reason — a host missing from step 1 shows up here as refusals from real users, not merely as a number that failed to reach 100%). The success event carries `audience_bound`: true for an upgraded CLI, false for an older one or for a caller that is not this CLI at all (a `boto3`/AWS SDK script signing its own `GetCallerIdentity` by hand has no reason to set this header, and is "unbound" exactly as an unupgraded CLI is — this is a property of the request, not of the CLI version). The criterion to move on is **`audience_bound=true` events are present and `audience_bound=false` events are not** for as long as your slowest user takes to upgrade — not merely "no `false` has appeared yet", which is also true before anyone has signed in at all.
+4. Set `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` and redeploy. The gateway refuses to start if it has no API URL to compare with, and refuses any value for this flag that is not a recognised boolean spelling (`1`/`true`/`yes`/`on` for on, `0`/`false`/`no`/`off`/empty for off) — a typo here is a startup failure, not a silent "off".
+
+A CloudWatch Logs Insights query for step 3:
+
+```text
+fields @timestamp, arn, audience_bound
+| filter @message like /sso_sts_exchange_verified/ and @message like /"audience_bound": ?false/
+| stats count() by arn
+```
+
+The second `filter` clause matches the literal JSON text. Measured on a real log group: this query and `filter audience_bound = 0` both count the unbound sign-in, while `filter audience_bound = false` matches nothing, so do not use the boolean literal: it would make "no `false` events" true when it is not.
+
+```text
+fields @timestamp, presented_host, reason
+| filter @message like /sso_sts_audience_refused/
+| stats count() by presented_host, reason
+```
+
+**Upgrading the gateway and the CLI can happen in either order.** A CLI 0.2.1 request against a gateway that predates this feature works unchanged: that gateway's `verify_and_call_sts` forwards every header it receives to STS verbatim and never reads `X-Stratoclave-Audience` at all, so the extra signed header is simply one more header STS verifies and ignores on the way back — nothing refuses it and nothing requires it. The only ordering constraint is the one stated above: every host in `STRATOCLAVE_STS_AUDIENCES` has to be configured on THIS gateway before a CLI bound to an unlisted host is handed to anyone, because the foreign-host refusal does not wait for `STRATOCLAVE_STS_AUDIENCE_REQUIRED`.
+
+**Local development:** a gateway with `ENVIRONMENT` set to `development`, `local` or `test` may run with no `STRATOCLAVE_API_ENDPOINT` at all (`core.deployment.is_local_environment`), but `mvp.sso_sts.expected_audiences()` then has no host to compare against, so `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` is refused at startup (there would be nothing for a bound request to match) and `audience_bound` is always reported false for every sign-in on that process. Set `STRATOCLAVE_API_ENDPOINT=http://127.0.0.1:<port>` (the port the backend listens on) to exercise the bound path locally.
+
+Rate limits on the sign-in routes, including what they do not cover on the private entry and for requests that fail authentication on an authenticated route, are in "Rate limits on sign-in routes" immediately below.
+
+## Rate limits on sign-in routes
+
+An authenticated route is bucketed by the verified user (`core.rate_limit._request_key`); a user behind a shared address, or on the private entry where every request arrives from the load balancer, is not throttled by anyone else sharing it. Sign-in routes have no verified user yet, so they are rate-limited differently, and twice:
+
+- **Keyed on the identity the request names, TOGETHER WITH the client's own address.** `/login` and `/respond` key on the normalised (lowercased) email in the request body plus the caller's address; `/sso-exchange` keys on the account STS actually verifies the signature belongs to — the account id plus the AWS-assigned prefix of the UserId, never the RoleSessionName tail of the ARN, which whoever calls AssumeRole picks — and ONLY after `verify_and_call_sts` has proven the caller holds the credential; an access key id merely parsed out of an unverified `Authorization` string is never charged against anything, because it is not evidence its holder made the request. This is `LOGIN_RATE_LIMIT` / `RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT` (default 10/minute, 10/minute, 20/minute), run explicitly inside each handler (`core.rate_limit.check_identity_rate_limit`) rather than through the route decorator, because the identity (and, for `/sso-exchange`, the verification) is not available at decoration time. The address half of the key is the fix for a real attack, not an optimisation: an identity-ONLY bucket lets anyone who merely KNOWS (never needs to hold) a victim's email lock that victim out — ten bad guesses from one address, discard it, repeat from another, and the victim's own sign-in attempts share that same exhausted bucket regardless of which address they come from. Binding the address means every attacking address only ever spends its OWN (identity, that address) bucket; the victim's own address is untouched by anything an attacker's addresses did. The identity half is hashed (SHA-256) before it becomes a DynamoDB key, and capped in length, so neither an unbounded string nor the raw email ends up stored there.
+- **Keyed on the client address alone, one bucket per route (not shared across routes).** Each of `/login`, `/respond`, `/sso-exchange` and `/ui-ticket/consume` keeps its OWN per-address flood guard at the SAME numbers above (`AUTH_LOGIN_RATE_LIMIT`/`AUTH_RESPOND_RATE_LIMIT` default 10/minute, `SSO_EXCHANGE_RATE_LIMIT` default 20/minute) — this is the route's existing `@limiter.limit(...)` decorator, run BEFORE the identity-and-address check above. It bounds total request volume (and so DynamoDB counter growth) from one address regardless of how many different identities it tries, which the identity-and-address bucket alone cannot: that bucket gives a fresh quota to every new (identity, address) pair, so an attacker trying many DIFFERENT made-up identities from one address would otherwise write an unbounded number of counters. A tripped address guard is checked first, so a flood never reaches the identity-and-address counters at all.
+- **`/ui-ticket/consume` has no identity-keyed check.** The single-use ticket it redeems is itself the only identity a request could name, and 256-bit entropy already makes guessing one uneconomic; its own per-address flood guard above is belt-and-braces against guessing at volume, not a credential-guessing control.
+- **On the private entry, every client shares one address** (the internal NLB-facing one — see "Private entry (PrivateLink), headless" above). There, the identity-and-address bucket is effectively back to identity-ONLY: any client inside an accepted consumer VPC can still lock a named user out of signing in from anywhere else on that same private entry, because every address involved is the same one. Size `AUTH_LOGIN_RATE_LIMIT`/`AUTH_RESPOND_RATE_LIMIT` for that topology specifically (lower is not necessarily safer — too low and the shared address's own legitimate traffic trips it) and treat guessing spread across MANY different accounts as Cognito's own job: Cognito's account-level lockout sees distributed guessing against one account regardless of address, which this gateway's per-(identity, address) bucket structurally cannot.
+- **A request that fails authentication on an AUTHENTICATED route is not rate-limited at all**, not merely "not counted against any user". FastAPI resolves a `Depends(get_current_user)` before calling the decorated handler, so when the credential does not verify and `get_current_user` raises, `@limiter.limit(...)`'s own wrapper body — the only place either the per-user or the per-address counter is written — never runs. Unlimited credential guessing against, for example, `POST /api/mvp/billing/authorize` with a bearer token or API key is bounded only by whatever TLS/compute cost each attempt itself has, not by this limiter. `test_rate_limit_xff.py::test_a_rejected_credential_never_sets_rate_principal_and_never_reaches_the_limiter` pins this as a documented gap, not a guarantee. The same is true of a request whose BODY fails Pydantic field validation on a sign-in route (a 422): FastAPI resolves the body before calling the decorated handler too, so that request touches neither the address guard nor the identity check — bounded instead by the existing, separate `MaxBodySizeASGIMiddleware` (`main.py`) for the oversized case, and by ordinary 422 response cost for a merely-malformed one.
+- A non-CLI SigV4 client (a `boto3`/AWS SDK script that signs its own `GetCallerIdentity`) is rate-limited exactly like any other `/sso-exchange` caller once STS has verified it — by the account its own signature proves. In the `sso_sts_exchange_verified` log line "Binding AWS sign-in to this gateway" (above) asks an operator to watch, it is reported `audience_bound=false`, the same as an unupgraded CLI, since it has no reason to set `X-Stratoclave-Audience` either. Turning `STRATOCLAVE_STS_AUDIENCE_REQUIRED` on locks such a script out exactly as it would an old CLI.
+- `AUTH_LOGIN_RATE_LIMIT`, `AUTH_RESPOND_RATE_LIMIT` and `SSO_EXCHANGE_RATE_LIMIT` are sourced from CDK context (`authLoginRateLimit`/`authRespondRateLimit`/`ssoExchangeRateLimit` in `iac/bin/iac.ts`), not `process.env` — set them by editing `iac/cdk.json`'s own "context" object directly, not with a per-deploy `-c` flag, which a later `cdk deploy` from a different shell would not repeat.
+
 ## Backend environment variables
 
 Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you can reproduce them locally or diagnose missing-value bugs.
 
 | Variable                                 | Required in production? | Set by CDK? | Notes |
 | ---------------------------------------- | ----------------------- | ----------- | ----- |
-| `ENVIRONMENT`                            | yes                     | yes (`production`) | |
+| `ENVIRONMENT`                            | yes                     | yes (always `'production'`, regardless of the resource tier below) | The backend's one question: "has this process been deployed" (`core.deployment.is_local_environment`; every bare `environment == "production"` check in `main.py`/`mvp/authz.py`). NOT the same value as the shell's own `ENVIRONMENT`, which `bin/iac.ts` separately reads for the RESOURCE TIER (DynamoDB deletion protection/PITR, Cognito retention, ECS exec default) — an operator may still deploy a disposable sandbox stack with that unset or `development`; the container's own `ENVIRONMENT` is `'production'` either way, because an ECS Fargate task is a deployment by construction, never a developer's own machine. |
 | `COGNITO_USER_POOL_ID`                   | yes                     | yes         | |
 | `COGNITO_CLIENT_ID`                      | yes                     | yes         | |
 | `COGNITO_DOMAIN`                         | yes                     | yes         | Full hosted-UI URL. |
@@ -977,7 +1041,9 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `OIDC_AUDIENCE`                          | yes                     | yes (equals client ID) | |
 | `BEDROCK_REGION`                         | yes                     | yes (= `BEDROCK_PRIMARY_REGION`) | Region Claude models are invoked in — the **model** primary region, independent of the deploy region. Always set explicitly by CDK. See `STRATOCLAVE_REGION` / `BEDROCK_PRIMARY_REGION`. |
 | `DEFAULT_BEDROCK_MODEL`                  | yes                     | yes         | |
-| `STRATOCLAVE_API_ENDPOINT`               | yes                     | yes         | Published in `/.well-known/stratoclave-config`. |
+| `STRATOCLAVE_API_ENDPOINT`               | yes                     | yes         | Published in `/.well-known/stratoclave-config`. Outside a local environment (`ENVIRONMENT` `development`, `local` or `test`) the gateway refuses to start without it, and the document is never built from request headers. Its host is also what a signed AWS sign-in must name (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)). |
+| `STRATOCLAVE_STS_AUDIENCES`              | no                      | yes, from CDK context `stsAudiences` (default empty) | Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start. Sourced from CDK context, not `process.env` — set it in `iac/cdk.json`'s own "context" object (a `-c` flag on one `cdk deploy` invocation is not repeated by the next), so a value configured once is not silently dropped by a later deploy from a different shell. |
+| `STRATOCLAVE_STS_AUDIENCE_REQUIRED`      | no                      | yes, from CDK context `stsAudienceRequired` (default empty = off) | When on, an AWS sign-in whose signed request carries no `X-Stratoclave-Audience` at all is refused; a request bound to a host that IS NOT this gateway's is refused regardless of this setting (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)). Off by default so CLIs older than 0.2.1 keep working; see that same section's runbook. Read strictly, both by the backend (`core.deployment.strict_flag`) and at synth time (`iac/bin/iac.ts`): `1`/`true`/`yes`/`on` for on, `0`/`false`/`no`/`off`/empty for off, anything else fails synth (and, independently, the backend's own startup) rather than silently reading as off. |
 | `STRATOCLAVE_PREFIX`                     | yes                     | yes (`stratoclave`) | DynamoDB, Secrets, and SSM key prefix. |
 | `DYNAMODB_USERS_TABLE`                   | yes                     | yes         | |
 | `DYNAMODB_USER_TENANTS_TABLE`            | yes                     | yes         | |
@@ -1007,6 +1073,7 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `STRATOCLAVE_CODEX_ENABLED`                          | optional                | yes (default `true`)  | Enables the OpenAI Responses API endpoint (`/openai/v1/*`). Set `STRATOCLAVE_CODEX_ENABLED=false` to disable. |
 | `DYNAMODB_RATE_LIMITS_TABLE`             | optional                | yes (default `stratoclave-rate-limits`) | DynamoDB table backing the per-IP auth rate limiter (`backend/core/rate_limit_ddb.py`). Fixed-window counters with a TTL attribute (`expires_at`) are **shared across every ECS task**, so caps hold under multi-task / multi-AZ scale-out with no Redis. Failure policy: a **misconfiguration** (missing/mis-named table, missing IAM grant → `ResourceNotFound`/`AccessDenied`/`Validation`) fails **CLOSED** — auth endpoints return `429` — so a broken limiter can't silently run unlimited. **⚠️ If every login/SSO returns 429 right after a deploy, check this table name + the task role's DynamoDB grant first.** A **transient outage** (connectivity/timeout) degrades to an in-process per-task limiter (not fully open). Wire a CloudWatch metric filter + alarm on the log line `rate_limit_degrade_to_local` to detect degraded mode. |
 | `RATE_LIMIT_TRUSTED_HOPS`                | optional                | no          | Number of right-side `X-Forwarded-For` entries written by your own proxy chain (not counting the viewer IP CloudFront appends). Default `1` matches CloudFront → ALB → ECS. Use `0` for CloudFront-only and `2` for custom WAF → CloudFront → ALB → ECS. See `backend/core/rate_limit.py`. |
+| `AUTH_LOGIN_RATE_LIMIT` / `AUTH_RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT` | optional | yes, from CDK context `authLoginRateLimit`/`authRespondRateLimit`/`ssoExchangeRateLimit` (default `10/minute`, `10/minute`, `20/minute`) | Each route's OWN two limits (see [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)): a per-address flood guard at this number, and an identity-plus-address bucket at the SAME number keyed on the email (`/login`, `/respond`) or the verified account (`/sso-exchange`, only after STS has confirmed it). `/ui-ticket/consume` also uses `SSO_EXCHANGE_RATE_LIMIT` for its own (address-only) flood guard. Sourced from CDK context, not `process.env`, for the same redeploy-persistence reason as the audience settings above — edit `iac/cdk.json`'s "context" object directly. |
 | `EXPOSE_TEMPORARY_PASSWORD`              | optional                | no          | If `true`, `admin user create` returns the one-time password in the response. Default `false` (response field is `null`). Not recommended for production. |
 | `STRATOCLAVE_FAILOVER_REGIONS`           | optional                | no          | Comma-separated cross-region Bedrock failover targets for the **streaming** path, in preference order (the primary `BEDROCK_REGION` is always tried first and is stripped if listed). Default `us-west-2,eu-west-1`. **Data residency:** set a same-jurisdiction list, or **`none`/`disabled`/`off`** (or an empty string) **to disable failover entirely** — single-region, streaming requests never send prompt bytes to another region. Prefer the `none` sentinel over `""` if your deploy tooling strips empty env vars. Non-streaming requests are single-region regardless. The effective set is logged at startup (`failover_regions_effective`). See `backend/mvp/routing/chains.py`. |
 

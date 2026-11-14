@@ -53,6 +53,7 @@ import hashlib
 import json
 import pathlib
 import re
+from collections import Counter
 
 import pytest
 
@@ -525,3 +526,77 @@ def test_a_hard_wrapped_blockquote_sentence_comes_out_whole():
         "execution, routing, or money)."
     ) in units
     assert not any(u.startswith("only*:") for u in units)
+
+
+# --------------------------------------------------------- clause-id collision guards
+#
+# The defect this section closes: two clause rows in CONTRACTS.md once shared
+# one id (a pair of security-feature rows reused the ids two pre-existing rows
+# already held), and the registry's JSON mirrored it with two keys of the same
+# name. Both `_clause_rows()` (a dict comprehension) and `json.load` (Python's
+# own parser) silently keep the LAST occurrence and say nothing about the
+# first -- so a collision like that cost nothing to introduce and nothing to
+# notice. These tests read the SAME files with a parser that cannot silently
+# drop a duplicate, rather than trusting a human to have re-read the whole
+# document.
+
+
+def _duplicate_clause_ids() -> list[str]:
+    """Every `**Cx.y**` id that appears on more than one row's leading cell,
+    with its count -- found by NOT collapsing into a set/dict first, unlike
+    `_clause_ids()`/`_clause_rows()` above, which both silently keep only one
+    occurrence of a repeated id."""
+    ids = [
+        m.group(1)
+        for line in CONTRACTS.read_text().split("\n")
+        for m in [re.match(r"^\|\s*\*\*(C\d+(?:\.\d+[a-c]?)?)\*\*", line.strip())]
+        if m
+    ]
+    counts = Counter(ids)
+    return [cid for cid, n in sorted(counts.items()) if n > 1]
+
+
+def test_no_clause_id_is_reused():
+    """A clause id must name exactly one row.
+    `_clause_rows()` and `_clause_ids()` elsewhere in this file would both stay
+    silent if this broke again -- a dict and a set both keep one winner and
+    drop the rest without complaint. This test is the one that would not."""
+    dupes = _duplicate_clause_ids()
+    assert not dupes, (
+        f"clause id(s) used on more than one row in {CONTRACTS}: {dupes}. "
+        f"Every anchor pinned to one of these resolves against whichever row "
+        f"a dict comprehension happened to keep, which may not be the row the "
+        f"anchor's own claim is about."
+    )
+
+
+def _duplicate_json_keys(path: pathlib.Path) -> list[str]:
+    """Every object key that appears more than once at the SAME nesting level
+    in a JSON file, found via `object_pairs_hook`, which sees every key-value
+    pair a parser read before `dict()` collapses repeats into the last one.
+    Plain `json.load`/`json.loads` would silently keep only the last value for
+    a repeated key -- exactly how the snapshot mirrored the clause-id
+    collision as two `"C6.9"` object keys with nothing to show for the first.
+    """
+    dupes: list[str] = []
+
+    def _check_pairs(pairs):
+        seen: dict[str, int] = {}
+        for key, _value in pairs:
+            seen[key] = seen.get(key, 0) + 1
+        dupes.extend(k for k, n in seen.items() if n > 1)
+        return dict(pairs)
+
+    json.loads(path.read_text(), object_pairs_hook=_check_pairs)
+    return dupes
+
+
+@pytest.mark.parametrize("filename", ["anchored.json", "snapshot.json", "config.json"])
+def test_no_duplicate_json_keys_in_claims_files(filename):
+    dupes = _duplicate_json_keys(CLAIMS_DIR / filename)
+    assert not dupes, (
+        f"{filename} repeats object key(s) {sorted(set(dupes))} at the same "
+        f"nesting level; `json.load` silently keeps only the last value for "
+        f"each, which is exactly how the clause-id collision reached this file "
+        f"undetected."
+    )

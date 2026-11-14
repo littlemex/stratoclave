@@ -140,6 +140,10 @@ def setup_logging(environment: str = "development") -> None:
             stream=sys.stdout,
             level=logging.INFO,
         )
+        # basicConfig does nothing when the root logger already has a handler
+        # (a server or test harness that configured logging first), so the
+        # level is set explicitly: INFO events are the operator's signals.
+        logging.getLogger().setLevel(logging.INFO)
         _floor_third_party_loggers()
     else:
         # Console output for development

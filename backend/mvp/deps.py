@@ -353,6 +353,19 @@ def cognito_auto_provision_enabled() -> bool:
 def get_current_user(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+    request: Request = None,  # injected by FastAPI; None only for a direct call
+) -> AuthenticatedUser:
+    """The authenticated caller, recorded on `request.state.rate_principal` so the
+    rate limiter buckets this request by the verified user rather than by an
+    address or a header the caller chose (`core.rate_limit._request_key`)."""
+    user = _resolve_current_user(authorization, x_api_key)
+    if request is not None:
+        request.state.rate_principal = user.user_id
+    return user
+
+
+def _resolve_current_user(
+    authorization: Optional[str], x_api_key: Optional[str],
 ) -> AuthenticatedUser:
     """Accept `Authorization: Bearer <token>` or `x-api-key: <token>`.
 
