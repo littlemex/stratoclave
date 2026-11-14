@@ -31,7 +31,7 @@ from .pricing_feeds.dimensions import (
     _GLOBAL_PROFILE_PREFIX as _RECOGNISED_GLOBAL_ID_PREFIX,
 )
 from dataclasses import dataclass
-from typing import Iterable, Literal, NoReturn, Optional
+from typing import TYPE_CHECKING, Iterable, Literal, NoReturn, Optional
 
 logger = get_logger(__name__)
 
@@ -234,6 +234,9 @@ class ModelEntry:
 # request routed to a model with no accounting policy) on the hot path.
 _REGISTRY_FILENAME = "defaults/models.json"
 _SUPPORTED_SCHEMA_VERSION = 1
+
+if TYPE_CHECKING:
+    from .inference_boundary import Exclusion
 
 _PROVIDERS = frozenset({"anthropic", "openai", "xai", "google", "nvidia", "qwen"})
 _WIRE_PROTOCOLS = frozenset({"messages", "responses"})
@@ -453,7 +456,7 @@ def _is_variant(a: ModelEntry, b: ModelEntry) -> bool:
     scopes (see the alias check in `load_registry`)."""
     return (a.provider == b.provider and a.model_family == b.model_family
             and a.wire_protocol == b.wire_protocol and a.pricing_key == b.pricing_key
-            and a.aliases == b.aliases and a.profile_scope != b.profile_scope
+            and set(a.aliases) == set(b.aliases) and a.profile_scope != b.profile_scope
             and a.bedrock_region != b.bedrock_region)
 
 
@@ -767,9 +770,11 @@ class _ComposedRegistry:
         kept, exclusions = _boundary.compose(
             _REGISTRY + activated, boundary=_boundary.configured(),
             primary=_boundary.primary_region())
-        static_ids = {id(e) for e in _REGISTRY}
-        base = tuple(e for e in kept if id(e) in static_ids)
-        activated = tuple(e for e in kept if id(e) not in static_ids)
+        # Bedrock ids are unique across both halves (the loader and promotion's
+        # identifier check guarantee it), so they say which half an entry is from.
+        static_ids = {e.bedrock_model_id for e in _REGISTRY}
+        base = tuple(e for e in kept if e.bedrock_model_id in static_ids)
+        activated = tuple(e for e in kept if e.bedrock_model_id not in static_ids)
         if exclusions and exclusions != self._exclusions:
             logger.info("composed_registry_exclusions",
                         excluded=[f"{x.bedrock_model_id}: {x.reason}" for x in exclusions])
@@ -844,7 +849,7 @@ class _ComposedRegistry:
 _composed_registry = _ComposedRegistry()
 
 
-def registry_exclusions() -> tuple:
+def registry_exclusions() -> "tuple[Exclusion, ...]":
     """The entries the inference boundary leaves out of this deployment, with the
     reason for each (`mvp.inference_boundary.Exclusion`)."""
     return _composed_registry.exclusions()

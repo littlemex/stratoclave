@@ -51,7 +51,7 @@ def _candidate(record, alias):
     from mvp.discovery.promotion import derive_candidate
 
     return derive_candidate(record, aliases=[alias], pricing_key="opus",
-                            jurisdiction="jp" if record.profile_scope != "global" else "jp",
+                            jurisdiction="jp",
                             probe_wire_protocol="messages", created_by="admin-1")
 
 

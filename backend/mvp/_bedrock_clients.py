@@ -193,8 +193,9 @@ def deployment_client():
     that target's region. `ModelEntry.bedrock_region` is authoritative only for the
     OpenAI-compatible surface on bedrock-runtime.
     """
-    region = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1"
-    return bedrock_runtime_client(region)
+    from .inference_boundary import primary_region
+
+    return bedrock_runtime_client(primary_region())
 
 
 def client_for_model(entry):

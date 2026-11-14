@@ -462,6 +462,10 @@ def _promotion_refused_to_http(exc: PromotionRefused) -> HTTPException:
         )
     if exc.reason == PromotionRefused.RECORD_NOT_FOUND:
         return HTTPException(status_code=404, detail={"type": exc.reason, "message": str(exc)})
+    if exc.reason == PromotionRefused.OUTSIDE_BOUNDARY:
+        # 422, as at the probe and activation steps: the model cannot be served
+        # in this deployment at all, which no retry or other state changes.
+        return HTTPException(status_code=422, detail={"type": exc.reason, "message": str(exc)})
     # IDENTIFIER_TAKEN (a state conflict against the store/registry) and
     # PROVIDER_UNSUPPORTED (a fact about the record, not the operator's
     # input) both land here, at 409: neither is a malformed field, and both
@@ -629,7 +633,10 @@ def probe_promotion_candidate(
             record, candidate, invocation=body.invocation,
         )
     except ProbeAttemptRefused as exc:
-        raise HTTPException(status_code=409, detail={"type": exc.reason, "message": exc.detail})
+        # The same 422 promotion and activation give for a model outside the
+        # inference boundary; the other reasons are state conflicts (409).
+        status = 422 if exc.reason == PromotionRefused.OUTSIDE_BOUNDARY else 409
+        raise HTTPException(status_code=status, detail={"type": exc.reason, "message": exc.detail})
 
     if not result.passed and result.blocker is not None and result.blocker.subtype == INDETERMINATE_SUBTYPE:
         raise HTTPException(

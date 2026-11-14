@@ -28,26 +28,26 @@ GLOBAL_ARNS = ["arn:aws:bedrock:::foundation-model/anthropic.claude-opus-5-5",
 
 
 def test_a_profile_reaches_its_listed_destinations():
-    assert destination_regions(_Bedrock(JP_ARNS), "jp.anthropic.claude-opus-5-5", is_profile=True,
+    assert destination_regions(_Bedrock(JP_ARNS), "jp.anthropic.claude-opus-5-5", profile_scope="jp",
                                source_region="ap-northeast-1") == ("ap-northeast-1", "ap-northeast-3")
 
 
 def test_a_region_less_destination_means_any_region():
-    assert destination_regions(_Bedrock(GLOBAL_ARNS), "global.x", is_profile=True,
+    assert destination_regions(_Bedrock(GLOBAL_ARNS), "global.x", profile_scope="jp",
                                source_region="ap-northeast-1") == (ib.UNBOUNDED,)
 
 
 def test_a_direct_id_reaches_only_where_it_is_called():
-    assert destination_regions(None, "qwen.x", is_profile=False, source_region="ap-northeast-1") == (
+    assert destination_regions(None, "qwen.x", profile_scope="no_profile", source_region="ap-northeast-1") == (
         "ap-northeast-1",)
 
 
 def test_a_profile_bedrock_does_not_know_is_unknown_never_local():
     with pytest.raises(ReachUnknown):
-        destination_regions(_Bedrock(error=RuntimeError("not found")), "jp.x", is_profile=True,
+        destination_regions(_Bedrock(error=RuntimeError("not found")), "jp.x", profile_scope="jp",
                             source_region="us-east-1")
     with pytest.raises(ReachUnknown):
-        destination_regions(_Bedrock([]), "jp.x", is_profile=True, source_region="ap-northeast-1")
+        destination_regions(_Bedrock([]), "jp.x", profile_scope="jp", source_region="ap-northeast-1")
 
 
 def test_the_discovered_destinations_become_the_activated_entrys_reach():
@@ -106,3 +106,12 @@ def test_discovery_reads_profiles_from_the_deployments_region_under_a_boundary(m
     result = reconcile.run_pass()
     assert seen["region"] == "ap-northeast-1"
     assert result.observation_blocker is not None  # the fake client stopped the pass
+
+
+def test_an_explicit_discovery_region_other_than_the_deployments_is_refused(monkeypatch):
+    from mvp.discovery import reconcile
+
+    monkeypatch.setenv(ib.ENV, "ap-northeast-1,ap-northeast-3")
+    monkeypatch.setenv("BEDROCK_REGION", "ap-northeast-1")
+    with pytest.raises(ValueError, match="discovery runs in ap-northeast-1"):
+        reconcile.run_pass(region="us-east-1")

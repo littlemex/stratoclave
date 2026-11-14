@@ -28,7 +28,7 @@ def main() -> int:
     import boto3
 
     from mvp.discovery.reach import ReachUnknown, destination_regions
-    from mvp.models import NO_PROFILE_SCOPE, load_registry
+    from mvp.models import load_registry
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--registry", help="registry document (default: the bundled one)")
@@ -45,7 +45,7 @@ def main() -> int:
         client = clients[region]
         try:
             actual = destination_regions(client, entry.bedrock_model_id,
-                                         is_profile=entry.profile_scope != NO_PROFILE_SCOPE,
+                                         profile_scope=entry.profile_scope,
                                          source_region=region)
         except ReachUnknown as exc:
             if entry.inference_regions is None:

@@ -609,7 +609,8 @@ def probe(
         profile_scope=record.profile_scope, destination_regions=record.destination_regions)
     if outside is not None:
         raise ProbeAttemptRefused(
-            "probe_refused", f"{candidate.bedrock_model_id} is outside the inference boundary: {outside}")
+            "outside_inference_boundary",
+            f"{candidate.bedrock_model_id} is outside the inference boundary: {outside}")
     pricing_key = candidate.pricing_key
     wire_protocol = candidate.wire_protocol
 

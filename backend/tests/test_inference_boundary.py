@@ -209,16 +209,20 @@ def test_no_module_builds_a_bedrock_runtime_client_but_the_one_factory():
     import ast
     import pathlib
 
-    root = pathlib.Path(__file__).resolve().parents[1] / "mvp"
+    root = pathlib.Path(__file__).resolve().parents[1]
     offenders = []
     for path in root.rglob("*.py"):
-        if path.name == "_bedrock_clients.py":
+        if "tests" in path.parts or ".venv" in path.parts or "site-packages" in path.parts:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and any(
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        builder = {id(n) for f in ast.walk(tree)
+                   if isinstance(f, ast.FunctionDef) and f.name == "_build_client"
+                   and path.name == "_bedrock_clients.py" for n in ast.walk(f)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and id(node) not in builder and any(
                     isinstance(a, ast.Constant) and a.value == "bedrock-runtime"
                     for a in [*node.args, *(k.value for k in node.keywords)]):
-                offenders.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno}")
+                offenders.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
     assert offenders == []
 
 
@@ -226,11 +230,11 @@ def test_no_bedrock_client_is_built_for_a_region_outside_the_boundary(japan):
     from mvp import _bedrock_clients, _openai_transport
 
     _bedrock_clients.reset_client_cache()
-    with pytest.raises(ib.BoundaryConfigError):
+    with pytest.raises(ib.RegionOutsideBoundary):
         _bedrock_clients.bedrock_runtime_client("us-east-1")
-    with pytest.raises(ib.BoundaryConfigError):
+    with pytest.raises(ib.RegionOutsideBoundary):
         _openai_transport.sync_client("us-east-2")
-    with pytest.raises(ib.BoundaryConfigError):
+    with pytest.raises(ib.RegionOutsideBoundary):
         _openai_transport.async_client("us-east-2")
     assert _bedrock_clients.bedrock_runtime_client("ap-northeast-1") is not None
     _bedrock_clients.reset_client_cache()
@@ -255,7 +259,7 @@ def test_startup_refuses_a_default_model_outside_the_boundary(japan):
 def test_startup_refuses_a_bedrock_region_outside_the_boundary(japan, monkeypatch):
     monkeypatch.setenv("BEDROCK_REGION", "us-east-1")
     models.reset_composed_registry_for_test()
-    with pytest.raises(ib.BoundaryConfigError, match="BEDROCK_REGION"):
+    with pytest.raises(ib.BoundaryConfigError, match="BEDROCK_REGION, else AWS_REGION"):
         _startup("jp.anthropic.claude-opus-4-7")
 
 
@@ -274,6 +278,7 @@ def test_startup_refuses_two_models_sharing_a_name_inside_the_boundary(monkeypat
     a = _entry("jp.anthropic.x", "ap-northeast-1", JP_REACH, aliases=["same"], family="x")
     b = _entry("qwen.y", "ap-northeast-1", ("ap-northeast-1",), scope="no_profile", aliases=["same"], family="y")
     kept, excluded = ib.compose([a, b], boundary=frozenset(JP_REACH), primary="ap-northeast-1")
+    assert [x.kind for x in excluded] == [ib.ALIAS_CONFLICT]
     with pytest.raises(ib.BoundaryConfigError, match="share a name"):
         ib.check_startup(entries=kept, exclusions=excluded, default_model="jp.anthropic.x")
 

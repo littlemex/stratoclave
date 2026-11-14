@@ -77,10 +77,15 @@ def configured() -> Optional[frozenset[str]]:
 
 
 def primary_region() -> str:
-    """The region the gateway calls Bedrock's Converse API from. The same expression
-    `mvp._bedrock_clients.deployment_client` and `mvp.routing.clients.default_region`
-    use."""
+    """The region the gateway calls Bedrock's Converse API from (`BEDROCK_REGION`,
+    else `AWS_REGION`, else us-east-1). The one definition:
+    `mvp._bedrock_clients.deployment_client` and
+    `mvp.routing.clients.default_region` call this."""
     return os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1"
+
+
+class RegionOutsideBoundary(RuntimeError):
+    """A Bedrock client was asked for a region outside the boundary."""
 
 
 def require_region(region: str) -> None:
@@ -89,8 +94,14 @@ def require_region(region: str) -> None:
     does not allow, whatever entry or setting led it there."""
     boundary = configured()
     if boundary is not None and region not in boundary:
-        raise BoundaryConfigError(
+        raise RegionOutsideBoundary(
             f"refusing a Bedrock client for {region}: outside {ENV} {sorted(boundary)}")
+
+
+#: Why an entry is left out (`Exclusion.kind`).
+OUTSIDE = "outside_boundary"          # the boundary rule
+VARIANT = "other_variant"             # another variant of the model serves the name
+ALIAS_CONFLICT = "alias_conflict"     # two in-boundary entries claim one name
 
 
 @dataclass(frozen=True)
@@ -98,22 +109,29 @@ class Exclusion:
     """An entry left out of the composed registry, and why."""
 
     bedrock_model_id: str
+    kind: str
     reason: str
 
 
-def exclusion_reason(entry, *, boundary: Optional[frozenset[str]], primary: str) -> Optional[str]:
-    """Why `entry` is not part of this deployment, or None when it is.
+def calls_from_primary(wire_protocol: str) -> bool:
+    """Whether the gateway calls an entry from `primary_region()` rather than from
+    the entry's own `bedrock_region`: true for Converse (`messages`, routed by
+    `mvp.routing.chains` from the deployment's region), false for the
+    OpenAI-compatible surface (`responses`, called in each entry's region by
+    `mvp._openai_transport`)."""
+    return wire_protocol == "messages"
 
-    With a boundary: the entry's recorded reach must be known, bounded and inside it,
-    and a Converse entry must have been recorded for the region the gateway calls
-    from (a profile's destinations depend on the source region).
 
-    Without a boundary nothing is left out here; `compose` only chooses among
-    variants of one model that share a name."""
-    if getattr(entry, "served_by", "bedrock") != "bedrock":
-        return None  # a self-hosted endpoint is not Bedrock inference
-    reach = getattr(entry, "inference_regions", None)
-    converse = entry.wire_protocol == "messages"
+def reach_reason(*, reach: Optional[tuple[str, ...]], bedrock_region: str,
+                 from_primary: bool, boundary: Optional[frozenset[str]],
+                 primary: str) -> Optional[str]:
+    """The one rule, over plain values. Why a model with recorded destinations
+    `reach`, recorded for calls from `bedrock_region`, is outside `boundary`, or
+    None when it is inside (always None without a boundary).
+
+    The destinations must be known, bounded and inside the boundary, and the
+    gateway must call the model from the region its destinations were recorded
+    for (a profile's destinations depend on the region it is called from)."""
     if boundary is None:
         return None
     if not reach:
@@ -123,20 +141,31 @@ def exclusion_reason(entry, *, boundary: Optional[frozenset[str]], primary: str)
     outside = sorted(set(reach) - boundary)
     if outside:
         return f"it can be served in {outside}, outside the boundary"
-    if converse and entry.bedrock_region != primary:
-        return (f"it was recorded for calls from {entry.bedrock_region}; this deployment "
-                f"calls Bedrock from {primary}")
-    if not converse and entry.bedrock_region not in boundary:
-        return f"it is called in {entry.bedrock_region}, outside the boundary"
+    called_in = primary if from_primary else bedrock_region
+    if called_in != bedrock_region:
+        return (f"its destinations were recorded for calls from {bedrock_region}; "
+                f"this deployment calls it from {called_in}")
+    if called_in not in boundary:
+        return f"it is called in {called_in}, outside the boundary"
     return None
+
+
+def exclusion_reason(entry, *, boundary: Optional[frozenset[str]], primary: str) -> Optional[str]:
+    """`reach_reason` for a registry entry. A self-hosted entry is not Bedrock
+    inference and is never left out by the boundary."""
+    if entry.served_by != "bedrock":
+        return None
+    return reach_reason(reach=entry.inference_regions, bedrock_region=entry.bedrock_region,
+                        from_primary=calls_from_primary(entry.wire_protocol),
+                        boundary=boundary, primary=primary)
 
 
 def reach_from_destinations(destinations, *, profile_scope: str,
                             source_region: str) -> Optional[tuple[str, ...]]:
-    """`ModelEntry.inference_regions` from a discovered record's destination regions
-    (`mvp.discovery.records.destination_regions_from_models`), which keep the
-    region-less ARN of a `global.` profile as "" (any region). A direct model id
-    is served where it is called. None when nothing was recorded."""
+    """`ModelEntry.inference_regions` from destination regions as
+    `mvp.discovery.records.destination_regions_from_models` reads them from Bedrock,
+    which keeps the region-less ARN of a `global.` profile as "" (any region). A
+    direct model id is served where it is called. None when nothing was recorded."""
     if profile_scope == "no_profile":
         return (source_region,)
     regions = tuple(destinations or ())
@@ -149,17 +178,14 @@ def reach_from_destinations(destinations, *, profile_scope: str,
 
 def discovered_exclusion_reason(*, bedrock_region: str, wire_protocol: str, profile_scope: str,
                                 destination_regions) -> Optional[str]:
-    """`exclusion_reason` for a model that is still a discovered record or a
-    candidate, so promotion and the verification probe refuse it before anything
-    is written or any prompt is sent, rather than only at activation."""
-    from types import SimpleNamespace
-
-    probe = SimpleNamespace(
-        served_by="bedrock", bedrock_region=bedrock_region, wire_protocol=wire_protocol,
-        profile_scope=profile_scope,
-        inference_regions=reach_from_destinations(destination_regions, profile_scope=profile_scope,
-                                                  source_region=bedrock_region))
-    return exclusion_reason(probe, boundary=configured(), primary=primary_region())
+    """`reach_reason` for a model that is still a discovered record or a candidate,
+    so promotion and the verification probe refuse it before anything is written or
+    any prompt is sent, rather than only at activation."""
+    return reach_reason(
+        reach=reach_from_destinations(destination_regions, profile_scope=profile_scope,
+                                      source_region=bedrock_region),
+        bedrock_region=bedrock_region, from_primary=calls_from_primary(wire_protocol),
+        boundary=configured(), primary=primary_region())
 
 
 def compose(entries: Iterable, *, boundary: Optional[frozenset[str]], primary: str,
@@ -173,15 +199,13 @@ def compose(entries: Iterable, *, boundary: Optional[frozenset[str]], primary: s
     two remain the later one is left out as an `ALIAS_CONFLICT`, which startup
     refuses. Without a boundary, among the variants sharing a name the one whose
     destinations include `primary` is served, else the first declared; an entry
-    that shares no name is never left out, so a deployment with no boundary and no
-    shared names serves exactly what it served before."""
+    that shares no name is never left out."""
     entries = tuple(entries)
     preferred: dict[str, object] = {}
     if boundary is None:
         def rank(item):
             index, e = item
-            reach = getattr(e, "inference_regions", None) or ()
-            return (0 if primary in reach else 1, index)
+            return (0 if primary in (e.inference_regions or ()) else 1, index)
 
         claims: dict[str, list] = {}
         for index, e in enumerate(entries):
@@ -193,19 +217,24 @@ def compose(entries: Iterable, *, boundary: Optional[frozenset[str]], primary: s
     excluded: list[Exclusion] = []
     owner: dict[str, str] = {}
     for entry in entries:
+        found: Optional[Exclusion] = None
         reason = exclusion_reason(entry, boundary=boundary, primary=primary)
-        if reason is None:
+        if reason is not None:
+            found = Exclusion(entry.bedrock_model_id, OUTSIDE, reason)
+        if found is None:
             winner = next((preferred[a] for a in entry.aliases
                            if a in preferred and preferred[a] is not entry), None)
             if winner is not None:
-                reason = (f"another variant of this model, {winner.bedrock_model_id}, serves "
-                          f"its name from {primary}")
-        if reason is None:
+                found = Exclusion(entry.bedrock_model_id, VARIANT,
+                                  f"another variant of this model, {winner.bedrock_model_id}, "
+                                  f"serves its name from {primary}")
+        if found is None:
             clash = next((a for a in entry.aliases if a in owner), None)
             if clash is not None:
-                reason = f"{ALIAS_CONFLICT}: alias {clash!r} is already served by {owner[clash]}"
-        if reason is not None:
-            excluded.append(Exclusion(entry.bedrock_model_id, reason))
+                found = Exclusion(entry.bedrock_model_id, ALIAS_CONFLICT,
+                                  f"alias {clash!r} is already served by {owner[clash]}")
+        if found is not None:
+            excluded.append(found)
             continue
         for alias in entry.aliases:
             owner[alias] = entry.bedrock_model_id
@@ -213,30 +242,36 @@ def compose(entries: Iterable, *, boundary: Optional[frozenset[str]], primary: s
     return tuple(kept), tuple(excluded)
 
 
-ALIAS_CONFLICT = "alias conflict"
-
-
 def check_startup(*, entries: Iterable, exclusions: Iterable[Exclusion],
                   default_model: str) -> None:
     """Refuse a deployment whose boundary contradicts the rest of its settings.
-    Called once at startup, before traffic. Does nothing when no boundary is set."""
+    Called once at startup, before traffic. Without a boundary it only warns when
+    the default model is a variant this region does not serve."""
+    from core.logging import get_logger
+
     boundary = configured()
+    exclusions = tuple(exclusions)
+    entries = tuple(entries)
+    served = {e.bedrock_model_id for e in entries}
     if boundary is None:
+        if default_model not in served and any(
+                e.bedrock_model_id == default_model for e in exclusions):
+            get_logger(__name__).warning("default_model_not_served_here", default_model=default_model)
         return
     primary = primary_region()
     if primary not in boundary:
         raise BoundaryConfigError(
-            f"BEDROCK_REGION {primary} is outside {ENV} {sorted(boundary)}")
-    entries = tuple(entries)
+            f"the region the gateway calls Bedrock from ({primary}: BEDROCK_REGION, else "
+            f"AWS_REGION) is outside {ENV} {sorted(boundary)}")
     if not entries:
         raise BoundaryConfigError(
             f"no model in the registry can be served inside {ENV} {sorted(boundary)}")
-    conflicts = [e for e in exclusions if e.reason.startswith(ALIAS_CONFLICT)]
+    conflicts = [e for e in exclusions if e.kind == ALIAS_CONFLICT]
     if conflicts:
         raise BoundaryConfigError(
             "two models inside the boundary share a name: "
             + "; ".join(f"{e.bedrock_model_id} ({e.reason})" for e in conflicts))
-    if default_model not in {e.bedrock_model_id for e in entries}:
+    if default_model not in served:
         why = next((e.reason for e in exclusions if e.bedrock_model_id == default_model),
                    "it is not in the model registry")
         raise BoundaryConfigError(

@@ -25,4 +25,6 @@ def bedrock_client(region: str):
 
 
 def default_region() -> str:
-    return os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION", "us-east-1")
+    from mvp.inference_boundary import primary_region
+
+    return primary_region()
