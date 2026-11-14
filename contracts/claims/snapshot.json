@@ -1446,6 +1446,9 @@
   },
   "cl-62217c3ecd04": {
    "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-c4c2332d80a2": {
+   "first_seen": "docs/DEPLOYMENT.md, the private-entry shared-address caveat corrected to one address per load balancer node after a real-machine measurement"
   }
  },
  "retired": {
