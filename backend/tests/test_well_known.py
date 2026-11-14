@@ -7,7 +7,7 @@ These tests lock the contract so CLI consumers can rely on it:
   - required fields are present.
   - no field value leaks secrets (password / aws_secret_access_key /
     private keys etc.).
-  - Cache-Control header is set to public, max-age=300.
+  - Cache-Control is no-store: the document says where a CLI sends credentials.
   - Endpoint is reachable without Authorization.
 """
 from __future__ import annotations
@@ -79,8 +79,24 @@ def test_well_known_sets_cache_control(monkeypatch):
     client = _make_client(monkeypatch)
     resp = client.get("/.well-known/stratoclave-config")
     cc = resp.headers.get("cache-control", "").lower()
-    assert "public" in cc
-    assert "max-age=300" in cc
+    assert cc == "no-store"
+
+
+def test_in_production_the_endpoint_is_never_taken_from_request_headers(monkeypatch):
+    client = _make_client(monkeypatch)
+    monkeypatch.delenv("STRATOCLAVE_API_ENDPOINT", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    resp = client.get("/.well-known/stratoclave-config",
+                      headers={"X-Forwarded-Host": "attacker.example", "X-Forwarded-Proto": "https"})
+    assert resp.status_code == 500
+    assert "attacker.example" not in resp.text
+
+
+def test_the_config_names_the_sts_server_id(monkeypatch):
+    client = _make_client(monkeypatch)
+    monkeypatch.setenv("COGNITO_CLIENT_ID", "client-abc")
+    monkeypatch.delenv("STRATOCLAVE_STS_SERVER_ID", raising=False)
+    assert client.get("/.well-known/stratoclave-config").json()["sts_server_id"] == "client-abc"
 
 
 _SECRET_RE = re.compile(

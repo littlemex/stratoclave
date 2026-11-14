@@ -69,9 +69,10 @@ _DEFAULT_OPENAI_SUPPORTED_REGIONS = "us-east-2,us-west-2"
 
 _DEFAULT_REGION_FALLBACK = "us-east-1"
 
-# Cache-Control: configuration changes are rare; 5 min is enough that
-# `stratoclave setup` reruns pick up updates promptly.
-_CACHE_CONTROL = "public, max-age=300"
+# Cache-Control: never stored. The document tells a CLI where to send its
+# credentials, so no shared cache (a CDN, a proxy) may answer one client with a
+# copy another request produced. It is fetched once per `stratoclave setup`.
+_CACHE_CONTROL = "no-store"
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,10 @@ class StratoclaveConfig(BaseModel):
     api_endpoint: str
     cognito: CognitoInfo
     cli: CliHints
+    # The value the CLI puts in `X-Stratoclave-Server-Id` before signing a
+    # GetCallerIdentity, binding the signed request to this gateway
+    # (`mvp.sso_sts.SERVER_ID_HEADER`). Public: it names the audience.
+    sts_server_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +131,11 @@ def _derive_api_endpoint(request: Request) -> str:
     explicit = os.getenv("STRATOCLAVE_API_ENDPOINT")
     if explicit:
         return explicit.rstrip("/")
+    # In production the endpoint is never taken from request headers: a caller
+    # could name any host in X-Forwarded-Host and hand that URL to a CLI, which
+    # would then send its credentials there. A deployment always sets the env.
+    if os.getenv("ENVIRONMENT", "").strip().lower() == "production":
+        raise HTTPException(status_code=500, detail="STRATOCLAVE_API_ENDPOINT is not set")
 
     # 2. Inspect X-Forwarded-* headers.
     headers = request.headers
@@ -221,6 +231,12 @@ def _resolve_codex_hints() -> Optional[CodexHints]:
 # ---------------------------------------------------------------------------
 
 
+def _sts_server_id() -> Optional[str]:
+    from .sso_sts import expected_server_id
+
+    return expected_server_id()
+
+
 @router.get(
     "/stratoclave-config",
     response_model=StratoclaveConfig,
@@ -272,6 +288,7 @@ def get_stratoclave_config(request: Request, response: Response) -> StratoclaveC
             callback_port=_DEFAULT_CALLBACK_PORT,
             codex=codex_hints,
         ),
+        sts_server_id=_sts_server_id(),
     )
 
     # Defensive: regression guard against accidentally exposing a secret.

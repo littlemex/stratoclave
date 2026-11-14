@@ -54,6 +54,20 @@ struct SsoExchangeResponse {
     new_user: bool,
 }
 
+/// The gateway's `sts_server_id` from `/.well-known/stratoclave-config`, or None when
+/// the gateway does not publish one (older deployments) or cannot be reached.
+async fn fetch_sts_server_id(api_endpoint: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Doc {
+        #[serde(default)]
+        sts_server_id: Option<String>,
+    }
+    let url = format!("{}/.well-known/stratoclave-config", api_endpoint.trim_end_matches('/'));
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().ok()?;
+    let doc: Doc = client.get(&url).send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
+    doc.sts_server_id.filter(|s| !s.is_empty())
+}
+
 pub async fn login(opts: SsoLoginOptions) -> Result<()> {
     let config = MvpConfig::load()?;
 
@@ -108,6 +122,14 @@ pub async fn login(opts: SsoLoginOptions) -> Result<()> {
         "application/x-www-form-urlencoded".to_string(),
     );
     headers_map.insert("Host".to_string(), sts_host.clone());
+    // Bind the signed request to this gateway: the header is signed, so STS refuses
+    // any change to it, and the gateway refuses a request naming another server.
+    // Without it, a GetCallerIdentity signed here could be replayed against another
+    // service that verifies identity the same way, and the reverse. Absent when the
+    // gateway predates the field.
+    if let Some(server_id) = fetch_sts_server_id(&config.api_endpoint).await {
+        headers_map.insert("X-Stratoclave-Server-Id".to_string(), server_id);
+    }
 
     let signable = SignableRequest::new(
         "POST",

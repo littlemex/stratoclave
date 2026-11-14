@@ -228,6 +228,59 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str =
             status_code=400, detail="Authorization header (sigv4) is required"
         )
 
+    _check_server_id(lowered)
+
+
+#: The header that binds a signed GetCallerIdentity to THIS gateway. The CLI puts
+#: it in the request before signing, so it is covered by the signature and STS
+#: rejects any change to it. Without it, a GetCallerIdentity a user signed for
+#: another service that uses the same pattern (HashiCorp Vault's AWS auth is the
+#: well-known one) could be replayed here inside the ±5 minute window; with it,
+#: such a request names a different server and is refused.
+SERVER_ID_HEADER = "x-stratoclave-server-id"
+
+
+def expected_server_id() -> Optional[str]:
+    """This deployment's server id: `STRATOCLAVE_STS_SERVER_ID`, else the Cognito app
+    client id (unique per deployment, already public in `/.well-known/stratoclave-config`).
+    Not a secret: it names the audience, it does not prove anything by itself."""
+    import os
+
+    return os.getenv("STRATOCLAVE_STS_SERVER_ID") or os.getenv("COGNITO_CLIENT_ID") or None
+
+
+def server_id_required() -> bool:
+    """Whether a signed request without the server id header is refused. Off while
+    CLIs that predate the header are still in use; a request that carries the
+    header must match either way."""
+    import os
+
+    return os.getenv("STRATOCLAVE_STS_SERVER_ID_REQUIRED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _signed_header_names(authorization: str) -> set[str]:
+    match = re.search(r"SignedHeaders=([^,\s]+)", authorization)
+    return set(match.group(1).lower().split(";")) if match else set()
+
+
+def _check_server_id(lowered: dict[str, str]) -> None:
+    present = SERVER_ID_HEADER in lowered
+    signed = SERVER_ID_HEADER in _signed_header_names(lowered.get("authorization", ""))
+    expected = expected_server_id()
+    if not present:
+        if server_id_required():
+            raise HTTPException(status_code=401, detail=(
+                f"the signed request must carry {SERVER_ID_HEADER}; update the CLI"))
+        _log.warning("sso_sts_server_id_absent")
+        return
+    if not signed:
+        raise HTTPException(status_code=401, detail=f"{SERVER_ID_HEADER} must be a signed header")
+    import hmac
+
+    if not expected or not hmac.compare_digest(lowered[SERVER_ID_HEADER], expected):
+        raise HTTPException(status_code=401, detail=(
+            f"the signed request names another server in {SERVER_ID_HEADER}"))
+
 
 def _signed_action(query: str, body: str) -> Optional[str]:
     """The `Action` the signed request carries, from the query string or the form body.
