@@ -770,13 +770,12 @@ can reach this deployment at all:
 2. Retrieve the one-time password from Secrets Manager, as already shown
    above.
 3. Point the CLI at this deployment: `stratoclave setup
-   https://stratoclave.internal.example.com --allow-internal-host` (your own
-   `STRATOCLAVE_PRIVATE_DOMAIN`). `setup`'s SSRF denylist refuses a host
-   ending in `.internal` / `.local` / `.localdomain` by default — exactly
-   the shape `STRATOCLAVE_PRIVATE_DOMAIN` takes above — so this path needs
-   `--allow-internal-host` to get past that one check; every other SSRF
-   check (metadata hosts, literal private/link-local IPs, userinfo,
-   HTTPS-only) still applies. This reads `/.well-known/stratoclave-config`
+   https://stratoclave.internal.example.com` (your own
+   `STRATOCLAVE_PRIVATE_DOMAIN`). If that name ends in `.internal`, `.local`
+   or `.localdomain`, `setup` refuses it by default; add
+   `--allow-internal-host`, which lifts only that check (metadata hosts,
+   literal private and link-local addresses, userinfo and plain HTTP are
+   still refused). This reads `/.well-known/stratoclave-config`
    from the gateway and writes the local CLI config; it must run before
    `auth login` below, which depends on it.
 4. Sign in with `stratoclave auth login --email <email>` (the password is

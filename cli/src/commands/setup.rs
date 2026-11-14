@@ -966,15 +966,12 @@ mod tests {
         assert!(msg.contains("/v1"));
     }
 
-    // fix/pv-verify: `STRATOCLAVE_ENTRY=private` deployments (see
-    // docs/DEPLOYMENT.md, "Private entry (PrivateLink), headless") use
-    // exactly this host shape by the doc's own example
-    // (`stratoclave.internal.example.com`); real-machine verification
-    // against a live private-entry deployment found `stratoclave setup`
-    // refusing it unconditionally, with no way past the check at all.
+    // A private entry's STRATOCLAVE_PRIVATE_DOMAIN is often a private hosted
+    // zone name under `.internal`; `setup` refuses that suffix unless the
+    // operator passes --allow-internal-host.
     #[test]
     fn test_validate_url_rejects_internal_suffix_by_default() {
-        let err = validate_url("https://stratoclave.internal.example.com", false).unwrap_err();
+        let err = validate_url("https://stratoclave.corp.internal", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("reserved internal suffix"));
         assert!(msg.contains("--allow-internal-host"));
@@ -982,8 +979,8 @@ mod tests {
 
     #[test]
     fn test_validate_url_allows_internal_suffix_with_flag() {
-        let out = validate_url("https://stratoclave.internal.example.com", true).unwrap();
-        assert_eq!(out, "https://stratoclave.internal.example.com");
+        let out = validate_url("https://stratoclave.corp.internal", true).unwrap();
+        assert_eq!(out, "https://stratoclave.corp.internal");
     }
 
     #[test]
