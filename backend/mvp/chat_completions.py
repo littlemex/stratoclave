@@ -40,6 +40,7 @@ from . import _converse_core
 from ._converse_types import additional_model_request_fields as _additional_model_request_fields
 from . import _money, _openai_transport
 from . import provider_outcome as _provider_outcome
+from .task_tag import asserted as _asserted_task_tag
 from ._bedrock_clients import deployment_client
 from ._timing import RequestTiming, phase as _timed_phase
 from .anthropic import _selected_bedrock_model
@@ -611,7 +612,8 @@ def chat_completions(
         # above: one payload, surveyed and then sent, not two independently
         # built copies.
         openai_payload, injected_usage = _build_openai_chat_payload(
-            body, entry, getattr(user, "org_id", None), user_id=getattr(user, "user_id", None))
+            body, entry, getattr(user, "org_id", None), user_id=getattr(user, "user_id", None),
+            task_tag=_asserted_task_tag(ctx))
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
     # survey whichever canonical payload this request will actually send —
@@ -751,6 +753,7 @@ def chat_completions(
             reservation=reservation, corr=corr,
             payload=openai_payload, injected_usage=injected_usage,
             request_id=ctx.request_id if ctx else None,
+            task_tag=_asserted_task_tag(ctx),
             timing=timing,
         )
 
@@ -775,6 +778,7 @@ def chat_completions(
             _stream_chat(body, model_id, user, tenants_repo, reservation, kwargs,
                          entry=entry,
                          request_id=ctx.request_id if ctx else None,
+                         task_tag=_asserted_task_tag(ctx),
                          timing=timing),
             media_type="text/event-stream",
             headers={
@@ -789,7 +793,7 @@ def chat_completions(
     hold = _open_hold(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=model_id, request_id=ctx.request_id if ctx else None,
-        route="chat_completions",
+        route="chat_completions", task_tag=_asserted_task_tag(ctx),
     )
     # The marker that lets an abandoned call be found in the provider's own
     # invocation log. Bedrock does not tokenise it, so it cannot move the token
@@ -972,6 +976,7 @@ def _build_openai_chat_payload(
     tenant_id: Optional[str],
     *,
     user_id: Optional[str],
+    task_tag: Optional[str],
 ) -> tuple[dict, bool]:
     """The exact JSON `payload` `/v1/chat/completions` sends to the OpenAI-compatible endpoint
     (`(payload, injected_usage)`), extracted so it can be built ONCE, BEFORE
@@ -1012,7 +1017,8 @@ def _build_openai_chat_payload(
             opts["include_usage"] = True
             injected_usage = True
         payload["stream_options"] = opts
-    _provider_outcome.stamp_openai_metadata_marker(payload, tenant_id, user_id=user_id)
+    _provider_outcome.stamp_openai_metadata_marker(
+        payload, tenant_id, user_id=user_id, task_tag=task_tag)
     return payload, injected_usage
 
 
@@ -1027,6 +1033,7 @@ def _openai_chat_completion(
     payload: Optional[dict] = None,
     injected_usage: Optional[bool] = None,
     request_id: Optional[str] = None,
+    task_tag: Optional[str] = None,
     timing: Optional[RequestTiming] = None,
 ):
     """Forward an OpenAI Chat Completions request to the OpenAI-compatible endpoint unchanged.
@@ -1060,7 +1067,8 @@ def _openai_chat_completion(
         # `_build_openai_chat_payload`. The real route path always supplies
         # `payload` pre-built, so this branch is never taken there.
         payload, injected_usage = _build_openai_chat_payload(
-            body, entry, getattr(user, "org_id", None), user_id=getattr(user, "user_id", None))
+            body, entry, getattr(user, "org_id", None), user_id=getattr(user, "user_id", None),
+            task_tag=task_tag)
 
     # The hold's latch is what keeps a 4xx on a streamed request from being
     # refunded by the error branch and then settled again by the generator's
@@ -1074,7 +1082,7 @@ def _openai_chat_completion(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=entry.bedrock_model_id, requested_model=body.model,
         request_id=request_id, route="chat_completions_openai",
-        payload=payload,
+        payload=payload, task_tag=task_tag,
     )
 
     def _settle(
@@ -1310,6 +1318,7 @@ async def _stream_chat(
     *,
     entry: Any,
     request_id: Optional[str] = None,
+    task_tag: Optional[str] = None,
     timing: Optional[RequestTiming] = None,
 ) -> AsyncGenerator[bytes, None]:
     """SSE stream via the shared _budget_flow.run_stream + ChatAdapter.
@@ -1491,7 +1500,7 @@ async def _stream_chat(
         hold=_open_hold(
             user=user, tenants_repo=tenants_repo, reservation=reservation,
             model_id=model_id, request_id=request_id,
-            route="chat_completions_stream",
+            route="chat_completions_stream", task_tag=task_tag,
         ),
         invoke_stream=_invoke,
         adapter=_ChatAdapter(),

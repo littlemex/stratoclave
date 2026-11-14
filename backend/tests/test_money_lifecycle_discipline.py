@@ -164,6 +164,7 @@ def _hold(*, departed: bool = True, **kw):
     settled: list[dict] = []
     released: list[bool] = []
     hold = _money.Hold(
+        task_tag=None,
         user=_User(), tenants_repo=repo, reservation=4000,
         model_id="model-x",
         settle=lambda **k: settled.append(k),
@@ -342,6 +343,8 @@ def test_the_observability_hook_only_runs_for_the_winner_and_cannot_break_a_sett
 def test_the_correlation_marker_carries_the_hold_the_tenant_and_the_user():
     hold, _repo, _settled, _released = _hold()
     assert hold.request_metadata() == {"sc_attempt_id": "hold-1", "sc_tenant": "acme", "sc_user": "u"}
+    hold.task_tag = "nightly-eval"
+    assert hold.request_metadata()["sc_task_tag"] == "nightly-eval"
 
 
 # ---------------------------------------------------------------------------

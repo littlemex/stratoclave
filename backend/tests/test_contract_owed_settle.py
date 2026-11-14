@@ -265,6 +265,7 @@ def _end_unobserved_through_the_hold(user, ctx):
     from mvp import _money
 
     hold = _money.Hold(
+        task_tag=None,
         user=user,
         tenants_repo=ctx,
         reservation=2500,

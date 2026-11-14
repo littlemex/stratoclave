@@ -168,6 +168,9 @@ ol.mini li{margin:3px 0}
 .tagflow{display:grid;grid-template-columns:.8fr 1.7fr .8fr;gap:20px}
 @media (max-width:1000px){.tagflow{grid-template-columns:1fr}}
 .tagflow>*{min-width:0}
+.logflow{grid-template-columns:1fr 1.25fr 1fr}
+@media (max-width:1000px){.logflow{grid-template-columns:1fr}}
+.logflow pre.term.wrap{overflow-wrap:anywhere}
 .tf-step{background:var(--card);border-radius:var(--r-box);padding:20px;box-shadow:var(--shadow);position:relative}
 .tf-n{font-family:var(--mono);font-size:12px;color:var(--ink3)}
 .tf-step h3{margin:4px 0 12px}
@@ -600,6 +603,57 @@ export OPENAI_API_KEY=$STRATOCLAVE_API_KEY</pre></div>
         <p data-t="tg.d1p">Tags attribute spend; budgets enforce it. The hard limits are the tenant pool, the user quota and the model quota, and a tag never changes what is admitted. A tag's total is a floor for the cost of that work: requests for the same work that carried no tag are counted under <code>unlabelled</code>. Amounts are kept as integer micro-dollars and turned into dollars only for display, so rounding never adds up to a different bill. Usage rows are kept for 90 days; the ledger is the system of record for charges.</p>
       </div>
     </details>
+
+    <div class="sec-head rv" id="logs" style="margin-top:56px">
+      <div class="eyebrow" data-t="lg.eyebrow">Traceable in your own logs</div>
+      <h2 data-t="lg.h">The same tag, and the user, land in Bedrock's invocation log and in your own endpoint's.</h2>
+      <p class="lede" data-t="lg.lede">Every model call carries a small marker: the tenant, the user, the attempt and the task tag. Bedrock writes it into its model invocation log; a self-hosted endpoint receives it as request headers. So a log record answers who called, for which task, and which charge it was, without the gateway keeping a copy of anything.</p>
+    </div>
+
+    <div class="tagflow logflow rv">
+      <div class="tf-step">
+        <div class="tf-n">1</div>
+        <h3 data-t="lg.s1">The same request</h3>
+        <div class="codewrap"><pre class="term wrap">curl $STRATOCLAVE_URL/v1/messages \
+  -H "x-api-key: $STRATOCLAVE_API_KEY" \
+  -H "x-sc-task-tag: nightly-eval" \
+  -d @request.json</pre></div>
+        <p class="muted" data-t="lg.s1p">Nothing new to send. The user comes from the key, the tag from the header you already use.</p>
+      </div>
+      <div class="tf-step">
+        <div class="tf-n">2</div>
+        <h3 data-t="lg.s2">Bedrock's invocation log record</h3>
+        <div class="codewrap"><pre class="term" translate="no">{
+  "operation": "ConverseStream",
+  "modelId": "us.anthropic.claude-haiku-4-5",
+  "requestMetadata": {
+    "sc_tenant": "tenant-7f3c...",
+    "sc_user": "8a41...",
+    "sc_task_tag": "nightly-eval",
+    "sc_attempt_id": "e339..."
+  },
+  "input": { "inputTokenCount": 9 },
+  "output": { "outputTokenCount": 4 }
+}</pre></div>
+        <p class="muted" data-t="lg.s2p">Streaming or not, Converse or the OpenAI-compatible surface. Query it by user or by task in CloudWatch Logs Insights or Athena, and join it to the usage rows on the same ids.</p>
+      </div>
+      <div class="tf-step">
+        <div class="tf-n">3</div>
+        <h3 data-t="lg.s3">Your own GPU endpoint</h3>
+        <div class="codewrap"><pre class="term wrap" translate="no">X-Stratoclave-Tenant: tenant-7f3c...
+X-Stratoclave-User: 8a41...
+X-Stratoclave-Task-Tag: nightly-eval
+X-Stratoclave-Attempt-Id: e339...</pre></div>
+        <p class="muted" data-t="lg.s3p">The gateway sends these headers; your reverse proxy writes them to its access log. What is kept there, and for how long, is yours to decide.</p>
+      </div>
+    </div>
+
+    <div class="chips rv" style="margin-top:28px">
+      <div class="chip"><b data-t="lg.c1">Ids only</b><span data-t="lg.c1p">The marker holds ids the gateway already has. No prompt, no email, nothing from the request body.</span></div>
+      <div class="chip"><b data-t="lg.c2">Cannot be forged</b><span data-t="lg.c2p">A caller's own <code>sc_*</code> metadata is removed and replaced, so a record names the real tenant and user.</span></div>
+      <div class="chip"><b data-t="lg.c3">Never model input</b><span data-t="lg.c3p">It travels beside the prompt, not in it: the model never sees it and it costs no tokens.</span></div>
+      <div class="chip"><b data-t="lg.c4">The gateway keeps no log</b><span data-t="lg.c4p">Logs stay in your account, under your IAM. Grant read access to them as you would to per-user usage data.</span></div>
+    </div>
   </div>
 </section>
 <section id="console">
@@ -1226,6 +1280,24 @@ Object.assign(window.__JA, {
 'tg.s3p': 'コンソールでは、テナントごとに同じ合計をメンバー別、タグ別に見られます。利用者は自分の分を見られます。',
 'tg.d1': 'タグの合計が意味すること、しないこと',
 'tg.d1p': 'タグは支出を振り分けるもので、予算を強制するのはテナントのプール、ユーザーの枠、モデルの枠です。タグによって通るリクエストが変わることはありません。タグの合計は、その作業にかかった費用の下限です。同じ作業でもタグを付け忘れたリクエストは <code>unlabelled</code> に数えられるからです。金額は micro-USD の整数で持ち、表示するときだけドルに直すので、丸めの積み重ねで請求額がずれることはありません。使用ログの保持は 90 日で、課金の正本は台帳です。',
+
+'lg.eyebrow': '自分のログで追える',
+'lg.h': '同じタグと利用者が、Bedrock の呼び出しログにも、自前のエンドポイントのログにも残る。',
+'lg.lede': 'モデルを呼び出すたびに、テナント、利用者、試行、タスクのタグを示す小さな目印を付けます。Bedrock はこれを model invocation logging の記録に書き込み、セルフホストのエンドポイントにはリクエストヘッダーとして届きます。ゲートウェイが何も控えを持たなくても、ログの 1 件から「誰が、どの作業で、どの課金の呼び出しか」がわかります。',
+'lg.s1': 'リクエストはそのまま',
+'lg.s1p': '新しく送るものはありません。利用者はキーから、タグはいつものヘッダーから取ります。',
+'lg.s2': 'Bedrock の呼び出しログの記録',
+'lg.s2p': 'ストリーミングでもそうでなくても、Converse でも OpenAI 互換の窓口でも同じです。CloudWatch Logs Insights や Athena で利用者別、タスク別に引けて、同じ ID で使用量の行とつなげられます。',
+'lg.s3': '自前の GPU エンドポイント',
+'lg.s3p': 'ゲートウェイはこのヘッダーを送るだけで、アクセスログに書くのは手前のリバースプロキシです。何をどれだけ残すかは運用する側が決めます。',
+'lg.c1': '載せるのは ID だけ',
+'lg.c1p': '目印はゲートウェイがもともと持っている ID だけです。プロンプト、メールアドレス、リクエスト本文の中身は入りません。',
+'lg.c2': 'なりすませない',
+'lg.c2p': '呼び出し側が自分で <code>sc_*</code> を metadata に入れても消して置き換えるので、記録には本当のテナントと利用者が残ります。',
+'lg.c3': 'モデルには渡らない',
+'lg.c3p': 'プロンプトの横に添えて送り、中には入れません。モデルからは見えず、トークン代もかかりません。',
+'lg.c4': 'ゲートウェイはログを持たない',
+'lg.c4p': 'ログはあなたのアカウントに、あなたの IAM のもとで残ります。読める人は、利用者ごとの使用量データと同じように絞ってください。',
 
 'ui.eyebrow': 'Web コンソール',
 'ui.h': '管理画面も最初から付いてくる。',

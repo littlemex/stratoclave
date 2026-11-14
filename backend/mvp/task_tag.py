@@ -67,6 +67,16 @@ class Source(str, Enum):
     DROPPED_GRAMMAR = "dropped_grammar"   # present, non-empty, and otherwise not usable
 
 
+def asserted(ctx) -> Optional[str]:
+    """The tag the caller asserted on this request, or None when it asserted
+    none or it was dropped. What the correlation marker carries as
+    `sc_task_tag` (C13.6): the sentinel is never sent, since it says nothing a
+    record without the key does not."""
+    if ctx is None or getattr(ctx, "task_tag_source", None) != Source.ASSERTED.value:
+        return None
+    return getattr(ctx, "task_tag", None)
+
+
 def dropped_reason(source: Source) -> Optional[str]:
     """The caller-facing reason for ``HDR_TASK_TAG_DROPPED``, or `None` when
     the tag was not dropped (``ABSENT`` and ``ASSERTED`` both resolve to `None`

@@ -404,8 +404,12 @@ class Hold:
         request_id: Optional[str] = None,
         route: Optional[str] = None,
         on_finalized: Optional[Callable[[str, Any], None]] = None,
+        task_tag: Optional[str],
     ) -> None:
         self.user = user
+        # The task tag the caller asserted (`mvp.task_tag.asserted`), carried in
+        # the correlation marker. Required so a route cannot forget to say.
+        self.task_tag = task_tag
         self.tenants_repo = tenants_repo
         self.reservation = reservation
         self.model_id = model_id
@@ -494,7 +498,7 @@ class Hold:
         `provider_outcome.attempt_request_metadata`.
         """
         return _outcome.attempt_request_metadata(
-            self.hold_id, self.tenant_id, getattr(self.user, "user_id", None))
+            self.hold_id, self.tenant_id, getattr(self.user, "user_id", None), self.task_tag)
 
     # ------------------------------------------------- claim, then write later
 

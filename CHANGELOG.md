@@ -36,18 +36,20 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Added
 
-- **Model invocation logs can be attributed to a user, on every transport (C13.6).** The
-  correlation marker now carries `sc_user`, the principal's `user_id`, beside `sc_tenant` and
+- **Model invocation logs can be attributed to a user and a task, on every transport
+  (C13.6).** The correlation marker now carries `sc_user`, the principal's `user_id`, and
+  `sc_task_tag`, the task tag the caller sent in `x-sc-task-tag`, beside `sc_tenant` and
   `sc_attempt_id`. This reverses the earlier statement that the marker carries no user
   identifier: whoever can read the invocation logs can now see calls per user, so grant read
   access to them as to per-user usage data (`docs/design/request-bodies.md`). A self-hosted
   endpoint receives the same marker as the headers `X-Stratoclave-Tenant`,
-  `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`, which its operator can write to an
-  access log. On the OpenAI-compatible surface `sc_user` is now a reserved `metadata` key: a
-  value a caller sends under it is replaced. When a caller's own keys leave no room for the
-  full marker under Bedrock's 16-key limit, `sc_user` is left out first and the attempt and
-  tenant pair is still sent, as before; a caller with 15 or more keys gets no marker, as
-  before.
+  `X-Stratoclave-User`, `X-Stratoclave-Attempt-Id` and `X-Stratoclave-Task-Tag`, which its
+  operator can write to an access log. On the OpenAI-compatible surface `sc_user` and
+  `sc_task_tag` are now reserved `metadata` keys: a value a caller sends under one is
+  replaced. When a caller's own keys leave no room for the full marker under Bedrock's
+  16-key limit, `sc_task_tag` and then `sc_user` are left out and the attempt and tenant pair
+  is still sent, as before; a caller with 15 or more keys gets no marker, as before. The
+  gateway refuses to start when `DEFAULT_ORG_ID` holds a character the marker cannot carry.
 
 - **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
   `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit
@@ -60,10 +62,11 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Fixed
 
-- **A tenant id with a character Bedrock does not accept in `requestMetadata` (such as `|`, or
-  any non-ASCII) made every Converse call for that tenant fail with `ValidationException`.**
-  Each marker value is now checked before it is sent and left out when it does not fit; the
-  call goes out with the other parts (C13.6).
+- **A `DEFAULT_ORG_ID` with a character Bedrock does not accept in `requestMetadata` (such as
+  `|`, or any non-ASCII) made every Converse call for that tenant fail with
+  `ValidationException`.** Each marker value is now checked before it is sent and left out
+  when it does not fit, so the call goes out with the other parts, and such a
+  `DEFAULT_ORG_ID` now stops the gateway at startup (C13.6).
 
 - **Streaming calls carried no correlation marker.** `/v1/messages` and `/v1/chat/completions`
   streamed through Converse without `requestMetadata`, so their invocation-log records could
