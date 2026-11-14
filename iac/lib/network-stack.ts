@@ -20,6 +20,22 @@ export interface NetworkStackProps extends cdk.StackProps {
    * @default 2
    */
   maxAzs?: number;
+
+  /**
+   * `STRATOCLAVE_ENTRY` mode. @default 'cloudfront'
+   *
+   * `'cloudfront'` is exactly today's stack: the ALB security group admits
+   * only the CloudFront origin-facing prefix list on :80. `'private'` skips
+   * that lookup and that ingress rule entirely — there is no CloudFront on
+   * that path — and instead creates the internal NLB's security group
+   * (`nlbSecurityGroup`) here, in the same stack that owns `albSecurityGroup`,
+   * so the ALB's admission rule (from the NLB only, on :443) and the NLB's
+   * egress rule (to the ALB only, on :443) are both ordinary same-stack L2
+   * calls. `lib/private-link-stack.ts` only consumes `nlbSecurityGroup`
+   * (to attach it to the NLB construct itself); it does not create or
+   * modify any security group.
+   */
+  entryMode?: 'cloudfront' | 'private';
 }
 
 /**
@@ -33,6 +49,8 @@ export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
   public readonly albSecurityGroup: ec2.SecurityGroup;
   public readonly ecsSecurityGroup: ec2.SecurityGroup;
+  /** Only created when `entryMode === 'private'`. */
+  public readonly nlbSecurityGroup?: ec2.SecurityGroup;
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
@@ -77,46 +95,99 @@ export class NetworkStack extends cdk.Stack {
     // direct ALB-DNS probe fails at the L4 boundary. CDK does not expose
     // a first-class lookup for managed prefix lists, so we resolve the ID
     // at deploy time with an AwsCustomResource (EC2 DescribeManagedPrefixLists).
-    const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
-      this,
-      'CloudFrontOriginFacingPrefixListLookup',
-      {
-        onUpdate: {
-          service: 'EC2',
-          action: 'describeManagedPrefixLists',
-          parameters: {
-            Filters: [
-              {
-                Name: 'prefix-list-name',
-                Values: ['com.amazonaws.global.cloudfront.origin-facing'],
-              },
-            ],
+    //
+    // `entryMode === 'private'` (STRATOCLAVE_ENTRY=private) skips this whole
+    // block: there is no CloudFront distribution on that path, so there is
+    // nothing to admit from it, and the custom resource's own IAM policy
+    // (ANY_RESOURCE describeManagedPrefixLists) would be dead weight on a
+    // deployment that never uses it. `albSecurityGroup` is created above
+    // either way; the private-mode branch below is what adds its one
+    // ingress rule for that mode instead (from the internal NLB's security
+    // group, on :443).
+    const entryMode = props.entryMode ?? 'cloudfront';
+    if (entryMode === 'cloudfront') {
+      const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
+        this,
+        'CloudFrontOriginFacingPrefixListLookup',
+        {
+          onUpdate: {
+            service: 'EC2',
+            action: 'describeManagedPrefixLists',
+            parameters: {
+              Filters: [
+                {
+                  Name: 'prefix-list-name',
+                  Values: ['com.amazonaws.global.cloudfront.origin-facing'],
+                },
+              ],
+            },
+            physicalResourceId: cr.PhysicalResourceId.of(
+              'cloudfront-origin-facing-prefix-list',
+            ),
           },
-          physicalResourceId: cr.PhysicalResourceId.of(
-            'cloudfront-origin-facing-prefix-list',
-          ),
+          policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+            resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+          }),
         },
-        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-          resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
-        }),
-      },
-    );
-    const cloudFrontPrefixListId = cloudFrontPrefixListLookup.getResponseField(
-      'PrefixLists.0.PrefixListId',
-    );
+      );
+      const cloudFrontPrefixListId = cloudFrontPrefixListLookup.getResponseField(
+        'PrefixLists.0.PrefixListId',
+      );
 
-    // CloudFront origin-facing prefix list contains ~50+ IP ranges. Each
-    // prefix-list ingress expands into one rule per CIDR at enforcement
-    // time and counts against the "Inbound or outbound rules per security
-    // group" quota (default 60). We only need port 80: the FrontendStack
-    // distribution talks to the ALB origin with `originProtocolPolicy:
-    // 'http-only'`, so a :443 ingress would never be used. Keeping it
-    // would double the rule count and blow past the SG quota.
-    this.albSecurityGroup.addIngressRule(
-      ec2.Peer.prefixList(cloudFrontPrefixListId),
-      ec2.Port.tcp(80),
-      'Allow HTTP from CloudFront edge locations only',
-    );
+      // CloudFront origin-facing prefix list contains ~50+ IP ranges. Each
+      // prefix-list ingress expands into one rule per CIDR at enforcement
+      // time and counts against the "Inbound or outbound rules per security
+      // group" quota (default 60). We only need port 80: the FrontendStack
+      // distribution talks to the ALB origin with `originProtocolPolicy:
+      // 'http-only'`, so a :443 ingress would never be used. Keeping it
+      // would double the rule count and blow past the SG quota.
+      this.albSecurityGroup.addIngressRule(
+        ec2.Peer.prefixList(cloudFrontPrefixListId),
+        ec2.Port.tcp(80),
+        'Allow HTTP from CloudFront edge locations only',
+      );
+    } else {
+      // The internal NLB's security group, created here (not in
+      // lib/private-link-stack.ts) so that both of the rules it needs can
+      // be ordinary same-stack L2 calls: `addIngressRule` and
+      // `addEgressRule` always scope the new `CfnSecurityGroupIngress` /
+      // `CfnSecurityGroupEgress` resource to the security group's OWN
+      // stack, and the ALB's security group already lives here. Creating
+      // the NLB's security group in PrivateLinkStack instead and then
+      // calling `albSecurityGroup.addIngressRule(nlbSg, ...)` from there
+      // would have put the new ingress resource back in THIS stack while
+      // it referenced an id that lives in PrivateLinkStack — and
+      // PrivateLinkStack already depends on this stack (via AlbStack), so
+      // that is a dependency cycle `cdk synth` refuses outright.
+      //
+      // No ingress rules of its own: PrivateLink traffic is evaluated
+      // against the endpoint service's own acceptance + allowed-principals
+      // gate instead (see `enforceSecurityGroupInboundRulesOnPrivateLinkTraffic:
+      // false` on the NLB construct in private-link-stack.ts), and nothing
+      // else in this VPC is meant to reach the NLB.
+      this.nlbSecurityGroup = new ec2.SecurityGroup(this, 'NlbSecurityGroup', {
+        vpc: this.vpc,
+        securityGroupName: `${props.prefix}-nlb-sg`,
+        description: `Security group for ${props.prefix} internal NLB (PrivateLink publication)`,
+        allowAllOutbound: false,
+      });
+      // The only traffic this NLB ever originates is forwarding to, and
+      // health-checking, its one target — the internal ALB on :443 — so
+      // egress is scoped to exactly that, not left open to the whole
+      // internet from inside the gateway's own VPC.
+      this.nlbSecurityGroup.addEgressRule(
+        this.albSecurityGroup,
+        ec2.Port.tcp(443),
+        'Allow HTTPS to the internal ALB only (forwarding and health checks)',
+      );
+      // The ALB admits only this NLB — never the internet, and never
+      // "anyone in the VPC".
+      this.albSecurityGroup.addIngressRule(
+        this.nlbSecurityGroup,
+        ec2.Port.tcp(443),
+        'Allow HTTPS from the internal NLB (PrivateLink publication) only',
+      );
+    }
 
     // P0-9 (2026-04 security review): the ECS task SG used to allow all
     // outbound traffic. Combined with `assignPublicIp: ENABLED` that

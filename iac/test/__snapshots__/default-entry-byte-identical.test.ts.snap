@@ -1,0 +1,235 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned alb: the load balancer and its listeners are pinned 1`] = `
+{
+  "Alb16C2F182": {
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-alb/Alb/Resource",
+    },
+    "Properties": {
+      "LoadBalancerAttributes": [
+        {
+          "Key": "deletion_protection.enabled",
+          "Value": "false",
+        },
+        {
+          "Key": "routing.http2.enabled",
+          "Value": "true",
+        },
+      ],
+      "Name": "defaultentrytest-alb",
+      "Scheme": "internet-facing",
+      "SecurityGroups": [
+        {
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7",
+        },
+      ],
+      "Subnets": [
+        {
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet1Subnet5C2D37C4FFA2B456",
+        },
+        {
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputRefVpcPublicSubnet2Subnet691E08A351552740",
+        },
+      ],
+      "Tags": [
+        {
+          "Key": "ManagedBy",
+          "Value": "CDK",
+        },
+        {
+          "Key": "Prefix",
+          "Value": "defaultentrytest",
+        },
+        {
+          "Key": "Project",
+          "Value": "Stratoclave",
+        },
+        {
+          "Key": "Stack",
+          "Value": "ALB",
+        },
+      ],
+      "Type": "application",
+    },
+    "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+  },
+  "AlbHttpListener00C8B33E": {
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-alb/Alb/HttpListener/Resource",
+    },
+    "Properties": {
+      "DefaultActions": [
+        {
+          "TargetGroupArn": {
+            "Ref": "BackendTargetGroupECF98930",
+          },
+          "Type": "forward",
+        },
+      ],
+      "LoadBalancerArn": {
+        "Ref": "Alb16C2F182",
+      },
+      "Port": 80,
+      "Protocol": "HTTP",
+      "Tags": [
+        {
+          "Key": "ManagedBy",
+          "Value": "CDK",
+        },
+        {
+          "Key": "Prefix",
+          "Value": "defaultentrytest",
+        },
+        {
+          "Key": "Project",
+          "Value": "Stratoclave",
+        },
+        {
+          "Key": "Stack",
+          "Value": "ALB",
+        },
+      ],
+    },
+    "Type": "AWS::ElasticLoadBalancingV2::Listener",
+  },
+}
+`;
+
+exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned cognito: the UserPoolClient callback/logout URLs are pinned 1`] = `
+{
+  "CallbackURLs": [
+    "http://127.0.0.1:18080/callback",
+    "http://localhost:3003/callback",
+    {
+      "Fn::Join": [
+        "",
+        [
+          "https://",
+          {
+            "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+          },
+          "/callback",
+        ],
+      ],
+    },
+  ],
+  "LogoutURLs": [
+    "http://127.0.0.1:18080",
+    "http://localhost:3003",
+    {
+      "Fn::Join": [
+        "",
+        [
+          "https://",
+          {
+            "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+          },
+        ],
+      ],
+    },
+  ],
+}
+`;
+
+exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned network: the ALB security-group ingress rule(s) and the CloudFront prefix-list lookup are pinned 1`] = `
+{
+  "AlbSecurityGroupfromIndirectPeer80C02E7218": {
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-network/AlbSecurityGroup/from {IndirectPeer}:80",
+    },
+    "Properties": {
+      "Description": "Allow HTTP from CloudFront edge locations only",
+      "FromPort": 80,
+      "GroupId": {
+        "Fn::GetAtt": [
+          "AlbSecurityGroup86A59E99",
+          "GroupId",
+        ],
+      },
+      "IpProtocol": "tcp",
+      "SourcePrefixListId": {
+        "Fn::GetAtt": [
+          "CloudFrontOriginFacingPrefixListLookupE17CADC1",
+          "PrefixLists.0.PrefixListId",
+        ],
+      },
+      "ToPort": 80,
+    },
+    "Type": "AWS::EC2::SecurityGroupIngress",
+  },
+  "CloudFrontOriginFacingPrefixListLookupE17CADC1": {
+    "DeletionPolicy": "Delete",
+    "DependsOn": [
+      "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615",
+    ],
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-network/CloudFrontOriginFacingPrefixListLookup/Resource/Default",
+    },
+    "Properties": {
+      "Create": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
+      "InstallLatestAwsSdk": false,
+      "ServiceToken": {
+        "Fn::GetAtt": [
+          "AWS679f53fac002430cb0da5b7982bd22872D164C4C",
+          "Arn",
+        ],
+      },
+      "Update": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
+    },
+    "Type": "Custom::AWS",
+    "UpdateReplacePolicy": "Delete",
+  },
+  "EcsSecurityGroupfromdefaultentrytestnetworkAlbSecurityGroupF7BE8E1C8000061BACFE": {
+    "Metadata": {
+      "aws:cdk:path": "defaultentrytest-network/EcsSecurityGroup/from defaultentrytestnetworkAlbSecurityGroupF7BE8E1C:8000",
+    },
+    "Properties": {
+      "Description": "Allow traffic from ALB on port 8000",
+      "FromPort": 8000,
+      "GroupId": {
+        "Fn::GetAtt": [
+          "EcsSecurityGroup44008BF1",
+          "GroupId",
+        ],
+      },
+      "IpProtocol": "tcp",
+      "SourceSecurityGroupId": {
+        "Fn::GetAtt": [
+          "AlbSecurityGroup86A59E99",
+          "GroupId",
+        ],
+      },
+      "ToPort": 8000,
+    },
+    "Type": "AWS::EC2::SecurityGroupIngress",
+  },
+}
+`;
+
+exports[`STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned the ECS task env entries this feature branches on are pinned 1`] = `
+{
+  "CORS_ORIGINS": {
+    "Fn::Join": [
+      "",
+      [
+        "https://",
+        {
+          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+        },
+      ],
+    ],
+  },
+  "STRATOCLAVE_API_ENDPOINT": {
+    "Fn::Join": [
+      "",
+      [
+        "https://",
+        {
+          "Fn::ImportValue": "defaultentrytest-frontend:ExportsOutputFnGetAttFrontendDistributionDomainNameD96E5EF9",
+        },
+      ],
+    ],
+  },
+}
+`;

@@ -18,12 +18,13 @@ If you only want to use an existing Stratoclave deployment, you do not need this
 5. [Post-deploy: container image](#post-deploy-container-image)
 6. [Post-deploy: quota gated stacks](#post-deploy-quota-gated-stacks)
 7. [Regional constraints](#regional-constraints)
-8. [Cost estimate](#cost-estimate)
-9. [Updates and re-deploys](#updates-and-re-deploys)
-10. [Local development](#local-development)
-11. [Backend environment variables](#backend-environment-variables)
-12. [Teardown](#teardown)
-13. [Troubleshooting](#troubleshooting)
+8. [Private entry (PrivateLink), headless](#private-entry-privatelink-headless)
+9. [Cost estimate](#cost-estimate)
+10. [Updates and re-deploys](#updates-and-re-deploys)
+11. [Local development](#local-development)
+12. [Backend environment variables](#backend-environment-variables)
+13. [Teardown](#teardown)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -75,7 +76,7 @@ A successful `deploy-all.sh` run provisions **nine CloudFormation stacks** in de
 | # | Stack                 | Resources                                                             | Purpose |
 | - | --------------------- | --------------------------------------------------------------------- | ------- |
 | 1 | `<Prefix>NetworkStack`  | VPC, 2 public subnets, SGs, VPC Flow Logs (CloudWatch, 30 d)          | Public-subnet-only network (no NAT). ALB SG inbound is restricted to the AWS-managed **CloudFront origin-facing prefix list** — direct ALB DNS probes fail at L4. |
-| 2 | `<Prefix>DynamodbStack` | 23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff) | All persistent state, `PAY_PER_REQUEST`. Audit-critical tables (`usage-logs`, `api-keys`) survive `cdk destroy`. |
+| 2 | `<Prefix>DynamodbStack` | 23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), `credit-ledger` and `quota-events` (RETAIN), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff) | All persistent state, `PAY_PER_REQUEST`. Audit tables (`api-keys`, `usage-logs`, `credit-ledger`, `quota-events`) survive `cdk destroy`; see [Teardown](#teardown). |
 | 3 | `<Prefix>EcrStack`      | Private ECR repository (RETAIN)                                       | Holds the backend container image. Rollback surface of last resort. |
 | 4 | `<Prefix>AlbStack`      | Internet-facing ALB, target group, HTTP listener on :80, `deletionProtection=true` in production | Public entry point for the backend; listeners use `open:false` so no 0.0.0.0/0 ingress is punched on the ALB SG. |
 | 5 | `<Prefix>WafStack`      | **WAFv2 WebACL** (CLOUDFRONT scope, `us-east-1`): CommonRuleSet, KnownBadInputs, IpReputation, rate-based (5-minute window, per-IP), optional IPSet allowlist | Opt-out with `ENABLE_WAF=false`. ARN is cross-stack referenced by FrontendStack. |
@@ -85,6 +86,8 @@ A successful `deploy-all.sh` run provisions **nine CloudFormation stacks** in de
 | 9 | `<Prefix>ConfigStack`   | SSM Parameter Store entries                                           | Static runtime values consumed by the backend and helper scripts. |
 
 Several archived stacks (RDS, Redis, CodeBuild, Verified Permissions) live under `iac/lib/_archived/` and are **not** deployed by default. They are kept for reference. The previous `WafStack` archive has been superseded by the live CLOUDFRONT-scope WAF described above.
+
+The nine-stack table above is `STRATOCLAVE_ENTRY=cloudfront`, the default. `STRATOCLAVE_ENTRY=private` builds a different, fresh deployment with no `WafStack` and no `FrontendStack` at all, and an internal (not internet-facing) `AlbStack`; in their place it adds a `<Prefix>PrivateLinkStack` (internal NLB + VPC endpoint service). See [Private entry (PrivateLink), headless](#private-entry-privatelink-headless).
 
 ### Synth-time security checks (cdk-nag)
 
@@ -515,6 +518,329 @@ benign.
 
 ---
 
+## Private entry (PrivateLink), headless
+
+By default Stratoclave's only entry point is CloudFront, which cannot be made
+private. `STRATOCLAVE_ENTRY=private` is a different, fresh deployment shape
+with no internet-facing path to the gateway API: the gateway's API is
+reachable only through AWS PrivateLink, from VPCs an operator has explicitly
+approved. It is for a client that has no route to the public internet at
+all, or for an operator whose compliance posture forbids an internet-facing
+path to the API. There is no web console on this path and no CloudFront
+distribution, S3 bucket, or CLOUDFRONT-scope WAF — this mode is API and CLI
+only. This is narrower than "no internet-facing entry point at all" for the
+whole deployment: see [What this path does not
+provide](#what-this-path-does-not-provide) for what stays reachable from the
+internet regardless (the Cognito user pool) and what else is not provided on
+this path.
+
+`STRATOCLAVE_ENTRY` is read once at synth and decides which stacks get built;
+switching an existing deployment between `cloudfront` and `private` is not
+supported — `iac/scripts/deploy-all.sh` refuses it outright at its
+pre-flight check, because the ALB would change from internet-facing to
+internal in place, which CloudFormation does by replacing the load balancer
+and would take a live deployment down rather than failing cleanly. Deploy
+`private` under a fresh `STRATOCLAVE_PREFIX`.
+
+`iac/scripts/deploy-all.sh` supports both entry modes: with
+`STRATOCLAVE_ENTRY=private` set, it deploys the same stacks `cdk deploy --all`
+would and skips the frontend build/upload/invalidation step entirely (there
+is no S3 bucket or CloudFront distribution in this mode to put anything
+into). `STRATOCLAVE_ENTRY=private` on its own is not enough to synth — the
+three `STRATOCLAVE_PRIVATE_*` variables below are required alongside it, or
+synth refuses outright naming whichever is missing. The exact environment to
+set, with illustrative values in place of your own certificate, domain, and
+consumer account, then the same deploy command as `cloudfront` mode:
+
+```bash
+export STRATOCLAVE_ENTRY=private
+export STRATOCLAVE_PRIVATE_CERTIFICATE_ARN=arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-0000-0000-000000000000
+export STRATOCLAVE_PRIVATE_DOMAIN=stratoclave.internal.example.com
+export STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS=arn:aws:iam::222222222222:root
+./iac/scripts/deploy-all.sh
+```
+
+`STRATOCLAVE_PRIVATE_CERTIFICATE_ARN` and `STRATOCLAVE_PRIVATE_DOMAIN` are
+yours to supply: the private ALB terminates HTTPS with your certificate on
+port 443 only, and opens no port 80 at all, not even a redirect — the first
+request on that port would already have sent a key in cleartext before any
+redirect could run. `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` is a
+comma-separated list of IAM principal ARNs (an account root, a role, or a
+user) allowed to request a connection to the endpoint service; it must be
+non-empty and must never contain a wildcard, which `cdk synth` refuses
+outright. `STRATOCLAVE_ENTRY=both` is named but refused at synth for now: as
+specified it would add reach without removing any — a key meant to stay
+private would still work from the internet through CloudFront — and it needs
+a second internal ALB and a way to tell which entry a request arrived on,
+neither of which this slice builds.
+
+### What gets built
+
+An internal Application Load Balancer, carrying only the HTTPS :443 listener
+described above, sits behind an internal Network Load Balancer with its own
+security group. The NLB's TCP :443 listener forwards to an ALB-type target
+group pointed at the internal ALB — this is the only shape AWS PrivateLink's
+endpoint service configuration accepts; it takes a network or gateway load
+balancer, never an ALB directly. A VPC endpoint service publishes the NLB,
+with connection acceptance required and the allowed-principals list above.
+The internal ALB's own security group admits only the NLB's security group,
+on port 443; nothing else, inside the VPC or outside it, can reach the ALB.
+
+Use `./iac/scripts/deploy-all.sh` (shown above), not a direct `npx cdk deploy
+--all`: the script's pre-flight is what refuses an in-place entry-mode
+switch (see "Switching an existing deployment" above) — a direct `cdk
+deploy` has no such guard and will attempt the switch, replacing the ALB in
+place. The script prints the stack outputs you need:
+
+```
+Outputs:
+stratoclave-private-link.EndpointServiceName = com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000
+stratoclave-private-link.PrivateUrl = https://stratoclave.internal.example.com
+stratoclave-alb.AlbDnsName = stratoclave-alb-0000000000.us-east-1.elb.amazonaws.com
+```
+
+(Illustrative values above; your actual output names the real endpoint
+service, the domain you set, and the ALB's own DNS name — which is an
+output of the `<Prefix>-alb` stack, not `<Prefix>-private-link`; the latter
+deliberately does not repeat it under a second name.)
+
+### The operator's side
+
+Everything below happens outside this repository, in each consumer account
+(to create an endpoint) and in the provider account (to accept it) — in that
+order, since there is nothing for the provider to accept until a consumer has
+asked. The commands below use illustrative ids; substitute your own consumer
+VPC/subnet/security-group ids, pending connection id, and region.
+
+1. In each consumer VPC, create an interface endpoint pointed at the service
+   name from the `EndpointServiceName` output:
+
+   ```bash
+   aws ec2 create-vpc-endpoint --region us-east-1 --vpc-endpoint-type Interface --vpc-id vpc-00000000000000000 --subnet-ids subnet-00000000000000000 --security-group-ids sg-00000000000000000 --service-name com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000
+   ```
+
+   This creates the endpoint in a `pendingAcceptance` state until the next step runs.
+
+2. In the provider account, review and accept the pending connection:
+
+   ```bash
+   aws ec2 describe-vpc-endpoint-connections --region us-east-1
+   aws ec2 accept-vpc-endpoint-connections --region us-east-1 --service-id vpce-svc-00000000000000000 --vpc-endpoint-ids vpce-00000000000000000
+   ```
+
+3. Point `STRATOCLAVE_PRIVATE_DOMAIN` at the interface endpoint from inside
+   the consumer VPC, with a private hosted zone (not a public record, since
+   the endpoint's DNS name only resolves inside VPCs that have the endpoint).
+   The consumer VPC needs `enableDnsSupport` and `enableDnsHostnames` both
+   on for this to resolve at all. The hosted zone name here is exactly
+   `STRATOCLAVE_PRIVATE_DOMAIN` — the record you add sits at the zone apex,
+   where Route 53 does not allow a CNAME, so this must be an alias record,
+   not a CNAME:
+
+   ```bash
+   aws route53 create-hosted-zone --name stratoclave.internal.example.com --vpc VPCRegion=us-east-1,VPCId=vpc-00000000000000000 --caller-reference stratoclave-private-dns-2026-11-14
+   ```
+
+   Read the endpoint's own regional DNS entry (its hosted-zone id, needed
+   for the alias target, is a property of the ENDPOINT, not something you
+   choose):
+
+   ```bash
+   aws ec2 describe-vpc-endpoints --vpc-endpoint-ids vpce-00000000000000000 --query 'VpcEndpoints[0].DnsEntries[0]'
+   ```
+
+   Then create the alias record in the hosted zone from step 3, using that
+   entry's `HostedZoneId` and `DnsName`:
+
+   ```bash
+   aws route53 change-resource-record-sets --hosted-zone-id Z00000000000000000000 --change-batch '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"stratoclave.internal.example.com","Type":"A","AliasTarget":{"HostedZoneId":"<DnsEntries[0].HostedZoneId from the previous command>","DNSName":"<DnsEntries[0].DnsName from the previous command>","EvaluateTargetHealth":false}}}]}'
+   ```
+
+4. Revoking access is two separate actions, and doing only one of them
+   leaves the other half of the door open:
+
+   - An **already-accepted** connection keeps working until the provider
+     explicitly rejects it. Removing the principal from
+     `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` and redeploying the
+     `private-link` stack only stops a NEW connection request from that
+     principal — it does nothing to a connection already accepted, which
+     stays connected indefinitely. To actually disconnect it:
+
+     ```bash
+     aws ec2 reject-vpc-endpoint-connections --region us-east-1 --service-id vpce-svc-00000000000000000 --vpc-endpoint-ids vpce-00000000000000000
+     ```
+
+   - Then remove the principal from `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS`
+     and redeploy the `private-link` stack, so the same principal cannot
+     simply reconnect. Do both; either one alone is a half-revocation.
+
+### Gaps a first-time PrivateLink setup will hit
+
+Synth cannot check any of these; they are entirely on the operator:
+
+- **Certificate.** `STRATOCLAVE_PRIVATE_CERTIFICATE_ARN` must cover
+  `STRATOCLAVE_PRIVATE_DOMAIN` — synth only checks the ARN's region, never
+  the certificate's own domain names. A public ACM certificate for a
+  domain you do not control publicly still needs DNS validation in a
+  public hosted zone for that domain (ACM validates ownership there even
+  though the deployment itself is private); a certificate issued by a
+  Private CA instead needs every client to be configured to trust that CA,
+  which a public ACM certificate does not require.
+- **Region and AZ.** The consumer's interface endpoint must be created in
+  the SAME region as this deployment, and in subnets whose Availability
+  Zone **ids** (`use1-az1`, not the account-relative name `us-east-1a`)
+  overlap the provider's two AZs — AZ names are mapped to physical AZs
+  per-account, so "us-east-1a" in the consumer's account is not
+  necessarily the same physical AZ as "us-east-1a" in the provider's.
+  `aws ec2 describe-availability-zones --region us-east-1` (run in each
+  account) shows the id-to-name mapping for that account.
+- **Endpoint security group.** The `--security-group-ids` group passed to
+  `create-vpc-endpoint` above must itself allow inbound 443 from whatever
+  will call the endpoint in the consumer VPC — the endpoint's own security
+  group is a real gate the consumer's network team owns, separate from
+  everything this deployment's own security groups control.
+- **Bootstrapping is a chicken-and-egg the operator hits first.** The
+  gateway's own VPC has no path to its own NLB other than through
+  PrivateLink (the NLB's security group admits nothing else at all, not
+  even from inside that VPC) — so testing the connection, and every step
+  under "Bootstrapping without a console" below, only works from a host
+  that is itself inside an ACCEPTED consumer VPC. In practice this means
+  the operator's own account (or whichever jump host they intend to
+  administer from) must be one of the principals in
+  `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` and must go through steps 1-2
+  above for itself, before anyone can bootstrap the first admin.
+
+### Sign-in options on this path
+
+API keys (`sk-stratoclave-*`) need no sign-in step at all.
+
+Vouch-by-STS: the CLI signs a `GetCallerIdentity` request **locally** —
+SigV4 signing is a cryptographic operation over credentials the CLI already
+holds, not a network call — and sends the signed request to the gateway,
+which is the one that calls AWS STS over the network to verify it. The
+client itself needs no direct network path to STS for this verification
+step. The one case that does need one is upstream of signing: if the
+client's own AWS credentials were themselves obtained by assuming a role
+(AssumeRole, AWS SSO, federation), that assumption is a real STS call the
+client makes before it ever signs anything, and that call needs network
+access to STS — an STS VPC endpoint in the consumer VPC
+(`com.amazonaws.<region>.sts`) satisfies it with no public internet route.
+A client holding long-lived IAM credentials directly needs no STS network
+access at all, for either step.
+
+`stratoclave auth login --email <email>` (password typed at the terminal, no
+browser) is also proxied entirely through the gateway:
+`POST /api/mvp/auth/login` (`backend/mvp/cognito_auth.py`) calls Cognito's
+`AdminInitiateAuth` server-side, because "the CLI does not have IAM
+permissions to call Cognito InitiateAuth directly" (that file's own
+docstring). So this sign-in path needs no direct client-to-Cognito network
+access either — only the browser Hosted-UI OAuth redirect (used by the web
+console, which this path does not have at all) needs the client to reach
+Cognito's own domain directly over the public internet. Cognito itself is
+still deployed on this path regardless
+(`/.well-known/stratoclave-config` requires `COGNITO_DOMAIN` regardless of
+entry mode).
+
+### Bootstrapping without a console
+
+This path has no web console, so the first admin and the first API key are
+both minted purely through API calls, exactly the mechanism "Post-deploy:
+first admin" above already describes — nothing here is specific to private
+mode:
+
+Run every step below from a host inside an accepted consumer VPC — see
+"Gaps a first-time PrivateLink setup will hit" above for why nothing else
+can reach this deployment at all:
+
+1. Set `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` and redeploy the ECS stack, as in
+   "Post-deploy: first admin". `backend/bootstrap/seed.py` mints the admin
+   at container startup by calling Cognito's `AdminCreateUser` and
+   `AdminSetUserPassword` itself — a Cognito API call the backend makes, not
+   something a browser does — and this is identical in both entry modes.
+2. Retrieve the one-time password from Secrets Manager, as already shown
+   above.
+3. Point the CLI at this deployment: `stratoclave setup
+   https://stratoclave.internal.example.com` (your own
+   `STRATOCLAVE_PRIVATE_DOMAIN`). This reads `/.well-known/stratoclave-config`
+   from the gateway and writes the local CLI config; it must run before
+   `auth login` below, which depends on it.
+4. Sign in with `stratoclave auth login --email <email>` (the password is
+   typed into the terminal; see "Sign-in options on this path" above for why
+   this needs no direct client-to-Cognito network path).
+5. Mint a long-lived API key for yourself with `stratoclave api-key create`
+   (see [`api-key create`](CLI_GUIDE.md#api-key)). From then on, use the
+   `sk-stratoclave-*` key for daily and unattended use; Cognito is no longer
+   needed at all once this key exists.
+
+### What this path does not provide
+
+There is no web console: this mode is headless by design, API and CLI only.
+
+There is no WAF on this path — a CLOUDFRONT-scope web ACL cannot attach to
+an internal ALB, and this slice does not add a REGIONAL one.
+
+**"No internet-facing path to the gateway API" is narrower than "no
+internet-facing entry point at all" for the whole deployment**, and two
+things stay reachable from the public internet regardless of entry mode:
+
+- **The Cognito user pool and its Hosted UI domain are still public.** The
+  app client has no client secret and `USER_PASSWORD_AUTH` is enabled (both
+  needed for the CLI's own `auth login` flow, in either entry mode), so
+  password-guessing against the pool is reachable from the internet on this
+  path exactly as it is on `cloudfront`. Nothing about `private` mode
+  narrows that.
+- **ECS tasks run in the public subnet with a public IP, and the VPC keeps
+  its internet gateway**, the same placement as `cloudfront` mode (see
+  `lib/network-stack.ts`: no NAT, no private subnets, in either mode). The
+  task security group (admits only the ALB on :8000) is the only barrier
+  between a task and the internet reaching it directly; this entry mode
+  does not change that placement or add a second one.
+
+**The per-IP rate limit is a shared-fate availability risk here, not merely
+"coarse".** Every request on this path arrives from the internal NLB, not
+from the original client, so a limiter keyed on the immediate peer address
+puts every principal reaching the gateway through PrivateLink into the
+same bucket — with no WAF in front to catch a flood earlier, one noisy or
+compromised consumer can exhaust that shared bucket and produce 429s for
+every other consumer, not just itself. The backend's rate-limit keying is
+being changed, separately from this IaC change, so that an AUTHENTICATED
+request is bucketed by the verified user rather than the address — once
+that lands, this path's per-user limits are exactly as precise as
+`cloudfront`'s. What stays genuinely shared on this path even after that
+change is the UNAUTHENTICATED sign-in routes (`/api/mvp/auth/login`,
+`/respond`, `/sso-exchange`): with no verified identity yet, the address is
+still the only key available, and on this path that address is the shared
+NLB-facing ALB address, not the real caller's.
+
+This is deliberate, not simply unfixed: the ALB attribute
+`routing.http.xff_header_processing.mode` is set to `remove` specifically
+so that a client-supplied `X-Forwarded-For` can never reach the application
+and be trusted as if it were a real client address — the alternative
+(trusting it) would let any consumer forge a distinct address and evade the
+shared bucket entirely, which is worse. Per-key budgets and per-tenant
+dollar pools still apply exactly as they do on the `cloudfront` path; they
+never depended on IP at all.
+
+**There is no full client-address attribution, even with the ALB access log
+now enabled** (see "Cost estimate" and `lib/alb-stack.ts`'s `enableAccessLogs`).
+What the ALB's access log records as the connection's address, for
+PrivateLink traffic specifically, is governed by AWS's own behaviour at
+that boundary; this document does not assert a specific value for it
+without having measured one on a real deployment. What it reliably is
+**not** is an application-level identity — the API key, the authenticated
+user, the tenant — all of which the application's own logs already carry,
+in both entry modes, from the request's own auth header.
+
+### TLS
+
+TLS terminates at the internal ALB, inside the gateway's own VPC, using the
+certificate you supply. The NLB in front of it carries a TCP listener, not a
+TLS one — it passes the connection straight through rather than terminating
+it, so it never holds key material of its own. The ALB-to-task hop, inside
+the same VPC, is plain HTTP, exactly as it is on the `cloudfront` path.
+
+---
+
 ## Cost estimate
 
 Representative monthly spend for a low-traffic single-team deployment in `us-east-1`. Figures are USD and **exclude Bedrock token usage**, which is billed separately by AWS.
@@ -533,6 +859,25 @@ Representative monthly spend for a low-traffic single-team deployment in `us-eas
 Set `ENABLE_WAF=false` to drop the WAF line item (~$10) for throwaway / sandbox stacks.
 
 The per-request cost of Bedrock dominates in practice. Track it from the Admin Usage page in the web UI (tokens per model) and via AWS Cost Explorer's **Bedrock** service filter.
+
+### `STRATOCLAVE_ENTRY=private`: the line items that differ
+
+CloudFront, the S3 console bucket, and WAF are never provisioned, and are
+replaced by an internal NLB and a VPC endpoint service:
+
+| Item                                                        | Monthly | Paid by |
+| ------------------------------------------------------------ | ------- | ------- |
+| Network Load Balancer (base hourly rate, 2 AZs; NLCU usage is additional and negligible at low traffic) | ~$16 to $17 | this deployment's account |
+| VPC endpoint service (the provider-side resource itself has no separate hourly charge beyond the NLB above) | $0 | — |
+| ALB access-log S3 bucket (small object count at low traffic, 90-day lifecycle expiry) | <$1 | this deployment's account |
+| CloudFront, S3 console bucket, WAFv2                        | removed | — |
+
+Each **consumer's** interface endpoint is a separate cost the consumer's own
+account pays, not this deployment's: roughly $0.01/hour per Availability
+Zone the endpoint spans (about $7 to $8/month per AZ, so about $14 to $16/month
+for the usual 2-AZ setup) plus $0.01/GB of data processed through it. That
+cost scales with how many consumer accounts connect, not with how this
+gateway is deployed — budget for it separately in each consumer account.
 
 ---
 
@@ -644,7 +989,11 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `DYNAMODB_API_KEYS_TABLE`                | yes                     | yes         | |
 | `CORS_ORIGINS`                           | yes (no `localhost`)    | yes         | Must match the CloudFront domain in production. Dev/local backends can set `http://localhost:3003`. |
 | `DYNAMODB_SSO_NONCES_TABLE`              | optional                | yes (default `stratoclave-sso-nonces`) | Vouch-by-STS replay defence (`backend/dynamo/sso_nonces.py`). If the table is missing, the backend logs a warning and falls back to the ±5 minute skew check only. |
-| `ENABLE_WAF`                             | IaC-only                | n/a         | CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. |
+| `STRATOCLAVE_ENTRY`                      | IaC-only                | n/a         | `cloudfront` (default) or `private` (see [Private entry](#private-entry-privatelink-headless)). `both` is named but refused at synth. |
+| `STRATOCLAVE_PRIVATE_CERTIFICATE_ARN`    | required for `private`  | n/a         | ACM certificate for the internal ALB's HTTPS :443 listener. |
+| `STRATOCLAVE_PRIVATE_DOMAIN`             | required for `private`  | no          | The operator's domain name for the PrivateLink publication. Not itself set on the container; CDK composes `https://<this>` into `STRATOCLAVE_API_ENDPOINT` and `CORS_ORIGINS` instead. |
+| `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` | required for `private`  | n/a         | Comma-separated IAM principal ARNs allowed to request a connection to the endpoint service. Must be non-empty; a wildcard is refused at synth. |
+| `ENABLE_WAF`                             | IaC-only                | n/a         | CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. Has no effect under `STRATOCLAVE_ENTRY=private`, which never provisions a WAF stack at all. |
 | `WAF_RATE_LIMIT_PER_5MIN`                | IaC-only                | n/a         | Per-IP request cap in the rate-based rule. Default: `300`. |
 | `WAF_IP_ALLOWLIST_ENABLED`               | IaC-only                | n/a         | Enable SSM-parameter-backed IPSet allowlist. Default: `false`. |
 | `STRATOCLAVE_REGION`                      | IaC-only                | n/a         | Body-stack deploy region `R` (Network/DynamoDB/ECR/ALB/Frontend/Cognito/ECS/Config). Falls back to `CDK_DEFAULT_REGION`, then `us-east-1`. The WAF stack always stays in `us-east-1`. GovCloud/China partitions are rejected. When `R != us-east-1` you must `cdk bootstrap` both `R` and `us-east-1`. See [Regional constraints](#regional-constraints). |
@@ -687,14 +1036,41 @@ cd iac
 npx cdk destroy --all --profile "$AWS_PROFILE"
 ```
 
-> **Destructive.** `cdk destroy --all` removes every Stratoclave CloudFormation stack in the target account. All Stratoclave DynamoDB tables are deleted, so every user, tenant, API key, and usage log is lost. Only run this if you truly want to wipe the deployment.
+> **Destructive.** `cdk destroy --all` removes every Stratoclave CloudFormation stack in the target account. The working tables are deleted, so every user and tenant is lost; the audit tables listed below are kept. Only run this if you truly want to wipe the deployment.
 
-Things that **remain** after `cdk destroy` and need manual cleanup if you want a truly empty account:
+**`STRATOCLAVE_ENTRY=private` only: reject every connection before destroying.** A VPC endpoint service with an active or a still-pending connection cannot be deleted; `cdk destroy` of the `<Prefix>-private-link` stack fails until every connection is gone. Reject them first, in the provider account:
 
-- **CloudWatch Logs** groups (retention is set but the groups are not deleted with the stacks).
-- **S3 buckets** marked `RemovalPolicy.RETAIN`. The frontend bucket is `DESTROY`; review the stack to confirm if you have customised it.
-- **The Cognito domain prefix** is unusable for **24 hours** after deletion. Redeploying immediately with the same `STRATOCLAVE_PREFIX` will fail; either wait a day or choose a new prefix.
-- **ECR images** inside the repository. The stack deletes the repository by default; if you disabled that, purge images first.
+```bash
+aws ec2 describe-vpc-endpoint-connections --region us-east-1 --filters Name=service-id,Values=<your endpoint service id>
+aws ec2 reject-vpc-endpoint-connections --region us-east-1 --service-id <your endpoint service id> --vpc-endpoint-ids <every vpc-endpoint-id the previous command listed>
+```
+
+Then `cdk destroy --all` as above.
+
+Things that **remain** after `cdk destroy`. They are kept on purpose (`RemovalPolicy.RETAIN`), and each has a fixed name derived from `STRATOCLAVE_PREFIX`, so **a redeploy with the same prefix fails with "already exists"** until they are deleted or the prefix is changed:
+
+| Resource | Name | Why it is kept |
+|---|---|---|
+| ECR repository | `<prefix>-backend` | Released images are the rollback of last resort. |
+| DynamoDB audit tables | `<prefix>-api-keys`, `<prefix>-usage-logs`, `<prefix>-credit-ledger`, `<prefix>-quota-events` | Audit record; kept in every environment. |
+| Secrets Manager secret | `<prefix>/bootstrap-admin-temp-password` | Pre-created so the task role needs only `PutSecretValue`; it holds the first admin's temporary password. |
+| CloudWatch Logs groups | `/ecs/<prefix>-backend`, `/aws/ecs/containerinsights/<prefix>-cluster/performance`, and the custom-resource Lambda groups `/aws/lambda/<prefix>-*` | Incident evidence. |
+| S3 bucket (only if the semantic router config bucket is enabled) | `<prefix>-vsr-config-<account>` | Versioned configuration. |
+
+To start over with the same prefix, export what you need from the audit tables first, then delete them:
+
+```bash
+export PREFIX=stratoclave
+aws ecr delete-repository --repository-name "$PREFIX-backend" --force
+for t in api-keys usage-logs credit-ledger quota-events; do aws dynamodb delete-table --table-name "$PREFIX-$t"; done
+aws secretsmanager delete-secret --secret-id "$PREFIX/bootstrap-admin-temp-password" --force-delete-without-recovery
+for g in "/ecs/$PREFIX-backend" "/aws/ecs/containerinsights/$PREFIX-cluster/performance" $(aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/$PREFIX-" --query 'logGroups[].logGroupName' --output text); do aws logs delete-log-group --log-group-name "$g"; done
+```
+
+Also note:
+
+- **The Cognito domain prefix** may be unusable for a while after deletion. If a redeploy with the same `STRATOCLAVE_PREFIX` fails on the user pool domain, wait or choose a new prefix.
+- **ECR images** are deleted together with the repository by the `--force` above.
 
 To also uninstall the client-side CLI, see [GETTING_STARTED.md -> Uninstall](GETTING_STARTED.md#uninstall).
 

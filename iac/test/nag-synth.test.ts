@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { hermeticSynthEnv } from './_hermetic-synth';
 
 /**
  * Runs the REAL `bin/iac.ts` entrypoint through `cdk synth`, with every
@@ -33,14 +34,13 @@ describe('cdk synth (real bin/iac.ts) — every context-gated stack, cdk-nag mus
     extraEnv: Record<string, string> = {},
   ): { failed: boolean; output: string } {
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratoclave-nag-synth-'));
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
+    const env = hermeticSynthEnv({
       CDK_DEFAULT_ACCOUNT: '123456789012',
       CDK_DEFAULT_REGION: 'us-east-1',
       STRATOCLAVE_REGION: 'us-east-1',
       STRATOCLAVE_PREFIX: 'nagtest',
       ...extraEnv,
-    };
+    });
     const args = ['cdk', 'synth', '--all', '-o', outDir, '--quiet'];
     for (const flag of contextFlags) args.push('-c', flag);
     try {
@@ -98,5 +98,24 @@ describe('cdk synth (real bin/iac.ts) — every context-gated stack, cdk-nag mus
       expect(result.output).toMatch(/must not equal the ECS backend's IMAGE_TAG/);
     },
     60_000,
+  );
+
+  test(
+    'STRATOCLAVE_ENTRY=private: synth succeeds with zero AwsSolutions errors',
+    () => {
+      const result = synth([], {
+        STRATOCLAVE_ENTRY: 'private',
+        STRATOCLAVE_PRIVATE_CERTIFICATE_ARN:
+          'arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555',
+        STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com',
+        STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root',
+      });
+      const errorLines = result.output
+        .split('\n')
+        .filter((line) => line.includes('[Error at') && line.includes('AwsSolutions-'));
+      expect(errorLines).toEqual([]);
+      expect(result.failed).toBe(false);
+    },
+    120_000,
   );
 });
