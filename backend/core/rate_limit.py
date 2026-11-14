@@ -177,7 +177,27 @@ BILLING_WRITE_RATE_LIMIT = os.getenv("BILLING_WRITE_RATE_LIMIT", "60/minute")
 # verbatim; only the counter storage moved from in-process to DynamoDB.
 from core.rate_limit_ddb import DynamoRateLimiter  # noqa: E402
 
-limiter = DynamoRateLimiter(client_key_func=_client_key)
+def _request_key(request: Request) -> str:
+    """The rate-limit bucket for a request: the credential it presents when it
+    presents one, else the client address (`_client_key`).
+
+    Keyed on the credential because an address is a poor identity for an
+    authenticated caller: many users share one behind a corporate NAT, and on the
+    private (PrivateLink) entry every request arrives from the load balancer, so
+    an address bucket there is shared by the whole deployment. Only a digest of
+    the credential is kept, never the value. A caller presenting a made-up
+    credential gets its own bucket, but cannot get past authentication, and the
+    credentials are long random values that cannot be guessed. Unauthenticated
+    routes (sign-in) still key on the address."""
+    import hashlib
+
+    raw = request.headers.get("x-api-key") or request.headers.get("authorization") or ""
+    if raw.strip():
+        return "cred:" + hashlib.sha256(raw.strip().encode("utf-8")).hexdigest()[:32]
+    return _client_key(request)
+
+
+limiter = DynamoRateLimiter(client_key_func=_request_key)
 
 
 __all__ = [

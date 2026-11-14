@@ -162,3 +162,34 @@ class TestWhitespaceAndEmptyEntries:
         # After stripping, parts = [198.51.100.5, 130.176.12.45];
         # hops=1 → parts[-2] = 198.51.100.5.
         assert key == "198.51.100.5"
+
+
+class TestRequestKey:
+    """`_request_key`: a request that presents a credential is bucketed by it, so
+    callers sharing an address (a corporate NAT, or the private entry where every
+    request arrives from the load balancer) do not share one bucket."""
+
+    def test_an_api_key_gets_its_own_bucket_whatever_the_address(self, monkeypatch):
+        rl = _reload_with(None, monkeypatch)
+        a = rl._request_key(_request({"x-api-key": "sk-stratoclave-aaa"}, client_host="10.0.0.1"))
+        b = rl._request_key(_request({"x-api-key": "sk-stratoclave-bbb"}, client_host="10.0.0.1"))
+        assert a != b and a.startswith("cred:") and "sk-stratoclave" not in a
+
+    def test_the_same_credential_from_two_addresses_is_one_bucket(self, monkeypatch):
+        rl = _reload_with(None, monkeypatch)
+        a = rl._request_key(_request({"authorization": "Bearer t"}, client_host="10.0.0.1"))
+        b = rl._request_key(_request({"authorization": "Bearer t"}, client_host="10.0.0.2"))
+        assert a == b
+
+    def test_without_a_credential_the_address_is_the_key(self, monkeypatch):
+        rl = _reload_with(None, monkeypatch)
+        assert rl._request_key(_request({}, client_host="10.0.0.42")) == "10.0.0.42"
+
+    def test_on_the_private_entry_no_other_client_ip_header_is_trusted(self, monkeypatch):
+        rl = _reload_with(None, monkeypatch)
+        """The private ALB removes X-Forwarded-For; any other header a client sends
+        must not become the bucket."""
+        key = rl._request_key(_request({"x-real-ip": "1.2.3.4", "forwarded": "for=1.2.3.4",
+                                        "cloudfront-viewer-address": "1.2.3.4:443"},
+                                       client_host="10.0.0.9"))
+        assert key == "10.0.0.9"
