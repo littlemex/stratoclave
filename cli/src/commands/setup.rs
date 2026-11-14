@@ -70,9 +70,10 @@ pub async fn run(
     force: bool,
     dry_run: bool,
     codex: bool,
+    allow_internal_host: bool,
 ) -> Result<()> {
     // 1. Validate the URL.
-    let api_endpoint = validate_url(&api_endpoint)?;
+    let api_endpoint = validate_url(&api_endpoint, allow_internal_host)?;
 
     // 2. Fetch the discovery document.
     let discovery_url = format!(
@@ -184,7 +185,7 @@ pub async fn run(
 // URL validation
 // ------------------------------------------------------------------
 
-fn validate_url(raw: &str) -> Result<String> {
+fn validate_url(raw: &str, allow_internal_host: bool) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         bail!("api_endpoint must not be empty");
@@ -328,10 +329,25 @@ fn validate_url(raw: &str) -> Result<String> {
     }
 
     // Explicit host suffix denylist for AWS-internal / intranet TLDs.
+    // `STRATOCLAVE_ENTRY=private` deployments (docs/DEPLOYMENT.md,
+    // "Private entry (PrivateLink), headless") are reached only from
+    // inside an already-accepted consumer VPC and are commonly published
+    // under exactly this kind of name (the doc's own illustrative value
+    // is `stratoclave.internal.example.com`), so an operator running
+    // `setup` against their own deployment's documented address needs an
+    // explicit way past this denylist. `--allow-internal-host` is that
+    // escape hatch; every other check above (metadata hosts, literal
+    // private/link-local IPs, userinfo, HTTPS-only) still applies.
     const DENY_SUFFIXES: &[&str] = &[".internal", ".local", ".localdomain"];
-    if DENY_SUFFIXES.iter().any(|suf| host.ends_with(suf)) && !loopback_host {
+    if DENY_SUFFIXES.iter().any(|suf| host.ends_with(suf))
+        && !loopback_host
+        && !allow_internal_host
+    {
         bail!(
-            "api_endpoint host {:?} uses a reserved internal suffix.",
+            "api_endpoint host {:?} uses a reserved internal suffix. \
+             If this is your own STRATOCLAVE_ENTRY=private deployment \
+             (see docs/DEPLOYMENT.md, \"Private entry (PrivateLink), \
+             headless\"), re-run with --allow-internal-host.",
             host
         );
     }
@@ -903,19 +919,19 @@ mod tests {
 
     #[test]
     fn test_validate_url_https() {
-        let out = validate_url("https://example.cloudfront.net").unwrap();
+        let out = validate_url("https://example.cloudfront.net", false).unwrap();
         assert_eq!(out, "https://example.cloudfront.net");
     }
 
     #[test]
     fn test_validate_url_http_localhost() {
-        let out = validate_url("http://localhost:8080").unwrap();
+        let out = validate_url("http://localhost:8080", false).unwrap();
         assert_eq!(out, "http://localhost:8080");
     }
 
     #[test]
     fn test_validate_url_trims_trailing_slash() {
-        let out = validate_url("https://example.cloudfront.net/").unwrap();
+        let out = validate_url("https://example.cloudfront.net/", false).unwrap();
         assert_eq!(out, "https://example.cloudfront.net");
     }
 
@@ -925,35 +941,65 @@ mod tests {
         // level (no scheme => RelativeUrlWithoutBase). We only assert
         // that *some* error is returned for the bare hostname input;
         // the exact wording is the underlying parse error.
-        let err = validate_url("example.cloudfront.net").unwrap_err();
+        let err = validate_url("example.cloudfront.net", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(!msg.is_empty(), "error message must not be empty");
     }
 
     #[test]
     fn test_validate_url_rejects_empty() {
-        let err = validate_url("").unwrap_err();
+        let err = validate_url("", false).unwrap_err();
         assert!(format!("{}", err).contains("empty"));
     }
 
     #[test]
     fn test_validate_url_rejects_v1_suffix() {
-        let err = validate_url("https://example.cloudfront.net/v1").unwrap_err();
+        let err = validate_url("https://example.cloudfront.net/v1", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("/v1"));
     }
 
     #[test]
     fn test_validate_url_rejects_v1_suffix_trailing_slash() {
-        let err = validate_url("https://example.cloudfront.net/v1/").unwrap_err();
+        let err = validate_url("https://example.cloudfront.net/v1/", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("/v1"));
+    }
+
+    // fix/pv-verify: `STRATOCLAVE_ENTRY=private` deployments (see
+    // docs/DEPLOYMENT.md, "Private entry (PrivateLink), headless") use
+    // exactly this host shape by the doc's own example
+    // (`stratoclave.internal.example.com`); real-machine verification
+    // against a live private-entry deployment found `stratoclave setup`
+    // refusing it unconditionally, with no way past the check at all.
+    #[test]
+    fn test_validate_url_rejects_internal_suffix_by_default() {
+        let err = validate_url("https://stratoclave.internal.example.com", false).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("reserved internal suffix"));
+        assert!(msg.contains("--allow-internal-host"));
+    }
+
+    #[test]
+    fn test_validate_url_allows_internal_suffix_with_flag() {
+        let out = validate_url("https://stratoclave.internal.example.com", true).unwrap();
+        assert_eq!(out, "https://stratoclave.internal.example.com");
+    }
+
+    #[test]
+    fn test_validate_url_flag_does_not_bypass_other_ssrf_checks() {
+        // `--allow-internal-host` only lifts the suffix denylist; the
+        // metadata-host denylist (and every other SSRF check) must still
+        // apply even when it is set.
+        let err = validate_url("https://169.254.169.254/", true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("blocked"));
     }
 
     // A-04-ssrf: IPv6 SSRF guards.
     #[test]
     fn test_validate_url_rejects_ipv6_link_local() {
-        let err = validate_url("https://[fe80::1]/").unwrap_err();
+        let err = validate_url("https://[fe80::1]/", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.to_lowercase().contains("ipv6") || msg.contains("link-local"),
@@ -963,7 +1009,7 @@ mod tests {
 
     #[test]
     fn test_validate_url_rejects_ipv6_unique_local() {
-        let err = validate_url("https://[fc00::1]/").unwrap_err();
+        let err = validate_url("https://[fc00::1]/", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.to_lowercase().contains("ipv6") || msg.contains("private"),
@@ -975,7 +1021,7 @@ mod tests {
     fn test_validate_url_rejects_ipv4_mapped_in_ipv6() {
         // [::ffff:10.0.0.1] resolves to RFC 1918 10.0.0.1 — semantically
         // a private IPv4 address and a classic SSRF bypass technique.
-        let err = validate_url("https://[::ffff:10.0.0.1]/").unwrap_err();
+        let err = validate_url("https://[::ffff:10.0.0.1]/", false).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.to_lowercase().contains("ipv6")
@@ -991,7 +1037,7 @@ mod tests {
         // outer http→https requirement carves out the literal `localhost`
         // host name only, so we use https:// here to confirm the IPv6
         // loopback address is *not* blocked by the new SSRF guard.
-        let out = validate_url("https://[::1]/").unwrap();
+        let out = validate_url("https://[::1]/", false).unwrap();
         assert!(out.contains("::1"));
     }
 
