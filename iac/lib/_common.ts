@@ -286,6 +286,52 @@ export const ORIGIN_READ_TIMEOUT_SECONDS = 60;
 export const ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 60;
 export const ALB_IDLE_TIMEOUT_SECONDS = 60;
 
+/**
+ * The listener port on the `STRATOCLAVE_ENTRY=both` shared internal ALB that
+ * CloudFront's VPC origin always lands on. `lib/alb-stack.ts`'s internal ALB
+ * build always forwards :80 on plain HTTP and never redirects it (see that
+ * file's `entryMode` prop doc for why); the PrivateLink NLB target is the
+ * SAME ALB's other listener, :443, fixed by the HTTPS protocol an
+ * `elbv2.ApplicationListener` with a certificate always uses — not a
+ * separate knob this constant needs to carry.
+ *
+ * `bin/iac.ts` passes this value to the backend container as
+ * `STRATOCLAVE_BOTH_CLOUDFRONT_PORT`, read by `backend/core/forwarded_port.py`.
+ * Round-1 implementation review, should-fix 3: before this constant existed,
+ * the CloudFront listener port was a literal `"80"` hardcoded independently
+ * in both `iac/lib/alb-stack.ts` (as the port number on the listener itself)
+ * and `backend/core/forwarded_port.py` (as the value `X-Forwarded-Port` is
+ * compared against) — two copies that a future change to either file could
+ * silently drift apart. This constant removes the Python side's copy
+ * entirely: the backend no longer hardcodes "80" at all, only the env var
+ * this constant populates.
+ */
+export const BOTH_MODE_CLOUDFRONT_LISTENER_PORT = 80;
+
+/**
+ * Trusted `X-Forwarded-For` hops on the CloudFront leg of the
+ * `STRATOCLAVE_ENTRY=both` shared ALB — the SAME figure
+ * `backend/core/rate_limit.py`'s own `RATE_LIMIT_TRUSTED_HOPS` default (1)
+ * encodes for a plain CloudFront → ALB → ECS topology, carried here as its
+ * own constant rather than read from that variable, because `both` mode
+ * forces `RATE_LIMIT_TRUSTED_HOPS=0` on the container precisely so an older
+ * backend image — built before `backend/core/forwarded_port.py` existed,
+ * with no leg classifier of its own — trusts no XFF at all on this shared
+ * ALB by default, rather than inheriting whatever single-leg value an
+ * operator had set for a plain `cloudfront`-entry deployment. Only a
+ * backend new enough to read `STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS`
+ * (this constant's value) ever trusts XFF on the CloudFront leg in `both`
+ * mode at all.
+ *
+ * Not operator-configurable in `both` mode the way `RATE_LIMIT_TRUSTED_HOPS`
+ * is for a plain `cloudfront` deployment: `both`'s shared ALB has exactly
+ * one possible topology by construction (CloudFront's VPC origin talks
+ * directly to this ALB, with no custom WAF or extra proxy hop the
+ * `cloudfront → ALB → ECS` figure of 1 would ever need adjusting for), so
+ * there is nothing for a knob to vary.
+ */
+export const BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS = 1;
+
 /** Fargate CPU units in one vCPU. */
 export const CPU_UNITS_PER_VCPU = 1024;
 

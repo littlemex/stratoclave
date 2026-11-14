@@ -1125,28 +1125,77 @@ cannot be `remove` for one leg and `append` for the other.
 On the PrivateLink leg, any `X-Forwarded-For` entry on an inbound request is
 not trustworthy — it was not written by a hop this deployment's topology
 trusts. The backend distinguishes the two legs using `X-Forwarded-Port`, an
-ALB-set header that always carries the port of the listener that accepted
-the connection. It is never a value a client can supply: unlike
-`X-Forwarded-For`, there is no "preserve" mode for it — see the
-[X-Forwarded-Port
-documentation](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/x-forwarded-headers.html#x-forwarded-port).
+ALB-set header the [AWS documentation describes as always carrying the port
+of the listener that accepted the
+connection](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/x-forwarded-headers.html#x-forwarded-port).
+That page states what the header MEANS, not whether the ALB OVERWRITES a
+client-supplied or duplicated `X-Forwarded-Port` the way it does for
+`X-Forwarded-Proto`, or merely appends to it the way it can for
+`X-Forwarded-For` — round-1 implementation review (both reviews' matching
+blocker) found no earlier verification of that premise on a real
+deployment, so this document no longer asserts it. What the code does
+instead (`backend/core/forwarded_port.py`) does not depend on the
+assertion being true: it reads EVERY value of the header
+(`Request.headers.getlist`, not `.get`'s first-of-duplicates) and requires
+EXACTLY ONE value, matching the configured CloudFront listener port
+(`STRATOCLAVE_BOTH_CLOUDFRONT_PORT`), to classify a request as the
+CloudFront leg — absent, duplicated, or any other value is "not
+positively CloudFront," which keeps the strict classifier safe even if a
+future measurement finds the ALB does, in some case, append rather than
+overwrite. The premise itself is settled by sending forged and duplicate
+`X-Forwarded-Port` headers through a deployed `both`-mode consumer endpoint
+and reading the raw headers the task actually received:
+
+```bash
+curl -H 'X-Forwarded-Port: 80' -H 'X-Forwarded-Port: 80' \
+     -H 'X-Forwarded-For: 203.0.113.9' \
+     "https://<private-host>/<rate-limited-route>"
+```
+
+**Result:** not yet run against a real deployment. Record the outcome here
+(the raw header list the task logged, and whether the request was
+classified as CloudFront or PrivateLink) once it has been.
+
 The match is positive, not a deny-list: only a request whose
-`X-Forwarded-Port` is exactly `80` (the CloudFront leg), or whose header is
-absent entirely (every entry mode but `both` never sends this header in a
-test fixture, and must not have its behaviour changed by this check's mere
-existence), keeps the deployment's configured `RATE_LIMIT_TRUSTED_HOPS`.
-Every other value — a confirmed `443` (PrivateLink), or anything this check
-does not recognise — is treated as if `RATE_LIMIT_TRUSTED_HOPS=0` had been
-set for that one request only. See `backend/core/forwarded_port.py` and
+`X-Forwarded-Port` carries EXACTLY ONE value, equal to the configured
+CloudFront listener port, keeps the deployment's configured trusted-hop
+count (`STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS`, under `both` — see
+below). Every entry mode but `both` never sends this header in a test
+fixture and must not have its behaviour changed by this check's mere
+existence, which is why the check also passes when
+`STRATOCLAVE_BOTH_CLOUDFRONT_PORT` is unset entirely. Every other case on a
+`both` deployment — a confirmed PrivateLink port, a duplicated header, or
+anything this check does not recognise — is treated as 0 trusted hops for
+that one request. See `backend/core/forwarded_port.py` and
 `backend/core/rate_limit.py`'s `_effective_trusted_hops`.
 
-On the PrivateLink leg, the ALB's own observed peer address (what
-`RATE_LIMIT_TRUSTED_HOPS=0` falls back to) is the internal NLB's node
-address, not the PrivateLink consumer's own address — PrivateLink traffic
-to an ALB-type NLB target reaches the target from the NLB's own ENIs, not
-the original client's. Every consumer behind the same NLB AZ shares one
-rate-limit bucket on this leg, the same coarseness a pure `private`
-deployment already has and for the same reason.
+**Version skew across a rolling deploy.** `bin/iac.ts` sets
+`RATE_LIMIT_TRUSTED_HOPS=0` on the shared-ALB container under `both`, on
+the SAME deploy that sets `STRATOCLAVE_BOTH_CLOUDFRONT_PORT` and
+`STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS`. An older backend image — built
+before `backend/core/forwarded_port.py` existed — reads only
+`RATE_LIMIT_TRUSTED_HOPS` and therefore trusts NO `X-Forwarded-For` at all
+on the shared ALB while it runs, rather than inheriting whatever a
+single-leg deployment's operator had set that variable to. Only a backend
+new enough to read the two new variables trusts XFF on the CloudFront leg
+specifically, during or after a rolling deploy that mixes image versions.
+
+On the PrivateLink leg, the 0-trusted-hops fallback is `backend/core/
+rate_limit.py`'s `get_remote_address`: the backend-observed ASGI peer
+address of the TCP connection uvicorn accepted. On this shared ALB, that
+connection is always opened BY the ALB itself to the backend task — the
+ALB terminates every inbound connection (from CloudFront's VPC origin or
+from the internal NLB) and originates a new one to the task — so the
+observed peer is the ALB's own address, not literally the NLB's. (uvicorn
+runs with no `--proxy-headers` flag and no `FORWARDED_ALLOW_IPS` set — see
+`backend/entrypoint.sh` — so this value is never rewritten from
+`X-Forwarded-For`; it is the backend's own untampered view of the TCP peer,
+regardless of what any header claims.) Every PrivateLink consumer behind
+this ALB shares one rate-limit bucket on this leg as a result, the same
+coarseness a pure `private` deployment already has and for the same
+reason — measure the actual sharing from an end-to-end deployment (a
+task-side peer log alongside each consumer's request) before treating this
+as more than a description of the mechanism.
 
 ### The API endpoint returned to clients
 
@@ -1155,19 +1204,22 @@ two candidate endpoints are configured on the container
 (`STRATOCLAVE_API_ENDPOINT`, the CloudFront URL, and
 `STRATOCLAVE_API_ENDPOINT_PRIVATE`, the PrivateLink URL), and the backend
 selects between them by the same `X-Forwarded-Port` signal described above
-— never by reading a URL out of a request header. A request on the
-PrivateLink leg receives the PrivateLink URL; every other request receives
-the CloudFront URL. See `backend/mvp/well_known.py`'s
-`_derive_api_endpoint`.
+— never by reading a URL out of a request header. A request positively
+identified as the CloudFront leg receives the CloudFront URL; every other
+request (including an ambiguous one — see above for why the safe default
+runs this direction) receives the PrivateLink URL. See
+`backend/mvp/well_known.py`'s `_derive_api_endpoint`.
 
 `CORS_ORIGINS` is the CloudFront domain only. The PrivateLink path is
 headless (no web console), so it needs no CORS grant of its own.
 
-`STRATOCLAVE_STS_AUDIENCES` is set to the comma-joined pair of the
-CloudFront URL and the PrivateLink URL. As of this writing the backend on
-`main` does not read this variable; it is wired here ahead of the sign-in
-audience allow-list it is intended for, so that change only has to add the
-read, not the IaC plumbing.
+`STRATOCLAVE_STS_AUDIENCES` is the deployment's normal, CDK-context-sourced
+audience allow-list (`mvp.sso_sts.expected_audiences`, which `main.py`
+validates at startup) with the PrivateLink URL appended when it is not
+already present. The CloudFront URL is NOT appended separately here: it is
+already covered unconditionally by that same consumer's own
+`core.deployment.api_endpoint()` check, so adding it a second time would
+only be a redundant entry in the same comma-separated list.
 
 ### Access logs
 
@@ -1398,7 +1450,8 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `ALLOW_ADMIN_CREATION`                   | bootstrap only          | yes (default `false`) | See [Locking down after bootstrap](#locking-down-after-bootstrap). |
 | `STRATOCLAVE_CODEX_ENABLED`                          | optional                | yes (default `true`)  | Enables the OpenAI Responses API endpoint (`/openai/v1/*`). Set `STRATOCLAVE_CODEX_ENABLED=false` to disable. |
 | `DYNAMODB_RATE_LIMITS_TABLE`             | optional                | yes (default `stratoclave-rate-limits`) | DynamoDB table backing the per-IP auth rate limiter (`backend/core/rate_limit_ddb.py`). Fixed-window counters with a TTL attribute (`expires_at`) are **shared across every ECS task**, so caps hold under multi-task / multi-AZ scale-out with no Redis. Failure policy: a **misconfiguration** (missing/mis-named table, missing IAM grant → `ResourceNotFound`/`AccessDenied`/`Validation`) fails **CLOSED** — auth endpoints return `429` — so a broken limiter can't silently run unlimited. **⚠️ If every login/SSO returns 429 right after a deploy, check this table name + the task role's DynamoDB grant first.** A **transient outage** (connectivity/timeout) degrades to an in-process per-task limiter (not fully open). Wire a CloudWatch metric filter + alarm on the log line `rate_limit_degrade_to_local` to detect degraded mode. |
-| `RATE_LIMIT_TRUSTED_HOPS`                | optional                | no          | Number of right-side `X-Forwarded-For` entries written by your own proxy chain (not counting the viewer IP CloudFront appends). Default `1` matches CloudFront → ALB → ECS. Use `0` for CloudFront-only and `2` for custom WAF → CloudFront → ALB → ECS. See `backend/core/rate_limit.py`. |
+| `RATE_LIMIT_TRUSTED_HOPS`                | optional                | no (CDK sets it to `0` under `STRATOCLAVE_ENTRY=both` — see below) | Number of right-side `X-Forwarded-For` entries written by your own proxy chain (not counting the viewer IP CloudFront appends). Default `1` matches CloudFront → ALB → ECS. Use `0` for CloudFront-only and `2` for custom WAF → CloudFront → ALB → ECS. See `backend/core/rate_limit.py`. |
+| `STRATOCLAVE_BOTH_CLOUDFRONT_PORT` / `STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS` | `STRATOCLAVE_ENTRY=both` only | yes, from `lib/_common.ts`'s `BOTH_MODE_CLOUDFRONT_LISTENER_PORT` / `BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS` | Not operator-set: the CloudFront listener port and trusted-hop count `backend/core/forwarded_port.py` uses to positively classify the CloudFront leg of the `both`-mode shared ALB. See [Client address and rate limiting](#client-address-and-rate-limiting) above for why `RATE_LIMIT_TRUSTED_HOPS` is separately forced to `0` on the same container. |
 | `AUTH_LOGIN_RATE_LIMIT` / `AUTH_RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT` | optional | yes, from CDK context `authLoginRateLimit`/`authRespondRateLimit`/`ssoExchangeRateLimit` (default `10/minute`, `10/minute`, `20/minute`) | Each route's OWN two limits (see [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)): a per-address flood guard at this number, and an identity-plus-address bucket at the SAME number keyed on the email (`/login`, `/respond`) or the verified account (`/sso-exchange`, only after STS has confirmed it). `/ui-ticket/consume` also uses `SSO_EXCHANGE_RATE_LIMIT` for its own (address-only) flood guard. Sourced from CDK context, not `process.env`, for the same redeploy-persistence reason as the audience settings above — edit `iac/cdk.json`'s "context" object directly. |
 | `EXPOSE_TEMPORARY_PASSWORD`              | optional                | no          | If `true`, `admin user create` returns the one-time password in the response. Default `false` (response field is `null`). Not recommended for production. |
 | `STRATOCLAVE_FAILOVER_REGIONS`           | optional                | no          | Comma-separated cross-region Bedrock failover targets for the **streaming** path, in preference order (the primary `BEDROCK_REGION` is always tried first and is stripped if listed). Default `us-west-2,eu-west-1`. **Data residency:** set a same-jurisdiction list, or **`none`/`disabled`/`off`** (or an empty string) **to disable failover entirely** — single-region, streaming requests never send prompt bytes to another region. Prefer the `none` sentinel over `""` if your deploy tooling strips empty env vars. Non-streaming requests are single-region regardless. The effective set is logged at startup (`failover_regions_effective`). See `backend/mvp/routing/chains.py`. |

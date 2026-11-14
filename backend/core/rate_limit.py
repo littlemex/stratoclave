@@ -103,27 +103,63 @@ def _trusted_hops() -> int:
 
 from core.forwarded_port import is_cloudfront_leg  # noqa: E402
 
+_BOTH_CLOUDFRONT_TRUSTED_HOPS_ENV = "STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS"
+
+
+def _both_mode_cloudfront_trusted_hops() -> int | None:
+    """The CloudFront leg's trusted-hop count under ``STRATOCLAVE_ENTRY=both``
+    (``iac/lib/_common.ts``'s ``BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS``), or
+    ``None`` on every other entry mode and on a ``both`` deployment running
+    an image old enough that ``bin/iac.ts`` had not yet started setting this
+    variable.
+
+    Deliberately NOT ``_trusted_hops()`` (``RATE_LIMIT_TRUSTED_HOPS``) in
+    this mode: ``bin/iac.ts`` sets ``RATE_LIMIT_TRUSTED_HOPS=0`` on the SAME
+    container, on purpose, precisely so an OLDER backend image — one that
+    predates this module's leg classification and reads only
+    ``RATE_LIMIT_TRUSTED_HOPS`` — trusts no XFF at all on the shared ALB,
+    rather than inheriting whatever value an operator had set for a plain
+    single-leg deployment. Reading ``_trusted_hops()`` here would read back
+    that forced 0 and silently defeat the whole mechanism for every request,
+    on every deployment new enough to look for this variable at all.
+    """
+    raw = os.getenv(_BOTH_CLOUDFRONT_TRUSTED_HOPS_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
 
 def _effective_trusted_hops(request: Request) -> int:
-    """``_trusted_hops()``, but ONLY on the request's CloudFront leg.
-    Everything else — including a confirmed PrivateLink request, a missing
-    or malformed ``X-Forwarded-Port``, or any value this function does not
+    """``_trusted_hops()`` (or, under ``both``, the dedicated CloudFront-leg
+    hop count above), but ONLY on the request's CloudFront leg. Everything
+    else — including a confirmed PrivateLink request, a missing or
+    malformed ``X-Forwarded-Port``, or any value this function does not
     positively recognise — gets 0.
 
     ``STRATOCLAVE_ENTRY=both`` (iac/bin/iac.ts) puts CloudFront (via a VPC
     origin, port 80) and the internal NLB/PrivateLink (port 443) on the SAME
     ALB. Classification is by `core.forwarded_port.is_cloudfront_leg` — a
-    POSITIVE match on the known-trusted port, not a negative match on the
+    POSITIVE match on the known-trusted port (and, round-1 implementation
+    review: on EXACTLY ONE value of the header, via `Request.headers.
+    getlist`, not `.get`'s first-of-duplicates), not a negative match on the
     known-untrusted one. The two are not equivalent: a positive match fails
     CLOSED (0 trusted hops: use the ALB's own observed peer) on anything
     unrecognised, including a future change this function does not know
-    about (e.g. an HTTPS CloudFront VPC origin landing on a different port).
-    A negative match (checking only "is this port 443") would instead have
-    failed OPEN — trusting ``X-Forwarded-For`` on anything that is not
-    exactly ``"443"`` — which is the direction that matters here: trusting a
-    forged client-controlled header on the rate-limited auth routes is a
-    bypass, where distrusting a legitimate CloudFront request only produces
-    a coarser bucket (`get_remote_address`'s fallback).
+    about (e.g. an HTTPS CloudFront VPC origin landing on a different port,
+    or a duplicate header this deployment's own ALB turns out to append
+    rather than overwrite — see `core/forwarded_port.py`'s own doc on why no
+    claim about ALB overwrite semantics is made here at all, only verified
+    by a live spoof test). A negative match (checking only "is this port
+    443") would instead have failed OPEN — trusting ``X-Forwarded-For`` on
+    anything that is not exactly ``"443"`` — which is the direction that
+    matters here: trusting a forged client-controlled header on the
+    rate-limited auth routes is a bypass, where distrusting a legitimate
+    CloudFront request only produces a coarser bucket (`get_remote_address`'s
+    fallback).
 
     0 here is the SAME value ``RATE_LIMIT_TRUSTED_HOPS=0`` already produces
     (operator override: "do not trust any XFF"), so this reuses that
@@ -137,6 +173,9 @@ def _effective_trusted_hops(request: Request) -> int:
     deployment (no PrivateLink leg at all) always arrives on port 80, so
     `is_cloudfront_leg` is true for every request and this is a no-op there.
     """
+    both_hops = _both_mode_cloudfront_trusted_hops()
+    if both_hops is not None:
+        return both_hops if is_cloudfront_leg(request) else 0
     if is_cloudfront_leg(request):
         return _trusted_hops()
     return 0

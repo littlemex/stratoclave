@@ -123,18 +123,25 @@ def _derive_api_endpoint(request: Request) -> str:
     Resolution order:
       1. `STRATOCLAVE_API_ENDPOINT` env (always wins when set) — EXCEPT that
          under `STRATOCLAVE_ENTRY=both`, where a second,
-         `STRATOCLAVE_API_ENDPOINT_PRIVATE` env is also set, a request that
-         arrived through the PrivateLink leg of the shared ALB gets THAT
-         value instead. The two are a closed, operator-configured pair; which
-         one is returned is chosen by `X-Forwarded-Port`, a header the ALB
-         itself always sets from which of its own listeners accepted the
-         connection (never a value a client can supply — there is no
-         "preserve" mode for it, unlike `X-Forwarded-For`; see AWS's
-         X-Forwarded-Port documentation). This is a SELECTOR between two
-         fixed, trusted strings, never a way to build a URL out of header
-         content — contrast with step 2 below, which does read a URL
-         component out of a header, for the very different case where no
-         operator-configured endpoint exists at all.
+         `STRATOCLAVE_API_ENDPOINT_PRIVATE` env is also set, a request NOT
+         positively identified as the CloudFront leg of the shared ALB
+         (`core.forwarded_port.is_cloudfront_leg` — round-1 implementation
+         review: this function makes no claim about what the ALB does with a
+         client-supplied or duplicated `X-Forwarded-Port`; that premise is
+         settled by a live spoof test, documented in docs/DEPLOYMENT.md's
+         "Both" section, not asserted here) gets THAT value instead. The
+         two are a closed, operator-configured pair; this is a SELECTOR
+         between two fixed, trusted strings, never a way to build a URL out
+         of header content — contrast with step 2 below, which does read a
+         URL component out of a header, for the very different case where
+         no operator-configured endpoint exists at all. The safe default
+         when the leg is ambiguous (header absent, duplicated, or any value
+         the classifier does not positively recognise) is the PRIVATE URL,
+         not the public one: a CloudFront client wrongly handed the private
+         URL simply cannot resolve or reach it from outside the VPC and
+         fails its bootstrap loudly, which is the safer direction to be
+         wrong in than a PrivateLink client being handed the public
+         CloudFront URL.
       2. `X-Forwarded-Proto` + `X-Forwarded-Host` (CloudFront / ALB).
       3. `request.url.scheme` + host (local development).
 

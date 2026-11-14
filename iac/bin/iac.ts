@@ -12,6 +12,8 @@ import {
   paramPath,
   positiveIntFromEnv,
   putStringParameter,
+  BOTH_MODE_CLOUDFRONT_LISTENER_PORT,
+  BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS,
 } from '../lib/_common';
 import { resolveRegionConfig } from '../lib/region-config';
 import {
@@ -840,25 +842,51 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // 'private': the operator's own domain name for the PrivateLink
     // publication — the single private URL returned in the config.
     // 'both': the CloudFront URL (same value `entryUrl` resolves to for
-    // plain `cloudfront`) — this is the default/fallback value
-    // `_derive_api_endpoint` returns. The PrivateLink URL for this mode is
-    // the separate `STRATOCLAVE_API_ENDPOINT_PRIVATE` below; the backend
-    // picks between the two per request by which ALB listener accepted the
-    // connection, not by trusting a client-suppliable header's VALUE — see
-    // that var's own comment and docs/DEPLOYMENT.md's "both" section.
+    // plain `cloudfront`) — returned only when the request is POSITIVELY
+    // identified as the CloudFront leg; the PrivateLink URL for this mode
+    // (`STRATOCLAVE_API_ENDPOINT_PRIVATE` below) is the safe default
+    // otherwise. The backend never trusts a client-suppliable header's
+    // VALUE to pick between the two (it selects by listener-port
+    // classification, not by reading a URL out of a header) — see that
+    // var's own comment and docs/DEPLOYMENT.md's "both" section.
     STRATOCLAVE_API_ENDPOINT: entryUrl,
     // Set ONLY under STRATOCLAVE_ENTRY=both (`privateUrl` is otherwise
     // undefined). backend/mvp/well_known.py's `_derive_api_endpoint` reads
     // this alongside `STRATOCLAVE_API_ENDPOINT` above and returns THIS
-    // value instead when the request's `X-Forwarded-Port` is `443` — the
-    // port ALWAYS carries the ALB LISTENER that accepted the connection
-    // (never a value a client can supply; there is no "preserve" mode for
-    // it, unlike X-Forwarded-For — see docs/DEPLOYMENT.md's "both" section
-    // for the AWS-doc citation), so on the shared internal ALB this mode
-    // builds, :443 is always the internal NLB (PrivateLink), never a
-    // CloudFront-forwarded viewer request.
+    // value as the SAFE DEFAULT — only returning `STRATOCLAVE_API_ENDPOINT`
+    // when `core.forwarded_port.is_cloudfront_leg` positively identifies
+    // the CloudFront leg (round-1 implementation review: this file makes no
+    // claim about ALB `X-Forwarded-Port` overwrite semantics; see
+    // `STRATOCLAVE_BOTH_CLOUDFRONT_PORT` below and
+    // `backend/core/forwarded_port.py`'s own doc).
     ...(entryConfig.mode === 'both' && privateUrl
       ? { STRATOCLAVE_API_ENDPOINT_PRIVATE: privateUrl }
+      : {}),
+    // Round-1 implementation review (should-fix 3, both reviews' matching
+    // blocker on version/image skew): under STRATOCLAVE_ENTRY=both, the
+    // CloudFront leg of the shared internal ALB (lib/alb-stack.ts) and the
+    // PrivateLink leg share one ALB, one security group, one target group,
+    // and consequently could share one XFF-trust decision if nothing told
+    // them apart. `backend/core/forwarded_port.py` reads
+    // STRATOCLAVE_BOTH_CLOUDFRONT_PORT — the SAME listener-port value
+    // lib/alb-stack.ts's internal ALB build uses for its :80 listener,
+    // sourced from the one constant `BOTH_MODE_CLOUDFRONT_LISTENER_PORT` in
+    // lib/_common.ts, never a second hardcoded literal — to positively
+    // identify the CloudFront leg, and STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS
+    // (lib/_common.ts's BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS) for how many XFF
+    // hops to trust once identified. RATE_LIMIT_TRUSTED_HOPS below is
+    // forced to "0" on the SAME container, in the SAME mode: an older
+    // backend image, built before `forwarded_port.py` existed, reads only
+    // that variable and therefore trusts NO XFF at all on this shared ALB
+    // by default — the fail-closed behaviour across a version-skewed
+    // rolling deploy. Only a backend new enough to read the two variables
+    // above ever trusts XFF on the CloudFront leg specifically.
+    ...(entryConfig.mode === 'both'
+      ? {
+          STRATOCLAVE_BOTH_CLOUDFRONT_PORT: String(BOTH_MODE_CLOUDFRONT_LISTENER_PORT),
+          STRATOCLAVE_BOTH_CLOUDFRONT_TRUSTED_HOPS: String(BOTH_MODE_CLOUDFRONT_TRUSTED_HOPS),
+          RATE_LIMIT_TRUSTED_HOPS: '0',
+        }
       : {}),
 
     // Comma-separated extra hosts a signed AWS sign-in may also name
