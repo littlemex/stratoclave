@@ -55,7 +55,16 @@ def failover_regions() -> list[str]:
     silently leak EU prompts to the US. An EXPLICIT list is honoured verbatim
     (the operator's stated intent; the CDK STRATOCLAVE_RESIDENCY check flags a
     cross-jurisdiction explicit list separately).
+
+    With an inference boundary (`mvp.inference_boundary`) there is no same-id
+    failover at all: a profile's destinations depend on the region it is called
+    from, so the same id called elsewhere is a different reach (or no model), and
+    a geo profile already fails over inside its own destinations.
     """
+    from mvp import inference_boundary as _boundary
+
+    if _boundary.configured() is not None:
+        return []
     primary = default_region()
     raw = os.getenv("STRATOCLAVE_FAILOVER_REGIONS")
     if raw is None:

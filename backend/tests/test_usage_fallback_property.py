@@ -23,7 +23,14 @@ import pytest
 from hypothesis import assume, given, strategies as st
 
 from mvp.me import _derive_fallback
-from mvp.models import _REGISTRY, resolve_bedrock_model, resolve_model
+from mvp import models as _models
+from mvp.inference_boundary import compose as _compose, primary_region as _primary
+from mvp.models import resolve_bedrock_model, resolve_model
+
+# The models this (default, US) deployment serves: the bundled registry minus the
+# variants the inference boundary hides here. Computed with the pure rule, not
+# `registry_entries()`, which would read the activated-entry store at import.
+_REGISTRY = _compose(_models._REGISTRY, boundary=None, primary=_primary())[0]
 
 # Per-model spelling lists (every alias + the bedrock id) + the bedrock id it
 # canonicalizes to on the write path.
@@ -182,7 +189,13 @@ def test_record_read_roundtrip_moto():
     (None, None)."""
     from moto import mock_aws
 
+    from dynamo.client import get_dynamodb_resource
+
     with mock_aws():
+        # The repository's DynamoDB resource is cached process-wide; one built by
+        # an earlier test outside the mock would send these writes to real AWS.
+        # Cleared on the way in and out, as the shared `dynamodb_mock` fixture does.
+        get_dynamodb_resource.cache_clear()
         table = _moto_usage_table()
         from dynamo.usage_logs import UsageLogsRepository
 
@@ -206,6 +219,7 @@ def test_record_read_roundtrip_moto():
             KeyConditionExpression=boto3.dynamodb.conditions.Key("tenant_id").eq("t1")
         )["Items"]
         assert len(items) == 2
+        get_dynamodb_resource.cache_clear()
         by_req = {it.get("requested_model_id"): it for it in items}
         fb = by_req[opus_bedrock]
         assert _derive_fallback(fb.get("requested_model_id"), str(fb["model_id"])) is True

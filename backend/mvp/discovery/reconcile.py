@@ -549,7 +549,13 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
     `rate_card_api_unavailable`, so the fact is asserted once
     (`PassResult.rate_card_api_unavailable`) no matter how many profiles this
     account has."""
-    endpoint_region = region or os.getenv(STRATOCLAVE_REGION_ENV) or _DEFAULT_REGION
+    # With an inference boundary the pass runs in the region the gateway calls
+    # Bedrock from: a profile's destinations depend on the region it is read
+    # from, and a `jp.` profile does not exist in us-east-1 at all.
+    from ..inference_boundary import configured as _boundary, primary_region as _primary
+
+    endpoint_region = (region or os.getenv(STRATOCLAVE_REGION_ENV)
+                       or (_primary() if _boundary() is not None else _DEFAULT_REGION))
     try:
         bedrock = _client("bedrock", region=endpoint_region, injected=bedrock)
     except Exception as exc:  # noqa: BLE001 — no client, no pass; recorded, not fatal.

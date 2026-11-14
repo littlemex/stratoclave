@@ -154,6 +154,11 @@ def bedrock_runtime_client(region: str, *, config: Optional[Config] = None):
 
 
 def _build_client(region: str, config: Config):
+    # Every bedrock-runtime client in the process is built here, so this is where
+    # a region outside the inference boundary is refused, whatever led to it.
+    from .inference_boundary import require_region
+
+    require_region(region)
     return _SESSION.client(
         "bedrock-runtime",
         region_name=region,

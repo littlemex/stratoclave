@@ -215,6 +215,13 @@ class ModelEntry:
     # The geography `profile_scope` bounds this entry to. Present iff
     # `jurisdiction_bounded` is True; PR2's policy reads this, PR1 only validates it.
     jurisdiction: Optional[str] = None
+    # Every region a call through this entry, made from `bedrock_region`, can be
+    # served in, as Bedrock reports it (`GetInferenceProfile`'s destination model
+    # ARNs for a profile; just `bedrock_region` for a direct id). `("*",)` when a
+    # destination is the region-less ARN of a `global.` profile. None when never
+    # recorded: such an entry is served exactly as before with no inference
+    # boundary and is left out with one (`mvp.inference_boundary`).
+    inference_regions: Optional[tuple[str, ...]] = None
 
 
 # Source of truth: an external JSON document, not a Python literal. Operators add
@@ -236,7 +243,7 @@ _ENTRY_FIELDS = frozenset({
     "provider", "bedrock_model_id", "bedrock_region", "aliases", "wire_protocol",
     "pricing_key", "served_by", "endpoint_key", "virtual", "sr_pool_ref", "notes",
     "price_model_id", "profile_scope", "model_family", "access",
-    "jurisdiction_bounded", "jurisdiction",
+    "jurisdiction_bounded", "jurisdiction", "inference_regions",
 })
 # `pricing_key` is required rather than defaulted. Defaulting a typo to "default"
 # charges the model at the `default` rate, and `default` is NOT an upper bound — the
@@ -436,7 +443,34 @@ def _parse_entry(path: str, index: int, raw: object) -> ModelEntry:
         access=access,
         jurisdiction_bounded=jurisdiction_bounded,
         jurisdiction=jurisdiction,
+        inference_regions=_parse_inference_regions(path, where, raw),
     )
+
+
+def _parse_inference_regions(path: str, where: str, raw: dict) -> Optional[tuple[str, ...]]:
+    """`inference_regions` is optional in the document (a registry written before it
+    existed still loads, see `ModelEntry.inference_regions`) but, when present, a
+    non-empty list of region ids or exactly `["*"]`. A direct id can only be served
+    where it is called, so its list must be exactly its `bedrock_region`."""
+    from .inference_boundary import UNBOUNDED, region_is_valid
+
+    value = raw.get("inference_regions")
+    if value is None:
+        return None
+    if (not isinstance(value, list) or not value
+            or not all(isinstance(r, str) for r in value) or len(set(value)) != len(value)):
+        _fail(path, f"{where}.inference_regions must be a non-empty list of distinct strings")
+    if UNBOUNDED in value:
+        if value != [UNBOUNDED]:
+            _fail(path, f"{where}.inference_regions: {UNBOUNDED!r} stands alone")
+        return (UNBOUNDED,)
+    bad = [r for r in value if not region_is_valid(r)]
+    if bad:
+        _fail(path, f"{where}.inference_regions has values that are not region ids: {bad}")
+    if raw["profile_scope"] == NO_PROFILE_SCOPE and value != [raw["bedrock_region"]]:
+        _fail(path, f"{where} is a direct model id, so inference_regions must be exactly "
+                    f"[{raw['bedrock_region']!r}], the region it is called in")
+    return tuple(sorted(value))
 
 
 def load_registry(path: Optional[str] = None) -> tuple[ModelEntry, ...]:
@@ -481,11 +515,23 @@ def load_registry(path: Optional[str] = None) -> tuple[ModelEntry, ...]:
         # bedrock_model_id (with different pricing keys, say) used to pass because
         # the id matched itself, leaving `_BEDROCK_ID_MAP` last-writer-wins and the
         # charged rate dependent on document order.
+        #
+        # One exception, for aliases only: the variants of one model reachable
+        # through different profile scopes (same `model_family`, e.g. the `us.` and
+        # `jp.` profiles of claude-opus-4-7) may share an alias, so a client keeps
+        # using one name wherever the deployment runs. Which variant serves it is
+        # decided per deployment by `mvp.inference_boundary.compose`, which leaves
+        # exactly one per alias. Bedrock ids stay unique.
         for name in (*entry.aliases, entry.bedrock_model_id):
             previous = seen.get(name)
             if previous is not None and previous != index:
+                other = entries[previous]
+                if (name != entry.bedrock_model_id and name != other.bedrock_model_id
+                        and other.model_family == entry.model_family
+                        and other.profile_scope != entry.profile_scope):
+                    continue
                 _fail(path, f"name {name!r} is claimed by models[{previous}] "
-                            f"({entries[previous].bedrock_model_id!r}) and models[{index}] "
+                            f"({other.bedrock_model_id!r}) and models[{index}] "
                             f"({entry.bedrock_model_id!r})")
             seen[name] = index
 
@@ -618,6 +664,7 @@ class _ComposedRegistry:
         self._allowed_bedrock_models: frozenset[str] = _STATIC_ALLOWED_BEDROCK_MODELS
         self._messages_route_aliases: frozenset[str] = _STATIC_MESSAGES_ROUTE_ALIASES
         self._activated: tuple[ModelEntry, ...] = ()
+        self._exclusions: tuple = ()
         self._loaded_at: float = 0.0
         self._lock = threading.Lock()
 
@@ -675,7 +722,21 @@ class _ComposedRegistry:
         # never does -- and a refresh that read the entries from one source and
         # the maps from another would resolve a name to an entry the composed
         # set does not contain. One source per refresh.
-        base = _REGISTRY
+        # The inference boundary (`mvp.inference_boundary`) decides which entries
+        # are part of this deployment at all, the bundled ones and the activated
+        # ones alike, so nothing downstream ever sees an entry it may not serve.
+        # Activated entries come second, as they always have.
+        from . import inference_boundary as _boundary
+
+        kept, exclusions = _boundary.compose(
+            _REGISTRY + activated, boundary=_boundary.configured(),
+            primary=_boundary.primary_region())
+        static_ids = {id(e) for e in _REGISTRY}
+        base = tuple(e for e in kept if id(e) in static_ids)
+        activated = tuple(e for e in kept if id(e) not in static_ids)
+        if exclusions and exclusions != self._exclusions:
+            logger.info("composed_registry_exclusions",
+                        excluded=[f"{x.bedrock_model_id}: {x.reason}" for x in exclusions])
         alias_map = {alias: e for e in base for alias in e.aliases}
         alias_map.update({alias: e for e in activated for alias in e.aliases})
         bedrock_id_map = {e.bedrock_model_id: e for e in base}
@@ -696,7 +757,8 @@ class _ComposedRegistry:
             if (mapping.get(a) is not None) or (e.bedrock_model_id in allowed_bedrock_models)
         )
         self._activated = activated
-        self._entries = _REGISTRY + activated
+        self._exclusions = exclusions
+        self._entries = base + activated
         self._alias_map = alias_map
         self._bedrock_id_map = bedrock_id_map
         self._mapping = mapping
@@ -717,6 +779,10 @@ class _ComposedRegistry:
     def entries(self) -> tuple[ModelEntry, ...]:
         self._ensure_fresh()
         return self._entries
+
+    def exclusions(self) -> tuple:
+        self._ensure_fresh()
+        return self._exclusions
 
     def alias_map(self) -> dict[str, ModelEntry]:
         self._ensure_fresh()
@@ -740,6 +806,12 @@ class _ComposedRegistry:
 
 
 _composed_registry = _ComposedRegistry()
+
+
+def registry_exclusions() -> tuple:
+    """The entries the inference boundary leaves out of this deployment, with the
+    reason for each (`mvp.inference_boundary.Exclusion`)."""
+    return _composed_registry.exclusions()
 
 
 def reset_composed_registry_for_test() -> None:

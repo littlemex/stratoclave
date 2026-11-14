@@ -726,6 +726,7 @@ _ACTIVATION_REFUSED_STATUS: dict[str, int] = {
     ActivationRefused.WIRE_PROTOCOL_MISMATCH: 409,
     ActivationRefused.VERDICT_SUBJECT_CHANGED: 409,
     ActivationRefused.IDENTIFIER_TAKEN: 409,
+    ActivationRefused.OUTSIDE_BOUNDARY: 422,
 }
 
 
