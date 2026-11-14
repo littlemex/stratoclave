@@ -356,7 +356,7 @@
   },
   "admin_usage_logs": {
     "title": "All usage",
-    "intro": "Browse the UsageLogs table with filters. Queries are backed by a PK Query when tenant_id is set, a GSI Query when user_id is set, and a Scan otherwise (truncated at 100 rows).",
+    "intro": "Browse the UsageLogs table with filters. Queries are backed by a PK Query when tenant_id is set, or a GSI Query when user_id is set. One of the two is required: this deployment does not grant Scan on this audit-critical table, so an unfiltered query is refused.",
     "filter_title": "Filters",
     "filter_desc": "`since` / `until` accept ISO 8601 strings such as <1>2026-04-01T00:00:00Z</1>.",
     "apply": "Apply filter",
@@ -375,7 +375,8 @@
     "fallback_badge": "fallback",
     "fallback_from": "Fell back from requested {{requested}}",
     "fallback_from_quota_exhausted": "Fell back from requested {{requested}} — its quota was exhausted",
-    "fallback_from_grant_expired": "Fell back from requested {{requested}} — your grant for that model expired"
+    "fallback_from_grant_expired": "Fell back from requested {{requested}} — your grant for that model expired",
+    "row_filter_required": "Enter a tenant_id or user_id above and apply the filter to view logs. An unfiltered query is refused because this table does not allow a full scan."
   },
   "admin_tenants": {
     "title": "Tenant administration",

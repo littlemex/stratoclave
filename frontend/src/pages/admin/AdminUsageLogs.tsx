@@ -50,6 +50,16 @@ export default function AdminUsageLogs() {
   const [cursor, setCursor] = useState<string | undefined>()
   const [cursorStack, setCursorStack] = useState<Array<string | undefined>>([])
 
+  // The backend refuses an unfiltered query with 400 ("tenant_id or user_id is
+  // required") because the ECS task role is not granted dynamodb:Scan on the
+  // usage-logs table (iac/lib/ecs-stack.ts's ScanLimitedToAdminConsoleTables,
+  // P0-10 security review -- an audit-critical table is deliberately kept off
+  // the Scan allowlist). Before this `enabled` guard, this page fired the
+  // query with `applied = {}` on first render -- before an operator ever
+  // touched the filter form -- and that unfiltered call 500'd every time
+  // (confirmed on a real deployment). Only run the query once a filter has
+  // actually been applied.
+  const hasFilter = Boolean(applied.tenant_id || applied.user_id)
   const logsQuery = useQuery({
     queryKey: ['admin', 'usage-logs', applied, cursor],
     queryFn: () =>
@@ -58,6 +68,7 @@ export default function AdminUsageLogs() {
         cursor,
         limit: 100,
       }),
+    enabled: hasFilter,
     placeholderData: (p) => p,
   })
 
@@ -174,7 +185,13 @@ export default function AdminUsageLogs() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {logsQuery.isLoading ? (
+            {!hasFilter ? (
+              <TableRow>
+                <TableCell colSpan={7} className="text-center text-muted-foreground">
+                  {t('admin_usage_logs.row_filter_required')}
+                </TableCell>
+              </TableRow>
+            ) : logsQuery.isLoading ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground">
                   {t('common.loading_ellipsis')}
@@ -241,9 +258,11 @@ export default function AdminUsageLogs() {
 
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
-          {t('admin_usage_logs.count_showing', {
-            shown: logsQuery.data?.logs.length ?? 0,
-          })}
+          {hasFilter
+            ? t('admin_usage_logs.count_showing', {
+                shown: logsQuery.data?.logs.length ?? 0,
+              })
+            : ''}
           {nextCursor ? t('admin_usage_logs.count_more') : ''}
         </span>
         <div className="flex gap-2">
