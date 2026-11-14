@@ -409,12 +409,27 @@ same concern and cannot both be set — pick one.
 # Japan: keep every Bedrock call inside Tokyo / Osaka.
 export STRATOCLAVE_INFERENCE_REGIONS=ap-northeast-1,ap-northeast-3
 export BEDROCK_PRIMARY_REGION=ap-northeast-1       # must be inside the boundary
+export DEFAULT_BEDROCK_MODEL=jp.anthropic.claude-opus-4-7   # a jp.-bounded profile; see below
 export STRATOCLAVE_CODEX_ENABLED=false             # see below
 
 # US: keep every Bedrock call inside the three Claude US regions.
 export STRATOCLAVE_INFERENCE_REGIONS=us-east-1,us-east-2,us-west-2
 export BEDROCK_PRIMARY_REGION=us-east-1
+export DEFAULT_BEDROCK_MODEL=us.anthropic.claude-opus-4-7
 ```
+
+`DEFAULT_BEDROCK_MODEL` must be set explicitly under a boundary — the built-in
+default (a `us.` profile) is refused whenever it is not reachable from
+`BEDROCK_PRIMARY_REGION` — and a `global.` profile is always refused under a
+boundary, because it is exactly the ARN shape the boundary's `Deny` statement
+(below) blocks. For a geo-prefixed id (`us.` / `eu.` / `apac.` / `jp.` / `au.`
+/ `ca.`), the IaC check only rules out a prefix whose geography cannot
+possibly include `BEDROCK_PRIMARY_REGION` (for example `us.` with a Japan
+primary); passing that check is not a guarantee the model is actually
+available there — verify with
+`aws bedrock list-foundation-models --region <primary>` as above. A
+directly-hosted (non-geo-prefixed) model id carries no such claim and is
+always accepted.
 
 What is enforced, and where:
 
@@ -427,22 +442,46 @@ What is enforced, and where:
   `STRATOCLAVE_INFERENCE_REGIONS`: every `foundation-model` / `inference-profile`
   resource is scoped to one ARN per region in the boundary (instead of a
   wildcard region), and an explicit `Deny` is added on the region-less
-  foundation-model ARN. Measured 2026-11-14 against the real Bedrock API: calling
-  a geo inference profile authorizes `bedrock:InvokeModel` on EVERY destination
-  region's foundation-model ARN up front — a role granted the Tokyo
-  (`ap-northeast-1`) and Osaka (`ap-northeast-3`) foundation-model ARNs could call
-  `jp.anthropic.*` 10/10, while `apac.anthropic.*` (whose destinations are outside
-  that pair) was denied 30/30, and `global.anthropic.*` was denied on the
-  region-less foundation-model ARN — the exact ARN this boundary now explicitly
-  denies. So a boundary is enforced twice, independently: even a backend defect
-  that served a model outside the boundary would still have its Bedrock call
+  foundation-model ARN. Measured 2026-11-14 against the real Bedrock API:
+  calling a geo inference profile authorizes `bedrock:InvokeModel` on EVERY
+  destination region's foundation-model ARN up front — a role granted the
+  Tokyo (`ap-northeast-1`) and Osaka (`ap-northeast-3`) foundation-model ARNs
+  could call `jp.anthropic.*` 10/10, while `apac.anthropic.*` (whose
+  destinations are outside that pair) was denied 30/30, and
+  `global.anthropic.*` was denied on the region-less foundation-model ARN —
+  the exact ARN this boundary now explicitly denies — 10/10 with a hand-built
+  scratch role and 5/5 with this Deny statement actually synthesized into the
+  stack. A separate measurement confirmed WHICH grant gates a geo profile's
+  reachable destinations: with the Osaka foundation-model grant removed, the
+  same role was denied `jp.*` (not `global.*`) 60/60 on that ARN — it is the
+  per-destination-region foundation-model grants, not the region-less Deny,
+  that gate a geo profile's reachable destinations; the Deny closes the one
+  shape (region-less) none of those per-region grants ever produces. So a
+  boundary is enforced twice, independently: even a backend defect that
+  served a model outside the boundary would still have its Bedrock call
   refused by AWS.
-- **Codex (the OpenAI/xAI path) must be disabled.** OpenAI GPT and xAI models on
-  Bedrock have no Japan-bounded (or other narrow) cross-region profile — only a
-  `global.` one — and the codex path's call region is hardwired in the backend
-  registry to `us-east-2` / `us-west-2` regardless of this variable. A boundary
-  that excludes those two regions and leaves codex enabled fails `cdk synth`
-  outright, naming `STRATOCLAVE_CODEX_ENABLED=false` as the fix.
+- **Models activated from the console before this release carry no recorded
+  destinations.** The gateway's model listing (above) can only filter a model
+  against the boundary using a destination it actually has on record; a model
+  that was promoted/activated through the console before this release has no
+  such record and is therefore left out of the listing under a boundary until
+  it is re-activated.
+- **The bundled Converse models** (`nvidia.nemotron-super-3-120b`,
+  `qwen.qwen3-next-80b-a3b`) are recorded for calls from `us-east-1` (US) and
+  `ap-northeast-1` (Japan) only. `BEDROCK_PRIMARY_REGION` must be one of those
+  two for the bundled list to be served at all; the IAM boundary itself grants a
+  foundation-model ARN for these ids in every region in
+  `STRATOCLAVE_INFERENCE_REGIONS` regardless, so an unused grant in a region
+  these models are not actually recorded for is harmless, not a security gap.
+- **Codex (the OpenAI/xAI path) must be disabled for a Japan boundary, but may
+  stay on for a US boundary.** OpenAI GPT and xAI models on Bedrock have no
+  Japan-bounded cross-region profile — only `us.` and `global.` — and the
+  codex path's call region is hardwired in the backend registry to
+  `us-east-2` / `us-west-2` regardless of this variable. A boundary that
+  excludes either of those two regions and leaves codex enabled fails
+  `cdk synth` outright, naming `STRATOCLAVE_CODEX_ENABLED=false` as the fix;
+  a US boundary that contains both `us-east-2` and `us-west-2` (as in the
+  recipe above) needs no such change.
 - **Same-id cross-region failover is off.** `STRATOCLAVE_FAILOVER_REGIONS` is
   ignored once a boundary is set (the backend turns same-id streaming failover
   off under a boundary) — a geo inference profile already fails over inside its
@@ -457,6 +496,13 @@ What is enforced, and where:
   informational annotation ("none" when unset), so redeploying from a shell that
   forgot to export `STRATOCLAVE_INFERENCE_REGIONS` is visible as the boundary
   silently widening back to "none", rather than invisible.
+- **The boundary has a region-count ceiling.** Every region added repeats
+  roughly 15 Bedrock ARNs across this task role's statements, and all of this
+  role's statements share one IAM inline-policy size quota (10,240 characters
+  per role). `cdk synth` fails fast, naming the character count, once the
+  Bedrock statements alone would use more than 8,000 of that budget — a
+  boundary that size needs fewer regions, since this stack has no separate
+  managed policy to move the Bedrock grants onto today.
 
 To audit what actually ran, Bedrock model-invocation logging (when turned on)
 records the destination region per call as `inferenceRegion`. This CloudWatch

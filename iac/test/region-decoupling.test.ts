@@ -307,13 +307,16 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
 
 describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFERENCE_REGIONS)', () => {
   // A Japan boundary needs codex explicitly off: codex's registry pin
-  // (us-west-2/us-east-2) is never inside a Japan-only boundary.
+  // (us-west-2/us-east-2) is never inside a Japan-only boundary. It also
+  // needs an explicit, jp.-compatible DEFAULT_BEDROCK_MODEL: the built-in
+  // default is a "us." profile, which is refused under any non-US boundary.
   function japanBoundaryEnv(overrides: Env = {}): Env {
     return baseEnv({
       STRATOCLAVE_REGION: 'ap-northeast-1',
       BEDROCK_PRIMARY_REGION: 'ap-northeast-1',
       STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-1,ap-northeast-3',
       STRATOCLAVE_CODEX_ENABLED: 'false',
+      DEFAULT_BEDROCK_MODEL: 'jp.anthropic.claude-opus-4-7',
       ...overrides,
     });
   }
@@ -369,6 +372,66 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
     ).toThrow(/BEDROCK_PRIMARY_REGION \(ap-northeast-1\) is not inside STRATOCLAVE_INFERENCE_REGIONS \(ap-northeast-3\)/);
   });
 
+  test('DEFAULT_BEDROCK_MODEL unset under a boundary throws (the US default cannot serve a non-US boundary)', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ DEFAULT_BEDROCK_MODEL: undefined })),
+    ).toThrow(/DEFAULT_BEDROCK_MODEL must be set explicitly under STRATOCLAVE_INFERENCE_REGIONS/);
+  });
+
+  test('a "global." DEFAULT_BEDROCK_MODEL under a boundary throws', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ DEFAULT_BEDROCK_MODEL: 'global.anthropic.claude-opus-5' })),
+    ).toThrow(/"global\." cross-region profile/);
+  });
+
+  test('a geo-prefixed DEFAULT_BEDROCK_MODEL whose geography excludes the primary region throws', () => {
+    // "us." never reaches ap-northeast-1.
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ DEFAULT_BEDROCK_MODEL: 'us.anthropic.claude-opus-5' })),
+    ).toThrow(/"us\." cross-region profile, which has no destination reachable from BEDROCK_PRIMARY_REGION \(ap-northeast-1\)/);
+    // "jp." never reaches us-east-1.
+    expect(() =>
+      resolveRegionConfig(
+        baseEnv({
+          STRATOCLAVE_REGION: 'us-east-1',
+          STRATOCLAVE_INFERENCE_REGIONS: 'us-east-1',
+          STRATOCLAVE_CODEX_ENABLED: 'false',
+          DEFAULT_BEDROCK_MODEL: 'jp.anthropic.claude-opus-5',
+        }),
+      ),
+    ).toThrow(/"jp\." cross-region profile, which has no destination reachable from BEDROCK_PRIMARY_REGION \(us-east-1\)/);
+  });
+
+  test.each([
+    ['us.anthropic.claude-opus-5', 'us-east-1'],
+    ['us-gov.anthropic.claude-opus-5', 'us-east-1'],
+    ['eu.anthropic.claude-opus-5', 'eu-west-1'],
+    ['ca.anthropic.claude-opus-5', 'ca-central-1'],
+    ['jp.anthropic.claude-opus-4-7', 'ap-northeast-1'],
+    ['jp.anthropic.claude-opus-4-7', 'ap-northeast-3'],
+    ['au.anthropic.claude-opus-5', 'ap-southeast-2'],
+    ['au.anthropic.claude-opus-5', 'ap-southeast-4'],
+    ['apac.anthropic.claude-opus-5', 'ap-southeast-1'],
+  ])('%s is accepted with BEDROCK_PRIMARY_REGION=%s', (model, primary) => {
+    expect(() =>
+      resolveRegionConfig(
+        baseEnv({
+          STRATOCLAVE_REGION: primary,
+          BEDROCK_PRIMARY_REGION: primary,
+          STRATOCLAVE_INFERENCE_REGIONS: primary,
+          STRATOCLAVE_CODEX_ENABLED: 'false',
+          DEFAULT_BEDROCK_MODEL: model,
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  test('a bare (directly-hosted) DEFAULT_BEDROCK_MODEL is accepted under any boundary, no geography check', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6' })),
+    ).not.toThrow();
+  });
+
   test('codex enabled with a registry region outside the boundary throws, naming the opt-out', () => {
     expect(() =>
       resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_CODEX_ENABLED: 'true' })),
@@ -403,6 +466,7 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
         BEDROCK_PRIMARY_REGION: 'us-east-1',
         STRATOCLAVE_INFERENCE_REGIONS: 'us-east-1',
         STRATOCLAVE_CODEX_ENABLED: 'false',
+        DEFAULT_BEDROCK_MODEL: 'us.anthropic.claude-opus-5',
       }),
     );
     expect(cfg.inferenceBoundaryWarnings.join('\n')).toMatch(

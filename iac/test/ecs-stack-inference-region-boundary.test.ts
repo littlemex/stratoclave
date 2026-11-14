@@ -7,17 +7,27 @@
  *   - UNSET: `inferenceRegions` is `undefined` (today's behaviour). Every
  *     Bedrock-invoke statement must keep EXACTLY today's resources, plus the
  *     one additive `inference-profile/jp.anthropic.*` grant — nothing else
- *     changes. This is pinned as a literal expectation BUILT FROM THE CODE
- *     BEFORE the boundary feature existed (the four original resources per
- *     statement), so a regression that widens or narrows the unset case fails
- *     loudly here even though it has nothing to do with the new feature.
+ *     changes, INCLUDING `project/*` in the OpenAI-family statement, which
+ *     must stay the exact literal it had before this feature (hardcoded
+ *     "aws", wildcard region) rather than becoming a partition-token join.
+ *     This is pinned as an exact (not `Match.arrayWith`) resource list per
+ *     statement, so a regression that widens, narrows, or re-orders the
+ *     unset case fails loudly here even though it has nothing to do with the
+ *     new feature.
  *   - BOUNDARY (Japan: ap-northeast-1 + ap-northeast-3): every Allow statement
  *     with a Bedrock invoke action must have ONLY resources whose region is
- *     inside the boundary — no `*` region, no region-less ARN — the explicit
- *     Deny on the region-less foundation-model ARN must be present, the
- *     partition must be the `AWS::Partition` pseudo-parameter (not a hardcoded
- *     string), and the container env `STRATOCLAVE_INFERENCE_REGIONS` must equal
- *     the same boundary IAM was generated from.
+ *     inside the boundary — no `*` region, no region-less ARN, no plain
+ *     string (every resource is a join on the `AWS::Partition` pseudo
+ *     parameter) — the explicit Deny on the region-less foundation-model ARN
+ *     must be present, and the container env `STRATOCLAVE_INFERENCE_REGIONS`
+ *     must equal the same boundary IAM was generated from.
+ *
+ * A third comparison (not unset-vs-today, but unset-vs-boundary) checks that
+ * the SET of resource-type/name suffixes (the ARN segment after the region)
+ * granted by each statement is identical between the two synths, so a suffix
+ * hand-typed into one branch's literal array and left out of the other's
+ * `flatMap` template (or vice versa) is caught even though neither
+ * individual-branch test above would notice a pattern missing from BOTH.
  */
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -86,6 +96,35 @@ function renderedResources(stmt: any): string[] {
   return resources.map((r: unknown) => JSON.stringify(r));
 }
 
+/**
+ * Flatten a CFN resource value (a plain string, or a boundary-generated
+ * `{"Fn::Join": ["", [...]]}` whose only non-literal part is the
+ * `AWS::Partition` pseudo parameter) back into an ARN-shaped string, with
+ * `PARTITION` standing in for the token. This lets the SAME suffix-extraction
+ * regex run over both the unset (plain-string) and boundary (joined) shapes.
+ */
+function flattenResource(resource: unknown): string {
+  if (typeof resource === 'string') return resource;
+  const parts = (resource as { 'Fn::Join'?: [string, unknown[]] })['Fn::Join']?.[1] ?? [];
+  return parts.map((p) => (typeof p === 'string' ? p : 'PARTITION')).join('');
+}
+
+/** The ARN segment after `arn:<partition>:<service>:<region>:<account>:`, i.e. the resource-type/name pattern a grant names, independent of which specific region or account it was generated for. */
+function resourceSuffix(resource: unknown): string {
+  const flat = flattenResource(resource);
+  const m = /^arn:[^:]*:[^:]*:[^:]*:[^:]*:(.+)$/.exec(flat);
+  if (!m) {
+    throw new Error(`resource does not look like a 6-field ARN: ${flat}`);
+  }
+  return m[1];
+}
+
+function suffixSet(stmt: any): string[] {
+  const resources: unknown[] = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource];
+  const suffixes: string[] = resources.map((r) => resourceSuffix(r));
+  return Array.from(new Set(suffixes)).sort();
+}
+
 describe('EcsStack Bedrock IAM — unset boundary (today\'s behaviour + jp.)', () => {
   let template: Template;
 
@@ -131,21 +170,28 @@ describe('EcsStack Bedrock IAM — unset boundary (today\'s behaviour + jp.)', (
     });
   });
 
-  test('AllowOpenAIFamilyBedrockInvoke model resources are unchanged from today', () => {
+  test('AllowOpenAIFamilyBedrockInvoke resources (including project/*) are EXACTLY unchanged from today', () => {
+    // Pinned as an exact array, not Match.arrayWith: the reviewer's concern
+    // was specifically that `project/*` could silently turn into an
+    // Fn::Join on AWS::Partition even with no boundary set, which an
+    // arrayWith subset check would not have caught (it only asserts
+    // presence, not that the array contains NOTHING else / nothing
+    // differently-shaped).
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
             Sid: 'AllowOpenAIFamilyBedrockInvoke',
             Effect: 'Allow',
-            Resource: Match.arrayWith([
+            Resource: [
+              `arn:aws:bedrock:*:${ACCOUNT}:project/*`,
               'arn:aws:bedrock:*::foundation-model/openai.*',
               'arn:aws:bedrock:*::foundation-model/xai.*',
               `arn:aws:bedrock:*:${ACCOUNT}:inference-profile/us.openai.*`,
               `arn:aws:bedrock:*:${ACCOUNT}:inference-profile/global.openai.*`,
               `arn:aws:bedrock:*:${ACCOUNT}:inference-profile/us.xai.*`,
               `arn:aws:bedrock:*:${ACCOUNT}:inference-profile/global.xai.*`,
-            ]),
+            ],
           }),
         ]),
       },
@@ -190,12 +236,10 @@ describe('EcsStack Bedrock IAM — Japan boundary (ap-northeast-1, ap-northeast-
     expect(statements.length).toBeGreaterThan(0);
     for (const stmt of statements) {
       for (const rendered of renderedResources(stmt)) {
-        // project/* is not a model resource and is not region-scoped by the
-        // boundary (see EcsStackProps.inferenceRegions / ecs-stack.ts comment);
-        // skip it here, it is covered by its own partition-token assertion below.
-        if (rendered.includes(':project/')) continue;
-        // No bare wildcard region segment ("bedrock:*:" or "bedrock:*::").
-        expect(rendered).not.toMatch(/bedrock:\\\*:/);
+        // No bare wildcard region segment ("bedrock:*:"). `project/*` is
+        // region-scoped under a boundary too (see ecs-stack.ts), so there is
+        // no exemption here any more.
+        expect(rendered).not.toMatch(/bedrock:\*:/);
         // No region-less foundation-model ARN (triple colon after "bedrock").
         expect(rendered).not.toMatch(/bedrock:::foundation-model/);
         // Every resource names one of the boundary regions.
@@ -218,21 +262,13 @@ describe('EcsStack Bedrock IAM — Japan boundary (ap-northeast-1, ap-northeast-
     expect(rendered.some((r) => r.includes('AWS::Partition'))).toBe(true);
   });
 
-  test('every generated (non-"aws"-literal) resource uses the AWS::Partition pseudo-parameter, never a hardcoded string', () => {
+  test('under a boundary, no Bedrock resource is a plain string — every one is a join on AWS::Partition', () => {
     const statements = bedrockInvokeStatements(template);
+    expect(statements.length).toBeGreaterThan(0);
     for (const stmt of statements) {
       for (const resource of Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource]) {
-        if (typeof resource === 'string') {
-          // A literal string resource must not hardcode a non-"aws" partition,
-          // and (boundary set) must not be the pre-boundary wildcard-region shape.
-          expect(resource).not.toMatch(/^arn:(?!aws:)[a-z0-9-]+:bedrock/);
-          continue;
-        }
-        // Fn::Join-shaped (partition interpolated): must reference the pseudo
-        // parameter and must NOT also hardcode a partition literal elsewhere
-        // in the same resource string.
-        const rendered = JSON.stringify(resource);
-        expect(rendered).toContain('AWS::Partition');
+        expect(typeof resource).not.toBe('string');
+        expect(JSON.stringify(resource)).toContain('AWS::Partition');
       }
     }
   });
@@ -274,6 +310,19 @@ describe('EcsStack Bedrock IAM — Japan boundary (ap-northeast-1, ap-northeast-
     }
   });
 
+  test('the OpenAI-family statement regenerates project/* per-region as well as the model ARNs', () => {
+    const stmt = bedrockInvokeStatements(template).find(
+      (s) => s.Sid === 'AllowOpenAIFamilyBedrockInvoke',
+    );
+    expect(stmt).toBeDefined();
+    const rendered = renderedResources(stmt);
+    for (const r of BOUNDARY) {
+      expect(rendered.some((x) => x.includes(`bedrock:${r}:`) && x.includes('project/*'))).toBe(
+        true,
+      );
+    }
+  });
+
   test('container env STRATOCLAVE_INFERENCE_REGIONS equals the boundary IAM was generated from', () => {
     template.hasResourceProperties('AWS::ECS::TaskDefinition', {
       ContainerDefinitions: Match.arrayWith([
@@ -287,5 +336,48 @@ describe('EcsStack Bedrock IAM — Japan boundary (ap-northeast-1, ap-northeast-
         }),
       ]),
     });
+  });
+});
+
+describe('EcsStack Bedrock IAM — resource-pattern parity between unset and boundary synth', () => {
+  let unsetTemplate: Template;
+  let boundaryTemplate: Template;
+  const BOUNDARY = ['ap-northeast-1', 'ap-northeast-3'];
+
+  beforeAll(() => {
+    unsetTemplate = synth(undefined, 'ParityUnset');
+    boundaryTemplate = synth(BOUNDARY, 'ParityBoundary');
+  });
+
+  test.each([
+    'AllowAnthropicBedrockInvoke',
+    'AllowRegistryConverseInvoke',
+    'AllowOpenAIFamilyBedrockInvoke',
+  ])('%s: the set of resource-type/name suffixes is identical between unset and boundary', (sid) => {
+    const unsetStmt = bedrockInvokeStatements(unsetTemplate).find((s) => s.Sid === sid);
+    const boundaryStmt = bedrockInvokeStatements(boundaryTemplate).find((s) => s.Sid === sid);
+    expect(unsetStmt).toBeDefined();
+    expect(boundaryStmt).toBeDefined();
+    expect(suffixSet(boundaryStmt)).toEqual(suffixSet(unsetStmt));
+  });
+});
+
+describe('EcsStack Bedrock IAM — policy-size guard', () => {
+  function synthWithRegions(regions: string[]): () => Template {
+    return () => synth(regions, `Size${regions.length}`);
+  }
+
+  test('a normal-sized boundary (2 regions) does not throw', () => {
+    expect(synthWithRegions(['ap-northeast-1', 'ap-northeast-3'])).not.toThrow();
+  });
+
+  test('a boundary with enough regions to blow the 8,000-character Bedrock budget throws a clear, actionable error', () => {
+    // Fake region-shaped strings (ecs-stack.ts does not itself validate region
+    // syntax -- that is region-config.ts's job) are enough to drive the
+    // character-count guard without needing 40 real AWS regions.
+    const manyRegions = Array.from({ length: 40 }, (_, i) => `zz-fakeregion${String(i).padStart(2, '0')}-1`);
+    expect(() => synth(manyRegions, 'SizeOverflow')).toThrow(
+      /generated Bedrock IAM resources alone are already ~\d+ characters, over this task role's 8000-character budget/,
+    );
   });
 });

@@ -293,6 +293,75 @@ export function resolveRegionConfig(env: Env): RegionConfig {
           `primary region must be reachable within the boundary, or every request fails.`
       );
     }
+    // DEFAULT_BEDROCK_MODEL must be explicit under a boundary: the built-in
+    // default ("us.anthropic.claude-opus-5") can never be inside a non-US
+    // boundary, and the backend refuses to start on a model the IAM boundary
+    // below cannot serve. No geography table is maintained here — only the
+    // minimum needed to catch the two shapes IaC CAN know without one:
+    // `global.` (always unreachable once the boundary's Deny statement is in
+    // place, regardless of which regions are in it) and a geo prefix whose
+    // destinations cannot include the one region
+    // (BEDROCK_PRIMARY_REGION, already required above to be inside the
+    // boundary) this gateway actually calls Bedrock from. A bare (directly
+    // hosted) model id carries no such claim and is accepted as-is.
+    if (env.DEFAULT_BEDROCK_MODEL === undefined) {
+      throw new Error(
+        `DEFAULT_BEDROCK_MODEL must be set explicitly under STRATOCLAVE_INFERENCE_REGIONS: ` +
+          `the built-in default ("us.anthropic.claude-opus-5") is a US cross-region profile ` +
+          `that cannot be called from every boundary, and the backend refuses to start if the ` +
+          `configured model cannot be served from within the boundary this module generates ` +
+          `IAM for. Set DEFAULT_BEDROCK_MODEL to a profile or directly-hosted model id that is ` +
+          `reachable from BEDROCK_PRIMARY_REGION (${bedrockPrimaryRegion}).`
+      );
+    }
+    const modelGeoPrefix = GEO_PROFILE_RE.exec(defaultBedrockModel)?.[1];
+    if (modelGeoPrefix === 'global') {
+      throw new Error(
+        `DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a "global." cross-region profile: ` +
+          `the IAM this module generates for STRATOCLAVE_INFERENCE_REGIONS explicitly denies ` +
+          `the region-less foundation-model ARN a "global." destination call is authorized ` +
+          `against (see lib/ecs-stack.ts), so it can never be called under a boundary. Use a ` +
+          `region-bounded geo profile (jp./au./ca./eu./us./apac., matching ` +
+          `BEDROCK_PRIMARY_REGION) or a directly-hosted model id instead.`
+      );
+    } else if (modelGeoPrefix !== undefined) {
+      // Minimal, deliberately not a geography table: which AWS regions a geo
+      // profile's destination set reaches is exactly what this module cannot
+      // know (that lives in AWS's own geography definitions, not in this
+      // app), so this only rules out the shapes it CAN rule out — the prefix
+      // naming a jurisdiction BEDROCK_PRIMARY_REGION is not even IN. A
+      // profile that passes this still is not guaranteed reachable; the
+      // operator is expected to have verified the model is actually
+      // available from BEDROCK_PRIMARY_REGION (docs/DEPLOYMENT.md says so).
+      const primaryMatchesGeoPrefix = ((): boolean => {
+        switch (modelGeoPrefix) {
+          case 'us':
+          case 'us-gov':
+            return bedrockPrimaryRegion.startsWith('us-');
+          case 'eu':
+            return bedrockPrimaryRegion.startsWith('eu-');
+          case 'ca':
+            return bedrockPrimaryRegion.startsWith('ca-');
+          case 'jp':
+            return bedrockPrimaryRegion === 'ap-northeast-1' || bedrockPrimaryRegion === 'ap-northeast-3';
+          case 'au':
+            return bedrockPrimaryRegion === 'ap-southeast-2' || bedrockPrimaryRegion === 'ap-southeast-4';
+          case 'apac':
+            return bedrockPrimaryRegion.startsWith('ap-');
+          default:
+            return false;
+        }
+      })();
+      if (!primaryMatchesGeoPrefix) {
+        throw new Error(
+          `DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a "${modelGeoPrefix}." cross-region ` +
+            `profile, which has no destination reachable from BEDROCK_PRIMARY_REGION ` +
+            `(${bedrockPrimaryRegion}). Set DEFAULT_BEDROCK_MODEL to a profile whose geography ` +
+            `covers ${bedrockPrimaryRegion} (or a directly-hosted model id), or move ` +
+            `BEDROCK_PRIMARY_REGION into that profile's geography.`
+        );
+      }
+    }
     if (codexEnabled) {
       const codexLeaks = OPENAI_REGISTRY_REGIONS.filter(
         (r) => !inferenceRegions.includes(r)
@@ -300,11 +369,12 @@ export function resolveRegionConfig(env: Env): RegionConfig {
       if (codexLeaks.length > 0) {
         throw new Error(
           `STRATOCLAVE_INFERENCE_REGIONS (${inferenceRegions.join(', ')}) excludes ` +
-            `${codexLeaks.join(', ')}, which the OpenAI/codex path is hardwired to ` +
-            `(OpenAI GPT and xAI models on Bedrock have no Japan-bounded profile, only a ` +
-            `"global." one). set STRATOCLAVE_CODEX_ENABLED=false to keep this boundary ` +
-            `with codex off, or widen STRATOCLAVE_INFERENCE_REGIONS to include ` +
-            `${codexLeaks.join(', ')}.`
+            `${codexLeaks.join(', ')}, which the OpenAI/codex path is hardwired to. OpenAI GPT ` +
+            `and xAI models on Bedrock have no Japan-bounded profile — only "us." and ` +
+            `"global." — so codex must be off for a boundary like this one; it may stay on ` +
+            `for a US boundary that contains both us-east-2 and us-west-2. set ` +
+            `STRATOCLAVE_CODEX_ENABLED=false to keep this boundary with codex off, or widen ` +
+            `STRATOCLAVE_INFERENCE_REGIONS to include ${codexLeaks.join(', ')}.`
         );
       }
     }
