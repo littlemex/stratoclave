@@ -488,6 +488,53 @@ mod tests {
         }
     }
 
+    /// Repoints `dirs::home_dir()` (via `$HOME`) at a fresh temp directory for the
+    /// life of the returned guard, and holds `env_lock()` for exactly as long.
+    ///
+    /// Two tests below used to call the REAL `dirs::home_dir()` directly, with no
+    /// lock at all, to exercise "refuse the user's own `~/.codex`" -- which means
+    /// they built a path under the developer's actual home directory and handed it
+    /// to `CodexHome::prepare`, trusting `reject_user_codex_home`'s own `dirs::
+    /// home_dir()` call, a few lines later, to read the SAME value back. `HOME` is
+    /// process-global (see `crate::test_env`'s own docs on why there is one lock for
+    /// it), so a `tokens`/`config` test repointing it mid-test -- on another thread,
+    /// in the same process, which is how `cargo test` runs by default -- could flip
+    /// what that second call saw. The forbidden-path comparison would then miss, the
+    /// guard would wave the request through, and `CodexHome::prepare` would go on to
+    /// `mkdir` and take `run.lock` in the real `~/.codex` it was supposed to refuse
+    /// -- which is not a hypothetical: it is what happened on a CI box running these
+    /// tests under load (see this change's own report).
+    ///
+    /// The fix is the same one `tokens.rs`/`config.rs` already use for every test
+    /// that is sensitive to `$HOME`: point it at a temp directory nobody but this
+    /// test can see, so there is no real `~/.codex` for either call to disagree
+    /// about, and hold the shared lock so no concurrent test can repoint `$HOME`
+    /// out from under it while it runs.
+    struct HomeGuard {
+        _tmp: tempfile::TempDir,
+        orig_home: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.orig_home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn with_temp_home() -> (HomeGuard, std::sync::MutexGuard<'static, ()>) {
+        let lock = env_lock();
+        let tmp = TempDir::new().expect("mktemp");
+        let guard = HomeGuard {
+            orig_home: std::env::var_os("HOME"),
+            _tmp: tmp,
+        };
+        std::env::set_var("HOME", guard._tmp.path());
+        (guard, lock)
+    }
+
     #[test]
     fn ephemeral_home_is_a_temp_dir_that_is_not_durable() {
         let home = CodexHome::prepare(None, true).expect("prepare");
@@ -647,9 +694,11 @@ mod tests {
     }
 
     // Pointing --codex-state-dir at the user's own codex home would rewrite the
-    // file every doc promises is never touched.
+    // file every doc promises is never touched. Exercised against a temp `$HOME`
+    // (see `with_temp_home`'s doc), not the developer's real one.
     #[test]
     fn the_users_codex_home_is_refused() {
+        let (_h, _lock) = with_temp_home();
         let home = dirs::home_dir().expect("home dir");
         let err = CodexHome::prepare(Some(home.join(".codex").to_str().unwrap()), false)
             .expect_err("must refuse ~/.codex");
@@ -707,9 +756,12 @@ mod tests {
 
     // `canonicalize` fails on a path that does not exist yet, so a raw comparison
     // would let `~/.codex/anything/..` through: the check passes, the directory is
-    // then created, and the rewrite lands on the user's real config.
+    // then created, and the rewrite lands on the user's real config. Exercised
+    // against a temp `$HOME` (see `with_temp_home`'s doc), not the developer's
+    // real one.
     #[test]
     fn the_codex_home_guard_is_not_bypassed_by_dot_dot() {
+        let (_h, _lock) = with_temp_home();
         let home = dirs::home_dir().expect("home dir");
         let sneaky = home.join(".codex").join("subdir").join("..");
         let err = CodexHome::prepare(Some(sneaky.to_str().unwrap()), false)
