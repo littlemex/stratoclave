@@ -2204,9 +2204,14 @@
    "anchor": "contract:C12.7@6e49e3b8"
   },
   {
-   "id": "cl-b73b5500b126",
-   "claim": "- **The gateway** sends the headers on each call, with the same values and the same absence rules as the Bedrock marker, and never puts them in the request body, so the endpoint's model never sees them and they cost no tokens.",
-   "anchor": "contract:C13.6@ff215ca9"
+   "id": "cl-2a82f3544beb",
+   "claim": "So each value is checked before it is sent, against that set with whitespace narrowed to an inner space, at most 256 characters, and a value that does not pass is left out, never altered.",
+   "anchor": "contract:C13.6@a52f5f99"
+  },
+  {
+   "id": "cl-6e0d28fc93c8",
+   "claim": "- **The gateway** sends the headers on each inference call, with the same values and the same absence rules as the Bedrock marker (the value rule above also keeps every value a valid header value), and never puts them in the request body, so the endpoint's model never sees them and they cost no tokens.",
+   "anchor": "contract:C13.6@a52f5f99"
   }
  ]
 }

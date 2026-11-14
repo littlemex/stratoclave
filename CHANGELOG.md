@@ -40,9 +40,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   correlation marker now carries `sc_user`, the gateway's own user id, beside `sc_tenant` and
   `sc_attempt_id`. A self-hosted endpoint receives the same marker as the headers
   `X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`, which its
-  operator can write to an access log. On the OpenAI-compatible surface the marker is three
-  keys of the 16 Bedrock accepts, so a caller using 14 or more of its own gets none of it
-  (was 15).
+  operator can write to an access log. On the OpenAI-compatible surface `sc_user` is now a
+  reserved `metadata` key: a value a caller sends under it is replaced. The marker is up to
+  three keys of the 16 Bedrock accepts, so it is left out whole when the caller's keys and the
+  marker's together exceed 16 (14 or more of the caller's with a full marker; was 15).
 
 - **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
   `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit
@@ -54,6 +55,11 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   adds a table the document does not name. No runtime change.
 
 ### Fixed
+
+- **A tenant id with a character Bedrock does not accept in `requestMetadata` (such as `|`, or
+  any non-ASCII) made every Converse call for that tenant fail with `ValidationException`.**
+  Each marker value is now checked before it is sent and left out when it does not fit; the
+  call goes out with the other parts (C13.6).
 
 - **Streaming calls carried no correlation marker.** `/v1/messages` and `/v1/chat/completions`
   streamed through Converse without `requestMetadata`, so their invocation-log records could

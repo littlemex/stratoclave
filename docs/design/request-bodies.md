@@ -82,9 +82,16 @@ each transport (C13.6). Bedrock echoes it into the invocation log.
 
 | Marker key | What it is | When it is absent |
 |---|---|---|
-| `sc_tenant` | the tenant id | in the case below where the whole marker is dropped |
-| `sc_user` | the gateway's own user id: the id the console and the usage records use, not an email, a Cognito username or an AWS identity | in the same case |
+| `sc_tenant` | the tenant id | when the value does not pass the value rule below; in the case below where the whole marker is dropped |
+| `sc_user` | the gateway's own user id: the id the console and the usage records use, not an email, a Cognito username or an AWS identity | when the principal has no user id; when the value does not pass the value rule; in the same case |
 | `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold |
+
+**The value rule.** Bedrock refuses the whole call when a `requestMetadata` value has
+a character outside letters, digits, whitespace and `:_@$#=/+,-.`. So each value is
+checked before it is sent, against that set with whitespace narrowed to an inner
+space, at most 256 characters, and a value that does not pass is left out, never
+altered. The call goes out with the other parts. An admin-chosen tenant id such as
+`team|a` therefore reaches the log without `sc_tenant`, and the call still succeeds.
 
 | Transport | Where the marker goes |
 |---|---|
@@ -93,8 +100,9 @@ each transport (C13.6). Bedrock echoes it into the invocation log.
 | A self-hosted endpoint | HTTP request headers, see [Self-hosted endpoints](#self-hosted-endpoints) |
 
 On the OpenAI-compatible surface, Bedrock accepts 16 `metadata` keys. A caller whose
-own `metadata` already uses 14 or more of them gets the request sent without the
-gateway's marker entirely rather than refused; that record carries none of the keys.
+own `metadata` and the marker together exceed 16 keys (14 or more of the caller's with
+a full marker) gets the request sent without the gateway's marker entirely rather than
+refused; that record carries none of the keys.
 
 So a logged record is attributable to a tenant and a user by key, and `sc_user`
 joins it to the usage records and the console's user list directly. The marker is
@@ -109,7 +117,8 @@ destination as you would to per-user usage data.
 ## Self-hosted endpoints
 
 A model registered as served by a self-hosted endpoint (`served_by` `vllm`, behind
-`HYBRID_SERVING_ENABLED`) gets the same marker, as HTTP request headers on every call:
+`HYBRID_SERVING_ENABLED`) gets the same marker, as HTTP request headers on every
+inference call:
 
 | Header | Value |
 |---|---|
@@ -119,10 +128,10 @@ A model registered as served by a self-hosted endpoint (`served_by` `vllm`, behi
 
 The responsibilities split at the wire:
 
-- **The gateway** sends the headers on each call, with the same values and the same
-  absence rules as the Bedrock marker, and never puts them in the request body, so the
-  endpoint's model never sees them and they cost no tokens. A value that is not
-  printable ASCII is left out rather than sent mangled. The gateway stores nothing
+- **The gateway** sends the headers on each inference call, with the same values and
+  the same absence rules as the Bedrock marker (the value rule above also keeps every
+  value a valid header value), and never puts them in the request body, so the
+  endpoint's model never sees them and they cost no tokens. The gateway stores nothing
   about the call beyond what it stores for a Bedrock call, and reads nothing back from
   the endpoint's logs.
 - **The endpoint's operator** decides what to keep. A reverse proxy in front of the

@@ -103,6 +103,7 @@ class TestChatCompletionsStampsTheMarker:
             "before the request left the gateway"
         )
         assert sent["metadata"]["sc_tenant"] == "org-chat-1"
+        assert sent["metadata"]["sc_user"] == "u1"
         # The placeholder must never actually reach the wire.
         assert ATTEMPT_ID_PLACEHOLDER not in json.dumps(sent)
 
@@ -241,6 +242,7 @@ def test_chat_completions_streaming_also_carries_the_real_hold_id():
 
     assert capture["payload"]["metadata"]["sc_attempt_id"] == REAL_HOLD_ID
     assert capture["payload"]["metadata"]["sc_tenant"] == "org-chat-stream"
+    assert capture["payload"]["metadata"]["sc_user"] == "u1"
     assert ATTEMPT_ID_PLACEHOLDER not in json.dumps(capture["payload"])
 
 
@@ -395,6 +397,7 @@ class TestOpenAIResponsesStampsTheMarker:
         sent = capture_openai_request[0]
         assert sent["metadata"]["sc_attempt_id"] == REAL_HOLD_ID
         assert sent["metadata"]["sc_tenant"] == "org-responses-1"
+        assert sent["metadata"]["sc_user"] == "user-marker"
         assert ATTEMPT_ID_PLACEHOLDER not in json.dumps(sent)
 
     def test_callers_own_metadata_is_preserved_beside_the_marker(
@@ -485,6 +488,7 @@ def test_openai_responses_streaming_also_carries_the_real_hold_id(
     sent = capture_openai_stream_request[0]
     assert sent["metadata"]["sc_attempt_id"] == REAL_HOLD_ID
     assert sent["metadata"]["sc_tenant"] == "org-responses-1"
+    assert sent["metadata"]["sc_user"] == "user-marker"
     assert ATTEMPT_ID_PLACEHOLDER not in json.dumps(sent)
 
 

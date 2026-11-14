@@ -157,7 +157,8 @@ as measured 2026-09-03, the only one whose calls appear in model invocation logs
 
 Because the marker has to be on the request *before* it is sent, stamping it is a
 correctness requirement rather than an optimisation. Values are ids the gateway
-minted: no prompt, no user identifier, nothing derived from request content.
+minted or holds (the attempt, the tenant and the gateway's own user id): no prompt, no
+email, nothing derived from request content.
 
 ## Two measurements about test environments, while we are here
 

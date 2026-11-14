@@ -28,6 +28,7 @@ encoding it as fact is the defect this replaces.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Optional
 
 from botocore.exceptions import (
@@ -320,10 +321,10 @@ def unobserved_holds_enforced() -> bool:
     return raw.strip().lower() in _TRUTHY
 
 
-#: The correlation marker's keys, and what each names (C13.6). This is the one
-#: place they are spelled: the Converse `requestMetadata`, the OpenAI-compatible
-#: `metadata` merge, the reserved-name set and the self-hosted headers are all
-#: derived from it.
+#: The correlation marker's keys, and what each names (C13.6). The Converse
+#: `requestMetadata`, the OpenAI-compatible `metadata` merge, the reserved-name
+#: set and the self-hosted headers all use these keys; `test_provider_outcome.py`
+#: holds `MARKER_KEYS`, `MARKER_HEADERS` and `RESERVED_METADATA_KEYS` to one set.
 MARKER_KEYS: dict[str, str] = {
     "sc_tenant": "the tenant id",
     "sc_attempt_id": "the id of this attempt's money hold",
@@ -331,7 +332,7 @@ MARKER_KEYS: dict[str, str] = {
 }
 
 #: The marker as HTTP request headers, for a self-hosted endpoint (C13.6). The
-#: gateway sends them on every call; recording them is the endpoint's job.
+#: gateway sends them on every inference call; recording them is the endpoint's job.
 MARKER_HEADERS: dict[str, str] = {
     "sc_tenant": "X-Stratoclave-Tenant",
     "sc_attempt_id": "X-Stratoclave-Attempt-Id",
@@ -339,6 +340,24 @@ MARKER_HEADERS: dict[str, str] = {
 }
 
 _MARKER_VALUE_MAX = 256
+
+#: The one rule every marker value passes before it is sent anywhere. Bedrock
+#: refuses the WHOLE call (`ValidationException`) when a `requestMetadata` value
+#: has a character outside `[a-zA-Z0-9\s:_@$#=/+,-.]` (checked on real Bedrock:
+#: "a|b" and non-ASCII refused, "u@x.com/1+2=3,#$:_-." accepted). Tenant ids are
+#: chosen by an admin and are not restricted to that set, so an unchecked value
+#: would turn every call for that tenant into an error. The rule is that set
+#: narrowed to what is also a safe HTTP header value: the only whitespace is an
+#: inner space (no tab or line break, nothing leading or trailing). A value that
+#: fails is left out, never altered: an altered id would name someone else.
+_MARKER_CHAR = r"A-Za-z0-9:_@$#=/+,.\-"
+_MARKER_VALUE_RE = re.compile(
+    rf"[{_MARKER_CHAR}](?:[{_MARKER_CHAR} ]{{0,{_MARKER_VALUE_MAX - 2}}}[{_MARKER_CHAR}])?")
+
+
+def marker_value_ok(value: object) -> bool:
+    """Whether `value` may be sent as a marker value (see `_MARKER_VALUE_RE`)."""
+    return isinstance(value, str) and _MARKER_VALUE_RE.fullmatch(value) is not None
 
 
 def attempt_request_metadata(
@@ -357,31 +376,23 @@ def attempt_request_metadata(
 
     Values are ids the gateway minted or holds: the hold id, the tenant id, and
     the gateway's own user id. No prompt, no email, nothing derived from request
-    content. Each value is capped at Bedrock's 256-character limit.
+    content. A value that is absent, longer than Bedrock's 256-character limit or
+    outside `_MARKER_VALUE_RE` is left out, so the call is never refused because
+    of its marker; the other parts are still sent.
     """
-    md: dict[str, str] = {}
-    if hold_id:
-        md["sc_attempt_id"] = str(hold_id)[:_MARKER_VALUE_MAX]
-    if tenant_id:
-        md["sc_tenant"] = str(tenant_id)[:_MARKER_VALUE_MAX]
-    if user_id:
-        md["sc_user"] = str(user_id)[:_MARKER_VALUE_MAX]
-    return md
+    parts = {"sc_attempt_id": hold_id, "sc_tenant": tenant_id, "sc_user": user_id}
+    return {key: value for key, value in parts.items() if marker_value_ok(value)}
 
 
 def marker_headers(marker: Optional[dict]) -> dict[str, str]:
     """The marker as the HTTP request headers a self-hosted endpoint receives.
 
-    Only the gateway's own keys are carried, under their fixed header names. A
-    value that is not printable ASCII is left out rather than sent mangled: a
-    header cannot carry CR, LF or non-ASCII, and the ids the gateway mints are
-    plain ASCII, so a value that is not is not one of them."""
-    out: dict[str, str] = {}
-    for key, header in MARKER_HEADERS.items():
-        value = (marker or {}).get(key)
-        if isinstance(value, str) and value and value.isascii() and value.isprintable():
-            out[header] = value[:_MARKER_VALUE_MAX]
-    return out
+    Only the gateway's own keys are carried, under their fixed header names, and
+    by the same value rule as the Bedrock marker (`marker_value_ok`), so a
+    self-hosted endpoint sees exactly the values a Bedrock log record would."""
+    marker = marker or {}
+    return {header: marker[key] for key, header in MARKER_HEADERS.items()
+            if marker_value_ok(marker.get(key))}
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +454,8 @@ OPENAI_METADATA_MAX_KEY_LEN = 64
 OPENAI_METADATA_MAX_VALUE_LEN = 512
 
 # The gateway's own keys are far inside both per-pair limits (longest key is
-# "sc_attempt_id", 13 chars; longest value is a tenant id truncated to 256
-# chars by `attempt_request_metadata`, itself inside OpenAI's 512-char cap),
+# "sc_attempt_id", 13 chars; `attempt_request_metadata` sends no value longer
+# than 256 characters, itself inside OpenAI's 512-char cap),
 # so only the 16-key ceiling can actually be violated by adding them.
 assert len(ATTEMPT_ID_PLACEHOLDER) <= OPENAI_METADATA_MAX_VALUE_LEN
 
@@ -459,10 +470,8 @@ assert len(ATTEMPT_ID_PLACEHOLDER) <= OPENAI_METADATA_MAX_VALUE_LEN
 #: like the gateway's own correlation marker. Found in review (issue #247);
 #: pinned by `TestMergeOpenAIMetadata::test_a_caller_cannot_forge_the_reserved_keys_by_padding_metadata_to_the_ceiling`.
 #:
-#: Derived from `attempt_request_metadata`'s own output (called with two
-#: truthy dummy values so both keys appear), not re-typed as string literals
-#: — the two routes' reserved-name set and the Converse marker's actual key
-#: names must stay the same set by construction, not by two places agreeing.
+#: The same set as `MARKER_KEYS`, so the names a caller may not use and the
+#: names the gateway sends cannot drift apart.
 RESERVED_METADATA_KEYS = frozenset(MARKER_KEYS)
 
 

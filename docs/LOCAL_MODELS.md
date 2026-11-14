@@ -155,7 +155,7 @@ Ollama's own usage chunk carried, not the reservation estimate.
 
 ## Attributing calls on your endpoint
 
-Every call the gateway makes to your endpoint carries three HTTP request headers:
+Every inference call the gateway makes to your endpoint carries three HTTP request headers:
 `X-Stratoclave-Tenant`, `X-Stratoclave-User` and `X-Stratoclave-Attempt-Id`. They are
 the same values Bedrock receives as `requestMetadata` and records in its invocation
 log, and they are not in the request body, so your model never sees them. To get a
