@@ -244,12 +244,10 @@ export function resolveEntryConfig(env: Env, bodyRegion: string): EntryConfig {
  * CloudFront-facing ALB has moved off a public address onto a CloudFront VPC
  * origin (`cloudfront_origins.VpcOrigin.withApplicationLoadBalancer`).
  *
- * This replaces a shared-secret header design (three review rounds, three new
- * outage paths, all "the two copies diverged" — see
- * docs/DEPLOYMENT.md's "Hardening the CloudFront to ALB hop" for the history)
- * with a network-reachability one: `vpc` mode's ALB has no public address at
- * all, so a third party's own CloudFront distribution cannot reach it
- * regardless of what it sends.
+ * This is a network-reachability design, not a shared-secret-header one:
+ * `vpc` mode's ALB has no public address at all, so a third party's own
+ * CloudFront distribution cannot reach it regardless of what it sends. See
+ * docs/DEPLOYMENT.md's "VPC origin" section.
  *
  * Five values, not two, because an EXISTING `public` deployment cannot jump
  * straight to `vpc` without downtime (the ALB's internal/internet-facing

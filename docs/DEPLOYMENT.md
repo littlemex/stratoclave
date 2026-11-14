@@ -609,23 +609,29 @@ A fresh deployment needs no migration: `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc`
 (the default) builds the internal ALB and the VPC origin directly.
 
 An **existing** deployment whose ALB is internet-facing cannot jump to `vpc`
-in one deploy — the ALB's internet-facing/internal scheme cannot change in
-place (CloudFormation replaces the load balancer), and the replacement has
-to exist, be registered with CloudFront, and be healthy before the old one
-can safely be removed. Migrate through three states, each its own deploy:
+in one deploy, for two independent reasons: the ALB's internet-facing/internal
+scheme cannot change in place (CloudFormation replaces the load balancer),
+and — round-1 implementation review's blocker — `cdk deploy --all` always
+updates a producer stack (AlbStack, which owns the public ALB's exports)
+before a consumer stack that still imports them, which is exactly backwards
+for DELETING an export. Migrate through FOUR states, each its own deploy,
+**always through `iac/scripts/deploy-all.sh`, never a bare `npx cdk deploy
+--all`** — the pre-flight checks below (the migration-sequencing guard, the
+AZ check, the entry-mode-switch guard) live in that wrapper, not in CDK
+itself, so a bare `cdk deploy --all` skips every one of them and is
+UNGUARDED:
 
 ```bash
 export STRATOCLAVE_PREFIX=stratoclave
 export STRATOCLAVE_REGION=us-east-1
 
-export STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand
-cd iac && npx cdk deploy --all --require-approval never
+STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand ./iac/scripts/deploy-all.sh
 
-export STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-switch
-npx cdk deploy --all --require-approval never
+STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-switch ./iac/scripts/deploy-all.sh
 
-export STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc
-npx cdk deploy --all --require-approval never
+STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-contract ./iac/scripts/deploy-all.sh
+
+STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc ./iac/scripts/deploy-all.sh
 ```
 
 What each step does:
@@ -637,40 +643,93 @@ What each step does:
   goes through the public ALB exactly as before. `AWS::CloudFront::VpcOrigin`
   creation takes several minutes; this step lets it finish, and lets the
   internal ALB's targets pass their health checks, before anything depends
-  on either.
+  on either. The public ALB's deletion protection is still whatever this
+  deployment's normal setting is — nothing is being removed yet.
 - **`vpc-switch`**: the distribution's four ALB behaviours (`/api/*`,
   `/v1/*`, `/openai/*`, `/.well-known/*`) retarget from the public origin to
   the VPC origin. **This is the step that moves live traffic.** The old
   public ALB, its target group, and its now-unreferenced CloudFront origin
   are still declared, so reverting to the public origin is a redeploy of the
-  previous step's configuration, not a rebuild.
-- **`vpc`**: the public ALB, its target group, its CloudFront origin, and
-  its `AlbDnsName` export are removed. **This is the step that closes the
-  public bypass** — before it, the public ALB still has a public address and
-  a third party's own CloudFront distribution could still reach it directly,
+  previous step's configuration, not a rebuild. From this step on, the
+  public ALB's deletion protection is forced off (`lib/alb-stack.ts`) —
+  every state from here on is explicitly working towards deleting it.
+  `deploy-all.sh` refuses to run this step until a prior `vpc-expand` has
+  deployed (the internal ALB exists).
+- **`vpc-contract`**: FrontendStack stops declaring the public `ALBOrigin`
+  and EcsStack stops registering the backend service with the public target
+  group — the CONSUMER side of the cross-stack export the next step needs
+  to delete. The public ALB, its target group, and its exports are still
+  declared by AlbStack, UNCHANGED from `vpc-switch`; nothing routes to the
+  public path and nothing imports its exports anymore, but it has not been
+  deleted yet. `deploy-all.sh` refuses to run this step until the LIVE
+  CloudFront distribution's behaviours are confirmed already targeting the
+  VPC origin AND the distribution's own `Status` is `Deployed` — not merely
+  until a `vpc-switch` deploy has been RUN, but until it has actually
+  finished propagating.
+- **`vpc`**: the public ALB, its target group, its exports, and its
+  CloudFront origin are removed. **This is the step that closes the public
+  bypass** — before it, the public ALB still has a public address and a
+  third party's own CloudFront distribution could still reach it directly,
   even though no production traffic is routed to it after `vpc-switch`.
+  `deploy-all.sh` refuses to run this step while the distribution still
+  declares the public `ALBOrigin` at all — i.e., until `vpc-contract` has
+  already deployed successfully — because AlbStack deleting those exports
+  while FrontendStack/EcsStack still imported them is exactly the
+  CloudFormation deadlock ("Export ... cannot be deleted as it is in use
+  by ...") this four-step sequence exists to avoid.
 
 A bare `cdk deploy --all` (or `./iac/scripts/deploy-all.sh`) with none of
 these variables set resolves to `vpc` — the default. Run against an existing
 deployment that still has a live internet-facing ALB and has never run
-`vpc-expand`/`vpc-switch`, that would attempt the one-shot replacement this
-staged migration exists to avoid. `iac/scripts/deploy-all.sh`'s pre-flight
-refuses that specific combination (a live internet-facing ALB, no internal
-ALB yet, and a target state of `vpc-switch` or `vpc`) before `cdk deploy`
-runs at all. A fresh deployment, or an existing one already partway through
-this migration, is unaffected by the refusal.
+`vpc-expand`/`vpc-switch`/`vpc-contract`, that would attempt the one-shot
+replacement this staged migration exists to avoid — through `deploy-all.sh`,
+its pre-flight refuses that combination before `cdk deploy` runs at all; a
+bare `cdk deploy --all` has no such check and WILL attempt it. A fresh
+deployment, or an existing one already partway through this migration, is
+unaffected by the refusal.
 
 ### Rollback
 
-- From `vpc-expand`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`. The
-  public ALB was never touched, so this removes only the internal ALB and
-  the VPC origin.
-- From `vpc-switch`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand`.
-  The behaviours retarget back to the public origin; both ALBs remain.
-- From `vpc`: there is no rollback deploy, because the public ALB no longer
-  exists. Restoring it means running the migration again from the start
-  under the same prefix (`vpc-expand` then `vpc-switch`), which creates a
-  new public ALB — it does not restore the old one's DNS name.
+Read the four states backwards — `vpc` -> `vpc-contract` -> `vpc-switch` ->
+`vpc-expand` -> `public` — with the SAME consumer/producer ordering
+constraint, reversed: each rollback step is re-ADDING an export, which
+`cdk deploy --all` (via `deploy-all.sh`) gets right on its own, EXCEPT the
+very first one, `vpc` -> `vpc-contract`, which recreates the public ALB
+that no longer exists, and the very last one, `vpc-expand` -> `public`,
+which has the SAME shape of cross-stack ordering problem the forward
+migration does (see below) because FrontendStack imports the internal ALB
+to build the VPC origin, and EcsStack registers with its target group,
+from `vpc-expand` onward — stopping that import is a CONSUMER-side change
+the same way `vpc-contract` is on the way up.
+
+- From `vpc`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-contract` through
+  `deploy-all.sh`. This recreates the public ALB, its target group, and its
+  exports (AlbStack is a pure producer here — nothing to re-order).
+- From `vpc-contract`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-switch`
+  through `deploy-all.sh`. FrontendStack re-declares `ALBOrigin` and EcsStack
+  re-registers the public target group — both already exist from the
+  previous step, so there is nothing for either to import before it exists.
+- From `vpc-switch`: redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc-expand`
+  through `deploy-all.sh`. The behaviours retarget back to the public
+  origin; both ALBs remain.
+- From `vpc-expand`: do NOT redeploy `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`
+  in one `cdk deploy --all` — that has the identical cross-stack deadlock
+  the forward migration's `vpc-contract` step exists to avoid, just on the
+  INTERNAL ALB's exports instead of the public one's: FrontendStack still
+  imports `internalAlb` to build the VPC origin resource, and EcsStack still
+  registers with the internal target group, at `vpc-expand`, so AlbStack
+  cannot delete the internal ALB's exports in the same deploy where both
+  stop importing them. Do it in two deploys instead, using CDK's own
+  `--exclusively` flag to update the consumers first: `cd iac && npx cdk
+  deploy stratoclave-frontend stratoclave-ecs --exclusively
+  --require-approval never` (with `STRATOCLAVE_CLOUDFRONT_ORIGIN=public`
+  already exported) to drop the VPC origin and the internal target-group
+  registration, THEN `./iac/scripts/deploy-all.sh` (same env) to let
+  AlbStack/NetworkStack remove the internal ALB and its isolated subnets.
+- From `vpc` with no intermediate step ever run: there is no rollback
+  deploy, because the public ALB no longer exists. Restoring it means
+  running the migration again from the start under the same prefix, which
+  creates a NEW public ALB — it does not restore the old one's DNS name.
 
 ### Cost and deploy time
 
@@ -690,12 +749,21 @@ For a fresh `vpc` deployment, after `cdk deploy --all` completes:
 ```bash
 export STRATOCLAVE_PREFIX=stratoclave
 export STRATOCLAVE_REGION=us-east-1
+# Not a name-contains-prefix filter: the internal ALB's name is CDK-generated
+# and is not guaranteed to contain the human-readable prefix at all. Resolve
+# its ARN from the SSM parameter lib/alb-stack.ts always writes instead.
+INTERNAL_ALB_ARN=$(aws ssm get-parameter --region "$STRATOCLAVE_REGION" \
+  --name "/${STRATOCLAVE_PREFIX}/alb/internal-arn" --query 'Parameter.Value' --output text)
 aws elbv2 describe-load-balancers --region "$STRATOCLAVE_REGION" \
-  --query "LoadBalancers[?contains(LoadBalancerName,'${STRATOCLAVE_PREFIX}')].{Name:LoadBalancerName,Scheme:Scheme}"
+  --load-balancer-arns "$INTERNAL_ALB_ARN" \
+  --query 'LoadBalancers[0].{Name:LoadBalancerName,Scheme:Scheme}'
+aws elbv2 describe-load-balancers --region "$STRATOCLAVE_REGION" \
+  --query "LoadBalancers[?LoadBalancerName=='${STRATOCLAVE_PREFIX}-alb']" --output text || true
 ```
 
-Confirm the ALB's `Scheme` is `internal` and that no load balancer in the
-account is named `<prefix>-alb` with `Scheme` `internet-facing`.
+Confirm the internal ALB's `Scheme` is `internal`, and that the second
+command (which looks up the public ALB's own, well-known name directly)
+returns nothing at all once the `vpc` step has removed it.
 
 For a migration, probe the distribution through `vpc-switch` with a
 multi-minute streaming request held open across the deploy, not only a

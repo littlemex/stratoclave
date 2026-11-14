@@ -855,7 +855,7 @@ else
   if [ "$CLOUDFRONT_ORIGIN" = "public" ]; then
     echo "  ALB endpoint:  http://$ALB_DNS   (public; reachable directly, not just through CloudFront — see docs/DEPLOYMENT.md's 'VPC origin' section for why STRATOCLAVE_CLOUDFRONT_ORIGIN=vpc closes that)"
   else
-    echo "  ALB (internal, no public address): $ALB_DNS   (reachable only through the CloudFront VPC origin above or from inside this VPC)"
+    echo "  ALB (internal, no public address): $ALB_DNS   (its security group admits only the CloudFront origin-facing prefix list on :80 -- and, under STRATOCLAVE_ENTRY=both, the internal NLB on :443 -- not every address inside this VPC)"
   fi
   echo "  User Pool ID:  $COGNITO_USER_POOL_ID"
   echo ""
