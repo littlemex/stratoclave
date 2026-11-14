@@ -116,11 +116,21 @@ describe('NetworkStack: cloudfrontOrigin and the PrivateIsolated subnet group', 
       FromPort: 80,
       SourcePrefixListId: Match.anyValue(),
     });
-    tpl.resourceCountIs('AWS::EC2::SecurityGroup', 3); // Alb, Ecs, Nlb
+    // Round-1 implementation review's SG-split fix: the public-shaped
+    // `AlbSecurityGroup` is still created unconditionally (unused by any
+    // ALB under `both`, since `both` never builds a public ALB at all),
+    // and the shared live ALB now has its OWN `InternalAlbSecurityGroup`
+    // (see that field's doc in lib/network-stack.ts) — four groups, not
+    // three.
+    tpl.resourceCountIs('AWS::EC2::SecurityGroup', 4); // Alb, InternalAlb, Ecs, Nlb
     const sgs = tpl.findResources('AWS::EC2::SecurityGroup');
     const nlbSg = Object.values(sgs).find(
       (r: any) => r.Properties?.GroupDescription?.includes('internal NLB'),
     );
     expect(nlbSg).toBeDefined();
+    const internalAlbSg = Object.values(sgs).find(
+      (r: any) => r.Properties?.GroupDescription?.includes('internal (VPC-origin) ALB'),
+    );
+    expect(internalAlbSg).toBeDefined();
   });
 });

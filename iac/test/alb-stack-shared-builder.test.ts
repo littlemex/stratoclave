@@ -31,16 +31,22 @@ describe('AlbStack: cloudfrontOrigin modes share one builder', () => {
       ],
     });
     const securityGroup = new ec2.SecurityGroup(networkStack, 'TestSG', { vpc });
-    return { app, vpc, securityGroup };
+    // Round-1 implementation review's SG-split fix: an internal ALB build
+    // now requires its OWN security group, never `securityGroup` above
+    // (lib/network-stack.ts's `internalAlbSecurityGroup`, lib/alb-stack.ts's
+    // `internalSecurityGroup` prop) — see that prop's doc for why.
+    const internalSecurityGroup = new ec2.SecurityGroup(networkStack, 'TestInternalSG', { vpc });
+    return { app, vpc, securityGroup, internalSecurityGroup };
   }
 
   test('vpc-expand: both ALBs exist, and carry IDENTICAL tuned attributes', () => {
-    const { app, vpc, securityGroup } = testVpcAndSg('Expand');
+    const { app, vpc, securityGroup, internalSecurityGroup } = testVpcAndSg('Expand');
     const stack = new AlbStack(app, 'TestAlbStackExpand', {
       env: { account: '123456789012', region: 'us-east-1' },
       prefix: 'stratoclave',
       vpc,
       securityGroup,
+      internalSecurityGroup,
       cloudfrontOrigin: 'vpc-expand',
     });
     const template = Template.fromStack(stack);
@@ -90,12 +96,13 @@ describe('AlbStack: cloudfrontOrigin modes share one builder', () => {
   });
 
   test('vpc (contract): only the internal ALB exists; no public one, no additionalTargetGroup', () => {
-    const { app, vpc, securityGroup } = testVpcAndSg('Contract');
+    const { app, vpc, securityGroup, internalSecurityGroup } = testVpcAndSg('Contract');
     const stack = new AlbStack(app, 'TestAlbStackVpc', {
       env: { account: '123456789012', region: 'us-east-1' },
       prefix: 'stratoclave',
       vpc,
       securityGroup,
+      internalSecurityGroup,
       cloudfrontOrigin: 'vpc',
     });
     const template = Template.fromStack(stack);
@@ -121,12 +128,13 @@ describe('AlbStack: cloudfrontOrigin modes share one builder', () => {
   });
 
   test('both: one internal ALB with BOTH an HTTP :80 forward listener AND an HTTPS :443 listener', () => {
-    const { app, vpc, securityGroup } = testVpcAndSg('Both');
+    const { app, vpc, securityGroup, internalSecurityGroup } = testVpcAndSg('Both');
     const stack = new AlbStack(app, 'TestAlbStackBoth', {
       env: { account: '123456789012', region: 'us-east-1' },
       prefix: 'stratoclave',
       vpc,
       securityGroup,
+      internalSecurityGroup,
       entryMode: 'both',
       cloudfrontOrigin: 'vpc',
       internal: true,

@@ -210,20 +210,30 @@ describe('STRATOCLAVE_ENTRY=both — synthesized templates', () => {
         });
       }
 
-      test('no SecurityGroup resource carries an INLINE SecurityGroupIngress/Egress array', () => {
-        // Every rule in this stack is added via `.addIngressRule`/
-        // `.addEgressRule`, which CDK renders as standalone
-        // `AWS::EC2::SecurityGroupIngress`/`...Egress` resources. A rule
-        // written inline instead (`new ec2.SecurityGroup(..., {
-        // securityGroupIngress: [...] })`) would be invisible to every
-        // `resourceCountIs('AWS::EC2::SecurityGroupIngress', ...)` check in
-        // this file, including the ones below.
+      test('no SecurityGroup resource carries an INLINE SecurityGroupIngress array', () => {
+        // Every INGRESS rule in this stack is added via `.addIngressRule`,
+        // which CDK renders as a standalone `AWS::EC2::SecurityGroupIngress`
+        // resource. A rule written inline instead (`new ec2.SecurityGroup(
+        // ..., { securityGroupIngress: [...] })`) would be invisible to
+        // every `resourceCountIs('AWS::EC2::SecurityGroupIngress', ...)`
+        // check in this file, including the ones below.
+        //
+        // Egress is deliberately NOT checked here the same way: every
+        // `allowAllOutbound: true` security group in this stack (the
+        // public and internal ALB groups) renders an inline
+        // `SecurityGroupEgress: [{CidrIp: "0.0.0.0/0", ...}]` by CDK's own
+        // design whenever that prop is set — that is CDK's normal
+        // rendering of a constructor PROP this codebase uses deliberately,
+        // not a rule hidden from `.addEgressRule`'s standalone-resource
+        // pattern the way an inline INGRESS array would be. The NLB's own
+        // security group (`allowAllOutbound: false`) has no such rule at
+        // all and its one real egress rule is still a standalone resource,
+        // asserted explicitly in the next test.
         const groups = Object.values(raw.Resources || {}).filter(
           (r: any) => r.Type === 'AWS::EC2::SecurityGroup',
         );
         for (const g of groups) {
           expect((g as any).Properties?.SecurityGroupIngress).toBeUndefined();
-          expect((g as any).Properties?.SecurityGroupEgress).toBeUndefined();
         }
       });
 
@@ -234,9 +244,13 @@ describe('STRATOCLAVE_ENTRY=both — synthesized templates', () => {
 
         const internalIngress = rulesForGroup('AWS::EC2::SecurityGroupIngress', internalSgId);
         expect(internalIngress).toHaveLength(2); // CF:80, NLB:443
+        // Sorted by FromPort NUMERICALLY, not via `Array.prototype.sort`'s
+        // default string-coercing comparator (which would put the `443`
+        // tuple before the `80` one, since "4" < "8" lexicographically —
+        // a mistake in THIS test, not in the resources it reads).
         const internalTuples = internalIngress
           .map((r: any) => [r.Properties.FromPort, r.Properties.ToPort, !!r.Properties.SourcePrefixListId, !!r.Properties.SourceSecurityGroupId])
-          .sort();
+          .sort((a: any[], b: any[]) => a[0] - b[0]);
         expect(internalTuples).toEqual([
           [80, 80, true, false], // CloudFront origin-facing prefix list
           [443, 443, false, true], // the internal NLB's security group
@@ -274,7 +288,17 @@ describe('STRATOCLAVE_ENTRY=both — synthesized templates', () => {
       // (round-1 implementation review: pinned per-group above too, not
       // only in total), so a stray additional rule fails this test.
       test('EXACTLY three ingress rules and one egress rule, across the whole stack', () => {
-        tpl.resourceCountIs('AWS::EC2::SecurityGroupIngress', 3); // CF:80 + NLB:443 (both on the internal ALB SG), ECS-from-ALB:8000 (on the ECS SG)
+        // CF:80 + NLB:443 (both on the internal ALB SG, explicit in this
+        // file's own wiring) + ECS-from-the-internal-ALB:8000 — NOT this
+        // file's own explicit (and, under `both`, inert) rule from the
+        // unused public-shaped `AlbSecurityGroup` (`needsPublicAlbSg` is
+        // false whenever `cloudfrontOrigin === 'vpc'`, which `both` always
+        // forces — lib/network-stack.ts no longer writes that rule at all
+        // in this mode), but the one CDK's own
+        // `FargateService.attachToApplicationTargetGroup` (lib/ecs-stack.ts)
+        // adds automatically, pointed at whichever security group the
+        // ATTACHED target group's ALB actually belongs to.
+        tpl.resourceCountIs('AWS::EC2::SecurityGroupIngress', 3);
         tpl.resourceCountIs('AWS::EC2::SecurityGroupEgress', 1); // NLB -> internal ALB:443 only
       });
 

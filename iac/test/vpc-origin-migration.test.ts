@@ -40,7 +40,9 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
   const PREFIX = 'migrationtest';
   const REGION = 'us-east-1';
 
-  function synth(cloudfrontOrigin: string): { outDir: string; raw: Record<string, Record<string, any>> } {
+  function synth(
+    cloudfrontOrigin: string,
+  ): { outDir: string; raw: Record<string, Record<string, any>>; allStacks: StackSet } {
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratoclave-vpc-migration-'));
     const env = hermeticSynthEnv({
       CDK_DEFAULT_ACCOUNT: '123456789012',
@@ -60,7 +62,21 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
     for (const id of ['alb', 'frontend', 'ecs', 'network']) {
       raw[id] = JSON.parse(fs.readFileSync(path.join(outDir, `${PREFIX}-${id}.template.json`), 'utf-8'));
     }
-    return { outDir, raw };
+    // The cross-stack export/import checker needs EVERY synthesized stack,
+    // not just the four this file's other tests read directly — EcsStack
+    // alone legitimately imports exports from DynamoDBStack, CognitoStack,
+    // EcrStack and (when WAF is on) WafStack, none of which ever changes
+    // shape across a `cloudfrontOrigin` transition. Restricting the
+    // checker to only `raw`'s four stacks made every import INTO one of
+    // them from an OUTSIDE stack look unresolved — a false positive this
+    // file's own fix found had nothing to do with the migration design.
+    const allStacks: StackSet = {};
+    for (const file of fs.readdirSync(outDir)) {
+      if (file.endsWith('.template.json')) {
+        allStacks[file] = JSON.parse(fs.readFileSync(path.join(outDir, file), 'utf-8'));
+      }
+    }
+    return { outDir, raw, allStacks };
   }
 
   function albLogicalIds(raw: Record<string, any>): string[] {
@@ -69,11 +85,11 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
     );
   }
 
-  let publicOut: { outDir: string; raw: Record<string, Record<string, any>> };
-  let expandOut: { outDir: string; raw: Record<string, Record<string, any>> };
-  let switchOut: { outDir: string; raw: Record<string, Record<string, any>> };
-  let contractOut: { outDir: string; raw: Record<string, Record<string, any>> };
-  let vpcOut: { outDir: string; raw: Record<string, Record<string, any>> };
+  let publicOut: { outDir: string; raw: Record<string, Record<string, any>>; allStacks: StackSet };
+  let expandOut: { outDir: string; raw: Record<string, Record<string, any>>; allStacks: StackSet };
+  let switchOut: { outDir: string; raw: Record<string, Record<string, any>>; allStacks: StackSet };
+  let contractOut: { outDir: string; raw: Record<string, Record<string, any>>; allStacks: StackSet };
+  let vpcOut: { outDir: string; raw: Record<string, Record<string, any>>; allStacks: StackSet };
 
   beforeAll(() => {
     publicOut = synth('public');
@@ -110,7 +126,7 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
       const [fromName, fromOut] = FORWARD[i];
       const [toName, toOut] = FORWARD[i + 1];
       test(`forward: ${fromName} -> ${toName}`, () => {
-        const problems = checkExportTransition(fromOut().raw as StackSet, toOut().raw as StackSet);
+        const problems = checkExportTransition(fromOut().allStacks, toOut().allStacks);
         expect(problems.unresolvedImports).toEqual([]);
         expect(problems.unsafeRemovals).toEqual([]);
         expect(isSafeTransition(problems)).toBe(true);
@@ -120,7 +136,7 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
       // the "to" state as OLD (currently deployed) and the "from" state as
       // NEW (what the rollback redeploys).
       test(`rollback: ${toName} -> ${fromName}`, () => {
-        const problems = checkExportTransition(toOut().raw as StackSet, fromOut().raw as StackSet);
+        const problems = checkExportTransition(toOut().allStacks, fromOut().allStacks);
         expect(problems.unresolvedImports).toEqual([]);
         expect(problems.unsafeRemovals).toEqual([]);
         expect(isSafeTransition(problems)).toBe(true);
@@ -138,7 +154,7 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
     // everything and only being trusted on the strength of the OTHER
     // (safe) results above.
     test('rollback vpc-expand -> public in ONE deploy is correctly flagged UNSAFE (this is why docs/DEPLOYMENT.md documents a two-deploy `--exclusively` workaround instead)', () => {
-      const problems = checkExportTransition(expandOut.raw as StackSet, publicOut.raw as StackSet);
+      const problems = checkExportTransition(expandOut.allStacks, publicOut.allStacks);
       expect(isSafeTransition(problems)).toBe(false);
     });
   });

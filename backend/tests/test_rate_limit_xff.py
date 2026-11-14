@@ -161,15 +161,26 @@ class TestBothModeSharedAlb:
     ALB :80) and PrivateLink (NLB, ALB :443) share one ALB. On the :443 leg,
     any ``X-Forwarded-For`` present was NOT written by a hop this
     deployment's topology trusts — it is attacker/caller-supplied, same as
-    ``RATE_LIMIT_TRUSTED_HOPS=0``. ``X-Forwarded-Port`` is the ALB's own
-    record of which listener accepted the connection and is never a value a
-    client can set.
+    ``RATE_LIMIT_TRUSTED_HOPS=0``. ``X-Forwarded-Port`` classification is
+    gated on ``STRATOCLAVE_BOTH_CLOUDFRONT_PORT`` (``bin/iac.ts`` sets it
+    only under ``STRATOCLAVE_ENTRY=both`` — see ``core/forwarded_port.py``):
+    every test below that exercises the POSITIVE-match classification sets
+    it explicitly, because `core.forwarded_port.is_cloudfront_leg` degrades
+    to "treat every request as the CloudFront leg" when it is unset — the
+    behaviour every OTHER entry mode (which never sets this variable) must
+    keep unchanged. ``test_cloudfront_leg_on_the_shared_alb_is_unaffected``
+    below is the one test in this class that deliberately does NOT set it,
+    because its whole point is to pin that exact degrade behaviour.
     """
+
+    def _reload_with_both_mode_port(self, monkeypatch, env_hops: str | None = None):
+        monkeypatch.setenv("STRATOCLAVE_BOTH_CLOUDFRONT_PORT", "80")
+        return _reload_with(env_hops, monkeypatch)
 
     def test_privatelink_leg_ignores_forged_xff_and_falls_back_to_peer(
         self, monkeypatch
     ):
-        rl = _reload_with(None, monkeypatch)  # default hops=1
+        rl = self._reload_with_both_mode_port(monkeypatch)  # default hops=1
         key = rl._client_key(
             _request(
                 {
@@ -212,7 +223,7 @@ class TestBothModeSharedAlb:
         else falls through to the normal trusting algorithm) would WRONGLY
         trust the forged XFF below; this is the regression that review
         found and this test pins against it recurring."""
-        rl = _reload_with(None, monkeypatch)
+        rl = self._reload_with_both_mode_port(monkeypatch)
         key = rl._client_key(
             _request(
                 {

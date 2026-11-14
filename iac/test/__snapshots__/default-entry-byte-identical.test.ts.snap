@@ -32,7 +32,7 @@ exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this
       "Scheme": "internal",
       "SecurityGroups": [
         {
-          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputFnGetAttAlbSecurityGroup86A59E99GroupIdE3A37BC7",
+          "Fn::ImportValue": "defaultentrytest-network:ExportsOutputFnGetAttInternalAlbSecurityGroup32D71C5AGroupIdB19046BB",
         },
       ],
       "Subnets": [
@@ -185,81 +185,6 @@ exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this
       "ViewerProtocolPolicy": "https-only",
     },
   ],
-}
-`;
-
-exports[`STRATOCLAVE_CLOUDFRONT_ORIGIN unset (default = vpc): the resources this feature branches on are pinned network: the ALB security-group ingress rule(s) and the CloudFront prefix-list lookup are pinned 1`] = `
-{
-  "AlbSecurityGroupfromIndirectPeer80C02E7218": {
-    "Metadata": {
-      "aws:cdk:path": "defaultentrytest-network/AlbSecurityGroup/from {IndirectPeer}:80",
-    },
-    "Properties": {
-      "Description": "Allow HTTP from CloudFront edge locations only",
-      "FromPort": 80,
-      "GroupId": {
-        "Fn::GetAtt": [
-          "AlbSecurityGroup86A59E99",
-          "GroupId",
-        ],
-      },
-      "IpProtocol": "tcp",
-      "SourcePrefixListId": {
-        "Fn::GetAtt": [
-          "CloudFrontOriginFacingPrefixListLookupE17CADC1",
-          "PrefixLists.0.PrefixListId",
-        ],
-      },
-      "ToPort": 80,
-    },
-    "Type": "AWS::EC2::SecurityGroupIngress",
-  },
-  "CloudFrontOriginFacingPrefixListLookupE17CADC1": {
-    "DeletionPolicy": "Delete",
-    "DependsOn": [
-      "CloudFrontOriginFacingPrefixListLookupCustomResourcePolicy71ED6615",
-    ],
-    "Metadata": {
-      "aws:cdk:path": "defaultentrytest-network/CloudFrontOriginFacingPrefixListLookup/Resource/Default",
-    },
-    "Properties": {
-      "Create": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
-      "InstallLatestAwsSdk": false,
-      "ServiceToken": {
-        "Fn::GetAtt": [
-          "AWS679f53fac002430cb0da5b7982bd22872D164C4C",
-          "Arn",
-        ],
-      },
-      "Update": "{"service":"EC2","action":"describeManagedPrefixLists","parameters":{"Filters":[{"Name":"prefix-list-name","Values":["com.amazonaws.global.cloudfront.origin-facing"]}]},"physicalResourceId":{"id":"cloudfront-origin-facing-prefix-list"}}",
-    },
-    "Type": "Custom::AWS",
-    "UpdateReplacePolicy": "Delete",
-  },
-  "EcsSecurityGroupfromdefaultentrytestnetworkAlbSecurityGroupF7BE8E1C8000061BACFE": {
-    "Metadata": {
-      "aws:cdk:path": "defaultentrytest-network/EcsSecurityGroup/from defaultentrytestnetworkAlbSecurityGroupF7BE8E1C:8000",
-    },
-    "Properties": {
-      "Description": "Allow traffic from ALB on port 8000",
-      "FromPort": 8000,
-      "GroupId": {
-        "Fn::GetAtt": [
-          "EcsSecurityGroup44008BF1",
-          "GroupId",
-        ],
-      },
-      "IpProtocol": "tcp",
-      "SourceSecurityGroupId": {
-        "Fn::GetAtt": [
-          "AlbSecurityGroup86A59E99",
-          "GroupId",
-        ],
-      },
-      "ToPort": 8000,
-    },
-    "Type": "AWS::EC2::SecurityGroupIngress",
-  },
 }
 `;
 

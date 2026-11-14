@@ -161,6 +161,22 @@ export class NetworkStack extends cdk.Stack {
     // one; vpc builds only the internal one) — see entry-config.ts's doc for
     // why there is no fourth, "no isolated subnets but still vpc" state.
     const needsIsolatedSubnets = cloudfrontOrigin !== 'public';
+    // Whether `albSecurityGroup` has a live, public ALB actually attached
+    // to it at all — hoisted here (not just computed inline where the
+    // CloudFront-prefix-list rule is added below) because
+    // `ecsSecurityGroup`'s own ingress rule, further down, needs the same
+    // fact: ECS must admit from whichever security group the ALB that is
+    // ACTUALLY live is a member of, not unconditionally from
+    // `albSecurityGroup` regardless of mode (round-1 implementation
+    // review's EC2 test run caught this: under the default `vpc` mode,
+    // `albSecurityGroup` has no ALB attached to it at all, so admitting
+    // ECS traffic FROM it is a stale, inert rule, and the one that matters
+    // — from `internalAlbSecurityGroup`, the live ALB's actual group — was
+    // missing from this file's own explicit wiring, left to depend
+    // entirely on whatever CDK's `attachToApplicationTargetGroup` adds on
+    // its own via the service's `connections` object instead of being
+    // stated here alongside every other rule in this stack).
+    const needsPublicAlbSg = cloudfrontOrigin !== 'vpc';
 
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       vpcName: `${props.prefix}-vpc`,
@@ -296,7 +312,6 @@ export class NetworkStack extends cdk.Stack {
       // `cloudfrontOrigin: 'vpc'`, so `both` never reaches this branch
       // either — its CloudFront admission lives only on
       // `internalAlbSecurityGroup` below.
-      const needsPublicAlbSg = cloudfrontOrigin !== 'vpc';
       if (needsPublicAlbSg) {
         this.albSecurityGroup.addIngressRule(
           ec2.Peer.prefixList(cloudFrontPrefixListId),
@@ -401,11 +416,29 @@ export class NetworkStack extends cdk.Stack {
       ec2.Port.udp(53),
       'DNS resolution (Route 53 Resolver for AWS endpoint hostnames)'
     );
-    this.ecsSecurityGroup.addIngressRule(
-      this.albSecurityGroup,
-      ec2.Port.tcp(8000),
-      'Allow traffic from ALB on port 8000'
-    );
+    // Only when a public ALB actually exists for this to admit traffic to
+    // — round-1 implementation review's EC2 test run surfaced this: under
+    // the default `vpc` mode (and under `both`), `albSecurityGroup` has NO
+    // ALB attached to it at all (`needsPublicAlbSg` is false), so this
+    // rule used to be a stale, inert one in those modes regardless. ECS
+    // admitting the INTERNAL ALB (the one actually live in those modes)
+    // is NOT a rule this file writes explicitly at all: CDK's own
+    // `FargateService.attachToApplicationTargetGroup` (lib/ecs-stack.ts)
+    // adds the matching ingress rule automatically, via the service's and
+    // the target group's `connections` objects, pointed at whichever
+    // security group the ATTACHED target group's ALB actually belongs
+    // to — confirmed in the synthesized template (a
+    // `EcsSecurityGroupFrom<InternalAlbSecurityGroup's construct path>:8000`
+    // resource appears there already, with no code in this file creating
+    // it) — so this file does not duplicate that wiring for the internal
+    // ALB the way it does, explicitly, for the public one.
+    if (needsPublicAlbSg) {
+      this.ecsSecurityGroup.addIngressRule(
+        this.albSecurityGroup,
+        ec2.Port.tcp(8000),
+        'Allow traffic from the public ALB on port 8000',
+      );
+    }
 
     // Parameter Store exports
     putStringParameter(this, 'VpcIdParam', {

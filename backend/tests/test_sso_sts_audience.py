@@ -182,7 +182,7 @@ def test_both_modes_appended_privatelink_host_normalises_through_host_of(monkeyp
     `bin/iac.ts`'s `stsAudiencesEffective` appends under
     `STRATOCLAVE_ENTRY=both`, through `host_of`, rather than assuming it
     from reading `sso_sts.py` alone. The value here is the EXACT string that
-    code produces: `privateUrl = \`https://${entryConfig.privateEntry.domainName}\``,
+    code produces: privateUrl = `https://${entryConfig.privateEntry.domainName}`,
     where `domainName` is `STRATOCLAVE_PRIVATE_DOMAIN` (validated by
     `lib/entry-config.ts`'s `BARE_HOSTNAME_RE` to already be a bare lowercase
     hostname) -- `stratoclave.internal.example.com` is the exact example
