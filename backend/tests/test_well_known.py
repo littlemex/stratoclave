@@ -126,6 +126,54 @@ def test_well_known_does_not_leak_secrets(monkeypatch):
     )
 
 
+def test_well_known_both_mode_selects_by_forwarded_port(monkeypatch):
+    """STRATOCLAVE_ENTRY=both (iac/bin/iac.ts) sets both
+    STRATOCLAVE_API_ENDPOINT (CloudFront) and STRATOCLAVE_API_ENDPOINT_PRIVATE
+    (PrivateLink) on the shared ALB. `X-Forwarded-Port: 443` must select the
+    PrivateLink URL; anything else (including no header at all) keeps the
+    CloudFront URL — never derived from the port number itself, only used to
+    pick between the two operator-configured strings.
+    """
+    client = _make_client(monkeypatch)
+    monkeypatch.setenv(
+        "STRATOCLAVE_API_ENDPOINT_PRIVATE",
+        "https://stratoclave.internal.example.com",
+    )
+
+    resp_private_leg = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "443"}
+    )
+    assert (
+        resp_private_leg.json()["api_endpoint"]
+        == "https://stratoclave.internal.example.com"
+    )
+
+    resp_cloudfront_leg = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "80"}
+    )
+    assert (
+        resp_cloudfront_leg.json()["api_endpoint"]
+        == "https://example-deployment.cloudfront.net"
+    )
+
+    resp_no_port_header = client.get("/.well-known/stratoclave-config")
+    assert (
+        resp_no_port_header.json()["api_endpoint"]
+        == "https://example-deployment.cloudfront.net"
+    )
+
+
+def test_well_known_single_endpoint_mode_ignores_forwarded_port(monkeypatch):
+    """Outside STRATOCLAVE_ENTRY=both, STRATOCLAVE_API_ENDPOINT_PRIVATE is
+    unset, so the port-based selector never engages — same behaviour as
+    before this feature, regardless of what X-Forwarded-Port says."""
+    client = _make_client(monkeypatch)
+    resp = client.get(
+        "/.well-known/stratoclave-config", headers={"x-forwarded-port": "443"}
+    )
+    assert resp.json()["api_endpoint"] == "https://example-deployment.cloudfront.net"
+
+
 def test_well_known_returns_503_when_misconfigured(monkeypatch):
     """If a required env var is missing the endpoint must fail closed
     with 503, not silently return partial data.

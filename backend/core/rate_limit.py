@@ -101,6 +101,47 @@ def _trusted_hops() -> int:
     return value
 
 
+from core.forwarded_port import is_cloudfront_leg  # noqa: E402
+
+
+def _effective_trusted_hops(request: Request) -> int:
+    """``_trusted_hops()``, but ONLY on the request's CloudFront leg.
+    Everything else — including a confirmed PrivateLink request, a missing
+    or malformed ``X-Forwarded-Port``, or any value this function does not
+    positively recognise — gets 0.
+
+    ``STRATOCLAVE_ENTRY=both`` (iac/bin/iac.ts) puts CloudFront (via a VPC
+    origin, port 80) and the internal NLB/PrivateLink (port 443) on the SAME
+    ALB. Classification is by `core.forwarded_port.is_cloudfront_leg` — a
+    POSITIVE match on the known-trusted port, not a negative match on the
+    known-untrusted one. The two are not equivalent: a positive match fails
+    CLOSED (0 trusted hops: use the ALB's own observed peer) on anything
+    unrecognised, including a future change this function does not know
+    about (e.g. an HTTPS CloudFront VPC origin landing on a different port).
+    A negative match (checking only "is this port 443") would instead have
+    failed OPEN — trusting ``X-Forwarded-For`` on anything that is not
+    exactly ``"443"`` — which is the direction that matters here: trusting a
+    forged client-controlled header on the rate-limited auth routes is a
+    bypass, where distrusting a legitimate CloudFront request only produces
+    a coarser bucket (`get_remote_address`'s fallback).
+
+    0 here is the SAME value ``RATE_LIMIT_TRUSTED_HOPS=0`` already produces
+    (operator override: "do not trust any XFF"), so this reuses that
+    existing branch in `_client_key` rather than adding a new one.
+
+    A pure ``STRATOCLAVE_ENTRY=private`` deployment needs no special case
+    here at all: its ALB-wide ``xff_header_processing.mode=remove``
+    (lib/alb-stack.ts) already strips ``X-Forwarded-For`` before this
+    function's caller ever sees it, so the ``if not xff`` branch in
+    `_client_key` always returns first. A plain ``STRATOCLAVE_ENTRY=cloudfront``
+    deployment (no PrivateLink leg at all) always arrives on port 80, so
+    `is_cloudfront_leg` is true for every request and this is a no-op there.
+    """
+    if is_cloudfront_leg(request):
+        return _trusted_hops()
+    return 0
+
+
 def _client_key(request: Request) -> str:
     """Identify the requester for rate-limit bucketing.
 
@@ -139,7 +180,7 @@ def _client_key(request: Request) -> str:
     if not parts:
         return get_remote_address(request)
 
-    hops = _trusted_hops()
+    hops = _effective_trusted_hops(request)
     if hops <= 0:
         # Operator declared zero trusted hops → do not trust any XFF.
         return get_remote_address(request)

@@ -156,6 +156,86 @@ class TestOperatorOverrides:
         )
 
 
+class TestBothModeSharedAlb:
+    """``STRATOCLAVE_ENTRY=both`` (iac/bin/iac.ts): CloudFront (VPC origin,
+    ALB :80) and PrivateLink (NLB, ALB :443) share one ALB. On the :443 leg,
+    any ``X-Forwarded-For`` present was NOT written by a hop this
+    deployment's topology trusts — it is attacker/caller-supplied, same as
+    ``RATE_LIMIT_TRUSTED_HOPS=0``. ``X-Forwarded-Port`` is the ALB's own
+    record of which listener accepted the connection and is never a value a
+    client can set.
+    """
+
+    def test_privatelink_leg_ignores_forged_xff_and_falls_back_to_peer(
+        self, monkeypatch
+    ):
+        rl = _reload_with(None, monkeypatch)  # default hops=1
+        key = rl._client_key(
+            _request(
+                {
+                    "x-forwarded-for": "8.8.8.8, 198.51.100.5",
+                    "x-forwarded-port": "443",
+                },
+                client_host="10.0.3.9",
+            )
+        )
+        # Not the forged leftmost, not the index-from-right pick either —
+        # the whole XFF header is distrusted on this leg and the ALB's own
+        # observed peer is used instead.
+        assert key == "10.0.3.9"
+
+    def test_cloudfront_leg_on_the_shared_alb_is_unaffected(self, monkeypatch):
+        """Port 80 (or no X-Forwarded-Port at all, e.g. every other entry
+        mode) is unaffected: this feature changes nothing about the
+        CloudFront leg's own bucketing."""
+        rl = _reload_with(None, monkeypatch)
+        key_port_80 = rl._client_key(
+            _request(
+                {
+                    "x-forwarded-for": "203.0.113.7, 130.176.12.45",
+                    "x-forwarded-port": "80",
+                }
+            )
+        )
+        key_no_port_header = rl._client_key(
+            _request({"x-forwarded-for": "203.0.113.7, 130.176.12.45"})
+        )
+        assert key_port_80 == "203.0.113.7"
+        assert key_no_port_header == "203.0.113.7"
+
+    def test_malformed_forwarded_port_is_distrusted_fail_closed(self, monkeypatch):
+        """Positive match, not a deny-list: a PRESENT X-Forwarded-Port that
+        is neither the CloudFront (80) nor the PrivateLink (443) listener
+        — malformed, a future listener this code does not know about, a
+        duplicated-value artifact — must still be distrusted. A deny-list
+        version of this check (only `== "443"` triggers distrust, anything
+        else falls through to the normal trusting algorithm) would WRONGLY
+        trust the forged XFF below; this is the regression that review
+        found and this test pins against it recurring."""
+        rl = _reload_with(None, monkeypatch)
+        key = rl._client_key(
+            _request(
+                {
+                    "x-forwarded-for": "8.8.8.8, 198.51.100.5",
+                    "x-forwarded-port": "31337",
+                },
+                client_host="10.0.9.1",
+            )
+        )
+        assert key == "10.0.9.1"
+
+    def test_private_only_mode_already_has_no_xff_to_distrust(self, monkeypatch):
+        """Pure STRATOCLAVE_ENTRY=private already strips X-Forwarded-For at
+        the ALB (xff_header_processing.mode=remove), so this feature's new
+        branch is never even reached there — the `if not xff` guard in
+        `_client_key` returns first regardless of X-Forwarded-Port."""
+        rl = _reload_with(None, monkeypatch)
+        key = rl._client_key(
+            _request({"x-forwarded-port": "443"}, client_host="10.0.5.1")
+        )
+        assert key == "10.0.5.1"
+
+
 class TestWhitespaceAndEmptyEntries:
     def test_empty_and_whitespace_entries_are_dropped(self, monkeypatch):
         rl = _reload_with(None, monkeypatch)

@@ -38,6 +38,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from core.forwarded_port import is_privatelink_leg
 from core.logging import get_logger
 
 
@@ -120,7 +121,20 @@ def _derive_api_endpoint(request: Request) -> str:
     """Infer the public origin used to reach this endpoint.
 
     Resolution order:
-      1. `STRATOCLAVE_API_ENDPOINT` env (always wins when set).
+      1. `STRATOCLAVE_API_ENDPOINT` env (always wins when set) — EXCEPT that
+         under `STRATOCLAVE_ENTRY=both`, where a second,
+         `STRATOCLAVE_API_ENDPOINT_PRIVATE` env is also set, a request that
+         arrived through the PrivateLink leg of the shared ALB gets THAT
+         value instead. The two are a closed, operator-configured pair; which
+         one is returned is chosen by `X-Forwarded-Port`, a header the ALB
+         itself always sets from which of its own listeners accepted the
+         connection (never a value a client can supply — there is no
+         "preserve" mode for it, unlike `X-Forwarded-For`; see AWS's
+         X-Forwarded-Port documentation). This is a SELECTOR between two
+         fixed, trusted strings, never a way to build a URL out of header
+         content — contrast with step 2 below, which does read a URL
+         component out of a header, for the very different case where no
+         operator-configured endpoint exists at all.
       2. `X-Forwarded-Proto` + `X-Forwarded-Host` (CloudFront / ALB).
       3. `request.url.scheme` + host (local development).
 
@@ -131,11 +145,17 @@ def _derive_api_endpoint(request: Request) -> str:
     # 1. Explicit env beats everything else. Read through `core.deployment` --
     # the single place that strips and empty-checks the value -- rather than
     # the bare env lookup, so a value nobody else in the backend would treat
-    # as "set" cannot slip through here.
-    from core.deployment import api_endpoint, is_local_environment
+    # as "set" cannot slip through here. `api_endpoint_private` is the second
+    # of the two fixed, operator-configured strings `STRATOCLAVE_ENTRY=both`
+    # sets (see this function's own docstring) -- selected between by
+    # `is_privatelink_leg`, never by reading a URL out of a request header.
+    from core.deployment import api_endpoint, api_endpoint_private, is_local_environment
 
     explicit = api_endpoint()
     if explicit:
+        private_explicit = api_endpoint_private()
+        if private_explicit and is_privatelink_leg(request):
+            return private_explicit
         return explicit
     # The endpoint is taken from request headers only in an explicit local or
     # test environment: a caller could name any host in X-Forwarded-Host and

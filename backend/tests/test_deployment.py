@@ -117,6 +117,31 @@ class TestValidateApiEndpoint:
         deployment.validate_api_endpoint()  # must not raise
 
 
+class TestValidateApiEndpointPrivate:
+    """`STRATOCLAVE_API_ENDPOINT_PRIVATE` — set only by `iac/bin/iac.ts` under
+    `STRATOCLAVE_ENTRY=both`. Unlike `STRATOCLAVE_API_ENDPOINT`, unset is the
+    normal case (every entry mode except `both`), so only a PRESENT,
+    malformed value is a startup failure."""
+
+    def test_unset_passes_in_any_environment(self, monkeypatch):
+        monkeypatch.delenv("STRATOCLAVE_API_ENDPOINT_PRIVATE", raising=False)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        deployment.validate_api_endpoint_private()  # must not raise
+        assert deployment.api_endpoint_private() is None
+
+    def test_a_scheme_less_value_raises(self, monkeypatch):
+        monkeypatch.setenv("STRATOCLAVE_API_ENDPOINT_PRIVATE", "stratoclave.internal.example.com")
+        with pytest.raises(RuntimeError, match="absolute http"):
+            deployment.validate_api_endpoint_private()
+
+    def test_a_valid_value_passes_and_is_returned_without_a_trailing_slash(self, monkeypatch):
+        monkeypatch.setenv(
+            "STRATOCLAVE_API_ENDPOINT_PRIVATE", "https://stratoclave.internal.example.com/"
+        )
+        deployment.validate_api_endpoint_private()  # must not raise
+        assert deployment.api_endpoint_private() == "https://stratoclave.internal.example.com"
+
+
 def test_lifespan_calls_both_startup_validators(monkeypatch):
     """`main.py`'s lifespan calls `validate_api_endpoint` and
     `validate_audience_config`, in that order, before it seeds the database --

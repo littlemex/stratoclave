@@ -138,3 +138,27 @@ def validate_api_endpoint() -> None:
         )
     if host_of(value) is None:
         raise RuntimeError(f"STRATOCLAVE_API_ENDPOINT is not an absolute http(s) URL: {value!r}")
+
+
+def api_endpoint_private() -> Optional[str]:
+    """The gateway's PrivateLink-only API URL (`STRATOCLAVE_API_ENDPOINT_PRIVATE`),
+    set only by `iac/bin/iac.ts` under `STRATOCLAVE_ENTRY=both`, where CloudFront
+    and PrivateLink share one ALB and this is the second of the two fixed,
+    operator-configured URLs `mvp.well_known._derive_api_endpoint` selects
+    between (by which ALB listener accepted the connection, never by reading a
+    URL out of a request header). `None` in every other entry mode."""
+    value = os.getenv("STRATOCLAVE_API_ENDPOINT_PRIVATE", "").strip().rstrip("/")
+    return value or None
+
+
+def validate_api_endpoint_private() -> None:
+    """Startup check: when set, `STRATOCLAVE_API_ENDPOINT_PRIVATE` must be an
+    absolute http(s) URL — the same rule `validate_api_endpoint` applies to
+    `STRATOCLAVE_API_ENDPOINT`. Unlike that one, this is optional: unset is the
+    normal case for every entry mode except `both`, so absence is not itself a
+    failure."""
+    value = api_endpoint_private()
+    if value is not None and host_of(value) is None:
+        raise RuntimeError(
+            f"STRATOCLAVE_API_ENDPOINT_PRIVATE is not an absolute http(s) URL: {value!r}"
+        )
