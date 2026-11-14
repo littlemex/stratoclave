@@ -1118,6 +1118,11 @@ deliberately does **not** do today:
   and an unset list is filtered to the primary's jurisdiction rather than
   defaulting to US (C11.1, C11.2). A `strict` residency setting refuses the CDK
   synth outright if any Bedrock call region leaves the deploy region (C11.4).
+  An inference boundary (`STRATOCLAVE_INFERENCE_REGIONS`, for example Tokyo and
+  Osaka) keeps every model call inside a set of regions: only models whose every
+  destination lies inside it are served, the model names clients already use keep
+  working through the in-region variant, and the serving role's Bedrock
+  permissions are generated from the same list (C11.5).
 - **The gateway sees prompt text.** Every request transits the FastAPI service,
   which is what makes pre-flight DLP and enforcement possible — but it also
   means the operator is in scope as a data processor. Weigh this for regulated
@@ -1270,7 +1275,7 @@ touches neither execution nor money is default-on for new tenants):**
 - **Offline routing evaluator.** The routing-signals table is written today but
   nothing consumes it yet; the evaluator that feeds routing policy back is a
   later increment (the schema is day-bucketed + sharded + TTL'd for it).
-- **Multi-region control plane, data-residency selection, external audit.**
+- **Multi-region control plane, external audit.**
   See [Non-goals and honest limitations](#non-goals-and-honest-limitations).
 
 ## Contributing

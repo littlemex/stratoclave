@@ -579,12 +579,13 @@ class TestC13ProfileScopeIsGrantable:
         with pytest.raises(ValueError):
             check_profile_scopes_granted_by_iam(entries=(openai_entry,))
 
-    @pytest.mark.parametrize("vendor", ["anthropic", "openai", "xai"])
-    @pytest.mark.parametrize("scope", ["jp", "gov"])
-    def test_jp_and_gov_are_not_granted_for_any_vendor(self, tmp_path, vendor, scope):
-        """No vendor's IAM statement mentions a `jp.` or `gov.`-style
-        inference-profile prefix at all -- these two of the six declared
-        geography values are not grantable for anyone yet. `price_model_id`
+    @pytest.mark.parametrize("vendor, scope", [
+        ("anthropic", "gov"), ("openai", "jp"), ("openai", "gov"), ("xai", "jp"), ("xai", "gov"),
+    ])
+    def test_jp_and_gov_are_not_granted_except_jp_for_anthropic(self, tmp_path, vendor, scope):
+        """`jp.anthropic.*` is granted (the Japan variants of the Claude models,
+        callable inside an inference boundary of Tokyo and Osaka); no other vendor
+        has a `jp.` grant, and no vendor a `gov.`-style one. `price_model_id`
         sidesteps the UNRELATED billed-id guesser, which does not recognise a
         bare `gov.` prefix (see test_each_declared_geography_value_is_accepted)."""
         kwargs = dict(provider=vendor, profile_scope=scope,
@@ -598,6 +599,13 @@ class TestC13ProfileScopeIsGrantable:
         (entry,) = load_registry(_write(tmp_path, _doc(_entry(**kwargs))))
         with pytest.raises(ValueError):
             check_profile_scopes_granted_by_iam(entries=(entry,))
+
+    def test_jp_is_granted_for_anthropic(self, tmp_path):
+        (entry,) = load_registry(_write(tmp_path, _doc(_entry(
+            provider="anthropic", profile_scope="jp", model_family="opus", pricing_key="opus",
+            bedrock_model_id=_geo_id("jp", "anthropic", "probe-test"), aliases=["probe-anthropic-jp"],
+        )), "jp.json"))
+        check_profile_scopes_granted_by_iam(entries=(entry,))
 
     def test_apac_is_granted_only_for_anthropic(self, tmp_path):
         (anthropic_entry,) = load_registry(_write(tmp_path, _doc(_entry(

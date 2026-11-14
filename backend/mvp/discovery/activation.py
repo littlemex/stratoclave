@@ -54,6 +54,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional
 
+from ..inference_boundary import reach_from_destinations as _boundary_reach
+
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
@@ -630,20 +632,6 @@ def _commit_activation(
         ) from exc
 
 
-def inference_regions_from_destinations(destinations) -> Optional[tuple[str, ...]]:
-    """`ModelEntry.inference_regions` from a discovered record's destination
-    regions (`records.destination_regions_from_models`): the region-less ARN of a
-    `global.` profile is kept there as the empty string, which means any region."""
-    from ..inference_boundary import UNBOUNDED
-
-    regions = tuple(destinations or ())
-    if not regions:
-        return None
-    if "" in regions:
-        return (UNBOUNDED,)
-    return tuple(sorted(set(regions)))
-
-
 def _build_entry(candidate: PromotionCandidate, *, jurisdiction_bounded: bool,
                  destination_regions) -> ModelEntry:
     """The candidate-to-registry-entry mapping, applied.
@@ -683,7 +671,8 @@ def _build_entry(candidate: PromotionCandidate, *, jurisdiction_bounded: bool,
         access="entitlement_required",
         jurisdiction_bounded=jurisdiction_bounded,
         jurisdiction=candidate.jurisdiction if jurisdiction_bounded else None,
-        inference_regions=inference_regions_from_destinations(destination_regions),
+        inference_regions=_boundary_reach(destination_regions, profile_scope=candidate.profile_scope,
+                                          source_region=candidate.bedrock_region),
     )
 
 

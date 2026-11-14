@@ -91,6 +91,12 @@ services:
       # Deliberately NOT overriding a Bedrock endpoint: inference stays real.
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_PROFILE: ${AWS_PROFILE:-default}
+      # Passed through only when set in the shell (a key with no value is unset in
+      # the container otherwise). STRATOCLAVE_INFERENCE_REGIONS keeps inference
+      # inside a set of regions (docs/DEPLOYMENT.md); a set-but-empty value is
+      # refused at startup, which is why it is not `${...:-}` like the others.
+      STRATOCLAVE_INFERENCE_REGIONS:
+      DEFAULT_BEDROCK_MODEL:
       # boto3 resolves SSO token cache relative to $HOME/.aws/sso/cache, so
       # HOME must point at the mounted .aws directory too, not just these two
       # file paths.

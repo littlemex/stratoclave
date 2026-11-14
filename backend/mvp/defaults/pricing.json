@@ -25,6 +25,13 @@
     "A rate object may also carry `notes`; any other key is rejected as a typo."
   ],
   "rates": {
+    "opus-5.5": {
+      "input_per_mtok_microusd": 4400000,
+      "output_per_mtok_microusd": 22000000,
+      "cache_read_per_mtok_microusd": 220000,
+      "cache_write_per_mtok_microusd": 5500000,
+      "notes": "Claude Opus 5.5 \u2014 $4.40/$22.00 per MTok in-region, cache read $0.22, cache write $5.50, the same in us-east-1 and ap-northeast-1 (AWS Price List, measured 2026-11-14). No bundled registry entry uses it: a deployment adds the model from the console (discovery, promotion, activation) and picks this key."
+    },
     "opus": {
       "input_per_mtok_microusd": 5500000,
       "output_per_mtok_microusd": 27500000,

@@ -163,10 +163,13 @@ class PromotionRefused(ValueError):
     IDENTIFIER_TAKEN = "identifier_taken"
     PROTOCOL_MISMATCH = "protocol_mismatch"
     RECORD_NOT_FOUND = "record_not_found"
+    # The deployment has an inference boundary and the record says this model
+    # can be served outside it (`mvp.inference_boundary`).
+    OUTSIDE_BOUNDARY = "outside_inference_boundary"
     REASONS = frozenset({
         PROVIDER_UNSUPPORTED, ALIAS_REQUIRED, PRICING_KEY_REQUIRED,
         PRICING_KEY_IS_DEFAULT, JURISDICTION_REQUIRED, IDENTIFIER_TAKEN,
-        PROTOCOL_MISMATCH, RECORD_NOT_FOUND,
+        PROTOCOL_MISMATCH, RECORD_NOT_FOUND, OUTSIDE_BOUNDARY,
     })
 
     def __init__(self, reason: str, *, detail: Optional[str] = None) -> None:
@@ -807,6 +810,14 @@ def derive_candidate(
     validate_human_inputs(
         aliases=aliases, pricing_key=pricing_key, jurisdiction=jurisdiction
     )
+    from ..inference_boundary import discovered_exclusion_reason
+
+    outside = discovered_exclusion_reason(
+        bedrock_region=record.invocation_region, wire_protocol=probe_wire_protocol,
+        profile_scope=record.profile_scope, destination_regions=record.destination_regions)
+    if outside is not None:
+        raise PromotionRefused(PromotionRefused.OUTSIDE_BOUNDARY,
+                               detail=f"{record.raw_id} cannot be served here: {outside}")
     cleaned_aliases = tuple(a for a in (aliases or ()) if a and a.strip())
 
     return PromotionCandidate(

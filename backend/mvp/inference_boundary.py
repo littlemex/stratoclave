@@ -131,6 +131,37 @@ def exclusion_reason(entry, *, boundary: Optional[frozenset[str]], primary: str)
     return None
 
 
+def reach_from_destinations(destinations, *, profile_scope: str,
+                            source_region: str) -> Optional[tuple[str, ...]]:
+    """`ModelEntry.inference_regions` from a discovered record's destination regions
+    (`mvp.discovery.records.destination_regions_from_models`), which keep the
+    region-less ARN of a `global.` profile as "" (any region). A direct model id
+    is served where it is called. None when nothing was recorded."""
+    if profile_scope == "no_profile":
+        return (source_region,)
+    regions = tuple(destinations or ())
+    if not regions:
+        return None
+    if "" in regions:
+        return (UNBOUNDED,)
+    return tuple(sorted(set(regions)))
+
+
+def discovered_exclusion_reason(*, bedrock_region: str, wire_protocol: str, profile_scope: str,
+                                destination_regions) -> Optional[str]:
+    """`exclusion_reason` for a model that is still a discovered record or a
+    candidate, so promotion and the verification probe refuse it before anything
+    is written or any prompt is sent, rather than only at activation."""
+    from types import SimpleNamespace
+
+    probe = SimpleNamespace(
+        served_by="bedrock", bedrock_region=bedrock_region, wire_protocol=wire_protocol,
+        profile_scope=profile_scope,
+        inference_regions=reach_from_destinations(destination_regions, profile_scope=profile_scope,
+                                                  source_region=bedrock_region))
+    return exclusion_reason(probe, boundary=configured(), primary=primary_region())
+
+
 def compose(entries: Iterable, *, boundary: Optional[frozenset[str]], primary: str,
             ) -> tuple[tuple, tuple[Exclusion, ...]]:
     """The entries that are part of this deployment, in their original order, and
@@ -206,6 +237,8 @@ def check_startup(*, entries: Iterable, exclusions: Iterable[Exclusion],
             "two models inside the boundary share a name: "
             + "; ".join(f"{e.bedrock_model_id} ({e.reason})" for e in conflicts))
     if default_model not in {e.bedrock_model_id for e in entries}:
+        why = next((e.reason for e in exclusions if e.bedrock_model_id == default_model),
+                   "it is not in the model registry")
         raise BoundaryConfigError(
-            f"DEFAULT_BEDROCK_MODEL {default_model} is not a model this deployment can "
-            f"serve inside {ENV}; set it to one that is")
+            f"DEFAULT_BEDROCK_MODEL {default_model} cannot be served inside {ENV}: {why}; "
+            f"set it to a model that can")

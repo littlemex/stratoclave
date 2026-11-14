@@ -8,8 +8,8 @@ serves from:
     python3 scripts/check_inference_regions.py --registry path/to/models.json
 
 Exits 1 when an entry disagrees with Bedrock, or Bedrock no longer knows an entry
-that records the field, printing the
-value Bedrock reports so the entry can be corrected. Only control-plane reads
+that records the field, printing the value Bedrock reports so the entry can be
+corrected. Only control-plane reads
 (`GetInferenceProfile`) are made, each in the entry's own `bedrock_region`, because
 a profile's destinations depend on the region it is called from.
 """
@@ -40,7 +40,9 @@ def main() -> int:
         if entry.served_by != "bedrock":
             continue
         region = entry.bedrock_region
-        client = clients.setdefault(region, boto3.client("bedrock", region_name=region))
+        if region not in clients:
+            clients[region] = boto3.client("bedrock", region_name=region)
+        client = clients[region]
         try:
             actual = destination_regions(client, entry.bedrock_model_id,
                                          is_profile=entry.profile_scope != NO_PROFILE_SCOPE,

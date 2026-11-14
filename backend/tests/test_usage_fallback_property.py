@@ -196,33 +196,39 @@ def test_record_read_roundtrip_moto():
         # an earlier test outside the mock would send these writes to real AWS.
         # Cleared on the way in and out, as the shared `dynamodb_mock` fixture does.
         get_dynamodb_resource.cache_clear()
-        table = _moto_usage_table()
-        from dynamo.usage_logs import UsageLogsRepository
+        try:
+            _roundtrip(_moto_usage_table())
+        finally:
+            get_dynamodb_resource.cache_clear()
 
-        repo = UsageLogsRepository(table_name="usage-fallback-test")
-        opus_bedrock = _REGISTRY[0].bedrock_model_id
-        haiku_bedrock = _REGISTRY[-1].bedrock_model_id
-        # Fallback row: requested opus, served haiku (both stored as bedrock ids).
-        repo.record(
-            tenant_id="t1", user_id="u1", user_email="e@x.com",
-            model_id=haiku_bedrock, input_tokens=1, output_tokens=1,
-            requested_model_id=opus_bedrock,
-        )
-        # Legacy-shaped row: no requested_model_id at all.
-        repo.record(
-            tenant_id="t1", user_id="u1", user_email="e@x.com",
-            model_id=opus_bedrock, input_tokens=1, output_tokens=1,
-        )
-        import boto3
 
-        items = table.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key("tenant_id").eq("t1")
-        )["Items"]
-        assert len(items) == 2
-        get_dynamodb_resource.cache_clear()
-        by_req = {it.get("requested_model_id"): it for it in items}
-        fb = by_req[opus_bedrock]
-        assert _derive_fallback(fb.get("requested_model_id"), str(fb["model_id"])) is True
-        legacy = by_req[None]
-        assert "requested_model_id" not in legacy
-        assert _derive_fallback(legacy.get("requested_model_id"), str(legacy["model_id"])) is None
+def _roundtrip(table):
+    """The round trip itself, against `table` inside the caller's mock."""
+    from dynamo.usage_logs import UsageLogsRepository
+
+    repo = UsageLogsRepository(table_name="usage-fallback-test")
+    opus_bedrock = _REGISTRY[0].bedrock_model_id
+    haiku_bedrock = _REGISTRY[-1].bedrock_model_id
+    # Fallback row: requested opus, served haiku (both stored as bedrock ids).
+    repo.record(
+        tenant_id="t1", user_id="u1", user_email="e@x.com",
+        model_id=haiku_bedrock, input_tokens=1, output_tokens=1,
+        requested_model_id=opus_bedrock,
+    )
+    # Legacy-shaped row: no requested_model_id at all.
+    repo.record(
+        tenant_id="t1", user_id="u1", user_email="e@x.com",
+        model_id=opus_bedrock, input_tokens=1, output_tokens=1,
+    )
+    import boto3
+
+    items = table.query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("tenant_id").eq("t1")
+    )["Items"]
+    assert len(items) == 2
+    by_req = {it.get("requested_model_id"): it for it in items}
+    fb = by_req[opus_bedrock]
+    assert _derive_fallback(fb.get("requested_model_id"), str(fb["model_id"])) is True
+    legacy = by_req[None]
+    assert "requested_model_id" not in legacy
+    assert _derive_fallback(legacy.get("requested_model_id"), str(legacy["model_id"])) is None

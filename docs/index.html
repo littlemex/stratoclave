@@ -171,6 +171,8 @@ ol.mini li{margin:3px 0}
 .logflow{grid-template-columns:1fr 1.25fr 1fr}
 @media (max-width:1000px){.logflow{grid-template-columns:1fr}}
 .logflow pre.term.wrap{overflow-wrap:anywhere}
+table.rows.wrapcells td{white-space:normal}
+table.rows.wrapcells td:first-child{white-space:nowrap}
 .tf-step{background:var(--card);border-radius:var(--r-box);padding:20px;box-shadow:var(--shadow);position:relative}
 .tf-n{font-family:var(--mono);font-size:12px;color:var(--ink3)}
 .tf-step h3{margin:4px 0 12px}
@@ -891,6 +893,50 @@ component, under the axioms stated at the top of each test file above.</pre>
       </div>
       <p style="margin:14px 0 0;font-size:15px"><a href="https://github.com/littlemex/stratoclave/blob/main/docs/LOCAL_MODELS.md" data-t="models.link">Set up a local model: docs/LOCAL_MODELS.md</a></p>
     </div>
+
+    <div class="sec-head rv" id="residency" style="margin-top:56px">
+      <div class="eyebrow" data-t="rs.eyebrow">Inference that stays in the country</div>
+      <h2 data-t="rs.h">Keep every model call inside Japan, or inside the US.</h2>
+      <p class="lede" data-t="rs.lede">Set one list of regions. Only models whose every destination lies inside it are offered, the model names your tools already use keep working, and a new model that stays inside is added from the console, with no code change.</p>
+    </div>
+
+    <div class="tagflow logflow rv">
+      <div class="tf-step">
+        <div class="tf-n">1</div>
+        <h3 data-t="rs.s1">Name the regions</h3>
+        <div class="codewrap"><pre class="term wrap" translate="no">STRATOCLAVE_INFERENCE_REGIONS=ap-northeast-1,ap-northeast-3
+BEDROCK_PRIMARY_REGION=ap-northeast-1
+DEFAULT_BEDROCK_MODEL=jp.anthropic.claude-opus-4-7</pre></div>
+        <p class="muted" data-t="rs.s1p">Tokyo and Osaka for Japan. The same setting with US regions closes a deployment to the US.</p>
+      </div>
+      <div class="tf-step">
+        <div class="tf-n">2</div>
+        <h3 data-t="rs.s2">The same names, served inside</h3>
+        <div class="table-scroll"><table class="rows wrapcells">
+          <thead><tr><th data-t="rs.c.name">name</th><th data-t="rs.c.where">runs in</th></tr></thead>
+          <tbody>
+            <tr><td translate="no">claude-opus-4-7</td><td data-t="rs.jp">Tokyo, Osaka (jp. profile)</td></tr>
+            <tr><td translate="no">claude-sonnet-4-6</td><td data-t="rs.jp2">Tokyo, Osaka (jp. profile)</td></tr>
+            <tr><td translate="no">claude-opus-5-5</td><td data-t="rs.jp3">Tokyo, Osaka (via the console)</td></tr>
+            <tr><td translate="no">claude-opus-5</td><td data-t="rs.none">not offered: US only</td></tr>
+            <tr><td translate="no">global.*</td><td data-t="rs.none2">not offered: any region</td></tr>
+          </tbody>
+        </table></div>
+        <p class="muted" data-t="rs.s2p">Claude Code and the SDKs keep sending the same model names. A model that can run outside the list is refused before any budget is reserved.</p>
+      </div>
+      <div class="tf-step">
+        <div class="tf-n">3</div>
+        <h3 data-t="rs.s3">New models from the console</h3>
+        <p data-t="rs.s3b">Discovery reads, from Bedrock itself, the regions each inference profile can run in. Promote and activate a model that stays inside, such as Opus 5.5 through its Japan profile; one that can run elsewhere is refused at each step, before the verification call.</p>
+      </div>
+    </div>
+
+    <div class="chips rv" style="margin-top:28px">
+      <div class="chip"><b data-t="rs.c1">Enforced by AWS too</b><span data-t="rs.c1p">The gateway role's Bedrock permissions are generated from the same list. AWS checks every region a profile can run in before the call, so a model outside is denied even if the gateway were wrong.</span></div>
+      <div class="chip"><b data-t="rs.c2">Measured, not assumed</b><span data-t="rs.c2p">With those permissions, Japan profiles ran and US, Asia-Pacific and global profiles were denied by AWS on every call (2026-11-14).</span></div>
+      <div class="chip"><b data-t="rs.c3">Auditable afterwards</b><span data-t="rs.c3p">Bedrock's invocation log records the region that served each call. A one-line Logs Insights query in the docs lists any call outside the list.</span></div>
+      <div class="chip"><b data-t="rs.c4">What it does not cover</b><span data-t="rs.c4p">Inference only. Where CloudFront terminates TLS and where the gateway itself runs are separate choices, stated in the docs.</span></div>
+    </div>
   </div>
 </section>
 
@@ -1093,6 +1139,26 @@ Object.assign(window.__JA, {
 </script>
 <script>
 Object.assign(window.__JA, {
+'rs.eyebrow': '国内で閉じる推論',
+'rs.h': 'モデルの呼び出しを、日本の中だけ、または米国の中だけに閉じる。',
+'rs.lede': 'リージョンの一覧を 1 つ決めるだけです。行き先がすべてその中にあるモデルだけが使えるようになり、ツールが使っているモデル名はそのまま動きます。中に閉じる新しいモデルも、コードを変えずにコンソールから追加できます。',
+'rs.s1': 'リージョンを決める',
+'rs.s1p': '日本なら東京と大阪です。同じ設定に米国のリージョンを並べれば、米国の中に閉じます。',
+'rs.s2': '同じ名前のまま、中で動く',
+'rs.c.name': '名前', 'rs.c.where': '動く場所',
+'rs.jp': '東京、大阪 (jp. プロファイル)', 'rs.jp2': '東京、大阪 (jp. プロファイル)', 'rs.jp3': '東京、大阪 (コンソールで追加)',
+'rs.none': '使えない: 米国だけ', 'rs.none2': '使えない: どこでも動く',
+'rs.s2p': 'Claude Code や SDK は同じモデル名を送り続けられます。外で動き得るモデルは、予算を確保する前に断ります。',
+'rs.s3': '新しいモデルはコンソールから',
+'rs.s3b': 'モデルの発見では、推論プロファイルごとに動き得るリージョンを Bedrock 自身から読み取ります。中に閉じるモデル (日本向けプロファイル経由の Opus 5.5 など) は、昇格と有効化でそのまま使えるようになります。外で動き得るモデルは、確認の呼び出しより前に、どの段階でも断ります。',
+'rs.c1': 'AWS 側でも止める',
+'rs.c1p': 'ゲートウェイのロールが持つ Bedrock の権限は、同じ一覧から作ります。AWS はプロファイルが動き得るリージョンをすべて呼び出し前に確かめるので、ゲートウェイが仮に間違えても、外のモデルは AWS が拒否します。',
+'rs.c2': '仮定ではなく実測',
+'rs.c2p': 'その権限で試すと、日本向けプロファイルは動き、米国、アジア太平洋、グローバルのプロファイルはすべての呼び出しで AWS が拒否しました (2026-11-14)。',
+'rs.c3': 'あとから確かめられる',
+'rs.c3p': 'Bedrock の呼び出しログには、どのリージョンで処理したかが残ります。一覧の外で処理された呼び出しを探す 1 行のクエリを文書に載せています。',
+'rs.c4': '範囲の外にあるもの',
+'rs.c4p': '対象は推論だけです。CloudFront がどこで TLS を終えるか、ゲートウェイ自体をどこで動かすかは別の選択で、文書に書いています。',
 'models.eyebrow': '自前のモデルも',
 'models.h': 'Bedrock のモデルも、手元の GPU やローカル LLM も、1 つの台帳で。',
 'models.lede': 'トークンがどこで生成されても、リクエストは同じ「確保、値付け、精算」の道を通り、同じ予算のもとで同じ台帳に残ります。',

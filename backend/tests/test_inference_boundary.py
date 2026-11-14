@@ -2,8 +2,9 @@
 
 With a boundary, a model entry is part of the deployment only if every region a
 call through it can be served in lies inside the boundary and the gateway calls it
-from inside. Without one, everything is as before, except that an entry which
-could never be called from this deployment's region is not listed.
+from inside. Without one, everything is as before, except that among variants of
+one model sharing a name, the one whose destinations include this deployment's
+region serves it.
 """
 from __future__ import annotations
 
@@ -80,7 +81,7 @@ def test_with_japan_only_entries_served_inside_japan_from_tokyo_remain():
     assert "ap-northeast-3" in reasons["jp.anthropic.recorded-from-osaka"]
 
 
-def test_without_a_boundary_only_uncallable_profiles_are_hidden():
+def test_without_a_boundary_only_same_name_variants_are_chosen_between():
     kept, excluded = ib.compose(FIXTURE, boundary=None, primary="us-east-1")
     ids = [e.bedrock_model_id for e in kept]
     # the jp. variant of m-a is hidden (it cannot be called from us-east-1), so the
@@ -98,6 +99,16 @@ def test_without_a_boundary_a_tokyo_deployment_gets_the_japan_variant():
     kept, _ = ib.compose(FIXTURE, boundary=None, primary="ap-northeast-1")
     owners = {a: e.bedrock_model_id for e in kept for a in e.aliases}
     assert owners["m-a"] == "jp.anthropic.m-a"
+
+
+def test_a_responses_entry_is_judged_by_where_it_is_called():
+    """The OpenAI-compatible surface calls each entry in its own region, so it need
+    not be the deployment's Converse region, only inside the boundary."""
+    inside = _entry("jp.openai.x", "ap-northeast-3", JP_REACH, wire="responses")
+    outside = _entry("jp.openai.y", "us-east-2", JP_REACH, wire="responses")
+    kept, excluded = ib.compose([inside, outside], boundary=frozenset(JP_REACH), primary="ap-northeast-1")
+    assert kept == (inside,)
+    assert "us-east-2" in excluded[0].reason
 
 
 def test_a_self_hosted_entry_is_not_bedrock_inference_and_is_untouched():
@@ -143,6 +154,30 @@ def test_every_japan_entry_is_declared_after_its_us_variant():
                 assert order[twin] < order[e.bedrock_model_id]
 
 
+def test_an_unreadable_activation_store_still_leaves_only_the_boundary(japan, monkeypatch):
+    from mvp.discovery import activation
+
+    def unreachable():
+        raise activation.ActivationStoreUnavailable("down")
+
+    monkeypatch.setattr(activation, "list_activated_entries", unreachable)
+    models.reset_composed_registry_for_test()
+    assert all(e.bedrock_model_id.startswith("jp.") for e in models.registry_entries())
+    with pytest.raises(ValueError):
+        models.resolve_model("us.anthropic.claude-opus-4-7")
+
+
+def test_the_view_before_the_first_refresh_follows_the_same_rule():
+    """The initial maps are built from the bundled entries as compose leaves them,
+    so even before a refresh the shared names go to the US variants here."""
+    assert models._STATIC_ALIAS_MAP["claude-opus-4-7"].bedrock_model_id == "us.anthropic.claude-opus-4-7"
+    assert not any(e.bedrock_model_id.startswith("jp.") for e in models._STATIC_VIEW)
+
+
+def test_under_a_boundary_the_listing_and_legacy_resolver_agree(japan):
+    assert models.resolve_bedrock_model("claude-opus-4-7") == "jp.anthropic.claude-opus-4-7"
+
+
 def test_an_activated_entry_outside_the_boundary_is_not_served(japan, monkeypatch):
     from mvp.discovery import activation
 
@@ -166,6 +201,25 @@ def test_no_failover_region_under_a_boundary(japan, monkeypatch):
     targets = chains.resolve_chain("claude-opus-4-7").targets
     assert [(t.model_id, t.region) for t in targets] == [("jp.anthropic.claude-opus-4-7", "ap-northeast-1")]
     chains.reset_catalog()
+
+
+def test_no_module_builds_a_bedrock_runtime_client_but_the_one_factory():
+    """Every bedrock-runtime client comes from `_bedrock_clients`, where the region
+    is checked, so no code path can reach a region the boundary does not allow."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "mvp"
+    offenders = []
+    for path in root.rglob("*.py"):
+        if path.name == "_bedrock_clients.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and any(
+                    isinstance(a, ast.Constant) and a.value == "bedrock-runtime"
+                    for a in [*node.args, *(k.value for k in node.keywords)]):
+                offenders.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno}")
+    assert offenders == []
 
 
 def test_no_bedrock_client_is_built_for_a_region_outside_the_boundary(japan):
@@ -274,16 +328,43 @@ def test_a_direct_id_records_exactly_the_region_it_is_called_in():
             assert e.inference_regions == (e.bedrock_region,), e.bedrock_model_id
 
 
-def test_only_variants_of_one_model_may_share_a_name(tmp_path):
+def _registry_with(tmp_path, extra):
     import json
 
     doc = json.load(open(models.registry_path(), encoding="utf-8"))
-    first = dict(doc["models"][0])
-    other = dict(first, bedrock_model_id="jp.anthropic.other-model", model_family="other-model",
-                 profile_scope="jp", jurisdiction="jp", bedrock_region="ap-northeast-1",
-                 inference_regions=list(JP_REACH))
-    doc["models"].append(other)
+    doc["models"].append(extra)
     path = tmp_path / "models.json"
     path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def _jp_twin(**changes):
+    import json
+
+    doc = json.load(open(models.registry_path(), encoding="utf-8"))
+    us = next(m for m in doc["models"] if m["bedrock_model_id"] == "us.anthropic.claude-opus-5")
+    twin = dict(us, bedrock_model_id="jp.anthropic.claude-opus-5", profile_scope="jp",
+                jurisdiction="jp", bedrock_region="ap-northeast-1", inference_regions=list(JP_REACH))
+    twin.update(changes)
+    return twin
+
+
+def test_a_true_variant_may_share_the_name(tmp_path):
+    models.load_registry(_registry_with(tmp_path, _jp_twin()))
+
+
+@pytest.mark.parametrize("change", [
+    {"model_family": "other-model"},
+    {"pricing_key": "sonnet"},
+    {"profile_scope": "us", "jurisdiction": "us", "bedrock_model_id": "us.anthropic.claude-opus-5b"},
+    {"aliases": ["claude-opus-5", "extra-name"]},
+    {"bedrock_region": "us-east-1"},
+])
+def test_only_a_true_variant_may_share_a_name(tmp_path, change):
     with pytest.raises(ValueError, match="is claimed by"):
-        models.load_registry(str(path))
+        models.load_registry(_registry_with(tmp_path, _jp_twin(**change)))
+
+
+def test_an_alias_may_never_equal_another_entrys_bedrock_id(tmp_path):
+    with pytest.raises(ValueError, match="is claimed by"):
+        models.load_registry(_registry_with(tmp_path, _jp_twin(aliases=["us.anthropic.claude-opus-5"])))

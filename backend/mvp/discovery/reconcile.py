@@ -554,8 +554,16 @@ def run_pass(*, bedrock=None, sts=None, region: Optional[str] = None) -> PassRes
     # from, and a `jp.` profile does not exist in us-east-1 at all.
     from ..inference_boundary import configured as _boundary, primary_region as _primary
 
-    endpoint_region = (region or os.getenv(STRATOCLAVE_REGION_ENV)
-                       or (_primary() if _boundary() is not None else _DEFAULT_REGION))
+    # Unconditionally: an override naming another region would record
+    # destinations for calls the gateway never makes.
+    if _boundary() is not None:
+        override = region or os.getenv(STRATOCLAVE_REGION_ENV)
+        if override and override != _primary():
+            logger.warning("discovery_region_override_ignored_under_boundary",
+                           requested=override, used=_primary())
+        endpoint_region = _primary()
+    else:
+        endpoint_region = region or os.getenv(STRATOCLAVE_REGION_ENV) or _DEFAULT_REGION
     try:
         bedrock = _client("bedrock", region=endpoint_region, injected=bedrock)
     except Exception as exc:  # noqa: BLE001 — no client, no pass; recorded, not fatal.

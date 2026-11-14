@@ -55,9 +55,10 @@ def test_the_discovered_destinations_become_the_activated_entrys_reach():
     activation turns it into "*"."""
     jp = destination_regions_from_models([{"modelArn": a} for a in JP_ARNS])
     glob = destination_regions_from_models([{"modelArn": a} for a in GLOBAL_ARNS])
-    assert activation.inference_regions_from_destinations(jp) == ("ap-northeast-1", "ap-northeast-3")
-    assert activation.inference_regions_from_destinations(glob) == (ib.UNBOUNDED,)
-    assert activation.inference_regions_from_destinations(()) is None
+    reach = lambda d: ib.reach_from_destinations(d, profile_scope="jp", source_region="ap-northeast-1")
+    assert reach(jp) == ("ap-northeast-1", "ap-northeast-3")
+    assert reach(glob) == (ib.UNBOUNDED,)
+    assert reach(()) is None
 
 
 def test_the_reach_survives_the_activated_entry_store_round_trip():
@@ -82,9 +83,11 @@ def test_activation_names_the_boundary_as_a_refusal_reason_with_a_client_status(
     assert _ACTIVATION_REFUSED_STATUS[activation.ActivationRefused.OUTSIDE_BOUNDARY] == 422
 
 
-def test_discovery_reads_profiles_from_the_deployments_region_under_a_boundary(monkeypatch):
+@pytest.mark.parametrize("override", [None, "us-east-1"])
+def test_discovery_reads_profiles_from_the_deployments_region_under_a_boundary(monkeypatch, override):
     """A `jp.` profile does not exist in us-east-1 (measured 2026-11-14), so with a
-    boundary the pass runs where the gateway calls Bedrock from."""
+    boundary the pass runs where the gateway calls Bedrock from, whatever region
+    an override names."""
     from mvp.discovery import reconcile
 
     seen = {}
@@ -94,13 +97,12 @@ def test_discovery_reads_profiles_from_the_deployments_region_under_a_boundary(m
         raise RuntimeError("stop here")
 
     monkeypatch.setattr(reconcile, "_client", fake_client)
-    monkeypatch.delenv(reconcile.STRATOCLAVE_REGION_ENV, raising=False)
+    if override:
+        monkeypatch.setenv(reconcile.STRATOCLAVE_REGION_ENV, override)
+    else:
+        monkeypatch.delenv(reconcile.STRATOCLAVE_REGION_ENV, raising=False)
     monkeypatch.setenv(ib.ENV, "ap-northeast-1,ap-northeast-3")
     monkeypatch.setenv("BEDROCK_REGION", "ap-northeast-1")
-    pass_fn = next(getattr(reconcile, n) for n in ("run_pass", "reconcile_pass", "discovery_pass")
-                   if hasattr(reconcile, n))
-    try:
-        pass_fn()
-    except Exception:  # noqa: BLE001 - only the region matters here
-        pass
+    result = reconcile.run_pass()
     assert seen["region"] == "ap-northeast-1"
+    assert result.observation_blocker is not None  # the fake client stopped the pass
