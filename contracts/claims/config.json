@@ -9,7 +9,8 @@
   "docs/DEPLOYMENT.md",
   "docs/design/price-feeds.md",
   "docs/design/limits.md",
-  "docs/design/quota-raises.md"
+  "docs/design/quota-raises.md",
+  "docs/design/request-bodies.md"
  ],
  "min_sentence_length": 40,
  "guarantee_terms": [

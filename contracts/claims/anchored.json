@@ -2197,6 +2197,11 @@
    "id": "cl-e458cd99f072",
    "claim": "`authz.owned_or_admin_tenant_or_404(tenant_id, user)` — the ownership gate every team-lead route that takes a tenant id calls, and the VSR config gate too.",
    "anchor": "contract:C6.10@f27338bb"
+  },
+  {
+   "id": "cl-8a948ec83446",
+   "claim": "[request-bodies.md](design/request-bodies.md) lists every table the deployment creates and what each holds, says which part is checked, and says where a body can be found instead.",
+   "anchor": "contract:C12.7@6e49e3b8"
   }
  ]
 }

@@ -34,6 +34,17 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ## [Unreleased]
 
+### Added
+
+- **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
+  `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit
+  log, where a body can be found instead (Bedrock model invocation logging, an
+  account-and-region setting), and what a logged record says about who sent it: the marker
+  identifies the tenant and the attempt, carries no user id, and a user can still often be
+  inferred from time, model and token counts. `test_usage_row_attributes_are_pinned.py` pins the usage row's attribute set,
+  so an attribute added to its one writer fails a test that names it, and fails when the IaC
+  adds a table the document does not name. No runtime change.
+
 ### Fixed
 
 - **`bedrock-mantle` is named as unsupported, not just absent (C13.5, issue #246).**
