@@ -72,6 +72,11 @@ _DEFAULT_REGION_FALLBACK = "us-east-1"
 # Cache-Control: never stored. The document tells a CLI where to send its
 # credentials, so no shared cache (a CDN, a proxy) may answer one client with a
 # copy another request produced. It is fetched once per `stratoclave setup`.
+# Belt-and-braces rather than the only guard: `iac/lib/frontend-stack.ts`
+# already routes `/.well-known/*` through CloudFront's managed "CachingDisabled"
+# policy (id `4135ea2d-6df8-44a3-9df3-4b5a84be39ad`), whose min/default/max TTL
+# are all 0 regardless of this header -- CloudFront does not cache this path's
+# responses at all, success or 503, with or without this header.
 _CACHE_CONTROL = "no-store"
 
 
@@ -123,18 +128,25 @@ def _derive_api_endpoint(request: Request) -> str:
     direct ALB hit through localhost during dev still returns the public
     URL when one is configured.
     """
-    # 1. Explicit env beats everything else.
-    explicit = os.getenv("STRATOCLAVE_API_ENDPOINT")
+    # 1. Explicit env beats everything else. Read through `core.deployment` --
+    # the single place that strips and empty-checks the value -- rather than
+    # the bare env lookup, so a value nobody else in the backend would treat
+    # as "set" cannot slip through here.
+    from core.deployment import api_endpoint, is_local_environment
+
+    explicit = api_endpoint()
     if explicit:
-        return explicit.rstrip("/")
+        return explicit
     # The endpoint is taken from request headers only in an explicit local or
     # test environment: a caller could name any host in X-Forwarded-Host and
     # hand that URL to a CLI, which would then send its credentials there. A
     # deployment always sets STRATOCLAVE_API_ENDPOINT; anything else refuses.
-    from core.deployment import is_local_environment
-
     if not is_local_environment():
-        raise HTTPException(status_code=503, detail="STRATOCLAVE_API_ENDPOINT is not set")
+        raise HTTPException(
+            status_code=503,
+            detail="STRATOCLAVE_API_ENDPOINT is not set",
+            headers={"Cache-Control": _CACHE_CONTROL},
+        )
 
     # 2. Inspect X-Forwarded-* headers.
     headers = request.headers
@@ -181,6 +193,7 @@ def _require_env(name: str) -> str:
                 f"Server is not fully configured: {name} is not set. "
                 "Contact your administrator."
             ),
+            headers={"Cache-Control": _CACHE_CONTROL},
         )
     return value
 
@@ -247,9 +260,11 @@ def get_stratoclave_config(request: Request, response: Response) -> StratoclaveC
     # localhost fallback: when the inference returns localhost, allow env
     # to override (covers dev hits through 127.0.0.1).
     if "localhost" in api_endpoint or "127.0.0.1" in api_endpoint:
-        override = os.getenv("STRATOCLAVE_API_ENDPOINT")
+        from core.deployment import api_endpoint as _configured_api_endpoint
+
+        override = _configured_api_endpoint()
         if override:
-            api_endpoint = override.rstrip("/")
+            api_endpoint = override
 
     # 2. Cognito info (required env).
     user_pool_id = _require_env("COGNITO_USER_POOL_ID")

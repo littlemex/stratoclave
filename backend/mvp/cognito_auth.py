@@ -22,7 +22,14 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from core.rate_limit import LOGIN_RATE_LIMIT, RESPOND_RATE_LIMIT, limiter
+from core.rate_limit import (
+    AUTH_ADDRESS_RATE_LIMIT,
+    AUTH_SIGN_IN_ADDRESS_SCOPE,
+    LOGIN_RATE_LIMIT,
+    RESPOND_RATE_LIMIT,
+    check_identity_rate_limit,
+    limiter,
+)
 
 
 router = APIRouter(prefix="/api/mvp/auth", tags=["mvp-auth"])
@@ -63,11 +70,18 @@ class RespondRequest(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit(LOGIN_RATE_LIMIT)
+@limiter.limit(AUTH_ADDRESS_RATE_LIMIT, scope=AUTH_SIGN_IN_ADDRESS_SCOPE)
 def login(request: Request, body: LoginRequest) -> LoginResponse:
-    """P0-3: limited to `AUTH_LOGIN_RATE_LIMIT` per source IP (default
-    10/minute). Credential stuffing + user enumeration mitigation."""
+    """Two independent limits, as every unauthenticated sign-in route has
+    (`core/rate_limit.py`): the decorator above is this address's share of
+    the coarse flood guard shared by every sign-in route, and the check below
+    is `AUTH_LOGIN_RATE_LIMIT` (default 10/minute) keyed on the email itself --
+    credential-stuffing and user-enumeration mitigation that a rotating
+    attacker cannot evade by trying a fresh address per guess, nor by trying a
+    fresh made-up email per request (the flood guard still bounds the
+    address)."""
     _ = request  # the rate limiter reads it from the signature
+    check_identity_rate_limit("auth_login_identity", "login", body.email, LOGIN_RATE_LIMIT)
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()
@@ -100,11 +114,14 @@ def login(request: Request, body: LoginRequest) -> LoginResponse:
 
 
 @router.post("/respond", response_model=LoginResponse)
-@limiter.limit(RESPOND_RATE_LIMIT)
+@limiter.limit(AUTH_ADDRESS_RATE_LIMIT, scope=AUTH_SIGN_IN_ADDRESS_SCOPE)
 def respond_challenge(request: Request, body: RespondRequest) -> LoginResponse:
-    """P0-3: same per-IP rate limit as /login. Prevents brute force of
+    """Same two-limit shape as `/login` (see its docstring): the decorator is
+    the shared address flood guard, and the check below is
+    `AUTH_RESPOND_RATE_LIMIT` keyed on the email, which bounds brute force of
     the one-time `temporary_password` emitted by admin user creation."""
     _ = request
+    check_identity_rate_limit("auth_respond_identity", "login", body.email, RESPOND_RATE_LIMIT)
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()

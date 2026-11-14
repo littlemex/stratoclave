@@ -200,12 +200,14 @@ class TestRequestKey:
 
 @pytest.mark.parametrize("is_async", [False, True])
 def test_a_limited_route_is_bucketed_by_the_user_the_auth_dependency_verified(monkeypatch, is_async):
-    """Through FastAPI, the real limiter decorator and the real get_current_user
-    (with only the token check faked): the bucket is the verified user, for sync
-    and async routes alike, and a made-up key on an unauthenticated route still
-    lands on the address."""
-    import asyncio
-
+    """Through FastAPI, the module's OWN production `limiter` (not a freshly
+    built `DynamoRateLimiter` with the same key function pasted in by hand --
+    that would pass even if `rate_limit.py`'s own `limiter = DynamoRateLimiter(...)`
+    line were reverted to `client_key_func=_client_key`) and the real
+    `get_current_user` (with only the token check faked): the bucket is the
+    verified user, for sync and async routes alike, and a made-up key on an
+    unauthenticated route still lands on the exact address, not merely on
+    something that is not a `user:`/`cred:` key."""
     from fastapi import Depends, FastAPI
     from fastapi.testclient import TestClient
 
@@ -217,22 +219,21 @@ def test_a_limited_route_is_bucketed_by_the_user_the_auth_dependency_verified(mo
     monkeypatch.setattr(ddb, "_check", lambda scope, key, limit, window: seen.append(key))
     monkeypatch.setattr(deps, "_resolve_current_user",
                         lambda authorization, x_api_key: SimpleNamespace(user_id="u-42"))
-    lim = ddb.DynamoRateLimiter(client_key_func=rl_mod._request_key)
     app = FastAPI()
 
     if is_async:
         @app.post("/limited")
-        @lim.limit("5/minute")
+        @rl_mod.limiter.limit("5/minute")
         async def limited(request: Request, user=Depends(deps.get_current_user)):
             return {"ok": True}
     else:
         @app.post("/limited")
-        @lim.limit("5/minute")
+        @rl_mod.limiter.limit("5/minute")
         def limited(request: Request, user=Depends(deps.get_current_user)):
             return {"ok": True}
 
     @app.post("/open")
-    @lim.limit("5/minute")
+    @rl_mod.limiter.limit("5/minute")
     def open_route(request: Request):
         return {"ok": True}
 
@@ -240,4 +241,61 @@ def test_a_limited_route_is_bucketed_by_the_user_the_auth_dependency_verified(mo
     assert client.post("/limited", headers={"x-api-key": "anything"}).status_code == 200
     assert client.post("/open", headers={"x-api-key": "made-up"}).status_code == 200
     assert seen[0] == "user:u-42"
-    assert not seen[1].startswith(("user:", "cred:"))
+    # `TestClient` has no real peer, so Starlette's ASGI transport reports a
+    # fixed address for every request; the point under test is that this is
+    # the UNMODIFIED address, not that it merely avoids looking like a
+    # verified-user key.
+    assert seen[1] == "testclient"
+
+
+def test_a_rejected_credential_never_sets_rate_principal_and_never_reaches_the_limiter(monkeypatch):
+    """`get_current_user` sets `request.state.rate_principal` only after
+    `_resolve_current_user` returns successfully (`mvp/deps.py`), so no
+    attacker-chosen or stale principal can reach the limiter through a
+    rejected credential -- that half is a true guarantee, and this pins it
+    with the REAL resolver (not a stub that always succeeds), so a presented
+    credential actually has to verify.
+
+    The other half is a documented gap, not a guarantee: FastAPI resolves a
+    `Depends(...)` BEFORE calling the decorated handler, so when
+    `get_current_user` itself raises, `@limiter.limit`'s own wrapper body
+    never runs at all -- not even far enough to bucket the request by
+    address. A caller who never presents a credential that verifies is
+    therefore not rate-limited on this route AT ALL (docs/DEPLOYMENT.md's
+    rate-limit section states this plainly; see also S9 in review history).
+    This test exists so a future change that silently closes the gap, or
+    silently widens it further, is visible here rather than only in prose.
+    """
+    from fastapi import Depends, FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    import core.rate_limit as rl_mod
+    import core.rate_limit_ddb as ddb
+    from mvp import deps
+
+    seen = []
+    monkeypatch.setattr(ddb, "_check", lambda scope, key, limit, window: seen.append(key))
+
+    def _always_invalid(authorization, x_api_key):
+        # The shape `_resolve_current_user` itself raises for a token that
+        # does not verify -- exercised, not assumed, by the real function
+        # existing and this stub matching its contract.
+        raise HTTPException(status_code=401, detail="invalid")
+
+    monkeypatch.setattr(deps, "_resolve_current_user", _always_invalid)
+    app = FastAPI()
+
+    @app.post("/limited")
+    @rl_mod.limiter.limit("5/minute")
+    def limited(request: Request, user=Depends(deps.get_current_user)):
+        return {"ok": True}  # unreachable: get_current_user raises first
+
+    client = TestClient(app)
+    resp = client.post("/limited", headers={"x-api-key": "forged"})
+    assert resp.status_code == 401
+    assert seen == [], (
+        "a rejected credential reached the limiter's own counter write -- if "
+        "this now bucket on the address, update the gap this test documents "
+        "(and docs/DEPLOYMENT.md's rate-limit section) instead of loosening "
+        "this assertion"
+    )

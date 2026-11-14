@@ -93,6 +93,10 @@ def test_outside_a_local_environment_the_endpoint_is_never_taken_from_request_he
     assert resp.status_code == 503
     assert "STRATOCLAVE_API_ENDPOINT" in resp.text
     assert "attacker.example" not in resp.text
+    # The 503 itself is never cached, same as the 200 it would have been --
+    # a shared cache serving a stale 503 to a different client is as wrong as
+    # serving a stale endpoint.
+    assert resp.headers.get("cache-control", "").lower() == "no-store"
 
 
 def test_in_a_local_environment_the_endpoint_may_come_from_request_headers(monkeypatch):
@@ -146,3 +150,4 @@ def test_well_known_returns_503_when_misconfigured(monkeypatch):
     client = TestClient(app)
     resp = client.get("/.well-known/stratoclave-config")
     assert resp.status_code == 503
+    assert resp.headers.get("cache-control", "").lower() == "no-store"

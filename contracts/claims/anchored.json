@@ -1226,11 +1226,6 @@
    "anchor": "boundary:'scopes' is the limit stated in the sentence"
   },
   {
-   "id": "cl-9d60f69d307d",
-   "claim": "23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff)",
-   "anchor": "boundary:'in production' is the limit stated in the sentence"
-  },
-  {
    "id": "cl-24bea37d2376",
    "claim": "Several archived stacks (RDS, Redis, CodeBuild, Verified Permissions) live under `iac/lib/_archived/` and are **not** deployed by default.",
    "anchor": "boundary:'not' is the limit stated in the sentence"
@@ -2271,22 +2266,247 @@
   {
    "id": "cl-f712992c01ff",
    "claim": "Make sure `STRATOCLAVE_API_ENDPOINT` (and `STRATOCLAVE_STS_AUDIENCES` if the gateway is reached under more than one name) lists every URL users set the CLI up against.",
-   "anchor": "contract:C6.9@49beca3b"
-  },
-  {
-   "id": "cl-eb902815f266",
-   "claim": "Sign-in routes are rate-limited by client address; behind a NAT, and on the private entry where every request arrives from the load balancer, that limit is shared by everyone, so one noisy client can slow sign-in for all.",
-   "anchor": "contract:C6.10@f27338bb"
+   "anchor": "contract:C6.11@c43c5b07"
   },
   {
    "id": "cl-1f26ac9a4ce4",
    "claim": "Published in `/.well-known/stratoclave-config`. Outside a local environment (`ENVIRONMENT` `development`, `local` or `test`) the gateway refuses to start without it, and the document is never built from request headers. Its host is also what a signed AWS sign-in must name (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)).",
-   "anchor": "contract:C6.9@49beca3b"
+   "anchor": "contract:C6.11@c43c5b07"
   },
   {
-   "id": "cl-cc963e964b60",
-   "claim": "Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start.",
-   "anchor": "contract:C6.9@49beca3b"
+   "id": "cl-d1c46e9f32fa",
+   "claim": "23 DynamoDB tables incl. `users`, `user-tenants`, `tenants`, `usage-logs` (RETAIN; PITR in production only), `api-keys` (RETAIN + PITR always), `credit-ledger` and `quota-events` (RETAIN), **`sso-nonces`** (TTL, for Vouch-by-STS replay defence), `ui-tickets` (TTL, CLI→SPA handoff)",
+   "anchor": "boundary:'in production' is the limit stated in the sentence"
+  },
+  {
+   "id": "cl-e80179a4cb2e",
+   "claim": "By default Stratoclave's only entry point is CloudFront, which cannot be made private.",
+   "anchor": "boundary:'By default' states the limit (STRATOCLAVE_ENTRY=private changes it)"
+  },
+  {
+   "id": "cl-e24ea498bece",
+   "claim": "`iac/scripts/deploy-all.sh` supports both entry modes: with `STRATOCLAVE_ENTRY=private` set, it deploys the same stacks `cdk deploy --all` would and skips the frontend build/upload/invalidation step entirely (there is no S3 bucket or CloudFront distribution in this mode to put anything into).",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-cb46da440980",
+   "claim": "`STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` is a comma-separated list of IAM principal ARNs (an account root, a role, or a user) allowed to request a connection to the endpoint service; it must be non-empty and must never contain a wildcard, which `cdk synth` refuses outright.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-76ad824a56d0",
+   "claim": "The NLB's TCP :443 listener forwards to an ALB-type target group pointed at the internal ALB — this is the only shape AWS PrivateLink's endpoint service configuration accepts; it takes a network or gateway load balancer, never an ALB directly.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-41833305e4ad",
+   "claim": "Use `./iac/scripts/deploy-all.sh` (shown above), not a direct `npx cdk deploy --all`: the script's pre-flight is what refuses an in-place entry-mode switch (see \"Switching an existing deployment\" above) — a direct `cdk deploy` has no such guard and will attempt the switch, replacing the ALB in place.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-9ca4db8a8e25",
+   "claim": "- Then remove the principal from `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` and redeploy the `private-link` stack, so the same principal cannot simply reconnect.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-37f92d1042f7",
+   "claim": "Synth cannot check any of these; they are entirely on the operator:",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-28143409407b",
+   "claim": "- **Certificate.** `STRATOCLAVE_PRIVATE_CERTIFICATE_ARN` must cover `STRATOCLAVE_PRIVATE_DOMAIN` — synth only checks the ARN's region, never the certificate's own domain names.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-a63b7a95e18c",
+   "claim": "A public ACM certificate for a domain you do not control publicly still needs DNS validation in a public hosted zone for that domain (ACM validates ownership there even though the deployment itself is private); a certificate issued by a Private CA instead needs every client to be configured to trust that CA, which a public ACM certificate does not require.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-2593227b6c0b",
+   "claim": "- **Bootstrapping is a chicken-and-egg the operator hits first.** The gateway's own VPC has no path to its own NLB other than through PrivateLink (the NLB's security group admits nothing else at all, not even from inside that VPC) — so testing the connection, and every step under \"Bootstrapping without a console\" below, only works from a host that is itself inside an ACCEPTED consumer VPC.",
+   "anchor": "boundary:'not even from inside that VPC' states the limit"
+  },
+  {
+   "id": "cl-04f2aa9097a5",
+   "claim": "There is no WAF on this path — a CLOUDFRONT-scope web ACL cannot attach to an internal ALB, and this slice does not add a REGIONAL one.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-593fa4f569ca",
+   "claim": "- **The Cognito user pool and its Hosted UI domain are still public.** The app client has no client secret and `USER_PASSWORD_AUTH` is enabled (both needed for the CLI's own `auth login` flow, in either entry mode), so password-guessing against the pool is reachable from the internet on this path exactly as it is on `cloudfront`.",
+   "anchor": "descriptive:AWS Cognito's own public reachability, unchanged by the entry mode; not a guarantee this gateway makes"
+  },
+  {
+   "id": "cl-e264aefd0650",
+   "claim": "**The per-IP rate limit is a shared-fate availability risk here, not merely \"coarse\", for the routes it still applies to.** Every request on this path arrives from the internal NLB, not from the original client, so a limiter keyed on the immediate peer address puts every principal reaching the gateway through PrivateLink into the same bucket — with no WAF in front to catch a flood earlier, one noisy or compromised consumer can exhaust that shared bucket and produce 429s for every other consumer, not just itself.",
+   "anchor": "boundary:'not' states the limit (the routes this still applies to)"
+  },
+  {
+   "id": "cl-4fe516b38183",
+   "claim": "An AUTHENTICATED request is bucketed by the verified user rather than the address (`core.rate_limit._request_key`), so this path's per-user limits are exactly as precise as `cloudfront`'s, and a caller behind the NLB cannot be locked out by another authenticated caller sharing the same address.",
+   "anchor": "contract:C6.12@442ad928"
+  },
+  {
+   "id": "cl-900367e3ffb4",
+   "claim": "What stays genuinely shared on this path is the UNAUTHENTICATED sign-in routes (`/api/mvp/auth/login`, `/respond`, `/sso-exchange`, `/ui-ticket/consume`): with no verified identity yet, these are rate-limited twice (see \"Rate limits on sign-in routes\" below) — a tight limit keyed on the identity (the email, or the access key id) the request names, which a rotating address cannot evade, and a coarse flood guard keyed on the address itself, shared by every sign-in route, which bounds total sign-in volume from one address regardless of how many distinct (possibly made-up) identities it tries.",
+   "anchor": "contract:C6.12@442ad928"
+  },
+  {
+   "id": "cl-337570c2ca8b",
+   "claim": "That flood guard is the one place the shared-NLB-address topology this paragraph opens with still matters: size `AUTH_ADDRESS_RATE_LIMIT` generously enough for every legitimate consumer on this path combined, since on this entry mode they genuinely do share one address.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-8174cd2854a6",
+   "claim": "This is deliberate, not simply unfixed: the ALB attribute `routing.http.xff_header_processing.mode` is set to `remove` specifically so that a client-supplied `X-Forwarded-For` can never reach the application and be trusted as if it were a real client address — the alternative (trusting it) would let any consumer forge a distinct address and evade the shared bucket entirely, which is worse.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-947a36cc1a9e",
+   "claim": "Per-key budgets and per-tenant dollar pools still apply exactly as they do on the `cloudfront` path; they never depended on IP at all.",
+   "anchor": "descriptive:restates that budget/pool enforcement (C14.x) never depended on IP; not a new guarantee this entry mode adds"
+  },
+  {
+   "id": "cl-fc0ca9ab789b",
+   "claim": "The NLB in front of it carries a TCP listener, not a TLS one — it passes the connection straight through rather than terminating it, so it never holds key material of its own.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-9a74f338239a",
+   "claim": "CloudFront, the S3 console bucket, and WAF are never provisioned, and are replaced by an internal NLB and a VPC endpoint service:",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-15c15d10574f",
+   "claim": "- **A request bound to a host that is not this gateway's own is always refused — unconditionally, regardless of `STRATOCLAVE_STS_AUDIENCE_REQUIRED` below.** If `X-Stratoclave-Audience` is present at all, its value must be a host in `STRATOCLAVE_API_ENDPOINT` or `STRATOCLAVE_STS_AUDIENCES`, or the gateway refuses the request.",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-9513b4904165",
+   "claim": "This is why every host users reach the gateway through — every custom domain, every CloudFront alias, the PrivateLink domain on the private entry — has to be listed in `STRATOCLAVE_STS_AUDIENCES` **before** distributing CLI 0.2.1 or later: a CLI configured against a host the gateway does not know about gets 401 on every sign-in attempt from the moment it is upgraded, not only after the requirement below is turned on.",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-f257d3f3dff7",
+   "claim": "To turn the second one off (require every sign-in to carry a bound audience):",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-0f7474276dbb",
+   "claim": "Both are wired through `iac/bin/iac.ts` and survive a `cdk deploy` (see the environment variable table below) — a value set by hand on the task definition and never added there is dropped on the next deploy.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-5d78988446f4",
+   "claim": "Watch the gateway's `sso_sts_exchange_verified` log events (success) and `sso_sts_audience_refused` (WARNING, logged on every refusal, with the host that was presented and the reason — a host missing from step 1 shows up here as refusals from real users, not merely as a number that failed to reach 100%).",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-2c23f084f277",
+   "claim": "**Upgrading the gateway and the CLI can happen in either order.** A CLI 0.2.1 request against a gateway that predates this feature works unchanged: that gateway's `verify_and_call_sts` forwards every header it receives to STS verbatim and never reads `X-Stratoclave-Audience` at all, so the extra signed header is simply one more header STS verifies and ignores on the way back — nothing refuses it and nothing requires it.",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-8594a9fbe755",
+   "claim": "The only ordering constraint is the one stated above: every host in `STRATOCLAVE_STS_AUDIENCES` has to be configured on THIS gateway before a CLI bound to an unlisted host is handed to anyone, because the foreign-host refusal does not wait for `STRATOCLAVE_STS_AUDIENCE_REQUIRED`.",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-2b51094a7509",
+   "claim": "**Local development:** a gateway with `ENVIRONMENT` set to `development`, `local` or `test` may run with no `STRATOCLAVE_API_ENDPOINT` at all (`core.deployment.is_local_environment`), but `mvp.sso_sts.expected_audiences()` then has no host to compare against, so `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` is refused at startup (there would be nothing for a bound request to match) and `audience_bound` is always reported false for every sign-in on that process.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-7b932518eed3",
+   "claim": "Two gaps remain, both covered in \"Rate limits on sign-in routes\" immediately below rather than here: the coarse per-address flood guard every sign-in route shares, and the fact that a request which fails authentication on an AUTHENTICATED route is not rate-limited at all.",
+   "anchor": "contract:C6.12@442ad928"
+  },
+  {
+   "id": "cl-7bff2dbdc9e9",
+   "claim": "An authenticated route is bucketed by the verified user (`core.rate_limit._request_key`); a user behind a shared address, or on the private entry where every request arrives from the load balancer, is not throttled by anyone else sharing it.",
+   "anchor": "contract:C6.12@442ad928"
+  },
+  {
+   "id": "cl-f7ecad3577e8",
+   "claim": "Sign-in routes have no verified user yet, so they are rate-limited differently, and twice:",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-d896e6153104",
+   "claim": "This is `LOGIN_RATE_LIMIT` / `RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT` (default 10/minute, 10/minute, 20/minute), run explicitly inside each handler (`core.rate_limit.check_identity_rate_limit`) rather than through the route decorator, because the identity lives in the request body, which the decorator's `Request`-only key function cannot read.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-6669dce47f0f",
+   "claim": "- **Keyed on the client address, shared by every sign-in route.** `AUTH_ADDRESS_RATE_LIMIT` (default 300/minute) is a coarse FLOOD GUARD, not a brute-force control — every one of `/login`, `/respond`, `/sso-exchange` and `/ui-ticket/consume` writes to the SAME address-keyed bucket (`core.rate_limit.AUTH_SIGN_IN_ADDRESS_SCOPE`), so an attacker cannot multiply their address's budget by spreading requests across routes, and cannot evade it by minting a fresh made-up identity on every request: the address bucket is touched once per request regardless of what identity (real or invented) the request names, and it is checked BEFORE the identity-keyed check runs, so a flood that trips it never reaches the identity counters at all (no DynamoDB write growth from an attacker minting unlimited fictitious identities).",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-022a4c48f72b",
+   "claim": "- **`/ui-ticket/consume` has no identity-keyed check.** The single-use ticket it redeems is itself the only identity a request could name, and 256-bit entropy already makes guessing one uneconomic; the address flood guard above is belt-and-braces against guessing at volume, not a credential-guessing control.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-3d9b102e44c4",
+   "claim": "- **A request that fails authentication on an AUTHENTICATED route is not rate-limited at all**, not merely \"not counted against any user\".",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-8c450098712a",
+   "claim": "FastAPI resolves a `Depends(get_current_user)` before calling the decorated handler, so when the credential does not verify and `get_current_user` raises, `@limiter.limit(...)`'s own wrapper body — the only place either the per-user or the per-address counter is written — never runs.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-2fa39a59f99e",
+   "claim": "`test_rate_limit_xff.py::test_a_rejected_credential_never_sets_rate_principal_and_never_reaches_the_limiter` pins this as a documented gap, not a guarantee.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-aa4a19a6a9f0",
+   "claim": "yes (always `'production'`, regardless of the resource tier below)",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-84ac1c99f7ab",
+   "claim": "The backend's one question: \"has this process been deployed\" (`core.deployment.is_local_environment`; every bare `environment == \"production\"` check in `main.py`/`mvp/authz.py`). NOT the same value as the shell's own `ENVIRONMENT`, which `bin/iac.ts` separately reads for the RESOURCE TIER (DynamoDB deletion protection/PITR, Cognito retention, ECS exec default) — an operator may still deploy a disposable sandbox stack with that unset or `development`; the container's own `ENVIRONMENT` is `'production'` either way, because an ECS Fargate task is a deployment by construction, never a developer's own machine.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-c1c6f1488d9f",
+   "claim": "Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start. Passed through unconditionally (empty when unset), so a value exported before one `cdk deploy` is not silently dropped by the next one that forgot to export it.",
+   "anchor": "boundary:'or the gateway refuses to start' states the limit"
+  },
+  {
+   "id": "cl-796d52ed8fa1",
+   "claim": "When on, an AWS sign-in whose signed request carries no `X-Stratoclave-Audience` at all is refused; a request bound to a host that IS NOT this gateway's is refused regardless of this setting (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)). Off by default so CLIs older than 0.2.1 keep working; see that same section's runbook. Read strictly (`core.deployment.strict_flag`): `1`/`true`/`yes`/`on` for on, `0`/`false`/`no`/`off`/empty for off, anything else fails the backend's own startup rather than silently reading as off.",
+   "anchor": "boundary:'NOT' / 'regardless of this setting' states the limit"
+  },
+  {
+   "id": "cl-0185d6a8d4e5",
+   "claim": "CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. Has no effect under `STRATOCLAVE_ENTRY=private`, which never provisions a WAF stack at all.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-77bd0fdd91fe",
+   "claim": "The coarse per-address flood guard shared by every sign-in route (default `300/minute`; see [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)). Raise this if a legitimate shared-address topology (a NAT, or the private entry's shared NLB-facing address) produces false 429s; it is not a brute-force control, so raising it does not weaken the identity-keyed limits above.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-f453dc7ee238",
+   "claim": "The working tables are deleted, so every user and tenant is lost; the audit tables listed below are kept.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-18d64e329912",
+   "claim": "**`STRATOCLAVE_ENTRY=private` only: reject every connection before destroying.** A VPC endpoint service with an active or a still-pending connection cannot be deleted; `cdk destroy` of the `<Prefix>-private-link` stack fails until every connection is gone.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-d56289e25dce",
+   "claim": "Audit record; kept in every environment.",
+   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
   }
  ]
 }

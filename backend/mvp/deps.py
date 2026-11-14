@@ -351,9 +351,9 @@ def cognito_auto_provision_enabled() -> bool:
 # Public entrypoint
 # ---------------------------------------------------------------
 def get_current_user(
-    request: Request = None,  # injected by FastAPI; None only for a direct call
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+    request: Request = None,  # injected by FastAPI; None only for a direct call
 ) -> AuthenticatedUser:
     """The authenticated caller, recorded on `request.state.rate_principal` so the
     rate limiter buckets this request by the verified user rather than by an

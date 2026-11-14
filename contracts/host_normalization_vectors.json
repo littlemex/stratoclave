@@ -1,0 +1,16 @@
+{
+  "_": "Host normalisation vectors shared by backend/core/deployment.py::host_of and cli/src/mvp/sso.rs::audience_host (contract:C6.11). Every case names the host both implementations must produce for the same URL, so a bound sign-in agrees on the audience rather than disagreeing per language. Read by backend/tests/test_deployment.py and cli/src/mvp/sso.rs's own test module.",
+  "cases": [
+    {"url": "https://d1.cloudfront.net", "host": "d1.cloudfront.net"},
+    {"url": "https://D1.CloudFront.net", "host": "d1.cloudfront.net"},
+    {"url": "https://d1.cloudfront.net:443", "host": "d1.cloudfront.net"},
+    {"url": "https://d1.cloudfront.net/", "host": "d1.cloudfront.net"},
+    {"url": "http://d1.cloudfront.net:80", "host": "d1.cloudfront.net"},
+    {"url": "https://gw.example.com:8443", "host": "gw.example.com:8443"},
+    {"url": "http://127.0.0.1:8080", "host": "127.0.0.1:8080"},
+    {"url": "https://[::1]:8080", "host": "[::1]:8080"},
+    {"url": "https://[::1]/", "host": "[::1]"},
+    {"url": "https://xn--caf-dma.example.com", "host": "xn--caf-dma.example.com"},
+    {"url": "https://café.example.com", "host": "xn--caf-dma.example.com"}
+  ]
+}

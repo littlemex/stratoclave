@@ -185,7 +185,10 @@
   "cl-6d79e3ad9ae5": "Apache 2.0 inspectability, not a functional guarantee",
   "cl-539d5ac64207": "an alarm-muting caution; the reap-timing invariant behind it is tested in hard-ceiling's own tests, not cited as a clause",
   "cl-a12e772054af": "the operator's duty not to list a directly-assumable role pattern; no clause and no test covers it",
-  "cl-1ffbef41ba3a": "the same operator duty, in the ADMIN_GUIDE table row"
+  "cl-1ffbef41ba3a": "the same operator duty, in the ADMIN_GUIDE table row",
+  "cl-d1c46e9f32fa": "DynamoDB table retention/PITR/TTL inventory; no clause covers resource-policy specifics, same exemption class as cl-8fe0fe2a42fd",
+  "cl-593fa4f569ca": "AWS Cognito's own public reachability (Hosted UI, USER_PASSWORD_AUTH), unchanged by entry mode; not a guarantee this gateway makes",
+  "cl-947a36cc1a9e": "money enforcement's independence from IP is C14.x's territory; this sentence restates it rather than making a new claim"
  },
  "floor_exemptions_note": "Per-id, with a reason each, because the alternative was widening the floor for everyone. An enumerated list is reviewable and a widened rule is not: `test_claim_judgement_worklist.py` prints these, so the population stays visible. Two of them — the operator's duty about directly-assumable role patterns — are a real gap and are on the open items."
 }

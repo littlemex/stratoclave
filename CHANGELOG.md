@@ -36,18 +36,54 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Upgrade notes
 
+- **`ENVIRONMENT` as the container sees it is now always `'production'`, independent of the
+  resource tier a deploy was synthesized with.** `iac/bin/iac.ts:574` sets the backend's own
+  `ENVIRONMENT` unconditionally, regardless of the operator-set `envName`/`isProd` the same
+  file still uses for DynamoDB deletion protection, PITR, Cognito retention and the ECS exec
+  default (`iac/bin/iac.ts:164-165`) — those are unchanged. Before this, a `cdk deploy` run
+  with no `ENVIRONMENT` exported (the common case: `iac/scripts/deploy-all.sh` never sets it)
+  shipped a production-reachable gateway with `ENVIRONMENT=development` on the container,
+  which skipped `main.py`'s `_REQUIRED_IN_PRODUCTION` env check, its `CORS_ORIGINS`
+  no-`localhost` requirement and its `http://` CORS refusal, and relaxed `mvp/authz.py`'s
+  admin-creation bootstrap window to the sticky `ALLOW_ADMIN_CREATION=true` (no
+  `ALLOW_ADMIN_CREATION_UNTIL` expiry required) — and also picked `core.logging.setup_logging`'s
+  development branch (a colored, human-readable `ConsoleRenderer`) over its production
+  `JSONRenderer`, so every deployed gateway's CloudWatch logs were plain text, not the JSON the
+  `sso_sts_exchange_verified` / `sso_sts_audience_refused` Logs Insights queries below need to
+  read a field by name at all. See docs/DEPLOYMENT.md's `ENVIRONMENT` row for what this variable
+  now means for the backend and what remains a separate, IaC-only decision.
 - **`STRATOCLAVE_API_ENDPOINT` is required outside a local environment.** The gateway refuses
   to start without it unless `ENVIRONMENT` is `development`, `local` or `test`, and
   `/.well-known/stratoclave-config` answers 503 rather than build its URL from request headers.
-  The CDK app always sets it. The document is now `Cache-Control: no-store`.
+  The CDK app always sets it (`entryUrl`, composed once regardless of entry mode, feeds
+  `STRATOCLAVE_API_ENDPOINT` unconditionally at `iac/bin/iac.ts:680`; `iac/test/backend-deployed-flag.test.ts`
+  synthesizes both entry modes and asserts the container receives it). The document is now
+  `Cache-Control: no-store`, including its own 503.
 - **AWS sign-in can be bound to this gateway (CLI 0.2.1).** The CLI signs
-  `X-Stratoclave-Audience`, the host of the gateway URL; the gateway refuses a request naming
-  another host, and with `STRATOCLAVE_STS_AUDIENCE_REQUIRED=true` refuses one without it. Off
-  by default; turn it on after every CLI is upgraded (docs/DEPLOYMENT.md, "Binding AWS sign-in
-  to this gateway").
-- **Rate limits on authenticated routes are per verified user**, not per client address, so
-  users behind one NAT or on the private entry no longer share a bucket. Sign-in routes are
-  still per address.
+  `X-Stratoclave-Audience`, the host of the gateway URL it sends the exchange to. A request
+  bound to a host that is not this gateway's own is refused unconditionally, whatever
+  `STRATOCLAVE_STS_AUDIENCE_REQUIRED` is set to; with that flag on, a request carrying no
+  audience at all is refused too. Off by default; turn the flag on after every CLI is upgraded
+  AND every host users reach this gateway by is listed in `STRATOCLAVE_STS_AUDIENCES` (now
+  wired through `iac/bin/iac.ts:692` so a `cdk deploy` does not drop a value set by hand —
+  `iac/test/backend-deployed-flag.test.ts` pins it) — **list every host before distributing CLI
+  0.2.1**, since the foreign-host refusal does not wait for the flag. Upgrading the gateway and
+  the CLI can happen in either order: a gateway that predates this feature forwards the extra
+  signed header to STS unchanged and never reads it, so CLI 0.2.1 against an unupgraded gateway
+  works exactly as before. Every refusal is now logged as a WARNING, `sso_sts_audience_refused`,
+  with the host that was presented and the reason (docs/DEPLOYMENT.md, "Binding AWS sign-in to
+  this gateway").
+- **Sign-in routes are rate-limited on the identity they name, not only the address.**
+  `/login` and `/respond` key on the email in the request body; `/sso-exchange` keys on the
+  access key id its presigned request names. A coarse, address-keyed flood guard
+  (`AUTH_ADDRESS_RATE_LIMIT`, default `300/minute`) is still shared by every sign-in route, so
+  rotating identities cannot buy a fresh address quota and rotating addresses cannot buy a
+  fresh identity quota. Rate limits on AUTHENTICATED routes remain per verified user, not per
+  client address, so users behind one NAT or on the private entry do not share a bucket there
+  either — but a request that FAILS authentication on an authenticated route is not
+  rate-limited at all (FastAPI resolves `Depends(get_current_user)`, and its failure, before
+  the limiter's own wrapper runs); this is a documented gap, not a guarantee. See
+  docs/DEPLOYMENT.md, "Rate limits on sign-in routes".
 
 - **The gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule**
   (1 to 256 ASCII letters, digits and `:_@$#=/+,.-`, inner spaces allowed, none leading or

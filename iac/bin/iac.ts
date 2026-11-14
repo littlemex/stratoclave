@@ -554,7 +554,25 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
   // IMAGE_TAG=<sha-or-release-tag> alongside the deploy command.
   imageTag: process.env.IMAGE_TAG || 'latest',
   environment: {
-    ENVIRONMENT: envName,
+    // Deliberately NOT `envName`. `envName`/`isProd` above answer "which
+    // resource tier should this stack use" (deletion protection, PITR,
+    // retain-on-delete, ECS exec default) -- an operator choice that is
+    // allowed to be `development` for a disposable sandbox stack. The
+    // container's own `ENVIRONMENT` answers a different question the
+    // backend asks of it: "has this process been deployed at all, as
+    // opposed to running on a developer's own machine" (`core.deployment
+    // .is_local_environment`, and every one-off `environment == "production"`
+    // check in `main.py`/`mvp/authz.py` that predates that module). Every
+    // ECS Fargate task IS a deployment by construction, whatever resource
+    // tier it was synthesized with, so this is always `'production'` --
+    // see docs/DEPLOYMENT.md's `ENVIRONMENT` row (under "Backend environment
+    // variables") for the behaviours this controls and why conflating the
+    // two meant a `cdk deploy` with no `ENVIRONMENT` exported (the default)
+    // shipped a production-reachable gateway running every local-machine
+    // relaxation: the required-env check skipped, CORS's `http://` refusal
+    // skipped, and the admin-creation bootstrap window's expiry requirement
+    // skipped.
+    ENVIRONMENT: 'production',
     STRATOCLAVE_PREFIX: prefix,
     AWS_REGION: env.region,
 
@@ -661,6 +679,24 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // 'private': the operator's own domain name for the PrivateLink
     // publication — the single private URL returned in the config.
     STRATOCLAVE_API_ENDPOINT: entryUrl,
+
+    // Comma-separated extra hosts a signed AWS sign-in may also name
+    // (`mvp.sso_sts.expected_audiences`), for a deployment reached under
+    // more than one name. No default: an empty string is what the backend
+    // already treats as "none configured" (`core.deployment`'s `.strip()`
+    // empty-check). Passed unconditionally, like `STRATOCLAVE_API_ENDPOINT`
+    // and `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` above/below -- the container's
+    // key set must not depend on which shell ran `cdk deploy`, or a value
+    // set by hand on the task definition is silently dropped by the next
+    // deploy that forgot to export it (docs/DEPLOYMENT.md, "Binding AWS
+    // sign-in to this gateway").
+    STRATOCLAVE_STS_AUDIENCES: process.env.STRATOCLAVE_STS_AUDIENCES || '',
+    // Requires every signed AWS sign-in to name one of the hosts above
+    // (`mvp.sso_sts.audience_required`, read with `core.deployment
+    // .strict_flag`: an unrecognised spelling fails the backend's own
+    // startup rather than silently reading as off). Off by default so
+    // CLIs older than 0.2.1 keep working; see the same runbook.
+    STRATOCLAVE_STS_AUDIENCE_REQUIRED: process.env.STRATOCLAVE_STS_AUDIENCE_REQUIRED || '',
 
     // Feature flags (MVP)
     VERIFIED_PERMISSIONS_ENABLED: 'false',

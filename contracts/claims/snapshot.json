@@ -688,9 +688,6 @@
   "cl-9c179ef121d8": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
-  "cl-9d60f69d307d": {
-   "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
-  },
   "cl-9eba20ef70eb": {
    "first_seen": "seeded from contracts/claims/anchored.json at the point the ratchet was introduced (CONTRACT-claim-coverage item 3)"
   },
@@ -1303,14 +1300,149 @@
   "cl-f712992c01ff": {
    "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.9)"
   },
-  "cl-eb902815f266": {
-   "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.10)"
-  },
   "cl-1f26ac9a4ce4": {
    "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.9)"
   },
-  "cl-cc963e964b60": {
-   "first_seen": "docs/DEPLOYMENT.md, binding AWS sign-in (C6.9)"
+  "cl-d1c46e9f32fa": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-e80179a4cb2e": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-e24ea498bece": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-cb46da440980": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-76ad824a56d0": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-41833305e4ad": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-9ca4db8a8e25": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-37f92d1042f7": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-28143409407b": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-a63b7a95e18c": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-2593227b6c0b": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-04f2aa9097a5": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-593fa4f569ca": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-e264aefd0650": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-4fe516b38183": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-900367e3ffb4": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-337570c2ca8b": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-8174cd2854a6": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-947a36cc1a9e": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-fc0ca9ab789b": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-9a74f338239a": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-15c15d10574f": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-9513b4904165": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-f257d3f3dff7": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-0f7474276dbb": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-5d78988446f4": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-2c23f084f277": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-8594a9fbe755": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-2b51094a7509": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-7b932518eed3": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-7bff2dbdc9e9": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-f7ecad3577e8": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-d896e6153104": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-6669dce47f0f": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-022a4c48f72b": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-3d9b102e44c4": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-8c450098712a": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-2fa39a59f99e": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-aa4a19a6a9f0": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-84ac1c99f7ab": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-c1c6f1488d9f": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-796d52ed8fa1": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-0185d6a8d4e5": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-77bd0fdd91fe": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-f453dc7ee238": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-18d64e329912": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-d56289e25dce": {
+   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   }
  },
  "retired": {
@@ -1408,6 +1540,26 @@
    "disposition": "reworded-to",
    "target": "cl-395db96c78d6",
    "why": "the synth check for the default model now reads the registry instead of a prefix rule; the obligation moved"
+  },
+  "cl-9d60f69d307d": {
+   "disposition": "reworded-to",
+   "target": "cl-d1c46e9f32fa",
+   "why": "the DynamoDB table inventory sentence gained two more retained tables (`credit-ledger`, `quota-events`); same sentence, new wording, new id"
+  },
+  "cl-eb902815f266": {
+   "disposition": "moved-to-clause",
+   "target": "C6.13",
+   "why": "the sign-in rate-limiting sentence this claim registered is superseded by the new C6.13 clause (identity-keyed plus address-keyed sign-in rate limits); docs/DEPLOYMENT.md's prose on the topic now anchors to that clause instead of standing as its own freestanding claim"
+  },
+  "cl-cc963e964b60": {
+   "disposition": "reworded-to",
+   "target": "cl-c1c6f1488d9f",
+   "why": "the STRATOCLAVE_STS_AUDIENCES table cell gained the IaC-wiring sentence; same cell, new wording, new id"
+  },
+  "cl-a0516a8dc567": {
+   "disposition": "reworded-to",
+   "target": "cl-8594a9fbe755",
+   "why": "reworded to avoid a false NOT_YET match ('does not yet know about' read as an unbuilt-feature confession rather than a per-deployment configuration state); same sentence, same meaning"
   }
  },
  "detector": {
@@ -1573,8 +1725,6 @@
     "C6.7": "E",
     "C6.8": "E",
     "C6.9": "E",
-    "C6.10": "E",
-    "C6.9": "E",
     "C6.10": "B",
     "C7.1": "E",
     "C7.2": "E",
@@ -1655,7 +1805,10 @@
     "C14.33": "B",
     "C14.34": "E",
     "C14.35": "B",
-    "C14.36": "E"
+    "C14.36": "E",
+    "C6.11": "E",
+    "C6.12": "E",
+    "C6.13": "E"
    }
   },
   "retired": {},

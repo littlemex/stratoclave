@@ -33,7 +33,13 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.rate_limit import SSO_EXCHANGE_RATE_LIMIT, limiter
+from core.rate_limit import (
+    AUTH_ADDRESS_RATE_LIMIT,
+    AUTH_SIGN_IN_ADDRESS_SCOPE,
+    SSO_EXCHANGE_RATE_LIMIT,
+    check_identity_rate_limit,
+    limiter,
+)
 
 from dynamo import (
     SsoPreRegistrationsRepository,
@@ -44,7 +50,7 @@ from dynamo import (
 
 from .authz import log_audit_event
 from .sso_gate import validate_sso_identity
-from .sso_sts import verify_and_call_sts
+from .sso_sts import access_key_id_of, verify_and_call_sts
 
 
 router = APIRouter(prefix="/api/mvp/auth", tags=["mvp-sso"])
@@ -210,13 +216,24 @@ def _cognito_admin_password_auth(
 # Endpoint
 # ------------------------------------------------------------------
 @router.post("/sso-exchange", response_model=SsoExchangeResponse)
-@limiter.limit(SSO_EXCHANGE_RATE_LIMIT)
+@limiter.limit(AUTH_ADDRESS_RATE_LIMIT, scope=AUTH_SIGN_IN_ADDRESS_SCOPE)
 def sso_exchange(request: Request, body: SsoExchangeRequest) -> SsoExchangeResponse:
-    """P0-3: per-IP rate limit (default 20/minute). The STS presigned
-    verification itself is cheap but we forward it to the AWS STS API,
-    so an unbounded rate would let an attacker waste our rate budget
-    and run identity-enumeration against the allowlisted accounts."""
+    """Two independent limits, as every unauthenticated sign-in route has
+    (`core/rate_limit.py`): the decorator above is this address's share of
+    the coarse flood guard shared by every sign-in route, and the check below
+    is `SSO_EXCHANGE_RATE_LIMIT` (default 20/minute) keyed on the access key
+    id the presigned request names. The STS presigned verification itself is
+    cheap but we forward it to the AWS STS API, so an unbounded rate would let
+    an attacker waste our rate budget and run identity-enumeration against
+    the allowlisted accounts; keying on the access key id rather than only
+    the address bounds that per credential, not just per source, so rotating
+    addresses does not buy a fresh quota for the same credential."""
     _ = request
+    access_key_id = access_key_id_of(dict(body.headers))
+    if access_key_id:
+        check_identity_rate_limit(
+            "auth_sso_exchange_identity", "sts", access_key_id, SSO_EXCHANGE_RATE_LIMIT
+        )
     # 1. Verify STS presigned request and extract identity.
     sts_identity = verify_and_call_sts(
         method=body.method,

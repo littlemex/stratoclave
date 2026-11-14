@@ -169,6 +169,25 @@ SSO_EXCHANGE_RATE_LIMIT = os.getenv("SSO_EXCHANGE_RATE_LIMIT", "20/minute")
 # the ~20-way concurrency the reserve CAS was tuned for.
 BILLING_WRITE_RATE_LIMIT = os.getenv("BILLING_WRITE_RATE_LIMIT", "60/minute")
 
+# A sign-in request has no verified caller yet, so the `@limiter.limit(...)`
+# decorator on each sign-in route cannot bucket it by user -- the address is
+# all there is for the DECORATOR to key on. But a single shared address
+# (behind a NAT, or on the private entry where every request arrives from the
+# load balancer) must not become one global lockout: the decorator's address
+# bucket is therefore a coarse FLOOD GUARD, sized well above what normal
+# shared egress produces, and every sign-in route writes to the SAME scope
+# (`AUTH_SIGN_IN_ADDRESS_SCOPE` below) so an attacker cannot multiply their
+# address budget by spreading requests across `/login`, `/respond`,
+# `/sso-exchange` and `/ui-ticket/consume`. The tight, credential-guessing
+# limits above (`LOGIN_RATE_LIMIT` etc.) move to a SEPARATE check keyed on the
+# identity the request names -- the username/email for `/login` and
+# `/respond`, the access key id for `/sso-exchange` -- run explicitly inside
+# each handler via `check_identity_rate_limit` below, because that identity
+# lives in the request BODY, which a `Request`-only decorator cannot read.
+# See docs/DEPLOYMENT.md's rate-limit section for the sizing rationale.
+AUTH_ADDRESS_RATE_LIMIT = os.getenv("AUTH_ADDRESS_RATE_LIMIT", "300/minute")
+AUTH_SIGN_IN_ADDRESS_SCOPE = "auth_sign_in_address"
+
 
 # The limiter is DynamoDB-backed (fixed-window, TTL-reaped). Per-IP
 # counters are shared across every ECS task, so caps hold under
@@ -188,9 +207,11 @@ def _request_key(request: Request) -> str:
     route runs, so it exists only after authentication has succeeded. Keyed on the user because an address is a poor
     identity for an authenticated caller: users behind one NAT share it, and on
     the private (PrivateLink) entry every request arrives from the load balancer.
-    Unauthenticated routes (sign-in) still key on the address, so on the private
-    entry their limit is shared by every caller (docs/DEPLOYMENT.md); a request
-    that fails authentication never reaches the limiter."""
+    Unauthenticated routes (sign-in) key on the address here too -- but that is
+    now only this decorator's coarse flood guard (`AUTH_ADDRESS_RATE_LIMIT`
+    above); the credential-guessing-relevant limit is the identity-keyed check
+    each sign-in handler runs itself. A request that fails authentication
+    never reaches the limiter."""
     principal = getattr(getattr(request, "state", None), "rate_principal", None)
     if principal:
         return f"user:{principal}"
@@ -200,11 +221,47 @@ def _request_key(request: Request) -> str:
 limiter = DynamoRateLimiter(client_key_func=_request_key)
 
 
+def identity_key(kind: str, raw: str) -> str:
+    """The rate-limit bucket for an identity a sign-in request NAMES ITSELF AS,
+    not one it merely presents in a free-form header: the username/email a
+    `/login` or `/respond` body carries, or the access key id a `/sso-exchange`
+    body's `Credential=` names. `kind` separates the two namespaces so a
+    username that happened to collide with an access key id could not share a
+    bucket with it. Lowercased and stripped so two spellings of the same
+    identity (`Alice@Example.com` / `alice@example.com`) cannot each buy their
+    own quota -- the whole point is that this bucket is exactly as hard for an
+    attacker to multiply as the account it names.
+    """
+    return f"identity:{kind}:{raw.strip().lower()}"
+
+
+def check_identity_rate_limit(scope: str, kind: str, raw_identity: str, spec: str) -> None:
+    """Run one DynamoDB-backed rate check immediately, keyed on the identity a
+    sign-in request names (`identity_key`) rather than on the `Request` object
+    the `@limiter.limit(...)` decorator reads -- the identity lives in a body
+    field FastAPI has not finished parsing at decoration time, so this has to
+    run inside the handler, after `body` exists, and before any expensive work
+    (a Cognito call, forwarding to STS) happens for a credential that might be
+    one of thousands an attacker is trying. Raises `RateLimitExceeded` (a 429)
+    exactly as the decorator does, through the same `_check`/`_parse_spec`
+    this module's own `DynamoRateLimiter.limit` uses, so the two mechanisms
+    share one failure policy, one TTL-reaped table and one 429 shape.
+    """
+    from core.rate_limit_ddb import _check, _parse_spec
+
+    limit, window = _parse_spec(spec)
+    _check(scope, identity_key(kind, raw_identity), limit, window)
+
+
 __all__ = [
+    "AUTH_ADDRESS_RATE_LIMIT",
+    "AUTH_SIGN_IN_ADDRESS_SCOPE",
     "BILLING_WRITE_RATE_LIMIT",
     "LOGIN_RATE_LIMIT",
     "RESPOND_RATE_LIMIT",
     "RateLimitExceeded",
     "SSO_EXCHANGE_RATE_LIMIT",
+    "check_identity_rate_limit",
+    "identity_key",
     "limiter",
 ]
