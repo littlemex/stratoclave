@@ -287,4 +287,140 @@ describe('resolveRegionConfig — residency (STRATOCLAVE_RESIDENCY)', () => {
     const cfg = resolveRegionConfig(baseEnv());
     expect(cfg.residencyWarnings).toEqual([]);
   });
+
+  test('jp. / au. / ca. are recognized as geo inference profiles under strict residency', () => {
+    for (const prefix of ['jp', 'au', 'ca']) {
+      expect(() =>
+        resolveRegionConfig(
+          baseEnv({
+            STRATOCLAVE_REGION: 'us-east-1',
+            STRATOCLAVE_FAILOVER_REGIONS: 'disabled',
+            STRATOCLAVE_CODEX_ENABLED: 'false',
+            STRATOCLAVE_RESIDENCY: 'strict',
+            DEFAULT_BEDROCK_MODEL: `${prefix}.anthropic.claude-opus-5`,
+          }),
+        ),
+      ).toThrow(/geo cross-region inference profile/i);
+    }
+  });
+});
+
+describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFERENCE_REGIONS)', () => {
+  // A Japan boundary needs codex explicitly off: codex's registry pin
+  // (us-west-2/us-east-2) is never inside a Japan-only boundary.
+  function japanBoundaryEnv(overrides: Env = {}): Env {
+    return baseEnv({
+      STRATOCLAVE_REGION: 'ap-northeast-1',
+      BEDROCK_PRIMARY_REGION: 'ap-northeast-1',
+      STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-1,ap-northeast-3',
+      STRATOCLAVE_CODEX_ENABLED: 'false',
+      ...overrides,
+    });
+  }
+
+  test('unset: no boundary, inferenceBoundaryInfo says "none", no warnings', () => {
+    const cfg = resolveRegionConfig(baseEnv());
+    expect(cfg.inferenceRegions).toBeUndefined();
+    expect(cfg.inferenceBoundaryInfo).toMatch(/none/);
+    expect(cfg.inferenceBoundaryWarnings).toEqual([]);
+  });
+
+  test('set: parsed, trimmed, order preserved; info names the effective boundary', () => {
+    const cfg = resolveRegionConfig(
+      japanBoundaryEnv({ STRATOCLAVE_INFERENCE_REGIONS: ' ap-northeast-1 , ap-northeast-3 ' }),
+    );
+    expect(cfg.inferenceRegions).toEqual(['ap-northeast-1', 'ap-northeast-3']);
+    expect(cfg.inferenceBoundaryInfo).toMatch(/ap-northeast-1, ap-northeast-3/);
+  });
+
+  test('empty string throws (treated as a blank entry, not "unset")', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_INFERENCE_REGIONS: '' })),
+    ).toThrow(/STRATOCLAVE_INFERENCE_REGIONS must be a non-empty/);
+  });
+
+  test('a blank entry throws', () => {
+    expect(() =>
+      resolveRegionConfig(
+        japanBoundaryEnv({ STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-1,,ap-northeast-3' }),
+      ),
+    ).toThrow(/STRATOCLAVE_INFERENCE_REGIONS must be a non-empty/);
+  });
+
+  test('a duplicate entry throws', () => {
+    expect(() =>
+      resolveRegionConfig(
+        japanBoundaryEnv({ STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-1,ap-northeast-1' }),
+      ),
+    ).toThrow(/lists "ap-northeast-1" more than once/);
+  });
+
+  test('a malformed region entry throws via assertRegion', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_INFERENCE_REGIONS: 'JAPAN' })),
+    ).toThrow(/STRATOCLAVE_INFERENCE_REGIONS entry/);
+  });
+
+  test('BEDROCK_PRIMARY_REGION outside the boundary throws, naming both', () => {
+    expect(() =>
+      resolveRegionConfig(
+        japanBoundaryEnv({ STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-3' }),
+      ),
+    ).toThrow(/BEDROCK_PRIMARY_REGION \(ap-northeast-1\) is not inside STRATOCLAVE_INFERENCE_REGIONS \(ap-northeast-3\)/);
+  });
+
+  test('codex enabled with a registry region outside the boundary throws, naming the opt-out', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_CODEX_ENABLED: 'true' })),
+    ).toThrow(/STRATOCLAVE_CODEX_ENABLED=false/);
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_CODEX_ENABLED: 'true' })),
+    ).toThrow(/us-west-2|us-east-2/);
+  });
+
+  test('codex explicitly disabled under the same boundary does not throw', () => {
+    expect(() => resolveRegionConfig(japanBoundaryEnv())).not.toThrow();
+  });
+
+  test('STRATOCLAVE_FAILOVER_REGIONS set under a boundary warns that it is ignored', () => {
+    const cfg = resolveRegionConfig(
+      japanBoundaryEnv({ STRATOCLAVE_FAILOVER_REGIONS: 'disabled' }),
+    );
+    expect(cfg.inferenceBoundaryWarnings.join('\n')).toMatch(
+      /STRATOCLAVE_FAILOVER_REGIONS is set but is ignored/,
+    );
+  });
+
+  test('STRATOCLAVE_FAILOVER_REGIONS unset under a boundary produces no such warning', () => {
+    const cfg = resolveRegionConfig(japanBoundaryEnv());
+    expect(cfg.inferenceBoundaryWarnings).toEqual([]);
+  });
+
+  test('a deploy region outside the boundary warns that the gateway itself sits outside it', () => {
+    const cfg = resolveRegionConfig(
+      baseEnv({
+        STRATOCLAVE_REGION: 'us-west-2',
+        BEDROCK_PRIMARY_REGION: 'us-east-1',
+        STRATOCLAVE_INFERENCE_REGIONS: 'us-east-1',
+        STRATOCLAVE_CODEX_ENABLED: 'false',
+      }),
+    );
+    expect(cfg.inferenceBoundaryWarnings.join('\n')).toMatch(
+      /deploy region us-west-2 is outside STRATOCLAVE_INFERENCE_REGIONS/,
+    );
+  });
+
+  test('a deploy region inside the boundary produces no such warning', () => {
+    const cfg = resolveRegionConfig(japanBoundaryEnv());
+    expect(cfg.inferenceBoundaryWarnings).toEqual([]);
+  });
+
+  test('STRATOCLAVE_RESIDENCY set together with STRATOCLAVE_INFERENCE_REGIONS throws, naming which to keep', () => {
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_RESIDENCY: 'warn' })),
+    ).toThrow(/STRATOCLAVE_INFERENCE_REGIONS and STRATOCLAVE_RESIDENCY cannot both be set/);
+    expect(() =>
+      resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_RESIDENCY: 'strict' })),
+    ).toThrow(/Keep STRATOCLAVE_INFERENCE_REGIONS/);
+  });
 });

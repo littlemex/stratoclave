@@ -385,15 +385,96 @@ the default failover set reaches `eu-west-1` — that is intended (strict means
 strict); set `STRATOCLAVE_FAILOVER_REGIONS=disabled` too.
 
 **Geo inference profiles break single-region residency.** A model id prefixed
-`us.` / `eu.` / `apac.` / `global.` (e.g. the default `us.anthropic.claude-opus-4-7`)
-is a *geography* cross-region inference profile — AWS routes inference to any
-region within that geography at its discretion, so no single-region guarantee is
-possible. Under `STRATOCLAVE_RESIDENCY=strict` a geo-profile model is **refused at
-synth**; you must set `DEFAULT_BEDROCK_MODEL` to a directly-hosted, region-specific
-model id (no geo prefix). If geography-level residency (rather than single-region)
-is acceptable, set `STRATOCLAVE_ALLOW_GEO_INFERENCE=true` to downgrade the refusal
-to a warning. Also verify the model is actually available in the target region:
+`us.` / `eu.` / `apac.` / `jp.` / `au.` / `ca.` / `global.` (e.g. the default
+`us.anthropic.claude-opus-4-7`) is a *geography* cross-region inference profile —
+AWS routes inference to any region within that geography at its discretion, so
+no single-region guarantee is possible. Under `STRATOCLAVE_RESIDENCY=strict` a
+geo-profile model is **refused at synth**; you must set `DEFAULT_BEDROCK_MODEL` to
+a directly-hosted, region-specific model id (no geo prefix). If geography-level
+residency (rather than single-region) is acceptable, set
+`STRATOCLAVE_ALLOW_GEO_INFERENCE=true` to downgrade the refusal to a warning. Also
+verify the model is actually available in the target region:
 `aws bedrock list-foundation-models --region eu-west-1`.
+
+### Keeping inference inside a set of regions
+
+`STRATOCLAVE_RESIDENCY` (above) only ever warns, or hard-fails `cdk synth`, on a
+leak the app itself would reach — it is a synth-time check, not an AWS-enforced
+boundary. `STRATOCLAVE_INFERENCE_REGIONS` is a different, stronger mechanism: a
+comma-separated allowlist of AWS regions Bedrock inference may run in, enforced
+by AWS IAM itself, not merely checked at synth. The two mechanisms address the
+same concern and cannot both be set — pick one.
+
+```bash
+# Japan: keep every Bedrock call inside Tokyo / Osaka.
+export STRATOCLAVE_INFERENCE_REGIONS=ap-northeast-1,ap-northeast-3
+export BEDROCK_PRIMARY_REGION=ap-northeast-1       # must be inside the boundary
+export STRATOCLAVE_CODEX_ENABLED=false             # see below
+
+# US: keep every Bedrock call inside the three Claude US regions.
+export STRATOCLAVE_INFERENCE_REGIONS=us-east-1,us-east-2,us-west-2
+export BEDROCK_PRIMARY_REGION=us-east-1
+```
+
+What is enforced, and where:
+
+- **The gateway's model listing** (what `/v1/models` offers) is filtered by the
+  backend container, which reads the same `STRATOCLAVE_INFERENCE_REGIONS` value
+  from its own environment and serves only the models whose destination
+  region(s) all lie inside it.
+- **AWS IAM** independently refuses anything outside the boundary. The ECS task
+  role's Bedrock permissions are generated from
+  `STRATOCLAVE_INFERENCE_REGIONS`: every `foundation-model` / `inference-profile`
+  resource is scoped to one ARN per region in the boundary (instead of a
+  wildcard region), and an explicit `Deny` is added on the region-less
+  foundation-model ARN. Measured 2026-11-14 against the real Bedrock API: calling
+  a geo inference profile authorizes `bedrock:InvokeModel` on EVERY destination
+  region's foundation-model ARN up front — a role granted the Tokyo
+  (`ap-northeast-1`) and Osaka (`ap-northeast-3`) foundation-model ARNs could call
+  `jp.anthropic.*` 10/10, while `apac.anthropic.*` (whose destinations are outside
+  that pair) was denied 30/30, and `global.anthropic.*` was denied on the
+  region-less foundation-model ARN — the exact ARN this boundary now explicitly
+  denies. So a boundary is enforced twice, independently: even a backend defect
+  that served a model outside the boundary would still have its Bedrock call
+  refused by AWS.
+- **Codex (the OpenAI/xAI path) must be disabled.** OpenAI GPT and xAI models on
+  Bedrock have no Japan-bounded (or other narrow) cross-region profile — only a
+  `global.` one — and the codex path's call region is hardwired in the backend
+  registry to `us-east-2` / `us-west-2` regardless of this variable. A boundary
+  that excludes those two regions and leaves codex enabled fails `cdk synth`
+  outright, naming `STRATOCLAVE_CODEX_ENABLED=false` as the fix.
+- **Same-id cross-region failover is off.** `STRATOCLAVE_FAILOVER_REGIONS` is
+  ignored once a boundary is set (the backend turns same-id streaming failover
+  off under a boundary) — a geo inference profile already fails over inside its
+  own geography, and same-id failover would otherwise be the one path that could
+  still cross the boundary. Setting it anyway only produces a `cdk synth`
+  warning, not an error.
+- **The boundary covers Bedrock inference only.** It says nothing about where
+  the gateway's own compute, logs, or CloudFront distribution run — those follow
+  `STRATOCLAVE_REGION` / the WAF's fixed `us-east-1`, as always. A deploy region
+  outside the boundary produces a `cdk synth` warning naming this explicitly.
+- **The effective boundary is always named** in a `cdk synth` / `cdk diff`
+  informational annotation ("none" when unset), so redeploying from a shell that
+  forgot to export `STRATOCLAVE_INFERENCE_REGIONS` is visible as the boundary
+  silently widening back to "none", rather than invisible.
+
+To audit what actually ran, Bedrock model-invocation logging (when turned on)
+records the destination region per call as `inferenceRegion`. This CloudWatch
+Logs Insights query lists any invocation whose `inferenceRegion` fell outside a
+Japan boundary:
+
+```
+fields @timestamp, modelId, inferenceRegion
+| filter inferenceRegion not in ["ap-northeast-1", "ap-northeast-3"]
+| stats count() by modelId, inferenceRegion
+```
+
+An empty result is the expected state: the IAM boundary above denies anything
+outside it before it would ever reach invocation logging. Treat ANY row this
+query returns as the alarm it is — it means a call to a region outside the
+intended boundary actually succeeded, which should not be reachable while the
+IAM boundary is in place; investigate immediately rather than assuming it is
+benign.
 
 ---
 
@@ -532,7 +613,7 @@ Injected automatically by `iac/bin/iac.ts` when you deploy; listed here so you c
 | `STRATOCLAVE_REGION`                      | IaC-only                | n/a         | Body-stack deploy region `R` (Network/DynamoDB/ECR/ALB/Frontend/Cognito/ECS/Config). Falls back to `CDK_DEFAULT_REGION`, then `us-east-1`. The WAF stack always stays in `us-east-1`. GovCloud/China partitions are rejected. When `R != us-east-1` you must `cdk bootstrap` both `R` and `us-east-1`. See [Regional constraints](#regional-constraints). |
 | `BEDROCK_PRIMARY_REGION`                 | IaC-only                | n/a         | Bedrock **model** primary region, independent of `R`. Becomes the task's `BEDROCK_REGION`. **Required at synth when `STRATOCLAVE_REGION != us-east-1`** (Stratoclave refuses to guess). Defaults to `us-east-1` when `R == us-east-1`. |
 | `STRATOCLAVE_RESIDENCY`                   | IaC-only                | n/a         | `strict` \| `warn` (any other value is rejected at synth). `strict` makes `cdk synth` **hard-fail** if any region Bedrock is actually called in (model + failover + codex) differs from the exact deploy region, or if the default model is a geo inference profile. `warn` (or unset) only warns, and only when `R` is non-default or this var is set. See the data-residency recipe under [Regional constraints](#regional-constraints). |
-| `STRATOCLAVE_ALLOW_GEO_INFERENCE`        | IaC-only                | n/a         | `true` downgrades the strict-mode refusal of a geo inference-profile model (`us./eu./apac./global.`-prefixed) to a warning — i.e. accept geography-level residency instead of single-region. Default: unset (strict refuses geo profiles). |
+| `STRATOCLAVE_ALLOW_GEO_INFERENCE`        | IaC-only                | n/a         | `true` downgrades the strict-mode refusal of a geo inference-profile model (`us./eu./apac./jp./au./ca./global.`-prefixed) to a warning — i.e. accept geography-level residency instead of single-region. Default: unset (strict refuses geo profiles). |
 | `OPENAI_BEDROCK_REGIONS`                 | IaC-only                | yes (default `us-east-2,us-west-2`) | **Display-only hint** surfaced to the CLI via `/.well-known/stratoclave-config`. It does **not** change the codex call region — that is hardwired per-model in `backend/mvp/models.py`. For residency, disable codex with `STRATOCLAVE_CODEX_ENABLED=false`; setting this var does not keep codex prompts in-region. |
 | `CDK_NAG`                                | IaC-only                | n/a         | Set to `off` to skip the cdk-nag synth-time aspect. Default: `on`. |
 | `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`      | optional                | no          | If set, the backend auto-provisions this email as admin on first startup when no admin exists. Idempotent. |

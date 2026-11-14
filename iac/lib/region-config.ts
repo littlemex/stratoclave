@@ -15,6 +15,12 @@
  *    STRATOCLAVE_FAILOVER_REGIONS list is honoured verbatim. Geo inference
  *    profiles cannot certify single-region residency. STRATOCLAVE_RESIDENCY=
  *    strict turns leaks into synth errors.
+ *  - Inference boundary: STRATOCLAVE_INFERENCE_REGIONS is a hard allowlist of
+ *    regions Bedrock inference may run in, AWS-enforced (not just checked at
+ *    synth) via the IAM this module's output drives in lib/ecs-stack.ts and the
+ *    container env the backend reads. A different mechanism from
+ *    STRATOCLAVE_RESIDENCY, so the two cannot both be set. See
+ *    docs/DEPLOYMENT.md, "Keeping inference inside a set of regions".
  */
 
 export const DEFAULT_REGION = 'us-east-1'; // historical single-region default (body)
@@ -34,7 +40,10 @@ const FAILOVER_DISABLE_SENTINELS = new Set(['', 'none', 'disabled', 'off']);
 const OPENAI_REGISTRY_REGIONS = ['us-west-2', 'us-east-2'];
 // Geo (cross-region) inference-profile prefixes. Denylist — extend as AWS ships
 // new geographies. us-gov is included though the gov partition is rejected.
-const GEO_PROFILE_RE = /^(us|eu|apac|global|us-gov)\./;
+// `jp`/`au`/`ca` mirror the backend's own list
+// (`backend/mvp/pricing_feeds/dimensions.py::_GEO_PROFILE_PREFIXES`); keep the
+// two in sync when AWS ships another geography.
+const GEO_PROFILE_RE = /^(us|eu|apac|jp|au|ca|global|us-gov)\./;
 
 export interface RegionConfig {
   bodyRegion: string;
@@ -48,6 +57,29 @@ export interface RegionConfig {
   residencyWarnings: string[];
   /** Deprecated-env-var-name warnings to surface as CDK Annotations (empty in the common case). */
   deprecationWarnings: string[];
+  /**
+   * Parsed STRATOCLAVE_INFERENCE_REGIONS — a hard allowlist of regions Bedrock
+   * inference may run in — or `undefined` when unset (no boundary, today's
+   * behaviour). Unlike `residencyWarnings` (synth-time warn/refuse only), this
+   * list also drives IAM generation in lib/ecs-stack.ts and is forwarded to the
+   * backend container, so AWS itself — not just this check — refuses anything
+   * outside it. See docs/DEPLOYMENT.md, "Keeping inference inside a set of
+   * regions".
+   */
+  inferenceRegions: string[] | undefined;
+  /**
+   * Informational CDK Annotation naming the effective boundary ("none" when
+   * unset), always present (length-1 message), so a redeploy from a shell
+   * without STRATOCLAVE_INFERENCE_REGIONS set is visible in `cdk synth`/`cdk diff`
+   * rather than silently widening back to "no boundary".
+   */
+  inferenceBoundaryInfo: string;
+  /**
+   * Warnings specific to the inference-region boundary (failover ignored under
+   * it / the deploy region itself sits outside it). Surfaced as CDK Annotations,
+   * same mechanism as `residencyWarnings`. Empty when no boundary is set.
+   */
+  inferenceBoundaryWarnings: string[];
 }
 
 export type Env = Record<string, string | undefined>;
@@ -108,6 +140,38 @@ export function effectiveFailoverRegions(env: Env, primaryRegion: string): strin
     }
   }
   return out;
+}
+
+/**
+ * Parse STRATOCLAVE_INFERENCE_REGIONS: comma-separated, each entry trimmed and
+ * validated with `assertRegion`. Unlike `parseRegionList` (used for the
+ * failover list, which silently drops blank items), a boundary is a security
+ * allowlist — a blank item, an empty overall list, or a duplicate is a
+ * misconfiguration and MUST throw rather than silently narrowing to something
+ * the operator did not ask for.
+ */
+function parseInferenceRegionsList(raw: string): string[] {
+  const items = raw.split(',').map((r) => r.trim());
+  if (items.length === 0 || items.some((r) => r.length === 0)) {
+    throw new Error(
+      `STRATOCLAVE_INFERENCE_REGIONS must be a non-empty comma-separated list of ` +
+        `AWS region ids with no blank entries (got "${raw}"). Example: ` +
+        `STRATOCLAVE_INFERENCE_REGIONS=ap-northeast-1,ap-northeast-3`
+    );
+  }
+  const seen = new Set<string>();
+  for (const r of items) {
+    if (seen.has(r)) {
+      throw new Error(
+        `STRATOCLAVE_INFERENCE_REGIONS lists "${r}" more than once (got "${raw}").`
+      );
+    }
+    seen.add(r);
+  }
+  for (const r of items) {
+    assertRegion('STRATOCLAVE_INFERENCE_REGIONS entry', r);
+  }
+  return items;
 }
 
 /**
@@ -192,6 +256,84 @@ export function resolveRegionConfig(env: Env): RegionConfig {
   }
   const codexEnabled = codexEnabledRaw.toLowerCase() === 'true';
 
+  // --- Inference-region boundary (STRATOCLAVE_INFERENCE_REGIONS) -----------
+  // A hard allowlist of AWS regions Bedrock inference may run in. Unset means
+  // no boundary (today's behaviour). This is a DIFFERENT mechanism from
+  // STRATOCLAVE_RESIDENCY: residency only warns or hard-fails THIS synth on a
+  // leak the app would reach; the boundary also drives what the ECS task
+  // role's IAM policy actually grants (lib/ecs-stack.ts) and what the backend
+  // container is told to serve, so AWS itself refuses anything outside it —
+  // not merely this check. The two mechanisms address the same concern
+  // (where Bedrock inference may run) through different enforcement points,
+  // so setting both is rejected rather than silently picking one.
+  const inferenceRegionsRaw = env.STRATOCLAVE_INFERENCE_REGIONS;
+  const inferenceRegions: string[] | undefined =
+    inferenceRegionsRaw === undefined
+      ? undefined
+      : parseInferenceRegionsList(inferenceRegionsRaw);
+
+  if (inferenceRegions !== undefined && env.STRATOCLAVE_RESIDENCY !== undefined) {
+    throw new Error(
+      `STRATOCLAVE_INFERENCE_REGIONS and STRATOCLAVE_RESIDENCY cannot both be set: ` +
+        `they are two different mechanisms for the same concern (where Bedrock ` +
+        `inference may run), and having both set leaves it ambiguous which one ` +
+        `governs. Keep STRATOCLAVE_INFERENCE_REGIONS — it is enforced by AWS IAM, not ` +
+        `just a synth-time warning or refusal — and unset STRATOCLAVE_RESIDENCY; or, ` +
+        `if you specifically want the single-region/geo-profile synth-time checks ` +
+        `instead, unset STRATOCLAVE_INFERENCE_REGIONS.`
+    );
+  }
+
+  const inferenceBoundaryWarnings: string[] = [];
+  if (inferenceRegions !== undefined) {
+    if (!inferenceRegions.includes(bedrockPrimaryRegion)) {
+      throw new Error(
+        `BEDROCK_PRIMARY_REGION (${bedrockPrimaryRegion}) is not inside ` +
+          `STRATOCLAVE_INFERENCE_REGIONS (${inferenceRegions.join(', ')}): the model's own ` +
+          `primary region must be reachable within the boundary, or every request fails.`
+      );
+    }
+    if (codexEnabled) {
+      const codexLeaks = OPENAI_REGISTRY_REGIONS.filter(
+        (r) => !inferenceRegions.includes(r)
+      );
+      if (codexLeaks.length > 0) {
+        throw new Error(
+          `STRATOCLAVE_INFERENCE_REGIONS (${inferenceRegions.join(', ')}) excludes ` +
+            `${codexLeaks.join(', ')}, which the OpenAI/codex path is hardwired to ` +
+            `(OpenAI GPT and xAI models on Bedrock have no Japan-bounded profile, only a ` +
+            `"global." one). set STRATOCLAVE_CODEX_ENABLED=false to keep this boundary ` +
+            `with codex off, or widen STRATOCLAVE_INFERENCE_REGIONS to include ` +
+            `${codexLeaks.join(', ')}.`
+        );
+      }
+    }
+    if (env.STRATOCLAVE_FAILOVER_REGIONS !== undefined) {
+      inferenceBoundaryWarnings.push(
+        `[inference-boundary] STRATOCLAVE_FAILOVER_REGIONS is set but is ignored under ` +
+          `STRATOCLAVE_INFERENCE_REGIONS: the backend turns same-id streaming failover ` +
+          `off once a boundary is set (a geo inference profile already fails over ` +
+          `inside its own reach, and same-id failover would otherwise be the ONE path ` +
+          `that could still cross the boundary).`
+      );
+    }
+    if (!inferenceRegions.includes(bodyRegion)) {
+      inferenceBoundaryWarnings.push(
+        `[inference-boundary] the deploy region ${bodyRegion} is outside ` +
+          `STRATOCLAVE_INFERENCE_REGIONS (${inferenceRegions.join(', ')}): the gateway's ` +
+          `own compute and logs are outside the boundary — STRATOCLAVE_INFERENCE_REGIONS ` +
+          `covers Bedrock inference only, not where the gateway itself (or CloudFront) runs.`
+      );
+    }
+  }
+
+  // Always surfaced (info, not warning) so a redeploy from a shell that forgot
+  // to export STRATOCLAVE_INFERENCE_REGIONS is visible in `cdk synth`/`cdk diff`
+  // as a boundary silently widening back to "none", rather than being invisible.
+  const inferenceBoundaryInfo =
+    `[inference-boundary] effective STRATOCLAVE_INFERENCE_REGIONS: ` +
+    (inferenceRegions !== undefined ? inferenceRegions.join(', ') : 'none');
+
   const effectiveFailover = effectiveFailoverRegions(env, bedrockPrimaryRegion);
   for (const r of effectiveFailover) {
     assertRegion('STRATOCLAVE_FAILOVER_REGIONS entry', r);
@@ -246,7 +388,7 @@ export function resolveRegionConfig(env: Env): RegionConfig {
       `[residency] DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a geo cross-region ` +
       `inference profile — AWS routes inference anywhere within its geography, so a ` +
       `single-region residency guarantee for the deploy region ${bodyRegion} cannot ` +
-      `be made. Use a directly-hosted (region-specific, non-"us./eu./apac./global."-` +
+      `be made. Use a directly-hosted (region-specific, non-"us./eu./apac./jp./au./ca./global."-` +
       `prefixed) model id, or set STRATOCLAVE_ALLOW_GEO_INFERENCE=true to accept ` +
       `geography-level (not region-level) residency.`;
     if (residencyStrict && !allowGeoInference) {
@@ -293,5 +435,8 @@ export function resolveRegionConfig(env: Env): RegionConfig {
     codexEnabled,
     residencyWarnings,
     deprecationWarnings,
+    inferenceRegions,
+    inferenceBoundaryInfo,
+    inferenceBoundaryWarnings,
   };
 }

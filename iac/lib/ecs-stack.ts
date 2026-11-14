@@ -27,6 +27,31 @@ export interface EcsStackProps extends cdk.StackProps {
   /** Cognito User Pool ARN (used to scope Task Role permissions) */
   userPoolArn: string;
 
+  /**
+   * Hard allowlist of AWS regions Bedrock inference may run in
+   * (STRATOCLAVE_INFERENCE_REGIONS, resolved by lib/region-config.ts), or
+   * `undefined` when unset (no boundary).
+   *
+   * Undefined => every Bedrock-invoke IAM statement below keeps EXACTLY
+   * today's resources (region wildcarded with `*`), plus the always-present
+   * `inference-profile/jp.anthropic.*` grant — nothing else changes.
+   *
+   * Set => every statement that allows a Bedrock invoke action
+   * (InvokeModel/InvokeModelWithResponseStream/Converse/ConverseStream, and
+   * the OpenAI-compatible surface's own InvokeModel grant) has its
+   * `foundation-model`/`inference-profile` resources regenerated with one ARN
+   * PER region in this list instead of a wildcard region, and an explicit Deny
+   * is added on the region-less foundation-model ARN
+   * (`arn:<partition>:bedrock:::foundation-model/*`) for those same actions —
+   * measured 2026-11-14: that region-less ARN is exactly what a `global.*`
+   * profile's destination call is authorized against, so denying it is what
+   * makes `global.*` profiles unreachable under a boundary. This makes the
+   * boundary AWS-enforced, not merely a backend-side listing filter.
+   *
+   * See docs/DEPLOYMENT.md, "Keeping inference inside a set of regions".
+   */
+  inferenceRegions?: string[];
+
   /** List of DynamoDB table ARNs (used to scope Task Role permissions) */
   dynamoDbTableArns: string[];
 
@@ -173,6 +198,14 @@ export class EcsStack extends cdk.Stack {
     const { prefix } = props;
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
+    // Inference-region boundary (STRATOCLAVE_INFERENCE_REGIONS, resolved by
+    // lib/region-config.ts). `undefined` => no boundary. `partition` is the
+    // stack's own partition token — never hardcoded — used ONLY for the
+    // boundary-generated ARNs below; the pre-existing, unconditional ARN
+    // literals keep their hardcoded "aws" exactly as before (see the Bedrock
+    // IAM block further down for why).
+    const inferenceRegions = props.inferenceRegions;
+    const partition = cdk.Aws.PARTITION;
 
     this.cluster = new ecs.Cluster(this, 'Cluster', {
       vpc: props.vpc,
@@ -706,10 +739,55 @@ export class EcsStack extends cdk.Stack {
     //
     //  - foundation-model: Bedrock-owned, no account boundary → `::`.
     //  - inference-profile: created in this account, prefixed by
-    //    `us./apac./eu./global.` per region.
+    //    `us./apac./eu./global./jp.` per region.
     //
-    // The wildcard region in each ARN covers cross-region inference
-    // routes that originate outside us-east-1.
+    // Resource generation (STRATOCLAVE_INFERENCE_REGIONS, see EcsStackProps):
+    //
+    //   - inferenceRegions === undefined (no boundary, the historical
+    //     default): the resources below are the SAME wildcard-region ARN
+    //     literals this statement has always granted, hardcoded to the "aws"
+    //     partition, PLUS one new line (`inference-profile/jp.anthropic.*` —
+    //     Japan's cross-region profile did not exist in this grant before).
+    //     Nothing else changes.
+    //
+    //   - inferenceRegions set: the wildcard region in EVERY ARN below is
+    //     replaced with one literal ARN per region in the boundary, built
+    //     from the stack's own partition token (`cdk.Aws.PARTITION`, never
+    //     hardcoded "aws") instead of a wildcard.
+    //
+    // These two branches are DELIBERATELY written out separately rather than
+    // through one shared, parameterized ARN-builder: `backend/mvp/registry_checks.py`
+    // (check C13) parses this FILE'S TEXT — not its runtime behaviour — for
+    // literal backtick ARN strings to learn which inference-profile scopes
+    // this task role grants per vendor. A shared builder that interpolates
+    // `${partition}` even for the unconditional branch would stop that text
+    // from containing the literal substring `arn:aws:bedrock`, and C13 would
+    // find no grants at all, regardless of which branch actually runs at a
+    // given synth. Keeping the unconditional branch's ARNs as literal
+    // backtick strings means C13 keeps parsing them out of this file
+    // correctly no matter what STRATOCLAVE_INFERENCE_REGIONS is set to for a
+    // particular deploy — the source text that names every granted prefix is
+    // always present.
+    const anthropicResources: string[] =
+      inferenceRegions === undefined
+        ? [
+            // foundation-model (region-less, account-less)
+            `arn:aws:bedrock:*::foundation-model/anthropic.*`,
+            // inference-profile in this account (us./apac./eu./global./jp. prefix, all regions)
+            `arn:aws:bedrock:*:${account}:inference-profile/us.anthropic.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/apac.anthropic.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/eu.anthropic.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/global.anthropic.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/jp.anthropic.*`,
+          ]
+        : inferenceRegions.flatMap((r) => [
+            `arn:${partition}:bedrock:${r}::foundation-model/anthropic.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/us.anthropic.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/apac.anthropic.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/eu.anthropic.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/global.anthropic.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/jp.anthropic.*`,
+          ]);
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowAnthropicBedrockInvoke',
@@ -720,15 +798,7 @@ export class EcsStack extends cdk.Stack {
           'bedrock:Converse',
           'bedrock:ConverseStream',
         ],
-        resources: [
-          // foundation-model (region-less, account-less)
-          `arn:aws:bedrock:*::foundation-model/anthropic.*`,
-          // inference-profile in this account (us./apac./eu./global. prefix, all regions)
-          `arn:aws:bedrock:*:${account}:inference-profile/us.anthropic.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/apac.anthropic.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/eu.anthropic.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/global.anthropic.*`,
-        ],
+        resources: anthropicResources,
       }),
     );
     // Non-Anthropic models the registry serves over Converse (see
@@ -748,6 +818,20 @@ export class EcsStack extends cdk.Stack {
       'nvidia.nemotron-super-3-120b',
       'qwen.qwen3-next-80b-a3b',
     ];
+    // Same unconditional-literal / boundary-generated split as the Anthropic
+    // statement above, and for the same C13 reason: the `.map()` call in the
+    // unconditional branch is also the shape `registry_checks.py`'s
+    // `_MAP_CALL_RE` looks for to resolve the exact ids this statement grants.
+    const registryConverseResources: string[] =
+      inferenceRegions === undefined
+        ? registryConverseModelIds.map(
+            (modelId) => `arn:aws:bedrock:*::foundation-model/${modelId}`,
+          )
+        : inferenceRegions.flatMap((r) =>
+            registryConverseModelIds.map(
+              (modelId) => `arn:${partition}:bedrock:${r}::foundation-model/${modelId}`,
+            ),
+          );
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowRegistryConverseInvoke',
@@ -758,11 +842,39 @@ export class EcsStack extends cdk.Stack {
           'bedrock:Converse',
           'bedrock:ConverseStream',
         ],
-        resources: registryConverseModelIds.map(
-          (modelId) => `arn:aws:bedrock:*::foundation-model/${modelId}`,
-        ),
+        resources: registryConverseResources,
       }),
     );
+    // Explicit Deny on the region-less foundation-model ARN, ONLY when a
+    // boundary is set. Measured 2026-11-14 against the real Bedrock API: a
+    // `global.*` cross-region inference profile authorizes its destination
+    // call against exactly this ARN shape
+    // (`arn:<partition>:bedrock:::foundation-model/<id>`, no region segment —
+    // "global" has no single region to put there), and a role that is NOT
+    // granted it was denied the `global.*` call 60/60 in that measurement
+    // (the same role granted ap-northeast-1/ap-northeast-3 foundation-model
+    // ARNs could still call `jp.*` 10/10). None of the Allow statements above
+    // grant this region-less ARN — they are all per-region once a boundary is
+    // set — so this Deny is belt-and-braces against a future Allow statement
+    // ever reintroducing it, not the sole thing standing between a `global.*`
+    // call and success. It is omitted when no boundary is set, preserving
+    // today's behaviour exactly (global.* profiles remain reachable, as they
+    // are today).
+    if (inferenceRegions !== undefined) {
+      this.taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'DenyBedrockInvokeOnRegionlessFoundationModelOutsideBoundary',
+          effect: iam.Effect.DENY,
+          actions: [
+            'bedrock:InvokeModel',
+            'bedrock:InvokeModelWithResponseStream',
+            'bedrock:Converse',
+            'bedrock:ConverseStream',
+          ],
+          resources: [`arn:${partition}:bedrock:::foundation-model/*`],
+        }),
+      );
+    }
     // Bedrock read-only operations (model discovery / /v1/models).
     // ListFoundationModels / ListInferenceProfiles do not support
     // resource-level scoping, so the resource list stays at `*`.
@@ -803,6 +915,31 @@ export class EcsStack extends cdk.Stack {
     // Anthropic statement above: `Resource: *` would let an RCE invoke any model in
     // the account. The registry pins these to `us.` profiles, so that is what is
     // granted; add a prefix here when a registry entry starts using one.
+    //
+    // `project/*` is NOT a model resource — it authorizes the OpenAI-compatible
+    // surface's PROJECT, not any particular model or region (see the comment on
+    // that line below), so STRATOCLAVE_INFERENCE_REGIONS never touches it; only
+    // the foundation-model / inference-profile ARNs are boundary-generated,
+    // same unconditional-literal / per-region split as the Anthropic statement
+    // above (and for the same C13 reason — see that comment).
+    const openaiFamilyModelResources: string[] =
+      inferenceRegions === undefined
+        ? [
+            `arn:aws:bedrock:*::foundation-model/openai.*`,
+            `arn:aws:bedrock:*::foundation-model/xai.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/us.openai.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/global.openai.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/us.xai.*`,
+            `arn:aws:bedrock:*:${account}:inference-profile/global.xai.*`,
+          ]
+        : inferenceRegions.flatMap((r) => [
+            `arn:${partition}:bedrock:${r}::foundation-model/openai.*`,
+            `arn:${partition}:bedrock:${r}::foundation-model/xai.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/us.openai.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/global.openai.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/us.xai.*`,
+            `arn:${partition}:bedrock:${r}:${account}:inference-profile/global.xai.*`,
+          ]);
     this.taskDefinition.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'AllowOpenAIFamilyBedrockInvoke',
@@ -820,17 +957,15 @@ export class EcsStack extends cdk.Stack {
           // the model-scoped ARNs alone produced a 401, and adding this produced 200.
           // The mantle statement this replaced had the same shape
           // (`arn:aws:bedrock-mantle:...:project/*`); dropping it in the namespace
-          // move was the defect.
-          `arn:aws:bedrock:*:${account}:project/*`,
+          // move was the defect. Partition is the stack token even when no
+          // boundary is set — this ARN is not one of the literals C13 parses
+          // (it has no foundation-model/inference-profile component), so there
+          // is no reason to hardcode "aws" here the way the model ARNs above do.
+          `arn:${partition}:bedrock:*:${account}:project/*`,
           // Kept as well: `Converse`-style model ARNs are what the same actions are
           // scoped by elsewhere, and a future direct InvokeModel on these families
           // should not need a second policy edit.
-          `arn:aws:bedrock:*::foundation-model/openai.*`,
-          `arn:aws:bedrock:*::foundation-model/xai.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/us.openai.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/global.openai.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/us.xai.*`,
-          `arn:aws:bedrock:*:${account}:inference-profile/global.xai.*`,
+          ...openaiFamilyModelResources,
         ],
       }),
     );
