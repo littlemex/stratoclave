@@ -10,12 +10,11 @@ export interface PrivateLinkStackProps extends cdk.StackProps {
   prefix: string;
   vpc: ec2.IVpc;
   /**
-   * The internal ALB's security group. This stack adds its one ingress rule
-   * — from the NLB's own security group, on :443 — once the NLB's security
-   * group exists; `lib/network-stack.ts` creates this group with no ingress
-   * rules at all in `private` mode precisely because that rule belongs here.
+   * The internal NLB's security group, created by `lib/network-stack.ts`
+   * (not here) with both of its rules already attached — see that file for
+   * why. This stack only attaches it to the NLB construct.
    */
-  albSecurityGroup: ec2.ISecurityGroup;
+  nlbSecurityGroup: ec2.ISecurityGroup;
   /**
    * The ALB's HTTPS :443 listener (`AlbStack.httpsListener`, only ever
    * created when `AlbStack` is given a certificate). Using the listener
@@ -25,10 +24,17 @@ export interface PrivateLinkStackProps extends cdk.StackProps {
    * targets.
    */
   albHttpsListener: elbv2.ApplicationListener;
-  /** `STRATOCLAVE_PRIVATE_DOMAIN` — used only to compose the `PrivateUrl` output. */
-  domainName: string;
+  /** The pre-composed `https://<STRATOCLAVE_PRIVATE_DOMAIN>` URL, echoed back as the `PrivateUrl` output. */
+  privateUrl: string;
   /** `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS`, already validated non-empty and non-wildcard. */
   allowedPrincipals: string[];
+  /**
+   * Enable NLB deletion protection, for parity with `AlbStack`'s own
+   * `deletionProtection` prop (both are driven by the same `isProd` flag in
+   * `bin/iac.ts`).
+   * @default false
+   */
+  deletionProtection?: boolean;
 }
 
 /**
@@ -43,32 +49,21 @@ export interface PrivateLinkStackProps extends cdk.StackProps {
  * ALB ARN directly), so "PrivateLink straight to an ALB" is not a real
  * option.
  *
- * Three things worth being exact about, and where each is handled:
+ * Two things worth being exact about, and where each is handled:
  *
  *   - TLS terminates at the ALB, not the NLB: the NLB listener below is TCP,
  *     not TLS. A TLS listener here would mean the NLB holds the certificate
  *     and talks plaintext to the ALB, which is exactly backwards from "TLS
  *     terminates inside the gateway's own VPC, with your certificate."
- *   - The NLB's security group carries no ingress rules, and PrivateLink
- *     traffic still reaches it, because
- *     `enforceSecurityGroupInboundRulesOnPrivateLinkTraffic: false` tells the
- *     NLB to evaluate PrivateLink-origin traffic against the endpoint
+ *   - The NLB's security group (created in `lib/network-stack.ts`) carries
+ *     no ingress rules, and PrivateLink traffic still reaches it, because
+ *     `enforceSecurityGroupInboundRulesOnPrivateLinkTraffic: false` tells
+ *     the NLB to evaluate PrivateLink-origin traffic against the endpoint
  *     service's own acceptance + allowed-principals gate instead of this
  *     security group. A workload inside the gateway's own VPC that tried to
  *     reach the NLB directly (not through PrivateLink) is a different
  *     traffic class and is not exempted by this flag; nothing in this VPC
  *     has a route to behave as if it already were a PrivateLink consumer.
- *     CDK's `NetworkLoadBalancerProps` exposes this as a first-class boolean
- *     (`aws-cdk-lib` 2.276), so no `CfnLoadBalancer` escape hatch is needed
- *     for it.
- *   - The ALB's own security group admits only this NLB's security group on
- *     :443 — never the internet, never "anyone in the VPC" — so the one
- *     network-layer control standing behind "acceptance required" is this
- *     exact chain: endpoint service -> NLB (PrivateLink-exempted SG) -> ALB
- *     (NLB-SG-only ingress) -> ECS task (ALB-SG-only ingress, already true
- *     today in `lib/network-stack.ts`). The NLB's own egress is scoped the
- *     same way, to the ALB security group on :443 only — it never gets
- *     `allowAllOutbound`.
  */
 export class PrivateLinkStack extends cdk.Stack {
   public readonly nlb: elbv2.NetworkLoadBalancer;
@@ -80,36 +75,17 @@ export class PrivateLinkStack extends cdk.Stack {
 
     const { prefix } = props;
 
-    // No ingress rules at construction: PrivateLink traffic bypasses this
-    // group entirely (enforceSecurityGroupInboundRulesOnPrivateLinkTraffic:
-    // false, below), and nothing else in this VPC is meant to reach the NLB.
-    //
-    // Egress is NOT `allowAllOutbound`: the only traffic this NLB ever
-    // originates is forwarding to, and health-checking, its one target — the
-    // internal ALB on :443 — so egress is scoped to exactly that, not left
-    // open to the whole internet from inside the gateway's own VPC.
-    const nlbSecurityGroup = new ec2.SecurityGroup(this, 'NlbSecurityGroup', {
-      vpc: props.vpc,
-      securityGroupName: `${prefix}-nlb-sg`,
-      description: `Security group for ${prefix} internal NLB (PrivateLink publication)`,
-      allowAllOutbound: false,
-    });
-    nlbSecurityGroup.addEgressRule(
-      props.albSecurityGroup,
-      ec2.Port.tcp(443),
-      'Allow HTTPS to the internal ALB only (forwarding and health checks)',
-    );
-
     this.nlb = new elbv2.NetworkLoadBalancer(this, 'Nlb', {
       vpc: props.vpc,
       internetFacing: false,
       loadBalancerName: `${prefix}-nlb`,
-      securityGroups: [nlbSecurityGroup],
-      // See the class doc (V2): PrivateLink-origin traffic is gated by the
-      // endpoint service's acceptance + allowed-principals, not by this
-      // security group having to carry a rule for every accepted consumer's
-      // address range (which it could not even express — VPC endpoint ENIs
-      // are allocated in the CONSUMER's VPC, not advertised as CIDRs here).
+      securityGroups: [props.nlbSecurityGroup],
+      deletionProtection: props.deletionProtection ?? false,
+      // PrivateLink-origin traffic is gated by the endpoint service's
+      // acceptance + allowed-principals, not by the NLB's own security
+      // group having to carry a rule for every accepted consumer's address
+      // range (which it could not even express — VPC endpoint ENIs are
+      // allocated in the CONSUMER's VPC, not advertised as CIDRs here).
       enforceSecurityGroupInboundRulesOnPrivateLinkTraffic: false,
     });
 
@@ -139,28 +115,6 @@ export class PrivateLinkStack extends cdk.Stack {
       defaultTargetGroups: [albTargetGroup],
     });
 
-    // The ALB admits only this NLB — never the internet, and never "anyone
-    // in this VPC". This is the one rule `lib/network-stack.ts` deliberately
-    // left for this stack to add, once the NLB's security group exists.
-    //
-    // NOT `props.albSecurityGroup.addIngressRule(...)`: that convenience
-    // method always scopes the new `CfnSecurityGroupIngress` resource to the
-    // SECURITY GROUP'S OWN stack (NetworkStack) — here, that resource would
-    // then reference `nlbSecurityGroup`'s id, which lives in THIS stack, and
-    // NetworkStack already sits upstream of this stack (via AlbStack), so
-    // the result is a dependency cycle (confirmed: `cdk synth` refuses it
-    // with "DependencyCycle ... would create a cyclic reference"). Building
-    // the L1 resource directly, scoped to `this`, keeps the new resource in
-    // the stack that is already downstream of both inputs it references.
-    new ec2.CfnSecurityGroupIngress(this, 'AlbIngressFromNlb', {
-      groupId: props.albSecurityGroup.securityGroupId,
-      sourceSecurityGroupId: nlbSecurityGroup.securityGroupId,
-      ipProtocol: 'tcp',
-      fromPort: 443,
-      toPort: 443,
-      description: 'Allow HTTPS from the internal NLB (PrivateLink publication) only',
-    });
-
     const endpointService = new ec2.VpcEndpointService(this, 'EndpointService', {
       vpcEndpointServiceLoadBalancers: [this.nlb],
       // Acceptance required, always: an endpoint service with acceptance NOT
@@ -173,7 +127,7 @@ export class PrivateLinkStack extends cdk.Stack {
     });
 
     this.endpointServiceName = endpointService.vpcEndpointServiceName;
-    this.privateUrl = `https://${props.domainName}`;
+    this.privateUrl = props.privateUrl;
 
     putStringParameter(this, 'EndpointServiceNameParam', {
       prefix,

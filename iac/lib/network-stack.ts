@@ -27,13 +27,13 @@ export interface NetworkStackProps extends cdk.StackProps {
    * `'cloudfront'` is exactly today's stack: the ALB security group admits
    * only the CloudFront origin-facing prefix list on :80. `'private'` skips
    * that lookup and that ingress rule entirely — there is no CloudFront on
-   * that path, so there is nothing for the ALB to admit from it, and the
-   * rule this stack would otherwise add would be a port (80) the private
-   * ALB never even listens on. The ALB's actual admission rule for
-   * `'private'` (from the internal NLB only, on :443) is added by
-   * `lib/private-link-stack.ts`, once the NLB's security group exists —
-   * this stack only creates the (as yet rule-less) `albSecurityGroup` for it
-   * to add that rule to.
+   * that path — and instead creates the internal NLB's security group
+   * (`nlbSecurityGroup`) here, in the same stack that owns `albSecurityGroup`,
+   * so the ALB's admission rule (from the NLB only, on :443) and the NLB's
+   * egress rule (to the ALB only, on :443) are both ordinary same-stack L2
+   * calls. `lib/private-link-stack.ts` only consumes `nlbSecurityGroup`
+   * (to attach it to the NLB construct itself); it does not create or
+   * modify any security group.
    */
   entryMode?: 'cloudfront' | 'private';
 }
@@ -49,6 +49,8 @@ export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
   public readonly albSecurityGroup: ec2.SecurityGroup;
   public readonly ecsSecurityGroup: ec2.SecurityGroup;
+  /** Only created when `entryMode === 'private'`. */
+  public readonly nlbSecurityGroup?: ec2.SecurityGroup;
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
@@ -99,10 +101,11 @@ export class NetworkStack extends cdk.Stack {
     // nothing to admit from it, and the custom resource's own IAM policy
     // (ANY_RESOURCE describeManagedPrefixLists) would be dead weight on a
     // deployment that never uses it. `albSecurityGroup` is created above
-    // either way; `lib/private-link-stack.ts` is what adds its one ingress
-    // rule for that mode (from the internal NLB's security group, on :443),
-    // once that security group exists.
-    if ((props.entryMode ?? 'cloudfront') === 'cloudfront') {
+    // either way; the private-mode branch below is what adds its one
+    // ingress rule for that mode instead (from the internal NLB's security
+    // group, on :443).
+    const entryMode = props.entryMode ?? 'cloudfront';
+    if (entryMode === 'cloudfront') {
       const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
         this,
         'CloudFrontOriginFacingPrefixListLookup',
@@ -142,6 +145,47 @@ export class NetworkStack extends cdk.Stack {
         ec2.Peer.prefixList(cloudFrontPrefixListId),
         ec2.Port.tcp(80),
         'Allow HTTP from CloudFront edge locations only',
+      );
+    } else {
+      // The internal NLB's security group, created here (not in
+      // lib/private-link-stack.ts) so that both of the rules it needs can
+      // be ordinary same-stack L2 calls: `addIngressRule` and
+      // `addEgressRule` always scope the new `CfnSecurityGroupIngress` /
+      // `CfnSecurityGroupEgress` resource to the security group's OWN
+      // stack, and the ALB's security group already lives here. Creating
+      // the NLB's security group in PrivateLinkStack instead and then
+      // calling `albSecurityGroup.addIngressRule(nlbSg, ...)` from there
+      // would have put the new ingress resource back in THIS stack while
+      // it referenced an id that lives in PrivateLinkStack — and
+      // PrivateLinkStack already depends on this stack (via AlbStack), so
+      // that is a dependency cycle `cdk synth` refuses outright.
+      //
+      // No ingress rules of its own: PrivateLink traffic is evaluated
+      // against the endpoint service's own acceptance + allowed-principals
+      // gate instead (see `enforceSecurityGroupInboundRulesOnPrivateLinkTraffic:
+      // false` on the NLB construct in private-link-stack.ts), and nothing
+      // else in this VPC is meant to reach the NLB.
+      this.nlbSecurityGroup = new ec2.SecurityGroup(this, 'NlbSecurityGroup', {
+        vpc: this.vpc,
+        securityGroupName: `${props.prefix}-nlb-sg`,
+        description: `Security group for ${props.prefix} internal NLB (PrivateLink publication)`,
+        allowAllOutbound: false,
+      });
+      // The only traffic this NLB ever originates is forwarding to, and
+      // health-checking, its one target — the internal ALB on :443 — so
+      // egress is scoped to exactly that, not left open to the whole
+      // internet from inside the gateway's own VPC.
+      this.nlbSecurityGroup.addEgressRule(
+        this.albSecurityGroup,
+        ec2.Port.tcp(443),
+        'Allow HTTPS to the internal ALB only (forwarding and health checks)',
+      );
+      // The ALB admits only this NLB — never the internet, and never
+      // "anyone in the VPC".
+      this.albSecurityGroup.addIngressRule(
+        this.nlbSecurityGroup,
+        ec2.Port.tcp(443),
+        'Allow HTTPS from the internal NLB (PrivateLink publication) only',
       );
     }
 

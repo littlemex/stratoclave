@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
-import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
 import {
   capacityPlan,
@@ -255,8 +254,14 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
     ? {
         certificateArn: entryConfig.privateEntry.certificateArn,
         domainName: entryConfig.privateEntry.domainName,
-        enableHttpListener: false,
+        httpRedirectListener: false,
         xffHeaderProcessingMode: 'remove' as const,
+        // See lib/alb-stack.ts's prop doc: this is the only per-request
+        // record the private path has at all (no CloudFront, no WAF, and
+        // XFF is stripped so even the backend's own logs carry no client
+        // address) — enabled here, never for `cloudfront` (unaffected,
+        // zero diff).
+        enableAccessLogs: true,
       }
     : {}),
   description:
@@ -265,39 +270,6 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
       : `[${prefix}] Internet-facing ALB`,
 });
 albStack.addDependency(networkStack);
-
-// --- 4b. Private-entry publication (STRATOCLAVE_ENTRY=private only): an
-// internal NLB + VPC endpoint service fronting the internal ALB above. See
-// lib/private-link-stack.ts for why this shape is the one PrivateLink
-// accepts at all.
-let privateLinkStack: PrivateLinkStack | undefined;
-if (entryConfig.mode === 'private') {
-  privateLinkStack = new PrivateLinkStack(app, stackName(prefix, 'private-link'), {
-    env,
-    prefix,
-    vpc: networkStack.vpc,
-    albSecurityGroup: networkStack.albSecurityGroup,
-    // `albStack.httpsListener` is only ever undefined when AlbStack was not
-    // given a certificate; AlbStack above always receives one in this
-    // branch (entryConfig.mode === 'private'), so the listener exists. A
-    // thrown assertion is preferred to a silent `!`: if this ever stops
-    // being true, synth should fail loudly here rather than produce a
-    // broken target group.
-    albHttpsListener: ((): elbv2.ApplicationListener => {
-      if (!albStack.httpsListener) {
-        throw new Error(
-          'AlbStack.httpsListener is undefined under STRATOCLAVE_ENTRY=private; ' +
-            'AlbStack should always create it when given a certificateArn.',
-        );
-      }
-      return albStack.httpsListener;
-    })(),
-    domainName: entryConfig.privateEntry.domainName,
-    allowedPrincipals: entryConfig.privateEntry.allowedPrincipals,
-    description: `[${prefix}] Internal NLB + VPC endpoint service (PrivateLink publication)`,
-  });
-  privateLinkStack.addDependency(albStack);
-}
 
 // --- 5a. WAF (CLOUDFRONT scope, pinned to us-east-1 via `wafEnv`). Never
 // created in 'private' mode: there is no CloudFront distribution for a
@@ -353,6 +325,70 @@ if (entryConfig.mode === 'cloudfront') {
   if (wafStack) {
     frontendStack.addDependency(wafStack);
   }
+}
+
+// The gateway's own entry URL, composed exactly once regardless of mode, and
+// used for every one of its three consumers below (PrivateLinkStack's
+// `privateUrl` prop, and the ECS task env's `CORS_ORIGINS` /
+// `STRATOCLAVE_API_ENDPOINT`) instead of three separate ternary expressions.
+// `frontendStack` is guaranteed defined in the `cloudfront` branch (it is
+// unconditionally constructed above whenever `entryConfig.mode ===
+// 'cloudfront'`); the explicit throw is a synth-time assertion of that
+// invariant, not a real expected failure.
+let entryUrl: string;
+if (entryConfig.mode === 'private') {
+  entryUrl = `https://${entryConfig.privateEntry.domainName}`;
+} else {
+  if (!frontendStack) {
+    throw new Error(
+      'frontendStack is undefined in cloudfront mode; it is always constructed ' +
+        'above when entryConfig.mode === "cloudfront", so this should never happen.',
+    );
+  }
+  entryUrl = `https://${frontendStack.cfnDistribution.attrDomainName}`;
+}
+
+// --- 5b. Private-entry publication (STRATOCLAVE_ENTRY=private only): an
+// internal NLB + VPC endpoint service fronting the internal ALB above. See
+// lib/private-link-stack.ts for why this shape is the one PrivateLink
+// accepts at all. Placed after the Frontend block so `entryUrl` above is
+// already resolved; in this branch it never depended on `frontendStack`, so
+// the ordering costs nothing.
+let privateLinkStack: PrivateLinkStack | undefined;
+if (entryConfig.mode === 'private') {
+  // `albStack.httpsListener` is only ever undefined when AlbStack was not
+  // given a certificate; AlbStack above always receives one in this branch,
+  // so the listener exists. A thrown assertion is preferred to a silent
+  // `!`: if this ever stops being true, synth should fail loudly here
+  // rather than produce a broken target group.
+  if (!albStack.httpsListener) {
+    throw new Error(
+      'AlbStack.httpsListener is undefined under STRATOCLAVE_ENTRY=private; ' +
+        'AlbStack should always create it when given a certificateArn.',
+    );
+  }
+  // `networkStack.nlbSecurityGroup` is only ever undefined when NetworkStack
+  // was constructed with a different entryMode; it is given the SAME
+  // `entryConfig.mode` as this branch's condition, so it exists here too.
+  if (!networkStack.nlbSecurityGroup) {
+    throw new Error(
+      'networkStack.nlbSecurityGroup is undefined under STRATOCLAVE_ENTRY=private; ' +
+        'NetworkStack should always create it when entryMode is "private".',
+    );
+  }
+  privateLinkStack = new PrivateLinkStack(app, stackName(prefix, 'private-link'), {
+    env,
+    prefix,
+    vpc: networkStack.vpc,
+    nlbSecurityGroup: networkStack.nlbSecurityGroup,
+    albHttpsListener: albStack.httpsListener,
+    privateUrl: entryUrl,
+    allowedPrincipals: entryConfig.privateEntry.allowedPrincipals,
+    // Parity with AlbStack's own deletionProtection prop, both driven by isProd.
+    deletionProtection: isProd,
+    description: `[${prefix}] Internal NLB + VPC endpoint service (PrivateLink publication)`,
+  });
+  privateLinkStack.addDependency(albStack);
 }
 
 // --- 6. Cognito (cross-stack reference to the Frontend CloudFront domain) ---
@@ -608,14 +644,12 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
 
     // CORS. 'cloudfront': the SPA's own origin (the CloudFront distribution
     // it is served from) — unchanged. 'private': there is no CloudFront
-    // distribution to read a domain from, so this is the private URL itself;
-    // that is a real origin a self-built browser client could run from, and
-    // it is never a wildcard (main.py's startup validation already refuses
-    // '*' regardless of entry mode).
-    CORS_ORIGINS:
-      entryConfig.mode === 'private'
-        ? `https://${entryConfig.privateEntry.domainName}`
-        : `https://${frontendStack!.cfnDistribution.attrDomainName}`,
+    // distribution to read a domain from and no web console at all, so this
+    // is a non-empty, non-wildcard placeholder (main.py's startup
+    // validation already refuses '*' regardless of entry mode); the private
+    // URL happens to be same-origin with the API itself, which needs no
+    // CORS grant, so effectively no cross-origin access is enabled here.
+    CORS_ORIGINS: entryUrl,
 
     // Public API endpoint. This is the value returned as api_endpoint in
     // /.well-known/stratoclave-config (see backend/mvp/well_known.py's own
@@ -626,10 +660,7 @@ const ecsStack = new EcsStack(app, stackName(prefix, 'ecs'), {
     // call it over HTTP.
     // 'private': the operator's own domain name for the PrivateLink
     // publication — the single private URL returned in the config.
-    STRATOCLAVE_API_ENDPOINT:
-      entryConfig.mode === 'private'
-        ? `https://${entryConfig.privateEntry.domainName}`
-        : `https://${frontendStack!.cfnDistribution.attrDomainName}`,
+    STRATOCLAVE_API_ENDPOINT: entryUrl,
 
     // Feature flags (MVP)
     VERIFIED_PERMISSIONS_ENABLED: 'false',
@@ -1034,12 +1065,12 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
     {
       id: 'AwsSolutions-EC23',
       reason:
-        'ALB inbound 80/443 is restricted to the com.amazonaws.global.cloudfront.origin-facing managed prefix list in network-stack.ts, not 0.0.0.0/0. cdk-nag cannot distinguish prefix-list CIDRs from "any" so flags it anyway.',
+        'ALB inbound is never 0.0.0.0/0, in either entry mode: `cloudfront` restricts it to the CloudFront origin-facing managed prefix list, and `private` restricts it to the internal NLB\'s own security group only (network-stack.ts, both cases). cdk-nag cannot distinguish a prefix-list or security-group source from "any" so it flags it regardless of mode.',
     },
     {
       id: 'AwsSolutions-ELB2',
       reason:
-        'ALB access logs are not enabled; VPC Flow Logs + CloudFront logs at the edge already give us request-level forensics without doubling S3 cost.',
+        'ALB access logs are not enabled; VPC Flow Logs (connection-level) + CloudFront logs at the edge (request-level) already give us forensics without doubling S3 cost. Only applies to `cloudfront` mode — the `private`-mode ALB enables real access logs instead (lib/alb-stack.ts\'s `enableAccessLogs`) and this suppression is deliberately not applied to it; see the `albSuppressions` filtering below.',
     },
     {
       id: 'AwsSolutions-L1',
@@ -1113,7 +1144,17 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
     },
   ];
   NagSuppressions.addStackSuppressions(networkStack, appLevelSuppressions);
-  NagSuppressions.addStackSuppressions(albStack, appLevelSuppressions);
+  // The private-mode ALB has real access logs (lib/alb-stack.ts's
+  // `enableAccessLogs`), so the `cloudfront`-only AwsSolutions-ELB2
+  // rationale above (which cites CloudFront's edge logs) does not apply to
+  // it and is deliberately not suppressed there — an honest absence, not a
+  // blanket reuse. `test/nag-synth.test.ts`'s private-mode case pins that
+  // this finding genuinely does not fire once the logs are real.
+  const albSuppressions =
+    entryConfig.mode === 'private'
+      ? appLevelSuppressions.filter((s) => s.id !== 'AwsSolutions-ELB2')
+      : appLevelSuppressions;
+  NagSuppressions.addStackSuppressions(albStack, albSuppressions);
   NagSuppressions.addStackSuppressions(ecsStack, appLevelSuppressions);
   NagSuppressions.addStackSuppressions(dynamoDBStack, appLevelSuppressions);
   if (frontendStack) {
@@ -1144,7 +1185,7 @@ if ((process.env.CDK_NAG || 'on').toLowerCase() !== 'off') {
       {
         id: 'AwsSolutions-ELB2',
         reason:
-          'NLB access logs are not enabled. This load balancer is internal (no internet-facing traffic to log separately) and VPC Flow Logs (network-stack.ts, same VPC) already give request-level forensics; there is no CloudFront edge in this entry mode to double up with either.',
+          'NLB access logs are not enabled. This load balancer is internal (no internet-facing traffic to log separately); VPC Flow Logs (network-stack.ts, same VPC) give connection-level forensics for it (source/destination/port/bytes, not per-request detail), and the ALB immediately behind it carries the real per-request access log in this entry mode (lib/alb-stack.ts\'s `enableAccessLogs`).',
       },
     ]);
   }
