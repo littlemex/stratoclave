@@ -34,6 +34,14 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **The gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule**
+  (1 to 256 ASCII letters, digits and `:_@$#=/+,.-`, inner spaces allowed, none leading or
+  trailing), and no tenant row is written with such an id. The check runs before the seed.
+  Reconciliation needs `sc_tenant` on every call, which is why this stops startup rather than
+  logging. The default `default-org` passes (C13.6).
+
 ### Added
 
 - **Model invocation logs can be attributed to a user and a task, on every transport
@@ -48,8 +56,7 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   `sc_task_tag` are now reserved `metadata` keys: a value a caller sends under one is
   removed, and replaced when the gateway has its own value. When a caller's own keys leave no room for the full marker under Bedrock's
   16-key limit, `sc_task_tag` and then `sc_user` are left out and the attempt and tenant pair
-  is still sent, as before; a caller with 15 or more keys gets no marker, as before. The
-  gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule.
+  is still sent, as before; a caller with 15 or more keys gets no marker, as before.
 
 - **Where request and response bodies are held, written down and checked (C12.7, issue #237).**
   `docs/design/request-bodies.md` lists the records the gateway writes to its tables and audit
@@ -62,11 +69,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Fixed
 
-- **A `DEFAULT_ORG_ID` with a character Bedrock does not accept in `requestMetadata` (such as
+- **A tenant id with a character Bedrock does not accept in `requestMetadata` (such as
   `|`, or any non-ASCII) made every Converse call for that tenant fail with
   `ValidationException`.** Each marker value is now checked before it is sent and left out
-  when it does not fit, so the call goes out with the other parts, and such a
-  `DEFAULT_ORG_ID` now stops the gateway at startup (C13.6).
+  when it does not fit, so the call goes out with the other parts (C13.6).
 
 - **Streaming calls carried no correlation marker.** `/v1/messages` and `/v1/chat/completions`
   streamed through Converse without `requestMetadata`, so their invocation-log records could

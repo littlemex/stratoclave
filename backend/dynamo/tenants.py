@@ -118,6 +118,19 @@ class TenantLimitExceededError(Exception):
     """Raised when a team lead exceeds the tenant creation limit."""
 
 
+def _require_marker_safe_id(tenant_id: str) -> None:
+    """Every tenant id is sent to Bedrock as the correlation marker's
+    `sc_tenant` (C13.6), and a value outside the marker rule is left out, which
+    loses the attribution reconciliation depends on. So a tenant row is never
+    written with such an id."""
+    from mvp.provider_outcome import marker_value_ok
+
+    if not marker_value_ok(tenant_id):
+        raise ValueError(
+            f"tenant id {tenant_id!r} cannot be carried in the correlation marker: "
+            "use ASCII letters, digits and ':_@$#=/+,.-' (inner spaces allowed)")
+
+
 class TenantsRepository:
     """CRUD operations for the Tenants table.
 
@@ -224,6 +237,7 @@ class TenantsRepository:
         self.ensure_below_tenant_limit(team_lead_user_id)
 
         tid = tenant_id or self.new_tenant_id()
+        _require_marker_safe_id(tid)
         now = _now_iso()
         item: dict[str, Any] = {
             "tenant_id": tid,
@@ -409,6 +423,7 @@ class TenantsRepository:
           - created=True: newly created by this call
           - created=False: already existed (no-op)
         """
+        _require_marker_safe_id(tenant_id)
         # If a record exists (even archived), return it without touching it.
         existing = self.get_including_archived(tenant_id)
         if existing:

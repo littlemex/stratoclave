@@ -547,7 +547,7 @@ def test_every_route_consults_the_classifier_on_failure(route_module, monkeypatc
 
     monkeypatch.setattr(route, "_release_pool", lambda ctx: released.append(True))
     hold = route._open_hold(
-        task_tag=None,
+        asserted_task_tag=None,
         user=_User(), tenants_repo=_Repo(), reservation=4000,
         model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     )
@@ -567,7 +567,7 @@ def test_every_route_consults_the_classifier_on_failure(route_module, monkeypatc
     # announcement must be refunded, or a crash inside this gateway holds a tenant's
     # budget until an operator releases it by hand.
     never_left = route._open_hold(
-        task_tag=None,
+        asserted_task_tag=None,
         user=_User(), tenants_repo=_Repo(), reservation=4000,
         model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
     )

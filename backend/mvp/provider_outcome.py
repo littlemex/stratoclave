@@ -348,8 +348,8 @@ _MARKER_VALUE_MAX = 256
 #: gateway mints all pass (`tenant-<uuid>`, Cognito `sub`, hold ids), but the
 #: default tenant's id comes from `DEFAULT_ORG_ID` and older rows may predate
 #: either, so an unchecked value could turn every call for that tenant into an
-#: error; `require_marker_safe_default_tenant` refuses such a deployment at
-#: startup. The rule is that set
+#: error; `mvp.deps.validate_default_org_id` refuses such a deployment at startup
+#: and `dynamo.tenants` refuses to write such a row. The rule is that set
 #: narrowed to what is also a safe HTTP header value: the only whitespace is an
 #: inner space (no tab or line break, nothing leading or trailing). A value that
 #: fails is left out, never altered: an altered id would name someone else.
@@ -363,19 +363,6 @@ def marker_value_ok(value: object) -> bool:
     return isinstance(value, str) and _MARKER_VALUE_RE.fullmatch(value) is not None
 
 
-def require_marker_safe_default_tenant(tenant_id: str) -> None:
-    """Refuse to start when the configured default tenant id cannot be sent in
-    the correlation marker: every call for that tenant would lose `sc_tenant`.
-    Called from the app's startup, the one place an operator-chosen tenant id
-    enters."""
-    if not marker_value_ok(tenant_id):
-        raise RuntimeError(
-            "DEFAULT_ORG_ID must be 1 to 256 characters of letters, digits and "
-            "':_@$#=/+,.-' (inner spaces allowed): the gateway sends it as the "
-            "correlation marker's sc_tenant and as a header, and leaves out any "
-            "value outside that rule.")
-
-
 # Keys already reported as dropped by `attempt_request_metadata`, so a tenant
 # whose id never fits logs once per process rather than once per call.
 _reported_drops: set[str] = set()
@@ -383,7 +370,7 @@ _reported_drops: set[str] = set()
 
 def attempt_request_metadata(
     hold_id: Optional[str], tenant_id: Optional[str] = None, user_id: Optional[str] = None,
-    task_tag: Optional[str] = None,
+    asserted_task_tag: Optional[str] = None,
 ) -> dict[str, str]:
     """The correlation handle to stamp on a provider call (C13.6).
 
@@ -405,7 +392,7 @@ def attempt_request_metadata(
     marker and a lost attribution is still visible. The other parts are sent.
     """
     given = {"sc_attempt_id": hold_id, "sc_tenant": tenant_id, "sc_user": user_id,
-             "sc_task_tag": task_tag}
+             "sc_task_tag": asserted_task_tag}
     assert given.keys() == MARKER_HEADERS.keys()
     md: dict[str, str] = {}
     for key, value in given.items():
@@ -596,11 +583,13 @@ def merge_openai_metadata(
 #: a key of its own; the
 #: user id is the gateway's own attestation.
 MARKER_GIVES_WAY: tuple[str, ...] = ("sc_task_tag", "sc_user")
+# A new marker key must take a place in this order, or be declared essential here.
+assert set(MARKER_KEYS) - set(MARKER_GIVES_WAY) == {"sc_attempt_id", "sc_tenant"}
 
 
 def stamp_openai_metadata_marker(
     payload: dict, tenant_id: Optional[str], *, user_id: Optional[str],
-    task_tag: Optional[str],
+    asserted_task_tag: Optional[str],
 ) -> bool:
     """Merge the gateway's correlation keys into `payload["metadata"]`,
     BEFORE the hard-ceiling survey runs over `payload` — see the module-level
@@ -620,7 +609,8 @@ def stamp_openai_metadata_marker(
     # the two routes' key names cannot drift apart ("the same identifiers
     # Converse carries" is then true by construction, not by two call sites
     # agreeing on two string literals).
-    marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id, user_id, task_tag)
+    marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id,
+                                      user_id=user_id, asserted_task_tag=asserted_task_tag)
     merged = merge_openai_metadata(payload.get("metadata"), marker)
     for key in MARKER_GIVES_WAY:
         if merged.get("sc_attempt_id") == ATTEMPT_ID_PLACEHOLDER:

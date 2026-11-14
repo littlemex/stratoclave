@@ -131,12 +131,12 @@ async def lifespan(app: FastAPI):
             environment=environment,
         )
 
-    # The default tenant's id is the one tenant id an operator chooses; it must
-    # fit the correlation marker (C13.6) or every call for it loses `sc_tenant`.
-    from mvp.deps import DEFAULT_ORG_ID as _default_org_id
-    from mvp.provider_outcome import require_marker_safe_default_tenant
+    # The default tenant's id is the one tenant id an operator chooses. It must
+    # fit the correlation marker (C13.6): reconciliation needs `sc_tenant`, so
+    # this stops startup rather than logging, unlike the seed below.
+    from mvp.deps import validate_default_org_id
 
-    require_marker_safe_default_tenant(_default_org_id)
+    validate_default_org_id()
 
     # OSS zero-touch seed: idempotently populate Permissions / Default Tenant.
     # A failure here does not prevent the backend from starting (service continuity first;

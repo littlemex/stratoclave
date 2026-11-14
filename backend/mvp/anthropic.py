@@ -1061,7 +1061,7 @@ def messages(
     hold = _open_hold(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=model_id, request_id=ctx.request_id if ctx else None,
-        route="messages", task_tag=_asserted_task_tag(ctx),
+        route="messages", asserted_task_tag=_asserted_task_tag(ctx),
     )
     _attempt_md = hold.request_metadata()
     if _attempt_md:
@@ -1391,7 +1391,7 @@ async def _stream_messages(
         hold=_open_hold(
             user=user, tenants_repo=tenants_repo, reservation=reservation,
             model_id=model_id, request_id=ctx.request_id if ctx else None,
-            route="messages_stream", task_tag=_asserted_task_tag(ctx),
+            route="messages_stream", asserted_task_tag=_asserted_task_tag(ctx),
             on_finalized=_on_finalized,
         ),
         invoke_stream=_invoke,

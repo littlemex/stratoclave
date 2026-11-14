@@ -122,7 +122,7 @@ def _hold(repo, settle, *, release=None, reservation=5000, mark_departed=None):
         return True
 
     hold = Hold(
-        task_tag=None,
+        asserted_task_tag=None,
         user=_User(),
         tenants_repo=repo,
         reservation=reservation,

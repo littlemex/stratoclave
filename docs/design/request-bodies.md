@@ -93,8 +93,10 @@ checked before it is sent, against that set with whitespace narrowed to an inner
 space, at most 256 characters, and a value that does not pass is left out, never
 altered. The call goes out with the other parts. The ids the gateway mints
 or receives from Cognito (`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task
-tag its grammar accepts pass. The default tenant's id is chosen in `DEFAULT_ORG_ID`, so the gateway refuses to
-start when that id does not pass.
+tag its grammar accepts pass. The default tenant's id is chosen in
+`DEFAULT_ORG_ID`, so the gateway refuses to start when that id does not pass, and no
+tenant row is written with an id that does not. A tenant row written before this
+check may not pass; its calls go out without `sc_tenant`, logged once per process.
 
 | Transport | Where the marker goes |
 |---|---|

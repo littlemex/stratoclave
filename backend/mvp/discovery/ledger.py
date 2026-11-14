@@ -319,7 +319,7 @@ def _open_hold(**kwargs) -> _money.Hold:
         settle=lambda **kw: settle_reservation_and_log(**kw),
         release=lambda ctx: release_pool(ctx),
         # An admin's probe carries no caller-asserted task tag.
-        task_tag=None,
+        asserted_task_tag=None,
         **kwargs,
     )
 

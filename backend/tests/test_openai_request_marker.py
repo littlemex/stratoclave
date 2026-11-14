@@ -89,7 +89,7 @@ def _call_chat_completion(body, *, org_id="org-chat-1", hold_id=REAL_HOLD_ID):
          patch("mvp.chat_completions._settle_reservation_and_log"), \
          patch("mvp.chat_completions._release_pool"):
         _openai_chat_completion(
-            task_tag=None,
+            asserted_task_tag=None,
             body=body, entry=_entry(), user=_user(org_id), tenants_repo=tenants_repo,
             reservation=1024, corr={}, request_id="req-1",
         )
@@ -166,7 +166,7 @@ def test_open_hold_without_payload_never_touches_provider_outcome():
          patch("mvp.chat_completions._release_pool"), \
          patch("mvp.provider_outcome.stamp_attempt_id") as stamp:
         _open_hold(
-            task_tag=None,
+            asserted_task_tag=None,
             user=_user(), tenants_repo=tenants_repo, reservation=1024,
             model_id="us.anthropic.claude-haiku-4-5", route="chat_completions",
         )
@@ -233,7 +233,7 @@ def test_chat_completions_streaming_also_carries_the_real_hold_id():
          patch("mvp.chat_completions._settle_reservation_and_log"), \
          patch("mvp.chat_completions._release_pool"):
         out = _openai_chat_completion(
-            task_tag=None,
+            asserted_task_tag=None,
             body=_body(stream=True), entry=_entry(), user=_user("org-chat-stream"),
             tenants_repo=tenants_repo, reservation=1024, corr={}, request_id="req-1",
         )
@@ -267,7 +267,7 @@ def test_surveyed_bytes_equal_sent_bytes_through_the_real_pipeline():
 
     entry = _entry()
     body = _body(extra_body={"metadata": {"caller_key": "x"}})
-    payload, _ = _build_openai_chat_payload(body, entry, "org-bytes", user_id=None, task_tag=None)
+    payload, _ = _build_openai_chat_payload(body, entry, "org-bytes", user_id=None, asserted_task_tag=None)
     assert payload["metadata"]["sc_attempt_id"] == ATTEMPT_ID_PLACEHOLDER, (
         "the placeholder must already be in the payload the builder hands "
         "to the caller, i.e. BEFORE the survey below ever runs"
@@ -485,6 +485,18 @@ def test_openai_responses_carries_the_callers_task_tag(
     assert capture_openai_request[0]["metadata"]["sc_task_tag"] == "nightly-eval"
 
 
+def test_an_untagged_responses_request_sends_no_task_tag(
+    monkeypatch, stub_auth_user, _stub_credit_pipeline, capture_openai_request
+):
+    """The usage record says "unlabelled"; the marker says nothing."""
+    app = _make_app()
+    _override_auth(app, stub_auth_user, monkeypatch)
+    client = TestClient(app)
+    resp = client.post("/openai/v1/responses", json={"model": "openai.gpt-5.6-sol", "input": "hi"})
+    assert resp.status_code == 200, resp.text
+    assert "sc_task_tag" not in capture_openai_request[0]["metadata"]
+
+
 def test_openai_responses_streaming_also_carries_the_real_hold_id(
     monkeypatch, stub_auth_user, _stub_credit_pipeline, capture_openai_stream_request
 ):
@@ -516,7 +528,7 @@ def test_surveyed_bytes_equal_sent_bytes_for_responses_payload_too():
         {"model": "gpt-5.6-sol", "input": "hi", "metadata": {"caller_key": "x"}}
     )
     payload = _build_openai_responses_payload(
-        body, _entry(), stream=False, tenant_id="org-bytes-resp", user_id=None, task_tag=None
+        body, _entry(), stream=False, tenant_id="org-bytes-resp", user_id=None, asserted_task_tag=None
     )
     assert payload["metadata"]["sc_attempt_id"] == ATTEMPT_ID_PLACEHOLDER
 

@@ -137,8 +137,11 @@ def _aws_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     # resolve to whatever the previous one installed. Reset with the same
     # per-test discipline.
     try:
-        from mvp.models import invalidate_composed_registry as _invalidate_registry
-        _invalidate_registry()
+        # `reset`, not `invalidate`: invalidate keeps the last known-good
+        # activated set (fail-static), which carried one test's activated model
+        # into the next test whenever that test could not reach the store.
+        from mvp.models import reset_composed_registry_for_test as _reset_registry
+        _reset_registry()
     except Exception:  # noqa: BLE001 — absent before the composed registry exists
         pass
     # Hybrid-serving (vLLM) caches the parsed endpoint allowlist + pooled httpx

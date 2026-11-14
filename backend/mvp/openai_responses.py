@@ -341,7 +341,7 @@ def _build_openai_responses_payload(
     stream: bool,
     tenant_id: Optional[str],
     user_id: Optional[str],
-    task_tag: Optional[str],
+    asserted_task_tag: Optional[str],
 ) -> dict:
     """The exact JSON `payload` `/openai/v1/responses` sends to the OpenAI-compatible endpoint,
     extracted so it can be built ONCE, BEFORE the reserve call
@@ -368,7 +368,7 @@ def _build_openai_responses_payload(
     payload["model"] = entry.bedrock_model_id
     payload["stream"] = stream
     _provider_outcome.stamp_openai_metadata_marker(
-        payload, tenant_id, user_id=user_id, task_tag=task_tag)
+        payload, tenant_id, user_id=user_id, asserted_task_tag=asserted_task_tag)
     return payload
 
 
@@ -647,7 +647,7 @@ async def create_response(
         body, entry, stream=body.stream,
         tenant_id=getattr(user, "org_id", None),
         user_id=getattr(user, "user_id", None),
-        task_tag=_asserted_task_tag(ctx),
+        asserted_task_tag=_asserted_task_tag(ctx),
     )
 
     # Hard-ceiling reservation bound (docs/design/hard-ceiling.md section 0/7b):
@@ -777,7 +777,7 @@ async def create_response(
         return StreamingResponse(
             _stream_response(body, entry, user, tenants_repo, reservation,
                              request_id=ctx.request_id if ctx else None,
-                             task_tag=_asserted_task_tag(ctx),
+                             asserted_task_tag=_asserted_task_tag(ctx),
                              sctx=sctx, payload=openai_payload),
             media_type="text/event-stream",
             headers={
@@ -798,7 +798,7 @@ async def create_response(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=entry.bedrock_model_id,
         request_id=ctx.request_id if ctx else None, route="responses",
-        payload=payload, task_tag=_asserted_task_tag(ctx),
+        payload=payload, asserted_task_tag=_asserted_task_tag(ctx),
     )
     sent = False
     try:
@@ -905,7 +905,7 @@ async def _stream_response(
     reservation: int,
     request_id: Optional[str] = None,
     *,
-    task_tag: Optional[str],
+    asserted_task_tag: Optional[str],
     sctx=None,
     payload: Optional[dict] = None,
 ) -> AsyncGenerator[bytes, None]:
@@ -974,13 +974,13 @@ async def _stream_response(
             body, entry, stream=True,
             tenant_id=getattr(user, "org_id", None),
             user_id=getattr(user, "user_id", None),
-            task_tag=task_tag,
+            asserted_task_tag=asserted_task_tag,
         )
 
     hold = _open_hold(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=entry.bedrock_model_id, request_id=request_id,
-        route="responses_stream", payload=payload, task_tag=task_tag,
+        route="responses_stream", payload=payload, asserted_task_tag=asserted_task_tag,
     )
     # The provider continuation id the stream actually minted (from
     # response.completed). None unless a real completed event carried one — so a
