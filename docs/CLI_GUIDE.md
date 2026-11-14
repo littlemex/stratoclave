@@ -74,9 +74,9 @@ Commands:
   api-key
     create                    Issue a long-lived key (plaintext shown once).
     list                      List your own keys.
-    revoke <key_hash>         Revoke one of your keys by SHA-256 hash.
+    revoke <key_id>           Revoke one of your keys by the key_id api-key list shows.
     admin-list                Admin only: list every key in the system.
-    admin-revoke <key_hash>   Admin only: revoke any key by SHA-256 hash.
+    admin-revoke <key_id>     Admin only: revoke any key by its key_id.
   admin
     user     create | list | show | delete | assign-tenant | set-credit
     tenant   create | list | show | delete | set-owner | members | usage | pool-budget
@@ -639,10 +639,10 @@ See [Known limitations](#known-limitations) for the caveat about revoking from t
 Revoke one of your keys. Takes effect immediately; the next request using the key returns `401 Unauthorized`.
 
 ```bash
-stratoclave api-key revoke <key_hash>
+stratoclave api-key revoke <key_id>
 ```
 
-The argument is the SHA-256 hex digest of the plaintext (the DynamoDB partition key), **not** the `key_id` shown by `api-key list`. See [Known limitations](#known-limitations) for the recommended workflow until this gap is closed.
+The argument is the masked `key_id` (`sk-stratoclave-XXXX...YYYY`) exactly as `api-key list` prints it.
 
 ### `api-key admin-list` and `admin-revoke`
 
@@ -650,7 +650,7 @@ Admin-only: inspect or revoke keys owned by any user.
 
 ```bash
 stratoclave api-key admin-list [--include-revoked]
-stratoclave api-key admin-revoke <key_hash>
+stratoclave api-key admin-revoke <key_id>
 ```
 
 `admin-list` output additionally prints `owner=<user_id>` and the key's `name` on the same line.
@@ -917,15 +917,6 @@ For `stratoclave claude` the exit code reflects the underlying `claude` subproce
 ## Known limitations
 
 The following are known, tracked gaps in the current CLI. Each will be closed in a follow-up release; in the meantime, use the documented workaround.
-
-### `api-key revoke` argument is the SHA-256 hash, not the `key_id`
-
-`api-key revoke` requires the `key_hash` (SHA-256 hex) of the plaintext, but `api-key list` does not currently include `key_hash` in its output. The masked `key_id` (`sk-stratoclave-XXXX...YYYY`) is displayed instead.
-
-Until the list output is enriched, revoke via one of the following:
-
-- **Web UI**: *Account -> API keys -> Revoke* for self, or *Admin -> API keys* for any user.
-- **HTTP API directly**: `DELETE /api/mvp/me/api-keys/{key_hash}` (the administrator can query `GET /api/mvp/admin/api-keys` to learn the hash).
 
 ### `admin user create` does not return a temporary password by default
 
