@@ -89,7 +89,26 @@ FRONTEND_DIR="$PROJECT_ROOT/frontend"
 # stack lives in us-east-1; this script never queries it, so REGION == R.
 REGION="${STRATOCLAVE_REGION:-${CDK_DEFAULT_REGION:-us-east-1}}"
 PREFIX="${STRATOCLAVE_PREFIX:-stratoclave}"
-ENTRY="${STRATOCLAVE_ENTRY:-cloudfront}"
+# Normalised and validated IDENTICALLY to `resolveEntryConfig`
+# (iac/lib/entry-config.ts): trim whitespace, lowercase, then only
+# "cloudfront" or "private" are accepted. Before this, the script compared
+# the RAW `STRATOCLAVE_ENTRY` string to the literal `private`, so e.g.
+# `STRATOCLAVE_ENTRY=Private` passed the CDK app's own (trimmed+lowercased)
+# parsing and synthesized the private stack set, while this script's
+# switch-mode guard below — comparing the untouched raw string — read it as
+# "not private" and let a `cdk deploy --all` through that the guard exists
+# specifically to refuse. Any other value (a typo, "both") is rejected here
+# the same way `resolveEntryConfig` rejects it in the app, rather than
+# silently falling through to the cloudfront plan under `--dry-run`.
+ENTRY="$(printf '%s' "${STRATOCLAVE_ENTRY:-cloudfront}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+ENTRY="${ENTRY:-cloudfront}"
+case "$ENTRY" in
+  cloudfront|private) ;;
+  *)
+    echo "[ERROR] STRATOCLAVE_ENTRY must be cloudfront or private (got '${STRATOCLAVE_ENTRY}')" >&2
+    exit 1
+    ;;
+esac
 SKIP_BUILD=false
 DRY_RUN=false
 DEPLOYMENT_LOG="$IAC_DIR/deploy-$(date +%Y%m%d-%H%M%S).log"
@@ -141,6 +160,14 @@ PRIVATE_LINK_STACK="${PREFIX}-private-link"
 COGNITO_STACK="${PREFIX}-cognito"
 ECS_STACK="${PREFIX}-ecs"
 CONFIG_STACK="${PREFIX}-config"
+# Matches iac/lib/_common.ts::pinnedStackName(prefix, 'waf', 'us-east-1', REGION):
+# the WAF stack's name only gets a region suffix when the body region is not
+# its pinned region (CLOUDFRONT-scope WebACLs must live in us-east-1).
+if [ "$REGION" = "us-east-1" ]; then
+  WAF_STACK="${PREFIX}-waf"
+else
+  WAF_STACK="${PREFIX}-waf-${REGION}"
+fi
 
 get_stack_output() {
   local stack_name=$1
@@ -228,27 +255,45 @@ fi
 # `cloudfront`-mode prefix redeployed as `private` would tear down the live
 # internet-facing ALB and stand up an internal one under the same logical
 # id — taking the current deployment down mid-flight, not failing cleanly.
-# Checked both directions, read-only, before anything is touched. Skipped
-# under --dry-run (consistent with the bootstrap checks above: dry-run
-# should not require credentials beyond the identity check already done).
-if [ "$DRY_RUN" != true ]; then
-  if [ "$ENTRY" = "private" ] && stack_exists "$FRONTEND_STACK"; then
-    log_error "STRATOCLAVE_ENTRY=private, but $FRONTEND_STACK already exists in $REGION."
-    log_error "  Switching an existing deployment from cloudfront to private is not"
-    log_error "  supported: AlbStack would change from internet-facing to internal in"
-    log_error "  place, which CloudFormation does by replacing the load balancer —"
-    log_error "  taking the live deployment down, not refusing cleanly."
-    log_error "  Deploy private under a fresh STRATOCLAVE_PREFIX instead."
-    exit 1
+#
+# Checks the REAL, deployed ALB scheme (via `aws elbv2 describe-load-balancers`)
+# rather than "does the FrontendStack/PrivateLinkStack exist": that proxy check
+# missed a `cloudfront` deploy that failed before FrontendStack was reached, or
+# a `private` one that failed before PrivateLinkStack was reached — both leave
+# the ALB itself already created with the scheme its FIRST deploy chose, and a
+# stack-existence check alone cannot see that.
+#
+# Runs even under --dry-run (unlike the bootstrap checks above, which skip
+# dry-run because they gate a real AWS mutation): a dry-run plan must not show
+# a run that the real invocation would refuse, so a mismatch here WARNS under
+# --dry-run and EXITS otherwise.
+check_alb_scheme_guard() {
+  if ! stack_exists "$ALB_STACK"; then
+    return 0
   fi
-  if [ "$ENTRY" != "private" ] && stack_exists "$PRIVATE_LINK_STACK"; then
-    log_error "STRATOCLAVE_ENTRY=$ENTRY, but $PRIVATE_LINK_STACK already exists in $REGION."
-    log_error "  Switching an existing deployment from private to cloudfront is not"
-    log_error "  supported, for the same reason in reverse."
-    log_error "  Deploy cloudfront under a fresh STRATOCLAVE_PREFIX instead."
-    exit 1
+  local expected_scheme
+  if [ "$ENTRY" = "private" ]; then expected_scheme="internal"; else expected_scheme="internet-facing"; fi
+  local actual_scheme
+  actual_scheme=$(aws elbv2 describe-load-balancers \
+    --names "$ALB_STACK" --region "$REGION" \
+    --query 'LoadBalancers[0].Scheme' --output text 2>/dev/null)
+  if [ -z "$actual_scheme" ] || [ "$actual_scheme" = "None" ]; then
+    # The ALB stack exists but the load balancer itself does not (yet, or
+    # any more) — nothing to compare against.
+    return 0
   fi
-fi
+  if [ "$actual_scheme" != "$expected_scheme" ]; then
+    local msg="STRATOCLAVE_ENTRY=$ENTRY expects the ALB scheme '$expected_scheme', but the live ALB ('$ALB_STACK') is '$actual_scheme'. Switching an existing deployment between entry modes is not supported: CloudFormation would replace the load balancer in place, taking the live deployment down rather than refusing cleanly. Deploy the other mode under a fresh STRATOCLAVE_PREFIX instead."
+    if [ "$DRY_RUN" = true ]; then
+      log_warn "$msg"
+      log_warn "  (--dry-run does not stop here; the real invocation would refuse with exit 1.)"
+    else
+      log_error "$msg"
+      exit 1
+    fi
+  fi
+}
+check_alb_scheme_guard
 
 if [ ! -d "$IAC_DIR/node_modules" ]; then
   log_info "Installing CDK dependencies..."
@@ -275,7 +320,9 @@ if [ "$DRY_RUN" = true ]; then
     echo "  8. $CONFIG_STACK"
     echo "  (no WAF stack, no Frontend stack: headless, no CloudFront, no S3 console)"
   else
-    echo "  5. ${PREFIX}-waf"
+    if [ "$ENABLE_WAF_EFFECTIVE" != "false" ]; then
+      echo "  5. $WAF_STACK"
+    fi
     echo "  6. $FRONTEND_STACK"
     echo "  7. $COGNITO_STACK"
     echo "  8. $ECS_STACK"
@@ -370,8 +417,8 @@ echo "============================================"
 echo ""
 
 if [ "$ENTRY" = "private" ]; then
-  PRIVATE_URL=$(get_stack_output "$PRIVATE_LINK_STACK" "PrivateUrl")
-  ENDPOINT_SERVICE_NAME=$(get_stack_output "$PRIVATE_LINK_STACK" "EndpointServiceName")
+  PRIVATE_URL=$(get_stack_output "$PRIVATE_LINK_STACK" "PrivateUrl" 2>/dev/null || echo "N/A")
+  ENDPOINT_SERVICE_NAME=$(get_stack_output "$PRIVATE_LINK_STACK" "EndpointServiceName" 2>/dev/null || echo "N/A")
   echo "  Private URL:       $PRIVATE_URL"
   echo "  Endpoint service:  $ENDPOINT_SERVICE_NAME"
   echo "  ALB (internal):    $ALB_DNS"
@@ -389,13 +436,16 @@ if [ "$ENTRY" = "private" ]; then
   echo "     cd $IAC_DIR && LAMBDA_IMAGE_TAG=<tag from step 1> npx cdk deploy \\"
   echo "       ${PREFIX}-quota-reconciler ${PREFIX}-quota-grants \\"
   echo "       -c quotaReconciler=true -c quotaGrants=true --require-approval never"
-  echo "  3. Accept the pending VPC endpoint connection from each approved consumer"
-  echo "     account, and have each consumer create their interface endpoint and"
-  echo "     private DNS. See docs/DEPLOYMENT.md, 'Private entry (PrivateLink),"
-  echo "     headless' for both sides of that exchange."
-  echo "  4. Create the first admin/API key without a console — see"
-  echo "     docs/DEPLOYMENT.md, 'Private entry (PrivateLink), headless', the"
-  echo "     'Bootstrapping without a console' subsection."
+  echo "  3. Have each approved consumer create their interface endpoint first, then"
+  echo "     accept the resulting pending connection(s) from this (provider) account,"
+  echo "     then point STRATOCLAVE_PRIVATE_DOMAIN at the endpoint from inside the"
+  echo "     consumer VPC. See docs/DEPLOYMENT.md, 'Private entry (PrivateLink),"
+  echo "     headless' for every step of that exchange."
+  echo "  4. From a host inside an accepted consumer VPC, point the CLI at this"
+  echo "     deployment, then create the first admin/API key without a console:"
+  echo "     stratoclave setup https://<your STRATOCLAVE_PRIVATE_DOMAIN>"
+  echo "     See docs/DEPLOYMENT.md, 'Private entry (PrivateLink), headless', the"
+  echo "     'Bootstrapping without a console' subsection, for the rest."
 else
   CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN:-$(get_stack_output "$FRONTEND_STACK" "CloudFrontDomainName")}
   echo "  Frontend URL:  https://$CLOUDFRONT_DOMAIN"
