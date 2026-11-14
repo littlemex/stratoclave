@@ -27,7 +27,7 @@ export function hermeticSynthEnv(extra: Record<string, string> = {}): NodeJS.Pro
   delete env.AWS_WEB_IDENTITY_TOKEN_FILE;
   return {
     ...env,
-    AWS_ACCESS_KEY_ID: 'AKIAFAKEFAKEFAKEFAKE',
+    AWS_ACCESS_KEY_ID: 'hermetic-synth-no-credentials',
     AWS_SECRET_ACCESS_KEY: 'fakefakefakefakefakefakefakefakefakefake',
     AWS_EC2_METADATA_DISABLED: 'true',
     ...extra,
