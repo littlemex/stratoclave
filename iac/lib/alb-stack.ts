@@ -14,7 +14,24 @@ import type { CloudfrontOriginMode } from './entry-config';
 export interface AlbStackProps extends cdk.StackProps {
   prefix: string;
   vpc: ec2.IVpc;
+  /**
+   * The public-facing-by-DNS ALB's security group (`public`/`vpc-expand`/
+   * `vpc-switch`/`vpc-contract`'s public ALB, or `private`'s one ALB —
+   * `lib/network-stack.ts`'s `albSecurityGroup`).
+   */
   securityGroup: ec2.ISecurityGroup;
+  /**
+   * The internal, VPC-origin-serving ALB's OWN security group
+   * (`lib/network-stack.ts`'s `internalAlbSecurityGroup`) — required
+   * whenever this stack builds that ALB at all (`cloudfrontOrigin !==
+   * 'public'`, including every `entryMode: 'both'` deployment). Never the
+   * SAME group as `securityGroup` above: see `network-stack.ts`'s field doc
+   * for why the two ALBs do not share one group (round-1 implementation
+   * review). Unused — and may be omitted — under `cloudfrontOrigin:
+   * 'public'` and under `entryMode: 'private'`, neither of which ever
+   * builds an internal ALB.
+   */
+  internalSecurityGroup?: ec2.ISecurityGroup;
 
   /** true = VPC-only ALB / false = internet-facing @default false */
   internal?: boolean;
@@ -250,12 +267,33 @@ export class AlbStack extends cdk.Stack {
           'lib/entry-config.ts::resolveCloudfrontOriginConfig.',
       );
     }
+    // `vpc-contract` keeps the public ALB (round-1 implementation review,
+    // the consumer-first contraction step — see lib/entry-config.ts's
+    // `CloudfrontOriginMode` doc): `lib/frontend-stack.ts` and
+    // `lib/ecs-stack.ts` stop CONSUMING it one step before this stack stops
+    // DECLARING it, so CloudFormation never has to delete an export that is
+    // still imported.
     const needsPublicAlb =
       entryMode !== 'both' &&
       (cloudfrontOrigin === 'public' ||
         cloudfrontOrigin === 'vpc-expand' ||
-        cloudfrontOrigin === 'vpc-switch');
+        cloudfrontOrigin === 'vpc-switch' ||
+        cloudfrontOrigin === 'vpc-contract');
     const needsInternalAlb = entryMode === 'both' || cloudfrontOrigin !== 'public';
+    // Round-1 implementation review, should-fix: a stray `cdk destroy`
+    // cannot be the ONLY thing standing between "mid-migration" and "public
+    // ALB deleted" — deletion protection on the public ALB must already be
+    // off by the time `vpc-contract`'s own deploy (the one that removes the
+    // exports' last consumers) completes, or the FOLLOWING `vpc` deploy
+    // (the one that actually deletes the public ALB) fails on protection
+    // rather than on anything migration-specific. Off from `vpc-switch` on
+    // — not `vpc-expand`, where the public ALB is still the ONLY thing
+    // serving live traffic and a normal production deployment's own
+    // deletion-protection setting still applies to it, same as `public`.
+    const publicAlbDeletionProtection =
+      cloudfrontOrigin === 'public' || cloudfrontOrigin === 'vpc-expand'
+        ? props.deletionProtection ?? false
+        : false;
 
     // `httpRedirectListener: false` only means something alongside a
     // certificate: it suppresses the :80-redirect-to-:443 listener that the
@@ -285,7 +323,7 @@ export class AlbStack extends cdk.Stack {
         loadBalancerName: `${prefix}-alb`,
         healthCheckPath: props.healthCheckPath || '/health',
         targetPort: props.targetPort || 8000,
-        deletionProtection: props.deletionProtection ?? false,
+        deletionProtection: publicAlbDeletionProtection,
         certificateArn: props.certificateArn,
         httpBehavior: props.certificateArn
           ? props.httpRedirectListener === false
@@ -329,9 +367,12 @@ export class AlbStack extends cdk.Stack {
       // backend. Every other mode that builds this ALB (`vpc-expand`/
       // `vpc-switch`/`vpc`) passes no certificate at all: it is never
       // reached directly by a client, only by the CloudFront VPC origin
-      // service, HTTP only (see docs/DEPLOYMENT.md, "VPC origin" — no TLS
-      // can be issued for `internal-*.elb.amazonaws.com`, so there is no
-      // HTTPS listener to build there even optionally).
+      // service, HTTP only — see docs/DEPLOYMENT.md, "Encryption on the
+      // CloudFront-to-ALB hop": this is a choice this implementation makes
+      // (ACM cannot issue a certificate for the ALB's own AWS-generated
+      // `internal-*.elb.amazonaws.com` name, and giving the VPC origin a
+      // separately-controlled domain + certificate is out of scope here),
+      // not a limit of CloudFront VPC origins in general.
       const internalCertificateArn = entryMode === 'both' ? props.certificateArn : undefined;
       if (entryMode === 'both' && !internalCertificateArn) {
         throw new Error(
@@ -342,11 +383,30 @@ export class AlbStack extends cdk.Stack {
             'constructed in "both" mode.',
         );
       }
+      if (!props.internalSecurityGroup) {
+        // Primary guard is `bin/iac.ts`, which always resolves
+        // `networkStack.internalAlbSecurityGroup` before constructing this
+        // stack whenever `needsInternalAlb` is true here — that field only
+        // comes back undefined from NetworkStack when ITS OWN
+        // `cloudfrontOrigin === 'public'`, and the two stacks are built
+        // from the same resolved `cloudfrontOriginMode`, so they cannot
+        // disagree about whether this ALB exists. This is defence in
+        // depth: a future caller constructing AlbStack directly with a
+        // mismatched pair of props fails loudly here instead of silently
+        // reusing the public ALB's security group on the internal ALB —
+        // which is the exact sharing round-1 implementation review flagged.
+        throw new Error(
+          'AlbStack: internalSecurityGroup is required whenever an internal ALB is built ' +
+            `(cloudfrontOrigin "${cloudfrontOrigin}", entryMode "${entryMode}"). It must be ` +
+            "a DIFFERENT security group from `securityGroup` — see network-stack.ts's " +
+            '`internalAlbSecurityGroup` doc for why the two ALBs never share one group.',
+        );
+      }
       internalBuilt = this.buildAlb({
         idPrefix: 'Internal',
         prefix,
         vpc: props.vpc,
-        securityGroup: props.securityGroup,
+        securityGroup: props.internalSecurityGroup,
         vpcSubnets: props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
         internal: true,
         loadBalancerName: undefined,
@@ -391,12 +451,24 @@ export class AlbStack extends cdk.Stack {
     }
 
     // "Primary" = the public ALB whenever one exists (unchanged meaning from
-    // before this feature existed), else the internal one. See the field doc.
-    const primary = publicBuilt ?? internalBuilt;
+    // before this feature existed), else the internal one — EXCEPT under
+    // `vpc-contract`, where both ALBs exist (`needsPublicAlb` above still
+    // includes it) but the internal one must be primary: `bin/iac.ts` wires
+    // `albStack.alb`/`.targetGroup`/`.httpsListener` straight into
+    // `EcsStack`'s backend service and `PrivateLinkStack`'s NLB target, and
+    // `vpc-contract`'s whole point is that NEITHER of those still points at
+    // the public ALB (see `lib/entry-config.ts`'s `CloudfrontOriginMode`
+    // doc) — only `lib/alb-stack.ts` itself (via `publicBuilt`, still built
+    // unchanged from `vpc-switch`) still declares it, for `vpc` to delete a
+    // step later with nothing importing it anymore.
+    const preferInternalAsPrimary = cloudfrontOrigin === 'vpc-contract';
+    const primary = preferInternalAsPrimary
+      ? internalBuilt ?? publicBuilt
+      : publicBuilt ?? internalBuilt;
     if (!primary) {
       // Unreachable: needsPublicAlb || needsInternalAlb is true for every
       // CloudfrontOriginMode ('public' takes the first branch, the other
-      // three take the second). A thrown assertion, not a silent `!`, so a
+      // four take the second). A thrown assertion, not a silent `!`, so a
       // future mode added to the union without updating this file fails
       // loudly at synth instead of producing a stack with no ALB at all.
       throw new Error('AlbStack: neither a public nor an internal ALB was built.');
@@ -406,7 +478,13 @@ export class AlbStack extends cdk.Stack {
     this.httpListener = primary.httpListener;
     this.httpsListener = primary.httpsListener;
 
-    if (publicBuilt && internalBuilt) {
+    // Never set under `vpc-contract`: `targetGroup` above is ALREADY the
+    // internal one there (`preferInternalAsPrimary`), and the whole point
+    // of this step is that the ECS service (`bin/iac.ts`'s
+    // `additionalTargetGroup` wiring) stops registering with the public
+    // target group — a non-undefined `additionalTargetGroup` here would
+    // put it right back.
+    if (publicBuilt && internalBuilt && !preferInternalAsPrimary) {
       this.additionalTargetGroup = internalBuilt.targetGroup;
     }
 

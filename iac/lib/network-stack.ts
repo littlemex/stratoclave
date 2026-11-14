@@ -5,6 +5,7 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { applyCommonTags, paramPath, putStringParameter } from './_common';
 import { hasCloudFrontLeg, hasPrivateLinkLeg } from './entry-config';
+import type { CloudfrontOriginMode } from './entry-config';
 
 export interface NetworkStackProps extends cdk.StackProps {
   /** Prefix applied to all resource names */
@@ -64,7 +65,7 @@ export interface NetworkStackProps extends cdk.StackProps {
    * receives both at once, but see the constructor for a same-stack assertion
    * of that invariant anyway (defence in depth, not the primary guard).
    */
-  cloudfrontOrigin?: 'public' | 'vpc-expand' | 'vpc-switch' | 'vpc';
+  cloudfrontOrigin?: CloudfrontOriginMode;
 }
 
 /**
@@ -76,8 +77,62 @@ export interface NetworkStackProps extends cdk.StackProps {
  */
 export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
+  /**
+   * The public-facing-by-DNS ALB's security group — `public`/`vpc-expand`/
+   * `vpc-switch`/`vpc-contract`'s public ALB (CloudFront's `ALBOrigin`), or
+   * `private`'s one ALB (there is no public/CloudFront concept on that path
+   * at all; this is simply "the one ALB this stack built" there, same as
+   * before `internalAlbSecurityGroup` existed). Never shared with the
+   * internal ALB's own security group below — see that field's doc for why
+   * (round-1 implementation review, Sol's blocker on a shared SG).
+   */
   public readonly albSecurityGroup: ec2.SecurityGroup;
   public readonly ecsSecurityGroup: ec2.SecurityGroup;
+  /**
+   * The internal, VPC-origin-serving ALB's OWN security group — created
+   * whenever that ALB exists at all (`cloudfrontOrigin !== 'public'`:
+   * `vpc-expand`/`vpc-switch`/`vpc-contract`/`vpc`, which includes every
+   * `entryMode: 'both'` deployment, since `both` always forces
+   * `cloudfrontOrigin: 'vpc'`).
+   *
+   * Deliberately a SEPARATE security group from `albSecurityGroup`, not a
+   * second ALB attached to the same one. Round-1 implementation review
+   * (both Fable's and Sol's): sharing one SG between the public and
+   * internal ALB during `vpc-expand`/`vpc-switch`/`vpc-contract` meant the
+   * internal ALB carried whatever the public one needed and vice versa, and
+   * — the sharper problem — there was no way to delete the public ALB's
+   * admission rule when the public ALB itself goes away at the final `vpc`
+   * step without ALSO touching the internal ALB's own rule, because they
+   * were the same rule on the same group. Two groups means the public one's
+   * SG (and its rule) is deleted alongside the public ALB with nothing left
+   * over to reason about on the internal ALB's side.
+   *
+   * Admits the SAME CloudFront origin-facing prefix list on :80 that
+   * `albSecurityGroup` admits for the public ALB — this is intentional, not
+   * a leftover: AWS's "Restrict access with VPC origins" guide, Option 1,
+   * documents the origin-facing managed prefix list as an explicitly
+   * supported source for a VPC origin's own target (confirmed against that
+   * page on 2026-11-15). The ALTERNATIVE AWS documents — the VPC-origin
+   * SERVICE's own managed security group (commonly referred to by a name
+   * like `CloudFront-VPCOrigins-Service-SG`) — was considered and rejected
+   * for THIS codebase specifically: that SG is created by AWS only once the
+   * `AWS::CloudFront::VpcOrigin` resource itself exists, which is a runtime,
+   * not a synth-time, dependency this stack has no way to resolve before
+   * `lib/frontend-stack.ts` creates the VPC origin in a later stack — and
+   * the internal ALB has no public address of its own at all, so admitting
+   * the origin-facing prefix list here is not the public-internet-shaped
+   * risk it would be on an internet-facing ALB; it only ever matters for
+   * traffic that already has to traverse AWS's own backbone to reach a
+   * private IP with no route from the internet in the first place.
+   *
+   * Also admits the internal NLB's :443 rule under `entryMode: 'both'` —
+   * see the `hasPrivateLinkLeg` block below. `private` mode never creates
+   * this group at all (`cloudfrontOrigin` is refused as anything but
+   * `'public'` on that path — see `lib/entry-config.ts`), so its one ALB's
+   * NLB rule stays on `albSecurityGroup`, unchanged from before this field
+   * existed.
+   */
+  public readonly internalAlbSecurityGroup?: ec2.SecurityGroup;
   /** Only created when `entryMode === 'private'` or `'both'`. */
   public readonly nlbSecurityGroup?: ec2.SecurityGroup;
 
@@ -156,22 +211,42 @@ export class NetworkStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    // P1-2c: the ALB only serves CloudFront. Restrict inbound 80/443 to
-    // the AWS managed prefix list for CloudFront origin-facing IPs, so a
-    // direct ALB-DNS probe fails at the L4 boundary. CDK does not expose
-    // a first-class lookup for managed prefix lists, so we resolve the ID
-    // at deploy time with an AwsCustomResource (EC2 DescribeManagedPrefixLists).
+    // The internal, VPC-origin-serving ALB's OWN security group — see that
+    // field's doc for why it is separate from `albSecurityGroup` rather
+    // than the same group shared across both ALBs. Created whenever that
+    // ALB itself exists (`needsIsolatedSubnets`, computed above from the
+    // same `cloudfrontOrigin !== 'public'` condition — the internal ALB
+    // and its own isolated subnets always exist together).
+    if (needsIsolatedSubnets) {
+      this.internalAlbSecurityGroup = new ec2.SecurityGroup(this, 'InternalAlbSecurityGroup', {
+        vpc: this.vpc,
+        securityGroupName: `${props.prefix}-internal-alb-sg`,
+        description: `Security group for ${props.prefix} internal (VPC-origin) ALB`,
+        allowAllOutbound: true,
+      });
+    }
+
+    // P1-2c: the ALB serving CloudFront (public or internal, see above)
+    // only serves CloudFront. Restrict inbound 80 to the AWS managed prefix
+    // list for CloudFront origin-facing IPs, so a direct ALB-DNS/VPC-origin
+    // probe fails at the L4 boundary. CDK does not expose a first-class
+    // lookup for managed prefix lists, so we resolve the ID at deploy time
+    // with an AwsCustomResource (EC2 DescribeManagedPrefixLists), ONCE,
+    // reused for whichever of the two ALB security groups above need the
+    // rule in this deployment's mode.
     //
     // `entryMode === 'private'` (STRATOCLAVE_ENTRY=private) skips this whole
     // block: there is no CloudFront distribution on that path, so there is
     // nothing to admit from it, and the custom resource's own IAM policy
     // (ANY_RESOURCE describeManagedPrefixLists) would be dead weight on a
-    // deployment that never uses it. `albSecurityGroup` is created above
-    // either way; the private-mode branch below is what adds its one
-    // ingress rule for that mode instead (from the internal NLB's security
-    // group, on :443). `entryMode` is resolved once, above, before the VPC
-    // is even constructed — see this prop's doc for the `'both'` case,
-    // where BOTH this block and the one below it run.
+    // deployment that never uses it. The private-mode branch below is what
+    // adds its one ingress rule for that mode instead (from the internal
+    // NLB's security group, on :443, onto `albSecurityGroup` directly —
+    // `private` never creates `internalAlbSecurityGroup` at all).
+    // `entryMode` is resolved once, above, before the VPC is even
+    // constructed — see this prop's doc for the `'both'` case, where BOTH
+    // this block and the one below it run, both against
+    // `internalAlbSecurityGroup`.
     if (hasCloudFrontLeg(entryMode)) {
       const cloudFrontPrefixListLookup = new cr.AwsCustomResource(
         this,
@@ -205,14 +280,44 @@ export class NetworkStack extends cdk.Stack {
       // prefix-list ingress expands into one rule per CIDR at enforcement
       // time and counts against the "Inbound or outbound rules per security
       // group" quota (default 60). We only need port 80: the FrontendStack
-      // distribution talks to the ALB origin with `originProtocolPolicy:
-      // 'http-only'`, so a :443 ingress would never be used. Keeping it
-      // would double the rule count and blow past the SG quota.
-      this.albSecurityGroup.addIngressRule(
-        ec2.Peer.prefixList(cloudFrontPrefixListId),
-        ec2.Port.tcp(80),
-        'Allow HTTP from CloudFront edge locations only',
-      );
+      // distribution talks to the ALB origin (by DNS name, or through the
+      // VPC origin) with HTTP only, so a :443 ingress would never be used.
+      // Keeping it would double the rule count per group and blow past the
+      // SG quota.
+      //
+      // `needsPublicAlbSg` (true for `public`/`vpc-expand`/`vpc-switch`/
+      // `vpc-contract` — every state up to and including the one where
+      // `lib/alb-stack.ts` still builds the public ALB) gates whether
+      // `albSecurityGroup` gets the rule at all: by the final `vpc` step
+      // there is no public ALB for it to admit traffic to, and the rule
+      // would contradict this deployment's own documented "no public ALB
+      // endpoint" boundary if it stayed. `cloudfrontOrigin === 'vpc'` is
+      // the one state this excludes; `entryMode === 'both'` always forces
+      // `cloudfrontOrigin: 'vpc'`, so `both` never reaches this branch
+      // either — its CloudFront admission lives only on
+      // `internalAlbSecurityGroup` below.
+      const needsPublicAlbSg = cloudfrontOrigin !== 'vpc';
+      if (needsPublicAlbSg) {
+        this.albSecurityGroup.addIngressRule(
+          ec2.Peer.prefixList(cloudFrontPrefixListId),
+          ec2.Port.tcp(80),
+          'Allow HTTP from CloudFront edge locations only',
+        );
+      }
+      // The internal ALB's own rule, on its own group, whenever that ALB
+      // exists in a CloudFront-entry deployment (every non-`public`
+      // `cloudfrontOrigin`, including `both`, which is always `vpc`). This
+      // is the SAME source as the public ALB's rule above — see
+      // `internalAlbSecurityGroup`'s field doc for why the origin-facing
+      // prefix list is accepted here even though this ALB has no public
+      // address of its own.
+      if (this.internalAlbSecurityGroup) {
+        this.internalAlbSecurityGroup.addIngressRule(
+          ec2.Peer.prefixList(cloudFrontPrefixListId),
+          ec2.Port.tcp(80),
+          'Allow HTTP from CloudFront edge locations only (VPC origin)',
+        );
+      }
     }
     if (hasPrivateLinkLeg(entryMode)) {
       // The internal NLB's security group, created here (not in
@@ -220,11 +325,11 @@ export class NetworkStack extends cdk.Stack {
       // be ordinary same-stack L2 calls: `addIngressRule` and
       // `addEgressRule` always scope the new `CfnSecurityGroupIngress` /
       // `CfnSecurityGroupEgress` resource to the security group's OWN
-      // stack, and the ALB's security group already lives here. Creating
+      // stack, and both ALB security groups already live here. Creating
       // the NLB's security group in PrivateLinkStack instead and then
-      // calling `albSecurityGroup.addIngressRule(nlbSg, ...)` from there
-      // would have put the new ingress resource back in THIS stack while
-      // it referenced an id that lives in PrivateLinkStack — and
+      // calling `<alb security group>.addIngressRule(nlbSg, ...)` from
+      // there would have put the new ingress resource back in THIS stack
+      // while it referenced an id that lives in PrivateLinkStack — and
       // PrivateLinkStack already depends on this stack (via AlbStack), so
       // that is a dependency cycle `cdk synth` refuses outright.
       //
@@ -239,18 +344,27 @@ export class NetworkStack extends cdk.Stack {
         description: `Security group for ${props.prefix} internal NLB (PrivateLink publication)`,
         allowAllOutbound: false,
       });
+      // `entryMode === 'both'` always forces `cloudfrontOrigin: 'vpc'`
+      // (`lib/entry-config.ts`), so `internalAlbSecurityGroup` always
+      // exists by the time this runs in that mode — the shared ALB's own
+      // group is what admits the NLB in `both`. `entryMode === 'private'`
+      // never creates `internalAlbSecurityGroup` at all (that mode refuses
+      // every `cloudfrontOrigin` but `'public'`); its one ALB's admission
+      // rule stays on `albSecurityGroup`, exactly as before this field
+      // existed — zero template diff for every `private` deployment.
+      const nlbTargetSg = this.internalAlbSecurityGroup ?? this.albSecurityGroup;
       // The only traffic this NLB ever originates is forwarding to, and
       // health-checking, its one target — the internal ALB on :443 — so
       // egress is scoped to exactly that, not left open to the whole
       // internet from inside the gateway's own VPC.
       this.nlbSecurityGroup.addEgressRule(
-        this.albSecurityGroup,
+        nlbTargetSg,
         ec2.Port.tcp(443),
         'Allow HTTPS to the internal ALB only (forwarding and health checks)',
       );
       // The ALB admits only this NLB — never the internet, and never
       // "anyone in the VPC".
-      this.albSecurityGroup.addIngressRule(
+      nlbTargetSg.addIngressRule(
         this.nlbSecurityGroup,
         ec2.Port.tcp(443),
         'Allow HTTPS from the internal NLB (PrivateLink publication) only',

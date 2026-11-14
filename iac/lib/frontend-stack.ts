@@ -100,13 +100,20 @@ export class FrontendStack extends cdk.Stack {
       cloudfrontOrigin === 'vpc-expand' ||
       cloudfrontOrigin === 'vpc-switch';
     const needsVpcOrigin = cloudfrontOrigin !== 'public';
-    // The origin every ALB behaviour's `targetOriginId` points at. Only
-    // 'vpc-switch' and 'vpc' route to the VPC origin; 'public' and
-    // 'vpc-expand' still route to the public ALB by DNS name (see
-    // `cloudfrontOrigin`'s prop doc for why 'vpc-expand' declares but does
-    // not yet reference the VPC origin).
+    // The origin every ALB behaviour's `targetOriginId` points at.
+    // 'vpc-switch', 'vpc-contract' and 'vpc' all route to the VPC origin;
+    // 'public' and 'vpc-expand' still route to the public ALB by DNS name
+    // (see `cloudfrontOrigin`'s prop doc for why 'vpc-expand' declares but
+    // does not yet reference the VPC origin). 'vpc-contract' does NOT
+    // declare `ALBOrigin` at all (see `needsPublicOrigin` above) — this
+    // constant only matters for the three states that still target
+    // `ALBOrigin` vs. the three that target `ALBVpcOrigin`; which origin
+    // objects actually EXIST in the template is `needsPublicOrigin`/
+    // `needsVpcOrigin`'s job, not this one's.
     const activeAlbOriginId =
-      cloudfrontOrigin === 'vpc-switch' || cloudfrontOrigin === 'vpc'
+      cloudfrontOrigin === 'vpc-switch' ||
+      cloudfrontOrigin === 'vpc-contract' ||
+      cloudfrontOrigin === 'vpc'
         ? VPC_ALB_ORIGIN_ID
         : PUBLIC_ALB_ORIGIN_ID;
 
@@ -280,9 +287,10 @@ export class FrontendStack extends cdk.Stack {
       needsVpcOrigin
         ? origins.VpcOrigin.withApplicationLoadBalancer(internalAlb!, {
             httpPort: 80,
-            // HTTP only: no TLS can be issued for an internal ALB's
-            // `internal-*.elb.amazonaws.com` DNS name. See
-            // docs/DEPLOYMENT.md's "VPC origin" section.
+            // HTTP only: this implementation's own choice, not a limit of
+            // CloudFront VPC origins in general — see
+            // docs/DEPLOYMENT.md's "Encryption on the CloudFront-to-ALB
+            // hop".
             protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
             originSslProtocols: [cloudfront.OriginSslPolicy.TLS_V1_2],
             // Same values as `albOriginProperty` above, same shared

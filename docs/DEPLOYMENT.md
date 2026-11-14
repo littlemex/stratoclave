@@ -551,11 +551,16 @@ is internal, and CloudFront reaches it through a CloudFront VPC origin
   permission can already detach the WebACL from the existing distribution or
   edit the ALB's security group directly, so this is not a new privilege
   boundary; it is the same one the rest of the account already has.
-- **Encryption on the CloudFront-to-ALB hop.** That hop is HTTP on the
-  private VPC-origin path, not HTTPS. No certificate can be issued for an
-  internal ALB's `internal-*.elb.amazonaws.com` DNS name, so there is no TLS
-  option on this path. The viewer-to-CloudFront hop is unaffected
-  (`https-only` on every API behaviour, regardless of this setting).
+- **Encryption on the CloudFront-to-ALB hop.** That hop is HTTP, not HTTPS,
+  on the VPC-origin path this implementation builds. This is a choice THIS
+  codebase makes, not a limit of CloudFront VPC origins in general — a VPC
+  origin does support HTTPS to its target, but only with a certificate
+  issued for a domain the operator controls and separately attaches to the
+  origin's own DNS, and ACM cannot issue a certificate for an internal ALB's
+  AWS-generated `internal-*.elb.amazonaws.com` name directly. Doing that is
+  out of scope here; this implementation configures HTTP only. The
+  viewer-to-CloudFront hop is unaffected (`https-only` on every API
+  behaviour, regardless of this setting).
 - **Private ECS tasks.** The ECS tasks still run in public subnets with
   public IPs, for Bedrock egress with no NAT gateway. This setting changes
   only the ALB's reachability, not the tasks'.

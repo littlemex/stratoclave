@@ -251,15 +251,17 @@ export function resolveEntryConfig(env: Env, bodyRegion: string): EntryConfig {
  * all, so a third party's own CloudFront distribution cannot reach it
  * regardless of what it sends.
  *
- * Four values, not two, because an EXISTING `public` deployment cannot jump
+ * Five values, not two, because an EXISTING `public` deployment cannot jump
  * straight to `vpc` without downtime (the ALB's internal/internet-facing
  * scheme cannot change in place; CloudFormation replaces it, and the
  * replacement has to be registered with CloudFront and healthy before the
  * old one can be removed, or every in-flight request through the old origin
- * fails for the outage window). A FRESH deployment has no such constraint and
- * may set `vpc` directly — there is no old ALB to migrate away from, so the
- * "expand" and "switch" steps collapse to nothing being built at all for the
- * states they would otherwise have carried forward.
+ * fails for the outage window) — AND cannot go straight from `vpc-switch` to
+ * `vpc` either, for a second, independent reason: see `vpc-contract`'s own
+ * entry below. A FRESH deployment has neither constraint and may set `vpc`
+ * directly — there is no old ALB to migrate away from, so "expand",
+ * "switch" and "contract" all collapse to nothing being built at all for
+ * the states they would otherwise have carried forward.
  *
  *   - `vpc` (default under `cloudfront`/`both` when unset or empty — see
  *     `defaultCloudfrontOrigin`'s doc for why `private`'s silent default is
@@ -283,34 +285,87 @@ export function resolveEntryConfig(env: Env, bodyRegion: string): EntryConfig {
  *     with BOTH target groups. Nothing about what CloudFront actually routes
  *     to changes in this step; its only job is to let the slow parts (VPC
  *     origin creation, the new ALB's target health) finish and be verified
- *     before any traffic depends on them.
+ *     before any traffic depends on them. The public ALB's deletion
+ *     protection is still whatever the deployment's normal setting is here
+ *     (see `lib/alb-stack.ts`'s `publicAlbDeletionProtection` — nothing is
+ *     being removed yet).
  *   - `vpc-switch`: the distribution's four ALB behaviours retarget from the
  *     public origin to the VPC origin. The old public ALB, its target group,
  *     and its (now unreferenced) CloudFront origin are all still declared —
  *     switching back is a one-line revert of the behaviours' `targetOriginId`
- *     while the old path is still warm, with no ALB to recreate first.
- *   - `vpc`: ALSO the contract step for a migration already under way (not
- *     just the default for a fresh deployment): the public ALB, its target
- *     group, its export, and its CloudFront origin are removed; only the
- *     internal ALB and the VPC origin remain. This is the step that
- *     actually closes the public bypass for an existing deployment — see
- *     docs/DEPLOYMENT.md's migration section, which names it plainly rather
- *     than leaving it implied by the state name.
+ *     while the old path is still warm, with no ALB to recreate first. From
+ *     this state on, the public ALB's deletion protection is forced OFF
+ *     (`lib/alb-stack.ts`) regardless of the deployment's normal setting:
+ *     every state from here on is explicitly working towards deleting it.
+ *   - `vpc-contract` (round-1 implementation review, blocker B1/the Sol
+ *     review's matching blocker): a SEPARATE step from `vpc`, not a detail
+ *     of it. `cdk deploy --all` always updates a producer stack before the
+ *     consumer stacks that import its exports — that ordering is what makes
+ *     normal deploys work, and it is exactly backwards for DELETING an
+ *     export: going straight from `vpc-switch` to `vpc` would have
+ *     `AlbStack` (the producer of the public ALB's DNS name and target
+ *     group ARN) try to delete both exports in the SAME `cdk deploy --all`
+ *     run where `FrontendStack`/`EcsStack` (the consumers) also stop
+ *     importing them — and CDK's own stack ordering runs the producer's
+ *     update FIRST, so CloudFormation refuses it outright ("Export ... cannot
+ *     be deleted as it is in use by ..."), stalling with the public bypass
+ *     still open. `vpc-contract` breaks the deadlock by moving the CONSUMER
+ *     side first, on its own: `lib/frontend-stack.ts` stops declaring
+ *     `ALBOrigin` and every behaviour's `targetOriginId` is already (still)
+ *     `ALBVpcOrigin` from `vpc-switch`; `lib/ecs-stack.ts`'s backend service
+ *     stops registering with the public target group (only the internal one
+ *     remains in its `LoadBalancers` list) — while `lib/alb-stack.ts` still
+ *     builds the public ALB, its target group, and its exports UNCHANGED
+ *     from `vpc-switch`, so there is nothing for CloudFormation to refuse.
+ *     Only once this step has deployed successfully (nothing importing the
+ *     public exports anymore) does the FOLLOWING `vpc` deploy let AlbStack
+ *     delete them — see `vpc`'s own entry below, and
+ *     `iac/test/vpc-origin-migration.test.ts`'s cross-stack-export
+ *     transition test, which checks every `N -> N+1` step (including this
+ *     one) rather than only synthesising each state alone.
+ *   - `vpc`: ALSO the contract step for a FRESH deployment (which never had
+ *     a public ALB to remove exports from, so there is nothing for the
+ *     deadlock above to apply to) — but for an EXISTING deployment migrating
+ *     off `public`, it must be reached FROM `vpc-contract`, never directly
+ *     from `vpc-switch` (see that entry). Removes the public ALB, its target
+ *     group, its exports, and its CloudFront origin; only the internal ALB
+ *     and the VPC origin remain. This is the step that actually closes the
+ *     public bypass for an existing deployment — see docs/DEPLOYMENT.md's
+ *     migration section, which names it plainly rather than leaving it
+ *     implied by the state name.
+ *
+ * Rollback is the same five states read backwards, with the same ordering
+ * constraint reversed: going back (`vpc` -> `vpc-contract` -> `vpc-switch` ->
+ * `vpc-expand` -> `public`) re-ADDS a producer export at each step rather
+ * than removing one, so the deadlock above does not apply to any single
+ * rollback step on its own — EXCEPT the first one, `vpc` -> `vpc-contract`,
+ * which recreates the public ALB. See docs/DEPLOYMENT.md's "Rollback"
+ * section for the exact `deploy-all.sh` invocation per step; `cdk deploy
+ * --all` (via `deploy-all.sh`, never bare) is the correct tool for every
+ * rollback step because CDK, not this file, decides the per-stack order and
+ * always deploys a producer before a consumer that newly depends on it.
  *
  * Refused outright, not degraded, when combined with `STRATOCLAVE_ENTRY=private`:
  * that path has no CloudFront distribution for a VPC origin to belong to, so
  * every value here would be silently inert on it. `STRATOCLAVE_ENTRY=both`
  * instead FORCES `vpc` (refusing every other value, including the unset
- * default's literal spelling `public`/`vpc-expand`/`vpc-switch`): a `both`
- * deployment's whole point is no public ALB at all, so there is nothing for
- * the migration states to migrate between.
+ * default's literal spelling `public`/`vpc-expand`/`vpc-switch`/
+ * `vpc-contract`): a `both` deployment's whole point is no public ALB at
+ * all, ever, so there is nothing for the migration states to migrate
+ * between.
  */
-export type CloudfrontOriginMode = 'public' | 'vpc-expand' | 'vpc-switch' | 'vpc';
+export type CloudfrontOriginMode =
+  | 'public'
+  | 'vpc-expand'
+  | 'vpc-switch'
+  | 'vpc-contract'
+  | 'vpc';
 
 const CLOUDFRONT_ORIGIN_MODES: readonly CloudfrontOriginMode[] = [
   'public',
   'vpc-expand',
   'vpc-switch',
+  'vpc-contract',
   'vpc',
 ];
 

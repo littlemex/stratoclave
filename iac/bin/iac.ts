@@ -299,6 +299,12 @@ const albStack = new AlbStack(app, stackName(prefix, 'alb'), {
   prefix,
   vpc: networkStack.vpc,
   securityGroup: networkStack.albSecurityGroup,
+  // Undefined exactly when `networkStack.internalAlbSecurityGroup` is
+  // (`cloudfrontOriginMode === 'public'`): AlbStack's own guard refuses to
+  // build an internal ALB with no internal security group rather than
+  // silently falling back to the public one (the sharing round-1
+  // implementation review flagged).
+  internalSecurityGroup: networkStack.internalAlbSecurityGroup,
   internal: entryConfig.mode === 'private',
   healthCheckPath: '/health',
   targetPort: 8000,
@@ -406,7 +412,23 @@ if (hasCloudFrontLeg(entryConfig.mode)) {
     // this stack needs to know exactly which ALB(s) exist for
     // `cloudfrontOriginMode`, not which one bin/iac.ts's ECS/scaling wiring
     // elsewhere treats as primary.
-    albDnsName: albStack.publicAlb?.loadBalancerDnsName,
+    //
+    // Deliberately NOT `albStack.publicAlb?.loadBalancerDnsName` on its
+    // own: `publicAlb` is STILL DEFINED under `vpc-contract` (AlbStack
+    // keeps declaring the public ALB there — see `lib/entry-config.ts`'s
+    // `CloudfrontOriginMode` doc) even though this stack must stop
+    // IMPORTING its DNS name in that exact step, so a truthiness check on
+    // `publicAlb` alone would reintroduce the cross-stack export the
+    // consumer-first contraction step exists to remove. Gated on the same
+    // three values `lib/frontend-stack.ts`'s own `needsPublicOrigin`
+    // checks, so the two files cannot drift on which modes still pass
+    // `albDnsName` at all.
+    albDnsName:
+      cloudfrontOriginMode === 'public' ||
+      cloudfrontOriginMode === 'vpc-expand' ||
+      cloudfrontOriginMode === 'vpc-switch'
+        ? albStack.publicAlb?.loadBalancerDnsName
+        : undefined,
     internalAlb: albStack.internalAlb,
     cloudfrontOrigin: cloudfrontOriginMode,
     webAclArn: wafStack?.webAclArn,
