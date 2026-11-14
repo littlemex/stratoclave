@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Template, Match } from 'aws-cdk-lib/assertions';
+import { hermeticSynthEnv } from './_hermetic-synth';
 
 /**
  * `STRATOCLAVE_ENTRY=private`: a real `cdk synth --all` through the actual
@@ -14,11 +15,10 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
  * PrivateLinkStack over the ALB security group's ingress rule) would have
  * been invisible to a per-stack unit test.
  *
- * Synth runs with ambient AWS credentials neutralised — see the file doc on
- * `test/default-entry-byte-identical.test.ts` for why that matters (the
- * `cdk` CLI otherwise overwrites `CDK_DEFAULT_ACCOUNT` with whatever real
- * account the ambient credentials resolve to, regardless of what this file
- * passes).
+ * Synth runs with ambient AWS credentials neutralised — see
+ * `test/_hermetic-synth.ts` for why that matters (the `cdk` CLI otherwise
+ * overwrites `CDK_DEFAULT_ACCOUNT` with whatever real account the ambient
+ * credentials resolve to, regardless of what this file passes).
  */
 describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
   const iacDir = path.resolve(__dirname, '..');
@@ -29,20 +29,7 @@ describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
   const PRINCIPAL = 'arn:aws:iam::123456789012:root';
 
   function baseEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    delete env.AWS_PROFILE;
-    delete env.AWS_DEFAULT_PROFILE;
-    delete env.AWS_SESSION_TOKEN;
-    delete env.AWS_REGION;
-    delete env.AWS_DEFAULT_REGION;
-    delete env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
-    delete env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
-    delete env.AWS_WEB_IDENTITY_TOKEN_FILE;
-    return {
-      ...env,
-      AWS_ACCESS_KEY_ID: 'AKIAFAKEFAKEFAKEFAKE',
-      AWS_SECRET_ACCESS_KEY: 'fakefakefakefakefakefakefakefakefakefake',
-      AWS_EC2_METADATA_DISABLED: 'true',
+    return hermeticSynthEnv({
       CDK_DEFAULT_ACCOUNT: '123456789012',
       CDK_DEFAULT_REGION: REGION,
       STRATOCLAVE_REGION: REGION,
@@ -53,7 +40,7 @@ describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
       STRATOCLAVE_PRIVATE_DOMAIN: DOMAIN,
       STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: PRINCIPAL,
       ...extra,
-    };
+    });
   }
 
   function synth(env: NodeJS.ProcessEnv): { outDir: string; failed: boolean; output: string } {
@@ -174,15 +161,31 @@ describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
         tpl = Template.fromJSON(raw);
       });
 
-      test('exactly one AWS::EC2::SecurityGroupIngress resource in the whole stack', () => {
-        tpl.resourceCountIs('AWS::EC2::SecurityGroupIngress', 1);
-      });
-
-      test('that one rule is the ECS task admitting the ALB on :8000, not anything CloudFront-shaped', () => {
+      // Two ingress rules now live in this stack: ECS admitting the ALB on
+      // :8000 (unaffected by entry mode), and the ALB admitting the NLB on
+      // :443 (the rule that moved here from private-link-stack.ts; see that
+      // file's class doc and network-stack.ts's `entryMode` prop doc for
+      // why it belongs here, not there).
+      test('exactly two AWS::EC2::SecurityGroupIngress resources, both same-stack, nothing CloudFront-shaped', () => {
+        tpl.resourceCountIs('AWS::EC2::SecurityGroupIngress', 2);
         tpl.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
           IpProtocol: 'tcp',
           FromPort: 8000,
           ToPort: 8000,
+        });
+        tpl.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
+          IpProtocol: 'tcp',
+          FromPort: 443,
+          ToPort: 443,
+        });
+      });
+
+      test('exactly one AWS::EC2::SecurityGroupEgress resource: the NLB egressing to the ALB on :443', () => {
+        tpl.resourceCountIs('AWS::EC2::SecurityGroupEgress', 1);
+        tpl.hasResourceProperties('AWS::EC2::SecurityGroupEgress', {
+          IpProtocol: 'tcp',
+          FromPort: 443,
+          ToPort: 443,
         });
       });
 
@@ -193,13 +196,50 @@ describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
         expect(customResources).toHaveLength(0);
       });
 
-      test('the ALB security group carries no ingress rule of its own', () => {
+      test('the ALB admits only the NLB security group, on :443, no CIDR/prefix-list source', () => {
+        const albIngress = tpl.findResources('AWS::EC2::SecurityGroupIngress', {
+          Properties: Match.objectLike({ FromPort: 443, ToPort: 443 }),
+        });
+        const ids = Object.keys(albIngress);
+        expect(ids).toHaveLength(1);
+        const props = albIngress[ids[0]].Properties;
+        expect(props.IpProtocol).toBe('tcp');
+        expect(props.CidrIp).toBeUndefined();
+        expect(props.CidrIpv6).toBeUndefined();
+        expect(props.SourcePrefixListId).toBeUndefined();
+        expect(props.SourceSecurityGroupId).toBeDefined();
+        // Same-stack now (finding 3): both GroupId and SourceSecurityGroupId
+        // are local Fn::GetAtt references, never a cross-stack import.
+        expect(props.GroupId).toHaveProperty('Fn::GetAtt');
+        expect(JSON.stringify(props.GroupId)).toMatch(/AlbSecurityGroup/);
+        expect(props.SourceSecurityGroupId).toHaveProperty('Fn::GetAtt');
+        expect(JSON.stringify(props.SourceSecurityGroupId)).toMatch(/NlbSecurityGroup/);
+      });
+
+      test('the NLB security group itself carries no inline ingress rule', () => {
         const sgs = tpl.findResources('AWS::EC2::SecurityGroup', {
-          Properties: Match.objectLike({ GroupDescription: Match.stringLikeRegexp('ALB') }),
+          Properties: Match.objectLike({ GroupDescription: Match.stringLikeRegexp('NLB') }),
         });
         const ids = Object.keys(sgs);
         expect(ids).toHaveLength(1);
         expect(sgs[ids[0]].Properties.SecurityGroupIngress).toBeUndefined();
+      });
+
+      test('the NLB security group egress is scoped to the ALB security group only, not allowAllOutbound', () => {
+        const sgs = tpl.findResources('AWS::EC2::SecurityGroup', {
+          Properties: Match.objectLike({ GroupDescription: Match.stringLikeRegexp('NLB') }),
+        });
+        const ids = Object.keys(sgs);
+        expect(ids).toHaveLength(1);
+        const egress = sgs[ids[0]].Properties.SecurityGroupEgress;
+        // No "allow all" egress rule (0.0.0.0/0 on IpProtocol -1) anywhere
+        // on this security group — neither inline nor as a standalone
+        // resource (resourceCountIs above already pins the standalone
+        // count to exactly one, the ALB-scoped rule).
+        const allowsAll = (egress ?? []).some(
+          (rule: any) => rule.CidrIp === '0.0.0.0/0' && rule.IpProtocol === '-1',
+        );
+        expect(allowsAll).toBe(false);
       });
     });
 
@@ -237,55 +277,10 @@ describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
         });
       });
 
-      test('exactly one SecurityGroupIngress: ALB admits only the NLB security group, no CIDR/prefix-list source', () => {
-        tpl.resourceCountIs('AWS::EC2::SecurityGroupIngress', 1);
-        const ingresses = tpl.findResources('AWS::EC2::SecurityGroupIngress');
-        const ids = Object.keys(ingresses);
-        expect(ids).toHaveLength(1);
-        const props = ingresses[ids[0]].Properties;
-        expect(props.IpProtocol).toBe('tcp');
-        expect(props.FromPort).toBe(443);
-        expect(props.ToPort).toBe(443);
-        expect(props.CidrIp).toBeUndefined();
-        expect(props.CidrIpv6).toBeUndefined();
-        expect(props.SourcePrefixListId).toBeUndefined();
-        expect(props.SourceSecurityGroupId).toBeDefined();
-        // GroupId must reference the ALB security group (a cross-stack
-        // import, since the ALB SG lives in the network stack), and
-        // SourceSecurityGroupId the NLB security group created in THIS
-        // stack (a local Fn::GetAtt, not a cross-stack import).
-        expect(JSON.stringify(props.GroupId)).toMatch(/ExportsOutput.*AlbSecurityGroup/);
-        expect(props.SourceSecurityGroupId).toHaveProperty('Fn::GetAtt');
-        expect(JSON.stringify(props.SourceSecurityGroupId)).toMatch(/NlbSecurityGroup/);
-      });
-
-      test('the NLB security group itself carries no ingress rule', () => {
-        const sgs = tpl.findResources('AWS::EC2::SecurityGroup', {
-          Properties: Match.objectLike({ GroupDescription: Match.stringLikeRegexp('NLB') }),
-        });
-        const ids = Object.keys(sgs);
-        expect(ids).toHaveLength(1);
-        expect(sgs[ids[0]].Properties.SecurityGroupIngress).toBeUndefined();
-      });
-
-      test('the NLB security group egress is scoped to the ALB security group on :443, not allowAllOutbound', () => {
-        const sgs = tpl.findResources('AWS::EC2::SecurityGroup', {
-          Properties: Match.objectLike({ GroupDescription: Match.stringLikeRegexp('NLB') }),
-        });
-        const ids = Object.keys(sgs);
-        expect(ids).toHaveLength(1);
-        const egress = sgs[ids[0]].Properties.SecurityGroupEgress;
-        // No "allow all" egress rule (0.0.0.0/0 on IpProtocol -1) anywhere
-        // on this security group.
-        const allowsAll = (egress ?? []).some(
-          (rule: any) => rule.CidrIp === '0.0.0.0/0' && rule.IpProtocol === '-1',
-        );
-        expect(allowsAll).toBe(false);
-        tpl.hasResourceProperties('AWS::EC2::SecurityGroupEgress', {
-          IpProtocol: 'tcp',
-          FromPort: 443,
-          ToPort: 443,
-        });
+      test('this stack owns no security group of any kind (finding 3: both now live in the network stack)', () => {
+        tpl.resourceCountIs('AWS::EC2::SecurityGroup', 0);
+        tpl.resourceCountIs('AWS::EC2::SecurityGroupIngress', 0);
+        tpl.resourceCountIs('AWS::EC2::SecurityGroupEgress', 0);
       });
 
       test('endpoint service: acceptance required, allowed principals exactly as configured', () => {
@@ -335,109 +330,21 @@ describe('STRATOCLAVE_ENTRY=private — synthesized templates', () => {
     });
   });
 
-  describe('negative: missing or invalid private config refuses to synth', () => {
-    test('missing all three refuses, naming them', () => {
-      const result = synth(
-        baseEnv({
-          STRATOCLAVE_PRIVATE_CERTIFICATE_ARN: '',
-          STRATOCLAVE_PRIVATE_DOMAIN: '',
-          STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: '',
-        }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/STRATOCLAVE_PRIVATE_CERTIFICATE_ARN/);
-      expect(result.output).toMatch(/STRATOCLAVE_PRIVATE_DOMAIN/);
-      expect(result.output).toMatch(/STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS/);
-    }, 60_000);
-
+  // Every validation CASE (missing values, each wildcard shape, wrong
+  // partition, cert region mismatch, malformed cert, domain shape) is
+  // already covered in-process by entry-config.test.ts, against the exact
+  // same `resolveEntryConfig` this synth calls — a `cdk synth` subprocess
+  // per case re-pays that proof at ~5-10s each for no additional coverage.
+  // This one case is kept at the subprocess level because it is what
+  // entry-config.test.ts cannot see: that `bin/iac.ts` actually calls the
+  // resolver and that a throw from it really does fail `cdk synth` (not,
+  // say, get caught and swallowed somewhere in the app's own CDK wiring).
+  describe('negative: a throw from the resolver fails synth', () => {
     test('a bare wildcard allowed-principal is refused', () => {
       const result = synth(baseEnv({ STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: '*' }));
       fs.rmSync(result.outDir, { recursive: true, force: true });
       expect(result.failed).toBe(true);
       expect(result.output).toMatch(/must not contain a wildcard/);
-    }, 60_000);
-
-    test('role/* is refused (wildcard inside an otherwise ARN-shaped entry)', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:role/*' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/must not contain a wildcard/);
-    }, 60_000);
-
-    test('root* is refused (wildcard suffix disguised as root)', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws:iam::123456789012:root*' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/must not contain a wildcard/);
-    }, 60_000);
-
-    test('arn:aws-cn: is refused (wrong partition, even though otherwise well-formed)', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS: 'arn:aws-cn:iam::123456789012:root' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/must be aws-partition IAM principal ARNs/);
-    }, 60_000);
-
-    test('STRATOCLAVE_ENTRY=both is refused', () => {
-      const result = synth(baseEnv({ STRATOCLAVE_ENTRY: 'both' }));
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/not supported yet/);
-    }, 60_000);
-
-    test('a certificate ARN in a different region than the deployment is refused', () => {
-      const result = synth(
-        baseEnv({
-          STRATOCLAVE_PRIVATE_CERTIFICATE_ARN:
-            'arn:aws:acm:us-west-2:123456789012:certificate/11111111-2222-3333-4444-555555555555',
-        }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/deployment's own region/);
-    }, 60_000);
-
-    test('a malformed certificate ARN is refused', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_CERTIFICATE_ARN: 'not-an-arn-at-all' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/deployment's own region/);
-    }, 60_000);
-
-    test('a domain with a scheme is refused', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_DOMAIN: 'https://stratoclave.internal.example.com' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/bare lowercase hostname/);
-    }, 60_000);
-
-    test('a domain with a trailing slash is refused', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com/' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/bare lowercase hostname/);
-    }, 60_000);
-
-    test('an uppercase domain is refused', () => {
-      const result = synth(
-        baseEnv({ STRATOCLAVE_PRIVATE_DOMAIN: 'Stratoclave.Internal.Example.com' }),
-      );
-      fs.rmSync(result.outDir, { recursive: true, force: true });
-      expect(result.failed).toBe(true);
-      expect(result.output).toMatch(/bare lowercase hostname/);
     }, 60_000);
   });
 });

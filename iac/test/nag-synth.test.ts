@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { hermeticSynthEnv } from './_hermetic-synth';
 
 /**
  * Runs the REAL `bin/iac.ts` entrypoint through `cdk synth`, with every
@@ -33,14 +34,13 @@ describe('cdk synth (real bin/iac.ts) — every context-gated stack, cdk-nag mus
     extraEnv: Record<string, string> = {},
   ): { failed: boolean; output: string } {
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratoclave-nag-synth-'));
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
+    const env = hermeticSynthEnv({
       CDK_DEFAULT_ACCOUNT: '123456789012',
       CDK_DEFAULT_REGION: 'us-east-1',
       STRATOCLAVE_REGION: 'us-east-1',
       STRATOCLAVE_PREFIX: 'nagtest',
       ...extraEnv,
-    };
+    });
     const args = ['cdk', 'synth', '--all', '-o', outDir, '--quiet'];
     for (const flag of contextFlags) args.push('-c', flag);
     try {

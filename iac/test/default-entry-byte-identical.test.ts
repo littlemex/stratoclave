@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { hermeticSynthEnv } from './_hermetic-synth';
 
 /**
  * `STRATOCLAVE_ENTRY` unset (or `cloudfront`) must synthesize the same
@@ -13,34 +14,32 @@ import * as path from 'path';
  * deployed). That proof cannot be re-run by a future CI job because there is
  * no "before" tree once this commit lands.
  *
- * What CAN be re-run forever is this: snapshot the stacks THIS feature
- * actually branches on (network, alb, cognito — the ones whose construction
- * changed shape when entry-mode support was added) plus the two ECS task-env
- * entries that changed (`CORS_ORIGINS`, `STRATOCLAVE_API_ENDPOINT`), and fail
- * the moment a future change to entry-config.ts, network-stack.ts,
- * alb-stack.ts, or bin/iac.ts's own branching moves the default path's
- * output by so much as one byte. The full nine-stack ECR/DynamoDB/WAF/
- * Frontend templates are NOT snapshotted here: this feature's branching does
- * not touch them at all in `cloudfront` mode (see bin/iac.ts — ecr,
- * dynamodb, waf and frontend are constructed identically regardless of
- * entry mode when that mode is `cloudfront`), so snapshotting them would
- * only add churn this test would need to absorb for unrelated changes.
+ * What CAN be re-run forever is this: pin the EXACT resources this feature's
+ * entry-mode branching touches — the ALB security-group ingress rule and the
+ * CloudFront prefix-list lookup (network), the ALB load balancer and its
+ * listeners (alb), the UserPoolClient's callback/logout URLs (cognito), and
+ * the two ECS task-env entries that changed (`CORS_ORIGINS`,
+ * `STRATOCLAVE_API_ENDPOINT`) — and fail the moment a future change to
+ * entry-config.ts, network-stack.ts, alb-stack.ts, or bin/iac.ts's own
+ * branching moves any of them by so much as one byte.
  *
- * Synth is run with the ambient AWS credentials NEUTRALISED (no AWS_PROFILE,
- * fake AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_EC2_METADATA_DISABLED).
- * Without this, the `cdk` CLI resolves its own "default account" from
- * whatever real credentials happen to be ambient in the shell that runs the
- * test and OVERWRITES `CDK_DEFAULT_ACCOUNT` with that real account before
- * spawning the app subprocess — regardless of what this file passes in its
- * own `env` object. Measured directly: with ambient credentials left alone,
- * the synthesized templates contained a real AWS account id, baked into
- * literal `Account` properties, ARNs, and bucket names, and that id reached
- * a committed snapshot once already. Neutralising credentials makes the
- * `cdk` CLI unable to resolve anything beyond what this file explicitly
- * passes, so `CDK_DEFAULT_ACCOUNT=123456789012` is the value every
- * downstream `this.account` resolves to.
+ * Deliberately NOT a snapshot of the whole network/alb/cognito templates:
+ * those stacks also carry plenty this feature never touches (VPC CIDR, flow
+ * log retention, the Cognito password policy, the ALB's target group health
+ * check, ...), and a whole-template snapshot would churn — and invite a
+ * reflexive `-u`, defeating the point of pinning anything — on every one of
+ * those unrelated edits. "Pinned" here means exactly these resources, not
+ * "byte-for-byte identical to the historical templates" (which the one-time
+ * hand-run proof above already established, for the templates in full, once).
+ *
+ * Synth is run with the ambient AWS credentials NEUTRALISED (see
+ * `test/_hermetic-synth.ts` for why that is load-bearing, not cosmetic: a
+ * real AWS account id reached a committed snapshot here once already,
+ * because the `cdk` CLI resolves its own "default account" from ambient
+ * credentials and overwrites `CDK_DEFAULT_ACCOUNT` with it, regardless of
+ * what this file passes).
  */
-describe('STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-for-stack', () => {
+describe('STRATOCLAVE_ENTRY unset (default): the resources this feature branches on are pinned', () => {
   const iacDir = path.resolve(__dirname, '..');
   const PREFIX = 'defaultentrytest';
   const DUMMY_ACCOUNT = '123456789012';
@@ -48,7 +47,7 @@ describe('STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-fo
   // Exactly the nine stacks a default (no context flags) deploy has always
   // produced. A ratchet: if entry-mode branching ever added or removed one
   // of these for the DEFAULT mode, this list — and the stack-list assertion
-  // below — catches it independently of the per-stack content snapshots.
+  // below — catches it independently of the pinned-resource snapshots.
   const DEFAULT_STACK_IDS = [
     'network',
     'dynamodb',
@@ -61,46 +60,23 @@ describe('STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-fo
     'config',
   ];
 
-  // The subset this feature's branching actually touches in `cloudfront`
-  // mode, and the only templates whose full content is snapshotted.
-  const SNAPSHOTTED_STACK_IDS = ['network', 'alb', 'cognito'];
-
-  /**
-   * A synth-time credential-free environment. See the file doc for why this
-   * is load-bearing, not cosmetic: without it, a real AWS account id reaches
-   * the output (and, previously, a committed snapshot).
-   */
   function hermeticEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    delete env.AWS_PROFILE;
-    delete env.AWS_DEFAULT_PROFILE;
-    delete env.AWS_SESSION_TOKEN;
-    delete env.AWS_REGION;
-    delete env.AWS_DEFAULT_REGION;
-    delete env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
-    delete env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
-    delete env.AWS_WEB_IDENTITY_TOKEN_FILE;
-    delete env.STRATOCLAVE_ENTRY;
-    return {
-      ...env,
-      AWS_ACCESS_KEY_ID: 'AKIAFAKEFAKEFAKEFAKE',
-      AWS_SECRET_ACCESS_KEY: 'fakefakefakefakefakefakefakefakefakefake',
-      AWS_EC2_METADATA_DISABLED: 'true',
+    const env = hermeticSynthEnv({
       CDK_DEFAULT_ACCOUNT: DUMMY_ACCOUNT,
       CDK_DEFAULT_REGION: 'us-east-1',
       STRATOCLAVE_REGION: 'us-east-1',
       STRATOCLAVE_PREFIX: PREFIX,
       CDK_NAG: 'off',
       ...extra,
-    };
-  }
-
-  /** Strip the CDK bookkeeping resource that carries no deployed behaviour. */
-  function stripCdkMetadata(template: Record<string, any>): Record<string, any> {
-    if (!template.Resources?.CDKMetadata) return template;
-    const resources = { ...template.Resources };
-    delete resources.CDKMetadata;
-    return { ...template, Resources: resources };
+    });
+    // STRATOCLAVE_ENTRY must be deliberately ABSENT: this is the precise
+    // condition ("unset") the default-mode guarantee covers. A `delete`
+    // here, not a spread of `undefined` into `hermeticSynthEnv`'s `extra` —
+    // whether Node's child_process treats an `undefined` env value as
+    // "unset" or as the literal string "undefined" is not a contract this
+    // file should depend on.
+    delete env.STRATOCLAVE_ENTRY;
+    return env;
   }
 
   /**
@@ -109,13 +85,34 @@ describe('STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-fo
    * it changes, including ones this feature does not touch) with a fixed
    * placeholder, so the snapshot only breaks on changes that matter to it.
    */
-  function normalizeAssetHashes(template: Record<string, any>): Record<string, any> {
-    const text = JSON.stringify(template).replace(/[0-9a-f]{64}/g, '<ASSET_HASH>');
+  function normalizeAssetHashes(value: unknown): unknown {
+    const text = JSON.stringify(value).replace(/[0-9a-f]{64}/g, '<ASSET_HASH>');
     return JSON.parse(text);
   }
 
-  function sanitize(template: Record<string, any>): Record<string, any> {
-    return normalizeAssetHashes(stripCdkMetadata(template));
+  /** Every resource of one of the given CloudFormation types, by logical id. */
+  function pickResourcesByType(
+    template: Record<string, any>,
+    types: string[],
+  ): Record<string, any> {
+    const out: Record<string, any> = {};
+    for (const [id, res] of Object.entries(template.Resources ?? {})) {
+      if (types.includes((res as any).Type)) out[id] = res;
+    }
+    return out;
+  }
+
+  function pickUserPoolClientUrls(template: Record<string, any>): {
+    CallbackURLs: unknown;
+    LogoutURLs: unknown;
+  } {
+    const client = Object.values(template.Resources ?? {}).find(
+      (r: any) => r.Type === 'AWS::Cognito::UserPoolClient',
+    ) as any;
+    return {
+      CallbackURLs: client?.Properties?.CallbackURLs,
+      LogoutURLs: client?.Properties?.LogoutURLs,
+    };
   }
 
   let outDir: string;
@@ -150,8 +147,24 @@ describe('STRATOCLAVE_ENTRY unset (default): template output is pinned, stack-fo
     expect(produced).toEqual(expected);
   });
 
-  test.each(SNAPSHOTTED_STACK_IDS)('%s stack template is byte-for-byte pinned', (id) => {
-    expect(sanitize(rawTemplates[id])).toMatchSnapshot();
+  test('network: the ALB security-group ingress rule(s) and the CloudFront prefix-list lookup are pinned', () => {
+    const picked = pickResourcesByType(rawTemplates.network, [
+      'AWS::EC2::SecurityGroupIngress',
+      'Custom::AWS',
+    ]);
+    expect(normalizeAssetHashes(picked)).toMatchSnapshot();
+  });
+
+  test('alb: the load balancer and its listeners are pinned', () => {
+    const picked = pickResourcesByType(rawTemplates.alb, [
+      'AWS::ElasticLoadBalancingV2::LoadBalancer',
+      'AWS::ElasticLoadBalancingV2::Listener',
+    ]);
+    expect(normalizeAssetHashes(picked)).toMatchSnapshot();
+  });
+
+  test('cognito: the UserPoolClient callback/logout URLs are pinned', () => {
+    expect(pickUserPoolClientUrls(rawTemplates.cognito)).toMatchSnapshot();
   });
 
   test('the ECS task env entries this feature branches on are pinned', () => {

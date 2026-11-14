@@ -36,9 +36,11 @@ export interface PrivateEntryConfig {
   readonly domainName: string;
   /**
    * `STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS` — IAM principal ARNs allowed to
-   * accept a VPC endpoint connection to the endpoint service, parsed,
-   * trimmed, and validated to look like IAM principal ARNs. Never empty and
-   * never containing `*` — both are rejected before this type is produced.
+   * request a connection to the endpoint service (the provider — this
+   * deployment's operator — still has to accept each one; being allowed is
+   * not being auto-connected), parsed, trimmed, and validated to look like
+   * IAM principal ARNs. Never empty and never containing `*` — both are
+   * rejected before this type is produced.
    */
   readonly allowedPrincipals: string[];
 }
@@ -66,12 +68,14 @@ export type Env = Record<string, string | undefined>;
 const IAM_PRINCIPAL_ARN_RE =
   /^arn:aws:iam::\d{12}:(root|(?:user|role)\/[\w+=,.@/-]+)$/;
 
-// A bare lowercase hostname: no scheme, no path, no port, at least two
-// labels (so a single word is refused, which already catches a copy-pasted
-// `https://...` or a trailing slash via the dot requirement combined with
-// the scheme/slash checks below). Matches RFC 1123 label rules: each label
-// starts and ends with an alphanumeric and is <= 63 characters internally
-// hyphen-only.
+// A bare lowercase hostname: no scheme, no path, no port, no uppercase, at
+// least two dot-separated labels. The character class alone already
+// refuses every one of those: a scheme or a path introduces `:` or `/`, a
+// port introduces `:`, and uppercase letters are outside `[a-z0-9]`/
+// `[a-z0-9-]` entirely — so one regex is the complete check, not a
+// pre-filter for some cases plus this for the rest. Matches RFC 1123 label
+// rules: each label starts and ends with an alphanumeric, with only
+// alphanumerics and hyphens in between, and is at most 63 characters.
 const BARE_HOSTNAME_RE =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
@@ -135,7 +139,7 @@ export function resolveEntryConfig(env: Env, bodyRegion: string): EntryConfig {
       `STRATOCLAVE_ENTRY=private requires ${missing.join(', ')} to be set. The private ` +
         'path has no CloudFront and no web console, so there is nothing to serve a ' +
         'certificate or discover a domain from — the operator supplies both, plus the ' +
-        'set of IAM principals allowed to accept a connection to the endpoint service. ' +
+        'set of IAM principals allowed to request a connection to the endpoint service. ' +
         'See docs/DEPLOYMENT.md, "Private entry (PrivateLink), headless".',
     );
   }
@@ -151,21 +155,13 @@ export function resolveEntryConfig(env: Env, bodyRegion: string): EntryConfig {
     );
   }
 
-  if (domainName.includes('://') || domainName.includes('/') || domainName !== domainName.toLowerCase()) {
-    throw new Error(
-      `STRATOCLAVE_PRIVATE_DOMAIN ("${domainName}") must be a bare lowercase hostname — ` +
-        'no scheme (no "https://"), no path, no port, e.g. ' +
-        '"stratoclave.internal.example.com". It is used both as the ALB\'s certificate ' +
-        'domain and as the literal value of STRATOCLAVE_API_ENDPOINT, which the backend ' +
-        '(main.py\'s CORS_ORIGINS validation) and the CLI both expect to be a bare host, ' +
-        'not a URL.',
-    );
-  }
   if (!BARE_HOSTNAME_RE.test(domainName)) {
     throw new Error(
-      `STRATOCLAVE_PRIVATE_DOMAIN ("${domainName}") does not look like a valid hostname ` +
-        '(expected one or more dot-separated DNS labels, lowercase letters/digits/hyphens, ' +
-        'e.g. "stratoclave.internal.example.com").',
+      `STRATOCLAVE_PRIVATE_DOMAIN ("${domainName}") must be a bare lowercase hostname — ` +
+        'no scheme (no "https://"), no path, no port, no uppercase, at least two ' +
+        'dot-separated DNS labels, e.g. "stratoclave.internal.example.com". It is ' +
+        'interpolated into `https://<domain>` for both the ALB\'s certificate domain ' +
+        'and the literal value of STRATOCLAVE_API_ENDPOINT.',
     );
   }
 
@@ -182,10 +178,10 @@ export function resolveEntryConfig(env: Env, bodyRegion: string): EntryConfig {
       'STRATOCLAVE_PRIVATE_ALLOWED_PRINCIPALS must not contain a wildcard ' +
         `(found: ${wildcarded.join(', ')}). The whole point of acceptance-required ` +
         'PrivateLink is that the operator names which accounts, roles, or users may ' +
-        'even ask to connect; a wildcard anywhere in an entry — a bare "*", "root*", ' +
-        '"role/*" — makes the endpoint service accept a connection request from anyone ' +
-        'or anything matching it, which is the public-internet failure mode this mode ' +
-        'exists to avoid.',
+        'even ASK to connect; a wildcard anywhere in an entry — a bare "*", "root*", ' +
+        '"role/*" — lets a connection request from anyone or anything matching it reach ' +
+        'this endpoint service at all, which is the public-internet failure mode this ' +
+        'mode exists to avoid.',
     );
   }
   const malformed = allowedPrincipals.filter((p) => !IAM_PRINCIPAL_ARN_RE.test(p));

@@ -252,7 +252,16 @@ describe('resolveEntryConfig', () => {
     test('a single-label domain is refused (not a valid hostname shape)', () => {
       expect(() =>
         resolveEntryConfig(privateEnv({ STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave' }), REGION),
-      ).toThrow(/does not look like a valid hostname/);
+      ).toThrow(/bare lowercase hostname/);
+    });
+
+    test('a domain with a port is refused (same message as scheme/slash/case)', () => {
+      expect(() =>
+        resolveEntryConfig(
+          privateEnv({ STRATOCLAVE_PRIVATE_DOMAIN: 'stratoclave.internal.example.com:443' }),
+          REGION,
+        ),
+      ).toThrow(/bare lowercase hostname/);
     });
 
     test('a well-formed multi-label domain is accepted', () => {
