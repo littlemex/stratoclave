@@ -44,35 +44,7 @@ class _AdminUser:
 
 
 @pytest.fixture
-def usage_logs_table(dynamodb_mock):
-    dynamodb_mock.create_table(
-        TableName="stratoclave-usage-logs",
-        KeySchema=[
-            {"AttributeName": "tenant_id", "KeyType": "HASH"},
-            {"AttributeName": "timestamp_log_id", "KeyType": "RANGE"},
-        ],
-        AttributeDefinitions=[
-            {"AttributeName": "tenant_id", "AttributeType": "S"},
-            {"AttributeName": "timestamp_log_id", "AttributeType": "S"},
-            {"AttributeName": "user_id", "AttributeType": "S"},
-        ],
-        GlobalSecondaryIndexes=[
-            {
-                "IndexName": "user-id-index",
-                "KeySchema": [
-                    {"AttributeName": "user_id", "KeyType": "HASH"},
-                    {"AttributeName": "timestamp_log_id", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            }
-        ],
-        BillingMode="PAY_PER_REQUEST",
-    )
-    yield
-
-
-@pytest.fixture
-def client(usage_logs_table, monkeypatch):
+def client(dynamodb_mock, monkeypatch):
     import mvp.authz as _authz
 
     monkeypatch.setattr(_authz, "user_has_permission", lambda u, p: True)
