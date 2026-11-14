@@ -47,6 +47,21 @@ from dynamo import (
 
 DEFAULT_ORG_ID = os.getenv("DEFAULT_ORG_ID", "default-org")
 
+
+def validate_default_org_id() -> None:
+    """Refuse to start when `DEFAULT_ORG_ID` cannot be carried in the correlation
+    marker (C13.6). Its calls would still succeed, but without `sc_tenant`, so
+    an unobserved charge for that tenant could not be attributed: reconciliation
+    needs it, which is why this stops startup rather than logging. Runs before
+    the seed writes the tenant row."""
+    from .provider_outcome import _MARKER_VALUE_MAX, marker_value_ok
+
+    if not marker_value_ok(DEFAULT_ORG_ID):
+        raise RuntimeError(
+            f"DEFAULT_ORG_ID={DEFAULT_ORG_ID!r} cannot be carried in the correlation "
+            f"marker: use 1 to {_MARKER_VALUE_MAX} ASCII letters, digits and "
+            "':_@$#=/+,.-' (inner spaces allowed, none leading or trailing).")
+
 _log = logging.getLogger(__name__)
 
 

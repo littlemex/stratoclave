@@ -134,6 +134,7 @@ class TestopenaiPassThrough:
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
             out = _openai_chat_completion(
+                asserted_task_tag=None,
                 body=body, entry=entry, user=_user(), tenants_repo=tenants_repo,
                 reservation=1024, corr={}, request_id="req-1",
             )
@@ -181,6 +182,7 @@ class TestopenaiPassThrough:
              patch("mvp.chat_completions._release_pool") as release:
             with pytest.raises(HTTPException) as ei:
                 _openai_chat_completion(
+                    asserted_task_tag=None,
                     body=_body(), entry=_entry(), user=_user(), tenants_repo=repo,
                     reservation=1024, corr={}, request_id="req-1",
                 )
@@ -269,6 +271,7 @@ class TestopenaiPassThrough:
              patch("mvp.chat_completions._release_pool") as release:
             with pytest.raises(HTTPException):
                 _openai_chat_completion(
+                    asserted_task_tag=None,
                     body=_body(), entry=_entry(), user=_user(), tenants_repo=repo,
                     reservation=1024, corr={}, request_id="req-1",
                 )
@@ -293,6 +296,7 @@ class TestopenaiPassThrough:
              patch("mvp.chat_completions._release_pool") as release:
             with pytest.raises(HTTPException):
                 _openai_chat_completion(
+                    asserted_task_tag=None,
                     body=_body(), entry=_entry(), user=_user(), tenants_repo=repo,
                     reservation=1024, corr={}, request_id="req-1",
                 )
@@ -322,6 +326,7 @@ class TestopenaiPassThrough:
              patch("mvp.chat_completions._settle_reservation_and_log"), \
              patch("mvp.chat_completions._release_pool"):
             _openai_chat_completion(
+                asserted_task_tag=None,
                 body=_body(model="grok-4.6"),
                 entry=_entry(region="us-west-2", model_id="xai.grok-4.6"),
                 user=_user(), tenants_repo=MagicMock(), reservation=1024,
@@ -415,6 +420,7 @@ class TestopenaiStreaming:
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
             out = _openai_chat_completion(
+                asserted_task_tag=None,
                 body=body, entry=_entry(), user=_user(), tenants_repo=repo,
                 reservation=1024, corr={}, request_id="req-1",
             )
@@ -475,6 +481,7 @@ class TestopenaiStreaming:
              patch("mvp.chat_completions._settle_reservation_and_log") as settle, \
              patch("mvp.chat_completions._release_pool") as release:
             out = _openai_chat_completion(
+                asserted_task_tag=None,
                 body=_body(stream=True), entry=_entry(), user=_user(), tenants_repo=repo,
                 reservation=1024, corr={}, request_id="req-1",
             )
@@ -574,6 +581,7 @@ class TestMaxOutputTokenSpelling:
              patch("mvp.chat_completions._settle_reservation_and_log"), \
              patch("mvp.chat_completions._release_pool"):
             _openai_chat_completion(
+                asserted_task_tag=None,
                 body=_body(max_completion_tokens=16000), entry=_entry(), user=_user(),
                 tenants_repo=MagicMock(), reservation=1024, corr={}, request_id=None,
             )
@@ -602,6 +610,7 @@ class TestopenaiStreamFraming:
              patch("mvp.chat_completions._settle_reservation_and_log"), \
              patch("mvp.chat_completions._release_pool"):
             out = _openai_chat_completion(
+                asserted_task_tag=None,
                 body=_body(stream=True), entry=_entry(), user=_user(),
                 tenants_repo=MagicMock(), reservation=1024, corr={}, request_id=None,
             )

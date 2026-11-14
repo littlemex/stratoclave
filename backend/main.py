@@ -131,6 +131,13 @@ async def lifespan(app: FastAPI):
             environment=environment,
         )
 
+    # The default tenant's id is the one tenant id an operator chooses. It must
+    # fit the correlation marker (C13.6): reconciliation needs `sc_tenant`, so
+    # this stops startup rather than logging, unlike the seed below.
+    from mvp.deps import validate_default_org_id
+
+    validate_default_org_id()
+
     # OSS zero-touch seed: idempotently populate Permissions / Default Tenant.
     # A failure here does not prevent the backend from starting (service continuity first;
     # exceptions are suppressed inside seed_all).

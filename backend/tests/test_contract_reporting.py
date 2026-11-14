@@ -104,6 +104,7 @@ class TestAbsenceIsNotZero:
             org_id = "acme"
 
         hold = _money.Hold(
+            asserted_task_tag=None,
             user=_U(), tenants_repo=_Repo(), reservation=1000, model_id="m",
             settle=lambda **k: settled.append(k),
             release=lambda ctx: None,
@@ -121,6 +122,7 @@ class TestAbsenceIsNotZero:
         # A reported zero still arrives as a number.
         settled.clear()
         hold2 = _money.Hold(
+            asserted_task_tag=None,
             user=_U(), tenants_repo=_Repo(), reservation=1000, model_id="m",
             settle=lambda **k: settled.append(k),
             release=lambda ctx: None,

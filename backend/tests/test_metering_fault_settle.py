@@ -90,6 +90,7 @@ def _mentions_no_final_usage(item: dict) -> bool:
 
 def _hold(user, ctx, reservation, *, model_id="us.anthropic.claude-opus-4-7"):
     return Hold(
+        asserted_task_tag=None,
         user=user, tenants_repo=ctx, reservation=reservation, model_id=model_id,
         settle=settle_reservation_and_log, release=release_pool,
     )

@@ -58,6 +58,7 @@ from ._bedrock_clients import bedrock_runtime_client
 from ._converse_core import usage_from_bedrock
 from ._converse_types import additional_model_request_fields as _additional_model_request_fields
 from . import _money
+from .task_tag import asserted as _asserted_task_tag
 from . import provider_outcome as _provider_outcome
 from ._pipeline import (
     eligibility_listing_context,
@@ -1060,7 +1061,7 @@ def messages(
     hold = _open_hold(
         user=user, tenants_repo=tenants_repo, reservation=reservation,
         model_id=model_id, request_id=ctx.request_id if ctx else None,
-        route="messages",
+        route="messages", asserted_task_tag=_asserted_task_tag(ctx),
     )
     _attempt_md = hold.request_metadata()
     if _attempt_md:
@@ -1390,7 +1391,7 @@ async def _stream_messages(
         hold=_open_hold(
             user=user, tenants_repo=tenants_repo, reservation=reservation,
             model_id=model_id, request_id=ctx.request_id if ctx else None,
-            route="messages_stream",
+            route="messages_stream", asserted_task_tag=_asserted_task_tag(ctx),
             on_finalized=_on_finalized,
         ),
         invoke_stream=_invoke,

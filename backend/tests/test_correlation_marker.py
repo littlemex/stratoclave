@@ -70,10 +70,68 @@ def test_a_dropped_value_is_logged_once_by_key_and_never_by_value(monkeypatch):
 
 
 def test_the_ids_the_gateway_mints_always_pass():
+    from dynamo.tenants import TenantsRepository
     from mvp._pipeline import _fresh_idempotency_token
 
     assert po.marker_value_ok(_fresh_idempotency_token())
+    from mvp.discovery.ledger import SYSTEM_TENANT_ID
+
+    assert po.marker_value_ok(TenantsRepository.new_tenant_id())
+    assert po.marker_value_ok(SYSTEM_TENANT_ID)
     assert po.marker_value_ok(po.ATTEMPT_ID_PLACEHOLDER)
+
+
+@pytest.mark.parametrize("org, starts", [("default-org", True), ("team|a", False), (" x", False)])
+def test_a_default_tenant_id_the_marker_cannot_carry_stops_the_gateway_starting(
+        monkeypatch, org, starts):
+    """Through `main.py`'s real lifespan, the one boot path."""
+    import main
+    import mvp.deps
+    import mvp.price_sources as price_sources
+
+    monkeypatch.setattr(mvp.deps, "DEFAULT_ORG_ID", org)
+    monkeypatch.setattr(price_sources, "validate_configuration", lambda: "bundled")
+    reached = []
+    monkeypatch.setattr("bootstrap.seed_all", lambda: reached.append(True))
+
+    async def once():
+        async with main.lifespan(main.app):
+            pass
+
+    if starts:
+        asyncio.run(once())
+        assert reached, "startup did not reach the seed"
+    else:
+        with pytest.raises(RuntimeError, match="DEFAULT_ORG_ID"):
+            asyncio.run(once())
+        assert not reached, "the check must run before the seed"
+
+
+def test_no_tenant_row_is_written_with_an_id_the_marker_cannot_carry(dynamodb_mock):
+    from dynamo.tenants import ADMIN_OWNED, TenantsRepository
+
+    repo = TenantsRepository()
+    with pytest.raises(ValueError, match="correlation marker"):
+        repo.create(name="a", team_lead_user_id=ADMIN_OWNED, created_by="t", tenant_id="team|a")
+    with pytest.raises(ValueError, match="correlation marker"):
+        repo.seed_default(tenant_id="ユーザー")
+    assert repo.create(name="a", team_lead_user_id=ADMIN_OWNED, created_by="t")["tenant_id"].startswith("tenant-")
+
+
+def test_no_tenant_creation_route_takes_an_id_from_the_caller():
+    from pydantic import ValidationError
+
+    from mvp.admin_tenants import CreateTenantRequest
+    from mvp.team_lead import CreateTenantTeamLeadRequest
+
+    admin = {"name": "a", "team_lead_user_id": "admin-owned"}
+    lead = {"name": "a"}
+    CreateTenantRequest.model_validate(admin)
+    CreateTenantTeamLeadRequest.model_validate(lead)
+    with pytest.raises(ValidationError):
+        CreateTenantRequest.model_validate({**admin, "tenant_id": "team|a"})
+    with pytest.raises(ValidationError):
+        CreateTenantTeamLeadRequest.model_validate({**lead, "tenant_id": "team|a"})
 
 
 @pytest.mark.parametrize("good", ["default-org", "u@x.com/1+2=3,#$:_-.", "team a", "x" * 256,
@@ -101,7 +159,7 @@ def test_the_headers_and_the_bedrock_marker_follow_one_value_rule(value):
 
 def test_the_openai_metadata_carries_the_user_too():
     payload: dict = {}
-    assert po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1") is True
+    assert po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1", asserted_task_tag=None) is True
     assert payload["metadata"]["sc_user"] == "u-1"
     assert payload["metadata"]["sc_tenant"] == "t-1"
 
@@ -117,15 +175,97 @@ def test_under_the_openai_key_ceiling_the_user_key_gives_way_first(caller_keys, 
     `sc_user` existed still fits; the pair itself is all or nothing, and the
     request is sent rather than refused."""
     payload: dict = {"metadata": {f"k{i}": "v" for i in range(caller_keys)}}
-    added = po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1")
+    added = po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1", asserted_task_tag=None)
     assert set(payload["metadata"]) & set(po.MARKER_KEYS) == sent
     assert added is ("sc_attempt_id" in sent)
     assert len(payload["metadata"]) <= po.OPENAI_METADATA_MAX_KEYS
 
 
+@pytest.mark.parametrize("caller_keys, sent", [
+    (12, {"sc_attempt_id", "sc_tenant", "sc_user", "sc_task_tag"}),
+    (13, {"sc_attempt_id", "sc_tenant", "sc_user"}),
+    (14, {"sc_attempt_id", "sc_tenant"}),
+    (15, set()),
+])
+def test_the_task_tag_gives_way_before_the_user(caller_keys, sent):
+    payload: dict = {"metadata": {f"k{i}": "v" for i in range(caller_keys)}}
+    added = po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1", asserted_task_tag="nightly-eval")
+    assert set(payload["metadata"]) & set(po.MARKER_KEYS) == sent
+    assert added is ("sc_attempt_id" in sent)
+    assert len(payload["metadata"]) <= po.OPENAI_METADATA_MAX_KEYS
+
+
+def test_the_marker_carries_the_asserted_task_tag_and_only_that():
+    from types import SimpleNamespace
+
+    from mvp import task_tag
+    assert po.attempt_request_metadata("h-1", "t-1", "u-1", "nightly-eval")["sc_task_tag"] == "nightly-eval"
+    asserted = SimpleNamespace(task_tag="nightly-eval", task_tag_source="asserted")
+    absent = SimpleNamespace(task_tag=task_tag.SENTINEL, task_tag_source="absent")
+    dropped = SimpleNamespace(task_tag=task_tag.SENTINEL, task_tag_source="dropped_grammar")
+    assert task_tag.asserted(asserted) == "nightly-eval"
+    assert task_tag.asserted(absent) is None
+    assert task_tag.asserted(dropped) is None
+    assert task_tag.asserted(None) is None
+
+
+def test_every_tag_the_grammar_accepts_passes_the_marker_rule():
+    """Every character the task tag grammar accepts, alone, between two plain
+    letters, and repeated to the grammar's longest length, gives a value the
+    marker can carry; so no asserted tag is ever left out of the marker."""
+    from mvp import task_tag
+
+    assert task_tag.MAX_LEN <= po._MARKER_VALUE_MAX
+    checked = 0
+    for c in map(chr, range(0x180)):
+        for candidate in (c, f"a{c}a", "a" + c * (task_tag.MAX_LEN - 2) + "a"):
+            tag, source = task_tag.resolve(candidate)
+            if source is task_tag.Source.ASSERTED:
+                checked += 1
+                assert po.marker_value_ok(tag), repr(candidate)
+    assert checked > 3 * 60, checked
+
+
+# The calls that carry the tag towards the marker. The usage record and the
+# decision log take `task_tag` too, with the sentinel for "none"; not these.
+_MARKER_PATHS = {"_open_hold", "_stream_chat", "_stream_response", "_openai_chat_completion",
+                 "_build_openai_chat_payload", "_build_openai_responses_payload",
+                 "stamp_openai_metadata_marker"}
+
+
+def test_every_marker_path_is_handed_the_asserted_tag():
+    """Every call under mvp/ that carries the tag towards the marker (the hold,
+    the payload builders and the helpers between) names `task_tag`, and what it
+    passes is the asserted tag from the request context or a `task_tag`
+    parameter threaded from one. `None` is allowed only where the caller is not
+    a tenant's request."""
+    allowed_none = {"mvp/discovery/ledger.py"}
+    seen = 0
+    for path in sorted((BACKEND / "mvp").rglob("*.py")):
+        rel = path.relative_to(BACKEND).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for call in ast.walk(tree):
+            if not (isinstance(call, ast.Call) and _callee_name(call) in _MARKER_PATHS | {"Hold"}):
+                continue
+            if rel == "mvp/discovery/ledger.py" and _callee_name(call) == "_open_hold":
+                continue  # the probe's own factory sets asserted_task_tag=None
+            kws = {k.arg: k.value for k in call.keywords}
+            if None in kws and "asserted_task_tag" not in kws:
+                continue  # a factory forwarding **kwargs; its own callers are checked
+            assert "asserted_task_tag" in kws, (
+                f"{rel}:{call.lineno} {_callee_name(call)} without asserted_task_tag")
+            seen += 1
+            v = kws["asserted_task_tag"]
+            ok = (isinstance(v, ast.Name) and v.id == "asserted_task_tag") or (
+                isinstance(v, ast.Call) and _callee_name(v) == "_asserted_task_tag") or (
+                rel in allowed_none and isinstance(v, ast.Constant) and v.value is None)
+            assert ok, f"{rel}:{call.lineno} passes asserted_task_tag={ast.unparse(v)}"
+    assert seen, "no marker path found"
+
+
 def test_a_caller_cannot_forge_the_user_key():
     payload = {"metadata": {"sc_user": "someone-else", " SC_USER ": "x"}}
-    po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1")
+    po.stamp_openai_metadata_marker(payload, "t-1", user_id="u-1", asserted_task_tag=None)
     assert payload["metadata"]["sc_user"] == "u-1"
     assert " SC_USER " not in payload["metadata"]
 
@@ -282,13 +422,19 @@ def test_the_streaming_messages_route_sends_the_marker_to_converse_stream(monkey
         "max_tokens": 16, "stream": True})
 
     async def drive():
+        from mvp.observability.context import build_request_context
+
+        ctx = build_request_context(tenant_id="default-org", group_id_header=None,
+                                    workflow_run_id_header=None, task_tag_header="nightly-eval")
         async for _ in anth._stream_messages(body=body, model_id="us.anthropic.claude-opus-4-7",
-                                             user=_User(), tenants_repo=_Repo(), reservation=100):
+                                             user=_User(), tenants_repo=_Repo(), reservation=100,
+                                             ctx=ctx):
             pass
 
     asyncio.run(drive())
     md = seen["kwargs"].get("requestMetadata")
-    assert md == {"sc_tenant": "default-org", "sc_user": "u-1", "sc_attempt_id": "hold-MARK"}, seen["kwargs"]
+    assert md == {"sc_tenant": "default-org", "sc_user": "u-1", "sc_attempt_id": "hold-MARK",
+                  "sc_task_tag": "nightly-eval"}, seen["kwargs"]
 
 
 def test_the_streaming_chat_route_sends_the_marker_to_converse_stream(monkeypatch):
@@ -327,12 +473,13 @@ def test_the_streaming_chat_route_sends_the_marker_to_converse_stream(monkeypatc
 
     async def drive():
         async for _ in cc._stream_chat(body, "us.anthropic.claude-opus-4-7", _User(), _Repo(), 100,
-                                       kwargs, entry=None):
+                                       kwargs, entry=None, asserted_task_tag="nightly-eval"):
             pass
 
     asyncio.run(drive())
     md = seen["kwargs"].get("requestMetadata")
-    assert md == {"sc_tenant": "default-org", "sc_user": "u-1", "sc_attempt_id": "hold-MARK"}, seen["kwargs"]
+    assert md == {"sc_tenant": "default-org", "sc_user": "u-1", "sc_attempt_id": "hold-MARK",
+                  "sc_task_tag": "nightly-eval"}, seen["kwargs"]
 
 
 # --- every Bedrock call site under mvp/ -------------------------------------
@@ -392,7 +539,8 @@ def test_a_self_hosted_call_carries_the_marker_as_headers(monkeypatch):
         region = "self-hosted"
 
     monkeypatch.setenv("HYBRID_SERVING_ENABLED", "true")
-    marker = {"sc_tenant": "tenant-MARK", "sc_attempt_id": "hold-MARK", "sc_user": "user-MARK"}
+    marker = {"sc_tenant": "tenant-MARK", "sc_attempt_id": "hold-MARK", "sc_user": "user-MARK",
+              "sc_task_tag": "tag-MARK"}
     payload = {"messages": [{"role": "user", "content": [{"text": "hi"}]}],
                "inferenceConfig": {"maxTokens": 8}, "requestMetadata": marker}
 
@@ -409,6 +557,7 @@ def test_a_self_hosted_call_carries_the_marker_as_headers(monkeypatch):
     assert headers["x-stratoclave-tenant"] == "tenant-MARK"
     assert headers["x-stratoclave-attempt-id"] == "hold-MARK"
     assert headers["x-stratoclave-user"] == "user-MARK"
+    assert headers["x-stratoclave-task-tag"] == "tag-MARK"
     body = json.loads(seen["body"])
     assert not set(po.MARKER_KEYS) & set(body) and "requestMetadata" not in body
     assert not any(v in seen["body"] for v in marker.values()), (

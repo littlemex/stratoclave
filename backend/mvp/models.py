@@ -626,6 +626,16 @@ class _ComposedRegistry:
         with self._lock:
             self._loaded_at = 0.0
 
+    def reset(self) -> None:
+        """Forget the last known-good activated set as well, so the next read
+        starts from the code-resident entries alone. For tests only: in a
+        process the fail-static set is the point, but between tests it carries
+        one test's activated model into the next whenever that one cannot reach
+        the store."""
+        with self._lock:
+            self._activated = ()
+            self._loaded_at = 0.0
+
     def _refresh_locked(self) -> None:
         # Imported inside the method, not at module top level: this module
         # (`mvp.models`) is imported very early by nearly everything, and
@@ -730,6 +740,11 @@ class _ComposedRegistry:
 
 
 _composed_registry = _ComposedRegistry()
+
+
+def reset_composed_registry_for_test() -> None:
+    """See `_ComposedRegistry.reset`."""
+    _composed_registry.reset()
 
 
 def invalidate_composed_registry() -> None:

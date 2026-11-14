@@ -119,6 +119,7 @@ def _hold(user, ctx, reservation, settle, *, release):
     from mvp._money import Hold
 
     return Hold(
+        asserted_task_tag=None,
         user=user, tenants_repo=ctx, reservation=reservation,
         model_id="us.anthropic.claude-opus-4-7", settle=settle, release=release,
     )

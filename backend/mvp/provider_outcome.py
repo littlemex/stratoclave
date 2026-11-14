@@ -328,12 +328,14 @@ def unobserved_holds_enforced() -> bool:
 #:   sc_tenant      the tenant id
 #:   sc_attempt_id  the id of this attempt's money hold
 #:   sc_user        whatever the gateway uses as the principal's `user_id`
+#:   sc_task_tag    the task tag the caller asserted (`mvp.task_tag`), when it did
 #: The gateway sends the headers on every inference call; recording them is the
 #: endpoint's job.
 MARKER_HEADERS: dict[str, str] = {
     "sc_tenant": "X-Stratoclave-Tenant",
     "sc_attempt_id": "X-Stratoclave-Attempt-Id",
     "sc_user": "X-Stratoclave-User",
+    "sc_task_tag": "X-Stratoclave-Task-Tag",
 }
 MARKER_KEYS: tuple[str, ...] = tuple(MARKER_HEADERS)
 
@@ -342,9 +344,12 @@ _MARKER_VALUE_MAX = 256
 #: The one rule every marker value passes before it is sent anywhere. Bedrock
 #: refuses the WHOLE call (`ValidationException`) when a `requestMetadata` value
 #: has a character outside `[a-zA-Z0-9\s:_@$#=/+,-.]` (checked on real Bedrock:
-#: "a|b" and non-ASCII refused, "u@x.com/1+2=3,#$:_-." accepted). Tenant ids are
-#: chosen by an admin and are not restricted to that set, so an unchecked value
-#: would turn every call for that tenant into an error. The rule is that set
+#: "a|b" and non-ASCII refused, "u@x.com/1+2=3,#$:_-." accepted). The ids the
+#: gateway mints all pass (`tenant-<uuid>`, Cognito `sub`, hold ids), but the
+#: default tenant's id comes from `DEFAULT_ORG_ID` and older rows may predate
+#: either, so an unchecked value could turn every call for that tenant into an
+#: error; `mvp.deps.validate_default_org_id` refuses such a deployment at startup
+#: and `dynamo.tenants` refuses to write such a row. The rule is that set
 #: narrowed to what is also a safe HTTP header value: the only whitespace is an
 #: inner space (no tab or line break, nothing leading or trailing). A value that
 #: fails is left out, never altered: an altered id would name someone else.
@@ -365,6 +370,7 @@ _reported_drops: set[str] = set()
 
 def attempt_request_metadata(
     hold_id: Optional[str], tenant_id: Optional[str] = None, user_id: Optional[str] = None,
+    asserted_task_tag: Optional[str] = None,
 ) -> dict[str, str]:
     """The correlation handle to stamp on a provider call (C13.6).
 
@@ -377,14 +383,16 @@ def attempt_request_metadata(
     gateway did not observe, which makes stamping it a correctness requirement
     rather than an optimisation.
 
-    Values are ids the gateway minted or holds: the hold id, the tenant id, and
-    the principal's `user_id`. Nothing derived from request content. A value that
+    Values are ids the gateway minted or holds: the hold id, the tenant id, the
+    principal's `user_id`, and the task tag the caller asserted in a header
+    (already held to `mvp.task_tag`'s grammar). Nothing from the request body. A value that
     is absent is left out; a value that is longer than Bedrock's 256-character
     limit or outside `_MARKER_VALUE_RE` is left out too, and logged once per
     process by key (never the value), so the call is never refused because of its
     marker and a lost attribution is still visible. The other parts are sent.
     """
-    given = {"sc_attempt_id": hold_id, "sc_tenant": tenant_id, "sc_user": user_id}
+    given = {"sc_attempt_id": hold_id, "sc_tenant": tenant_id, "sc_user": user_id,
+             "sc_task_tag": asserted_task_tag}
     assert given.keys() == MARKER_HEADERS.keys()
     md: dict[str, str] = {}
     for key, value in given.items():
@@ -567,8 +575,21 @@ def merge_openai_metadata(
     return merged
 
 
+#: The marker keys that give way, in this order, when the full marker does not
+#: fit under the OpenAI-compatible key ceiling. What is left is the attempt and
+#: tenant pair, which fitted before either existed and is the part
+#: reconciliation needs; the pair itself is all or nothing. The task tag goes
+#: first because the caller chose it and can put it in its own `metadata` under
+#: a key of its own; the
+#: user id is the gateway's own attestation.
+MARKER_GIVES_WAY: tuple[str, ...] = ("sc_task_tag", "sc_user")
+# A new marker key must take a place in this order, or be declared essential here.
+assert set(MARKER_KEYS) - set(MARKER_GIVES_WAY) == {"sc_attempt_id", "sc_tenant"}
+
+
 def stamp_openai_metadata_marker(
     payload: dict, tenant_id: Optional[str], *, user_id: Optional[str],
+    asserted_task_tag: Optional[str],
 ) -> bool:
     """Merge the gateway's correlation keys into `payload["metadata"]`,
     BEFORE the hard-ceiling survey runs over `payload` — see the module-level
@@ -580,21 +601,22 @@ def stamp_openai_metadata_marker(
     ceiling) — the caller uses this to decide whether `stamp_attempt_id`
     later has anything to swap.
 
-    When the full marker does not fit under the ceiling, the attempt and tenant
-    pair is tried without `sc_user` before giving up: that pair is what fitted
-    before `sc_user` existed, and it is the part reconciliation needs. The pair
-    itself is still all or nothing (`merge_openai_metadata`).
+    When the full marker does not fit under the ceiling, the keys in
+    `MARKER_GIVES_WAY` are left out one at a time, in order, before giving up.
     """
     # Built from `attempt_request_metadata` — the SAME function Converse
     # calls — rather than re-typing `"sc_attempt_id"`/`"sc_tenant"` here, so
     # the two routes' key names cannot drift apart ("the same identifiers
     # Converse carries" is then true by construction, not by two call sites
     # agreeing on two string literals).
-    marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id, user_id)
+    marker = attempt_request_metadata(ATTEMPT_ID_PLACEHOLDER, tenant_id,
+                                      user_id=user_id, asserted_task_tag=asserted_task_tag)
     merged = merge_openai_metadata(payload.get("metadata"), marker)
-    if merged.get("sc_attempt_id") != ATTEMPT_ID_PLACEHOLDER and "sc_user" in marker:
-        without_user = {k: v for k, v in marker.items() if k != "sc_user"}
-        merged = merge_openai_metadata(payload.get("metadata"), without_user)
+    for key in MARKER_GIVES_WAY:
+        if merged.get("sc_attempt_id") == ATTEMPT_ID_PLACEHOLDER:
+            break
+        marker = {k: v for k, v in marker.items() if k != key}
+        merged = merge_openai_metadata(payload.get("metadata"), marker)
     if merged.get("sc_attempt_id") != ATTEMPT_ID_PLACEHOLDER:
         # The key-count ceiling made `merge_openai_metadata` drop the whole
         # marker (the caller's own `sc_attempt_id`, if any, was stripped by

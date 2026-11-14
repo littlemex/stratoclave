@@ -83,15 +83,20 @@ each transport (C13.6). Bedrock echoes it into the invocation log.
 | Marker key | What it is | When it is absent |
 |---|---|---|
 | `sc_tenant` | the tenant id | when the value does not pass the value rule below; in the case below where the whole marker is dropped |
-| `sc_user` | the principal's `user_id`, the id the console and the usage records use | when the principal has no user id; when the value does not pass the value rule; first, when the OpenAI-compatible key limit below leaves no room for it |
+| `sc_user` | the principal's `user_id`, the id the console and the usage records use | when the principal has no user id; when the value does not pass the value rule; after `sc_task_tag`, when the OpenAI-compatible key limit below leaves no room for it |
 | `sc_attempt_id` | the gateway's id for this attempt's money hold | for a tenant with no dollar pool, which has no hold; in the case below where the whole marker is dropped |
+| `sc_task_tag` | the task tag the caller sent in `x-sc-task-tag`, the same one the usage records group by | when the caller sent none or it was dropped (an untagged request is not sent as `unlabelled`); first of all, when the OpenAI-compatible key limit below leaves no room for it |
 
 **The value rule.** Bedrock refuses the whole call when a `requestMetadata` value has
 a character outside letters, digits, whitespace and `:_@$#=/+,-.`. So each value is
 checked before it is sent, against that set with whitespace narrowed to an inner
 space, at most 256 characters, and a value that does not pass is left out, never
-altered. The call goes out with the other parts. An admin-chosen tenant id such as
-`team|a` therefore reaches the log without `sc_tenant`, and the call still succeeds.
+altered. The call goes out with the other parts. The ids the gateway mints
+or receives from Cognito (`tenant-<uuid>`, a Cognito `sub`, a hold id) and every task
+tag its grammar accepts pass. The default tenant's id is chosen in
+`DEFAULT_ORG_ID`, so the gateway refuses to start when that id does not pass, and no
+tenant row is written with an id that does not. A tenant row written before this
+check may not pass; its calls go out without `sc_tenant`, logged once per process.
 
 | Transport | Where the marker goes |
 |---|---|
@@ -100,15 +105,17 @@ altered. The call goes out with the other parts. An admin-chosen tenant id such 
 | A self-hosted endpoint | HTTP request headers, see [Self-hosted endpoints](#self-hosted-endpoints) |
 
 On the OpenAI-compatible surface, Bedrock accepts 16 `metadata` keys. When a caller's
-own keys leave no room for the full marker, `sc_user` is left out first, and the attempt
-and tenant pair is still sent (14 of the caller's keys). A caller with 15 or more keys
+own keys leave no room for the full marker, `sc_task_tag` is left out first and then
+`sc_user`, and the attempt and tenant pair is still sent (up to 14 of the caller's keys).
+A caller with 15 or more keys
 gets the request sent without the gateway's marker entirely rather than refused; that
 record carries none of the keys.
 
-So a logged record is attributable to a tenant and a user by key when the key is
-present, and `sc_user` joins it to the usage records and the console's user list directly. The marker is
-values the gateway already holds; it carries no email and nothing from the request's
-content.
+So a logged record is attributable to a tenant, a user and a task by key when the key
+is present: `sc_user` joins it to the usage records and the console's user list,
+and `sc_task_tag` to the usage records' task grouping. The marker is values the
+gateway already holds and the caller's task tag; it carries no email and nothing from
+the request body.
 
 **What this means for whoever can read the logs.** With logging on, anyone who can
 read the destination can see, per user id, which model was called when and with how
@@ -126,6 +133,7 @@ inference call:
 | `X-Stratoclave-Tenant` | `sc_tenant` |
 | `X-Stratoclave-User` | `sc_user` |
 | `X-Stratoclave-Attempt-Id` | `sc_attempt_id` |
+| `X-Stratoclave-Task-Tag` | `sc_task_tag` |
 
 The responsibilities split at the wire:
 
@@ -136,8 +144,8 @@ The responsibilities split at the wire:
   about the call beyond what it stores for a Bedrock call, and reads nothing back from
   the endpoint's logs.
 - **The endpoint's operator** decides what to keep. A reverse proxy in front of the
-  model server that writes these three headers into its access log, together with the
-  token counts or the response status, gives the same per-tenant and per-user record
+  model server that writes these headers into its access log, together with the
+  token counts or the response status, gives the same per-tenant, per-user and per-task record
   Bedrock's invocation log gives. Whether the bodies are kept there is equally the
   operator's choice.
 

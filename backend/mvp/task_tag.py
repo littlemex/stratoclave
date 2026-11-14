@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import unicodedata
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 # Reused, not copied: the same correlation-id grammar `observability.context`
 # validates client headers with (bounded length, DynamoDB-key-safe characters).
 # A tag never uses `_validate` itself -- see the module docstring.
 from .observability.context import _ID_GRAMMAR as GRAMMAR
+
+if TYPE_CHECKING:
+    from .observability.context import RequestContext
 
 #: The header a client asserts a task tag under.
 HDR_TASK_TAG = "x-sc-task-tag"
@@ -65,6 +68,16 @@ class Source(str, Enum):
     ASSERTED = "asserted"                 # grammar-valid, canonicalised
     DROPPED_RESERVED = "dropped_reserved"  # canonical form IS the sentinel
     DROPPED_GRAMMAR = "dropped_grammar"   # present, non-empty, and otherwise not usable
+
+
+def asserted(ctx: "Optional[RequestContext]") -> Optional[str]:
+    """The tag the caller asserted on this request, or None when it asserted
+    none or it was dropped. What the correlation marker carries as
+    `sc_task_tag` (C13.6): the sentinel is never sent, since it says nothing a
+    record without the key does not."""
+    if ctx is None or ctx.task_tag_source != Source.ASSERTED.value:
+        return None
+    return ctx.task_tag
 
 
 def dropped_reason(source: Source) -> Optional[str]:

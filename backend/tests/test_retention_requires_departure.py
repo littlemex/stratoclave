@@ -63,6 +63,7 @@ def _hold(**kw):
         return True
 
     hold = _money.Hold(
+        asserted_task_tag=None,
         user=type("U", (), {"org_id": "acme", "user_id": "u-1"})(),
         tenants_repo=_FakeRepo(),
         reservation=4000,

@@ -1166,3 +1166,43 @@ def test_set_rates_refuses_a_default_below_the_floor(dynamodb_mock):
                             floor.cache_write_per_mtok_microusd),
         })
     assert repo.current_version() is None
+
+
+class TestRegistryIsolationBetweenTests:
+    """A test that activated a model must not leave it in the next test's
+    registry. The cache's fail-static half kept it across `invalidate`, and a
+    later test that could not reach the activation store saw it as shipped,
+    which is how `test_the_golden_mapping_covers_every_shipped_entry` failed
+    only under some test orders."""
+
+    def test_the_per_test_reset_drops_an_earlier_tests_activated_entry(self, monkeypatch):
+        import ast
+        import pathlib
+
+        from mvp import models
+        from mvp.discovery import activation
+
+        first = models._REGISTRY[0]
+        leftover = first.__class__(**{**first.__dict__, "bedrock_model_id": "leftover.model-v1",
+                                      "aliases": ("leftover-model",)})
+
+        def unreachable():
+            raise activation.ActivationStoreUnavailable("store unreachable in this test")
+
+        monkeypatch.setattr(activation, "list_activated_entries", unreachable)
+
+        # What `invalidate` alone did between tests: the leftover survives.
+        models._composed_registry._activated = (leftover,)
+        models.invalidate_composed_registry()
+        assert "leftover.model-v1" in {e.bedrock_model_id for e in models.registry_entries()}
+
+        # What the per-test reset does now.
+        models._composed_registry._activated = (leftover,)
+        models.reset_composed_registry_for_test()
+        assert "leftover.model-v1" not in {e.bedrock_model_id for e in models.registry_entries()}
+
+        conftest = ast.parse((pathlib.Path(__file__).parent / "conftest.py").read_text(encoding="utf-8"))
+        imported = {a.name for n in ast.walk(conftest) if isinstance(n, ast.ImportFrom)
+                    and n.module == "mvp.models" for a in n.names}
+        assert "reset_composed_registry_for_test" in imported
+        assert "invalidate_composed_registry" not in imported
