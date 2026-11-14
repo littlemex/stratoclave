@@ -442,37 +442,33 @@ What is enforced, and where:
   `STRATOCLAVE_INFERENCE_REGIONS`: every `foundation-model` / `inference-profile`
   resource is scoped to one ARN per region in the boundary (instead of a
   wildcard region), and an explicit `Deny` is added on the region-less
-  foundation-model ARN. Measured 2026-11-14 against the real Bedrock API:
-  calling a geo inference profile authorizes `bedrock:InvokeModel` on EVERY
-  destination region's foundation-model ARN up front — a role granted the
-  Tokyo (`ap-northeast-1`) and Osaka (`ap-northeast-3`) foundation-model ARNs
-  could call `jp.anthropic.*` 10/10, while `apac.anthropic.*` (whose
-  destinations are outside that pair) was denied 30/30, and
-  `global.anthropic.*` was denied on the region-less foundation-model ARN —
-  the exact ARN this boundary now explicitly denies — 10/10 with a hand-built
-  scratch role and 5/5 with this Deny statement actually synthesized into the
-  stack. A separate measurement confirmed WHICH grant gates a geo profile's
-  reachable destinations: with the Osaka foundation-model grant removed, the
-  same role was denied `jp.*` (not `global.*`) 60/60 on that ARN — it is the
-  per-destination-region foundation-model grants, not the region-less Deny,
-  that gate a geo profile's reachable destinations; the Deny closes the one
-  shape (region-less) none of those per-region grants ever produces. So a
-  boundary is enforced twice, independently: even a backend defect that
-  served a model outside the boundary would still have its Bedrock call
-  refused by AWS.
+  foundation-model ARN. Calling a geo inference profile authorizes
+  `bedrock:InvokeModel` on EVERY destination region's foundation-model ARN up
+  front, so the per-destination-region grants above are what gate a geo
+  profile's reachable destinations, and the region-less `Deny` closes the one
+  shape (no region at all) none of those grants ever produces — the shape a
+  `global.*` profile's destination call is authorized against, which is what
+  makes `global.*` unreachable under a boundary. So a boundary is enforced
+  twice, independently: even a backend defect that served a model outside the
+  boundary would still have its Bedrock call refused by AWS. (Measured
+  2026-11-14 against the real Bedrock API; see `docs/design/CONTRACTS.md`,
+  C11.)
 - **Models activated from the console before this release carry no recorded
   destinations.** The gateway's model listing (above) can only filter a model
   against the boundary using a destination it actually has on record; a model
   that was promoted/activated through the console before this release has no
   such record and is therefore left out of the listing under a boundary until
   it is re-activated.
-- **The bundled Converse models** (`nvidia.nemotron-super-3-120b`,
-  `qwen.qwen3-next-80b-a3b`) are recorded for calls from `us-east-1` (US) and
-  `ap-northeast-1` (Japan) only. `BEDROCK_PRIMARY_REGION` must be one of those
-  two for the bundled list to be served at all; the IAM boundary itself grants a
+- **BEDROCK_PRIMARY_REGION decides which bundled entries can be served.** The
+  bundled Claude entries are recorded for calls from `us-east-1` (`us.`
+  profiles) or `ap-northeast-1` (`jp.` profiles); `nvidia.nemotron-super-3-120b`
+  and `qwen.qwen3-next-80b-a3b` are recorded for `us-east-1` only — a boundary
+  whose `BEDROCK_PRIMARY_REGION` is not `us-east-1` leaves them out of the
+  gateway's model listing entirely, regardless of which other regions are in
+  `STRATOCLAVE_INFERENCE_REGIONS`. The IAM boundary itself still grants a
   foundation-model ARN for these ids in every region in
-  `STRATOCLAVE_INFERENCE_REGIONS` regardless, so an unused grant in a region
-  these models are not actually recorded for is harmless, not a security gap.
+  `STRATOCLAVE_INFERENCE_REGIONS`, so an unused grant in a region a given
+  entry is not actually recorded for is harmless, not a security gap.
 - **Codex (the OpenAI/xAI path) must be disabled for a Japan boundary, but may
   stay on for a US boundary.** OpenAI GPT and xAI models on Bedrock have no
   Japan-bounded cross-region profile — only `us.` and `global.` — and the

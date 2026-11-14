@@ -22,12 +22,11 @@
  *     must be present, and the container env `STRATOCLAVE_INFERENCE_REGIONS`
  *     must equal the same boundary IAM was generated from.
  *
- * A third comparison (not unset-vs-today, but unset-vs-boundary) checks that
- * the SET of resource-type/name suffixes (the ARN segment after the region)
- * granted by each statement is identical between the two synths, so a suffix
- * hand-typed into one branch's literal array and left out of the other's
- * `flatMap` template (or vice versa) is caught even though neither
- * individual-branch test above would notice a pattern missing from BOTH.
+ * There is no separate suffix-parity check between the two synths: the
+ * boundary resources are derived FROM the unset literal arrays
+ * (`boundaryResourcesFrom` in lib/ecs-stack.ts), so the same resource-type/
+ * name pattern existing in one case and not the other is not something these
+ * two configurations could drift into independently.
  */
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -96,35 +95,6 @@ function renderedResources(stmt: any): string[] {
   return resources.map((r: unknown) => JSON.stringify(r));
 }
 
-/**
- * Flatten a CFN resource value (a plain string, or a boundary-generated
- * `{"Fn::Join": ["", [...]]}` whose only non-literal part is the
- * `AWS::Partition` pseudo parameter) back into an ARN-shaped string, with
- * `PARTITION` standing in for the token. This lets the SAME suffix-extraction
- * regex run over both the unset (plain-string) and boundary (joined) shapes.
- */
-function flattenResource(resource: unknown): string {
-  if (typeof resource === 'string') return resource;
-  const parts = (resource as { 'Fn::Join'?: [string, unknown[]] })['Fn::Join']?.[1] ?? [];
-  return parts.map((p) => (typeof p === 'string' ? p : 'PARTITION')).join('');
-}
-
-/** The ARN segment after `arn:<partition>:<service>:<region>:<account>:`, i.e. the resource-type/name pattern a grant names, independent of which specific region or account it was generated for. */
-function resourceSuffix(resource: unknown): string {
-  const flat = flattenResource(resource);
-  const m = /^arn:[^:]*:[^:]*:[^:]*:[^:]*:(.+)$/.exec(flat);
-  if (!m) {
-    throw new Error(`resource does not look like a 6-field ARN: ${flat}`);
-  }
-  return m[1];
-}
-
-function suffixSet(stmt: any): string[] {
-  const resources: unknown[] = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource];
-  const suffixes: string[] = resources.map((r) => resourceSuffix(r));
-  return Array.from(new Set(suffixes)).sort();
-}
-
 describe('EcsStack Bedrock IAM — unset boundary (today\'s behaviour + jp.)', () => {
   let template: Template;
 
@@ -171,12 +141,11 @@ describe('EcsStack Bedrock IAM — unset boundary (today\'s behaviour + jp.)', (
   });
 
   test('AllowOpenAIFamilyBedrockInvoke resources (including project/*) are EXACTLY unchanged from today', () => {
-    // Pinned as an exact array, not Match.arrayWith: the reviewer's concern
-    // was specifically that `project/*` could silently turn into an
-    // Fn::Join on AWS::Partition even with no boundary set, which an
-    // arrayWith subset check would not have caught (it only asserts
-    // presence, not that the array contains NOTHING else / nothing
-    // differently-shaped).
+    // Pinned as an exact array, not Match.arrayWith: `project/*` must stay
+    // the exact pre-existing literal (not an Fn::Join on AWS::Partition) when
+    // no boundary is set, and only an exact-array check — never an arrayWith
+    // subset check, which only asserts presence — can catch that shape
+    // changing underneath an otherwise-passing test.
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -339,45 +308,54 @@ describe('EcsStack Bedrock IAM — Japan boundary (ap-northeast-1, ap-northeast-
   });
 });
 
-describe('EcsStack Bedrock IAM — resource-pattern parity between unset and boundary synth', () => {
-  let unsetTemplate: Template;
-  let boundaryTemplate: Template;
-  const BOUNDARY = ['ap-northeast-1', 'ap-northeast-3'];
+describe('EcsStack Bedrock IAM — a large boundary still synthesizes', () => {
+  // A wide boundary's Bedrock statements are large enough that CDK's own
+  // `iam.Role` overflow mechanism (`Role.splitLargePolicy`, unconditional)
+  // moves some of them off the role's default inline policy and onto
+  // separately attached `AWS::IAM::ManagedPolicy` resources. This asserts
+  // that outcome, not any size limit of this stack's own: synth must not
+  // throw, and every Bedrock-invoke statement the role carries (wherever it
+  // physically landed) must still be present and still boundary-scoped.
+  test('a ten-region boundary synthesizes, and every Bedrock-invoke statement is still boundary-scoped wherever it landed', () => {
+    const wideBoundary = [
+      'ap-northeast-1',
+      'ap-northeast-3',
+      'us-east-1',
+      'us-east-2',
+      'us-west-2',
+      'eu-west-1',
+      'eu-central-1',
+      'ap-southeast-1',
+      'ap-southeast-2',
+      'ca-central-1',
+    ];
+    let template: Template;
+    expect(() => {
+      template = synth(wideBoundary, 'Wide');
+    }).not.toThrow();
 
-  beforeAll(() => {
-    unsetTemplate = synth(undefined, 'ParityUnset');
-    boundaryTemplate = synth(BOUNDARY, 'ParityBoundary');
-  });
-
-  test.each([
-    'AllowAnthropicBedrockInvoke',
-    'AllowRegistryConverseInvoke',
-    'AllowOpenAIFamilyBedrockInvoke',
-  ])('%s: the set of resource-type/name suffixes is identical between unset and boundary', (sid) => {
-    const unsetStmt = bedrockInvokeStatements(unsetTemplate).find((s) => s.Sid === sid);
-    const boundaryStmt = bedrockInvokeStatements(boundaryTemplate).find((s) => s.Sid === sid);
-    expect(unsetStmt).toBeDefined();
-    expect(boundaryStmt).toBeDefined();
-    expect(suffixSet(boundaryStmt)).toEqual(suffixSet(unsetStmt));
-  });
-});
-
-describe('EcsStack Bedrock IAM — policy-size guard', () => {
-  function synthWithRegions(regions: string[]): () => Template {
-    return () => synth(regions, `Size${regions.length}`);
-  }
-
-  test('a normal-sized boundary (2 regions) does not throw', () => {
-    expect(synthWithRegions(['ap-northeast-1', 'ap-northeast-3'])).not.toThrow();
-  });
-
-  test('a boundary with enough regions to blow the 8,000-character Bedrock budget throws a clear, actionable error', () => {
-    // Fake region-shaped strings (ecs-stack.ts does not itself validate region
-    // syntax -- that is region-config.ts's job) are enough to drive the
-    // character-count guard without needing 40 real AWS regions.
-    const manyRegions = Array.from({ length: 40 }, (_, i) => `zz-fakeregion${String(i).padStart(2, '0')}-1`);
-    expect(() => synth(manyRegions, 'SizeOverflow')).toThrow(
-      /generated Bedrock IAM resources alone are already ~\d+ characters, over this task role's 8000-character budget/,
-    );
+    const policies = {
+      ...template!.findResources('AWS::IAM::Policy'),
+      ...template!.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const statements: any[] = [];
+    for (const res of Object.values(policies)) {
+      const stmts = (res as any).Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of stmts) {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+        if (actions.some((a: string) => typeof a === 'string' && a.startsWith('bedrock:') && /Invoke|Converse/.test(a))) {
+          statements.push(stmt);
+        }
+      }
+    }
+    expect(statements.length).toBeGreaterThan(0);
+    for (const stmt of statements) {
+      for (const resource of Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource]) {
+        const rendered = JSON.stringify(resource);
+        if (rendered.includes(':project/')) continue;
+        if (stmt.Effect === 'Deny') continue; // the region-less Deny resource is deliberate.
+        expect(wideBoundary.some((r) => rendered.includes(`bedrock:${r}:`))).toBe(true);
+      }
+    }
   });
 });

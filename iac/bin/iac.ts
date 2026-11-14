@@ -874,20 +874,11 @@ class BackendConfigStack extends Stack {
       value: defaultBedrockModel,
       description: 'Bedrock fallback model inference profile ID',
     });
-    putStringParameter(this, 'InferenceRegionsBoundaryParam', {
-      prefix,
-      relativePath: 'bedrock/inference-regions-boundary',
-      // Mirrors the same mechanism as BedrockRegionParam/DefaultBedrockModelParam
-      // above: a static Parameter Store value re-written on every synth, so an
-      // operator (or an audit) can see the effective boundary without needing
-      // the shell that ran the last `cdk deploy`. "none" (not an empty string)
-      // when unset, matching regionCfg.inferenceBoundaryInfo's own convention —
-      // an SSM StringParameter rejects an empty value outright, and "none" is
-      // unambiguous where "" could be misread as "boundary of zero regions".
-      value: inferenceRegions !== undefined ? inferenceRegions.join(',') : 'none',
-      description:
-        'STRATOCLAVE_INFERENCE_REGIONS boundary in effect at the last synth ("none" = unset, no boundary)',
-    });
+    // No SSM parameter for the inference-region boundary: nothing reads one.
+    // The effective boundary is already visible via the `cdk synth`/`cdk diff`
+    // info annotation (regionCfg.inferenceBoundaryInfo, added near the top of
+    // this file) and the container env (STRATOCLAVE_INFERENCE_REGIONS, set
+    // above) -- an SSM parameter here would be a third copy with no reader.
 
     cdk.Tags.of(this).add('Project', 'Stratoclave');
     cdk.Tags.of(this).add('Prefix', prefix);

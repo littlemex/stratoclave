@@ -1,3 +1,4 @@
+import * as path from 'path';
 import {
   resolveRegionConfig,
   effectiveFailoverRegions,
@@ -5,6 +6,16 @@ import {
   WAF_REGION,
   type Env,
 } from '../lib/region-config';
+
+// Fixture registry (shaped like backend/mvp/defaults/models.json) carrying a
+// jp.-prefixed entry the REAL bundled file does not have yet, so the
+// inference-region boundary's data-driven DEFAULT_BEDROCK_MODEL check can be
+// exercised cleanly against a Japan boundary via STRATOCLAVE_MODEL_REGISTRY_PATH.
+const FIXTURE_MODEL_REGISTRY_PATH = path.resolve(
+  __dirname,
+  'fixtures',
+  'model-registry-fixture.json',
+);
 
 /**
  * In-process tests for the region / residency resolution (lib/region-config.ts),
@@ -310,6 +321,10 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
   // (us-west-2/us-east-2) is never inside a Japan-only boundary. It also
   // needs an explicit, jp.-compatible DEFAULT_BEDROCK_MODEL: the built-in
   // default is a "us." profile, which is refused under any non-US boundary.
+  // STRATOCLAVE_MODEL_REGISTRY_PATH points at the fixture registry (which
+  // carries a jp. entry the real bundled file does not have yet) so this
+  // model resolves cleanly, with no "not in the bundled registry" warning,
+  // for every test below that only cares about the OTHER boundary checks.
   function japanBoundaryEnv(overrides: Env = {}): Env {
     return baseEnv({
       STRATOCLAVE_REGION: 'ap-northeast-1',
@@ -317,6 +332,7 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
       STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-1,ap-northeast-3',
       STRATOCLAVE_CODEX_ENABLED: 'false',
       DEFAULT_BEDROCK_MODEL: 'jp.anthropic.claude-opus-4-7',
+      STRATOCLAVE_MODEL_REGISTRY_PATH: FIXTURE_MODEL_REGISTRY_PATH,
       ...overrides,
     });
   }
@@ -384,49 +400,60 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
     ).toThrow(/"global\." cross-region profile/);
   });
 
-  test('a geo-prefixed DEFAULT_BEDROCK_MODEL whose geography excludes the primary region throws', () => {
-    // "us." never reaches ap-northeast-1.
+  test('a registry entry whose bedrock_region matches BEDROCK_PRIMARY_REGION is accepted, no warning', () => {
+    // Via the real bundled file: us.anthropic.claude-opus-5's bedrock_region
+    // is us-east-1, matching a US boundary's primary.
+    const cfg = resolveRegionConfig(
+      baseEnv({
+        STRATOCLAVE_REGION: 'us-east-1',
+        STRATOCLAVE_INFERENCE_REGIONS: 'us-east-1',
+        STRATOCLAVE_CODEX_ENABLED: 'false',
+        DEFAULT_BEDROCK_MODEL: 'us.anthropic.claude-opus-5',
+      }),
+    );
+    expect(cfg.inferenceBoundaryWarnings).toEqual([]);
+
+    // Via the fixture registry: jp.anthropic.claude-opus-4-7's bedrock_region
+    // is ap-northeast-1, matching the Japan boundary's primary.
+    const jpCfg = resolveRegionConfig(japanBoundaryEnv());
+    expect(jpCfg.inferenceBoundaryWarnings).toEqual([]);
+  });
+
+  test('a registry entry whose bedrock_region does NOT match BEDROCK_PRIMARY_REGION throws', () => {
+    // us.anthropic.claude-opus-5 is recorded at bedrock_region=us-east-1, so
+    // it cannot be reached from a Japan boundary's primary (ap-northeast-1).
     expect(() =>
       resolveRegionConfig(japanBoundaryEnv({ DEFAULT_BEDROCK_MODEL: 'us.anthropic.claude-opus-5' })),
-    ).toThrow(/"us\." cross-region profile, which has no destination reachable from BEDROCK_PRIMARY_REGION \(ap-northeast-1\)/);
-    // "jp." never reaches us-east-1.
-    expect(() =>
-      resolveRegionConfig(
-        baseEnv({
-          STRATOCLAVE_REGION: 'us-east-1',
-          STRATOCLAVE_INFERENCE_REGIONS: 'us-east-1',
-          STRATOCLAVE_CODEX_ENABLED: 'false',
-          DEFAULT_BEDROCK_MODEL: 'jp.anthropic.claude-opus-5',
-        }),
-      ),
-    ).toThrow(/"jp\." cross-region profile, which has no destination reachable from BEDROCK_PRIMARY_REGION \(us-east-1\)/);
+    ).toThrow(
+      /recorded in the bundled model registry as calling Bedrock from bedrock_region="us-east-1", not BEDROCK_PRIMARY_REGION \(ap-northeast-1\)/,
+    );
   });
 
-  test.each([
-    ['us.anthropic.claude-opus-5', 'us-east-1'],
-    ['us-gov.anthropic.claude-opus-5', 'us-east-1'],
-    ['eu.anthropic.claude-opus-5', 'eu-west-1'],
-    ['ca.anthropic.claude-opus-5', 'ca-central-1'],
-    ['jp.anthropic.claude-opus-4-7', 'ap-northeast-1'],
-    ['jp.anthropic.claude-opus-4-7', 'ap-northeast-3'],
-    ['au.anthropic.claude-opus-5', 'ap-southeast-2'],
-    ['au.anthropic.claude-opus-5', 'ap-southeast-4'],
-    ['apac.anthropic.claude-opus-5', 'ap-southeast-1'],
-  ])('%s is accepted with BEDROCK_PRIMARY_REGION=%s', (model, primary) => {
-    expect(() =>
-      resolveRegionConfig(
-        baseEnv({
-          STRATOCLAVE_REGION: primary,
-          BEDROCK_PRIMARY_REGION: primary,
-          STRATOCLAVE_INFERENCE_REGIONS: primary,
-          STRATOCLAVE_CODEX_ENABLED: 'false',
-          DEFAULT_BEDROCK_MODEL: model,
-        }),
-      ),
-    ).not.toThrow();
+  test('a DEFAULT_BEDROCK_MODEL not in the bundled registry warns instead of throwing', () => {
+    const cfg = resolveRegionConfig(
+      baseEnv({
+        STRATOCLAVE_REGION: 'us-east-1',
+        STRATOCLAVE_INFERENCE_REGIONS: 'us-east-1',
+        STRATOCLAVE_CODEX_ENABLED: 'false',
+        // Not in backend/mvp/defaults/models.json at all -- e.g. a console-activated model.
+        DEFAULT_BEDROCK_MODEL: 'anthropic.claude-console-activated-example',
+      }),
+    );
+    expect(cfg.inferenceBoundaryWarnings.join('\n')).toMatch(
+      /is not in the bundled model registry \(backend\/mvp\/defaults\/models\.json\)/,
+    );
   });
 
-  test('a bare (directly-hosted) DEFAULT_BEDROCK_MODEL is accepted under any boundary, no geography check', () => {
+  test('STRATOCLAVE_MODEL_REGISTRY_PATH overrides which file is read', () => {
+    // Pointed at the fixture, jp.anthropic.claude-opus-4-7 resolves (no
+    // warning) even though it is not in the real bundled file.
+    const cfg = resolveRegionConfig(japanBoundaryEnv());
+    expect(
+      cfg.inferenceBoundaryWarnings.some((w) => w.includes('not in the bundled model registry')),
+    ).toBe(false);
+  });
+
+  test('a bare (directly-hosted) DEFAULT_BEDROCK_MODEL not in the registry warns rather than throws', () => {
     expect(() =>
       resolveRegionConfig(japanBoundaryEnv({ DEFAULT_BEDROCK_MODEL: 'anthropic.claude-sonnet-4-6' })),
     ).not.toThrow();
@@ -438,6 +465,24 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
     ).toThrow(/STRATOCLAVE_CODEX_ENABLED=false/);
     expect(() =>
       resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_CODEX_ENABLED: 'true' })),
+    ).toThrow(/us-west-2|us-east-2/);
+  });
+
+  test('the codex region exclusion reads the REAL bundled registry when STRATOCLAVE_MODEL_REGISTRY_PATH is unset', () => {
+    // No fixture override here, and codex is left at its true-by-default
+    // value, so this only passes if the codex-region set this module derived
+    // from backend/mvp/defaults/models.json still includes us-east-2/us-west-2.
+    expect(() =>
+      resolveRegionConfig(
+        baseEnv({
+          STRATOCLAVE_REGION: 'ap-northeast-1',
+          BEDROCK_PRIMARY_REGION: 'ap-northeast-1',
+          STRATOCLAVE_INFERENCE_REGIONS: 'ap-northeast-1,ap-northeast-3',
+          // DEFAULT_BEDROCK_MODEL deliberately not in the real file -- this test is
+          // only about the codex check, so the model check must warn, not throw.
+          DEFAULT_BEDROCK_MODEL: 'anthropic.claude-console-activated-example',
+        }),
+      ),
     ).toThrow(/us-west-2|us-east-2/);
   });
 
@@ -486,5 +531,18 @@ describe('resolveRegionConfig — inference-region boundary (STRATOCLAVE_INFEREN
     expect(() =>
       resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_RESIDENCY: 'strict' })),
     ).toThrow(/Keep STRATOCLAVE_INFERENCE_REGIONS/);
+  });
+
+  test('under a boundary, the legacy residency analysis is skipped entirely: residencyWarnings is always []', () => {
+    // Even configurations that would have produced legacy [residency] warnings
+    // without a boundary (a non-default body region, a geo-profile model)
+    // produce none here -- that analysis does not run once a boundary is set.
+    const cfg = resolveRegionConfig(japanBoundaryEnv());
+    expect(cfg.residencyWarnings).toEqual([]);
+  });
+
+  test('under a boundary, STRATOCLAVE_FAILOVER_REGIONS is never forwarded to the container, even when set', () => {
+    const cfg = resolveRegionConfig(japanBoundaryEnv({ STRATOCLAVE_FAILOVER_REGIONS: 'us-west-2' }));
+    expect(cfg.failoverRegionsEnv).toBeUndefined();
   });
 });

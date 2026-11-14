@@ -23,8 +23,16 @@
  *    docs/DEPLOYMENT.md, "Keeping inference inside a set of regions".
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 export const DEFAULT_REGION = 'us-east-1'; // historical single-region default (body)
 export const WAF_REGION = 'us-east-1'; // AWS hard requirement: CLOUDFRONT-scope WebACL
+// The fallback DEFAULT_BEDROCK_MODEL when the operator sets none. Named so
+// every message that talks about it interpolates this constant rather than
+// repeating the literal, which would drift silently if this value ever
+// changes.
+export const DEFAULT_BEDROCK_MODEL_FALLBACK = 'us.anthropic.claude-opus-5';
 
 // Default cross-region failover targets when STRATOCLAVE_FAILOVER_REGIONS is
 // unset. Mirrors mvp/routing/chains.py::_DEFAULT_FAILOVER_REGIONS — if you
@@ -33,17 +41,66 @@ export const WAF_REGION = 'us-east-1'; // AWS hard requirement: CLOUDFRONT-scope
 // primary's jurisdiction below (residency safety).
 const DEFAULT_FAILOVER_REGIONS = ['us-west-2', 'eu-west-1'];
 const FAILOVER_DISABLE_SENTINELS = new Set(['', 'none', 'disabled', 'off']);
-// Hardcoded in mvp/models.py — the codex path calls the OpenAI-compatible surface
-// on bedrock-runtime in these regions regardless of OPENAI_BEDROCK_REGIONS. A
-// backend drift test (test_openai_region_residency_contract.py) guards that
-// these stay in sync.
-const OPENAI_REGISTRY_REGIONS = ['us-west-2', 'us-east-2'];
 // Geo (cross-region) inference-profile prefixes. Denylist — extend as AWS ships
 // new geographies. us-gov is included though the gov partition is rejected.
 // `jp`/`au`/`ca` mirror the backend's own list
 // (`backend/mvp/pricing_feeds/dimensions.py::_GEO_PROFILE_PREFIXES`); keep the
 // two in sync when AWS ships another geography.
 const GEO_PROFILE_RE = /^(us|eu|apac|jp|au|ca|global|us-gov)\./;
+
+/** The shape this module reads out of backend/mvp/defaults/models.json. Only
+ * the fields used below are declared; the real file carries more. */
+interface ModelRegistryEntry {
+  bedrock_model_id: string;
+  bedrock_region: string;
+  wire_protocol: string;
+  [key: string]: unknown;
+}
+
+function defaultModelRegistryPath(): string {
+  return path.resolve(__dirname, '..', '..', 'backend', 'mvp', 'defaults', 'models.json');
+}
+
+/**
+ * Load the bundled Bedrock model registry — the SAME file
+ * `backend/mvp/models.py` loads its `_REGISTRY` from (`_REGISTRY_FILENAME =
+ * "defaults/models.json"`) — so the checks below read one source of truth for
+ * which Bedrock region an entry actually calls, instead of a hand-maintained
+ * TS table that can drift from it. `STRATOCLAVE_MODEL_REGISTRY_PATH`
+ * overrides the path (e.g. for a test fixture); unset reads the real file,
+ * resolved relative to this module so it does not depend on process cwd.
+ */
+function loadModelRegistry(env: Env): ModelRegistryEntry[] {
+  const registryPath = env.STRATOCLAVE_MODEL_REGISTRY_PATH || defaultModelRegistryPath();
+  let raw: string;
+  try {
+    raw = fs.readFileSync(registryPath, 'utf-8');
+  } catch (e) {
+    // `new Error(message, { cause })` needs an ES2022 lib target this app
+    // does not build with; Object.assign attaches a real `cause` property
+    // (readable by any ES2022-aware tooling) without needing it.
+    throw Object.assign(
+      new Error(
+        `Could not read the Bedrock model registry at "${registryPath}" (override with ` +
+          `STRATOCLAVE_MODEL_REGISTRY_PATH; default is backend/mvp/defaults/models.json): ` +
+          `${(e as Error).message}`
+      ),
+      { cause: e }
+    );
+  }
+  let doc: { models?: ModelRegistryEntry[] };
+  try {
+    doc = JSON.parse(raw) as { models?: ModelRegistryEntry[] };
+  } catch (e) {
+    throw Object.assign(
+      new Error(
+        `Bedrock model registry at "${registryPath}" is not valid JSON: ${(e as Error).message}`
+      ),
+      { cause: e }
+    );
+  }
+  return doc.models ?? [];
+}
 
 export interface RegionConfig {
   bodyRegion: string;
@@ -151,8 +208,12 @@ export function effectiveFailoverRegions(env: Env, primaryRegion: string): strin
  * the operator did not ask for.
  */
 function parseInferenceRegionsList(raw: string): string[] {
+  // `"".split(',')` is `['']` (length 1, not 0) and a comma-only string is
+  // likewise never empty, so every blank-overall-list case this function
+  // needs to refuse is already a blank ITEM — there is no separate
+  // zero-length case to check.
   const items = raw.split(',').map((r) => r.trim());
-  if (items.length === 0 || items.some((r) => r.length === 0)) {
+  if (items.some((r) => r.length === 0)) {
     throw new Error(
       `STRATOCLAVE_INFERENCE_REGIONS must be a non-empty comma-separated list of ` +
         `AWS region ids with no blank entries (got "${raw}"). Example: ` +
@@ -203,9 +264,8 @@ export function resolveRegionConfig(env: Env): RegionConfig {
   assertRegion('BEDROCK_PRIMARY_REGION', bedrockPrimaryRegion);
 
   const defaultBedrockModel =
-    env.DEFAULT_BEDROCK_MODEL || 'us.anthropic.claude-opus-5';
+    env.DEFAULT_BEDROCK_MODEL || DEFAULT_BEDROCK_MODEL_FALLBACK;
 
-  const failoverRegionsEnv = env.STRATOCLAVE_FAILOVER_REGIONS;
   // Match the backend for every EXPLICIT value: mvp/openai_responses.py treats
   // codex as enabled iff `STRATOCLAVE_CODEX_ENABLED.lower() == "true"`. Using
   // `!== 'false'` here would flip an existing `..._ENABLED=0`/`no`/`off`
@@ -256,6 +316,24 @@ export function resolveRegionConfig(env: Env): RegionConfig {
   }
   const codexEnabled = codexEnabledRaw.toLowerCase() === 'true';
 
+  // The bundled Bedrock model registry, read once per call (see
+  // loadModelRegistry's comment for why this is the file backend/mvp/models.py
+  // itself loads, not a second copy of it). `openaiRegistryRegions` is the
+  // set of Bedrock regions the codex/responses-protocol entries actually
+  // call from — this REPLACES a hand-maintained constant that used to list
+  // the same two regions by hand; backend/tests/test_openai_region_residency_contract.py
+  // independently pins its own expectation of this set against the SAME
+  // file (via mvp.models._REGISTRY), so the two stay in sync by both reading
+  // one source rather than by a human updating two.
+  const modelRegistry = loadModelRegistry(env);
+  const openaiRegistryRegions = Array.from(
+    new Set(
+      modelRegistry
+        .filter((m) => m.wire_protocol === 'responses')
+        .map((m) => m.bedrock_region)
+    )
+  );
+
   // --- Inference-region boundary (STRATOCLAVE_INFERENCE_REGIONS) -----------
   // A hard allowlist of AWS regions Bedrock inference may run in. Unset means
   // no boundary (today's behaviour). This is a DIFFERENT mechanism from
@@ -294,76 +372,63 @@ export function resolveRegionConfig(env: Env): RegionConfig {
       );
     }
     // DEFAULT_BEDROCK_MODEL must be explicit under a boundary: the built-in
-    // default ("us.anthropic.claude-opus-5") can never be inside a non-US
+    // default (DEFAULT_BEDROCK_MODEL_FALLBACK) can never be inside a non-US
     // boundary, and the backend refuses to start on a model the IAM boundary
-    // below cannot serve. No geography table is maintained here — only the
-    // minimum needed to catch the two shapes IaC CAN know without one:
-    // `global.` (always unreachable once the boundary's Deny statement is in
-    // place, regardless of which regions are in it) and a geo prefix whose
-    // destinations cannot include the one region
-    // (BEDROCK_PRIMARY_REGION, already required above to be inside the
-    // boundary) this gateway actually calls Bedrock from. A bare (directly
-    // hosted) model id carries no such claim and is accepted as-is.
+    // below cannot serve.
     if (env.DEFAULT_BEDROCK_MODEL === undefined) {
       throw new Error(
         `DEFAULT_BEDROCK_MODEL must be set explicitly under STRATOCLAVE_INFERENCE_REGIONS: ` +
-          `the built-in default ("us.anthropic.claude-opus-5") is a US cross-region profile ` +
-          `that cannot be called from every boundary, and the backend refuses to start if the ` +
-          `configured model cannot be served from within the boundary this module generates ` +
-          `IAM for. Set DEFAULT_BEDROCK_MODEL to a profile or directly-hosted model id that is ` +
-          `reachable from BEDROCK_PRIMARY_REGION (${bedrockPrimaryRegion}).`
+          `the built-in default ("${DEFAULT_BEDROCK_MODEL_FALLBACK}") is a US cross-region ` +
+          `profile that cannot be called from every boundary, and the backend refuses to start ` +
+          `if the configured model cannot be served from within the boundary this module ` +
+          `generates IAM for. Set DEFAULT_BEDROCK_MODEL to a profile or directly-hosted model ` +
+          `id that is reachable from BEDROCK_PRIMARY_REGION (${bedrockPrimaryRegion}).`
       );
     }
-    const modelGeoPrefix = GEO_PROFILE_RE.exec(defaultBedrockModel)?.[1];
-    if (modelGeoPrefix === 'global') {
+    // `global.` is refused unconditionally, independent of the registry: AWS
+    // authorizes a "global." destination call against the region-less
+    // foundation-model ARN, and the boundary's Deny statement (lib/ecs-stack.ts)
+    // always blocks exactly that ARN, so no region list could ever make a
+    // "global." profile reachable under a boundary.
+    if (GEO_PROFILE_RE.exec(defaultBedrockModel)?.[1] === 'global') {
       throw new Error(
         `DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a "global." cross-region profile: ` +
           `the IAM this module generates for STRATOCLAVE_INFERENCE_REGIONS explicitly denies ` +
           `the region-less foundation-model ARN a "global." destination call is authorized ` +
           `against (see lib/ecs-stack.ts), so it can never be called under a boundary. Use a ` +
-          `region-bounded geo profile (jp./au./ca./eu./us./apac., matching ` +
-          `BEDROCK_PRIMARY_REGION) or a directly-hosted model id instead.`
+          `region-bounded profile (matching BEDROCK_PRIMARY_REGION) or a directly-hosted model ` +
+          `id instead.`
       );
-    } else if (modelGeoPrefix !== undefined) {
-      // Minimal, deliberately not a geography table: which AWS regions a geo
-      // profile's destination set reaches is exactly what this module cannot
-      // know (that lives in AWS's own geography definitions, not in this
-      // app), so this only rules out the shapes it CAN rule out — the prefix
-      // naming a jurisdiction BEDROCK_PRIMARY_REGION is not even IN. A
-      // profile that passes this still is not guaranteed reachable; the
-      // operator is expected to have verified the model is actually
-      // available from BEDROCK_PRIMARY_REGION (docs/DEPLOYMENT.md says so).
-      const primaryMatchesGeoPrefix = ((): boolean => {
-        switch (modelGeoPrefix) {
-          case 'us':
-          case 'us-gov':
-            return bedrockPrimaryRegion.startsWith('us-');
-          case 'eu':
-            return bedrockPrimaryRegion.startsWith('eu-');
-          case 'ca':
-            return bedrockPrimaryRegion.startsWith('ca-');
-          case 'jp':
-            return bedrockPrimaryRegion === 'ap-northeast-1' || bedrockPrimaryRegion === 'ap-northeast-3';
-          case 'au':
-            return bedrockPrimaryRegion === 'ap-southeast-2' || bedrockPrimaryRegion === 'ap-southeast-4';
-          case 'apac':
-            return bedrockPrimaryRegion.startsWith('ap-');
-          default:
-            return false;
-        }
-      })();
-      if (!primaryMatchesGeoPrefix) {
-        throw new Error(
-          `DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a "${modelGeoPrefix}." cross-region ` +
-            `profile, which has no destination reachable from BEDROCK_PRIMARY_REGION ` +
-            `(${bedrockPrimaryRegion}). Set DEFAULT_BEDROCK_MODEL to a profile whose geography ` +
-            `covers ${bedrockPrimaryRegion} (or a directly-hosted model id), or move ` +
-            `BEDROCK_PRIMARY_REGION into that profile's geography.`
-        );
-      }
+    }
+    // Reachability for everything else is read from the bundled model
+    // registry (backend/mvp/defaults/models.json) rather than guessed from
+    // the id's prefix: an entry's own `bedrock_region` IS the region AWS
+    // actually calls it from, so it is compared to BEDROCK_PRIMARY_REGION
+    // directly. An id this build has never bundled — a console-activated
+    // model, most plausibly — has no such record to check, so it only
+    // warns, never throws; verifying it is the operator's job (docs/DEPLOYMENT.md
+    // says so).
+    const registryEntry = modelRegistry.find(
+      (m) => m.bedrock_model_id === defaultBedrockModel
+    );
+    if (registryEntry === undefined) {
+      inferenceBoundaryWarnings.push(
+        `[inference-boundary] DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is not in the ` +
+          `bundled model registry (backend/mvp/defaults/models.json): its Bedrock call region ` +
+          `cannot be verified against the boundary here. If it was activated from the console, ` +
+          `confirm yourself that it is reachable from BEDROCK_PRIMARY_REGION ` +
+          `(${bedrockPrimaryRegion}).`
+      );
+    } else if (registryEntry.bedrock_region !== bedrockPrimaryRegion) {
+      throw new Error(
+        `DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is recorded in the bundled model ` +
+          `registry as calling Bedrock from bedrock_region="${registryEntry.bedrock_region}", ` +
+          `not BEDROCK_PRIMARY_REGION (${bedrockPrimaryRegion}). Set DEFAULT_BEDROCK_MODEL to an ` +
+          `entry whose bedrock_region matches, or move BEDROCK_PRIMARY_REGION to match it.`
+      );
     }
     if (codexEnabled) {
-      const codexLeaks = OPENAI_REGISTRY_REGIONS.filter(
+      const codexLeaks = openaiRegistryRegions.filter(
         (r) => !inferenceRegions.includes(r)
       );
       if (codexLeaks.length > 0) {
@@ -404,96 +469,114 @@ export function resolveRegionConfig(env: Env): RegionConfig {
     `[inference-boundary] effective STRATOCLAVE_INFERENCE_REGIONS: ` +
     (inferenceRegions !== undefined ? inferenceRegions.join(', ') : 'none');
 
-  const effectiveFailover = effectiveFailoverRegions(env, bedrockPrimaryRegion);
-  for (const r of effectiveFailover) {
-    assertRegion('STRATOCLAVE_FAILOVER_REGIONS entry', r);
-  }
+  // The legacy residency analysis below (STRATOCLAVE_RESIDENCY's warn/strict
+  // geo-profile and cross-region-leak checks) is SKIPPED ENTIRELY once a
+  // boundary is set: it is superseded by the boundary-specific checks above,
+  // which already cover the model and the codex path in a boundary-aware
+  // way, and two of its inputs change meaning under a boundary — same-id
+  // streaming failover is off (the backend ignores STRATOCLAVE_FAILOVER_REGIONS
+  // under a boundary, so nothing is forwarded to the container either), and
+  // STRATOCLAVE_RESIDENCY cannot be set at the same time as a boundary (see
+  // the throw above), so there is nothing left for this analysis to add.
+  let failoverRegionsEnv: string | undefined;
+  let residencyWarnings: string[];
 
-  // Every region a PROMPT can actually reach at runtime, tagged with its source.
-  const bedrockCallRegions: { region: string; source: string }[] = [
-    { region: bedrockPrimaryRegion, source: 'model' },
-    ...effectiveFailover.map((r) => ({ region: r, source: 'failover' })),
-    ...(codexEnabled
-      ? OPENAI_REGISTRY_REGIONS.map((r) => ({ region: r, source: 'codex' }))
-      : []),
-  ];
-  // STRICT single-region residency: any region != the deploy region is a leak.
-  const residencyLeaks = Array.from(
-    new Set(
-      bedrockCallRegions
-        .filter((c) => c.region !== bodyRegion)
-        .map((c) => `${c.region}(${c.source})`)
-    )
-  );
+  if (inferenceRegions !== undefined) {
+    failoverRegionsEnv = undefined;
+    residencyWarnings = [];
+  } else {
+    const effectiveFailover = effectiveFailoverRegions(env, bedrockPrimaryRegion);
+    for (const r of effectiveFailover) {
+      assertRegion('STRATOCLAVE_FAILOVER_REGIONS entry', r);
+    }
+    failoverRegionsEnv = env.STRATOCLAVE_FAILOVER_REGIONS;
 
-  const residencyRaw = (env.STRATOCLAVE_RESIDENCY || '').toLowerCase();
-  if (residencyRaw && residencyRaw !== 'strict' && residencyRaw !== 'warn') {
-    throw new Error(
-      `STRATOCLAVE_RESIDENCY must be "strict" or "warn" (got "${env.STRATOCLAVE_RESIDENCY}").`
+    // Every region a PROMPT can actually reach at runtime, tagged with its source.
+    const bedrockCallRegions: { region: string; source: string }[] = [
+      { region: bedrockPrimaryRegion, source: 'model' },
+      ...effectiveFailover.map((r) => ({ region: r, source: 'failover' })),
+      ...(codexEnabled
+        ? openaiRegistryRegions.map((r) => ({ region: r, source: 'codex' }))
+        : []),
+    ];
+    // STRICT single-region residency: any region != the deploy region is a leak.
+    const residencyLeaks = Array.from(
+      new Set(
+        bedrockCallRegions
+          .filter((c) => c.region !== bodyRegion)
+          .map((c) => `${c.region}(${c.source})`)
+      )
     );
-  }
-  const residencyStrict = residencyRaw === 'strict';
 
-  // The leak analysis only runs under residency intent — a non-default body
-  // region or an explicit STRATOCLAVE_RESIDENCY — so a plain us-east-1 deploy
-  // stays silent (backward compatible).
-  const residencyIntent =
-    bodyRegion !== DEFAULT_REGION || env.STRATOCLAVE_RESIDENCY !== undefined;
-
-  const modelIsGeoProfile = GEO_PROFILE_RE.test(defaultBedrockModel);
-  const allowGeoInference =
-    (env.STRATOCLAVE_ALLOW_GEO_INFERENCE || '').toLowerCase() === 'true';
-
-  const residencyWarnings: string[] = [];
-  // Model-region != deploy-region is always noteworthy (prompt bytes leave R).
-  if (bedrockPrimaryRegion !== bodyRegion) {
-    residencyWarnings.push(
-      `[residency] prompt data leaves the deploy region ${bodyRegion}: ` +
-        `Bedrock primary = ${bedrockPrimaryRegion}.`
-    );
-  }
-  // Geo-profile residency check: only meaningful under residency intent.
-  if (residencyIntent && modelIsGeoProfile) {
-    const geoMsg =
-      `[residency] DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a geo cross-region ` +
-      `inference profile — AWS routes inference anywhere within its geography, so a ` +
-      `single-region residency guarantee for the deploy region ${bodyRegion} cannot ` +
-      `be made. Use a directly-hosted (region-specific, non-"us./eu./apac./jp./au./ca./global."-` +
-      `prefixed) model id, or set STRATOCLAVE_ALLOW_GEO_INFERENCE=true to accept ` +
-      `geography-level (not region-level) residency.`;
-    if (residencyStrict && !allowGeoInference) {
+    const residencyRaw = (env.STRATOCLAVE_RESIDENCY || '').toLowerCase();
+    if (residencyRaw && residencyRaw !== 'strict' && residencyRaw !== 'warn') {
       throw new Error(
-        `STRATOCLAVE_RESIDENCY=strict: refusing to synth — model is a geo inference ` +
-          `profile.\n${geoMsg}`
+        `STRATOCLAVE_RESIDENCY must be "strict" or "warn" (got "${env.STRATOCLAVE_RESIDENCY}").`
       );
     }
-    residencyWarnings.push(geoMsg);
-  }
-  if (residencyIntent && residencyLeaks.length > 0) {
-    const hints: string[] = [];
-    if (effectiveFailover.some((r) => r !== bodyRegion)) {
-      hints.push('set STRATOCLAVE_FAILOVER_REGIONS=disabled (or to same-region only)');
-    }
-    if (codexEnabled && OPENAI_REGISTRY_REGIONS.some((r) => r !== bodyRegion)) {
-      hints.push(
-        `set STRATOCLAVE_CODEX_ENABLED=false (the OpenAI/codex path is hardwired to ` +
-          `${OPENAI_REGISTRY_REGIONS.join(', ')} in the model registry and cannot be relocated)`
-      );
-    }
+    const residencyStrict = residencyRaw === 'strict';
+
+    // The leak analysis only runs under residency intent — a non-default body
+    // region or an explicit STRATOCLAVE_RESIDENCY — so a plain us-east-1 deploy
+    // stays silent (backward compatible).
+    const residencyIntent =
+      bodyRegion !== DEFAULT_REGION || env.STRATOCLAVE_RESIDENCY !== undefined;
+
+    const modelIsGeoProfile = GEO_PROFILE_RE.test(defaultBedrockModel);
+    const allowGeoInference =
+      (env.STRATOCLAVE_ALLOW_GEO_INFERENCE || '').toLowerCase() === 'true';
+
+    residencyWarnings = [];
+    // Model-region != deploy-region is always noteworthy (prompt bytes leave R).
     if (bedrockPrimaryRegion !== bodyRegion) {
-      hints.push(`set BEDROCK_PRIMARY_REGION=${bodyRegion}`);
-    }
-    const msg =
-      `[residency] prompts can reach region(s) other than the deploy region ` +
-      `${bodyRegion}: ${residencyLeaks.join(', ')}. ` +
-      `For strict single-region residency: ${hints.join('; ')}.`;
-    if (residencyStrict) {
-      throw new Error(
-        `STRATOCLAVE_RESIDENCY=strict: refusing to synth — Bedrock is reachable ` +
-          `outside the deploy region.\n${msg}`
+      residencyWarnings.push(
+        `[residency] prompt data leaves the deploy region ${bodyRegion}: ` +
+          `Bedrock primary = ${bedrockPrimaryRegion}.`
       );
     }
-    residencyWarnings.push(msg);
+    // Geo-profile residency check: only meaningful under residency intent.
+    if (residencyIntent && modelIsGeoProfile) {
+      const geoMsg =
+        `[residency] DEFAULT_BEDROCK_MODEL="${defaultBedrockModel}" is a geo cross-region ` +
+        `inference profile — AWS routes inference anywhere within its geography, so a ` +
+        `single-region residency guarantee for the deploy region ${bodyRegion} cannot ` +
+        `be made. Use a directly-hosted (region-specific, non-"us./eu./apac./jp./au./ca./global."-` +
+        `prefixed) model id, or set STRATOCLAVE_ALLOW_GEO_INFERENCE=true to accept ` +
+        `geography-level (not region-level) residency.`;
+      if (residencyStrict && !allowGeoInference) {
+        throw new Error(
+          `STRATOCLAVE_RESIDENCY=strict: refusing to synth — model is a geo inference ` +
+            `profile.\n${geoMsg}`
+        );
+      }
+      residencyWarnings.push(geoMsg);
+    }
+    if (residencyIntent && residencyLeaks.length > 0) {
+      const hints: string[] = [];
+      if (effectiveFailover.some((r) => r !== bodyRegion)) {
+        hints.push('set STRATOCLAVE_FAILOVER_REGIONS=disabled (or to same-region only)');
+      }
+      if (codexEnabled && openaiRegistryRegions.some((r) => r !== bodyRegion)) {
+        hints.push(
+          `set STRATOCLAVE_CODEX_ENABLED=false (the OpenAI/codex path is hardwired to ` +
+            `${openaiRegistryRegions.join(', ')} in the model registry and cannot be relocated)`
+        );
+      }
+      if (bedrockPrimaryRegion !== bodyRegion) {
+        hints.push(`set BEDROCK_PRIMARY_REGION=${bodyRegion}`);
+      }
+      const msg =
+        `[residency] prompts can reach region(s) other than the deploy region ` +
+        `${bodyRegion}: ${residencyLeaks.join(', ')}. ` +
+        `For strict single-region residency: ${hints.join('; ')}.`;
+      if (residencyStrict) {
+        throw new Error(
+          `STRATOCLAVE_RESIDENCY=strict: refusing to synth — Bedrock is reachable ` +
+            `outside the deploy region.\n${msg}`
+        );
+      }
+      residencyWarnings.push(msg);
+    }
   }
 
   return {
