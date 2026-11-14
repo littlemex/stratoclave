@@ -145,28 +145,35 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 ### Added
 
 - **CloudFront VPC origin, replacing a shared-secret origin-verification design that never
-  shipped.** `STRATOCLAVE_CLOUDFRONT_ORIGIN` (`public` | `vpc-expand` | `vpc-switch` | `vpc`,
-  default `vpc`) decides whether the ALB behind CloudFront has a public address. In `vpc`
-  mode CloudFront reaches the ALB through `AWS::CloudFront::VpcOrigin` instead of the ALB's
-  public DNS name, so the ALB has no public address and a third party's own CloudFront
-  distribution cannot reach it directly. `vpc-expand`/`vpc-switch` are the two intermediate
-  steps for migrating an existing internet-facing deployment without downtime: `vpc-expand`
-  adds the internal ALB and VPC origin alongside the untouched public one; `vpc-switch`
-  retargets the distribution's behaviours to the VPC origin while the public ALB stays
-  declared as a rollback target; `vpc` removes the public ALB, its target group, and its
-  CloudFront origin. `viewerProtocolPolicy: https-only` on the four ALB behaviours
-  (previously `redirect-to-https`), and the ALB attributes
+  shipped.** `STRATOCLAVE_CLOUDFRONT_ORIGIN` (`public` | `vpc-expand` | `vpc-switch` |
+  `vpc-contract` | `vpc`, default `vpc`) decides whether the ALB behind CloudFront has a
+  public address. In `vpc` mode CloudFront reaches the ALB through
+  `AWS::CloudFront::VpcOrigin` instead of the ALB's public DNS name, so the ALB has no
+  public address and a third party's own CloudFront distribution cannot reach it directly.
+  `vpc-expand`/`vpc-switch`/`vpc-contract` are three intermediate, staged steps for
+  migrating an existing internet-facing deployment: `vpc-expand` adds the internal ALB and
+  VPC origin alongside the existing public one, whose target-group registration and ALB
+  attributes are not otherwise changed in this step; `vpc-switch` retargets the
+  distribution's behaviours to the VPC origin while the public ALB stays declared as a
+  rollback target; `vpc-contract` stops the frontend and backend from consuming the public
+  ALB's exports while AlbStack still declares them, so the following `vpc` step can remove
+  them without CloudFormation refusing an in-use export deletion; `vpc` removes the public
+  ALB, its target group, and its CloudFront origin. Interruption during the migration —
+  measured on a real migration: TBD. `viewerProtocolPolicy: https-only` on the four ALB
+  behaviours (previously `redirect-to-https`), and the ALB attributes
   `routing.http.drop_invalid_header_fields.enabled` and `routing.http.desync_mitigation_mode`
   (set explicitly to AWS's own default, `defensive`), apply unconditionally in every entry
   mode. See [`docs/DEPLOYMENT.md`, "VPC origin"](docs/DEPLOYMENT.md#vpc-origin).
 - **`STRATOCLAVE_ENTRY=both`: CloudFront and PrivateLink on one shared internal ALB.**
   Requires the same `STRATOCLAVE_PRIVATE_*` variables as `STRATOCLAVE_ENTRY=private`.
-  `STRATOCLAVE_CLOUDFRONT_ORIGIN` is forced to `vpc` in this mode. The ALB security group
-  admits the CloudFront origin-facing prefix list on :80 and the internal NLB's security
-  group on :443; PrivateLink traffic does not pass through CloudFront or WAF.
-  `STRATOCLAVE_API_ENDPOINT_PRIVATE` and `STRATOCLAVE_STS_AUDIENCES` (the latter not yet read
-  by the backend) are added to the task environment in this mode only. See
-  [`docs/DEPLOYMENT.md`, "Both"](docs/DEPLOYMENT.md#both-cloudfront-and-privatelink-together).
+  `STRATOCLAVE_CLOUDFRONT_ORIGIN` is forced to `vpc` in this mode. The internal ALB has its
+  OWN security group, separate from the one a public ALB would use, admitting the
+  CloudFront origin-facing prefix list on :80 and the internal NLB's security group on
+  :443; PrivateLink traffic does not pass through CloudFront or WAF. `STRATOCLAVE_API_ENDPOINT_PRIVATE`
+  is added to the task environment in this mode only; `STRATOCLAVE_STS_AUDIENCES` is set in
+  every mode (read by `mvp.sso_sts.expected_audiences`), with the PrivateLink host appended
+  only under `both`. See [`docs/DEPLOYMENT.md`,
+  "Both"](docs/DEPLOYMENT.md#both-cloudfront-and-privatelink-together).
 
 - **Model invocation logs can be attributed to a user and a task, on every transport
   (C13.6).** The correlation marker now carries `sc_user`, the principal's `user_id`, and

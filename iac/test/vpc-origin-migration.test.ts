@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Template } from 'aws-cdk-lib/assertions';
 import { hermeticSynthEnv } from './_hermetic-synth';
+import { checkExportTransition, isSafeTransition, type StackSet } from './_cross-stack-export-transition';
 
 /**
  * `STRATOCLAVE_CLOUDFRONT_ORIGIN`'s three migration states
@@ -71,19 +72,75 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
   let publicOut: { outDir: string; raw: Record<string, Record<string, any>> };
   let expandOut: { outDir: string; raw: Record<string, Record<string, any>> };
   let switchOut: { outDir: string; raw: Record<string, Record<string, any>> };
+  let contractOut: { outDir: string; raw: Record<string, Record<string, any>> };
   let vpcOut: { outDir: string; raw: Record<string, Record<string, any>> };
 
   beforeAll(() => {
     publicOut = synth('public');
     expandOut = synth('vpc-expand');
     switchOut = synth('vpc-switch');
+    contractOut = synth('vpc-contract');
     vpcOut = synth('vpc');
-  }, 180_000);
+  }, 240_000);
 
   afterAll(() => {
-    for (const o of [publicOut, expandOut, switchOut, vpcOut]) {
+    for (const o of [publicOut, expandOut, switchOut, contractOut, vpcOut]) {
       if (o?.outDir) fs.rmSync(o.outDir, { recursive: true, force: true });
     }
+  });
+
+  // The actual deadlock detector round-1 implementation review's blocker
+  // B1 asked for — see `./_cross-stack-export-transition.ts`'s own doc for
+  // why it is checked against the OLD state's imports, not the NEW state's.
+  // `cross-stack-export-transition.test.ts` proves the checker itself
+  // catches the pre-vpc-contract shape of this bug with hand-made
+  // templates; THIS describe block proves the actual, real `cdk synth`
+  // output of every state this feature can reach — forward AND the
+  // documented rollback direction — never hits it.
+  describe('cross-stack export/import safety across every migration step, forward and rollback', () => {
+    const FORWARD: Array<[string, () => { raw: Record<string, Record<string, any>> }]> = [
+      ['public', () => publicOut],
+      ['vpc-expand', () => expandOut],
+      ['vpc-switch', () => switchOut],
+      ['vpc-contract', () => contractOut],
+      ['vpc', () => vpcOut],
+    ];
+
+    for (let i = 0; i < FORWARD.length - 1; i++) {
+      const [fromName, fromOut] = FORWARD[i];
+      const [toName, toOut] = FORWARD[i + 1];
+      test(`forward: ${fromName} -> ${toName}`, () => {
+        const problems = checkExportTransition(fromOut().raw as StackSet, toOut().raw as StackSet);
+        expect(problems.unresolvedImports).toEqual([]);
+        expect(problems.unsafeRemovals).toEqual([]);
+        expect(isSafeTransition(problems)).toBe(true);
+      });
+      // Rollback is the SAME pair of states, checked in the OPPOSITE
+      // direction — a real `cdk deploy --all` for the ROLLBACK step reads
+      // the "to" state as OLD (currently deployed) and the "from" state as
+      // NEW (what the rollback redeploys).
+      test(`rollback: ${toName} -> ${fromName}`, () => {
+        const problems = checkExportTransition(toOut().raw as StackSet, fromOut().raw as StackSet);
+        expect(problems.unresolvedImports).toEqual([]);
+        expect(problems.unsafeRemovals).toEqual([]);
+        expect(isSafeTransition(problems)).toBe(true);
+      });
+    }
+
+    // The one rollback step docs/DEPLOYMENT.md's "Rollback" section
+    // documents as UNSAFE for a single `cdk deploy --all` -- vpc-expand's
+    // consumers (FrontendStack's VPC origin, EcsStack's internal
+    // target-group registration) still import the internal ALB's exports,
+    // the same shape vpc-contract exists to solve on the way up. This test
+    // is the inverse of every other one in this block: it PROVES the
+    // checker still correctly flags the one transition this migration
+    // design does NOT make safe in one step, rather than silently passing
+    // everything and only being trusted on the strength of the OTHER
+    // (safe) results above.
+    test('rollback vpc-expand -> public in ONE deploy is correctly flagged UNSAFE (this is why docs/DEPLOYMENT.md documents a two-deploy `--exclusively` workaround instead)', () => {
+      const problems = checkExportTransition(expandOut.raw as StackSet, publicOut.raw as StackSet);
+      expect(isSafeTransition(problems)).toBe(false);
+    });
   });
 
   test('public -> vpc-expand: the public ALB keeps the EXACT SAME logical ids (expand only adds)', () => {
@@ -141,6 +198,36 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
     expect(ids).toContain('ALBOrigin');
   });
 
+  test('vpc-contract: the public ALB is STILL declared, but nothing imports it any more — the consumer-first step', () => {
+    // AlbStack itself is UNCHANGED from vpc-switch: same logical ids, same
+    // properties. This is the step's whole point (lib/entry-config.ts's
+    // CloudfrontOriginMode doc) — only the CONSUMERS move.
+    const switchIds = albLogicalIds(switchOut.raw.alb).sort();
+    const contractIds = albLogicalIds(contractOut.raw.alb).sort();
+    expect(contractIds).toEqual(switchIds);
+    for (const id of switchIds) {
+      expect(contractOut.raw.alb.Resources[id]).toEqual(switchOut.raw.alb.Resources[id]);
+    }
+    expect(Object.keys(contractOut.raw.alb.Outputs || {})).toContain('AlbDnsName');
+
+    // FrontendStack stops declaring the public origin entirely (not merely
+    // retargeting away from it, the way vpc-switch itself does to
+    // ALBOrigin).
+    const dist = Object.values(contractOut.raw.frontend.Resources).find(
+      (r: any) => r.Type === 'AWS::CloudFront::Distribution',
+    ) as any;
+    const ids = dist.Properties.DistributionConfig.Origins.map((o: any) => o.Id);
+    expect(ids).not.toContain('ALBOrigin');
+
+    // EcsStack stops registering the backend service with the public
+    // target group — exactly one LoadBalancers entry (the internal one),
+    // not two.
+    const ecsTpl = Template.fromJSON(contractOut.raw.ecs);
+    const services = ecsTpl.findResources('AWS::ECS::Service');
+    const svc = Object.values(services)[0] as any;
+    expect(svc.Properties.LoadBalancers).toHaveLength(1);
+  });
+
   test('vpc (contract): the public ALB and its export are gone entirely', () => {
     const publicIds = albLogicalIds(publicOut.raw.alb);
     const remainingIds = Object.keys(vpcOut.raw.alb.Resources || {});
@@ -156,15 +243,39 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
     expect(ids).not.toContain('ALBOrigin'); // the bypass's origin is gone, not just unreferenced
   });
 
-  test('every state keeps the ALB security group ingress rule byte-identical (network stack untouched by cloudfrontOrigin)', () => {
-    const pick = (raw: Record<string, any>) =>
-      Object.entries(raw.Resources || {}).filter(
-        ([, r]: [string, any]) => r.Type === 'AWS::EC2::SecurityGroupIngress',
+  // Round-1 implementation review: the ORIGINAL version of this test
+  // compared the network stack's WHOLE `AWS::EC2::SecurityGroupIngress`
+  // list byte-for-byte across every state, which only held because every
+  // state shared ONE security group. Splitting the public and internal
+  // ALBs onto separate groups (round-1 implementation review's SG-sharing
+  // blocker fix) means the TOTAL list legitimately differs from state to
+  // state (the internal group's own rules only exist once that group
+  // does) — so this test now isolates the ONE thing that is still
+  // genuinely invariant: the PUBLIC ALB's own security group's own rule
+  // never changes across every state where that group still exists.
+  test("the public ALB's security group ingress rule stays byte-identical across every state it exists in", () => {
+    function publicAlbSgIngress(raw: Record<string, any>): any[] {
+      const sgEntry = Object.entries(raw.Resources || {}).find(
+        ([, r]: [string, any]) =>
+          r.Type === 'AWS::EC2::SecurityGroup' &&
+          /^Security group for \S+ ALB$/.test(r.Properties?.GroupDescription ?? ''),
       );
-    const base = JSON.stringify(pick(publicOut.raw.network));
-    for (const out of [expandOut, switchOut, vpcOut]) {
-      expect(JSON.stringify(pick(out.raw.network))).toBe(base);
+      expect(sgEntry).toBeDefined();
+      const [sgLogicalId] = sgEntry as [string, any];
+      return Object.values(raw.Resources || {}).filter(
+        (r: any) =>
+          r.Type === 'AWS::EC2::SecurityGroupIngress' &&
+          JSON.stringify(r.Properties?.GroupId ?? {}).includes(sgLogicalId),
+      );
     }
+    const base = JSON.stringify(publicAlbSgIngress(publicOut.raw.network));
+    for (const out of [expandOut, switchOut, contractOut]) {
+      expect(JSON.stringify(publicAlbSgIngress(out.raw.network))).toBe(base);
+    }
+    // vpc: the public ALB's security group no longer admits anything at
+    // all — `needsPublicAlbSg` is false once `cloudfrontOrigin === 'vpc'`
+    // (lib/network-stack.ts), so there is nothing left to compare.
+    expect(publicAlbSgIngress(vpcOut.raw.network)).toHaveLength(0);
   });
 
   test("bin/iac.ts's own idle timeout / drop_invalid_header_fields / desync_mitigation_mode never drift across migration states", () => {
@@ -177,7 +288,7 @@ describe('STRATOCLAVE_CLOUDFRONT_ORIGIN migration states', () => {
       for (const a of albs[0].Properties.LoadBalancerAttributes) out[a.Key] = a.Value;
       return out;
     };
-    for (const out of [expandOut, switchOut]) {
+    for (const out of [expandOut, switchOut, contractOut]) {
       const pub = albAttrs(out.raw.alb, 'internet-facing');
       const internal = albAttrs(out.raw.alb, 'internal');
       for (const key of [

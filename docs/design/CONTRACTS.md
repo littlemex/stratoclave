@@ -655,3 +655,19 @@ without paying a cost the clause names.
   (`backend/tests/test_ledger_latency_figures_annotated_l39d.py`), which asserts this
   bullet stays listed for as long as the pending marker remains in the document,
   rather than merely skipping silently while nothing requires anyone to re-run it.
+
+- **The `X-Forwarded-Port` overwrite-vs-append spoof test for `STRATOCLAVE_ENTRY=both`
+  is pending.** `docs/DEPLOYMENT.md`'s "Client address and rate limiting" section
+  (the "Both" section) names the exact `curl` command that would send forged and
+  duplicate `X-Forwarded-Port` headers through a deployed `both`-mode consumer
+  endpoint and read the raw headers the backend task actually received, with a
+  "Result: not yet run against a real deployment" placeholder in place of that
+  command's output. An earlier version of `backend/core/forwarded_port.py` asserted
+  that the ALB always overwrites this header rather than appending to it, citing only
+  an AWS documentation page that states what the header MEANS, not its overwrite
+  semantics; that assertion has been removed, and the classifier
+  (`is_cloudfront_leg`/`is_privatelink_leg`) is written to stay safe (fail closed on
+  the rate-limited routes) even if a future run of this test finds the ALB does
+  append in some case. Closing it means running the documented `curl` command against
+  a real `both`-mode deployment and replacing the placeholder with the raw header
+  list the task logged and the resulting leg classification.

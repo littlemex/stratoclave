@@ -1465,15 +1465,6 @@
   "cl-ea49a5eabc51": {
    "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
   },
-  "cl-d79021bc692d": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
-  "cl-5488b66696d7": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
-  "cl-47ddbb2f965f": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
   "cl-1b3499ffafbc": {
    "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
   },
@@ -1492,26 +1483,59 @@
   "cl-188d718a49ea": {
    "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
   },
-  "cl-3fb7166160bf": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
-  "cl-112458c088f1": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
-  "cl-c11d55914fdb": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
-  "cl-c22fa0ce3226": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
-  "cl-4c05023a072c": {
-   "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
-  },
   "cl-e34d217774b4": {
    "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
   },
   "cl-52c82bce8e14": {
    "first_seen": "docs/DEPLOYMENT.md, the CloudFront VPC origin (opt-out default) and STRATOCLAVE_ENTRY=both change"
+  },
+  "cl-ed1a44e6cc10": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-690a8a9eebad": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-c325796be20e": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-4a474b203f34": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-d994a5722bd8": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-4365b6e0f7df": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-af0b708246ec": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-1b5773ea2ee1": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-f63c030645ac": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-48f60e900874": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-d8930fbdc855": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-543b15f08df2": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-2c8e99d46edd": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-bc62409b350a": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-4e13448504c8": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
+  },
+  "cl-bb40445cb116": {
+   "first_seen": "docs/DEPLOYMENT.md, round-1 implementation review fixes (vpc-contract, SG split, both-mode leg classification, migration/rollback rewrite)"
   }
  },
  "retired": {
@@ -1684,6 +1708,46 @@
    "disposition": "moved-to-clause",
    "target": "C6.11",
    "why": "the rationale for a string match was replaced by the measured result on a real log group (the string match and audience_bound = 0 count the unbound sign-in, audience_bound = false matches nothing); the rollout signal it serves is C6.11's"
+  },
+  "cl-d79021bc692d": {
+   "disposition": "reworded-to",
+   "target": "cl-690a8a9eebad",
+   "why": "reworded to state the second, independent reason (the cross-stack export deadlock round-1 implementation review's B1 found) alongside the original ALB-scheme-change reason"
+  },
+  "cl-5488b66696d7": {
+   "disposition": "reworded-to",
+   "target": "cl-4365b6e0f7df",
+   "why": "reworded to add vpc-contract to the named prior steps and to name deploy-all.sh vs. a bare cdk deploy --all explicitly"
+  },
+  "cl-47ddbb2f965f": {
+   "disposition": "reworded-to",
+   "target": "cl-af0b708246ec",
+   "why": "the one-step 'redeploy public' rollback this sentence described is no longer correct -- it has the same cross-stack export deadlock the forward migration's vpc-contract step exists to avoid, just on the internal ALB's exports; replaced by guidance for the two-deploy --exclusively workaround"
+  },
+  "cl-3fb7166160bf": {
+   "disposition": "reworded-to",
+   "target": "cl-d8930fbdc855",
+   "why": "reworded to attribute the claim to the AWS documentation explicitly, rather than stating it as this document's own assertion"
+  },
+  "cl-112458c088f1": {
+   "disposition": "retracted-false",
+   "target": "overwrite-vs-append spoof test",
+   "why": "round-1 implementation review (both Fable's and Sol's matching blocker): this sentence asserted X-Forwarded-Port is 'never a value a client can supply' citing only an AWS page that states what the header MEANS, not its overwrite-vs-append semantics -- no live verification backed it. The classifier no longer depends on this premise being true (it fails closed either way), and docs/DEPLOYMENT.md now names the live spoof test that would confirm or refute it, tracked as the open item named here, rather than restating the assertion."
+  },
+  "cl-c11d55914fdb": {
+   "disposition": "reworded-to",
+   "target": "cl-543b15f08df2",
+   "why": "reworded from a single-value positive match to the getlist-based 'exactly one value' match (round-1 implementation review, Fable B3: .get() silently returns only the first of duplicate header lines)"
+  },
+  "cl-c22fa0ce3226": {
+   "disposition": "reworded-to",
+   "target": "cl-2c8e99d46edd",
+   "why": "reworded to drop the literal '443' deny-list-shaped description (is_privatelink_leg is now 'not is_cloudfront_leg', not an independent positive match) in favour of 'a confirmed PrivateLink port, a duplicated header, or anything unrecognised'"
+  },
+  "cl-4c05023a072c": {
+   "disposition": "reworded-to",
+   "target": "cl-bb40445cb116",
+   "why": "reworded to name the ALB (not the NLB) as the backend-observed peer, and to add the uvicorn --proxy-headers/FORWARDED_ALLOW_IPS check"
   }
  },
  "detector": {

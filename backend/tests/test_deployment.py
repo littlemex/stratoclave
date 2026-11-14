@@ -143,17 +143,28 @@ class TestValidateApiEndpointPrivate:
 
 
 def test_lifespan_calls_both_startup_validators(monkeypatch):
-    """`main.py`'s lifespan calls `validate_api_endpoint` and
-    `validate_audience_config`, in that order, before it seeds the database --
-    reading the source rather than driving the ASGI lifespan, which would need
-    a live DynamoDB/Cognito to construct the app at all."""
+    """`main.py`'s lifespan calls `validate_api_endpoint`,
+    `validate_api_endpoint_private`, and `validate_audience_config`, in that
+    order, before it seeds the database -- reading the source rather than
+    driving the ASGI lifespan, which would need a live DynamoDB/Cognito to
+    construct the app at all.
+
+    `validate_api_endpoint_private` is pinned here specifically because
+    round-1 implementation review of the STRATOCLAVE_ENTRY=both change asked
+    for a test that fails if it is removed from startup -- a deployment
+    whose STRATOCLAVE_API_ENDPOINT_PRIVATE is malformed must refuse to start,
+    the same way one with a malformed STRATOCLAVE_API_ENDPOINT already does;
+    `test_deployment.py`'s own `TestValidateApiEndpointPrivate` class proves
+    the validator function works correctly in isolation, but proves nothing
+    about whether `main.py` actually calls it."""
     main_source = (ROOT / "backend" / "main.py").read_text()
     lifespan_body = main_source.split("async def lifespan(", 1)[1]
     endpoint_at = lifespan_body.index("validate_api_endpoint()")
+    private_endpoint_at = lifespan_body.index("validate_api_endpoint_private()")
     audience_at = lifespan_body.index("validate_audience_config()")
     seed_at = lifespan_body.index("seed_all()")
-    assert endpoint_at < audience_at < seed_at, (
-        "both startup validators must run, in this order, before the seed -- "
-        "a misconfigured gateway must refuse to start rather than seed data "
-        "it will not serve correctly"
+    assert endpoint_at < private_endpoint_at < audience_at < seed_at, (
+        "all three startup validators must run, in this order, before the "
+        "seed -- a misconfigured gateway must refuse to start rather than "
+        "seed data it will not serve correctly"
     )
