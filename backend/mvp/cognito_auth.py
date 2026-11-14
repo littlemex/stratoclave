@@ -23,12 +23,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from core.rate_limit import (
-    AUTH_ADDRESS_RATE_LIMIT,
-    AUTH_SIGN_IN_ADDRESS_SCOPE,
     LOGIN_RATE_LIMIT,
     RESPOND_RATE_LIMIT,
     check_identity_rate_limit,
     limiter,
+    sign_in_address,
 )
 
 
@@ -70,18 +69,22 @@ class RespondRequest(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit(AUTH_ADDRESS_RATE_LIMIT, scope=AUTH_SIGN_IN_ADDRESS_SCOPE)
+@limiter.limit(LOGIN_RATE_LIMIT)
 def login(request: Request, body: LoginRequest) -> LoginResponse:
-    """Two independent limits, as every unauthenticated sign-in route has
-    (`core/rate_limit.py`): the decorator above is this address's share of
-    the coarse flood guard shared by every sign-in route, and the check below
-    is `AUTH_LOGIN_RATE_LIMIT` (default 10/minute) keyed on the email itself --
-    credential-stuffing and user-enumeration mitigation that a rotating
-    attacker cannot evade by trying a fresh address per guess, nor by trying a
-    fresh made-up email per request (the flood guard still bounds the
-    address)."""
+    """Two independent limits (`core/rate_limit.py`): the decorator above is
+    this route's own per-address flood guard, at `AUTH_LOGIN_RATE_LIMIT`
+    (default 10/minute) -- it bounds total request volume from one address
+    regardless of what email each request names, including a flood of
+    made-up emails. The check below is the SAME number, but keyed on the
+    email TOGETHER WITH the address: this is what stops an attacker who does
+    not control the address from locking the named victim out by guessing
+    from elsewhere -- each attacking address only ever spends its own
+    (email, that address) bucket, never the victim's own (email, victim's
+    address) one."""
     _ = request  # the rate limiter reads it from the signature
-    check_identity_rate_limit("auth_login_identity", "login", body.email, LOGIN_RATE_LIMIT)
+    check_identity_rate_limit(
+        "auth_login_identity", "login", body.email, sign_in_address(request), LOGIN_RATE_LIMIT
+    )
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()
@@ -114,14 +117,18 @@ def login(request: Request, body: LoginRequest) -> LoginResponse:
 
 
 @router.post("/respond", response_model=LoginResponse)
-@limiter.limit(AUTH_ADDRESS_RATE_LIMIT, scope=AUTH_SIGN_IN_ADDRESS_SCOPE)
+@limiter.limit(RESPOND_RATE_LIMIT)
 def respond_challenge(request: Request, body: RespondRequest) -> LoginResponse:
     """Same two-limit shape as `/login` (see its docstring): the decorator is
-    the shared address flood guard, and the check below is
-    `AUTH_RESPOND_RATE_LIMIT` keyed on the email, which bounds brute force of
-    the one-time `temporary_password` emitted by admin user creation."""
+    this route's own per-address flood guard, and the check below is
+    `AUTH_RESPOND_RATE_LIMIT` keyed on the email TOGETHER WITH the address,
+    which bounds brute force of the one-time `temporary_password` emitted by
+    admin user creation without letting an attacker lock the named user out
+    from an address the user never uses."""
     _ = request
-    check_identity_rate_limit("auth_respond_identity", "login", body.email, RESPOND_RATE_LIMIT)
+    check_identity_rate_limit(
+        "auth_respond_identity", "login", body.email, sign_in_address(request), RESPOND_RATE_LIMIT
+    )
     pool_id = _require_env("COGNITO_USER_POOL_ID")
     client_id = _require_env("COGNITO_CLIENT_ID")
     cognito = _cognito_client()

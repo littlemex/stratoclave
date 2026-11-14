@@ -24,17 +24,17 @@ from fastapi import HTTPException
 
 from core.logging import get_logger
 
-# `get_logger` (structlog's stdlib-wrapping `BoundLogger`), not the bare
-# `logging.getLogger` this module used before: a plain stdlib logger's
-# `.info(msg, extra={...})` call puts the `extra` dict on the `LogRecord`
-# object, but `setup_logging`'s production handler formats records with
-# `"%(message)s"`, which never reads it -- so every field the runbook below
-# tells an operator to watch (`audience_bound`, `presented_host`, `reason`)
-# was silently absent from the actual JSON line shipped to CloudWatch,
-# while this exact source still looked correct. `get_logger(...).info(event,
-# **fields)` renders through structlog's own JSON processor instead, which
-# is the path every other module here uses and the one the runbook's
-# Logs Insights queries actually parse.
+# `get_logger` (structlog's stdlib-wrapping `BoundLogger`), never a bare
+# `logging.getLogger`: a plain stdlib logger's `.info(msg, extra={...})` call
+# puts the `extra` dict on the `LogRecord` object, but `setup_logging`'s
+# production handler formats records with `"%(message)s"`, which never reads
+# it -- so every field the runbook below tells an operator to watch
+# (`audience_bound`, `presented_host`, `reason`) would be silently absent
+# from the actual JSON line shipped to CloudWatch, while the call site still
+# looked correct. `get_logger(...).info(event, **fields)` renders through
+# structlog's own JSON processor instead, which is the path every other
+# module here uses and the one the runbook's Logs Insights queries actually
+# parse.
 _log = get_logger(__name__)
 
 _ALLOWED_STS_HOSTS = {
@@ -281,6 +281,21 @@ def _validate_inputs(method: str, url: str, headers: dict[str, str], body: str =
             status_code=400, detail="Authorization header (sigv4) is required"
         )
 
+    # A syntactically well-formed SigV4 header whose Credential names no
+    # access key id at all (`Credential=/20261114/us-east-1/sts/aws4_request`)
+    # is not a credential; refuse it here rather than forward it to STS or
+    # let `access_key_id_of` return None and have a caller skip it quietly.
+    # A header that is malformed in some OTHER way falls through this check
+    # (`credential` stays None) and is caught later by `_check_audience`'s own
+    # `_sigv4_parameters` call, which raises the general "malformed" 400.
+    try:
+        credential = _sigv4_parameters(lowered["authorization"])["Credential"]
+    except HTTPException:
+        credential = None
+    if credential is not None and not credential.split("/", 1)[0]:
+        raise HTTPException(
+            status_code=400, detail="Authorization Credential has no access key id"
+        )
 
 
 #: The header that binds a signed GetCallerIdentity to THIS gateway: the host of
@@ -361,10 +376,16 @@ def access_key_id_of(headers: dict[str, str]) -> Optional[str]:
     with the same strict `_sigv4_parameters` this module uses to decide
     whether `AUDIENCE_HEADER` was signed -- so a request this gateway would
     refuse as malformed is not read as naming an access key id here either.
-    Used for rate-limiting a sign-in attempt by the credential it presents
-    (`core.rate_limit.check_identity_rate_limit`), before the request is
-    forwarded to STS. None when the header is missing or malformed; the
-    caller falls back to the address-only flood guard in that case.
+
+    Not used to rate-limit `/sso-exchange` BEFORE STS verification: an
+    access key id read here is merely parsed out of an unverified header, not
+    evidence its holder made the request, so charging a bucket keyed on it
+    would let anyone who merely knows (not holds) a victim's access key id
+    spend that victim's quota with a forged, STS-will-reject header. `/sso-
+    exchange` charges `core.rate_limit.check_identity_rate_limit` only AFTER
+    `verify_and_call_sts` has proven the caller holds the credential, keyed on
+    the account STS actually verified rather than on this. None when the
+    header is missing or malformed.
     """
     lowered = {k.lower(): v for k, v in headers.items()}
     try:

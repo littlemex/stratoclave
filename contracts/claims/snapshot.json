@@ -1348,12 +1348,6 @@
   "cl-4fe516b38183": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
-  "cl-900367e3ffb4": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
-  "cl-337570c2ca8b": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
   "cl-8174cd2854a6": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
@@ -1373,9 +1367,6 @@
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
   "cl-f257d3f3dff7": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
-  "cl-0f7474276dbb": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
   "cl-5d78988446f4": {
@@ -1399,15 +1390,6 @@
   "cl-f7ecad3577e8": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
-  "cl-d896e6153104": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
-  "cl-6669dce47f0f": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
-  "cl-022a4c48f72b": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
   "cl-3d9b102e44c4": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
@@ -1423,16 +1405,7 @@
   "cl-84ac1c99f7ab": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
-  "cl-c1c6f1488d9f": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
-  "cl-796d52ed8fa1": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
   "cl-0185d6a8d4e5": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
-  "cl-77bd0fdd91fe": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
   "cl-f453dc7ee238": {
@@ -1443,6 +1416,42 @@
   },
   "cl-d56289e25dce": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
+  },
+  "cl-c67f8f309153": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-6374437be213": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-a12626c6d4fd": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-13019d20facf": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-b856f27a2654": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-bfd95b27e79c": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-01eda7f5a1c1": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-ae816fa9db47": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-7a6bf7ba028d": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-4639e5aedbeb": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-a0b9e55c66a4": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
+  },
+  "cl-62217c3ecd04": {
+   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
   }
  },
  "retired": {
@@ -1553,13 +1562,58 @@
   },
   "cl-cc963e964b60": {
    "disposition": "reworded-to",
-   "target": "cl-c1c6f1488d9f",
-   "why": "the STRATOCLAVE_STS_AUDIENCES table cell gained the IaC-wiring sentence; same cell, new wording, new id"
+   "target": "cl-4639e5aedbeb",
+   "why": "the STRATOCLAVE_STS_AUDIENCES table cell has been reworded twice since: first to add the IaC-wiring sentence (cl-c1c6f1488d9f, itself since retired), then to state CDK-context sourcing instead of process.env passthrough. retargeted straight at the live successor rather than through the now-retired intermediate id, per the ratchet's own rule against moving the hole one hop over"
   },
   "cl-a0516a8dc567": {
    "disposition": "reworded-to",
    "target": "cl-8594a9fbe755",
    "why": "reworded to avoid a false NOT_YET match ('does not yet know about' read as an unbuilt-feature confession rather than a per-deployment configuration state); same sentence, same meaning"
+  },
+  "cl-900367e3ffb4": {
+   "disposition": "reworded-to",
+   "target": "cl-c67f8f309153",
+   "why": "the sign-in overview paragraph was rewritten to describe an identity-plus-address bucket and a per-route (not shared) flood guard instead of a shared AUTH_ADDRESS_RATE_LIMIT bucket; the same summarising sentence carries the new design"
+  },
+  "cl-337570c2ca8b": {
+   "disposition": "reworded-to",
+   "target": "cl-ae816fa9db47",
+   "why": "the private-entry sizing advice moved from one shared AUTH_ADDRESS_RATE_LIMIT to sizing each route's own AUTH_LOGIN_RATE_LIMIT/AUTH_RESPOND_RATE_LIMIT, and now also states the Cognito-lockout boundary the old sentence did not"
+  },
+  "cl-0f7474276dbb": {
+   "disposition": "reworded-to",
+   "target": "cl-4639e5aedbeb",
+   "why": "the one summary sentence ('both are wired through iac/bin/iac.ts and survive a cdk deploy') was replaced by each env-var table row stating its own CDK-context sourcing and redeploy-persistence individually"
+  },
+  "cl-d896e6153104": {
+   "disposition": "reworded-to",
+   "target": "cl-bfd95b27e79c",
+   "why": "the mechanical note about where the identity check runs (inside the handler, not the decorator) was folded into the surrounding ordering explanation; the ordering claim that survives in the same paragraph is the direct descendant"
+  },
+  "cl-6669dce47f0f": {
+   "disposition": "reworded-to",
+   "target": "cl-a12626c6d4fd",
+   "why": "the same bullet ('Keyed on the client address, shared by every sign-in route') was rewritten to describe keying on identity-plus-address instead of address-only"
+  },
+  "cl-022a4c48f72b": {
+   "disposition": "reworded-to",
+   "target": "cl-01eda7f5a1c1",
+   "why": "near-identical bullet about /ui-ticket/consume, reworded only to point at its own per-route flood guard instead of the removed shared address guard"
+  },
+  "cl-c1c6f1488d9f": {
+   "disposition": "reworded-to",
+   "target": "cl-4639e5aedbeb",
+   "why": "the STRATOCLAVE_STS_AUDIENCES table row was reworded from 'passed through unconditionally via process.env' to 'sourced from CDK context', the actual fix this round made"
+  },
+  "cl-796d52ed8fa1": {
+   "disposition": "reworded-to",
+   "target": "cl-a0b9e55c66a4",
+   "why": "the STRATOCLAVE_STS_AUDIENCE_REQUIRED table row is unchanged in its first two sentences and gained a clause naming iac/bin/iac.ts's own synth-time strict-boolean check, which changed its hash"
+  },
+  "cl-77bd0fdd91fe": {
+   "disposition": "reworded-to",
+   "target": "cl-62217c3ecd04",
+   "why": "the AUTH_LOGIN_RATE_LIMIT table row was rewritten from describing one shared 300/minute flood guard to describing each route's own two CDK-context-sourced limits"
   }
  },
  "detector": {

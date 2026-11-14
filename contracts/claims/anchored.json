@@ -2349,16 +2349,6 @@
    "anchor": "contract:C6.12@442ad928"
   },
   {
-   "id": "cl-900367e3ffb4",
-   "claim": "What stays genuinely shared on this path is the UNAUTHENTICATED sign-in routes (`/api/mvp/auth/login`, `/respond`, `/sso-exchange`, `/ui-ticket/consume`): with no verified identity yet, these are rate-limited twice (see \"Rate limits on sign-in routes\" below) — a tight limit keyed on the identity (the email, or the access key id) the request names, which a rotating address cannot evade, and a coarse flood guard keyed on the address itself, shared by every sign-in route, which bounds total sign-in volume from one address regardless of how many distinct (possibly made-up) identities it tries.",
-   "anchor": "contract:C6.12@442ad928"
-  },
-  {
-   "id": "cl-337570c2ca8b",
-   "claim": "That flood guard is the one place the shared-NLB-address topology this paragraph opens with still matters: size `AUTH_ADDRESS_RATE_LIMIT` generously enough for every legitimate consumer on this path combined, since on this entry mode they genuinely do share one address.",
-   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
-  },
-  {
    "id": "cl-8174cd2854a6",
    "claim": "This is deliberate, not simply unfixed: the ALB attribute `routing.http.xff_header_processing.mode` is set to `remove` specifically so that a client-supplied `X-Forwarded-For` can never reach the application and be trusted as if it were a real client address — the alternative (trusting it) would let any consumer forge a distinct address and evade the shared bucket entirely, which is worse.",
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
@@ -2391,11 +2381,6 @@
   {
    "id": "cl-f257d3f3dff7",
    "claim": "To turn the second one off (require every sign-in to carry a bound audience):",
-   "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
-  },
-  {
-   "id": "cl-0f7474276dbb",
-   "claim": "Both are wired through `iac/bin/iac.ts` and survive a `cdk deploy` (see the environment variable table below) — a value set by hand on the task definition and never added there is dropped on the next deploy.",
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
   },
   {
@@ -2434,21 +2419,6 @@
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
   },
   {
-   "id": "cl-d896e6153104",
-   "claim": "This is `LOGIN_RATE_LIMIT` / `RESPOND_RATE_LIMIT` / `SSO_EXCHANGE_RATE_LIMIT` (default 10/minute, 10/minute, 20/minute), run explicitly inside each handler (`core.rate_limit.check_identity_rate_limit`) rather than through the route decorator, because the identity lives in the request body, which the decorator's `Request`-only key function cannot read.",
-   "anchor": "contract:C6.13@4d26afd0"
-  },
-  {
-   "id": "cl-6669dce47f0f",
-   "claim": "- **Keyed on the client address, shared by every sign-in route.** `AUTH_ADDRESS_RATE_LIMIT` (default 300/minute) is a coarse FLOOD GUARD, not a brute-force control — every one of `/login`, `/respond`, `/sso-exchange` and `/ui-ticket/consume` writes to the SAME address-keyed bucket (`core.rate_limit.AUTH_SIGN_IN_ADDRESS_SCOPE`), so an attacker cannot multiply their address's budget by spreading requests across routes, and cannot evade it by minting a fresh made-up identity on every request: the address bucket is touched once per request regardless of what identity (real or invented) the request names, and it is checked BEFORE the identity-keyed check runs, so a flood that trips it never reaches the identity counters at all (no DynamoDB write growth from an attacker minting unlimited fictitious identities).",
-   "anchor": "contract:C6.13@4d26afd0"
-  },
-  {
-   "id": "cl-022a4c48f72b",
-   "claim": "- **`/ui-ticket/consume` has no identity-keyed check.** The single-use ticket it redeems is itself the only identity a request could name, and 256-bit entropy already makes guessing one uneconomic; the address flood guard above is belt-and-braces against guessing at volume, not a credential-guessing control.",
-   "anchor": "contract:C6.13@4d26afd0"
-  },
-  {
    "id": "cl-3d9b102e44c4",
    "claim": "- **A request that fails authentication on an AUTHENTICATED route is not rate-limited at all**, not merely \"not counted against any user\".",
    "anchor": "contract:C6.13@4d26afd0"
@@ -2474,24 +2444,9 @@
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
   },
   {
-   "id": "cl-c1c6f1488d9f",
-   "claim": "Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start. Passed through unconditionally (empty when unset), so a value exported before one `cdk deploy` is not silently dropped by the next one that forgot to export it.",
-   "anchor": "boundary:'or the gateway refuses to start' states the limit"
-  },
-  {
-   "id": "cl-796d52ed8fa1",
-   "claim": "When on, an AWS sign-in whose signed request carries no `X-Stratoclave-Audience` at all is refused; a request bound to a host that IS NOT this gateway's is refused regardless of this setting (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)). Off by default so CLIs older than 0.2.1 keep working; see that same section's runbook. Read strictly (`core.deployment.strict_flag`): `1`/`true`/`yes`/`on` for on, `0`/`false`/`no`/`off`/empty for off, anything else fails the backend's own startup rather than silently reading as off.",
-   "anchor": "boundary:'NOT' / 'regardless of this setting' states the limit"
-  },
-  {
    "id": "cl-0185d6a8d4e5",
    "claim": "CDK-side flag (read in `iac/bin/iac.ts`). `false` skips provisioning `<Prefix>WafStack`. Default: `true`. Has no effect under `STRATOCLAVE_ENTRY=private`, which never provisions a WAF stack at all.",
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
-  },
-  {
-   "id": "cl-77bd0fdd91fe",
-   "claim": "The coarse per-address flood guard shared by every sign-in route (default `300/minute`; see [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)). Raise this if a legitimate shared-address topology (a NAT, or the private entry's shared NLB-facing address) produces false 429s; it is not a brute-force control, so raising it does not weaken the identity-keyed limits above.",
-   "anchor": "contract:C6.13@4d26afd0"
   },
   {
    "id": "cl-f453dc7ee238",
@@ -2507,6 +2462,66 @@
    "id": "cl-d56289e25dce",
    "claim": "Audit record; kept in every environment.",
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
+  },
+  {
+   "id": "cl-c67f8f309153",
+   "claim": "What stays genuinely shared on this path is the UNAUTHENTICATED sign-in routes (`/api/mvp/auth/login`, `/respond`, `/sso-exchange`, `/ui-ticket/consume`): with no verified identity yet, these are rate-limited twice (see \"Rate limits on sign-in routes\" below) — a tight limit keyed on the identity TOGETHER WITH the address (the email, or, for `/sso-exchange`, the account STS verifies), and each route's own per-address flood guard (`AUTH_LOGIN_RATE_LIMIT` etc.), which bounds total sign-in volume from one address regardless of how many distinct (possibly made-up) identities it tries.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-6374437be213",
+   "claim": "A string match on `\"audience_bound\": false` (optional space after the colon, to tolerate either JSON serializer convention) is read directly off the line `core.logging`'s `JSONRenderer` actually produces, so it cannot silently match nothing the way an unproven field comparison could — which would make \"no `false` events\" trivially, and wrongly, true.",
+   "anchor": "descriptive:explains why a string match on the rendered log line was chosen over a field-based Logs Insights comparison that this file does not claim works"
+  },
+  {
+   "id": "cl-a12626c6d4fd",
+   "claim": "- **Keyed on the identity the request names, TOGETHER WITH the client's own address.** `/login` and `/respond` key on the normalised (lowercased) email in the request body plus the caller's address; `/sso-exchange` keys on the account STS actually verifies the signature belongs to — the account id plus the AWS-assigned prefix of the UserId, never the RoleSessionName tail of the ARN, which whoever calls AssumeRole picks — and ONLY after `verify_and_call_sts` has proven the caller holds the credential; an access key id merely parsed out of an unverified `Authorization` string is never charged against anything, because it is not evidence its holder made the request.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-13019d20facf",
+   "claim": "The address half of the key is the fix for a real attack, not an optimisation: an identity-ONLY bucket lets anyone who merely KNOWS (never needs to hold) a victim's email lock that victim out — ten bad guesses from one address, discard it, repeat from another, and the victim's own sign-in attempts share that same exhausted bucket regardless of which address they come from.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-b856f27a2654",
+   "claim": "It bounds total request volume (and so DynamoDB counter growth) from one address regardless of how many different identities it tries, which the identity-and-address bucket alone cannot: that bucket gives a fresh quota to every new (identity, address) pair, so an attacker trying many DIFFERENT made-up identities from one address would otherwise write an unbounded number of counters.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-bfd95b27e79c",
+   "claim": "A tripped address guard is checked first, so a flood never reaches the identity-and-address counters at all.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-01eda7f5a1c1",
+   "claim": "- **`/ui-ticket/consume` has no identity-keyed check.** The single-use ticket it redeems is itself the only identity a request could name, and 256-bit entropy already makes guessing one uneconomic; its own per-address flood guard above is belt-and-braces against guessing at volume, not a credential-guessing control.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-ae816fa9db47",
+   "claim": "Size `AUTH_LOGIN_RATE_LIMIT`/`AUTH_RESPOND_RATE_LIMIT` for that topology specifically (lower is not necessarily safer — too low and the shared address's own legitimate traffic trips it) and treat guessing spread across MANY different accounts as Cognito's own job: Cognito's account-level lockout sees distributed guessing against one account regardless of address, which this gateway's per-(identity, address) bucket structurally cannot.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-7a6bf7ba028d",
+   "claim": "- A non-CLI SigV4 client (a `boto3`/AWS SDK script that signs its own `GetCallerIdentity`) is rate-limited exactly like any other `/sso-exchange` caller once STS has verified it — by the account its own signature proves.",
+   "anchor": "contract:C6.13@4d26afd0"
+  },
+  {
+   "id": "cl-4639e5aedbeb",
+   "claim": "Comma-separated extra URLs this gateway is reached under, whose hosts a signed AWS sign-in may also name. Every entry must be an absolute http(s) URL, or the gateway refuses to start. Sourced from CDK context, not `process.env` — set it in `iac/cdk.json`'s own \"context\" object (a `-c` flag on one `cdk deploy` invocation is not repeated by the next), so a value configured once is not silently dropped by a later deploy from a different shell.",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-a0b9e55c66a4",
+   "claim": "When on, an AWS sign-in whose signed request carries no `X-Stratoclave-Audience` at all is refused; a request bound to a host that IS NOT this gateway's is refused regardless of this setting (see [Binding AWS sign-in to this gateway](#binding-aws-sign-in-to-this-gateway)). Off by default so CLIs older than 0.2.1 keep working; see that same section's runbook. Read strictly, both by the backend (`core.deployment.strict_flag`) and at synth time (`iac/bin/iac.ts`): `1`/`true`/`yes`/`on` for on, `0`/`false`/`no`/`off`/empty for off, anything else fails synth (and, independently, the backend's own startup) rather than silently reading as off.",
+   "anchor": "contract:C6.11@c43c5b07"
+  },
+  {
+   "id": "cl-62217c3ecd04",
+   "claim": "Each route's OWN two limits (see [Rate limits on sign-in routes](#rate-limits-on-sign-in-routes)): a per-address flood guard at this number, and an identity-plus-address bucket at the SAME number keyed on the email (`/login`, `/respond`) or the verified account (`/sso-exchange`, only after STS has confirmed it). `/ui-ticket/consume` also uses `SSO_EXCHANGE_RATE_LIMIT` for its own (address-only) flood guard. Sourced from CDK context, not `process.env`, for the same redeploy-persistence reason as the audience settings above — edit `iac/cdk.json`'s \"context\" object directly.",
+   "anchor": "contract:C6.13@4d26afd0"
   }
  ]
 }

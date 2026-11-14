@@ -1,8 +1,8 @@
-"""C6.12 sweep: every rate-limited route either authenticates its caller
+"""C6.12/C6.13 sweep: every rate-limited route either authenticates its caller
 (bucketed by the verified user, `core.rate_limit._request_key`) or is a named,
-unauthenticated sign-in route (bucketed by address plus, for `/login`,
-`/respond` and `/sso-exchange`, the identity it names -- `core.rate_limit`'s
-`AUTH_SIGN_IN_ADDRESS_SCOPE` / `check_identity_rate_limit`).
+unauthenticated sign-in route (bucketed by its own per-route address, plus,
+for `/login`, `/respond` and `/sso-exchange`, the identity it names together
+with that address -- `core.rate_limit.check_identity_rate_limit`).
 
 `test_rate_limit_xff.py` proves the MECHANISM (a limited route IS bucketed by
 `request.state.rate_principal` when one is set) on one synthetic route. That

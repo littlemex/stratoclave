@@ -31,10 +31,14 @@ const iacDir = path.resolve(__dirname, '..');
 
 type CfnTemplate = { Resources?: Record<string, any> };
 
-function synth(prefix: string, extraEnv: Record<string, string>): CfnTemplate {
+function synth(
+  prefix: string,
+  extraEnv: Record<string, string>,
+  contextArgs: string[] = [],
+): CfnTemplate {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratoclave-deployed-flag-'));
   try {
-    execFileSync('npx', ['cdk', 'synth', '--all', '-o', outDir, '--quiet'], {
+    execFileSync('npx', ['cdk', 'synth', '--all', '-o', outDir, '--quiet', ...contextArgs], {
       cwd: iacDir,
       env: hermeticSynthEnv({
         CDK_DEFAULT_ACCOUNT: '123456789012',
@@ -195,33 +199,57 @@ describe('STRATOCLAVE_API_ENDPOINT is always set on the ECS task, in both entry 
   }, 120_000);
 });
 
-describe('STRATOCLAVE_STS_AUDIENCES / STRATOCLAVE_STS_AUDIENCE_REQUIRED survive a cdk deploy', () => {
+describe('STRATOCLAVE_STS_AUDIENCES / STRATOCLAVE_STS_AUDIENCE_REQUIRED persist across a redeploy', () => {
   // Both are read by the backend (`mvp.sso_sts.expected_audiences`,
-  // `.audience_required`) but were not wired through `bin/iac.ts` at all: a
-  // value an operator set by hand on the task definition during the runbook
-  // in docs/DEPLOYMENT.md ("Binding AWS sign-in to this gateway") was
-  // silently dropped on the next `cdk deploy`, same defect class as the
-  // first-admin-email regression `documented-env-wiring.test.ts` exists for.
-  test('an exported value reaches the container unchanged', () => {
-    const prefix = `stsenv${Math.random().toString(36).slice(2, 6)}`;
+  // `.audience_required`) and are sourced from CDK CONTEXT
+  // (`stsAudiences`/`stsAudienceRequired` in `bin/iac.ts`), not
+  // `process.env`: reading it as `process.env.X || ''` instead would blank
+  // a value a PREVIOUS deploy configured the moment a later `cdk deploy`
+  // runs from a shell that forgot to re-export it -- the same
+  // defect class as the first-admin-email regression
+  // `documented-env-wiring.test.ts` exists for, but worse here because the
+  // failure mode is a silent security regression (the foreign-host
+  // allowlist shrinking, or the audience requirement turning back off)
+  // rather than a missing admin.
+  test('a context value reaches the container unchanged', () => {
+    const prefix = `stsctx${Math.random().toString(36).slice(2, 6)}`;
     const audiences = 'https://stratoclave.internal.example.com,https://alias.example.com';
-    const template = synth(prefix, {
-      STRATOCLAVE_STS_AUDIENCES: audiences,
-      STRATOCLAVE_STS_AUDIENCE_REQUIRED: 'true',
-    });
+    const template = synth(prefix, {}, [
+      `-c`, `stsAudiences=${audiences}`,
+      `-c`, `stsAudienceRequired=true`,
+    ]);
     const env = backendContainerEnv(template);
     expect(env.STRATOCLAVE_STS_AUDIENCES).toBe(audiences);
     expect(env.STRATOCLAVE_STS_AUDIENCE_REQUIRED).toBe('true');
   }, 120_000);
 
-  test('the keys exist (as empty strings) even when nothing was exported', () => {
+  test('a synth with NO exports and NO -c flags does not blank a value that would otherwise be set in cdk.json', () => {
+    // This cannot literally edit the repo's own `cdk.json` from a test, so
+    // it proves the other half instead: `process.env` is irrelevant now --
+    // setting STRATOCLAVE_STS_AUDIENCES as an environment variable (what the
+    // old, now-fixed wiring read) has NO effect on the synthesized value,
+    // which is exactly what "sourced from context, not process.env" means.
+    // Combined with the test above (a context value DOES reach the
+    // container), the only way `stsAudiences` in `cdk.json` could still be
+    // dropped is if `bin/iac.ts` read `process.env` again -- which this
+    // pins against regressing to.
+    const prefix = `stsctxenv${Math.random().toString(36).slice(2, 6)}`;
+    const template = synth(prefix, {
+      STRATOCLAVE_STS_AUDIENCES: 'https://this-must-be-ignored.example.com',
+      STRATOCLAVE_STS_AUDIENCE_REQUIRED: 'true',
+    });
+    const env = backendContainerEnv(template);
+    expect(env.STRATOCLAVE_STS_AUDIENCES).toBe('');
+    expect(env.STRATOCLAVE_STS_AUDIENCE_REQUIRED).toBe('');
+  }, 120_000);
+
+  test('the keys exist (as empty strings) even when nothing was configured', () => {
     // Same reasoning as `documented-env-wiring.test.ts`'s
     // `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL` check: the key SET must not depend
-    // on which shell ran the deploy, and the backend already treats an
-    // empty string as "not configured" (`core.deployment`'s `.strip()`
-    // check), so this is not a behaviour change for an operator who sets
-    // neither.
-    const prefix = `stsenvoff${Math.random().toString(36).slice(2, 6)}`;
+    // on whether an operator configured anything, and the backend already
+    // treats an empty string as "not configured" (`core.deployment`'s
+    // `.strip()` check).
+    const prefix = `stsctxoff${Math.random().toString(36).slice(2, 6)}`;
     const template = synth(prefix, {});
     const env = backendContainerEnv(template);
     expect(env).toHaveProperty('STRATOCLAVE_STS_AUDIENCES');
@@ -229,4 +257,29 @@ describe('STRATOCLAVE_STS_AUDIENCES / STRATOCLAVE_STS_AUDIENCE_REQUIRED survive 
     expect(env.STRATOCLAVE_STS_AUDIENCES).toBe('');
     expect(env.STRATOCLAVE_STS_AUDIENCE_REQUIRED).toBe('');
   }, 120_000);
+
+  test('an unrecognised stsAudienceRequired context value fails synth', () => {
+    const prefix = `stsctxbad${Math.random().toString(36).slice(2, 6)}`;
+    expect(() => synth(prefix, {}, ['-c', 'stsAudienceRequired=enabled'])).toThrow();
+  }, 120_000);
+
+  test('auth rate-limit settings also come from context and default to the old numbers', () => {
+    const prefix = `ratectx${Math.random().toString(36).slice(2, 6)}`;
+    const defaults = synth(prefix, {});
+    const defaultEnv = backendContainerEnv(defaults);
+    expect(defaultEnv.AUTH_LOGIN_RATE_LIMIT).toBe('10/minute');
+    expect(defaultEnv.AUTH_RESPOND_RATE_LIMIT).toBe('10/minute');
+    expect(defaultEnv.SSO_EXCHANGE_RATE_LIMIT).toBe('20/minute');
+
+    const prefix2 = `ratectx2${Math.random().toString(36).slice(2, 6)}`;
+    const configured = synth(prefix2, {}, [
+      '-c', 'authLoginRateLimit=5/minute',
+      '-c', 'authRespondRateLimit=5/minute',
+      '-c', 'ssoExchangeRateLimit=15/minute',
+    ]);
+    const configuredEnv = backendContainerEnv(configured);
+    expect(configuredEnv.AUTH_LOGIN_RATE_LIMIT).toBe('5/minute');
+    expect(configuredEnv.AUTH_RESPOND_RATE_LIMIT).toBe('5/minute');
+    expect(configuredEnv.SSO_EXCHANGE_RATE_LIMIT).toBe('15/minute');
+  }, 180_000);
 });

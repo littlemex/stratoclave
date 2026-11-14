@@ -3,10 +3,12 @@ answers them the same way: whether it runs locally, how a boolean setting is
 spelled, and which host the gateway's own API URL names."""
 from __future__ import annotations
 
+import ipaddress
 import os
-import re
 from typing import Optional
 from urllib.parse import urlsplit
+
+import idna
 
 #: `ENVIRONMENT` values for a developer machine or a test run, where the gateway
 #: may infer its own URL from request headers. Anything else is a deployment.
@@ -15,14 +17,6 @@ LOCAL_ENVIRONMENTS = frozenset({"development", "local", "test"})
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _DEFAULT_PORTS = {"https": 443, "http": 80}
-
-#: A hostname (or IPv4 literal; the digit grammar is a subset of this) as dot-
-#: separated labels of letters, digits and internal hyphens. `urlsplit` itself
-#: validates a bracketed IPv6 literal (raises `ValueError` for one that is not
-#: a real address), but it does not validate an unbracketed netloc as a host
-#: at all -- "https://a, https://b" parses with `.hostname == "a, https"`,
-#: which is not a host by any grammar and must not be read as one.
-_HOSTNAME_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))*$")
 
 
 def is_local_environment() -> bool:
@@ -56,16 +50,25 @@ def strict_flag(name: str) -> bool:
 
 
 def host_of(url: str) -> Optional[str]:
-    """The host a URL names: lowercased, IDNA-encoded, an IPv6 literal kept
-    bracketed, and the port included only when it is not the scheme's default
-    -- the same normalisation `cli/src/mvp/sso.rs::audience_host` gets for free
-    from the `url` crate (shared test vectors:
-    `contracts/host_normalization_vectors.json`). None when the value is not a
-    plain absolute http(s) URL: no scheme or host, a scheme other than
-    http/https, a malformed bracketed IPv6 literal, or a userinfo, query or
-    fragment component -- a configured endpoint has no business carrying
+    """The host a URL names: an IP literal canonicalised with `ipaddress`
+    (IPv6 compressed to its shortest form and bracketed), or a hostname
+    IDNA-encoded under UTS #46 (`idna.encode(..., uts46=True)`, not the
+    stdlib `str.encode("idna")` codec -- that codec is IDNA 2003, which
+    disagrees with UTS #46 on real inputs, e.g. German "straße"), with the
+    port included only when it is not the scheme's default -- the same
+    normalisation `cli/src/mvp/sso.rs::audience_host` gets for free from the
+    `url` crate's own WHATWG-URL-standard host parsing (shared test vectors:
+    `contracts/host_normalization_vectors.json`). None when the value is not
+    a plain absolute http(s) URL: no scheme or host, a scheme other than
+    http/https, a malformed bracketed IPv6 literal, a userinfo, query or
+    fragment component (a configured endpoint has no business carrying
     credentials or a path's tail, and silently dropping them would publish
-    whatever was left over through `/.well-known/stratoclave-config`."""
+    whatever was left over through `/.well-known/stratoclave-config`), or a
+    hostname `idna.encode` itself refuses (empty, a label with a leading or
+    trailing hyphen, an over-length label, or any codepoint a hostname
+    cannot contain at all -- "https://a, https://b"'s `.hostname` of
+    `"a, https"` is exactly this last case, since `urlsplit` does not
+    validate an unbracketed netloc as a host at all)."""
     try:
         parts = urlsplit(url.strip())
     except ValueError:
@@ -83,21 +86,34 @@ def host_of(url: str) -> Optional[str]:
         port = parts.port
     except ValueError:
         return None
-    hostname = parts.hostname.lower()
+
+    raw_hostname = parts.hostname
+    # An IP literal: canonicalise with `ipaddress` BEFORE anything IDNA-shaped
+    # ever sees it -- `idna.encode` rejects a raw IPv6 literal outright (":"
+    # is not a valid hostname codepoint), and the stdlib `.hostname` property
+    # already stripped the brackets a bracketed IPv6 literal was written
+    # with, so what is left is exactly the string `ipaddress.ip_address`
+    # expects. `ipaddress` also compresses: "0:0:0:0:0:0:0:1" and "::1" must
+    # read back as the SAME audience, which neither `urlsplit` nor the stdlib
+    # "idna" codec did on their own.
     try:
-        host = hostname.encode("idna").decode("ascii")
-    except UnicodeError:
+        ip = ipaddress.ip_address(raw_hostname)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        host = f"[{ip}]" if ip.version == 6 else str(ip)
+        return host if port in (None, _DEFAULT_PORTS[parts.scheme]) else f"{host}:{port}"
+
+    # A hostname. Strip one trailing root-label dot ("example.com." names the
+    # same name as "example.com" for every purpose this function serves)
+    # before encoding -- `idna.encode` does not normalise that away on its
+    # own (it would keep the dot verbatim in the output).
+    hostname = raw_hostname.rstrip(".")
+    if not hostname:
         return None
-    if ":" in host:
-        # An IPv6 literal: `.hostname` already stripped the brackets `urlsplit`
-        # read, so put them back. Without this, "::1" concatenated with a port
-        # as "::1:8080" is not the address the CLI's `url` crate would read
-        # back (which keeps `[::1]:8080`), and the two sides disagree on every
-        # bound sign-in against an IPv6 endpoint. `urlsplit` already validated
-        # the bracketed form as a real IPv6 address, so no further grammar
-        # check applies here.
-        host = f"[{host}]"
-    elif not _HOSTNAME_RE.match(host):
+    try:
+        host = idna.encode(hostname, uts46=True).decode("ascii")
+    except idna.IDNAError:
         return None
     return host if port in (None, _DEFAULT_PORTS[parts.scheme]) else f"{host}:{port}"
 

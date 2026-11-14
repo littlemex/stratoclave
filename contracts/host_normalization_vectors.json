@@ -11,6 +11,12 @@
     {"url": "https://[::1]:8080", "host": "[::1]:8080"},
     {"url": "https://[::1]/", "host": "[::1]"},
     {"url": "https://xn--caf-dma.example.com", "host": "xn--caf-dma.example.com"},
-    {"url": "https://café.example.com", "host": "xn--caf-dma.example.com"}
-  ]
+    {"url": "https://café.example.com", "host": "xn--caf-dma.example.com"},
+    {"url": "https://straße.example.com", "host": "xn--strae-oqa.example.com"},
+    {"url": "https://[0:0:0:0:0:0:0:1]:8080", "host": "[::1]:8080"},
+    {"url": "https://[0:0:0:0:0:0:0:1]/", "host": "[::1]"},
+    {"url": "https://d1.cloudfront.net.", "host": "d1.cloudfront.net"},
+    {"url": "https://d1.cloudfront.net./", "host": "d1.cloudfront.net"}
+  ],
+  "_known_divergent_residual": "Legacy IPv4 shorthand ('127.1', '0x7f.1', a bare decimal integer) is not covered here: Python's `ipaddress.ip_address` refuses all of these (strict 4-octet dotted-decimal only), so `core.deployment.host_of` falls through to the hostname/IDNA branch and reads '127.1' as the two-label hostname it looks like, not as 127.0.0.1. Whether the CLI's `url` crate (whose IPv4 parser follows the WHATWG URL standard, which DOES accept shorthand forms and expands them) agrees is unverified -- adding it here as an equality case would be a vector asserting a behaviour neither side has confirmed. No real STRATOCLAVE_API_ENDPOINT/STRATOCLAVE_STS_AUDIENCES value is expected to use shorthand IPv4; this is recorded as a known gap, not fixed."
 }

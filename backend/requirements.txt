@@ -11,6 +11,15 @@ python-multipart==0.0.33
 # and by tests; keep it in the runtime set.
 httpx==0.28.1
 
+# Was already present transitively (httpx depends on it), now pinned
+# directly: `core/deployment.py::host_of` relies on `idna.encode(...,
+# uts46=True)` for the UTS #46 host normalisation the CLI's `url` crate
+# applies, which the stdlib `str.encode("idna")` codec (IDNA 2003) does not
+# match on every input. A transitive version is not a declared contract; a
+# future httpx release dropping or reshaping it must not silently change
+# this module's own behaviour.
+idna==3.7
+
 # AWS
 boto3==1.44.1
 # Mints short-lived bearer tokens for the OpenAI-compatible surface on

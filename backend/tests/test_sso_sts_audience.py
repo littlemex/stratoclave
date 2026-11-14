@@ -50,6 +50,18 @@ def production_log_lines(caplog, monkeypatch):
 
     saved_config = structlog.get_config()
     setup_logging(environment="production")
+    # Proven BEFORE `caplog.set_level` below gets a chance to force it: if
+    # `setup_logging`'s production branch regressed to a level above INFO
+    # (silencing `sso_sts_exchange_verified`/`sso_sts_audience_refused`
+    # entirely in a real deployment), this fails here. `caplog.set_level`
+    # right after is pytest's own capture-harness requirement -- it widens
+    # what THIS TEST'S handler receives, which is unrelated to, and must not
+    # be mistaken for, what the real production config actually enables.
+    assert _logging.getLogger("mvp.sso_sts").isEnabledFor(_logging.INFO), (
+        "setup_logging(environment='production') does not enable INFO for "
+        "mvp.sso_sts -- the audience-binding rollout signal would be silently "
+        "dropped in a real deployment"
+    )
     caplog.set_level(_logging.INFO, logger="mvp.sso_sts")
     # `sso_sts._log` is a MODULE-LEVEL singleton, created once at import time.
     # structlog's `cache_logger_on_first_use=True` bakes in whatever
@@ -240,6 +252,53 @@ def test_an_unrecognised_audience_required_value_fails_startup(monkeypatch):
         sso_sts.audience_required()
 
 
+def test_validate_audience_config_itself_fails_on_the_same_typo(monkeypatch):
+    """The test above calls `audience_required()` directly; this one calls
+    the actual startup entry point `main.py`'s lifespan invokes
+    (`validate_audience_config`), so a future change that stopped that
+    function from calling `audience_required()` at all -- leaving a typo to
+    surface only as a 401/500 on the first real sign-in instead of at
+    startup -- would be caught here."""
+    monkeypatch.delenv("STRATOCLAVE_STS_AUDIENCES", raising=False)
+    monkeypatch.setenv("STRATOCLAVE_STS_AUDIENCE_REQUIRED", "enabled")
+    with pytest.raises(RuntimeError, match="STRATOCLAVE_STS_AUDIENCE_REQUIRED"):
+        sso_sts.validate_audience_config()
+
+
+@pytest.mark.parametrize("authorization", [
+    "AWS4-HMAC-SHA256 Credential=/20261114/us-east-1/sts/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc",
+])
+def test_an_empty_access_key_id_in_credential_is_refused_at_input_validation(authorization):
+    """`Credential=/...` parses as well-formed SigV4 (every parameter name
+    present, no duplicates) but names no access key id at all -- refused
+    here rather than forwarded to STS or silently skipped by whatever reads
+    the access key id out of it."""
+    headers = {
+        "authorization": authorization,
+        "x-amz-date": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+    }
+    with pytest.raises(HTTPException) as exc:
+        sso_sts._validate_inputs("POST", URL, headers, BODY)
+    assert exc.value.status_code == 400
+    assert "access key id" in exc.value.detail
+
+
+def test_a_credential_with_a_real_access_key_id_still_passes_input_validation():
+    h = _headers(["host"])  # the default Authorization names "AKIDEXAMPLE"
+    sso_sts._validate_inputs("POST", URL, h, BODY)  # must not raise
+
+
+def test_a_malformed_authorization_does_not_trip_the_empty_access_key_id_check():
+    """A header that is not SigV4-shaped at all must fall through to the
+    general malformed-header path (checked elsewhere, e.g. `_check_audience`)
+    rather than being misread as "empty access key id"."""
+    headers = {
+        "authorization": "not sigv4 at all",
+        "x-amz-date": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+    }
+    sso_sts._validate_inputs("POST", URL, headers, BODY)  # must not raise HERE
+
+
 def test_every_verified_exchange_is_logged_with_whether_it_was_bound(monkeypatch, production_log_lines):
     """Through verify_and_call_sts, with the STS call and the replay store faked, and
     through the real production JSON formatter -- `audience_bound` must be a real field
@@ -270,3 +329,42 @@ def test_every_verified_exchange_is_logged_with_whether_it_was_bound(monkeypatch
         lines = [line for line in production_log_lines() if line.get("event") == "sso_sts_exchange_verified"]
         assert lines, "no sso_sts_exchange_verified line reached stdout through the real formatter"
         assert lines[0]["audience_bound"] is bound
+
+
+def test_the_documented_logs_insights_filter_matches_the_real_line(monkeypatch, caplog, production_log_lines):
+    """Proves the regex docs/DEPLOYMENT.md's runbook tells an operator to
+    paste into a CloudWatch Logs Insights query -- `@message like
+    /"audience_bound": ?false/` -- against the RAW text this process would
+    actually ship, not against the parsed-and-therefore-forgiving JSON
+    object the other test in this file compares against. A field-based
+    filter (`audience_bound = false`) depends on CloudWatch's own JSON
+    auto-discovery agreeing the field is a boolean, which nothing here can
+    confirm; a substring/regex match on the literal line does not."""
+    import re
+
+    class _Resp:
+        status_code = 200
+        text = ('<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
+                "<GetCallerIdentityResult><Arn>arn:aws:sts::123456789012:"
+                "assumed-role/r/s</Arn><UserId>AROAEXAMPLE:s</UserId><Account>123456789012</Account>"
+                "</GetCallerIdentityResult></GetCallerIdentityResponse>")
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, **k): return _Resp()
+
+    monkeypatch.setattr(sso_sts.httpx, "Client", _Client)
+    import dynamo.sso_nonces as nonces
+    monkeypatch.setattr(nonces.SsoNoncesRepository, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(nonces.SsoNoncesRepository, "consume", lambda self, **k: None)
+
+    sso_sts.verify_and_call_sts("POST", URL, _headers(["host"]), BODY)  # unbound: no audience header
+
+    documented_pattern = re.compile(r'"audience_bound": ?false')
+    raw_lines = [r.getMessage() for r in caplog.records if '"event": "sso_sts_exchange_verified"' in r.getMessage()]
+    assert raw_lines, "no sso_sts_exchange_verified line captured"
+    assert documented_pattern.search(raw_lines[0]), (
+        f"the documented Logs Insights pattern does not match the real line: {raw_lines[0]!r}"
+    )

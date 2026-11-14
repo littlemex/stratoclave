@@ -37,21 +37,41 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 ### Upgrade notes
 
 - **`ENVIRONMENT` as the container sees it is now always `'production'`, independent of the
-  resource tier a deploy was synthesized with.** `iac/bin/iac.ts:574` sets the backend's own
+  resource tier a deploy was synthesized with.** `iac/bin/iac.ts:610` sets the backend's own
   `ENVIRONMENT` unconditionally, regardless of the operator-set `envName`/`isProd` the same
   file still uses for DynamoDB deletion protection, PITR, Cognito retention and the ECS exec
   default (`iac/bin/iac.ts:164-165`) — those are unchanged. Before this, a `cdk deploy` run
   with no `ENVIRONMENT` exported (the common case: `iac/scripts/deploy-all.sh` never sets it)
-  shipped a production-reachable gateway with `ENVIRONMENT=development` on the container,
-  which skipped `main.py`'s `_REQUIRED_IN_PRODUCTION` env check, its `CORS_ORIGINS`
-  no-`localhost` requirement and its `http://` CORS refusal, and relaxed `mvp/authz.py`'s
-  admin-creation bootstrap window to the sticky `ALLOW_ADMIN_CREATION=true` (no
-  `ALLOW_ADMIN_CREATION_UNTIL` expiry required) — and also picked `core.logging.setup_logging`'s
-  development branch (a colored, human-readable `ConsoleRenderer`) over its production
-  `JSONRenderer`, so every deployed gateway's CloudWatch logs were plain text, not the JSON the
+  shipped a production-reachable gateway with `ENVIRONMENT=development` on the container.
+  Exactly three places in the backend read this variable, and only this one (`main.py:23`;
+  also read by `core/deployment.py:23` and `mvp/authz.py:375` under their own defaults) --
+  no scheduled Lambda (quota-reconciler, quota-grants, the certificate scheduler, the ledger
+  projector) reads it at all, so none of them are affected by this change. What it gated:
+  `main.py`'s `_REQUIRED_IN_PRODUCTION` env check, its `CORS_ORIGINS` no-`localhost`
+  requirement and its `http://` CORS refusal; `mvp/authz.py`'s admin-creation bootstrap
+  window (see "Action required" below); and `core.logging.setup_logging`'s choice between
+  its development branch (a colored, human-readable `ConsoleRenderer`) and its production
+  `JSONRenderer` -- a deployed gateway's CloudWatch logs were plain text, not the JSON the
   `sso_sts_exchange_verified` / `sso_sts_audience_refused` Logs Insights queries below need to
-  read a field by name at all. See docs/DEPLOYMENT.md's `ENVIRONMENT` row for what this variable
-  now means for the backend and what remains a separate, IaC-only decision.
+  read a field by name at all. `iac/test/backend-startup-validation.test.ts` runs the
+  synthesized container environment (every resource tier, every entry mode, with placeholders
+  standing in for values only CloudFormation resolves at deploy time) through `main.py`'s real
+  startup validation in a subprocess, so a fresh task's own import-time checks are proven to
+  pass, not merely asserted to. See docs/DEPLOYMENT.md's `ENVIRONMENT` row for what this
+  variable now means for the backend and what remains a separate, IaC-only decision.
+
+  **Action required** if this deployment relies on `ALLOW_ADMIN_CREATION=true` alone (with no
+  `ALLOW_ADMIN_CREATION_UNTIL`) to promote admins after the first one, through the
+  authenticated `POST /api/mvp/admin/users`: `mvp/authz.py::admin_creation_allowed()` now
+  always takes the production branch, which refuses that promotion unless
+  `ALLOW_ADMIN_CREATION_UNTIL=<future-epoch>` is ALSO set -- this already matched
+  docs/DEPLOYMENT.md's own documented production instructions, so no procedure changes, but a
+  deployment that had been relying on the bug (the sticky boolean alone, because every
+  deployment ran as `development` for this check) must now set the epoch too before promoting
+  a second admin. **This does NOT affect the first admin.**
+  `backend/bootstrap/seed.py::seed_bootstrap_admin` (the `STRATOCLAVE_BOOTSTRAP_ADMIN_EMAIL`
+  path `docs/DEPLOYMENT.md`'s "Post-deploy: first admin" documents) has no `ENVIRONMENT`
+  dependency at all and is unaffected.
 - **`STRATOCLAVE_API_ENDPOINT` is required outside a local environment.** The gateway refuses
   to start without it unless `ENVIRONMENT` is `development`, `local` or `test`, and
   `/.well-known/stratoclave-config` answers 503 rather than build its URL from request headers.
@@ -65,7 +85,10 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   `STRATOCLAVE_STS_AUDIENCE_REQUIRED` is set to; with that flag on, a request carrying no
   audience at all is refused too. Off by default; turn the flag on after every CLI is upgraded
   AND every host users reach this gateway by is listed in `STRATOCLAVE_STS_AUDIENCES` (now
-  wired through `iac/bin/iac.ts:692` so a `cdk deploy` does not drop a value set by hand —
+  sourced from CDK CONTEXT, `iac/bin/iac.ts:729` — not `process.env`, specifically so a `cdk
+  deploy` run from a shell that forgot to export something does not blank out what a PREVIOUS
+  deploy configured; set it by editing `iac/cdk.json`'s own "context" object, not with a
+  per-invocation `-c` flag, which would be exactly as forgettable —
   `iac/test/backend-deployed-flag.test.ts` pins it) — **list every host before distributing CLI
   0.2.1**, since the foreign-host refusal does not wait for the flag. Upgrading the gateway and
   the CLI can happen in either order: a gateway that predates this feature forwards the extra
@@ -73,17 +96,35 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
   works exactly as before. Every refusal is now logged as a WARNING, `sso_sts_audience_refused`,
   with the host that was presented and the reason (docs/DEPLOYMENT.md, "Binding AWS sign-in to
   this gateway").
-- **Sign-in routes are rate-limited on the identity they name, not only the address.**
-  `/login` and `/respond` key on the email in the request body; `/sso-exchange` keys on the
-  access key id its presigned request names. A coarse, address-keyed flood guard
-  (`AUTH_ADDRESS_RATE_LIMIT`, default `300/minute`) is still shared by every sign-in route, so
-  rotating identities cannot buy a fresh address quota and rotating addresses cannot buy a
-  fresh identity quota. Rate limits on AUTHENTICATED routes remain per verified user, not per
-  client address, so users behind one NAT or on the private entry do not share a bucket there
+- **Sign-in routes are rate-limited on the identity they name TOGETHER WITH the client's own
+  address, not on the identity alone.** `/login` and `/respond` key on the email in the
+  request body plus the caller's address; `/sso-exchange` charges the account STS actually
+  verifies the signature belongs to — never an access key id merely parsed out of an
+  unverified `Authorization` string — and only AFTER `verify_and_call_sts` has proven the
+  caller holds the credential. The address is load-bearing, not incidental: an
+  identity-only bucket is a lever an attacker who does NOT hold the credential can still
+  pull — name a victim's email from
+  address after address, ten guesses each, and the victim's own sign-in attempts share that
+  same bucket no matter which address they come from. Binding the address means every
+  attacking address only ever spends its OWN (identity, that address) bucket. Each route
+  also keeps its own per-address flood guard, at the SAME numbers this project has always
+  used (`AUTH_LOGIN_RATE_LIMIT`/`AUTH_RESPOND_RATE_LIMIT` default `10/minute`,
+  `SSO_EXCHANGE_RATE_LIMIT` default `20/minute`, now sourced from CDK context —
+  `iac/bin/iac.ts:742` — for the same persistence reason as the audience settings above) —
+  this bounds total request volume (and so DynamoDB item growth) from one address
+  regardless of how many identities it tries, which the identity-plus-address bucket alone
+  does not. Rate limits on AUTHENTICATED routes remain per verified user, not per client
+  address, so users behind one NAT or on the private entry do not share a bucket there
   either — but a request that FAILS authentication on an authenticated route is not
   rate-limited at all (FastAPI resolves `Depends(get_current_user)`, and its failure, before
-  the limiter's own wrapper runs); this is a documented gap, not a guarantee. See
-  docs/DEPLOYMENT.md, "Rate limits on sign-in routes".
+  the limiter's own wrapper runs); this is a documented gap, not a guarantee. **On the
+  private entry, every client shares one address** (the internal NLB-facing one), so there
+  the (identity, address) bucket is effectively per identity again: any client inside an
+  accepted consumer VPC can still lock out a named user from everyone else on that same
+  private entry. Size `AUTH_LOGIN_RATE_LIMIT`/`AUTH_RESPOND_RATE_LIMIT` with that in mind on
+  that entry mode, and rely on Cognito's own account lockout (distributed across many
+  identities, which this gateway's own per-identity bucket cannot see) for guessing spread
+  across many different accounts. See docs/DEPLOYMENT.md, "Rate limits on sign-in routes".
 
 - **The gateway refuses to start when `DEFAULT_ORG_ID` does not pass the marker value rule**
   (1 to 256 ASCII letters, digits and `:_@$#=/+,.-`, inner spaces allowed, none leading or

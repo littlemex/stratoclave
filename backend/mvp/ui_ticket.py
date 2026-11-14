@@ -36,7 +36,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.rate_limit import AUTH_ADDRESS_RATE_LIMIT, AUTH_SIGN_IN_ADDRESS_SCOPE, limiter
+from core.rate_limit import SSO_EXCHANGE_RATE_LIMIT, limiter
 
 from dynamo import TicketNotFoundError, UiTicketsRepository
 
@@ -191,7 +191,7 @@ class ConsumeUiTicketResponse(BaseModel):
 
 
 @router.post("/ui-ticket/consume", response_model=ConsumeUiTicketResponse)
-@limiter.limit(AUTH_ADDRESS_RATE_LIMIT, scope=AUTH_SIGN_IN_ADDRESS_SCOPE)
+@limiter.limit(SSO_EXCHANGE_RATE_LIMIT)
 def consume_ui_ticket(
     request: Request, body: ConsumeUiTicketRequest
 ) -> ConsumeUiTicketResponse:
@@ -200,9 +200,8 @@ def consume_ui_ticket(
     identity-keyed check here, unlike `/login` and `/sso-exchange`: the
     ticket itself is the only identity a request could name, it is
     single-use, and 256-bit entropy already makes guessing one uneconomic.
-    The decorator above is this address's share of the flood guard every
-    sign-in route shares (`core/rate_limit.py`); belt-and-braces against
-    blind guessing at volume.
+    The decorator above is this route's own per-address flood guard
+    (`core/rate_limit.py`); belt-and-braces against blind guessing at volume.
     """
     _ = request  # the rate limiter reads it from the signature
     try:
