@@ -30,7 +30,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, params
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,6 +39,7 @@ from core.logging import get_logger
 from . import _converse_core
 from ._converse_types import additional_model_request_fields as _additional_model_request_fields
 from . import _money, _openai_transport
+from . import perigraph_record as _perigraph
 from . import provider_outcome as _provider_outcome
 from .task_tag import asserted as _asserted_task_tag
 from ._bedrock_clients import deployment_client
@@ -505,6 +506,29 @@ def _warn_answerless_billed(
 # Route
 # ---------------------------------------------------------------------------
 
+async def _decoded_body(request: Request) -> Any:
+    """The request body as decoded from JSON, for the perigraph record. Decoded again here (Starlette caches the bytes)
+    because the binding reads decoded values and `ChatCompletionsRequest` coerces some of them."""
+    try:
+        return json.loads(await request.body())
+    except Exception:  # noqa: BLE001 -- the record says the collector failed; the request is unaffected
+        return _perigraph.BODY_NOT_DECODED
+
+
+def _add_perigraph_headers(corr: dict[str, str], response: Response, request: Request, decoded: Any,
+                           model_id: str) -> None:
+    """Add the perigraph headers once the provider model is final, after which nothing on this route changes it.
+    Into `corr` as well as `response`, because the OpenAI-transport and streamed responses are built from `corr`;
+    an error raised after this point is an `HTTPException`, which carries neither."""
+    if isinstance(decoded, params.Depends):
+        # Called directly rather than through FastAPI, so there is no decoded body to describe.
+        decoded = _perigraph.BODY_NOT_DECODED
+    want = request.headers.get(_perigraph.HDR_WANT_RECORD, "").strip().lower() == _perigraph.WANT_RECORD_VALUE
+    headers = _perigraph.response_headers(decoded, model_id=model_id, want_record=want)
+    corr.update(headers)
+    response.headers.update(headers)
+
+
 @router.post("/v1/chat/completions")
 def chat_completions(
     body: ChatCompletionsRequest,
@@ -512,6 +536,7 @@ def chat_completions(
     response: Response,
     user: AuthenticatedUser = Depends(require_permission("messages:send")),
     ctx: RequestContext = Depends(get_request_context),
+    decoded: Any = Depends(_decoded_body),
 ):
     # P0-12: echo the correlation ids so a client can stitch calls into a run.
     corr = _corr_headers(ctx)
@@ -748,6 +773,7 @@ def chat_completions(
         # and reused rather than rebuilt.
         assert openai_payload is not None
         openai_payload["model"] = entry.bedrock_model_id
+        _add_perigraph_headers(corr, response, request, decoded, entry.bedrock_model_id)
         return _openai_chat_completion(
             body=body, entry=entry, user=user, tenants_repo=tenants_repo,
             reservation=reservation, corr=corr,
@@ -772,6 +798,7 @@ def chat_completions(
             # registry does not know. Keep the entry we validated up front rather
             # than invoking against a guessed region.
             pass
+    _add_perigraph_headers(corr, response, request, decoded, model_id)
 
     if body.stream:
         return StreamingResponse(
@@ -1001,6 +1028,10 @@ def _build_openai_chat_payload(
     alone; the real route always supplies it.
     """
     payload = body.model_dump(exclude_none=True)
+    # A request template is for the gateway's perigraph record, not for the provider (binding
+    # openai-chat-completions, Forwarding). Removed here, so the hard-ceiling bound is computed over the payload
+    # that is actually sent.
+    _perigraph.strip_template(payload)
     payload["model"] = entry.bedrock_model_id
     # Collapse to the modern spelling without letting `max_tokens`'s default
     # overwrite a value the caller actually asked for.

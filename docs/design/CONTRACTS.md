@@ -593,7 +593,7 @@ without paying a cost the clause names.
   `docs/LOCAL.md`, `docs/LOCAL_MODELS.md`, `docs/VSR_CONFIG_CONTRACT.md`, `docs/design/calibrated-mode.md`,
   `docs/design/charge-loss.md`, `docs/design/gateway-capacity.md`,
   `docs/design/ledger-hot-path.md`, `docs/design/pending-protocol.md`,
-  `docs/design/vsr-savings-certificate.md`, `docs/EVIDENCE.md`,
+  `docs/design/vsr-savings-certificate.md`, `docs/design/perigraph-record.md`, `docs/EVIDENCE.md`,
   `docs/benchmarks/ledger-latency.md`, `docs/demo/README.md`,
   `docs/demo/savings-certificate-sample.md`, `docs/demo/savings-vs-litellm.md` and
   this document itself, `docs/design/CONTRACTS.md` — the last six found only when

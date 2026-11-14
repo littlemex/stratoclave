@@ -1,0 +1,1288 @@
+{
+  "note": "Golden fixtures every implementation MUST reproduce. Only `model_visible` values appear here: a `parsed` digest is collector-local by spec and the two reference implementations legitimately disagree on one. Produced by the Python implementation and verified against the TypeScript one; a future divergence on any identity here is a test failure on both sides rather than a discovery made by comparing two records in production. From version 3, a case may name `request_template`: the part's model_visible digest when it is held, or the reason it is absent; `request_template_serialisation_example` gives the bytes of one serialisation before hashing.",
+  "cases": [
+    {
+      "name": "terse instruction with a tool and two sampler knobs",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with the option letter only. Do not explain."
+          },
+          {
+            "role": "user",
+            "content": "Q1"
+          }
+        ],
+        "tools": [
+          {
+            "function": {
+              "name": "search",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ],
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "identity": "eeb813c17bed213fe02c7100",
+      "instruction_digest": "a57ac565bffcbeaeb74a934deef4f5e089ea851bb1d23001b2e578f137473a0a"
+    },
+    {
+      "name": "instruction only",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Terse."
+          }
+        ]
+      },
+      "identity": "785c5f3fce7a1cfb747ab8bd",
+      "instruction_digest": "adfaa1973e3c206b83d071dbcc6611aa3e358a9e9d1ddcfc493dd5d4990c25ed"
+    },
+    {
+      "name": "two system messages, newline joined",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "First."
+          },
+          {
+            "role": "system",
+            "content": "Second."
+          },
+          {
+            "role": "user",
+            "content": "Q"
+          }
+        ]
+      },
+      "identity": "6e534c0481805f3cfb3189d3",
+      "instruction_digest": "4bc5477fed25998af01e98e34df946bf1e65236886e0b042adf832b7bcf4373a"
+    },
+    {
+      "name": "a non-ascii instruction, which is where an encoding disagreement would show",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "選択肢の文字だけで答えよ。説明するな。"
+          }
+        ]
+      },
+      "identity": "1413e77105d3bec0f8ab200a",
+      "instruction_digest": "bbf45641c651f3089f079f3a5bca0b487fbc59dd95efcede9ddcab59e743025b"
+    },
+    {
+      "name": "whitespace differs from the first case only",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": " Answer with the option letter only. Do not explain."
+          }
+        ]
+      },
+      "identity": "35d1123979a29b8ddba4d753",
+      "instruction_digest": "00855b7d30a6499b70ec45e7973b6346c5fc88a2d0c2e7b4a8a4ec74ab2c03cf"
+    },
+    {
+      "name": "a system message whose content is an array of parts: no rendering is model-visible, so no identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Terse."
+          },
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "Answer with one word."
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": "Q1"
+          }
+        ],
+        "temperature": 0.0
+      },
+      "identity": null,
+      "instruction_digest": null
+    },
+    {
+      "name": "a system message with no content: no identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "Q1"
+          }
+        ]
+      },
+      "identity": null,
+      "instruction_digest": null
+    },
+    {
+      "name": "a number as system content: not a string, so no identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": 5
+          },
+          {
+            "role": "user",
+            "content": "Q1"
+          }
+        ]
+      },
+      "identity": null,
+      "instruction_digest": null
+    },
+    {
+      "name": "tools and response_format sent as null are fields the sender did not send",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with the option letter only. Do not explain."
+          }
+        ],
+        "tools": null,
+        "response_format": null
+      },
+      "identity": "eeb813c17bed213fe02c7100",
+      "instruction_digest": "a57ac565bffcbeaeb74a934deef4f5e089ea851bb1d23001b2e578f137473a0a"
+    },
+    {
+      "name": "a message with no role might have been a system message: no identity",
+      "body": {
+        "messages": [
+          {
+            "content": "Q0"
+          },
+          {
+            "role": "system",
+            "content": "Answer with the option letter only. Do not explain."
+          }
+        ]
+      },
+      "identity": null,
+      "instruction_digest": null
+    },
+    {
+      "name": "an instruction of white space only (U+3000, U+0085, tab) is none sent",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "　\t"
+          }
+        ],
+        "temperature": 0.0
+      },
+      "identity": null,
+      "instruction_digest": null
+    },
+    {
+      "name": "U+FEFF is not white space, so an instruction of it alone is held",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "\ufeff"
+          }
+        ]
+      },
+      "identity": "33fd7bf489219bbd8782bbd1",
+      "instruction_digest": "f1945cd6c19e56b3c1c78943ef5ec18116907a4ca1efc40a57d48ab1db7adfc5"
+    },
+    {
+      "name": "an empty tools array and an empty response_format are none sent",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with the option letter only. Do not explain."
+          }
+        ],
+        "tools": [],
+        "response_format": {}
+      },
+      "identity": "eeb813c17bed213fe02c7100",
+      "instruction_digest": "a57ac565bffcbeaeb74a934deef4f5e089ea851bb1d23001b2e578f137473a0a"
+    },
+    {
+      "name": "a response_format that is not an object fails readout, not the identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with the option letter only. Do not explain."
+          }
+        ],
+        "response_format": "json"
+      },
+      "identity": "eeb813c17bed213fe02c7100",
+      "instruction_digest": "a57ac565bffcbeaeb74a934deef4f5e089ea851bb1d23001b2e578f137473a0a"
+    },
+    {
+      "name": "an instruction and a user-turn wrapper: the template splits what the instruction alone would join",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Headline: Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Headline: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "f08885706333aea000bb787e",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "9397d49334deb0e9f29b922901e05546d714645fa5b9edd7394a7c7ff705ad5c"
+    },
+    {
+      "name": "the same instruction and the same item with no wrapper and no template: the version 2 identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Stocks rise"
+          }
+        ]
+      },
+      "identity": "4b48154ffe86e14005abbc01",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "not_provided"
+      }
+    },
+    {
+      "name": "the instruction in the user turn and no system message: the template is held and gives no identity",
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Answer with one word: bearish, bullish or neutral.\n\nHeadline: Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "user",
+              "fixed": [
+                "Answer with one word: bearish, bullish or neutral.\n\nHeadline: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": null,
+      "request_template": "9a2756198c81d42c2ccef2e243d82a2acb4ef322475bb4fbb3d73711e76d8c29"
+    },
+    {
+      "name": "a template that fixes nothing is not sent",
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "user",
+              "fixed": [
+                "",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": null,
+      "request_template": {
+        "absent": "not_provided"
+      }
+    },
+    {
+      "name": "untemplated entries only beside an instruction: not sent, and the version 2 identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user"
+            }
+          ]
+        }
+      },
+      "identity": "4b48154ffe86e14005abbc01",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "not_provided"
+      }
+    },
+    {
+      "name": "a fixed string before the hole",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "X Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "X ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "dd1887bd865b550346f7bf40",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "cf5bb496c348afedec86a9b7a330966907f4d04855ac15873e26cf71899c4134"
+    },
+    {
+      "name": "the same fixed string after the hole: a different identity",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Stocks rise X "
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "",
+                "X "
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "516051b3f3fc3a5b19375edb",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "aebc55d4f235810155b2b5d7e8337bc182978abb965e78fc0169042e7ce6d37d"
+    },
+    {
+      "name": "two fixed strings over AB",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "AB"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "A",
+                "B"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "89879807625a9d6a37256596",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "00ccd697be1912d3b3ac4bd40cfb3bc5fbaae954068e8274873a403bdbaf89ca"
+    },
+    {
+      "name": "one fixed string over AB: the same model input, a different identity, which is the safe direction",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "AB"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "AB"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "2c9bd8206c52f0897d4fa298",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "2837516fea6352cd49db2360c4b618b10a103679bd84fdaac01f7029e71ece66"
+    },
+    {
+      "name": "Japanese and an astral-plane character in a fixed string, where a UTF-16 length would differ",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "簡潔に答えよ。"
+          },
+          {
+            "role": "user",
+            "content": "見出し😀：株価上昇"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "見出し😀：",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "9b9b0f05ac4f0f2d10a67b19",
+      "instruction_digest": "94a5c8f5361de202023c184e1971e86582208584dac1a93c1df9d41eeada1b59",
+      "request_template": "7b225293402ddc92217d2b99b7f7924795100b44bcba3531ae058d565d4f9afa"
+    },
+    {
+      "name": "a system message after the user message",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "A."
+          },
+          {
+            "role": "user",
+            "content": "Q: x"
+          },
+          {
+            "role": "system",
+            "content": "B."
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            },
+            {
+              "role": "system"
+            }
+          ]
+        }
+      },
+      "identity": "676e0405c3804f0411431789",
+      "instruction_digest": "5388612c1cb755ff662e3b0ca315a31297d204245a7a64fa4e606449140f2e55",
+      "request_template": "d4a59a7007371744cfb4aaed2978171845838d4502649c307e8d883138dff050"
+    },
+    {
+      "name": "the same system messages before the user message: the same instruction, a different template",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "A."
+          },
+          {
+            "role": "system",
+            "content": "B."
+          },
+          {
+            "role": "user",
+            "content": "Q: x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "fb888132f31b8ad815d7dcae",
+      "instruction_digest": "5388612c1cb755ff662e3b0ca315a31297d204245a7a64fa4e606449140f2e55",
+      "request_template": "eacb73cf8d079ef8401e082bd9a11b9f74bd9a7ace6baa81935243608446850d"
+    },
+    {
+      "name": "braces in a fixed string are text, not a placeholder",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Render {{name}}: Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Render {{name}}: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "f1170f8303e0b30ba4f59a67",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "48a4858ed747e701341b6cf132dffbad34afa5094e97aa6ee2e73510194c5306"
+    },
+    {
+      "name": "a hole holding a newline and U+2028, and content ending in a newline",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "<a>\nx\u2028y</a>\n"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "<a>",
+                "</a>\n"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "e3693760a8a7f4de8861c466",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "27818754975c4e2fa26adbd4ff72623ccadaae346aa319abb38b147681581e5e"
+    },
+    {
+      "name": "U+FEFF and U+001F are not white space here, so this template fixes text",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "\ufeff\u001fStocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "\ufeff\u001f",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "5279846cabdb5e03c2c238cb",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "b754fefd199275d61f8406c2d6f524ef5cc325b252fee53fff29f369e2e90a7b"
+    },
+    {
+      "name": "an assistant message with tool calls and no content, as an untemplated entry",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Q: x"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "f",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "r"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            },
+            {
+              "role": "assistant"
+            },
+            {
+              "role": "tool"
+            }
+          ]
+        }
+      },
+      "identity": "71bee5670b90755aaf005f94",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "dbdf22762f09a692dab8815f2c730d1e94170f4f668977fb2688d33258559600"
+    },
+    {
+      "name": "a template the content contradicts: extraction_failed, and no identity although the instruction is held",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Stocks rise"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Headline: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "ab and bc over abc overlap: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "abc"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "ab",
+                "bc"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a system entry with fixed strings: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system",
+              "fixed": [
+                "Answer with one word: bearish, bullish or neutral."
+              ]
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "an empty interior fixed string: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "a-b"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "a",
+                "",
+                "b"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "an entry member the binding does not define: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Q: x",
+            "name": "v1"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ],
+              "name": "v1"
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a role that differs by a trailing space: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Q: x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user ",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "an entry count that differs from messages: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "Q: x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a template with no messages in the request: extraction_failed",
+      "body": {
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": null,
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a templated message whose content is an array: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Q: x"
+              }
+            ]
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "Q: ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a null template is not sent",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "x"
+          }
+        ],
+        "perigraph_template": null
+      },
+      "identity": "4b48154ffe86e14005abbc01",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "not_provided"
+      }
+    },
+    {
+      "name": "an empty template with a wrong entry count fails: the emptiness test comes after the checks",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "user",
+              "fixed": [
+                "",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "an empty fixed array: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": []
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a null fixed array: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": null
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "three fixed strings with two holes",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "a1b2c"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "a",
+                "b",
+                "c"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "5662096be08804c1d193b6eb",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": "8bcd574c472e4abbc882916692c7ec031de865e99d1db960af1b361dcc713b2d"
+    },
+    {
+      "name": "a repeated interior string that occurs only once: extraction_failed",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": "a1b2c"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                "a",
+                "b",
+                "b",
+                "c"
+              ]
+            }
+          ]
+        }
+      },
+      "identity": null,
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "extraction_failed"
+      }
+    },
+    {
+      "name": "a fixed string of white space only is not sent",
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Answer with one word: bearish, bullish or neutral."
+          },
+          {
+            "role": "user",
+            "content": " x"
+          }
+        ],
+        "perigraph_template": {
+          "messages": [
+            {
+              "role": "system"
+            },
+            {
+              "role": "user",
+              "fixed": [
+                " ",
+                ""
+              ]
+            }
+          ]
+        }
+      },
+      "identity": "4b48154ffe86e14005abbc01",
+      "instruction_digest": "1808faf1ea443565db3fda6a6bd23fc3c892bfcb7fc7a357bdfa0fc25c7a5c3f",
+      "request_template": {
+        "absent": "not_provided"
+      }
+    }
+  ],
+  "request_template_serialisation_example": {
+    "case": "an instruction and a user-turn wrapper: the template splits what the instruction alone would join",
+    "payload_utf8_hex": "323a363a73797374656d303a343a75736572323a31303a486561646c696e653a20303a",
+    "payload_text": "2:6:system0:4:user2:10:Headline: 0:"
+  }
+}

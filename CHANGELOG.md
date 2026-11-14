@@ -44,6 +44,16 @@ Leaving 0.x means committing to a compatibility surface, so this is what it is.
 
 ### Added
 
+- **`/v1/chat/completions` returns perigraph headers.** Successful responses carry
+  `x-sc-perigraph-status` and, when the record has one, `x-sc-perigraph-harness-identity`:
+  a [perigraph](https://github.com/littlemex/perigraph) spec version 3 harness identity over
+  the system text and a request template, when one is sent and verifies. Sending
+  `x-sc-perigraph-return: record` also returns the whole record in `x-sc-perigraph-record`,
+  including the provider model id invoked; the four model parts are `not_observable`. A
+  `perigraph_template` member is read for the record and is no longer forwarded to the
+  OpenAI-compatible endpoint, which rejects it as an unknown parameter
+  (`docs/design/perigraph-record.md`).
+
 - **Model invocation logs can be attributed to a user and a task, on every transport
   (C13.6).** The correlation marker now carries `sc_user`, the principal's `user_id`, and
   `sc_task_tag`, the task tag the caller sent in `x-sc-task-tag`, beside `sc_tenant` and

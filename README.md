@@ -1048,6 +1048,7 @@ section. Changing the behaviour means changing the document first.
 | [`docs/design/pending-protocol.md`](./docs/design/pending-protocol.md) | The PENDING-protocol migration for hold records, and the gate conditions for deleting the old shape. |
 | [`docs/design/gateway-capacity.md`](./docs/design/gateway-capacity.md) | How many requests the gateway holds at once, what limits it, and how to size it. |
 | [`docs/design/vsr-savings-certificate.md`](./docs/design/vsr-savings-certificate.md) | The counterfactual savings report: what is potential, what is realised, and why they are never added. |
+| [`docs/design/perigraph-record.md`](./docs/design/perigraph-record.md) | The perigraph record on `/v1/chat/completions`: the headers, what each part is read from, why the model parts are `not_observable`, and the routes it does not cover. |
 
 Measured runs live in [`docs/benchmarks/`](./docs/benchmarks) and demo assets in
 [`docs/demo/`](./docs/demo) — the synthetic ones carry a `SYNTHETIC` banner.
