@@ -1381,9 +1381,6 @@
   "cl-2b51094a7509": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
-  "cl-7b932518eed3": {
-   "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
-  },
   "cl-7bff2dbdc9e9": {
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
@@ -1418,9 +1415,6 @@
    "first_seen": "docs/DEPLOYMENT.md, the sign-in binding / rate-limit security sweep"
   },
   "cl-c67f8f309153": {
-   "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
-  },
-  "cl-6374437be213": {
    "first_seen": "docs/DEPLOYMENT.md, the fix binding sign-in identity rate limits to the caller address (closing the targeted-lockout gap) and sourcing STS-audience and sign-in rate-limit settings from CDK context instead of process.env"
   },
   "cl-a12626c6d4fd": {
@@ -1614,6 +1608,16 @@
    "disposition": "reworded-to",
    "target": "cl-62217c3ecd04",
    "why": "the AUTH_LOGIN_RATE_LIMIT table row was rewritten from describing one shared 300/minute flood guard to describing each route's own two CDK-context-sourced limits"
+  },
+  "cl-7b932518eed3": {
+   "disposition": "moved-to-clause",
+   "target": "C6.13",
+   "why": "the sentence listed a shared per-address flood guard that no longer exists; the paragraph now only points to the sign-in rate limit section, whose obligations are C6.13"
+  },
+  "cl-6374437be213": {
+   "disposition": "moved-to-clause",
+   "target": "C6.11",
+   "why": "the rationale for a string match was replaced by the measured result on a real log group (the string match and audience_bound = 0 count the unbound sign-in, audience_bound = false matches nothing); the rollout signal it serves is C6.11's"
   }
  },
  "detector": {

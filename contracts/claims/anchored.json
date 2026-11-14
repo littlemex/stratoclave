@@ -2404,11 +2404,6 @@
    "anchor": "descriptive:operational description of AWS/IaC mechanics (PrivateLink, CDK synth, deploy procedure) or of this document's own structure; makes no claim about this gateway's own correctness"
   },
   {
-   "id": "cl-7b932518eed3",
-   "claim": "Two gaps remain, both covered in \"Rate limits on sign-in routes\" immediately below rather than here: the coarse per-address flood guard every sign-in route shares, and the fact that a request which fails authentication on an AUTHENTICATED route is not rate-limited at all.",
-   "anchor": "contract:C6.12@442ad928"
-  },
-  {
    "id": "cl-7bff2dbdc9e9",
    "claim": "An authenticated route is bucketed by the verified user (`core.rate_limit._request_key`); a user behind a shared address, or on the private entry where every request arrives from the load balancer, is not throttled by anyone else sharing it.",
    "anchor": "contract:C6.12@442ad928"
@@ -2467,11 +2462,6 @@
    "id": "cl-c67f8f309153",
    "claim": "What stays genuinely shared on this path is the UNAUTHENTICATED sign-in routes (`/api/mvp/auth/login`, `/respond`, `/sso-exchange`, `/ui-ticket/consume`): with no verified identity yet, these are rate-limited twice (see \"Rate limits on sign-in routes\" below) — a tight limit keyed on the identity TOGETHER WITH the address (the email, or, for `/sso-exchange`, the account STS verifies), and each route's own per-address flood guard (`AUTH_LOGIN_RATE_LIMIT` etc.), which bounds total sign-in volume from one address regardless of how many distinct (possibly made-up) identities it tries.",
    "anchor": "contract:C6.13@4d26afd0"
-  },
-  {
-   "id": "cl-6374437be213",
-   "claim": "A string match on `\"audience_bound\": false` (optional space after the colon, to tolerate either JSON serializer convention) is read directly off the line `core.logging`'s `JSONRenderer` actually produces, so it cannot silently match nothing the way an unproven field comparison could — which would make \"no `false` events\" trivially, and wrongly, true.",
-   "anchor": "descriptive:explains why a string match on the rendered log line was chosen over a field-based Logs Insights comparison that this file does not claim works"
   },
   {
    "id": "cl-a12626c6d4fd",
